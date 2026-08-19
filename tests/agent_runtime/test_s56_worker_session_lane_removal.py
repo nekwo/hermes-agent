@@ -314,24 +314,93 @@ def test_the_repo_bundle_store_read_side_went_at_s57():
     assert not hasattr(models, "RepoBundle")
 
 
-def test_the_status_frame_dropped_every_constant_wire_row():
+#: The ten constant wire rows S56/S57 cut from the status frame.
+_RETIRED_STATUS_KEYS = (
+    "worker_sessions",
+    "active_worker_sessions",
+    "repo_bundles",
+    "repo_bundle_closeout",
+    "bundle_queue",
+    "repo_locks",
+    "lanes",
+    "production_envelope",
+    "swarm",
+    "swarm_budget",
+)
+
+
+def _status_module_emitted_keys() -> set[str]:
+    """Every string key ``agent_runtime.status`` writes into a dict, module-wide.
+
+    Two forms, because the module uses both: ``data["x"] = ...`` (an
+    ``ast.Subscript`` store with a string slice, which is how the frame is
+    actually assembled) and ``{"x": ...}`` literals. Read off the AST, so the
+    retirement COMMENTS this module carries for all ten cut keys — lines 92-104
+    — cannot be mistaken for emissions."""
+
+    module = ast.parse(inspect.getsource(status))
+    keys: set[str] = set()
+    for node in ast.walk(module):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if (
+                    isinstance(target, ast.Subscript)
+                    and isinstance(target.slice, ast.Constant)
+                    and isinstance(target.slice.value, str)
+                ):
+                    keys.add(target.slice.value)
+        elif isinstance(node, ast.Dict):
+            for key in node.keys:
+                if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    keys.add(key.value)
+    return keys
+
+
+def test_the_status_frame_dropped_every_constant_wire_row(isolate_agent_runtime_root):
+    """RE-AIMED 2026-08-19 (MCF-53 sweep). This was VACUOUS THREE WAYS OVER.
+
+    It read ``inspect.getsource(status.build_status)`` — ONE statement, a
+    ``with`` wrapping ``return _build_status_in_runtime_scope(...)``, 12 lines
+    and 713 characters. The third instance of the same wrapper-walk defect
+    MCF-47 records for ``_build_snapshot_uncoalesced``. Killer evidence: the
+    frame this gate is named for demonstrably emits ``operator_channels``, and
+    ``"operator_channels"`` does not appear in the source it scanned. If the
+    LIVE keys were invisible to it, so were the ten retired ones.
+
+    Second, independent defect: the spelling was wrong even for the right scope.
+    The frame is assembled as ``data["operator_channels"] = ...``, and the gate
+    looked for ``"operator_channels":`` — the dict-literal form, with a colon.
+    Zero of the twelve keys match that form anywhere in ``status.py``.
+
+    Third: all ten tokens DO occur in ``status.py``, every one of them inside the
+    retirement comments the cut wrote. A naive re-aim by raw substring goes red
+    on its own tombstone — which is why the structural half below is AST, and
+    comment-immune by construction.
+
+    The guarantee is a fact about the PRODUCED frame, so that is asserted first
+    and directly; the AST half is the structural pin that also covers the arms a
+    default-fixture build does not reach."""
+
     from agent_runtime.migrations import effective_config_summary
 
     assert "production_envelope" not in effective_config_summary()
-    src = inspect.getsource(status.build_status)
-    for key in (
-        '"worker_sessions"',
-        '"active_worker_sessions"',
-        '"repo_bundles"',
-        '"repo_bundle_closeout"',
-        '"bundle_queue"',
-        '"repo_locks"',
-        '"lanes"',
-        '"production_envelope"',
-        '"swarm"',
-        '"swarm_budget"',
-    ):
-        assert f"{key}:" not in src, key
+
+    # The wire itself.
+    frame = status.build_status()
+    assert frame, "build_status produced nothing; the behavioural half is vacuous"
+    for key in _RETIRED_STATUS_KEYS:
+        assert key not in frame, key
+
+    # The producer, module-wide and comment-immune. Anti-vacuity first: a live
+    # key the frame demonstrably carries must be visible to the derivation, or
+    # the absence loop below means nothing.
+    emitted = _status_module_emitted_keys()
+    assert "operator_channels" in emitted, (
+        "the key derivation cannot see operator_channels, which build_status "
+        f"emits — it is reading the wrong thing. Derived: {sorted(emitted)}"
+    )
+    for key in _RETIRED_STATUS_KEYS:
+        assert key not in emitted, key
 
 
 def test_runtime_instances_keeps_its_own_lanes_sub_key():
