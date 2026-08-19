@@ -36,7 +36,9 @@ from hermes_cli.auth import (
     _save_provider_state,
     _store_provider_state,
     read_credential_pool,
+    read_pool_rotation_state,
     write_credential_pool,
+    write_pool_rotation_state,
 )
 
 logger = logging.getLogger(__name__)
@@ -579,6 +581,79 @@ def _write_through_provider_state_to_global_root(
         )
 
 
+@dataclass(frozen=True)
+class PoolRotationCursor:
+    """Where a provider's round-robin selection stands — as a TYPED FIELD.
+
+    MCF-44. The cursor used to have no field of its own: it WAS the order of
+    the persisted credential rows, so "advance by one" meant renumbering every
+    entry's ``priority`` and rewriting the whole credential store. That made a
+    READ impossible without a write, moved ``auth.json``'s bytes on a quiescent
+    store (MCF-16), and left ``priority`` meaning two different things at once.
+
+    Here the position is one named field, persisted in its own sidecar record
+    beside ``auth.json`` (:func:`hermes_cli.auth.write_pool_rotation_state`).
+    Rotating writes this record and NOTHING else — no credential row moves, and
+    no token material is ever stored here: only ids the pool itself minted.
+    """
+
+    last_selected_id: Optional[str] = None
+
+    @classmethod
+    def from_state(cls, state: Any) -> "PoolRotationCursor":
+        if not isinstance(state, dict):
+            return cls()
+        raw = state.get("last_selected_id")
+        return cls(last_selected_id=raw if isinstance(raw, str) and raw else None)
+
+    def to_state(self) -> Dict[str, Any]:
+        state: Dict[str, Any] = {}
+        if self.last_selected_id:
+            state["last_selected_id"] = self.last_selected_id
+        return state
+
+
+#: Providers already warned about an unwritable rotation sidecar, so a failing
+#: store degrades loudly ONCE rather than storming the shared log on every
+#: selection. Bounded by the number of providers, which is bounded by config.
+_rotation_persist_warned: Set[str] = set()
+
+
+def read_pool_rotation_cursor(provider: str) -> PoolRotationCursor:
+    """Load one provider's cursor. A missing/damaged sidecar starts at the top."""
+    try:
+        return PoolRotationCursor.from_state(read_pool_rotation_state(provider))
+    except Exception:  # pragma: no cover - defensive; the reader never raises
+        logger.debug(
+            "credential pool: could not read rotation cursor for %s",
+            provider, exc_info=True,
+        )
+        return PoolRotationCursor()
+
+
+def write_pool_rotation_cursor(provider: str, cursor: PoolRotationCursor) -> None:
+    """Persist one provider's cursor.
+
+    A failure here does NOT fail the selection: the caller already holds a
+    usable credential, and refusing to hand it over because the rotation
+    bookkeeping did not land would turn housekeeping into an outage. It is not
+    silent either — the degradation (this process stops distributing across
+    processes) is named once per provider, because a silent drop with no
+    accounting is the class this whole line exists to retire.
+    """
+    try:
+        write_pool_rotation_state(provider, cursor.to_state())
+    except Exception as exc:
+        if provider not in _rotation_persist_warned:
+            _rotation_persist_warned.add(provider)
+            logger.warning(
+                "credential pool: could not persist the %s rotation cursor "
+                "(%s) — selection still succeeded, but rotation will not "
+                "distribute across processes until this store is writable",
+                provider, exc,
+            )
+
+
 class CredentialPool:
     def __init__(self, provider: str, entries: List[PooledCredential]):
         self.provider = provider
@@ -602,6 +677,37 @@ class CredentialPool:
         # loop runs unbounded and non-interruptible.  Reset whenever a real
         # entry is identified or an escape path returns None.
         self._unmatched_rotation_streak: int = 0
+        # MCF-44: round-robin's position, as a typed field loaded lazily from
+        # its own sidecar record. ``None`` means "not read yet" — distinct from
+        # a read that found no cursor, which is ``PoolRotationCursor()``. Lazy
+        # so constructing a pool for a non-rotating provider (the common case)
+        # costs no file read.
+        self._rotation_cursor: Optional[PoolRotationCursor] = None
+
+    def _rotation_cursor_unlocked(self) -> PoolRotationCursor:
+        if self._rotation_cursor is None:
+            self._rotation_cursor = read_pool_rotation_cursor(self.provider)
+        return self._rotation_cursor
+
+    def _next_after_cursor(self, available: List[PooledCredential]) -> PooledCredential:
+        """The available entry that FOLLOWS the cursor in priority order.
+
+        Order comes from ``self._entries`` (operator priority); position comes
+        from the typed cursor. Neither is derived from the other any more,
+        which is the whole of MCF-44: rotating reorders nothing and rewrites
+        nothing. Entries in cooldown are skipped without consuming a slot, and
+        a cursor naming an id that has since left the pool restarts at the top
+        rather than pinning the first entry forever.
+        """
+        order = [entry.id for entry in self._entries]
+        by_id = {entry.id: entry for entry in available}
+        last = self._rotation_cursor_unlocked().last_selected_id
+        start = order.index(last) + 1 if last in order else 0
+        for offset in range(len(order)):
+            picked = by_id.get(order[(start + offset) % len(order)])
+            if picked is not None:
+                return picked
+        return available[0]
 
     def has_credentials(self) -> bool:
         with self._lock:
@@ -1604,14 +1710,21 @@ class CredentialPool:
         """``select()`` for a READ — rotates in memory, never writes the cursor.
 
         Readiness / visibility passes resolve a credential only to learn whether
-        one resolves at all; they throw the entry away. Under
-        ``STRATEGY_ROUND_ROBIN`` the plain ``select()`` rewrites the whole
-        credential store to advance the cursor, which makes a pure read perturb
-        an input the snapshot build reads but does not declare (MCF-16). This
-        entry point performs the IDENTICAL selection — including the in-memory
-        rotation, so a caller holding one pool still sees successive entries and
-        the strategy is not silently degraded to "always the first" — and skips
+        one resolves at all; they throw the entry away. This entry point
+        performs the IDENTICAL selection — including the in-memory rotation, so
+        a caller holding one pool still sees successive entries and the
+        strategy is not silently degraded to "always the first" — and skips
         only the write-back.
+
+        MCF-44 moved the round-robin cursor out of the credential rows and into
+        its own typed sidecar record, so the write this suppresses is no longer
+        a full credential-store rewrite. The entry point survives that fix for a
+        reason that outlives it: a probe that persisted the cursor would CONSUME
+        a rotation slot on behalf of a caller that never used the credential,
+        so the next real consumer would skip an entry. A read still writes
+        nothing. (Historically the write also moved ``auth.json`` on a quiescent
+        store — MCF-16 — because ``_save_auth_store`` stamps ``updated_at``
+        unconditionally; that half is retired by the sidecar.)
 
         What it deliberately does NOT suppress: cooldown expiry clears and token
         refreshes reached through ``_available_entries``. Those carry a REAL
@@ -1811,26 +1924,29 @@ class CredentialPool:
             return updated
 
         if self._strategy == STRATEGY_ROUND_ROBIN and len(available) > 1:
-            entry = available[0]
-            rotated = [candidate for candidate in self._entries if candidate.id != entry.id]
-            rotated.append(replace(entry, priority=len(self._entries) - 1))
-            self._entries = [replace(candidate, priority=idx) for idx, candidate in enumerate(rotated)]
-            # The ONLY write on this path, and the only one that carries no
-            # credential change: round-robin's cursor lives in the persisted
-            # priority order, so a real consumer must write it back or the next
-            # ``load_pool()`` (which re-reads from disk every call) hands out the
-            # same entry forever. A readiness/visibility PROBE is a read: it
-            # discards the pool object, so the write buys nothing and costs the
-            # snapshot fingerprint a moving input it never declared (MCF-16 —
-            # ``_save_auth_store`` stamps ``updated_at`` unconditionally, so two
-            # logically identical writes still produce different bytes, and
-            # ``auth.json`` is read by the build's readiness pass while sitting
-            # OUTSIDE its input closure ⇒ a credential change on an otherwise
-            # quiescent store is served as a false cache HIT).
+            entry = self._next_after_cursor(available)
+            # MCF-44: the cursor is a typed field in its own sidecar record, so
+            # advancing it writes that record and NOTHING else. No credential
+            # row is rewritten to move one integer, ``priority`` means operator
+            # intent only (``_normalize_pool_priorities`` can no longer erase a
+            # rotation by re-sorting seeded rows), and ``auth.json`` does not
+            # move — which is what made a rotation perturb an input the
+            # snapshot build reads but never declared (MCF-16).
+            #
+            # A real consumer must still persist, because ``load_pool()``
+            # re-reads from disk on every call: without the write the next
+            # process starts from the same position forever. A
+            # readiness/visibility PROBE is a read — it discards the pool
+            # object — so it rotates in memory and writes nothing, and thereby
+            # also does not consume a rotation slot belonging to a real
+            # consumer (see ``select_without_persisting_rotation``).
+            self._rotation_cursor = replace(
+                self._rotation_cursor_unlocked(), last_selected_id=entry.id
+            )
             if persist_rotation:
-                self._persist()
+                write_pool_rotation_cursor(self.provider, self._rotation_cursor)
             self._current_id = entry.id
-            return self._current_unlocked() or entry
+            return entry
 
         entry = available[0]
         self._current_id = entry.id

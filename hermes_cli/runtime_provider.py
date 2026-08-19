@@ -581,8 +581,11 @@ def _select_pool_entry(pool, *, persist_pool_rotation: bool):
     ``persist_pool_rotation`` is threaded from :func:`resolve_runtime_provider`
     down to every pool selection it can reach, so a caller cannot half-suppress
     the write by hitting a different branch of the resolver. It is True for real
-    runtime consumers — round-robin's cursor IS the persisted priority order —
-    and False only for the readiness/visibility probe, which is a read (see
+    runtime consumers — round-robin's cursor is persisted (since MCF-44, in its
+    own typed sidecar record rather than in the credential rows' order), and a
+    selection that does not write it leaves the next process at the same
+    position — and False only for the readiness/visibility probe, which is a
+    read that must not consume a rotation slot (see
     :func:`probe_runtime_provider`).
     """
     if persist_pool_rotation:
@@ -1642,8 +1645,8 @@ def resolve_runtime_provider(
     """Resolve runtime provider credentials for agent execution.
 
     persist_pool_rotation: True for every real consumer — a credential pool on
-    ``round_robin`` keeps its cursor in the persisted priority order, so a
-    selection that does not write hands the next caller the same entry. Pass
+    ``round_robin`` persists its cursor (a typed sidecar record since MCF-44),
+    so a selection that does not write hands the next caller the same entry. Pass
     False ONLY from a read that discards the result; prefer the named entry
     point :func:`probe_runtime_provider` over passing this by hand, so the
     non-persisting choice is a decision someone made rather than a default

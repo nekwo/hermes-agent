@@ -1598,6 +1598,140 @@ def write_credential_pool(
         return _save_auth_store(auth_store)
 
 
+# =============================================================================
+# Credential pool rotation state — SELECTION state, never credential state
+# =============================================================================
+#
+# MCF-44. Round-robin's cursor used to be encoded as the ORDER of the persisted
+# credential rows: "advance by one" meant rewriting every entry's ``priority``
+# and re-saving the whole credential store. Three consequences, structural
+# rather than cosmetic:
+#
+#   1. advancing one integer performed a full-store credential write, so a pure
+#      READ (a readiness/visibility probe) could not select without writing;
+#   2. ``_save_auth_store`` stamps ``updated_at`` unconditionally, so that write
+#      moved ``auth.json``'s bytes — an input the snapshot build reads but does
+#      not declare (MCF-16), which serves a real credential change as a false
+#      cache HIT;
+#   3. ``priority`` could not mean what its name says. It was operator intent
+#      AND a rotation side effect at once, and for ``anthropic`` — whose seeded
+#      rows are re-sorted by SOURCE on every ``load_pool`` via
+#      ``_normalize_pool_priorities`` — the two meanings actively fought:
+#      rotation among seeded entries was erased on the very next load.
+#
+# The cursor is selection state, so it lives in its own typed record in its own
+# file beside ``auth.json``. It holds credential IDS and counters and NEVER any
+# token material. Writing it leaves every credential row — and every byte of
+# ``auth.json`` — untouched.
+
+ROTATION_STATE_VERSION = 1
+
+
+def _rotation_state_path() -> Path:
+    """Sidecar path for pool selection state, beside the active auth store.
+
+    Derived from ``_auth_file_path()`` on purpose: it inherits that function's
+    pytest seat belt, so a test that forgot to sandbox ``HERMES_HOME`` cannot
+    write rotation state into the real user's Hermes root either.
+    """
+    return _auth_file_path().with_name("credential_rotation.json")
+
+
+def _empty_rotation_state() -> Dict[str, Any]:
+    return {"version": ROTATION_STATE_VERSION, "providers": {}}
+
+
+def _load_rotation_state() -> Dict[str, Any]:
+    """Read the rotation sidecar. Never raises; a damaged file starts empty.
+
+    Rotation state is reconstructible by definition — losing it costs one
+    provider one selection slot, never a credential — so an unreadable sidecar
+    degrades to "start from the first entry" instead of failing a runtime
+    resolution.
+    """
+    path = _rotation_state_path()
+    if not path.exists():
+        return _empty_rotation_state()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning(
+            "auth: failed to parse %s (%s) — restarting credential rotation "
+            "from the first entry",
+            path, exc,
+        )
+        return _empty_rotation_state()
+    if not isinstance(raw, dict) or not isinstance(raw.get("providers"), dict):
+        return _empty_rotation_state()
+    return raw
+
+
+def read_pool_rotation_state(provider_id: str) -> Dict[str, Any]:
+    """Return one provider's persisted selection state as a plain dict.
+
+    No global-root fallback, deliberately: a profile that borrows another
+    store's CREDENTIALS still rotates on its own. Sharing the cursor would let
+    one profile consume another's rotation slots, and the fallback store is
+    read-only for this process anyway.
+    """
+    providers = _load_rotation_state().get("providers")
+    if not isinstance(providers, dict):
+        return {}
+    slice_ = providers.get((provider_id or "").strip().lower())
+    return dict(slice_) if isinstance(slice_, dict) else {}
+
+
+def _write_rotation_state_file(store: Dict[str, Any]) -> Path:
+    """Atomic 0600 write of the whole sidecar, mirroring ``_save_auth_store``."""
+    path = _rotation_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    secure_parent_dir(path)
+    payload = json.dumps(store, indent=2) + "\n"
+    tmp_path = path.with_name(f"{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
+    try:
+        fd = os.open(
+            str(tmp_path),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            stat.S_IRUSR | stat.S_IWUSR,
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        atomic_replace(tmp_path, path)
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+    return path
+
+
+def write_pool_rotation_state(provider_id: str, state: Dict[str, Any]) -> Path:
+    """Persist one provider's selection state, leaving auth.json untouched.
+
+    Takes the auth store lock so rotation writes serialize against credential
+    writes under the existing lock ordering rather than introducing a second
+    one. An empty ``state`` drops the provider's slice, so a pool that stops
+    rotating does not leave a row behind forever.
+    """
+    key = (provider_id or "").strip().lower()
+    with _auth_store_lock():
+        store = _load_rotation_state()
+        providers = store.get("providers")
+        if not isinstance(providers, dict):
+            providers = {}
+            store["providers"] = providers
+        if state:
+            providers[key] = dict(state)
+        else:
+            providers.pop(key, None)
+        store["version"] = ROTATION_STATE_VERSION
+        store["updated_at"] = datetime.now(timezone.utc).isoformat()
+        return _write_rotation_state_file(store)
+
+
 def suppress_credential_source(provider_id: str, source: str) -> None:
     """Mark a credential source as suppressed so it won't be re-seeded."""
     with _auth_store_lock():
