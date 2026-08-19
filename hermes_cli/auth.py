@@ -8611,8 +8611,21 @@ def _nous_device_code_login(
     now = datetime.now(timezone.utc)
     token_expires_in = _coerce_ttl_seconds(token_data.get("expires_in", 0))
     expires_at = now.timestamp() + token_expires_in
+    # The device-code poll response is NETWORK data, exactly like the refresh
+    # responses validated at the three sibling sites. Until 2026-08-19 this one
+    # site persisted it through `_optional_base_url` alone, so a poisoned poll
+    # response could redirect every subsequent proxy request - each bearing the
+    # user's inference JWT - to an attacker-controlled host. That is verbatim
+    # the threat `_validate_nous_inference_url_from_network`'s own docstring
+    # says it exists to close.
+    #
+    # Fails soft by design: the validator returns None for anything non-https
+    # or off the host allowlist, and the `or` below then falls back to the URL
+    # we asked for - the same path an absent field already took.
     resolved_inference_url = (
-        _optional_base_url(token_data.get("inference_base_url"))
+        _validate_nous_inference_url_from_network(
+            _optional_base_url(token_data.get("inference_base_url"))
+        )
         or requested_inference_url
     )
     if resolved_inference_url != requested_inference_url:
