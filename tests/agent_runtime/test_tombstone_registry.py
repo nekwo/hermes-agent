@@ -3176,6 +3176,38 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         "RuntimeRootMismatch",
         scope=("agent_runtime.errors",),
     ),
+    # -- S72 stage H-CLI-3 — two uninvoked verbs. -------------------------
+    # `persona instance resolve-chat-turn` was a second parser binding the SAME
+    # handler as `mission-chat turn-resolve`, with the same four required flags
+    # and the instance id positional instead of a flag. The launcher has always
+    # emitted `turn-resolve`; the alias could only be reached by a human who
+    # read the wrong doc line.
+    #
+    # `workspace actors` listed persona-instance summaries filtered by
+    # workspace — the same store, through the same `persona_instance_summary`,
+    # that `persona list` already reads. Cut on the principle that decided this
+    # whole stage: a verb whose data has ANOTHER DOOR goes; a verb that IS the
+    # only door stays. `contracts dump` was proposed alongside these two and
+    # was REFUSED on exactly that test — it is the only reader of
+    # `contract_manifest()`, which the audit's own ruling wanted kept.
+    #
+    # The launcher's committed `hermes_cli_contract.json` still carries both
+    # paths. Its gate asserts launcher-emitted argv EXISTS in the dump and not
+    # the reverse, so it stays green — but the fixture is now stale in the
+    # extra direction too, and the refresh is a LAUNCHER commit this repo
+    # cannot make.
+    *rows(
+        "s72",
+        "HEAD",
+        Form.CODE,
+        "dead-code audit pass 2 H-CLI-3 — a duplicate-authority alias for "
+        "`mission-chat turn-resolve` and a convenience lister whose data "
+        "`persona list` already serves; neither had an invocation in either "
+        "repo",
+        "resolve-chat-turn",
+        "_cmd_workspace_actors",
+        scope=("hermes_cli",),
+    ),
 )
 
 

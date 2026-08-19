@@ -58,7 +58,7 @@ LEDGER: dict[str, str] = {
         "_cmd_skills_promote", "_cmd_skills_inventory",
         "_cmd_prompt_context_show",
         "_cmd_workspace_list", "_cmd_workspace_show", "_cmd_workspace_create",
-        "_cmd_workspace_delete", "_cmd_workspace_use", "_cmd_workspace_actors",
+        "_cmd_workspace_delete", "_cmd_workspace_use",
         "_cmd_workspace_add_agent", "_cmd_workspace_remove_agent",
         "_cmd_workspace_rename", "_cmd_workspace_archive",
         "_cmd_realm_list", "_cmd_realm_show", "_cmd_realm_create",

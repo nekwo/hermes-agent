@@ -345,11 +345,6 @@ def build_parser(parent_subparsers) -> None:
     )
     _add_stage42_global_args(workspace_use)
     workspace_use.set_defaults(func=_cmd_workspace_use)
-    workspace_actors = workspace_subs.add_parser("actors", help="List typed actors in a workspace")
-    workspace_actors.add_argument("workspace_id")
-    workspace_actors.add_argument("--kind", default=None)
-    _add_stage42_global_args(workspace_actors)
-    workspace_actors.set_defaults(func=_cmd_workspace_actors)
     workspace_add_agent = workspace_subs.add_parser("add-agent", help="Add a persona to a workspace roster")
     workspace_add_agent.add_argument("workspace_id")
     workspace_add_agent.add_argument("persona_id")
@@ -961,16 +956,12 @@ def build_parser(parent_subparsers) -> None:
     _add_coordinator_permission_args(persona_instance_open)
     persona_instance_open.add_argument("--json", action="store_true")
     persona_instance_open.set_defaults(func=_cmd_persona_instance_open_chat)
-    persona_instance_resolve_turn = persona_instance_subs.add_parser(
-        "resolve-chat-turn", help="Strictly resolve one ambiguous persona-chat turn"
-    )
-    persona_instance_resolve_turn.add_argument("persona_instance_id")
-    persona_instance_resolve_turn.add_argument("--session-id", required=True)
-    persona_instance_resolve_turn.add_argument("--client-message-id", required=True)
-    persona_instance_resolve_turn.add_argument("--turn-id", required=True)
-    persona_instance_resolve_turn.add_argument("--action", choices=["abandon"], required=True)
-    persona_instance_resolve_turn.add_argument("--json", action="store_true")
-    persona_instance_resolve_turn.set_defaults(func=_cmd_mission_chat_turn_resolve)
+    # `persona instance resolve-chat-turn` lived here until 2026-08-19: a
+    # second parser binding the SAME handler as `mission-chat turn-resolve`,
+    # with the same four required flags and the instance id positional instead
+    # of a flag. Two spellings for one operation, zero invocations in either
+    # repo, and the launcher has always emitted `turn-resolve` — so the alias
+    # could only ever be reached by a human who read the wrong doc line.
     # S70 removed `persona instance message`. It queued a "free-floating
     # persona assignment" — a lane whose only durable consumer was the tick
     # loop removed by the 2026-07-30 chat-only purge (a queued row dead-ended
@@ -2183,19 +2174,6 @@ def _activation_outcome_row(store, row_builder, outcome: dict, key: str) -> dict
     row["superseded"] = outcome.get("reason") == "superseded"
     row[f"requested_{key}"] = outcome.get(f"requested_{key}")
     return row
-
-
-def _cmd_workspace_actors(args) -> int:
-    workspace = WorkspaceStore().get(args.workspace_id)
-    actors = [
-        persona_instance_summary(instance)
-        for instance in PersonaInstanceStore().list_all()
-        if getattr(instance, "workspace_id", None) == workspace.id
-    ]
-    if getattr(args, "kind", None):
-        actors = [actor for actor in actors if actor.get("kind") == args.kind]
-    _print_stage42(_list_envelope("actor", actors), args=args)
-    return 0
 
 
 def _known_persona_ids() -> set[str]:

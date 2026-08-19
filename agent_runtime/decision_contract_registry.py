@@ -91,6 +91,27 @@ def contract_hash() -> str:
 # ledger's settled closed-loop rule (item 2): a symbol whose whole importer set
 # is the test written to exercise it is not covered code. ``contract_manifest``
 # stays — it has a production reader.
+#
+# 2026-08-19: that production reader is ``hermes harness contracts dump``, and
+# the dead-code audit proposed cutting the verb (0 invocations in either repo
+# or the shared skills root) while its own ruling 5 said to KEEP
+# ``contract_manifest``. Both together are not a coherent position: with the
+# verb gone the constant's whole importer set is ``test_s15_event_contract_
+# pruning``, which asserts the manifest is a faithful projection of
+# ``event_catalog()`` / ``contract_hash()`` — the closed loop the rule above
+# names. So it is one decision, not two, and it was resolved KEEP-BOTH:
+#
+#   * "no committed invocation" is weak evidence for a read-only DIAGNOSTIC.
+#     Operators run `observe`, `migrate`, `snapshot` and this by hand; none of
+#     those appears in a committed script either, and nobody proposes cutting
+#     them.
+#   * this is the ONLY door onto the canonical contract registry. A registry
+#     you cannot dump is a registry you cannot audit, and 12 lines is a poor
+#     trade for that.
+#
+# The principle the two H-CLI-3 verbs that DID go were judged on: cut a verb
+# whose data has another door (`workspace actors` — `persona list` reads the
+# same store through the same summary), keep a verb that IS the only door.
 
 
 _EVENT_CONTRACTS: dict[str, EventContract] = {
