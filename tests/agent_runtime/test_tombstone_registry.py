@@ -2894,6 +2894,47 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         "fetch_account_usage",
         scope=("hermes_cli",),
     ),
+    # -- S72 = dead-code audit pass 2 (2026-08-19), stage HB-1. -----------
+    # `agent_runtime/risk_flags.py` was an ISLAND BEHIND A FOLDED PREDICATE.
+    # Its only production reader was one arm of `serde._coerce`:
+    #
+    #     if annotation.__name__ == "Task" and isinstance(upgraded, dict):
+    #
+    # `agent_runtime` has had no `Task` dataclass since the mission-lane
+    # removal — `test_models_serde` asserts `not hasattr(runtime_models,
+    # "Task")` — and an AST class-definition walk over every production
+    # package finds exactly ONE `class Task` in the tree, upstream's
+    # `hermes_cli/kanban_db.py`, which imports nothing from `serde` and is
+    # never handed to `_coerce`. The predicate could not fire, so the whole
+    # module (a 40-name flag vocabulary, a prefix set, and the normalizer)
+    # was reachable only from itself.
+    #
+    # CODE rows as well as the MODULE row because the vocabulary names are
+    # STRING-shaped on the wire (`"risk_flags"` was a persisted Task key) and
+    # a re-grown normalizer would most likely arrive as a private copy in
+    # another module rather than as this import.
+    *rows(
+        "s72",
+        "HEAD",
+        Form.MODULE,
+        "dead-code audit pass 2 HB-1 — the task risk-flag vocabulary was an "
+        "island behind a folded predicate: its only reader tested "
+        "`annotation.__name__ == \"Task\"` and no `Task` dataclass has "
+        "existed in agent_runtime since the mission-lane removal",
+        "agent_runtime.risk_flags",
+    ),
+    *rows(
+        "s72",
+        "HEAD",
+        Form.CODE,
+        "dead-code audit pass 2 HB-1 — the task risk-flag normalizer and its "
+        "two vocabularies went with the module; nothing in production may "
+        "re-grow the migration lane without a Task dataclass to migrate",
+        "normalize_task_risk_flags",
+        "is_known_risk_flag",
+        "KNOWN_RISK_FLAGS",
+        "PARAMETERIZED_RISK_FLAG_PREFIXES",
+    ),
 )
 
 

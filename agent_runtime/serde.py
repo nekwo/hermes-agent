@@ -92,11 +92,6 @@ def _coerce(annotation: Any, raw: Any) -> Any:
 
     if isinstance(annotation, type) and is_dataclass(annotation):
         upgraded = upgrade(raw)
-        if annotation.__name__ == "Task" and isinstance(upgraded, dict):
-            from .risk_flags import normalize_task_risk_flags
-
-            flags, notes = normalize_task_risk_flags(upgraded.get("risk_flags"), upgraded.get("operator_notes"))
-            upgraded = {**upgraded, "risk_flags": flags, "operator_notes": notes}
         hints = _dataclass_type_hints(annotation)
         kwargs = {}
         for field in fields(annotation):
