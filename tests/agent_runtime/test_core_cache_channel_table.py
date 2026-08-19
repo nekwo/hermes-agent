@@ -54,11 +54,46 @@ _LOGGER_METHODS = {"debug", "info", "warning", "error", "exception", "critical"}
 #: would otherwise miss, so they are derived from the source, not listed.
 _HAND_WORDED_REASON = re.compile(r"reason=([a-z][a-z0-9_]*)")
 
-#: A bare snake_case token inside a table cell. Anything with a dot, a slash, an
-#: ``=``, a space or a capital is a field path, a file, a ``key=value`` pair, a
-#: sentence or a class name — none of which is a vocabulary token, and each of
-#: which the reverse direction must not try to resolve.
+#: A bare snake_case token inside a table cell.
 _BARE_TOKEN = re.compile(r"^[a-z][a-z0-9_]*$")
+
+#: A token spelled with the FIELD that carries it — ``reason=entries_io``,
+#: ``diff_scope=every_pass``, ``core_source=cache``.
+#:
+#: **This was the reverse direction's hole, found by H3/MCF-21 and measured.**
+#: The gate below resolved bare spans only, so a row naming its token in this
+#: spelling was invisible to it — and that is the spelling C22 EXISTS to index,
+#: since the whole filing was "three ``reason=`` vocabularies on one logger, two
+#: of them colliding". Proven at the moment the ``entries=false`` row was retired:
+#: with the writer deleted, re-adding the row spelled ``reason=entries_io`` left
+#: all eleven cases green, while the identical row spelled ``entries_io``
+#: reddened this one. So the row for a retired reason could survive forever —
+#: "a census instruction that returns zero forever", which is the exact defect
+#: this direction's own docstring says it exists to prevent.
+_FIELD_TOKEN = re.compile(r"^[a-z][a-z0-9_]*=([a-z][a-z0-9_]*)$")
+
+#: ``ok=true``, ``stale=true``, ``entries=false``. The lane's BOOLEAN fields, and
+#: the one ``key=value`` shape whose right-hand side is not a vocabulary token —
+#: resolving them would make the gate demand a writer for ``true``. Listed rather
+#: than pattern-matched, because "which fields are booleans" is a fact about this
+#: lane and not a syntactic property.
+_BOOLEAN_FIELD_VALUES = frozenset({"true", "false"})
+
+
+def _named_token(span: str) -> str | None:
+    """The vocabulary token a table cell's ``…``-quoted span names, if any.
+
+    Anything with a dot, a slash, a space or a capital is a field path, a file, a
+    sentence or a class name — none of which is a vocabulary token, and each of
+    which the reverse direction must not try to resolve.
+    """
+
+    if _BARE_TOKEN.match(span):
+        return span
+    field = _FIELD_TOKEN.match(span)
+    if field is not None and field.group(1) not in _BOOLEAN_FIELD_VALUES:
+        return field.group(1)
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -172,6 +207,13 @@ def test_the_parsers_are_reading_something():
     assert len(_log_format_strings()) >= 14, "the logger-call walker found almost nothing"
     assert len(_vocabulary()) >= 20, f"the vocabulary is suspiciously small: {_vocabulary()}"
     assert len(_families()) >= 4, f"families: {_families()}"
+    # Both spellings a row can use must resolve to the same token, or the reverse
+    # direction is blind to whichever one it cannot read — which is what it was,
+    # for the ``reason=`` spelling, until H3 (see :data:`_FIELD_TOKEN`).
+    assert _named_token("entries_io") == "entries_io"
+    assert _named_token("reason=entries_io") == "entries_io"
+    assert _named_token("ok=false") is None, "a boolean field is not a vocabulary token"
+    assert _named_token('parity.core_source == "cache"') is None
 
 
 # --------------------------------------------------------------------------- #
@@ -206,11 +248,11 @@ def test_every_token_the_table_names_is_one_a_writer_emits():
     # make one drift red two tests with two different reasons.
     dead = sorted(
         {
-            span
+            token
             for span in _quoted_spans()
-            if _BARE_TOKEN.match(span)
-            and not span.startswith("snapshot_")
-            and span not in vocabulary
+            if not span.startswith("snapshot_")
+            for token in [_named_token(span)]
+            if token is not None and token not in vocabulary
         }
     )
 
