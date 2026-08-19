@@ -25,13 +25,23 @@ cannot also set:
 
 * two DISTINCT keys through one write path, so a constant payload satisfies at
   most one of them (test 1);
-* a stale generation planted on disk whose paths must NOT come back, which a
-  reader that trusts position over provenance cannot avoid returning (test 2);
-* the pair's own presence on disk after the diagnostic's writer was made to
-  raise, which a landing that wrapped all three writes together cannot show
-  (test 3);
+* an entries file planted on disk whose paths must NOT come back, which a reader
+  that trusts position over provenance cannot avoid returning (test 2);
 * the entries path's ABSENCE from the fingerprint it is written beside, which a
-  cache that fingerprints its own diagnostic cannot produce (test 4).
+  cache that fingerprints its own diagnostic cannot produce (test 3).
+
+WHAT LEFT THIS FILE, AND WHERE IT WENT (MCF-21)
+===============================================
+
+A fourth case used to pin the arm this file was designed around: the entries
+write was BEST EFFORT, so a failed one left the core and sidecar landed, the
+write-back returning ``True``, and a receipt worded ``entries=false
+reason=entries_io``. The generation swap retired that state — a published
+generation missing any of its three files is unrepresentable — so the case was
+not edited to agree with the new world, it was replaced by the opposite claim in
+``test_core_cache_generation_swap.py``: an entries failure publishes NOTHING.
+That inversion is the mutation which proves the design changed rather than the
+docstrings.
 """
 
 from __future__ import annotations
@@ -144,25 +154,31 @@ def test_the_entries_file_lands_bound_to_the_digest_it_describes(
 
 
 # --------------------------------------------------------------------------- #
-# 2. A stale generation refuses to be read, in its own words
+# 2. An entries file the sidecar does not describe refuses to be read
 # --------------------------------------------------------------------------- #
 def test_entries_from_another_write_back_refuse_to_be_diffed(
     isolate_agent_runtime_root,
 ):
-    """The failure this binding exists for, driven: an entries file left behind.
+    """The binding, RE-AIMED by MCF-21 and still convicting.
 
-    It is not hypothetical. The entries write is best effort (test 3), so a
-    failed one leaves the PREVIOUS generation's entries beside a NEW sidecar —
-    exactly this shape. A reader that trusted position would then diff the
-    current store against a store from some earlier write-back and name paths
-    from a generation nobody asked about, which reads to an operator as "these
-    files moved" when they did not.
+    What it used to guard is gone: the entries write was best effort, so a failed
+    one left the PREVIOUS generation's entries beside a NEW sidecar, and a reader
+    trusting position would diff the current store against some earlier one. The
+    generation swap makes that shape unrepresentable — one directory, one pointer
+    replace — and the case was NOT deleted with it.
+
+    It is re-aimed at what a swap cannot prevent, and the fixture now drives that
+    literally: the entries file inside the LIVE generation is overwritten with
+    content bound to a digest nobody published. Position beside the sidecar is
+    still not provenance, and the alternative to refusing is a receipt that NAMES
+    FILES an operator will go and investigate, computed against a stat set that is
+    not this pair's.
 
     The stale path is asserted ABSENT rather than only the reason asserted
-    present: a mutant that returned the wrong generation AND a typed reason
-    would satisfy a reason-only probe.
+    present: a mutant that returned the wrong stat set AND a typed reason would
+    satisfy a reason-only probe.
 
-    *Kill:* drop the digest comparison in ``_persisted_entries``. The stale
+    *Kill:* drop the digest comparison in ``_persisted_entries``. The planted
     triples come back, the reason is empty, and both halves of this red.
     """
 
@@ -171,8 +187,8 @@ def test_entries_from_another_write_back_refuse_to_be_diffed(
     current = _key([(str(root / "workspaces" / "ws_current.json"), 31, 32)])
     assert core_cache.write_back(_core(0), fingerprint=current) is True
 
-    # A generation that is NOT the one the sidecar describes, written by hand
-    # through the same atomic writer the lane uses.
+    # Content the published write-back did not put there, written into the LIVE
+    # generation by hand through the same atomic writer the lane uses.
     atomic_json_write(
         core_cache.entries_path(),
         {"fingerprint": "a-digest-from-some-earlier-write-back", "entries": [[stale_path, 41, 42]]},
@@ -203,61 +219,7 @@ def test_entries_from_another_write_back_refuse_to_be_diffed(
 
 
 # --------------------------------------------------------------------------- #
-# 3. The diagnostic never takes the cache down with it
-# --------------------------------------------------------------------------- #
-def test_a_failed_entries_write_leaves_the_cache_landed_and_says_so(
-    isolate_agent_runtime_root, monkeypatch, caplog
-):
-    """``write_back``'s contract: a failed write changes NOTHING about the build.
-
-    The entries file is a diagnostic that explains a miss. Letting its failure
-    retract a cache pair that landed would trade the thing this module exists for
-    against the thing that describes it — and it would do so silently, because
-    the caller only sees ``False``.
-
-    Two independent claims, so two kills. *Kill A:* move the entries write inside
-    the pair's ``try`` (or drop its ``except``) — the exception propagates, the
-    write-back is not ``True``, and the return assertion reds. *Kill B:* swallow
-    the failure without logging — the pair still lands, and the receipt assertion
-    reds on an empty list.
-    """
-
-    root = isolate_agent_runtime_root
-    key = _key([(str(root / "workspaces" / "ws_alpha.json"), 11, 12)])
-    real_write = atomic_json_write
-
-    def refuse_only_the_entries(path, payload, **kwargs):
-        if str(path) == str(core_cache.entries_path()):
-            raise OSError("the disk refused exactly the diagnostic")
-        return real_write(path, payload, **kwargs)
-
-    monkeypatch.setattr(core_cache, "atomic_json_write", refuse_only_the_entries)
-
-    with caplog.at_level(logging.WARNING, logger="agent_runtime.core_cache"):
-        landed = core_cache.write_back(_core(0), fingerprint=key)
-
-    assert landed is True, (
-        "a failed entries write retracted a cache pair that landed — the "
-        "diagnostic is now able to disable the lane it exists to explain"
-    )
-    assert core_cache.core_path().exists() and core_cache.sidecar_path().exists()
-    assert _sidecar()["fingerprint"] == key.digest
-    assert not core_cache.entries_path().exists(), "the fixture did not reach the entries write"
-
-    receipts = [line for line in _lines(caplog) if "entries=false" in line]
-    assert len(receipts) == 1, (
-        f"the failed entries write left no countable receipt: {_lines(caplog)}"
-    )
-    assert "reason=entries_io" in receipts[0], receipts[0]
-    assert "ok=false" not in receipts[0], (
-        "the failure was worded as a WRITE REFUSAL, but the pair landed and the "
-        "write-back returned True — a census keyed on ok=false would now count a "
-        f"successful cache write as a failed one: {receipts[0]}"
-    )
-
-
-# --------------------------------------------------------------------------- #
-# 4. The cache's new file does not flip the cache's own key
+# 3. The cache's new file does not flip the cache's own key
 # --------------------------------------------------------------------------- #
 def test_the_entries_file_is_outside_the_key_it_is_written_beside(
     isolate_agent_runtime_root,

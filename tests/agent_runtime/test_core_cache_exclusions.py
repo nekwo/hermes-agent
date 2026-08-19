@@ -575,7 +575,7 @@ def test_the_persisted_entries_shrink_with_the_closure(
 ):
     """MC-3's ``entries.json`` carries no graveyard path — the two stay joined.
 
-    ``_write_entries`` persists ``key.entries``, i.e. the fingerprint's own stat
+    ``_entries_payload`` persists ``key.entries``, i.e. the fingerprint's own stat
     set, so today this property holds BY CONSTRUCTION rather than by a second
     decision. That is stated plainly instead of dressed up: the gate's job is not
     to discover a bug, it is to PIN the join, because the alternative shape — a
@@ -583,7 +583,7 @@ def test_the_persisted_entries_shrink_with_the_closure(
     refactor that would silently restore ~81 % of the write-back MCF-20 measured
     at ~3.4 MiB per led build.
 
-    *Kill:* have ``_write_entries`` persist a freshly re-walked store instead of
+    *Kill:* have ``_entries_payload`` persist a freshly re-walked store instead of
     the key it was handed (``_walk_tree(paths.store_root(), fresh, limit=...)``
     with no ``exclude_top``). Every triple the fingerprint excluded comes back
     into the file and this reds, while the fingerprint's own digest — and every

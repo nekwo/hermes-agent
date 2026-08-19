@@ -856,9 +856,12 @@ def _office_actor_unpublished(actor: Any) -> bool | None:
 #   ``harness snapshot`` CLI verb. The stream lane calls ``build_snapshot()``
 #   and never ``write_snapshot``; a ``harness snapshot`` answered from serve's
 #   20-second read cache does not write either. EG-3.1 did NOT change this: the
-#   persisted read-model core serve now writes and reads is a different pair of
-#   files (``<store_root>/serve_read_model/{core,sidecar}.json``,
-#   ``agent_runtime.core_cache``), deliberately not this one — ``snapshot.json``
+#   persisted read-model core serve now writes and reads lives somewhere else
+#   entirely (under ``<store_root>/serve_read_model/``, in a generation directory
+#   that ``agent_runtime.core_cache`` publishes through a pointer file — MCF-21.
+#   The filenames are deliberately not respelled here: ``core_cache.core_path``
+#   and ``sidecar_path`` are their one authority, and a second copy of a layout
+#   is a thing that goes stale), deliberately not this one — ``snapshot.json``
 #   has a consumer of its own in the launcher's cold-paint lane, and one file
 #   with two writers of different provenance could not say which produced it.
 # * The launcher has NO writer at all — it only reads the file — and a folded

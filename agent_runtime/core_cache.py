@@ -116,6 +116,40 @@ therefore never authoritative. No write-lane predicate is reachable from
 either field.
 
 =============================================================================
+A WRITE-BACK IS ONE UNIT (MCF-21)
+=============================================================================
+
+The cache is three files — the core, the sidecar that binds to its bytes, and
+the stat set that makes a later miss diffable. They landed through three
+independent ``os.replace`` calls: each atomic alone, the TRIO not. The property
+"these three describe one build" was held up by two ad-hoc binding guards
+(``core_sha256`` between core and sidecar, ``entries.fingerprint`` between
+entries and sidecar) rather than by one rule, and a fourth file would have made
+a third guard.
+
+So the unit is now the GENERATION. Every write-back mints ``gen-<stamp>/`` under
+:data:`CORE_CACHE_DIRNAME`, writes all three files into it while nothing points
+at it, and lands by replacing ONE small pointer file naming it. Atomicity rides
+that single replace. A crash or a disk failure at any earlier point leaves a
+directory the pointer never named — invisible to every reader, reaped by the
+next successful write-back.
+
+Two consequences are worth stating where they can be read rather than derived:
+
+* **The recorded target shape was not implementable and this is not it.** MC-3
+  said "``os.replace`` the directory"; ``os.replace`` cannot replace a non-empty
+  directory anywhere, and on Windows cannot replace a directory at all. The full
+  argument, including why rename-away-then-rename-in is REFUSED, is at
+  :func:`_live_generation_dir`.
+* **The guards were re-aimed, not deleted.** A swap makes a TORN trio
+  impossible. It does nothing about a tampered or hand-restored file inside a
+  generation that is already published, which is what ``core_sha256`` convicts
+  and what ``entries_unbound`` now convicts. Both stay, documented to their new
+  reason. What DID retire is the partial-landing arm: a published pair with no
+  entries file, and its ``entries=false reason=entries_io`` receipt, are
+  unrepresentable and are gone from the table below.
+
+=============================================================================
 THE RECEIPT CHANNEL TABLE (ML-14 / C22)
 =============================================================================
 
@@ -147,10 +181,9 @@ same fact. There is exactly one: the snapshot's own ``parity`` envelope, which
 | ``snapshot_core_cache never_converged`` (WARNING) | none | ``builds=`` then ``diff_scope=`` ``changed=`` ``diff=`` LAST (paths may contain spaces). **CENSUS RULE (C22(i)): read ``diff_scope=`` or the count over-reports.** ``every_pass`` = the inputs oscillate, i.e. self-perturbation, the A2 defect worth acting on; ``last_pair`` = a store that is simply moving, where the receipt is true (the cache IS buying nothing) but names no defect; ``none`` with ``diff=diff_unavailable`` and ``diff_reason=no_entries``/``digest_without_entry_delta`` = the diff could not be computed and says so in its own words |
 | ``snapshot_core_cache core_source=cache`` (INFO) | the snapshot payload | ``parity.core_source == "cache"`` — SAME spelling, no split. The line also carries ``caller=`` ``inputs=`` ``fingerprint=`` ``offset=``, none of which reach the payload |
 | ``snapshot_core_cache core_source=cache stale=true`` (INFO) | the snapshot payload | ``parity.core_stale == true`` AND ``parity.freshness.state == "stale"`` — the field the launcher's ``MissionSnapshotEnvelope`` already maps to ``MissionSnapshotHealth.stale``. RESIDUAL SPLIT, named rather than fixed: the log says ``stale=true``, the payload says ``parity.core_stale``/``parity.freshness.state``, and the payload spelling is a consumer contract that predates this lane |
-| ``snapshot_core_cache core_source=rebuilt`` (INFO, ``_log_demote``) | the snapshot payload, PARTIALLY | ``parity.core_source == "rebuilt"`` carries THAT the cache was demoted; the ``reason=`` never leaves this logger, and ``CoreDecision.reason`` is read by no caller today. So a field census of WHY a cache demoted has exactly one source: this line. Reasons ``unreadable`` ``core_digest_mismatch`` ``fingerprint_unavailable`` ``fingerprint_mismatch`` ``build_stamp_unknown`` ``build_stamp_mismatch`` ``contract_mismatch`` ``runtime_root_mismatch`` ``home_mismatch``. **CENSUS RULE (MC-2): ``home_mismatch`` is not an ordinary miss.** The other reasons say the STORE moved, the install changed, or the pair is unbound — all facts about the thing being cached. This one says the persisted pair was keyed under a different Hermes home than the reading process resolved, i.e. the two runs asked different QUESTIONS, and it is emitted INSTEAD of ``fingerprint_mismatch`` so the distinction is countable rather than inferred. On a multi-home install (an operator who really does run two roots) it is ordinary. On a SINGLE-PROFILE operator boot it is evidence that a persona scope was live while a build stat'd — the capture in ``core_cache.resolved_fingerprint_home`` was taken too late — which is a defect to go fix, not noise to tune out. A pair carrying no ``sidecar.fingerprint_home`` at all (every one written before MC-2) is skipped rather than demoted, so this reason can never fire for an install that simply predates the field. ``absent`` is deliberately NOT logged (the ordinary cold start would print a line on every build in every process), so its only trace is the ABSENCE of a line and a census must not read "no demote line" as "no demote". **CENSUS RULE (MC-3): ``fingerprint_mismatch`` ALONE grows a tail**, and the tail is ``changed=`` then ``diff=`` LAST (paths may contain spaces, so nothing can be field-parsed after it; the tail is additive, so an existing ``reason=`` grep is unaffected). No other reason carries one, deliberately: a diff on a ``build_stamp_mismatch`` would name every file the operator's upgrade touched and read as store churn. **The scope is ``last_pair`` BY CONSTRUCTION and that caveat is the row's most important sentence:** a demote diff is the delta since the LAST WRITE-BACK, so on a busy store it legitimately names files that are simply moving, and the receipt is TRUE without naming a defect. It is self-perturbation evidence — the A1-b/A2 class worth acting on — ONLY when the named paths are ones the runtime itself writes (``dispatch_delivery_drain.json``, ``serve_socket.owner.json``, ``state.db-wal``, ``serve_socket.lock``); when they are store paths the operator's own writes touched, the miss is legitimate and the cache is working as designed. An arm that could not compute the diff says so in its own words rather than emitting an empty list, which would read as "we looked and nothing moved": ``diff_scope=none changed=0 diff_reason=`` ``no_entries`` (nothing persisted yet, or an install predating MC-3) / ``entries_unbound`` (the entries on disk belong to another write-back — see the ``entries=false`` row) / ``digest_without_entry_delta`` (the digests disagreed and no triple did), then ``diff=diff_unavailable`` |
+| ``snapshot_core_cache core_source=rebuilt`` (INFO, ``_log_demote``) | the snapshot payload, PARTIALLY | ``parity.core_source == "rebuilt"`` carries THAT the cache was demoted; the ``reason=`` never leaves this logger, and ``CoreDecision.reason`` is read by no caller today. So a field census of WHY a cache demoted has exactly one source: this line. Reasons ``unreadable`` ``core_digest_mismatch`` ``fingerprint_unavailable`` ``fingerprint_mismatch`` ``build_stamp_unknown`` ``build_stamp_mismatch`` ``contract_mismatch`` ``runtime_root_mismatch`` ``home_mismatch``. **CENSUS RULE (MC-2): ``home_mismatch`` is not an ordinary miss.** The other reasons say the STORE moved, the install changed, or the pair is unbound — all facts about the thing being cached. This one says the persisted pair was keyed under a different Hermes home than the reading process resolved, i.e. the two runs asked different QUESTIONS, and it is emitted INSTEAD of ``fingerprint_mismatch`` so the distinction is countable rather than inferred. On a multi-home install (an operator who really does run two roots) it is ordinary. On a SINGLE-PROFILE operator boot it is evidence that a persona scope was live while a build stat'd — the capture in ``core_cache.resolved_fingerprint_home`` was taken too late — which is a defect to go fix, not noise to tune out. A pair carrying no ``sidecar.fingerprint_home`` at all (every one written before MC-2) is skipped rather than demoted, so this reason can never fire for an install that simply predates the field. ``absent`` is deliberately NOT logged (the ordinary cold start would print a line on every build in every process), so its only trace is the ABSENCE of a line and a census must not read "no demote line" as "no demote". **CENSUS RULE (MC-3): ``fingerprint_mismatch`` ALONE grows a tail**, and the tail is ``changed=`` then ``diff=`` LAST (paths may contain spaces, so nothing can be field-parsed after it; the tail is additive, so an existing ``reason=`` grep is unaffected). No other reason carries one, deliberately: a diff on a ``build_stamp_mismatch`` would name every file the operator's upgrade touched and read as store churn. **The scope is ``last_pair`` BY CONSTRUCTION and that caveat is the row's most important sentence:** a demote diff is the delta since the LAST WRITE-BACK, so on a busy store it legitimately names files that are simply moving, and the receipt is TRUE without naming a defect. It is self-perturbation evidence — the A1-b/A2 class worth acting on — ONLY when the named paths are ones the runtime itself writes (``dispatch_delivery_drain.json``, ``serve_socket.owner.json``, ``state.db-wal``, ``serve_socket.lock``); when they are store paths the operator's own writes touched, the miss is legitimate and the cache is working as designed. An arm that could not compute the diff says so in its own words rather than emitting an empty list, which would read as "we looked and nothing moved": ``diff_scope=none changed=0 diff_reason=`` ``no_entries`` (nothing persisted yet, or an install predating MC-3) / ``entries_unbound`` (the entries file in the live generation is not the one that write-back put there — MCF-21 made a torn trio unrepresentable, so this now reads as tampering or corruption rather than as a failed diagnostic write) / ``digest_without_entry_delta`` (the digests disagreed and no triple did), then ``diff=diff_unavailable`` |
 | ``snapshot_core_cache_write ok=true`` (INFO) | none | ``inputs=`` ``fingerprint=`` ``offset=`` |
 | ``snapshot_core_cache_write ok=false`` (INFO/WARNING) | none | reasons ``serialize`` ``build_stamp_unknown`` ``fingerprint_unavailable`` ``io``. **COLLISION:** ``build_stamp_unknown`` and ``fingerprint_unavailable`` are ALSO demote reasons on the row above. Grep the family token with them, never the reason alone |
-| ``snapshot_core_cache_write entries=false`` (WARNING) | none | ``reason=entries_io``. **NOT a write refusal, and deliberately not spelled ``ok=false``:** the core and sidecar LANDED and the cache is usable; only the stat set that makes a later miss diffable did not. A census that folded this into ``ok=false`` would count a successful cache write as a failed one. Its consequence is countable on the OTHER lane rather than inferred: the entries file left behind is bound to an older digest, so the next fingerprint demote reports ``diff_reason=entries_unbound`` |
 | ``snapshot_core_shadow ok=true`` (INFO) | none | ``caller=`` ``divergence=none`` — the shadow build agreed with the cache |
 | ``snapshot_core_shadow ok=false`` (WARNING) | none | ``caller=`` ``reason=build`` — the shadow build itself raised |
 | ``snapshot_core_shadow_divergence`` (WARNING) | none | ``caller=`` ``section=`` (the first section that disagreed). Its own family token rather than a field on the row above, because retiring the shadow lane is keyed on counting exactly this |
@@ -179,8 +212,11 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import stat
 import threading
+import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, NamedTuple
@@ -211,6 +247,37 @@ SIDECAR_FILENAME = "sidecar.json"
 #: triples into it would make the cheap half of the judgement pay for the
 #: diagnostic half. See :func:`entries_path` for the measured size.
 ENTRIES_FILENAME = "entries.json"
+
+#: The ONE file whose replacement publishes a write-back (MCF-21). It names the
+#: generation directory holding the trio above; nothing else decides which trio
+#: is live. See :func:`_live_generation_dir` for why a pointer and not a
+#: directory rename.
+POINTER_FILENAME = "live.json"
+
+#: Every generation directory is named with this prefix, and :func:`_is_generation_name`
+#: is the only reader of that fact. The prefix is what lets the reaper tell a
+#: directory this module owns from anything else that ever lands beside it, and
+#: it is what CONTAINS a pointer: a name that does not match is refused rather
+#: than joined onto :func:`_cache_dir`, so a corrupt or hostile pointer cannot
+#: resolve the live trio outside the cache's own directory.
+_GENERATION_PREFIX = "gen-"
+
+#: What :func:`core_path` / :func:`sidecar_path` / :func:`entries_path` resolve
+#: to when NO generation is published — a cold store, or the first consult after
+#: MCF-21 landed on a store still holding the flat trio.
+#:
+#: A stable placeholder rather than ``None`` or a raise, because those helpers
+#: have dozens of callers that legitimately ask "where would it be" before
+#: anything is there (``unlink(missing_ok=True)``, ``_stat_entry``'s
+#: absent-is-a-fact triple). Nothing ever WRITES here: a write-back always mints
+#: a fresh generation, so a read through this path is an ``OSError`` and the
+#: judgement demotes ``absent``, which is the honest answer.
+_NO_GENERATION_DIRNAME = f"{_GENERATION_PREFIX}none"
+
+#: The flat trio this module wrote before MCF-21. Read by NOTHING — see
+#: :func:`_live_generation_dir` for why a pointerless store demotes rather than
+#: adopting these — and reaped by the first successful write-back after landing.
+_LEGACY_FLAT_FILENAMES = (CORE_FILENAME, SIDECAR_FILENAME, ENTRIES_FILENAME)
 
 #: ``parity.core_source`` values.
 CORE_SOURCE_CACHE = "cache"
@@ -1264,27 +1331,151 @@ def _cache_dir() -> Path:
     return _paths.store_root() / CORE_CACHE_DIRNAME
 
 
+def pointer_path() -> Path:
+    """The file whose replacement IS the write-back (MCF-21)."""
+
+    return _cache_dir() / POINTER_FILENAME
+
+
+def _is_generation_name(name: Any) -> bool:
+    """Whether ``name`` is a generation directory this module could have minted.
+
+    CONTAINMENT, not tidiness. The name comes off disk, out of a file any process
+    on the machine can write, and it is about to be joined onto
+    :func:`_cache_dir`. ``..`` or a separator would resolve the "live trio"
+    anywhere on the filesystem, and the judgement downstream would then be asked
+    to bless bytes this module never wrote. The charset admits exactly what
+    :func:`_new_generation_name` mints and nothing else — no dots, no separators,
+    no drive letters — so escaping is unrepresentable rather than filtered.
+    """
+
+    if not isinstance(name, str) or not name.startswith(_GENERATION_PREFIX):
+        return False
+    body = name[len(_GENERATION_PREFIX) :]
+    return bool(body) and all(char in "0123456789abcdef-" for char in body)
+
+
+def _new_generation_name() -> str:
+    """A generation name no other write-back can collide with.
+
+    The timestamp is for the OPERATOR — a directory listing of the cache sorts
+    into the order the write-backs happened, which is what makes a stranded
+    staging directory legible. It is NOT how the live generation is chosen: the
+    pointer is the only authority, and a reader that preferred the newest name or
+    mtime would resurrect a generation whose publish never completed. The random
+    tail is what makes the name unique across two processes writing back inside
+    the same nanosecond.
+    """
+
+    return f"{_GENERATION_PREFIX}{time.time_ns():x}-{uuid.uuid4().hex[:8]}"
+
+
+def _live_generation_dir() -> Path:
+    """The directory holding the trio the pointer names.
+
+    =========================================================================
+    WHY A POINTER AND NOT A DIRECTORY SWAP
+    =========================================================================
+
+    MC-3 recorded the target shape as "write ``serve_read_model.next/``,
+    ``os.replace`` the directory". That is not implementable, and the reason is a
+    platform fact rather than a preference: ``os.replace`` cannot replace a
+    NON-EMPTY directory anywhere (POSIX ``rename`` answers ``ENOTEMPTY``), and on
+    Windows — the primary platform — it cannot replace a directory AT ALL, empty
+    or not (measured 2026-08-18: ``PermissionError`` / ``WinError 5`` for both).
+    A directory can only be renamed onto a name that does not exist.
+
+    The shape that follows from that is rename-away-then-rename-in, and it is
+    REFUSED: between the two renames there is no live generation at all, so a
+    concurrent consult is served ``absent`` — a window strictly worse than the
+    torn trio the swap exists to retire.
+
+    So the atomicity rides ONE small file instead. The complete trio is written
+    into a fresh generation directory that nothing points at, and the write-back
+    lands when — and only when — the pointer naming it is replaced through
+    :func:`utils.atomic_json_write`, the same single atomic-write authority the
+    rest of this module already uses. A crash before that leaves a directory the
+    pointer never named, which serves nobody and is reaped by the next successful
+    write-back.
+
+    =========================================================================
+    A POINTERLESS STORE DEMOTES — IT DOES NOT ADOPT THE FLAT TRIO
+    =========================================================================
+
+    Every store that held a cache before MCF-21 has ``core.json`` /
+    ``sidecar.json`` / ``entries.json`` sitting flat in :func:`_cache_dir`, and
+    adopting them as generation zero was the alternative on offer. It is refused,
+    and NOT because the judgement could not vet them — it could; the full
+    conjunction in :func:`_judge_persisted_pair` is exactly what a torn legacy
+    trio fails. It is refused because keeping a second resolution alive forever
+    means a pointer that is ever LOST — deleted, truncated, unparseable — silently
+    falls back to whatever flat trio is on disk. That path can serve an arbitrarily
+    old core as authoritative, which is the missed-input direction this module
+    calls its worst failure, reached through the one code path nobody exercises.
+
+    The cost of refusing is exactly one demote, on the first boot after this
+    lands, on each store. A cache's cold start is its designed-for state.
+    """
+
+    name = _live_generation_name()
+    return _cache_dir() / (name if name is not None else _NO_GENERATION_DIRNAME)
+
+
+def _live_generation_name() -> str | None:
+    """What the pointer says, or ``None`` when nothing usable does.
+
+    Never raises, and every unusable shape answers the SAME way — no pointer, an
+    unreadable one, a non-object, a missing field, a name that is not one this
+    module mints. They are one fact ("no generation is published") and giving
+    them one answer is what keeps the caller from growing a second judgement.
+    """
+
+    try:
+        payload = json.loads(pointer_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    name = payload.get("generation")
+    return name if _is_generation_name(name) else None
+
+
 def core_path() -> Path:
-    return _cache_dir() / CORE_FILENAME
+    return _live_generation_dir() / CORE_FILENAME
 
 
 def sidecar_path() -> Path:
-    return _cache_dir() / SIDECAR_FILENAME
+    return _live_generation_dir() / SIDECAR_FILENAME
 
 
 def entries_path() -> Path:
     """The stat set behind the sidecar's digest, so a miss can name a path.
 
-    **The binding rule.** The payload is
-    ``{"fingerprint": <digest>, "entries": [[path, mtime_ns, size], …]}`` and the
-    digest is what makes the file usable: three files in one directory written by
-    three ``os.replace`` calls are three separate generations if any of them
-    fails, so a reader that trusted position over provenance would diff the
-    CURRENT store against SOME EARLIER store and name paths from a generation
-    nobody asked about. A reader compares ``entries.fingerprint`` against the
-    sidecar's and refuses (``diff_reason=entries_unbound``) when they differ —
-    the same rule ``core_sha256`` already applies between the sidecar and the
-    core, one file further out.
+    **The binding rule, RE-AIMED by MCF-21.** The payload is
+    ``{"fingerprint": <digest>, "entries": [[path, mtime_ns, size], …]}`` and a
+    reader compares ``entries.fingerprint`` against the sidecar's, refusing
+    ``diff_reason=entries_unbound`` when they differ.
+
+    The reason it was written is GONE, and saying so is the point. It used to
+    guard POSITIONAL MIXING: three files landed through three independent
+    ``os.replace`` calls, so any one of them failing left three separate
+    generations in one directory, and a reader trusting position over provenance
+    would diff the current store against some earlier one and name paths from a
+    generation nobody asked about. The generation swap makes that unrepresentable
+    — the three files are written into one directory that becomes live in a
+    single pointer replace, so the entries file beside a sidecar is always that
+    sidecar's own.
+
+    **What it still defends, which is why it stays.** Provenance is not proved by
+    position even inside a published generation: a hand-restored, truncated or
+    tampered ``entries.json`` still reaches this reader, and the alternative to
+    refusing is a diff computed against a stat set that is not this pair's — a
+    receipt that NAMES FILES an operator will go and investigate. A diagnostic
+    that cannot prove which store it is describing must refuse and say so, never
+    pass on partial knowledge. That is the same rule as ``core_sha256`` one file
+    further out, and it now has the same shape of reason: both convict bytes that
+    are not the ones this module wrote, rather than binding files the swap
+    already binds.
 
     **SIZE, PRICED RATHER THAN DISCOVERED** (the C-7 class). Measured
     2026-08-18 by walking the operator's live ``agent-runtime`` tree read-only
@@ -1310,7 +1501,7 @@ def entries_path() -> Path:
     cost was never the lever and did not move.
     """
 
-    return _cache_dir() / ENTRIES_FILENAME
+    return _live_generation_dir() / ENTRIES_FILENAME
 
 
 def _core_digest(payload: Any) -> str:
@@ -1323,17 +1514,43 @@ def _core_digest(payload: Any) -> str:
 # Write-back
 # --------------------------------------------------------------------------- #
 def write_back(core: dict, *, fingerprint: CoreFingerprint | None = None) -> bool:
-    """Persist the core's WIRE form plus its sidecar. Best effort, by contract.
+    """Persist the core, its sidecar and its stat set as ONE generation.
 
     A failed write logs and changes NOTHING about the build that produced the
     core — the build path is byte-identical whether this succeeds or fails,
     which is what makes the cache safe to add to a hot path (test 9's second
-    half is the pin).
+    half is the pin). That outer contract is unchanged by MCF-21.
 
-    The sidecar binds to the core BYTES via ``core_sha256``, not merely to the
-    path. Two writers cannot own one file here, but a half-replaced pair, a
-    hand-edited core, or a rollback that restored an older ``core.json`` beside
-    a newer sidecar would otherwise be indistinguishable from a valid pair.
+    **ALL THREE FILES OR NONE (MCF-21).** This used to land three files through
+    three independent ``os.replace`` calls: each was atomic alone and the TRIO
+    was not, so the property "these three describe one build" was held up by two
+    ad-hoc binding guards rather than by one rule — and a fourth file would have
+    made a third guard. Now the trio is written into a fresh generation directory
+    nothing points at, and the write-back LANDS when the pointer naming it is
+    replaced. One atomic act publishes three files; a failure anywhere before it
+    publishes nothing at all. See :func:`_live_generation_dir` for why a pointer
+    rather than the directory swap MC-3 recorded, and why a store with no pointer
+    demotes instead of adopting the flat trio it finds.
+
+    **The arm that retires with it.** The entries write used to sit deliberately
+    OUTSIDE the pair's ``try``, so a failed diagnostic left a usable cache behind
+    and receipted itself as ``entries=false reason=entries_io``. A published
+    generation missing one of its three files is now unrepresentable, so that
+    state — and its receipt — are gone from the vocabulary and from the channel
+    table. An entries failure aborts the generation and the write-back reports
+    the one failure it had: ``ok=false reason=io``. The trade is named rather
+    than discovered: the lane loses the ability to keep a cache whose diagnostic
+    could not be written, and gains the property that anything published is
+    whole. It is the right way round because the diagnostic exists to explain the
+    cache, and a cache nobody can explain is the state MCF-14 spent a whole
+    investigation in.
+
+    The sidecar still binds to the core BYTES via ``core_sha256``, and that check
+    is NOT retired with the torn pair. It convicts a different thing now: a
+    hand-edited core, a rollback that dropped an older ``core.json`` into the
+    live generation, or bytes that did not come from this module at all — none of
+    which a swap can prevent, because they happen to a generation that is already
+    published.
 
     **``fingerprint`` must be the caller's PRE-build stat set.** The direction of
     the error matters and only one direction is safe. A key stat'd AFTER the
@@ -1417,11 +1634,47 @@ def write_back(core: dict, *, fingerprint: CoreFingerprint | None = None) -> boo
     # A process boundary is not a convergence event — see
     # :func:`_capture_boot_streak_seed`.
     _capture_boot_streak_seed(key)
+    generation = _new_generation_name()
+    staged = _cache_dir() / generation
     try:
-        atomic_json_write(core_path(), payload, indent=None, separators=(",", ":"), sort_keys=True)
-        atomic_json_write(sidecar_path(), sidecar, indent=None, sort_keys=True)
+        # The SAME atomic writer as everything else this module lands
+        # (``utils.atomic_json_write``, compact separators for the two large
+        # payloads), because one atomic-write authority is this module's rule. It
+        # is not what makes the trio atomic — the pointer replace below is — but a
+        # second staging convention inside one directory is how a half-written
+        # file gets read as a whole one.
+        atomic_json_write(
+            staged / CORE_FILENAME, payload, indent=None, separators=(",", ":"), sort_keys=True
+        )
+        atomic_json_write(staged / SIDECAR_FILENAME, sidecar, indent=None, sort_keys=True)
+        # The convergence authority runs BEFORE the entries write and hands it
+        # the number, rather than the entries write deriving one of its own: the
+        # streak is ``_note_written_key``'s to decide, and a second site computing
+        # it from the same seed would be two rules for one question (property 6).
+        # It sits INSIDE the staging block, after the two files that make a cache
+        # exist — see that function's docstring for the one window in which it can
+        # now advance for a generation that does not publish, and why that window
+        # is narrower than it looks.
+        streak = _note_written_key(key)
+        atomic_json_write(
+            staged / ENTRIES_FILENAME,
+            _entries_payload(key, streak),
+            indent=None,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        # THE LANDING. Everything above wrote into a directory nothing points at;
+        # this one replace is the write-back.
+        atomic_json_write(
+            pointer_path(), {"generation": generation}, indent=None, sort_keys=True
+        )
     except Exception:
         logger.warning("snapshot_core_cache_write ok=false reason=io", exc_info=True)
+        # The pointer never named it, so this is housekeeping and not a retraction
+        # — the previous generation is still live and still whole. Best effort by
+        # construction: if it fails, the directory is inert residue and the next
+        # successful write-back reaps it.
+        shutil.rmtree(staged, ignore_errors=True)
         return False
     logger.info(
         "snapshot_core_cache_write ok=true inputs=%d fingerprint=%s offset=%s",
@@ -1429,71 +1682,68 @@ def write_back(core: dict, *, fingerprint: CoreFingerprint | None = None) -> boo
         key.digest[:12],
         "unknown" if sidecar["event_offset"] is None else sidecar["event_offset"],
     )
-    # The convergence authority runs BEFORE the entries write and hands it the
-    # number, rather than the entries write deriving one of its own: the streak
-    # is ``_note_written_key``'s to decide, and a second site computing it from
-    # the same seed would be two rules for one question (property 6).
-    streak = _note_written_key(key)
-    # LAST, and OUTSIDE the pair's ``try``, on purpose. ``write_back``'s contract
-    # is that a failed write changes NOTHING about the build, and the pair is
-    # what the cache is FOR: the entries are a diagnostic that makes a later miss
-    # diffable. Letting a diagnostic's failure retract a landed cache would trade
-    # the thing this module exists for against the thing that explains it. So the
-    # entries write reports itself and the write-back still succeeds.
-    _write_entries(key, streak=streak)
+    _reap_superseded_generations(generation)
     return True
 
 
-def _write_entries(key: CoreFingerprint, *, streak: int = 0) -> bool:
-    """Persist the stat set beside the pair. BEST EFFORT — never fails a write-back.
+def _entries_payload(key: CoreFingerprint, streak: int) -> dict:
+    """The stat set behind the digest, bound to the digest — see :func:`entries_path`."""
 
-    The SAME atomic writer as the pair (``utils.atomic_json_write``, compact
-    separators), because one atomic-write authority is the rule this module
-    already follows and a second staging convention in one directory is how a
-    half-written generation gets read as a whole one.
+    return {
+        "fingerprint": key.digest,
+        # The convergence streak this write-back left standing, so the NEXT
+        # process can carry it instead of restarting from zero. It rides here
+        # rather than on the sidecar for two reasons: the sidecar is read by every
+        # consult on the boot path and must stay the cheap half of the judgement,
+        # and this file already IS "what this write-back knew" — the streak is
+        # that, not a property of the cached core. See
+        # :func:`_capture_boot_streak_seed`.
+        "streak": int(streak),
+        "entries": [[entry.path, entry.mtime_ns, entry.size] for entry in key.entries],
+    }
 
-    Bound to the digest it describes rather than to its position beside the
-    sidecar — see :func:`entries_path` for why that binding is the whole point of
-    the file.
 
-    A failure is receipted on the write lane's own family with its own field
-    shape: ``entries=false`` rather than ``ok=false``, because ``ok=false`` is
-    documented to mean the pair did not land and this is exactly the case where
-    it DID. Reusing it would tell a census a cache write refused when a cache
-    write succeeded.
+def _reap_superseded_generations(live: str) -> None:
+    """Drop what the pointer no longer names. BEST EFFORT, and it must stay that way.
+
+    Three things accumulate in :func:`_cache_dir` and all three are reaped by one
+    rule — "keep the pointer and the generation it names":
+
+    * the generations this write-back superseded;
+    * staging directories stranded by a crash or a failed landing, which never
+      served anybody because the pointer never named them;
+    * the FLAT trio written before MCF-21, which :func:`_live_generation_dir`
+      deliberately refuses to read. This is the only thing that ever removes it,
+      and it is a one-time cleanup per store rather than a migration.
+
+    **Why failure is swallowed rather than receipted.** A reader in another
+    process can be mid-read of a generation this call is removing; on Windows that
+    makes the removal fail outright, which is exactly the right outcome and not an
+    event worth a line in a log an operator reads. The cost of losing a reap is one
+    directory that the next write-back tries again on. The cost of letting it raise
+    would be a landed write-back reporting failure.
+
+    A file it does not recognise is LEFT ALONE — including ``atomic_json_write``'s
+    own ``.tmp`` staging files, which live in this directory while the pointer is
+    being replaced. Reaping one of those would break a concurrent write-back for
+    the sake of tidiness.
     """
 
+    cache_dir = _cache_dir()
     try:
-        atomic_json_write(
-            entries_path(),
-            {
-                "fingerprint": key.digest,
-                # The convergence streak this write-back left standing, so the
-                # NEXT process can carry it instead of restarting from zero.
-                # It rides here rather than on the sidecar for two reasons: the
-                # sidecar is read by every consult on the boot path and must stay
-                # the cheap half of the judgement, and this file already IS "what
-                # this write-back knew" — the streak is that, not a property of
-                # the cached core. See :func:`_capture_boot_streak_seed`.
-                "streak": int(streak),
-                "entries": [[entry.path, entry.mtime_ns, entry.size] for entry in key.entries],
-            },
-            indent=None,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-    except Exception:
-        logger.warning(
-            "snapshot_core_cache_write entries=false reason=entries_io — the core "
-            "and its sidecar LANDED and the cache is usable; only the stat set "
-            "that would let a later miss name the file that moved did not. The "
-            "stale entries file left behind is bound to an older digest, so a "
-            "demote reads diff_reason=entries_unbound rather than diffing across "
-            "two generations.",
-            exc_info=True,
-        )
-        return False
-    return True
+        names = os.listdir(cache_dir)
+    except OSError:
+        return
+    for name in names:
+        if name == live:
+            continue
+        if _is_generation_name(name):
+            shutil.rmtree(cache_dir / name, ignore_errors=True)
+        elif name in _LEGACY_FLAT_FILENAMES:
+            try:
+                (cache_dir / name).unlink()
+            except OSError:
+                pass
 
 
 # --------------------------------------------------------------------------- #
@@ -1681,9 +1931,22 @@ def _note_written_key(key: CoreFingerprint) -> int:
     process can continue it. This function stays the ONE authority for that
     number; the file only records what it decided.
 
-    Called on SUCCESSFUL write-backs only: a write that did not land is already a
-    receipt of its own (``snapshot_core_cache_write ok=false``) and a key that was
-    never persisted is not a key any later process could have agreed with.
+    **When it is called, and the one window MCF-21 opened.** It runs once the core
+    and sidecar have staged — i.e. once the write-back is going to land unless the
+    disk fails twice — and before the entries file that RECORDS its answer, because
+    the entries file is now inside the published unit and cannot be written after
+    the landing. So the old sentence "called on successful write-backs only" is no
+    longer exactly true and is not left standing as if it were: an entries-write or
+    pointer-publish failure now advances this process's streak for a generation
+    that did not publish.
+
+    That window is narrower than the change makes it sound. Under the OLD ordering
+    an entries failure already fired this, so the genuinely new case is a pointer
+    replace that fails immediately after three files were written successfully into
+    the same directory. And the consequence is bounded by what the streak MEASURES:
+    whether consecutive BUILDS produce keys that agree — a property of the store's
+    stability, not of what reached the disk. A write-back that failed leaves that
+    answer just as true as one that landed.
     """
 
     global _last_written_digest, _streak_entries, _streak_length
@@ -1831,7 +2094,10 @@ def _persisted_entries(*, expect_digest: Any) -> tuple[PersistedEntries | None, 
     than no diagnostic.
 
     ``expect_digest`` is the SIDECAR's fingerprint, and the comparison is the
-    binding rule :func:`entries_path` documents. It is a required keyword rather
+    binding rule :func:`entries_path` documents — which MCF-21 re-aimed rather
+    than retired: the swap makes cross-generation mixing unrepresentable, and this
+    check now convicts an entries file inside the LIVE generation whose contents
+    are not the ones the write-back put there. It is a required keyword rather
     than an optional check, because "read the entries" and "read the entries that
     belong to this pair" are different operations and only one of them is sound —
     an optional check is one call site away from being the unsound one.
@@ -1935,12 +2201,19 @@ def _read_pair() -> tuple[str, str] | None:
     Its own function so the boot lane can count and memoise the READ separately
     from the judgement — and so a witness can prove one read happened rather than
     inferring it from a duration.
+
+    The generation is resolved ONCE and both files are read out of it, rather than
+    asking :func:`sidecar_path` and :func:`core_path` in turn. Two resolutions
+    could straddle a publish and read one file from each of two generations, which
+    is precisely the torn read MCF-21 exists to end — reintroduced by the reader
+    instead of the writer.
     """
 
+    generation = _live_generation_dir()
     try:
         return (
-            sidecar_path().read_text(encoding="utf-8"),
-            core_path().read_text(encoding="utf-8"),
+            (generation / SIDECAR_FILENAME).read_text(encoding="utf-8"),
+            (generation / CORE_FILENAME).read_text(encoding="utf-8"),
         )
     except OSError:
         return None
@@ -2154,7 +2427,7 @@ _shadow_done = False
 #: computed region takes :data:`_lane_lock`, and no holder of the lane lock takes
 #: this one — the two never nest.
 class _ConsultMemo(NamedTuple):
-    stamp: tuple[FingerprintEntry, FingerprintEntry]
+    stamp: tuple[FingerprintEntry, ...]
     raw_core: str
     read: CacheRead
 
@@ -2163,10 +2436,24 @@ _memo_lock = threading.Lock()
 _consult_memo: _ConsultMemo | None = None
 
 
-def _pair_stamp() -> tuple[FingerprintEntry, FingerprintEntry]:
-    """Two stats over the persisted pair — the memo's whole invalidation rule."""
+def _pair_stamp() -> tuple[FingerprintEntry, ...]:
+    """The pointer and the pair it names — the memo's whole invalidation rule.
 
-    return (_stat_entry(sidecar_path()), _stat_entry(core_path()))
+    The POINTER is in the stamp, and it is the load-bearing third stat. A
+    generation flip is already visible in the other two — a
+    :class:`FingerprintEntry` carries its path and the generation name is in it —
+    but that leaves the memo's invalidation depending on a naming convention. The
+    pointer's own mtime moves on every publish by the same ``os.replace`` argument
+    the whole module rests on, so the memo drops on a republish whatever the
+    generations are called.
+    """
+
+    generation = _live_generation_dir()
+    return (
+        _stat_entry(pointer_path()),
+        _stat_entry(generation / SIDECAR_FILENAME),
+        _stat_entry(generation / CORE_FILENAME),
+    )
 
 
 def _drop_consult_memo() -> None:

@@ -1847,11 +1847,23 @@ def test_a_core_whose_bytes_the_sidecar_does_not_describe_is_refused(
 ):
     """The sidecar binds to the core's BYTES, not to its path.
 
-    A half-replaced pair, a hand-edited core, or a rollback that restored an
-    older ``core.json`` beside a newer sidecar would otherwise be
-    indistinguishable from a valid pair — and this one is refused OUTRIGHT
-    rather than served stale, because nothing here can say what an unbound core
-    contains.
+    A hand-edited core, or a rollback that dropped an older ``core.json`` into
+    the live generation, would otherwise be indistinguishable from a valid pair —
+    and this one is refused OUTRIGHT rather than served stale, because nothing
+    here can say what an unbound core contains.
+
+    **This guard survived MCF-21 deliberately, and this case is why.** The
+    generation swap retired ONE of the two things ``core_sha256`` used to catch:
+    a half-replaced pair, where the core and the sidecar came from two different
+    write-backs, is now unrepresentable — they land together or not at all. What
+    it cannot touch is bytes that changed AFTER a generation was published, which
+    is exactly what the fixture below drives: the tamper lands inside the live
+    generation, through the same atomic writer, and the pair is still refused. A
+    swap makes the writer honest; it says nothing about the disk afterwards.
+
+    *Kill:* drop the ``core_sha256`` comparison in ``_judge_persisted_pair``. The
+    tampered core is served as authoritative and both the reason and the
+    stale-first refusal red.
     """
 
     tampered = _persisted_core()
