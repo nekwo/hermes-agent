@@ -1716,18 +1716,6 @@ class PersonaChatClarifyTicketStore:
                 newest = record
         return newest
 
-    def list_tickets(self) -> list[dict[str, Any]]:
-        """Every ticket on disk, newest first. The operator readout's source.
-
-        DELIBERATELY the full scan, and it must stay that way: the by-session
-        index knows only OPEN tickets, so answering from it would omit exactly
-        the settled ones the adoption metric is computed from — every
-        ``bound_via`` the histogram counts is recorded at settle. This is a cold
-        operator read, not the per-turn lookup, and it is the one caller that
-        legitimately wants the whole store."""
-
-        return self.scan_tickets()[0]
-
     def scan_tickets(self) -> tuple[list[dict[str, Any]], int]:
         """:meth:`list_tickets`, plus how many ticket files would not decode.
 

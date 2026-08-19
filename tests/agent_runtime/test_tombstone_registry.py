@@ -3208,6 +3208,43 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         "_cmd_workspace_actors",
         scope=("hermes_cli",),
     ),
+    # -- S72 stages HA-5 / HB-4-EXCL — three lossy or callerless reads. ----
+    # `IncidentStore.list_open_with_closed_count` was a SNAPSHOT-LANE
+    # optimisation (open rows plus a count of the closed tail, so a runtime
+    # with thousands of closed incident files did not coerce them all per
+    # frame). Its caller went with the incident observability S9 removed;
+    # `status.build_status` — the function that still reads an incident store —
+    # calls `list_all()`. What was left was a perf argument for a cost nobody
+    # pays and three asserts that were its only exercise.
+    #
+    # `PersonaChatClarifyTicketStore.list_tickets` returned `scan_tickets()[0]`
+    # and DROPPED the unreadable count. `scan_tickets`' own docstring says why
+    # that count has to travel: the adoption metric is a RATIO over the whole
+    # store, and "an adoption ratio that moved because the operator asked to
+    # see fewer rows would be a lying metric". A thin sibling that silently
+    # moves the denominator is the same defect as HB-4's `_list_active_cards`,
+    # on a different store.
+    #
+    # `persona_assignments.safe_assignment_state` had no caller at all.
+    *rows(
+        "s72",
+        "HEAD",
+        Form.CLASS_ATTR,
+        "dead-code audit pass 2 HA-5 / HB-4 — a snapshot-lane optimisation "
+        "whose caller went with S9's incident observability, and a thin read "
+        "that dropped the unreadable count its own sibling exists to carry",
+        "store.IncidentStore.list_open_with_closed_count",
+        "persona_chat_continuity.PersonaChatClarifyTicketStore.list_tickets",
+        scope=_AR,
+    ),
+    *rows(
+        "s72",
+        "HEAD",
+        Form.ATTR,
+        "dead-code audit pass 2 HB-4 — callerless assignment-state coercion",
+        "safe_assignment_state",
+        scope=("agent_runtime.persona_assignments",),
+    ),
 )
 
 

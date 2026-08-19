@@ -21,18 +21,6 @@ class Store:
     def list_all(self):
         return list(self.items)
 
-    def list_open_with_closed_count(self):
-        """The incident-store contract ``build_snapshot`` reads since cc9db651f.
-
-        Closed incidents are history-only in the steady-state frame, so the real
-        store returns the open rows plus a COUNT of the closed tail rather than
-        coercing thousands of closed files per snapshot. This double answers the
-        same shape off whatever it was handed."""
-
-        items = list(self.items)
-        open_items = [item for item in items if getattr(item, "closed_at", None) is None]
-        return open_items, len(items) - len(open_items)
-
 
 class EmptyAgentStore:
     def list_all(self):

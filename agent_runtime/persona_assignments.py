@@ -2989,13 +2989,6 @@ def _dedupe_tokens(values: list[str] | None) -> list[str]:
     return result
 
 
-def safe_assignment_state(value: str) -> str:
-    state = safe_assignment_token(value)
-    if state in ACTIVE_ASSIGNMENT_STATES or state in TERMINAL_ASSIGNMENT_STATES:
-        return state
-    return "queued"
-
-
 def _safe_skill_overrides(values: list[str]) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []

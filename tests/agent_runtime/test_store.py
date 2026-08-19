@@ -164,52 +164,15 @@ def test_incident_store_reads_open_and_closed_history():
 
     store_module._write_model(paths.incident_path(incident.id), incident)
     assert store.get("inc_1") == incident
-    assert store.list_open_with_closed_count()[0] == [incident]
+    assert store.list_all() == [incident]
 
     incident.closed_at = now()
     store_module._write_model(paths.incident_path(incident.id), incident)
-    assert store.list_open_with_closed_count()[0] == []
+    # `list_all` is the whole read surface now: `list_open_with_closed_count`
+    # was a snapshot-lane optimisation whose caller went with the incident
+    # observability S9 removed, leaving these asserts as its only exercise.
+    assert [item.closed_at for item in store.list_all()] == [incident.closed_at]
     assert not hasattr(store, "open")
     assert not hasattr(store, "close")
+    assert not hasattr(store, "list_open_with_closed_count")
 
-
-def test_incident_store_open_with_closed_count_skips_closed_model_coercion(
-    isolate_agent_runtime_root, monkeypatch
-):
-    store = IncidentStore()
-    open_incident = Incident(
-        id="inc_open_fast",
-        task_id="task_fast",
-        run_id=None,
-        kind="proof_failure",
-        summary="open",
-        detail_path=None,
-        opened_at=now(),
-    )
-    closed_incident = Incident(
-        id="inc_closed_fast",
-        task_id="task_fast",
-        run_id=None,
-        kind="proof_failure",
-        summary="closed",
-        detail_path=None,
-        opened_at=now(),
-        closed_at=now(),
-    )
-    store_module._write_model(paths.incident_path(open_incident.id), open_incident)
-    store_module._write_model(paths.incident_path(closed_incident.id), closed_incident)
-
-    real_from_jsonable = store_module.from_jsonable
-    coerced_ids = []
-
-    def recording_from_jsonable(cls, raw):
-        if cls is Incident:
-            coerced_ids.append(raw.get("id"))
-        return real_from_jsonable(cls, raw)
-
-    monkeypatch.setattr(store_module, "from_jsonable", recording_from_jsonable)
-    live, closed_count = store.list_open_with_closed_count()
-
-    assert [item.id for item in live] == [open_incident.id]
-    assert closed_count == 1
-    assert coerced_ids == [open_incident.id]

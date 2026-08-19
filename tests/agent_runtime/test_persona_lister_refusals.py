@@ -550,8 +550,12 @@ def test_the_ticket_readout_states_what_it_could_not_read(
     assert unreadable == corrupt_count
     # Membership, not position: the readable ticket is still listed.
     assert {record["clarify_token"] for record in records} == {token}
-    # The thin view keeps its signature for every caller that only wants rows.
-    assert [record["clarify_token"] for record in store.list_tickets()] == [token]
+    # There is deliberately no thin `list_tickets()` view beside this. It
+    # returned `scan_tickets()[0]` and DROPPED the unreadable count — the
+    # denominator the adoption ratio is computed over, which `scan_tickets`'
+    # own docstring says must travel. One reader, one signature, no lossy
+    # sibling to reach for by accident.
+    assert not hasattr(store, "list_tickets")
 
 
 # --- site 5: the workspace-delete cascade --------------------------------

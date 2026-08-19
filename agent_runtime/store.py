@@ -659,36 +659,5 @@ class IncidentStore:
     def get(self, incident_id: str) -> Incident:
         return _read_model(Incident, paths.incident_path(incident_id))
 
-    def list_open_with_closed_count(self) -> tuple[list[Incident], int]:
-        """Return live incidents without deserializing the closed-history tail.
-
-        Mission Control keeps only open incidents in its steady-state frame;
-        closed rows are represented by a count and fetched on demand.  Large
-        long-lived runtimes can have thousands of closed incident files, and
-        coercing every one into the recursive ``Incident`` dataclass graph on
-        every snapshot made history cost as much as live state.
-
-        We still JSON-decode every file so corrupt store rows fail exactly as
-        ``list_all`` does.  Only closed rows skip the substantially more
-        expensive ``from_jsonable`` pass.
-        """
-
-        directory = paths.incidents_dir()
-        if not directory.exists():
-            return [], 0
-        open_incidents: list[Incident] = []
-        closed_count = 0
-        for path in directory.glob("*.json"):
-            try:
-                raw = _read_json(path)
-            except NotFound:
-                # Preserve the archive-race tolerance of ``_list_models``.
-                continue
-            if raw.get("closed_at") is not None:
-                closed_count += 1
-                continue
-            open_incidents.append(from_jsonable(Incident, raw))
-        return sorted(open_incidents, key=lambda item: item.id), closed_count
-
     def list_all(self) -> list[Incident]:
         return _list_models(Incident, paths.incidents_dir())
