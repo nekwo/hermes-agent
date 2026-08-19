@@ -76,6 +76,7 @@ def test_no_production_module_still_imports_it():
 
     root = pathlib.Path(agent_runtime.__file__).resolve().parents[1]
     offenders = []
+    scanned = 0
     for package in ("agent_runtime", "hermes_cli", "gateway", "agent", "acp_adapter", "tools"):
         for path in (root / package).rglob("*.py"):
             if "__pycache__" in path.parts:
@@ -84,13 +85,27 @@ def test_no_production_module_still_imports_it():
                 tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
             except SyntaxError:
                 continue
+            scanned += 1
             for node in ast.walk(tree):
-                if isinstance(node, ast.ImportFrom) and "launcher_process_hygiene" in (node.module or ""):
-                    offenders.append(f"{path.relative_to(root)}:{node.lineno}")
+                if isinstance(node, ast.ImportFrom):
+                    # BOTH halves of an ``ImportFrom``. Until the MCF-53 sweep only
+                    # ``node.module`` was read, so ``from agent_runtime import
+                    # launcher_process_hygiene`` — where the module name is an ALIAS and
+                    # ``node.module`` is just ``agent_runtime`` — was invisible to
+                    # this gate. That is the idiomatic spelling for importing a
+                    # submodule, and there are ~95 such sites across the six scanned
+                    # packages, so the one form most likely to resurrect the module
+                    # was the one form the gate could not see.
+                    if "launcher_process_hygiene" in (node.module or "") or any(
+                        alias.name == "launcher_process_hygiene" for alias in node.names
+                    ):
+                        offenders.append(f"{path.relative_to(root)}:{node.lineno}")
                 elif isinstance(node, ast.Import):
                     for alias in node.names:
                         if "launcher_process_hygiene" in alias.name:
                             offenders.append(f"{path.relative_to(root)}:{node.lineno}")
+    # ANTI-VACUITY: an absence gate whose walk visited no file passes forever.
+    assert scanned > 300, scanned
     assert offenders == [], offenders
 
 
