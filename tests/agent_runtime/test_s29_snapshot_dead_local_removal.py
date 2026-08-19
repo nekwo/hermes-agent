@@ -131,6 +131,47 @@ def _function(name: str) -> ast.FunctionDef:
     raise AssertionError(f"{name} is not defined in agent_runtime.snapshot")
 
 
+#: A local ``agent_runtime.snapshot`` demonstrably binds, used as the
+#: anti-vacuity witness for :func:`_bound_names`. A binding walk that resolves
+#: nothing passes every absence assertion forever — the exact failure this file
+#: was re-aimed twice to retire.
+_ANTI_VACUITY_LIVE_LOCAL = "agents"
+
+
+def _bound_names(node) -> set[str]:
+    """Every plain name BOUND anywhere under ``node``, in any binding form.
+
+    ``ast.Assign`` alone answers "was this name given a value by ``name = ...``",
+    which is narrower than the question these gates ask ("is this seed back?").
+    A reintroduced seed spelled ``for runs in ...``, ``runs: list = []``,
+    ``runs += ...``, ``(runs := [])`` or ``with ... as runs`` would be invisible
+    to it."""
+
+    bound: set[str] = set()
+
+    def _record(target) -> None:
+        if isinstance(target, ast.Name):
+            bound.add(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for element in target.elts:
+                _record(element)
+        elif isinstance(target, ast.Starred):
+            _record(target.value)
+
+    for inner in ast.walk(node):
+        if isinstance(inner, ast.Assign):
+            for target in inner.targets:
+                _record(target)
+        elif isinstance(inner, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+            _record(inner.target)
+        elif isinstance(inner, (ast.For, ast.AsyncFor, ast.comprehension)):
+            _record(inner.target)
+        elif isinstance(inner, ast.withitem):
+            if inner.optional_vars is not None:
+                _record(inner.optional_vars)
+    return bound
+
+
 def _repo_root() -> pathlib.Path:
     return pathlib.Path(snapshot.__file__).resolve().parents[1]
 
@@ -301,18 +342,44 @@ def test_no_function_assigns_a_local_it_never_reads():
     assert offenders == []
 
 
-def test_the_named_dead_locals_are_not_bound_anywhere_in_the_builder():
+def test_the_named_dead_locals_are_not_bound_anywhere_in_the_snapshot_module():
     """Name-level pin on top of the defect-class gate, so a re-introduction is
-    reported as the specific mission-lane seed it is."""
+    reported as the specific mission-lane seed it is.
 
-    builder = _function("_build_snapshot_uncoalesced")
-    bound = {
-        target.id
-        for statement in ast.walk(builder)
-        if isinstance(statement, ast.Assign)
-        for target in statement.targets
-        if isinstance(target, ast.Name)
-    }
+    RE-AIMED 2026-08-19 (MCF-47), and it is the SAME defect the sibling
+    ``test_the_lookalike_live_locals_survive`` was re-aimed for at MCF-27 —
+    missed here because this gate names a function rather than a source
+    segment. It walked ``_function("_build_snapshot_uncoalesced")`` for
+    ``ast.Assign`` targets. That function became a two-statement WRAPPER when
+    the SessionDB acquisition moved to the build's outermost frame: one ``with
+    runtime_resolution_scope(), persona_session_db_scope() as session_db:`` and
+    one ``return _build_snapshot_in_runtime_scope(...)``. It contains **zero**
+    assignments, so ``bound`` was the empty set and the intersection was empty
+    for a reason that had nothing to do with the seeds. **The gate could not
+    have failed** — reintroducing all ten seeds in the body would have left it
+    green.
+
+    Re-aiming it at ``_build_snapshot_in_runtime_scope`` would reproduce the
+    defect at the next refactor that moves a section one frame over, exactly as
+    the sibling's docstring argues. So the scope is the MODULE: the guarantee is
+    "no surviving code in ``agent_runtime.snapshot`` binds one of these ten
+    mission-lane seed names", which is where the guarantee actually lives and is
+    strictly stronger than any single-function walk.
+
+    Binding is read in every form a seed could come back in — plain and
+    annotated assignment, augmented assignment, walrus, ``for`` and
+    comprehension targets, ``with ... as`` — because ``ast.Assign`` alone would
+    let ``for runs in ...`` back in silently. And the walk is pinned
+    ANTI-VACUOUSLY against a live local: if it resolves nothing, it says so
+    instead of passing."""
+
+    module = ast.parse(inspect.getsource(snapshot))
+    bound = _bound_names(module)
+    assert _ANTI_VACUITY_LIVE_LOCAL in bound, (
+        f"the binding walk cannot see {_ANTI_VACUITY_LIVE_LOCAL!r}, a local "
+        "agent_runtime.snapshot demonstrably binds — it is resolving nothing "
+        f"and this gate would pass vacuously. Resolved {len(bound)} names."
+    )
     assert sorted(bound & set(REMOVED_DEAD_LOCALS)) == []
 
 
