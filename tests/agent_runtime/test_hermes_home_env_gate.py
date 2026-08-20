@@ -25,6 +25,23 @@ An earlier gate in this repo matched the comments describing what it forbade,
 so it went red on its own documentation and was weakened until it caught
 nothing. This one parses the module and inspects call/subscript nodes, so
 prose — including the paragraph above — is structurally invisible to it.
+
+Scopes are covered, never skipped (2026-08-20, MCF-53 sweep)
+------------------------------------------------------------
+
+The scope resolver used to read ``if path.exists(): files.append(path)``, which
+is a SILENT SKIP. ``SCANNED_FILES`` therefore named two files and scanned one:
+``tools/mission_goal_tool.py`` was deleted with the mission lane at
+``2154f05428`` and had been dropped without a word ever since. The same hole
+covered ``SCANNED_ROOTS`` — a renamed package makes ``rglob`` yield nothing —
+and it is invisible by construction, because every assertion here is of the form
+"no unexpected hits" and an empty scan satisfies all of them.
+
+``_scope_contributions`` now resolves without deciding, and
+``test_every_named_scan_scope_resolves_to_something`` decides, under the same
+covered-or-fail rule ``test_tombstone_registry``'s CODE arm adopted for exactly
+this defect. That is the S66 meta-invariant: an unresolvable scope must be
+COVERED, never SKIPPED.
 """
 
 from __future__ import annotations
@@ -47,10 +64,13 @@ SCANNED_ROOTS = (
     "agent_runtime",
     "hermes_cli/harness_parts",
 )
-SCANNED_FILES = (
-    "tools/agent_chat_tool.py",
-    "tools/mission_goal_tool.py",
-)
+#: ``tools/mission_goal_tool.py`` stood here until 2026-08-20 and had been
+#: DELETED since the mission-lane removal (``2154f05428``). The resolver below
+#: skipped it silently, so this tuple named two files and scanned one, with
+#: nothing anywhere saying so. Its subject is covered — ``tests/agent_runtime/
+#: test_mission_goal.py`` asserts ``tools.mission_goal_tool`` has no spec — so
+#: the row is deleted rather than re-pointed.
+SCANNED_FILES = ("tools/agent_chat_tool.py",)
 
 #: module path -> why THIS module is allowed to ask the environment directly.
 #:
@@ -82,15 +102,30 @@ ALLOWED: dict[str, str] = {
 }
 
 
-def _python_files() -> list[Path]:
-    files: list[Path] = []
+def _scope_contributions() -> dict[str, list[Path]]:
+    """Every named scope -> the files it actually contributes.
+
+    Resolution FAILURE is deliberately not handled here. A scope that names
+    nothing yields an EMPTY list and says so to
+    :func:`test_every_named_scan_scope_resolves_to_something`, which decides
+    what that means. The previous shape resolved and SKIPPED in one step
+    (``if path.exists(): files.append(path)``), which is how this tuple came to
+    name two files and scan one for nineteen days without a single failure.
+    """
+
+    contributions: dict[str, list[Path]] = {}
     for root in SCANNED_ROOTS:
-        files.extend(sorted((REPO_ROOT / root).rglob("*.py")))
+        directory = REPO_ROOT / root
+        found = sorted(directory.rglob("*.py")) if directory.is_dir() else []
+        contributions[root] = [f for f in found if "tests" not in f.parts]
     for name in SCANNED_FILES:
         path = REPO_ROOT / name
-        if path.exists():
-            files.append(path)
-    return [f for f in files if "tests" not in f.parts]
+        contributions[name] = [path] if path.is_file() and "tests" not in path.parts else []
+    return contributions
+
+
+def _python_files() -> list[Path]:
+    return [path for files in _scope_contributions().values() for path in files]
 
 
 def _is_process_environ(node: ast.expr) -> bool:
@@ -157,6 +192,39 @@ def scanned() -> dict[str, list[int]]:
         if hits:
             found[path.relative_to(REPO_ROOT).as_posix()] = hits
     return found
+
+
+def test_every_named_scan_scope_resolves_to_something() -> None:
+    """A scope that names nothing must FAIL, never be skipped.
+
+    This is the arm the gate was missing. ``SCANNED_FILES`` named
+    ``tools/mission_goal_tool.py``, deleted with the mission lane at
+    ``2154f05428``; the old resolver's ``if path.exists()`` dropped it without a
+    word, so the tuple advertised two files and read one. The same hole covers
+    ``SCANNED_ROOTS``: a renamed or moved package makes ``rglob`` yield nothing,
+    and every assertion downstream is of the form "no unexpected hits", which an
+    empty scan satisfies perfectly.
+
+    The witness below cannot see this. It proves the scan finds
+    ``agent_runtime/chat_session_scope.py``, so it fires only when
+    ``agent_runtime`` breaks; ``agent``, ``hermes_cli/harness_parts`` and every
+    ``SCANNED_FILES`` entry could each collapse to zero underneath it.
+    (``harness_parts`` is incidentally covered by
+    ``test_allowlist_has_not_rotted``, because one ALLOWED entry lives there —
+    incidentally, which is not a property to rely on.)
+    """
+
+    contributions = _scope_contributions()
+    empty = sorted(scope for scope, files in contributions.items() if not files)
+    assert not empty, (
+        "these named scan scopes contribute ZERO files, so everything inside "
+        f"them is unpoliced and nothing says so: {empty}\n\n"
+        "A scope must be COVERED, never SKIPPED. Either the path moved (re-point "
+        "the entry), or its subject is gone (delete the entry, and say in the "
+        "commit which gate covers the subject now). Do not leave it standing: "
+        "every assertion in this file is an ABSENCE, and an absence over an "
+        "empty scan is green forever."
+    )
 
 
 def test_the_scan_finds_the_known_authorities(scanned: dict[str, list[int]]) -> None:
