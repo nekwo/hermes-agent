@@ -142,26 +142,128 @@ def test_root_turn_seeds_speaker_so_self_send_is_refused(tmp_path, monkeypatch):
     assert result["relay_chain"] == ["neko_supervisor"]
 
 
+def _json_documents(out: str) -> list[dict]:
+    """Every JSON object in *out*, however it was formatted.
+
+    The reader this replaces was LINE-oriented (``line.startswith("{")`` then
+    ``json.loads(line)``), and the emitter on this lane PRETTY-PRINTS: the real
+    payload arrives as a multi-line object, so that reader collected exactly
+    ``['{']``, failed to decode it, ``continue``d, and inspected nothing. A
+    stream decoder does not care how the producer chose to indent.
+    """
+
+    decoder = json.JSONDecoder()
+    found: list[dict] = []
+    index = 0
+    while index < len(out):
+        if out[index] != "{":
+            index += 1
+            continue
+        try:
+            value, end = decoder.raw_decode(out, index)
+        except json.JSONDecodeError:
+            index += 1
+            continue
+        if isinstance(value, dict):
+            found.append(value)
+        index = end
+    return found
+
+
+def test_the_json_reader_sees_a_pretty_printed_payload():
+    """Anti-vacuity for the reader above, pinned on synthetic text.
+
+    The gate below asserts that something is ABSENT from what it read. That is
+    the shape that keeps passing once the reader stops reading, so the reader
+    is proven independently — including on the exact formatting the lane uses.
+    """
+
+    pretty = json.dumps({"ok": False, "error_kind": "relay_cycle"}, indent=2, sort_keys=True)
+    assert _json_documents(pretty) == [{"ok": False, "error_kind": "relay_cycle"}]
+    assert [d["error_kind"] for d in _json_documents("noise\n" + pretty + "\n" + pretty)] == [
+        "relay_cycle",
+        "relay_cycle",
+    ]
+    assert _json_documents("not json at all\n") == []
+    # The old line-oriented reader on the same text, for the record.
+    assert [ln for ln in pretty.splitlines() if ln.strip().startswith("{")] == ["{"]
+
+
 def test_direct_operator_send_carries_no_relay_refusal(tmp_path, monkeypatch, capsys):
-    # No envelope: the guard must not reject; the send proceeds past it (and
-    # fails later only if the runtime/persona store is absent in tmp_path —
-    # any such failure must NOT be a relay_* error_kind).
+    """No envelope: the guard must not reject. The send proceeds past it and
+    fails later on the PERSONA lane, because the store is absent in tmp_path —
+    and that failure must not be a ``relay_*`` one.
+
+    REBUILT 2026-08-20 (MCF-53 sweep). The previous shape had two independent
+    routes to a silent pass:
+
+    1. The reader was LINE-oriented while this lane's emitter PRETTY-PRINTS.
+       Measured on the real lane: it returns 2 and writes a multi-line object,
+       so ``[line for line in out.splitlines() if line.strip().startswith("{")]``
+       collected exactly ``['{']``, that entry raised ``JSONDecodeError``, it
+       was ``continue``d, and the only assertion in the test never executed. A
+       single-line refusal WOULD have been caught; a refusal in the formatting
+       the runtime actually uses would not. That is the whole defect: the gate
+       could see a shape the producer does not emit.
+    2. ``try: args.func(args) / except Exception: return`` accepted ANY failure
+       as success — including the relay guard itself raising, which is the one
+       thing this test exists to notice.
+
+    Both are fixed: the payload is decoded as a STREAM (indentation-agnostic),
+    a raise is inspected instead of swallowed, and the claim is backed
+    POSITIVELY first. A stability claim — "no relay refusal" — is satisfied
+    exactly as well by producing nothing at all (MCF-50), so the test proves it
+    read something before it says what it did not find.
+    """
+
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     args = parser().parse_args(
         ["harness", "mission-chat", "message", "--persona", "dev", "--message", "hi", "--json"]
     )
     try:
-        args.func(args)
-    except Exception:
-        return  # runtime plumbing absent in tmp root — acceptable; guard didn't fire
+        exit_code = args.func(args)
+    except Exception as exc:  # noqa: BLE001 - the exception IS the evidence here
+        # A raise is acceptable ONLY if it is not the relay lane. Blanket
+        # acceptance is the second silent-pass route, and it swallowed the one
+        # failure this test exists to notice: the guard itself blowing up.
+        evidence = " ".join(
+            str(part)
+            for part in (
+                type(exc).__name__,
+                getattr(exc, "code", None),
+                getattr(exc, "error_kind", None),
+                exc,
+            )
+            if part is not None
+        ).lower()
+        assert "relay" not in evidence, (
+            "the direct operator send — which carries NO relay envelope — failed "
+            f"on the relay lane: {exc!r}"
+        )
+        return
+
     out = capsys.readouterr().out
-    json_lines = [line for line in out.splitlines() if line.strip().startswith("{")]
-    for line in json_lines:
-        try:
-            data = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        assert not str(data.get("error_kind") or "").startswith("relay_")
+    assert out.strip(), (
+        "the direct operator send emitted NOTHING, so this test read nothing "
+        "and its claim is unbacked. --json is on; the lane must answer."
+    )
+    payloads = _json_documents(out)
+    assert payloads, (
+        "stdout carried no decodable JSON document, so nothing was inspected:\n"
+        + out[:400]
+    )
+    for data in payloads:
+        assert not str(data.get("error_kind") or "").startswith("relay_"), (
+            f"a send with NO relay envelope was refused by the relay guard: {data}"
+        )
+    # The positive half: this lane fails on the PERSONA store, which is what
+    # "the guard did not fire, the send proceeded past it" actually looks like.
+    kinds = [d.get("error_kind") for d in payloads]
+    assert exit_code == 2 and "unsupported_persona" in kinds, (
+        "the direct operator lane no longer fails on the absent persona store. "
+        "That is not automatically wrong, but this test's whole premise is that "
+        f"it gets PAST the relay guard and dies later: {exit_code} {kinds}"
+    )
 
 
 # --------------------------------------------------------------------------- #
