@@ -49,8 +49,8 @@ The two absence forms this file asserted are now registry rows:
   ``find_spec`` pin AND the ``pytest.raises(ModuleNotFoundError)`` pin went:
   they are one fact stated twice, since a module with no spec cannot be
   imported.
-* the four closed-loop test files that went with their subjects — ``Form.PATH``
-  rows (``tests/agent_runtime/test_budget_approval.py``,
+* the four closed-loop test files that went with their subjects, all four
+  **deleted** — ``Form.PATH`` rows (``tests/agent_runtime/test_budget_approval.py``,
   ``test_context_requests.py``, ``test_stage_intent.py``,
   ``test_stage53_contracts.py``). ``DELETED_TEST_FILES`` existed only to feed
   that pin and went with it.

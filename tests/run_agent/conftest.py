@@ -14,8 +14,9 @@ We deliberately DO NOT mock ``time.sleep`` here — some tests
 the real ``time.sleep`` for threading coordination or assert that it
 was called with specific values. Tests that want to additionally
 fast-path direct ``time.sleep(N)`` calls in production code should
-monkeypatch ``run_agent.time.sleep`` locally (see
-``test_anthropic_error_handling.py`` for the pattern).
+monkeypatch ``run_agent.time.sleep`` locally. This note used to point at
+``test_anthropic_error_handling.py`` for the pattern; that file has never
+existed in this tree (MCF-78, 2026-08-20) -- no worked example is on disk.
 """
 
 from __future__ import annotations

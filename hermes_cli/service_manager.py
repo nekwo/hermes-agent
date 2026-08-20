@@ -407,7 +407,10 @@ _S6_BIN_DIR = "/command"
 
 # UID/GID of the in-image ``hermes`` user. Hardcoded to match what
 # ``stage2-hook.sh`` enforces (the runtime invariant — see also
-# tests/docker/test_uid_remap.py). The container starts s6-supervise
+# tests/docker/test_docker_exec_privilege_drop.py, whose
+# ``test_shim_drops_root_to_hermes_uid`` (`:106`) proves the drop lands on this
+# UID; this line named tests/docker/test_uid_remap.py, which never existed --
+# repointed MCF-78 2026-08-20). The container starts s6-supervise
 # under root and immediately drops to this UID via ``s6-setuidgid``.
 _HERMES_UID = 10000
 _HERMES_GID = 10000

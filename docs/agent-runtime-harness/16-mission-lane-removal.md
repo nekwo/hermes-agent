@@ -314,9 +314,12 @@ the same sentence.
   `personas.load_bundled_prompt`, the helpers only it used (`_recommended_skill_guidance`,
   `_specialist_dev_guidance`, `_normal_worker_flow_guidance`, the `_simplified_contract_*`
   trio), and all five `agent_runtime/prompts/*.md` files (the four role prompts plus
-  `shared_harness_overlay.md`) are removed. The overlay's board sentence is pinned on the
-  chat prompt path only now (`test_board_agent_tools.py::test_board_sentence_present_in_chat_prompt`);
-  its anti-Kanban rule governed the deleted GOAL PIPELINE and needed no migration. The
+  `shared_harness_overlay.md`) are removed. The overlay's board sentence now ships from the
+  situational HUD, not from a persona prompt builder, and is pinned by
+  `tests/agent_runtime/test_board_agent_tools.py::test_hud_digest_present_when_open_cards_exist`.
+  **[The 2026-08-20 correction](#board-sentence-corrected-2026-08-20) replaces what this bullet
+  claimed when it was written.** Its anti-Kanban rule governed the deleted GOAL PIPELINE
+  and needed no migration. The
   bundled-prompt pinning tests in `test_personas.py` / `test_persona_prompts.py` /
   `test_persona_skill_policy.py` / `test_decision_contract_registry.py` /
   `test_decision_schema.py` were retargeted or removed in the same commit;
@@ -627,3 +630,60 @@ runtime Launcher worktrees under `.hermes/agent-runtime/wt/` (382 MiB), and the 
 registered `%TEMP%\hermes-agent-wt` worktrees (1.78 GiB) were all removed through
 `git worktree remove` after their contents were proven recoverable from git objects —
 that ~2.2 GiB is already reclaimed and is **not** what the archive directory above holds.
+
+---
+
+## Board sentence corrected 2026-08-20
+
+The "Persona prompt-builder lane deleted" follow-up above originally said:
+
+> The overlay's board sentence is pinned on the chat prompt path only now
+> (`test_board_agent_tools.py::test_board_sentence_present_in_chat_prompt` — an id
+> **deleted** on 2026-08-02, quoted here as history and not as a pointer.)
+
+Both halves were false three days after they were written, and stayed in a
+document every mission-lane reader is told to trust for eighteen days. MCF-78
+found it; this is what is true at HEAD.
+
+**The named pin is gone.** `test_board_sentence_present_in_chat_prompt` was
+deleted in `c4a1fdef5c` (2026-08-02, "retire compiled persona lanes").
+
+**So is the path it named.** That test called
+`persona_runtime._persona_chat_system_prompt`, and the *same commit* removed
+that function — it is a `Form.ATTR` tombstone row today
+(`tests/agent_runtime/test_tombstone_registry.py`, s61: "the free-chat prompt
+builder and compiled role voice died with the callerless free-chat lane"). The
+"chat prompt path" the sentence points at does not exist. A grep for
+`board.sentence` or `board_sentence` across `tests/` and `agent_runtime/`
+returns zero, which is what made this look uncovered on first pass — but the
+sentence is not called that anywhere in the code, and **the seam's own words
+were never searched for.** A token is not the unit of meaning.
+
+**The seam ships, and it IS pinned — elsewhere.** At HEAD the sentence is
+emitted by `agent_runtime/runtime_hud.py:812`, inside the `## Runtime
+Situation` board line:
+
+> `- Board: {…} (a workspace board exists; you MAY add a card for follow-up
+> work worth tracking — advisory, never required)`
+
+and it is pinned by `tests/agent_runtime/test_board_agent_tools.py::test_hud_digest_present_when_open_cards_exist`,
+which asserts `"MAY add a card" in block` against the real
+`render_situational_hud_block` output. Its two siblings pin the absence
+direction (`::test_hud_digest_absent_without_board`,
+`::test_hud_digest_absent_when_only_done_cards` — no OPEN cards, no line:
+nudged, never forced).
+
+**What is NOT pinned, stated rather than implied.** The chain from that
+rendered block to a live chat turn is
+`runtime_hud._board_digest_for_workspace` → `resolve_situational_hud(board=…)`
+→ `MissionChatTurnContext.situational_hud_body()` →
+`.runtime_context_envelope()` → `persona_commands.py:2991` → the runtime call
+at `:3183`. The first four hops are pinned
+(`tests/agent_runtime/test_mission_chat_turn_context.py` asserts
+`situational_hud_body()` equals `render_situational_hud_block(...)` of the same
+HUD, and the envelope round-trips through `extract_runtime_context_envelope`).
+**The last hop is not.** `persona_commands.py` is `exec`'d into harness
+globals, so no test imports it, and no board-specific test drives a chat turn
+end to end. Nothing would fail if that lane stopped passing
+`situational_hud_content=`. That is an **UNCOVERED SEAM**, and it is the half
+the deleted test actually covered.

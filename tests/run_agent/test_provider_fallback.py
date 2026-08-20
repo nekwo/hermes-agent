@@ -1,8 +1,10 @@
 """Tests for ordered provider fallback chain (salvage of PR #1761).
 
-Extends the single-fallback tests in test_fallback_model.py to cover
-the new list-based ``fallback_providers`` config format and chain
-advancement through multiple providers.
+Covers the list-based ``fallback_providers`` config format and chain
+advancement through multiple providers. It used to say it extended
+``test_fallback_model.py``; that file was DELETED upstream in ``e2fd462ebe``
+(2026-05-19), so the single-fallback half it referred to is gone and this
+file no longer builds on anything (MCF-78, 2026-08-20).
 """
 
 from unittest.mock import MagicMock, patch

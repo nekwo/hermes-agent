@@ -687,8 +687,16 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
             # the request.  We only defer to the built-in when the raw name is
             # the canonical provider itself (``nous``, ``openrouter``, …) so
             # accidentally shadowing a canonical provider still resolves to
-            # the built-in. See tests/hermes_cli/test_runtime_provider_resolution.py
-            # ``test_named_custom_provider_does_not_shadow_builtin_provider``.
+            # the built-in. The ALIAS half is pinned by
+            # tests/hermes_cli/test_runtime_provider_resolution.py
+            # ``test_named_custom_provider_wins_over_builtin_alias`` (`:660`).
+            # **UNCOVERED SEAM (MCF-78, 2026-08-20): the canonical half -- the
+            # ``return None`` below -- has no test.** No case in that file defines
+            # a custom provider named after a CANONICAL provider (`nous`,
+            # `openrouter`, ...) and asserts the built-in still wins; the names it
+            # uses are Local/CLIProxy/gpt/claude/kimi/vendor/lmstudio. This line
+            # previously named ``..._does_not_shadow_builtin_provider``, which has
+            # never existed.
             if (canonical or "").strip().lower() == requested_norm:
                 return None
 

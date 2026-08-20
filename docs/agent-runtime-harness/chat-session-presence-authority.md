@@ -47,8 +47,10 @@ every probe that resolved its own root confirmed health):
 
 Pins: `tests/agent_runtime/test_chat_scope_instance_rung.py` (19, every one
 red-proven by sabotage), plus the inverted
-`test_persona_chat_history_fetch_refuses_an_ambient_self_resolve` (formerly
-asserted the silent-empty success). This lands part of what P2/P3 planned
+`tests/agent_runtime/test_snapshot_history_eviction.py::test_persona_chat_history_fetch_refuses_an_ambient_self_resolve`
+(`:404`; formerly asserted the silent-empty success). **[Corrected 2026-08-20 —
+MCF-78: that function lives in the eviction suite, not the instance-rung suite,
+and this line named no file at all.]** This lands part of what P2/P3 planned
 (typed refusals on the read lane) without SessionDB identity (P4/P5), which
 remains open — the stamp records a head PATH, not a DB identity, so a
 restored/moved `state.db` is still out of scope until P4.
@@ -612,7 +614,9 @@ anomalous drops for a sustained window. Do not bundle with P1–P5.
 
 ## 5. Test plan
 
-**P1 — chokepoint (`tests/agent_runtime/test_chat_session_presence.py`, new)**
+**P1 — chokepoint — LANDED as `tests/agent_runtime/test_chat_session_scope.py`**
+(the name below was the proposal; `test_chat_session_presence.py` was never
+created — MCF-78, 2026-08-20)
 - `resolve()` returns `RELAY_CONTEXT` when the ContextVar is recorded,
   `ENV_HEAD_HOME` when only the env var is set, `AMBIENT_HOME` (and
   `authoritative=False`) when neither is — one table test replacing four
@@ -621,7 +625,8 @@ anomalous drops for a sustained window. Do not bundle with P1–P5.
   `authoritative=True` (the legitimate same-DB relay case documented at
   `persona_commands.py:4036-4040`; the old path-equality check killed it live
   on 2026-07-23 — pin the regression here).
-- **AST guard** `test_chat_session_presence_chokepoint.py`: a synthetic
+- **AST guard** `test_chat_session_presence_chokepoint.py` — **NOT BUILT**
+  (UNCOVERED SEAM as of MCF-78, 2026-08-20): a synthetic
   unclassified `SessionDB(` construction inside `agent_runtime/` fails the
   test. Modeled on `test_store_event_invariant.py`.
 - D1: `serve._fingerprint` includes the head-home `state.db` path when

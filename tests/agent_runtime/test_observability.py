@@ -422,7 +422,10 @@ def test_active_run_summary_includes_current_tool_command_label():
 # Daemon was retired before this wave, so every daemon signal, freshness row,
 # and intervention was derived from a `{"state": "offline"}` default. The
 # removal contract lives at
-# tests/agent_runtime/test_s28_status_observe_shrink.py::test_the_daemon_and_task_intervention_families_are_gone.
+# tests/agent_runtime/test_s28_status_observe_shrink.py::test_build_observability_no_longer_accepts_the_literal_fed_parameters
+# (`:94`) and ::test_the_envelope_drops_every_row_those_parameters_fed (`:116`).
+# This comment named ::test_the_daemon_and_task_intervention_families_are_gone,
+# which has never existed -- repointed MCF-78 2026-08-20.
 # What survives from them is the health-status derivation itself, which is
 # parameter-independent and is pinned here.
 

@@ -21,14 +21,16 @@ Deleted with it, because every assertion in them was about names inside a module
 that no longer exists (a deleted module satisfies "does not have attribute X"
 vacuously):
 
-* ``tests/agent_runtime/test_s27_context_builder_lane_removal.py`` — 5 tests.
+* ``tests/agent_runtime/test_s27_context_builder_lane_removal.py`` — **deleted**,
+  5 tests.
   Its one gate that was NOT about the module's contents was carried below and
   later retargeted by S39 (``149a9ae53``) when fresh-row ``mission_hud`` writes
   were retired while historical Launcher reads stayed supported.
 * Five gates in ``test_s19_context_builder_cluster_removal.py``; that file keeps
   its ``mission_hud_preview`` entry-point and live-HUD halves.
-* ``tests/agent_runtime/test_persona_memory_scope.py`` — 4 tests, all of
-  ``_persona_run_uses_memory``.
+* ``tests/agent_runtime/test_persona_memory_scope.py`` — **deleted with the
+  symbol** (4 tests, all of ``_persona_run_uses_memory``). Marked as deleted
+  MCF-78 2026-08-20: the bare path read as a live pin.
 
 NOT collateral: ``AgentRun`` (``agent_runtime.models``, live everywhere) and
 the distinct live ``situational_hud`` observability projection. Both are pinned

@@ -606,15 +606,39 @@ direction only — strictly more receipts, no decision changes.
 
 ### 7.2 `tools/skills_sync.py` → call-time home (§3)
 
-**Applied 2026-07-27**, with one deliberate extension noted below. Guards:
-`tests/agent_runtime/test_env_determinism_audit.py::test_skills_sync_keeps_the_constants_as_seams_and_reads_them_at_call_time`
-(the constants survive AND an accessor exists for each),
-`::test_no_skills_sync_function_body_reads_a_frozen_constant_directly` (an AST
-sweep — one surviving in-body `SKILLS_DIR` is the whole bug back),
-`::test_the_constants_are_still_the_override_seam_the_doc_promised` (a patched
-constant still wins; an unpatched module follows a live profile switch), and
-`::test_every_skills_module_resolves_its_root_at_call_time`, whose parametrize
-list grew from two modules to three.
+**Applied 2026-07-27**, with one deliberate extension noted below.
+
+> [!caution] **UNCOVERED SEAM — and the invariant is VIOLATED at HEAD.**
+> This section used to name four guards in
+> `tests/agent_runtime/test_env_determinism_audit.py`: the constants-as-seams
+> pin, the in-body AST sweep, the override-seam pin, and the all-modules
+> parametrize. **All four were deleted on 2026-07-30 by `2154f05428`**
+> (mission-lane removal S0–S12), which gutted that file to a single
+> five-line retirement probe. Nothing replaced them, and this section went on
+> claiming them for three weeks (MCF-78, 2026-08-20).
+>
+> The AST sweep said *"one surviving in-body `SKILLS_DIR` is the whole bug
+> back."* **It is back eleven times.** The upstream merge `b9721809e6`
+> (2026-07-31 — the day AFTER the guard died) brought in
+> `_index_installed_skill_dirs_by_name`, `_find_installed_skill_dir_by_name`,
+> `_backfill_optional_provenance`, `_read_hub_install_paths`,
+> `_index_active_skills` and `_recover_renamed_skill`, and every one of them
+> reads the import-time-frozen `SKILLS_DIR` instead of `_skills_dir()`.
+> Re-running the deleted sweep's exact logic scores **0 offenders at
+> `2154f05428^` and 11 at `b9721809e6` and at HEAD** — the guard would have
+> reddened on that merge, which is what it existed to do.
+>
+> What survives: `tests/test_no_frozen_hermes_home.py` still ledgers
+> `SKILLS_DIR` / `MANIFEST_FILE` / `_SKILLS_DIR_AT_IMPORT` as *deliberate*
+> frozen seams, so the "the constants survive" half is guarded. **Unguarded:**
+> that an accessor exists for each; that no function body bypasses them; that a
+> patched constant still wins while an unpatched module follows a live profile
+> switch; that every skills module resolves its root at call time.
+>
+> Restoring the sweep reds the suite until the eleven call sites move to
+> `_skills_dir()`. That is a code fix in an upstream-owned file, not a
+> documentation fix, so it is stated here rather than silently repaired —
+> escalated on MCF-78's row.
 
 **Extension applied on top of the literal diff.** The diff below defines only
 `_skills_dir()`, and the prose then says to replace the `MANIFEST_FILE` /
@@ -674,10 +698,14 @@ the one it exists to stop. The comment at that site now says so.
 
 ### 7.3 the `smoke` subparser → retire the `--temp-root` flag (Q5)
 
-**Applied 2026-07-27** (wave 6). Both literal hunks below are in. Guards:
-`tests/hermes_cli/test_harness_cli.py::test_the_smoke_subparser_no_longer_registers_temp_root`
-(the flag is gone from the parser AND `--temp-root` is now a parse error) and
-the existing `::test_harness_parser_exposes_smoke`, which moved off the flag.
+**Applied 2026-07-27** (wave 6). Both literal hunks below are in. Guard (as of
+MCF-78, 2026-08-20): `tests/hermes_cli/test_harness_cli.py::test_harness_smoke_command_is_removed`.
+The two ids this line used to name —
+`test_the_smoke_subparser_no_longer_registers_temp_root` and
+`test_harness_parser_exposes_smoke` — are both gone, superseded rather than
+lost: the whole `harness smoke` verb was removed afterwards, so the surviving
+guard asserts the stronger fact (no subparser at all) and the flag-level pins
+had nothing left to stand on.
 `run_smoke`'s `temp_root=` parameter was deliberately **kept**: it is still the
 seam six Q5 tests drive directly (`test_env_determinism_audit.py` §"a smoke run
 is synthetic, always"), and the CLI no longer being able to set it is exactly
@@ -694,10 +722,35 @@ must be imported by harness.py — and two of them read `os`
 `HERMES_HOME` report row). Grepping harness.py's own source says "unused",
 which is how the audit reached that conclusion; deleting the import raises
 `NameError` on a **live chat turn** and on nothing a test run would notice.
-Guard: `tests/agent_runtime/test_env_determinism_audit.py::test_the_harness_keeps_the_import_its_execd_command_parts_depend_on`
-— it asserts the import survives *and* that the exec'd parts still read it, so
+Guard: `test_the_harness_keeps_the_import_its_execd_command_parts_depend_on` —
+it asserted the import survives *and* that the exec'd parts still read it, so
 the day they genuinely stop, the guard says so instead of silently permitting a
 removal that was only ever accidentally safe.
+
+> [!caution] **The guard is GONE and its premise INVERTED — read the paragraph
+> above as history, not as the state of the tree.** (MCF-78, 2026-08-20.)
+>
+> The guard died with the rest of `test_env_determinism_audit.py` in
+> `2154f05428` (2026-07-30). Then `e887cdf265` (2026-08-01, "let each exec'd
+> part declare the names it actually uses") did the thing the guard was
+> supposed to announce — and announced nothing, because it was already gone.
+>
+> At HEAD: **`hermes_cli/harness.py` contains zero `os.` uses of its own**, and
+> each part that needs `os` imports it itself
+> (`persona_commands.py`, `runtime_commands.py`, `serve.py`). The refusal above
+> was correct on 2026-07-27 and is stale now — `harness.py:7`'s `import os` is
+> today an ordinary unused import, not a load-bearing one, and the audit's
+> original instruction to delete it has become right by a route nobody
+> recorded.
+>
+> **UNCOVERED SEAM:** nothing asserts that each exec'd part imports the names
+> it uses. `tests/agent_runtime/test_s41_dead_import_bindings.py` pins which
+> bindings must be *absent* from `harness.py` and which halves of shared import
+> lines must *stay* (`RETAINED_BINDINGS`), but `os` is in neither table, and no
+> test walks the parts for names they read without binding. The next part that
+> uses a name harness.py happens to import will keep working until harness.py
+> stops importing it, and the failure surfaces on a live chat turn, not in a
+> test run — exactly the shape this section was written about.
 
 In `hermes_cli/harness.py`, where the `smoke` subparser is built:
 

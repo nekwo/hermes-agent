@@ -26,7 +26,9 @@ What was actually verified before the cut, name by name:
   rather than moving — the smallest honest change.
 
 **Wave-3's ``checklist_for_task_stage`` ruling is transitively falsified.**
-``tests/agent_runtime/test_s27_live_module_dead_insides.py`` pinned it as LIVE,
+``test_s27_live_module_dead_insides.py`` (a name that never existed under it;
+the pin is in ``tests/agent_runtime/test_tombstone_registry.py`` -- corrected
+MCF-78 2026-08-20) pinned it as LIVE,
 and that was true *at the time*: ``RoleChecklistStore.open_or_create`` called it
 and ``role_envelopes.py:91`` called that. The whole justification was the
 ``role_envelopes`` import. With that importer gone the chain is dead from its

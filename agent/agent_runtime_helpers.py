@@ -2799,8 +2799,9 @@ def repair_tool_call(agent, tool_name: str) -> str | None:
     #
     # Crucially we DO NOT split on whitespace: legitimate inputs like
     # "write file" must keep flowing through ``_norm`` -> ``write_file``
-    # (covered by test_space_to_underscore in
-    # tests/run_agent/test_repair_tool_call_name.py).
+    # (covered by `test_space_separated_name_still_normalizes` in
+    # tests/run_agent/test_repair_tool_call_name.py, `:116` -- renamed from
+    # test_space_to_underscore; repointed MCF-78 2026-08-20).
     for _xml_sep in ('"', "'", "<", ">"):
         _idx = tool_name.find(_xml_sep)
         if _idx > 0:

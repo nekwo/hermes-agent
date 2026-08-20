@@ -2612,7 +2612,11 @@ def _profile_id_for_persona_or_template(persona_or_template_id: str) -> str | No
 # is no disable consumer: nothing in either repo branches on a false verdict
 # except the CLI's own "runtime is disabled" print. Both sections are now
 # unconditional; the ``persona_instance_runtime`` WIRE block survives and
-# reports the truth. See tests/agent_runtime/test_s56_roster_gate_removal.py.
+# reports the truth. See tests/agent_runtime/test_s56_config_block_removal.py
+# (`::test_the_roster_section_is_emitted_unconditionally`, `:186`, and
+# `::test_an_operator_config_that_still_disables_the_old_block_does_not_suppress_the_roster`,
+# `:260`) -- this line named test_s56_roster_gate_removal.py, which never
+# existed; repointed MCF-78 2026-08-20.
 
 
 def persona_instance_summary(

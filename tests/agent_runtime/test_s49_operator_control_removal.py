@@ -9,7 +9,8 @@ What was re-verified against the tree before the cut, name by name:
 
 * ``operator_takeover_worker`` was the module's ONLY public symbol and had
   **zero** production importers. Its whole importer set was two tests
-  (``tests/agent_runtime/test_worker_sessions.py``) plus the S41 binding pin —
+  (``tests/agent_runtime/test_worker_sessions.py``, itself **deleted** with the
+  worker-session lane at S56) plus the S41 binding pin —
   and the S41 pin exists precisely because ``hermes_cli/harness.py`` used to
   bind the name and stopped reading it. Removing that binding is what left the
   module importer-free; S49 finishes the job.

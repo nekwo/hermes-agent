@@ -529,7 +529,8 @@ CI restore drill. Check your brain first.”
 - CI perf gates: RD0 SLOs become hard asserts
   (`test_read_model_slo.py` — full-build ≤ 2000 ms, incremental ≤ 150 ms on
   the pinned synthetic fixture; fail, not warn).
-- Concurrency soak (`tests/agent_runtime/test_read_model_soak.py`, marked
+- Concurrency soak — **not built** (`tests/agent_runtime/test_read_model_soak.py`
+  does not exist; MCF-78, 2026-08-20), as specified:  marked
   `integration`): daemon-style projector + 2 CLI event writers + 1 reader
   process for 60 s on a temp root — zero `HarnessLockUnavailable` leaks to
   callers, zero torn reads (every render passes schema validation).

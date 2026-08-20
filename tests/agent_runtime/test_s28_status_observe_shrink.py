@@ -33,12 +33,15 @@ opens a run. S33 retired ``_attach_repo_baseline`` after ``a54e802cd`` proved it
 had had zero callers since S5, leaving ``progress.RunProgressSink`` as the sole
 production ``RunStore().update`` caller, so the RUNNING count can never move.
 
-Retargeted here, citing this wave (their subject was the daemon lane, which no
-longer reaches observability at all):
-
-* ``tests/agent_runtime/test_observability.py::test_non_offline_daemon_without_heartbeat_is_critical``
-* ``tests/agent_runtime/test_observability.py::test_manual_mode_does_not_page_stale_idle_daemon_status``
-* ``tests/agent_runtime/test_observability.py::test_daemon_mode_treats_offline_daemon_as_critical``
+Three ``test_observability.py`` cases went with them (their subject was the
+daemon lane, which no longer reaches observability at all).
+**They were DELETED, not retargeted** -- this docstring used to list them as
+live ids in that file, where none of the three has existed since this wave
+(corrected MCF-78, 2026-08-20). Their names were
+``test_non_offline_daemon_without_heartbeat_is_critical``,
+``test_manual_mode_does_not_page_stale_idle_daemon_status`` and
+``test_daemon_mode_treats_offline_daemon_as_critical``; what replaces them is
+the removal contract below, not a renamed sibling.
 """
 
 from __future__ import annotations

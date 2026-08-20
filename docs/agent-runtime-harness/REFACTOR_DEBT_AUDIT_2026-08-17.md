@@ -432,7 +432,10 @@ for hub-free tests, its own docstring says so).
   The pair pins the id comparison; neither drop-all nor forward-all passes both (two
   driven values — the FC-0 discipline).
 - **Second independent witness, different file** (beside the existing partition gate
-  in `test_patch_coverage.py`): every office-scoped coverable entity enumerated from
+  in `tests/agent_runtime/test_stream_patch.py::test_every_covered_domain_event_is_registered_or_declared_historical`,
+  `:514` — this line said `test_patch_coverage.py`, a file that has never existed;
+  corrected MCF-78 2026-08-20, and the planned witness below landed at `:562`
+  as `::test_every_office_entity_the_coverage_authority_knows_is_scopable`): every office-scoped coverable entity enumerated from
   `patch_coverage`'s own constants (`office_actor`, `office_surface`) must be scoped
   non-None by `office_patch_scope` on a minimal fixture row. *What it kills that
   witness 1 cannot:* the NEXT WV-H3 — covering a new office entity without teaching

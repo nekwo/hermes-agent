@@ -1560,7 +1560,10 @@ def _binding_for_profile(profile: str | None) -> PersonaProfileBinding:
 #: comfortably longer than the turn that is about to use it. Raising this past
 #: the skew would hand out expired credentials, so it must stay well under it —
 #: the invariant is pinned by
-#: ``tests/agent_runtime/test_runtime_resolve_cache.py``.
+#: ``tests/agent_runtime/test_send_path_runner_reuse.py`` (`:425-426`, which
+#: asserts this constant is positive AND below half the refresh skew). This
+#: line named ``test_runtime_resolve_cache.py``, a file that never existed;
+#: repointed MCF-78 2026-08-20.
 RUNTIME_RESOLVE_CACHE_TTL_SECONDS = 30.0
 
 #: Files whose content can change what ``resolve_runtime_provider`` returns for
