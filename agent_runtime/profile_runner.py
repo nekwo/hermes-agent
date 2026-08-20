@@ -1796,6 +1796,78 @@ def _agent_chat_dispatch_fields(tool_name: str | None, invocation: Any) -> dict[
     return fields
 
 
+#: Opaque runtime identifiers (``persona_chat_personainst_dev_bbbbbbbbbbbb``,
+#: ``personainst_dev_3ebfce41``). Deliberately NOT run through
+#: :func:`_looks_sensitive_or_pathish` — that helper's path heuristic would also
+#: have to be taught these shapes; the strict charset below is the whole guard,
+#: plus the secret-marker check, so an id containing e.g. ``token`` is dropped.
+_DISPATCH_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,240}")
+
+
+def _safe_dispatch_id(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text or _line_has_secret(text) or not _DISPATCH_ID_RE.fullmatch(text):
+        return None
+    return text
+
+
+def _dispatch_result_envelope(result: Any) -> dict[str, Any] | None:
+    """The ``agent_chat_send`` result as a mapping.
+
+    Both shapes are the SAME envelope: the tool returns ``json.dumps(...)``, so a
+    live relay reaches the progress adapter as a serialized string, while
+    in-process callers hand over the dict. :func:`_is_error_result` already reads
+    both for exactly this reason — this is the same pair of doors, not a new one.
+    """
+
+    if isinstance(result, dict):
+        return result
+    if not isinstance(result, str):
+        return None
+    text = result.strip()
+    if not text.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(text)
+    except (ValueError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _agent_chat_dispatch_thread_fields(tool_name: str | None, result: Any) -> dict[str, str]:
+    """The relay's OTHER HALF: which thread the message actually landed in.
+
+    ``dispatch_target``/``dispatch_order`` name WHO was told WHAT; these name
+    WHERE, so the operator console can open that thread instead of only reading
+    about it. Sourced from the tool RESULT because the target thread is resolved
+    downstream of the invocation — the sender may not have named a session at
+    all, and the default lane mints a fresh one per dispatch.
+
+    Only the WAITING lane can answer this. A ``wait=false`` dispatch returns
+    ``"session_id": None`` by construction (the child turn resolves its thread
+    long after the sender's turn ended, and the durable dispatch row learns it at
+    completion), so a detached relay emits NO thread field and any console link
+    stays inert. Absent stays absent: an empty string would be a link to nowhere.
+    A refused relay (``ok: false``) has no thread either.
+
+    THE THREAD ONLY, never the target's ``persona_instance_id``. The instance id
+    is a mutable, re-stamped binding pointer, and naming it in an open request is
+    what broke launcher chat switching on 2026-07-24 — a wire field whose only
+    plausible consumer is the harmful one is not worth emitting.
+    """
+
+    if tool_name != "agent_chat_send":
+        return {}
+    payload = _dispatch_result_envelope(result)
+    if not payload or payload.get("ok") is False:
+        return {}
+    # `chat_session_id` and `session_id` are the same root chat session on the
+    # relay payload; the chat-scoped name is preferred so the field keeps its
+    # meaning if the generic one ever narrows.
+    session_id = _safe_dispatch_id(payload.get("chat_session_id") or payload.get("session_id"))
+    return {"dispatch_target_session_id": session_id} if session_id else {}
+
+
 def _tool_started_payload(event_type: str, tool_name: str | None, *, invocation: Any = None) -> dict[str, Any]:
     payload = {"type": event_type, "phase": "tool", "step": "tool_started", "status": "started"}
     if tool_name:
@@ -1879,6 +1951,10 @@ def _tool_finished_payload(event_type: str, tool_name: str | None, *, duration: 
     todo_state = _todo_state_payload(tool_name, result, invocation)
     if todo_state is not None:
         payload["todo_state"] = todo_state
+    # Where the relay landed. Additive: the started event's
+    # dispatch_target/dispatch_order are untouched, and a lane that cannot name
+    # a thread (detached dispatch, refusal) emits nothing at all.
+    payload.update(_agent_chat_dispatch_thread_fields(tool_name, result))
     # agent_chat_send input is already first-class (dispatch_target/dispatch_order
     # on the started event) — re-attaching the order as tool_input would spend
     # the same bytes twice against the event cap. Its RESULT still attaches.

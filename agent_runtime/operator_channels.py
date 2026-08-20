@@ -1230,6 +1230,10 @@ _TOOL_DETAIL_STR_FIELDS = (
     # full order, carried onto the tool{} payload under the same names the
     # launcher reads. Already operator-sanitized upstream; straight newest-wins.
     "dispatch_target", "dispatch_order",
+    # ...plus the thread the relay landed in, so the console's dispatch tile can
+    # open the other half of the exchange. Newest-wins like its siblings: the
+    # started entry has no thread yet, the finished entry supplies it.
+    "dispatch_target_session_id",
     # Generic tool input/result record (tools with no dedicated detail field) —
     # feeds the console's collapsed Input/Result dropdowns.
     "tool_input", "tool_result",

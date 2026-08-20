@@ -1320,6 +1320,66 @@ def test_trace_entry_carries_operator_detail_fields():
     assert read["target"] == "lib/main.dart"
 
 
+def test_trace_entry_carries_the_dispatch_target_thread():
+    """PA-1: the typed thread pointer survives from the tool payload to the
+    launcher-facing trace entry. Without this the dispatch tile can only NAME
+    the teammate it briefed; with it the console can open that thread."""
+
+    events = EventLog()
+    ts = now()
+    events.append(
+        Event(
+            ts=ts,
+            type="run.tool.started",
+            task_id="task_relay",
+            run_id="run_neko",
+            persona_id="neko_supervisor",
+            payload={
+                "tool_name": "agent_chat_send",
+                "status": "started",
+                "summary": "Started tool agent_chat_send: → backend_dev: run the check",
+                "dispatch_target": "backend_dev",
+                "dispatch_order": "Run a bounded backend health check.",
+            },
+        )
+    )
+    events.append(
+        Event(
+            ts=ts,
+            type="run.tool.finished",
+            task_id="task_relay",
+            run_id="run_neko",
+            persona_id="neko_supervisor",
+            payload={
+                "tool_name": "agent_chat_send",
+                "status": "passed",
+                "summary": "Finished tool agent_chat_send: passed",
+                "dispatch_target_session_id": (
+                    "persona_chat_personainst_backend_dev_bbbbbbbbbbbb"
+                ),
+            },
+        )
+    )
+
+    rows = persona_chat_trace_summary(
+        persona_instances=[
+            _persona_instance("personainst_neko", "neko_supervisor", "task_relay")
+        ],
+        event_log=events,
+    )
+
+    entries = rows[0]["entries"]
+    started = next(entry for entry in entries if entry["event"] == "tool_started")
+    finished = next(entry for entry in entries if entry["event"] == "tool_finished")
+    # The started event names WHO and WHAT...
+    assert started["dispatch_target"] == "backend_dev"
+    # ...and cannot yet name WHERE (the thread is resolved downstream).
+    assert started["dispatch_target_session_id"] is None
+    assert finished["dispatch_target_session_id"] == (
+        "persona_chat_personainst_backend_dev_bbbbbbbbbbbb"
+    )
+
+
 def test_trace_entry_carries_generic_tool_io():
     events = EventLog()
     ts = now()

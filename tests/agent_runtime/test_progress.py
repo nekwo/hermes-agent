@@ -263,6 +263,48 @@ def test_safe_progress_payload_passes_dispatch_fields():
     assert payload["target_label"] == "→ backend_dev: run a bounded backend health check"
 
 
+def test_safe_progress_payload_passes_the_dispatch_target_thread():
+    payload = _safe_progress_payload(
+        "run.tool.finished",
+        {
+            "type": "run.tool.finished",
+            "tool_name": "agent_chat_send",
+            "status": "passed",
+            "dispatch_target_session_id": "persona_chat_personainst_backend_dev_bbbbbbbbbbbb",
+        },
+    )
+
+    assert payload["dispatch_target_session_id"] == (
+        "persona_chat_personainst_backend_dev_bbbbbbbbbbbb"
+    )
+
+
+def test_safe_progress_payload_drops_a_malformed_dispatch_target_thread():
+    # Re-asserted AT THE SINK, not only at the producer: this is the redaction
+    # boundary, and a caller that hand-built the payload gets the same contract.
+    # Truncating would hand the console a WRONG session to open, so an over-long
+    # or prose value is dropped whole.
+    payload = _safe_progress_payload(
+        "run.tool.finished",
+        {
+            "type": "run.tool.finished",
+            "tool_name": "agent_chat_send",
+            "dispatch_target_session_id": "the dev chat, probably",
+        },
+    )
+    assert "dispatch_target_session_id" not in payload
+
+    over_long = _safe_progress_payload(
+        "run.tool.finished",
+        {
+            "type": "run.tool.finished",
+            "tool_name": "agent_chat_send",
+            "dispatch_target_session_id": "s" * 241,
+        },
+    )
+    assert "dispatch_target_session_id" not in over_long
+
+
 def test_safe_progress_payload_bounds_dispatch_order_at_1500():
     payload = _safe_progress_payload(
         "run.tool.started",

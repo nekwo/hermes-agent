@@ -1077,6 +1077,59 @@ def test_tool_call_message_carries_dispatch_target_and_order():
     assert dispatch["status"] == "ok"
 
 
+def test_tool_call_message_carries_the_dispatch_target_thread():
+    """The mirror of the test above: the STARTED row cannot name the thread and
+    the FINISHED row can, so the newest-wins merge must carry the finished
+    value onto the collapsed tool_call the launcher reads."""
+
+    ts = now()
+    channels = operator_channel_summary(
+        persona_instances=[_dev_task_instance(ts)],
+        persona_chat_history=[],
+        persona_chat_trace=[
+            {
+                "session_id": "20260705_dev_session",
+                "persona_id": "dev",
+                "persona_instance_id": "personainst_dev",
+                "task_id": "task_goal",
+                "entries": [
+                    {
+                        "event": "tool_started",
+                        "tool_name": "agent_chat_send",
+                        "summary": "Started tool agent_chat_send: → backend_dev: run a check",
+                        "status": "started",
+                        "run_id": "run_a",
+                        "dispatch_target": "backend_dev",
+                        "ts": "2026-07-05T05:48:03Z",
+                    },
+                    {
+                        "event": "tool_finished",
+                        "tool_name": "agent_chat_send",
+                        "summary": "Finished tool agent_chat_send: passed",
+                        "status": "passed",
+                        "run_id": "run_a",
+                        "dispatch_target_session_id": (
+                            "persona_chat_personainst_backend_dev_bbbbbbbbbbbb"
+                        ),
+                        "ts": "2026-07-05T05:48:09Z",
+                    },
+                ],
+            }
+        ],
+    )
+
+    tool_calls = [
+        message
+        for message in channels[0]["conversation"]["messages"]
+        if message["kind"] == "tool_call"
+    ]
+    dispatch = next(m for m in tool_calls if m["tool"]["tool_name"] == "agent_chat_send")
+    assert dispatch["tool"]["dispatch_target"] == "backend_dev"
+    assert dispatch["tool"]["dispatch_target_session_id"] == (
+        "persona_chat_personainst_backend_dev_bbbbbbbbbbbb"
+    )
+
+
 def test_native_reasoning_mints_thinking_row_and_reply_echo_is_deduped():
     session_id = "persona_chat_personainst_neko_fanout"
     reply_text = "Dispatched to backend_dev, dev, and qa; each got a one-line bounded check."

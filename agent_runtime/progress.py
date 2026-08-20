@@ -43,6 +43,11 @@ _SAFE_PROGRESS_KEYS = {
     # and the FULL order, so the operator console shows exactly what each
     # teammate was told without parsing the 90-char-excerpted target_label prose.
     "dispatch_target", "dispatch_order",
+    # ...and WHERE it landed: the target's chat THREAD (never the target's
+    # instance id — a mutable binding pointer), from the RESULT of a waiting
+    # relay, so the console can open the other half of the exchange instead of
+    # only naming it. A detached (wait=false) dispatch cannot answer this.
+    "dispatch_target_session_id",
     # Generic tool-call input/result record for tools with no dedicated field
     # (non-terminal, non-dev-work): a bounded key-per-line rendering of the raw
     # invocation and result, produced by profile_runner._attach_tool_io. This is
@@ -58,6 +63,13 @@ _OPERATOR_OUTPUT_TAIL_MAX = 1200
 _OPERATOR_PATHS_MAX = 12
 _OPERATOR_DISPATCH_TARGET_MAX = 120
 _OPERATOR_DISPATCH_ORDER_MAX = 1500
+# Relay thread pointers: opaque runtime ids, never prose. Re-asserted at the
+# sink (the producer already checked) because this is the redaction boundary —
+# a caller that hand-built the payload gets the same contract. Truncation would
+# yield a WRONG id rather than a short one, so an over-long value is dropped.
+_OPERATOR_DISPATCH_ID_MAX = 240
+_DISPATCH_ID_KEYS = ("dispatch_target_session_id",)
+_DISPATCH_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,%d}" % _OPERATOR_DISPATCH_ID_MAX)
 # Producer bounds are 1000/1600 (profile_runner) plus a one-line truncation
 # marker; these re-scrub bounds sit just above so the marker itself is never
 # re-truncated into garbage.
@@ -331,6 +343,14 @@ def _safe_progress_payload(event_type: str, payload: dict[str, Any]) -> dict[str
                     _mark_would_redact(safe, key, "reasoning_summary")
                 continue
             safe[key] = f"{text[:497]}…" if len(text) > 500 else text
+            continue
+        if isinstance(value, str) and key in _DISPATCH_ID_KEYS:
+            text = value.strip()
+            if text and not _looks_sensitive(text) and _DISPATCH_ID_RE.fullmatch(text):
+                safe[key] = text
+            elif observe and text:
+                safe[key] = _observe_text(text, limit=_OPERATOR_DISPATCH_ID_MAX)
+                _mark_would_redact(safe, key, key)
             continue
         if isinstance(value, str) and key == "command_label":
             text = " ".join(value.strip().replace("\\", "/").split())

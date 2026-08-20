@@ -1966,6 +1966,13 @@ def _trace_entry(event: Any) -> dict[str, Any] | None:
         # the console renders the whole briefing, not the 90-char target excerpt.
         "dispatch_target": _safe_trace_operator_line(payload.get("dispatch_target"), limit=120),
         "dispatch_order": _safe_trace_operator_block(payload.get("dispatch_order"), limit=1500),
+        # Where the relay landed (finished event, WAITING lane only). This makes
+        # the dispatch tile navigable — the console opens this thread rather than
+        # re-deriving one from the order prose. A detached dispatch carries none,
+        # and the tile stays a read-only record.
+        "dispatch_target_session_id": _safe_trace_operator_line(
+            payload.get("dispatch_target_session_id"), limit=240
+        ),
         "detail": _safe_trace_operator_line(payload.get("detail"), limit=500),
         "output": _safe_trace_operator_block(payload.get("output"), limit=1600),
         # Generic tool input/result record (tools with no dedicated field):

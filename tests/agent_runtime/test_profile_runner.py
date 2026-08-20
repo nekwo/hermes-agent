@@ -1426,6 +1426,138 @@ def test_agent_chat_send_finished_keeps_result_but_not_duplicate_input():
     assert payload["tool_result"] == "ok: true\ndelivered: true"
 
 
+# PA-1: the relay's OTHER HALF. dispatch_target/dispatch_order (started event)
+# name WHO was told WHAT; these name WHERE it landed, so the operator console can
+# open that thread instead of only reading about it. Sourced from the RESULT
+# because the target thread is resolved downstream of the invocation.
+
+
+def test_agent_chat_send_finished_carries_the_target_thread():
+    payload = _tool_finished_payload(
+        "run.tool.finished",
+        "agent_chat_send",
+        duration=None,
+        is_error=False,
+        result={
+            "ok": True,
+            "target_persona": "backend_dev",
+            "reply": "health check green",
+            "session_id": "persona_chat_personainst_backend_dev_bbbbbbbbbbbb",
+            "chat_session_id": "persona_chat_personainst_backend_dev_bbbbbbbbbbbb",
+            "persona_instance_id": "personainst_backend_dev_3ebfce41",
+        },
+        invocation={"persona_id": "backend_dev", "message": "run the check"},
+    )
+
+    assert payload["dispatch_target_session_id"] == (
+        "persona_chat_personainst_backend_dev_bbbbbbbbbbbb"
+    )
+    # THE THREAD ONLY: the target's persona_instance_id is deliberately NOT on
+    # the wire (mutable re-stamped binding pointer; naming it in an open request
+    # is the 2026-07-24 chat-switching break).
+    assert "dispatch_target_instance_id" not in payload
+    # Additive: the prose/label lane is untouched.
+    assert payload["target_label"] == "→ backend_dev: run the check"
+
+
+def test_agent_chat_send_finished_reads_a_serialized_relay_envelope():
+    # The tool returns json.dumps(...), so a LIVE relay reaches the adapter as a
+    # string; the in-process dict above is the same envelope through the other
+    # door (the pair _is_error_result already reads).
+    payload = _tool_finished_payload(
+        "run.tool.finished",
+        "agent_chat_send",
+        duration=None,
+        is_error=False,
+        result=json.dumps(
+            {
+                "ok": True,
+                "chat_session_id": "persona_chat_personainst_qa_cccccccccccc",
+                "persona_instance_id": "personainst_qa_9f0a1b2c",
+            }
+        ),
+        invocation={"persona_id": "qa", "message": "review it"},
+    )
+
+    assert payload["dispatch_target_session_id"] == "persona_chat_personainst_qa_cccccccccccc"
+
+
+def test_detached_agent_chat_send_names_no_thread():
+    # wait=false returns session_id: None BY CONSTRUCTION — the child turn
+    # resolves its thread long after the sender's turn ended. The absence is the
+    # honest answer, and it is what keeps the console's link inert on this lane.
+    payload = _tool_finished_payload(
+        "run.tool.finished",
+        "agent_chat_send",
+        duration=None,
+        is_error=False,
+        result=json.dumps(
+            {
+                "ok": True,
+                "dispatched": True,
+                "dispatch_id": "dsp_abc123",
+                "target_persona": "backend_dev",
+                "session_id": None,
+            }
+        ),
+        invocation={"persona_id": "backend_dev", "message": "run the long suite"},
+    )
+
+    assert "dispatch_target_session_id" not in payload
+
+
+def test_refused_agent_chat_send_names_no_thread():
+    payload = _tool_finished_payload(
+        "run.tool.finished",
+        "agent_chat_send",
+        duration=None,
+        is_error=True,
+        result={
+            "ok": False,
+            "error": "no such persona",
+            "chat_session_id": "persona_chat_personainst_dev_dddddddddddd",
+        },
+        invocation={"persona_id": "nope", "message": "hi"},
+    )
+
+    assert "dispatch_target_session_id" not in payload
+
+
+def test_target_thread_fields_are_dispatch_only_and_id_shaped():
+    # Another tool whose result happens to carry the same keys gets nothing.
+    other = _tool_finished_payload(
+        "run.tool.finished",
+        "agent_chat_open",
+        duration=None,
+        is_error=False,
+        result={"ok": True, "chat_session_id": "persona_chat_personainst_dev_eeeeeeeeeeee"},
+        invocation={"persona_id": "dev"},
+    )
+    assert "dispatch_target_session_id" not in other
+
+    # Prose in an id slot is not an id. Truncating would hand the console a
+    # WRONG session to open, so the field drops instead.
+    prose = _tool_finished_payload(
+        "run.tool.finished",
+        "agent_chat_send",
+        duration=None,
+        is_error=False,
+        result={"ok": True, "chat_session_id": "the dev chat, probably"},
+        invocation={"persona_id": "dev", "message": "hi"},
+    )
+    assert "dispatch_target_session_id" not in prose
+
+    over_long = _tool_finished_payload(
+        "run.tool.finished",
+        "agent_chat_send",
+        duration=None,
+        is_error=False,
+        result={"ok": True, "chat_session_id": "s" * 241},
+        invocation={"persona_id": "dev", "message": "hi"},
+    )
+    assert "dispatch_target_session_id" not in over_long
+
+
 def test_dev_work_finished_payload_never_records_raw_tool_io():
     # Dev-work policy: changed_paths/changed_files ARE the record; the raw
     # invocation (diff body, machine-absolute paths) never rides the payload.
