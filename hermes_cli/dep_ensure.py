@@ -153,6 +153,16 @@ def ensure_dependency(
             return False
         cmd = [
             ps_bin,
+            # -NoProfile is not optional here, and it is what every other
+            # PowerShell spawn in this repo already passes (claw, clipboard,
+            # gateway, tools_config, voice_mode, tools/environments/local).
+            # A user profile runs BEFORE -File does: on 2026-08-20 an operator
+            # profile that upgrades 5.1 sessions to pwsh replaced this script
+            # with an interactive shell, which inherited the caller's pipe
+            # stdin and blocked forever — `hermes postinstall --yes --json`
+            # hung for 20 minutes under the Eternia Launcher — and, because the
+            # profile ended in `exit`, install.ps1 had never run at all.
+            "-NoProfile", "-NonInteractive",
             "-ExecutionPolicy", "Bypass",
             "-File", str(script),
             "-Ensure", dep,
@@ -166,6 +176,12 @@ def ensure_dependency(
     result = subprocess.run(
         cmd,
         env=run_env,
+        # The env var above only ASKS the script to be non-interactive. This
+        # makes it so: anything that reads stdin — the install script, a shell
+        # profile, a package manager prompt — gets EOF instead of a pipe that
+        # never closes. Applies to the bash branch too, which has the same
+        # exposure through ~/.bashrc.
+        stdin=subprocess.DEVNULL,
     )
     if result.returncode != 0:
         return False
