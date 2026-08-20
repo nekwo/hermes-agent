@@ -764,6 +764,86 @@ def _neutralize_macos_keychain_creds(request, monkeypatch):
     return None
 
 
+@pytest.fixture(autouse=True)
+def _neutralize_claude_code_credentials_file(request, monkeypatch):
+    """Keep the suite off Claude Code's real ``~/.claude/.credentials.json``.
+
+    The twin of ``_neutralize_macos_keychain_creds`` for the OTHER source
+    ``read_claude_code_credentials()`` consults — and, unlike the keychain,
+    this one is a READ **and a WRITE**.
+
+    Invariant 2 at the top of this file deliberately does not redirect
+    ``HOME`` ("that broke subprocesses in CI"), so ``HERMES_HOME`` never
+    covered this path: ``Path.home()`` in any test resolves to the operator's
+    real profile. ``~/.claude/.credentials.json`` is Claude Code's file,
+    deliberately outside Hermes home (``credential_sources.py`` refuses to
+    delete it for exactly that reason), so relocating it under
+    ``HERMES_HOME`` was never an option either.
+
+    Two routes reach it from the credential pool, gated differently:
+
+    * ``_seed_from_singletons`` -> ``read_claude_code_credentials()``
+      (``credential_pool.py``) sits behind
+      ``is_provider_explicitly_configured("anthropic")``, which reads files
+      ``HERMES_HOME`` *does* sandbox. Blocked — but only until a fixture
+      writes ``active_provider: anthropic`` into its own hermetic
+      ``auth.json``, which is one line and which the suite already does.
+    * ``_available_entries`` -> ``_sync_anthropic_entry_from_credentials_file``
+      has **no gate at all** and fires whenever a hermetic pool holds an
+      anthropic entry with ``source="claude_code"`` and an exhausted/dead
+      ``last_status``.
+
+    The write side is the worse half: a test that reaches the token-refresh
+    path calls ``_write_claude_code_credentials`` (from the adapter's own
+    ``_refresh_oauth_token`` and from two pool refresh sites), which
+    rewrites the operator's live Claude Code login with whatever the test's
+    mocked refresh endpoint returned.
+
+    Both module attributes are replaced here. A test that legitimately needs
+    the real code path declares ``@pytest.mark.allow_claude_code_credentials_file``
+    **and** points ``Path.home()`` at its own tmpdir — the gate in
+    ``tests/test_claude_code_credentials_file_gate.py`` enforces the second
+    half, because the marker alone would hand the host file straight back.
+
+    Returns a call-count dict (never argument values — those are
+    credentials) so the proof tests can assert the routes actually land here.
+    """
+    counts = {"read": 0, "write": 0}
+
+    if request.node.get_closest_marker(_ALLOW_CLAUDE_CODE_CREDENTIALS_FILE_MARK):
+        return counts
+
+    try:
+        import agent.anthropic_adapter as _anthropic_adapter
+    except Exception:
+        return counts
+
+    def _blocked_read(*_args, **_kwargs):
+        counts["read"] += 1
+        return None
+
+    def _blocked_write(*_args, **_kwargs):
+        counts["write"] += 1
+        return None
+
+    _blocked_read._hermes_neutralized = True  # type: ignore[attr-defined]
+    _blocked_write._hermes_neutralized = True  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(
+        _anthropic_adapter,
+        "_read_claude_code_credentials_from_file",
+        _blocked_read,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        _anthropic_adapter,
+        "_write_claude_code_credentials",
+        _blocked_write,
+        raising=False,
+    )
+    return counts
+
+
 # ── Kanban write guard (#69283) ─────────────────────────────────────────────
 # When hermetic isolation is bypassed (stale checkout, wrong rootdir, direct
 # invocation), kanban writes silently pollute the real ~/.hermes. This autouse
@@ -1159,6 +1239,7 @@ def _wal_is_usable() -> bool:
 
 _AUDIO_GUARD_BYPASS_MARK = "real_audio_playback"
 _ALLOW_MACOS_KEYCHAIN_MARK = "allow_macos_keychain"
+_ALLOW_CLAUDE_CODE_CREDENTIALS_FILE_MARK = "allow_claude_code_credentials_file"
 
 
 def pytest_configure(config):  # noqa: D401 — pytest hook
@@ -1185,6 +1266,13 @@ def pytest_configure(config):  # noqa: D401 — pytest hook
         "markers",
         f"{_ALLOW_MACOS_KEYCHAIN_MARK}: allow a test to exercise the macOS "
         "Keychain credential reader with its own subprocess/platform mocks.",
+    )
+    config.addinivalue_line(
+        "markers",
+        f"{_ALLOW_CLAUDE_CODE_CREDENTIALS_FILE_MARK}: allow a test to "
+        "exercise the real ~/.claude/.credentials.json reader/writer. The "
+        "test MUST also point Path.home() at its own tmpdir — the marker "
+        "alone hands back the operator's live Claude Code login.",
     )
 
     # The pyproject addopts pin ``--timeout-method=signal`` relies on

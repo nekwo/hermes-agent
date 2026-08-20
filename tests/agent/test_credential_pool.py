@@ -1644,6 +1644,9 @@ def test_persist_preserves_concurrent_disk_only_entry(tmp_path, monkeypatch):
     # Block external-credential autodiscovery: a real ~/.claude/.credentials.json
     # on a dev machine would seed an extra claude_code entry and break the
     # exact-id assertions below (passes on CI where no such file exists).
+    # The claude_code half is now held suite-wide by the autouse
+    # ``_neutralize_claude_code_credentials_file`` (MCF-66); the stub below is
+    # redundant for it and still load-bearing for read_hermes_oauth_credentials.
     monkeypatch.setattr("agent.anthropic_adapter.read_hermes_oauth_credentials", lambda: None)
     monkeypatch.setattr("agent.anthropic_adapter.read_claude_code_credentials", lambda: None)
     _write_auth_store(

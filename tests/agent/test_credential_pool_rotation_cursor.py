@@ -77,6 +77,13 @@ def home(tmp_path, monkeypatch) -> Path:
     # non-hermetic class already catalogued in tests/agent/conftest.py). Left
     # live, gate 4 would sync REAL host tokens into a temp pool and then fail
     # or pass on whatever that host happens to hold.
+    #
+    # As of MCF-66 that is no longer this fixture's job to remember: the
+    # autouse ``_neutralize_claude_code_credentials_file`` in tests/conftest.py
+    # holds the seam for the whole suite, and
+    # tests/test_claude_code_credentials_file_gate.py gates it. This stub is
+    # now redundant belt-and-braces, kept because it also documents WHY this
+    # particular pool must be quiescent.
     monkeypatch.setattr(
         "agent.anthropic_adapter.read_claude_code_credentials",
         lambda *args, **kwargs: None,

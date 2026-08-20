@@ -42,8 +42,13 @@ class TestReadClaudeCodeCredentialsFromKeychain:
 
 
 
+@pytest.mark.allow_claude_code_credentials_file
 class TestReadClaudeCodeCredentialsPriority:
-    """Bug 4: Keychain must be checked before the JSON file."""
+    """Bug 4: Keychain must be checked before the JSON file.
+
+    The JSON half is the real reader, so this opts out of the suite-wide
+    neutralization — with ``Path.home()`` redirected at ``tmp_path`` in every
+    test before a credentials file is written (MCF-66)."""
 
     def test_keychain_takes_priority_over_json_file(self, tmp_path, monkeypatch):
         """When both Keychain and JSON file have credentials, Keychain wins."""
@@ -115,8 +120,12 @@ class TestReadClaudeCodeCredentialsPriority:
         assert creds is None
 
 
+@pytest.mark.allow_claude_code_credentials_file
 class TestReadClaudeCodeCredentialsDesync:
     """Reconciliation when Keychain and JSON file disagree.
+
+    Real reader on the JSON side; ``_setup`` redirects ``Path.home()`` at the
+    test's own ``tmp_path`` before writing anything (MCF-66).
 
     Observed in the wild on Claude Code 2.1.x: a refresh updates one source
     (commonly the JSON file) but leaves the other holding an expired token.
