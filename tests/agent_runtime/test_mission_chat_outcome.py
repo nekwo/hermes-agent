@@ -314,36 +314,173 @@ DECLARED_LITERAL_EXCEPTIONS = {
 }
 
 
+#: The wire keys this gate polices.
+_VOCABULARY_KEYS = ("execution_state", "error_kind")
+
+
+def _vocabulary_literals(tree: ast.AST) -> list[tuple[str, str, str, int, str]]:
+    """Every place this tree spells a turn-outcome value as a STRING LITERAL.
+
+    Returns ``(form, enclosing-def-or-'<module>', key, lineno, value)``.
+
+    SIX forms, because the key is not the unit of meaning — the same wire value
+    can be written six ways and only two of them used to be inspected. Measured
+    on 2026-08-20 by planting one literal per form in ``persona_commands.py``
+    and running this gate:
+
+        dict literal          SEEN (red)
+        call keyword          SEEN (red)
+        kwonly default        BLIND (green)
+        positional default    BLIND (green)
+        subscript store       BLIND (green)
+        bare/annotated assign BLIND (green)
+
+    The kwonly-default hole was not hypothetical: ``persona_commands.py`` uses
+    exactly that form at ``_retired_persona_instance_refusal``, and it is the
+    file's own DECLARED exception. So the gate could not see the one spelling
+    the lane demonstrably prefers, and ``DECLARED_LITERAL_EXCEPTIONS``' claim to
+    hold "the single deliberate literal left in the CLI lane" was a claim
+    nothing could check — a second one would have been structurally invisible.
+
+    KNOWN BOUND, stated rather than hidden (a gate that overclaims its reach is
+    the defect it exists to stop): this reads SHAPE, not dataflow.
+    ``_X = "failed"`` at module scope followed by
+    ``payload["execution_state"] = _X`` is invisible, and was measured invisible
+    alongside the six above. Closing it needs constant propagation; the six
+    syntactic forms are what a re-spelling actually looks like when someone
+    writes one by hand.
+    """
+
+    owner: dict[ast.AST, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for inner in ast.walk(node):
+                owner.setdefault(inner, node.name)
+
+    found: list[tuple[str, str, str, int, str]] = []
+
+    def record(form: str, node: ast.AST, key: str, value: ast.AST) -> None:
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            found.append((form, owner.get(node, "<module>"), key, node.lineno, value.value))
+
+    for node in ast.walk(tree):
+        # 1. {"error_kind": "..."}
+        if isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values):
+                if isinstance(key, ast.Constant) and key.value in _VOCABULARY_KEYS:
+                    for child in ast.walk(value):
+                        record("dict-literal", key, key.value, child)
+        # 2. f(error_kind="...")
+        if isinstance(node, ast.Call):
+            for keyword in node.keywords:
+                if keyword.arg in _VOCABULARY_KEYS:
+                    record("call-keyword", node, keyword.arg, keyword.value)
+        # 3/4. def f(error_kind="...") and def f(*, error_kind="...")
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            args = node.args
+            positional = args.posonlyargs + args.args
+            pairs = list(zip(positional[len(positional) - len(args.defaults):], args.defaults))
+            pairs += list(zip(args.kwonlyargs, args.kw_defaults))
+            for arg, default in pairs:
+                if default is not None and arg.arg in _VOCABULARY_KEYS:
+                    record("parameter-default", arg, arg.arg, default)
+        # 5. payload["error_kind"] = "..."
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if (
+                    isinstance(target, ast.Subscript)
+                    and isinstance(target.slice, ast.Constant)
+                    and target.slice.value in _VOCABULARY_KEYS
+                ):
+                    record("subscript-store", target, target.slice.value, node.value)
+                if isinstance(target, ast.Name) and target.id in _VOCABULARY_KEYS:
+                    record("name-assign", target, target.id, node.value)
+        # 6. error_kind: str = "..."
+        if isinstance(node, ast.AnnAssign) and node.value is not None:
+            target = node.target
+            if isinstance(target, ast.Name) and target.id in _VOCABULARY_KEYS:
+                record("annotated-assign", target, target.id, node.value)
+            if (
+                isinstance(target, ast.Subscript)
+                and isinstance(target.slice, ast.Constant)
+                and target.slice.value in _VOCABULARY_KEYS
+            ):
+                record("annotated-assign", target, target.slice.value, node.value)
+
+    return found
+
+
 def test_the_cli_lane_spells_no_execution_state_or_error_kind_literal():
     """Every wire value is the enum member, not a string that happens to match."""
 
-    offenders: list[str] = []
-    for node in ast.walk(_persona_commands_tree()):
-        if isinstance(node, ast.Dict):
-            for key, value in zip(node.keys, node.values):
-                if not (isinstance(key, ast.Constant) and key.value in
-                        ("execution_state", "error_kind")):
-                    continue
-                for child in ast.walk(value):
-                    if isinstance(child, ast.Constant) and isinstance(child.value, str):
-                        offenders.append(f'{key.value}={child.value!r} @ L{key.lineno}')
-        if isinstance(node, ast.Call):
-            for keyword in node.keywords:
-                if keyword.arg in ("execution_state", "error_kind") and isinstance(
-                    keyword.value, ast.Constant
-                ):
-                    offenders.append(
-                        f"{keyword.arg}={keyword.value.value!r} @ L{node.lineno}"
-                    )
+    offenders = sorted(
+        f"{key}={value!r} ({form}) @ L{lineno} in {where}"
+        for form, where, key, lineno, value in _vocabulary_literals(_persona_commands_tree())
+        if DECLARED_LITERAL_EXCEPTIONS.get((where, key)) is None
+    )
     assert not offenders, (
         "persona_commands.py re-spells the turn-outcome vocabulary instead of "
-        f"reading agent_runtime.mission_chat_outcome: {sorted(offenders)}"
+        f"reading agent_runtime.mission_chat_outcome: {offenders}"
     )
 
 
-def test_the_declared_literal_exception_still_matches_its_member():
-    """The one literal left standing may not drift from the enum."""
+def test_the_detector_sees_every_spelling_and_stays_quiet_on_the_enum():
+    """Anti-vacuity. The gate above asserts an EMPTY list, which is the shape
+    that keeps passing quietly once the reader stops reading — so the reader is
+    pinned here, independently of the tree, in each form it must cover.
+    """
 
+    planted = ast.parse(
+        'def a():\n'
+        '    return {"error_kind": "chat_busy"}\n'
+        'def b():\n'
+        '    return dict(error_kind="chat_busy")\n'
+        'def c(*, error_kind: str = "chat_busy"):\n'
+        '    return error_kind\n'
+        'def d(execution_state="failed"):\n'
+        '    return execution_state\n'
+        'def e(payload):\n'
+        '    payload["execution_state"] = "failed"\n'
+        'def f():\n'
+        '    error_kind: str = "chat_busy"\n'
+        '    return error_kind\n'
+    )
+    forms = {form for form, _where, _key, _lineno, _value in _vocabulary_literals(planted)}
+    assert forms == {
+        "dict-literal",
+        "call-keyword",
+        "parameter-default",
+        "subscript-store",
+        "annotated-assign",
+    }, sorted(forms)
+
+    correct = ast.parse(
+        "def a():\n"
+        '    return {"error_kind": ChatErrorKind.CHAT_BUSY}\n'
+        "def b(*, error_kind: str = ChatErrorKind.CHAT_BUSY):\n"
+        "    return error_kind\n"
+        "def c(payload):\n"
+        '    payload["execution_state"] = ExecutionState.FAILED\n'
+        "def d(payload, error_kind):\n"
+        '    return {"error_kind": error_kind, "note": "a plain string elsewhere"}\n'
+    )
+    assert _vocabulary_literals(correct) == []
+
+
+def test_the_declared_literal_exception_still_matches_its_member():
+    """The one literal left standing may not drift from the enum — and must
+    still BE there.
+
+    The loop below carried every assertion in this test and iterated a lookup
+    that misses silently: if ``_retired_persona_instance_refusal`` were renamed
+    or deleted, ``DECLARED_LITERAL_EXCEPTIONS.get(...)`` returns ``None`` for
+    every function, the body never runs, and an exemption for a site that no
+    longer exists sits here reading like a reviewed decision. An unmatched
+    exemption is the ``test_allowlist_has_not_rotted`` failure one file over. So
+    the sites are collected first and the coverage is asserted OUTSIDE the loop.
+    """
+
+    matched: set[tuple[str, str]] = set()
     for function in (
         node
         for node in _persona_commands_tree().body
@@ -355,10 +492,19 @@ def test_the_declared_literal_exception_still_matches_its_member():
             expected = DECLARED_LITERAL_EXCEPTIONS.get((function.name, arg.arg))
             if expected is None:
                 continue
+            matched.add((function.name, arg.arg))
             assert isinstance(default, ast.Constant)
             assert default.value == expected.value, (
                 f"{function.name}({arg.arg}=) drifted from {expected!r}"
             )
+
+    unmatched = sorted(set(DECLARED_LITERAL_EXCEPTIONS) - matched)
+    assert not unmatched, (
+        "these DECLARED_LITERAL_EXCEPTIONS name no keyword-only parameter in "
+        f"persona_commands.py any more: {unmatched}. The site was renamed or "
+        "deleted; delete the entry in the same commit. An exemption that "
+        "matches nothing grants cover to whatever is next given that name."
+    )
 
 
 def test_every_owned_member_has_a_producer_in_the_cli_lane():
