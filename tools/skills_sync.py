@@ -457,15 +457,15 @@ def restore_official_optional_skill(name: str, *, restore: bool = False) -> dict
 def _index_installed_skill_dirs_by_name() -> Dict[str, List[Path]]:
     """Index installed skills by directory name with one active-tree scan."""
     index: Dict[str, List[Path]] = {}
-    if not SKILLS_DIR.exists():
+    if not _skills_dir().exists():
         return index
-    for skill_md in SKILLS_DIR.rglob("SKILL.md"):
+    for skill_md in _skills_dir().rglob("SKILL.md"):
         if is_excluded_skill_path(skill_md):
             continue
         candidate = skill_md.parent
         # Never reach outside the skills tree (symlinked/external dirs).
         try:
-            candidate.resolve().relative_to(SKILLS_DIR.resolve())
+            candidate.resolve().relative_to(_skills_dir().resolve())
         except (OSError, ValueError):
             continue
         index.setdefault(candidate.name, []).append(candidate)
@@ -485,7 +485,7 @@ def _find_installed_skill_dir_by_name(
     would write provenance onto the wrong skill. The caller still verifies a
     byte-identical content hash before recording anything.
     """
-    if not skill_dir_name or not SKILLS_DIR.exists():
+    if not skill_dir_name or not _skills_dir().exists():
         return None
     if installed_index is None:
         installed_index = _index_installed_skill_dirs_by_name()
@@ -554,7 +554,7 @@ def _backfill_optional_provenance(quiet: bool = False) -> List[str]:
             if dest is None:
                 continue
             try:
-                install_path = _safe_rel_install_path(dest, SKILLS_DIR)
+                install_path = _safe_rel_install_path(dest, _skills_dir())
             except ValueError as e:
                 logger.debug("Skipping relocated optional skill %s: %s", dest, e)
                 continue
@@ -618,7 +618,7 @@ def _read_hub_install_paths() -> Set[str]:
     content happens to match a bundled origin hash, or the lock's
     ``install_path`` would point at a directory that no longer exists.
     """
-    lock_path = SKILLS_DIR / ".hub" / "lock.json"
+    lock_path = _skills_dir() / ".hub" / "lock.json"
     if not lock_path.exists():
         return set()
     try:
@@ -641,9 +641,9 @@ def _index_active_skills() -> Dict[str, List[Path]]:
     locate a bundled skill that upstream moved to a new category/directory.
     """
     index: Dict[str, List[Path]] = {}
-    if not SKILLS_DIR.exists():
+    if not _skills_dir().exists():
         return index
-    for skill_md in SKILLS_DIR.rglob("SKILL.md"):
+    for skill_md in _skills_dir().rglob("SKILL.md"):
         if is_excluded_skill_path(skill_md):
             continue
         skill_dir = skill_md.parent
@@ -683,7 +683,7 @@ def _recover_renamed_skill(
         if candidate == dest or not candidate.is_dir():
             continue
         try:
-            rel = candidate.relative_to(SKILLS_DIR).as_posix()
+            rel = candidate.relative_to(_skills_dir()).as_posix()
         except ValueError:
             continue
         # Never relocate a hub-installed skill — the hub owns its path.
@@ -696,7 +696,7 @@ def _recover_renamed_skill(
             if not quiet:
                 print(
                     f"  ⚠ {skill_name}: upstream moved this skill to "
-                    f"{dest.relative_to(SKILLS_DIR).as_posix()}, but your "
+                    f"{dest.relative_to(_skills_dir()).as_posix()}, but your "
                     f"modified copy at {rel} was kept — it will not receive "
                     f"updates. Run `hermes skills reset {skill_name} --restore` "
                     f"to move to the new location."
@@ -713,7 +713,7 @@ def _recover_renamed_skill(
             return None
         logger.info("Relocated renamed bundled skill: %s -> %s", candidate, dest)
         if not quiet:
-            print(f"  → {skill_name} (moved {rel} → {dest.relative_to(SKILLS_DIR).as_posix()})")
+            print(f"  → {skill_name} (moved {rel} → {dest.relative_to(_skills_dir()).as_posix()})")
         return rel
     return None
 

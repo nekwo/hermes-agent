@@ -147,11 +147,15 @@ hid the one that bites:
 | `tools/skills_sync.py` | `_skills_dir()` / `_hermes_home()` / `_manifest_file()` ✔ | only inside the accessors | **mitigated (§7.2, 2026-07-27)** |
 
 The staleness was reproducible, not theoretical — and the guard that reproduced
-it is still there, now inverted: `test_env_determinism_audit.py` switches
-`HERMES_HOME` after import and asserts each module's accessor **follows** the
-switch while the module-level constants stay put (they are the override seam,
-not the reader). An AST sweep fails if any function body in `skills_sync` goes
-back to reading a frozen constant directly.
+it is still there, now inverted:
+`tests/agent_runtime/test_skills_root_call_time_gate.py` switches `HERMES_HOME`
+after import and asserts each module's accessor **follows** the switch while the
+module-level constants stay put (they are the override seam, not the reader) and
+an explicit patch of the constant still outranks the switch. An AST sweep in the
+same file fails if any function body in a guarded `tools/` module goes back to
+reading a frozen constant directly. (Its first home,
+`tests/agent_runtime/test_env_determinism_audit.py`, was gutted on 2026-07-30 —
+see §7.2 for what that cost and how the restoration is built not to repeat it.)
 
 **No fork-owned accessor was added, on purpose.** `agent_runtime/` is already
 immune by construction: `skill_publishability.py` imports only the two *pure*
@@ -160,7 +164,8 @@ helpers (`_dir_hash`, `_read_skill_name`) and derives every skills root itself
 — dead code standing in for a fix. What shipped instead is the drift guard plus
 the exact diff (§7.2, applied 2026-07-27 under operator approval), and an AST
 test that fails if any `agent_runtime` module ever imports one of the frozen
-names.
+names (`test_agent_runtime_never_imports_a_frozen_root_constant_from_tools`,
+restored to the new gate file on 2026-08-21).
 
 ---
 
@@ -608,37 +613,54 @@ direction only — strictly more receipts, no decision changes.
 
 **Applied 2026-07-27**, with one deliberate extension noted below.
 
-> [!caution] **UNCOVERED SEAM — and the invariant is VIOLATED at HEAD.**
+> [!note] **SEAM RE-COVERED 2026-08-21 — MCF-90 closed.**
 > This section used to name four guards in
 > `tests/agent_runtime/test_env_determinism_audit.py`: the constants-as-seams
 > pin, the in-body AST sweep, the override-seam pin, and the all-modules
 > parametrize. **All four were deleted on 2026-07-30 by `2154f05428`**
-> (mission-lane removal S0–S12), which gutted that file to a single
-> five-line retirement probe. Nothing replaced them, and this section went on
-> claiming them for three weeks (MCF-78, 2026-08-20).
+> (mission-lane removal S0–S12), which gutted that file to a single five-line
+> retirement probe. Nothing replaced them, and this section went on claiming
+> them for three weeks (MCF-78, 2026-08-20). The deletion was **collateral, not
+> a judgement**: that module's top-level imports (`agent_runtime.smoke`,
+> `agent_runtime.terminal_envelope`,
+> `agent_runtime.stagec_mcp_visual_provider`) were part of the lane being
+> removed, so an unrelated invariant went out with them.
 >
 > The AST sweep said *"one surviving in-body `SKILLS_DIR` is the whole bug
-> back."* **It is back eleven times.** The upstream merge `b9721809e6`
+> back."* **It came back eleven times.** The upstream merge `b9721809e6`
 > (2026-07-31 — the day AFTER the guard died) brought in
 > `_index_installed_skill_dirs_by_name`, `_find_installed_skill_dir_by_name`,
 > `_backfill_optional_provenance`, `_read_hub_install_paths`,
 > `_index_active_skills` and `_recover_renamed_skill`, and every one of them
-> reads the import-time-frozen `SKILLS_DIR` instead of `_skills_dir()`.
+> read the import-time-frozen `SKILLS_DIR` instead of `_skills_dir()`.
 > Re-running the deleted sweep's exact logic scores **0 offenders at
-> `2154f05428^` and 11 at `b9721809e6` and at HEAD** — the guard would have
-> reddened on that merge, which is what it existed to do.
+> `2154f05428^`, 11 at `b9721809e6`, 11 at HEAD-before-this-fix** — the guard
+> would have reddened on that merge, which is what it existed to do.
 >
-> What survives: `tests/test_no_frozen_hermes_home.py` still ledgers
+> **Converted, not tracked.** All eleven sites now call `_skills_dir()`. The
+> row assumed this was a fork rewrite that would collide on the next upstream
+> sync; the opposite is true. **Upstream fixed the same bug itself in
+> `cc421cb697`** ("dashboard console skills commands no longer act on the wrong
+> profile", #65828, 2026-08-18) and `upstream/main` scores **zero offenders**.
+> The fork is merely behind that commit, so the conversion is byte-identical to
+> upstream's own and REMOVES a future conflict instead of creating one.
+>
+> **The gate lives in
+> `tests/agent_runtime/test_skills_root_call_time_gate.py`** — a fork-owned
+> file, since the old home is retired. It restores the invariant rather than
+> the file: the guarded modules are **discovered** (any `tools/*.py` carrying
+> the constant + accessor + `*_AT_IMPORT` trio), so a fourth module joining the
+> lineage is covered the day it lands; the exemption baseline is empty and a
+> stale entry fails; and `test_the_gate_still_has_subjects` pins the three known
+> members by name so the sweep cannot go silently vacuous. **It survives the
+> reason the original died**: nothing but stdlib and `pytest` is imported at
+> module scope — the subjects are read off disk and parsed with `ast`, and the
+> behavioural half imports `tools.skills_sync` inside its fixture — so no
+> future lane removal can take the gate down as collateral again.
+>
+> Also still standing: `tests/test_no_frozen_hermes_home.py` ledgers
 > `SKILLS_DIR` / `MANIFEST_FILE` / `_SKILLS_DIR_AT_IMPORT` as *deliberate*
-> frozen seams, so the "the constants survive" half is guarded. **Unguarded:**
-> that an accessor exists for each; that no function body bypasses them; that a
-> patched constant still wins while an unpatched module follows a live profile
-> switch; that every skills module resolves its root at call time.
->
-> Restoring the sweep reds the suite until the eleven call sites move to
-> `_skills_dir()`. That is a code fix in an upstream-owned file, not a
-> documentation fix, so it is stated here rather than silently repaired —
-> escalated on MCF-78's row.
+> frozen seams, which guards the "the constants survive" half.
 
 **Extension applied on top of the literal diff.** The diff below defines only
 `_skills_dir()`, and the prose then says to replace the `MANIFEST_FILE` /
