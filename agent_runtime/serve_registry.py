@@ -44,6 +44,34 @@ what it removed. Listing never prunes: an operator debugging "why do I have
 four serves" must see the wreckage, not a registry that tidied the evidence
 away before they looked.
 
+Pruning at BOOT, and why that is a different moment
+---------------------------------------------------
+
+Serve boot calls the prune once, immediately after registering its own entry,
+and puts the returned report on the service log
+(``harness_parts.serve``, event ``serve_instances_pruned``). That is not the
+rule above being quietly relaxed. The rule protects a READ from destroying the
+evidence it is reporting; a boot is a WRITE moment — it has just created a file
+in this directory — and the evidence is not destroyed but relocated: the report
+names pid, boot_id, path, classification and reason for every record, deleted
+and kept alike, onto a channel correlatable by ``boot_id`` against that boot's
+``ready`` frame. Records leave a directory nobody reads for a log the operator
+already reads.
+
+It is needed because the launcher's boot hygiene sweep ``taskkill /F``s orphan
+serves, which is a crash by construction — those serves are never given the
+chance to unregister — so the deliberate "a crash leaves the file behind"
+design accumulates without a floor. Measured on the operator's runtime: 14
+serve boots in ~19 h left 2 records, while a third exited cleanly and removed
+its own. This is tidiness plus forensics, NOT a correctness fix: leftover
+records are already harmless, since ``resolve_socket_target`` returns only rows
+classified ``live``, the launcher never reads this directory, and the
+fingerprint exclusion below keeps them out of every freshness key.
+
+Ordering is load-bearing (register first, then prune) and so is the classifier:
+the boot caller passes no widened classification set, so ``unknown`` and
+``stale_recycled_pid`` survive a boot exactly as they survive everything else.
+
 Fingerprint exclusion (load-bearing)
 ------------------------------------
 

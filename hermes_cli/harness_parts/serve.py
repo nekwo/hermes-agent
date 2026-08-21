@@ -1567,6 +1567,68 @@ def serve_loop(
                 ).payload()
             except Exception as exc:
                 instance_block = {"outcome": f"error:{type(exc).__name__}"}
+            # ...and, having just written, drop the records that are provably
+            # wreckage. AFTER registration on purpose: this serve's own entry
+            # then exists and classifies `live`, so the sweep can never be the
+            # thing that removes it.
+            #
+            # WHY THIS DOES NOT CONTRADICT "listing never prunes"
+            # ---------------------------------------------------
+            # serve_registry's docstring argues, correctly, that a READ must not
+            # destroy the evidence it is reporting: an operator asking "why do I
+            # have four serves" must see the wreckage. A boot is not that
+            # moment. It is a WRITE moment - the line above just created a file
+            # in this directory - and, decisively, the evidence does not vanish:
+            # prune_stale_serve_instances returns pid, boot_id, path,
+            # classification and reason for every record, deleted and kept
+            # alike, and that report goes onto the service log correlatable by
+            # boot_id against this boot's ready frame. The wreckage moves from a
+            # directory nobody reads into a log the operator already reads.
+            #
+            # It is needed because clean exit removes its own entry and the
+            # crash path deliberately does not - and the launcher's boot hygiene
+            # sweep taskkill /F's orphan serves, which is a crash by
+            # construction: those serves are never given the chance to
+            # unregister. Measured on the operator's runtime: 14 serve boots in
+            # ~19 h left 2 records behind (13856, 35080), while a third (21440)
+            # exited cleanly and removed its own.
+            #
+            # SCOPE, stated plainly: this is tidiness plus forensics, not a
+            # correctness fix. The leftover records are already harmless -
+            # resolve_socket_target returns only rows classified `live`, the
+            # launcher never reads this directory, and it is excluded from every
+            # freshness fingerprint (see the module docstring).
+            #
+            # What is pruned is NOT widened here: stale_dead_pid only, which is
+            # the registry's own rule. stale_recycled_pid names a live process
+            # this registry no longer understands, and `unknown` means a probe
+            # could not answer - deleting on a failed probe is how a sweep
+            # removes a RUNNING service's record, and this repo has already been
+            # bitten once by a recycled pid killing an unrelated process.
+            #
+            # Silent when it found nothing to do: a line every boot saying it
+            # deleted zero files is the kind of noise that trains an operator to
+            # stop reading the channel this report needs to be seen on.
+            try:
+                from agent_runtime.serve_registry import (
+                    prune_stale_serve_instances,
+                )
+
+                prune_report = prune_stale_serve_instances(store_root_path)
+                if prune_report.get("deleted_count") or any(
+                    "error" in row for row in prune_report.get("kept") or ()
+                ):
+                    _service_log(
+                        {
+                            "event": "serve_instances_pruned",
+                            "boot_id": boot_id,
+                            "pid": os.getpid(),
+                            **prune_report,
+                        }
+                    )
+            except Exception:
+                # Bookkeeping must never take a boot with it.
+                pass
         timeline.mark("service_foundations_ms")
         # Orphaned-turn sweep BEFORE the ready frame: serve boot is the moment
         # a launcher restart replaces a dead runtime, and the first hydrate is
