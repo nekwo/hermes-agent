@@ -654,3 +654,109 @@ def test_the_emitted_events_equal_the_two_call_flow(qa_persona):
     # Guard the guard: a comparison of two empty lists would pass forever.
     assert len(one_call) >= 2
     assert "persona_instance.chat_opened" in one_call
+
+
+# ── the chat root this lane hands back must RESOLVE ──────────────────────────
+#
+# Live 2026-08-20. An operator dragged a QA agent into the office and every
+# message to it came back
+#
+#   UNKNOWN EXPLICIT PERSONA CHAT ROOT:
+#   persona_chat_personainst_qa_agent_03ba2049_67d5a1a6921f
+#
+# That root was written into the persona-instance row (as BOTH
+# ``default_chat_session_id`` and ``session_id``), into the create
+# reservation's recorded result, and into the serve read-model — and into no
+# SessionDB on the machine. ``persona_chat_session_id_for`` is a bare
+# ``uuid4``; nothing on this lane created its row, because chat-root durability
+# lived entirely in ``hermes_cli/harness_parts/persona_commands.py`` and this
+# lane is not in ``hermes_cli``.
+#
+# It never self-heals: ``mission-chat message`` refuses any explicit root with
+# no SessionDB row (correctly — that guard's job is refusing fabricated roots),
+# and ``resolve_default_chat_session_id_for_instance`` re-offers the stored
+# pointer forever on shape alone. So the agent is born undeliverable.
+#
+# What these rows assert is therefore not "a root came back" — the broken lane
+# returned one too — but that the exact root in the reply DEREFERENCES, and
+# that a store which cannot persist one leaves no agent behind at all.
+
+
+def _chat_row(session_id: str):
+    """Read one row out of the OPERATOR-visible chat store, and close it."""
+
+    from agent_runtime.persona_chat_durability import default_persona_session_db
+
+    session_db = default_persona_session_db()
+    try:
+        return session_db.get_session(session_id)
+    finally:
+        session_db.close()
+
+
+def test_the_root_the_create_returns_resolves_in_the_operator_chat_store(qa_persona):
+    _seed_workspace()
+    reply = _call(_params(placement_id="qa_agent_durable"))
+    result = reply["result"]
+    root = result["default_chat_session_id"]
+
+    # The reply's root, the row's pointer and the SessionDB row are ONE fact.
+    assert _instances()[result["persona_instance_id"]].default_chat_session_id == root
+    assert _chat_row(root) is not None, (
+        f"the create returned {root!r} as this agent's chat pointer and no "
+        "SessionDB row for it exists: every mission-chat send to this agent "
+        "will be refused unknown_chat_session, forever"
+    )
+
+
+def test_the_created_root_carries_its_persona_ownership(qa_persona):
+    """A row is not enough — the projection reads its ownership block.
+
+    Without this the previous row could be satisfied by any bare insert, and
+    ``_persona_chat_session_owner`` (the ``foreign_chat_session`` guard's
+    reader) would answer nothing for a session the agent legitimately owns.
+    """
+
+    _seed_workspace()
+    reply = _call(_params(placement_id="qa_agent_owned"))
+    result = reply["result"]
+
+    row = _chat_row(result["default_chat_session_id"])
+    assert row is not None
+    assert row["source"] == "agent_runtime_persona_chat"
+    assert json.loads(row["model_config"])["persona_instance_id"] == (
+        result["persona_instance_id"]
+    )
+
+
+def test_a_chat_store_that_cannot_persist_leaves_no_agent_behind(
+    qa_persona, monkeypatch
+):
+    """The failure path, pinned: refuse loudly rather than bind a phantom.
+
+    The defect this whole section exists for was not "the row was missing" — it
+    was a mint treating "could not persist" as "carry on and bind anyway". So
+    the store failing must produce NO instance row, NO placement, and a typed
+    refusal, not an ``ok`` reply naming a root nothing can dereference.
+    """
+
+    from agent_runtime import persona_chat_durability
+
+    def _no_store():
+        raise persona_chat_durability.PersonaChatPersistenceError("session_db_acquire")
+
+    monkeypatch.setattr(
+        persona_chat_durability, "default_persona_session_db", _no_store
+    )
+
+    _seed_workspace()
+    reply = _call(_params(placement_id="qa_agent_no_store"))
+
+    assert "result" not in reply
+    error = reply["error"]
+    assert error["data"]["reason"] == "chat_session_persist_failed"
+    assert error["data"]["persistence_operation"] == "session_db_acquire"
+    # BOTH rows absent — the same "durable, or neither" property every other
+    # failure row here asserts.
+    assert "personainst_qa_agent_no_store" not in _instances()
+    assert _actors() == {}

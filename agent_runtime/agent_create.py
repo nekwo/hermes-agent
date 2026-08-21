@@ -703,6 +703,7 @@ def perform_agent_create(
         PersonaInstanceStore,
         RetiredPersonaInstanceError,
     )
+    from .persona_chat_durability import PersonaChatPersistenceError
 
     started = time.monotonic()
 
@@ -798,6 +799,38 @@ def perform_agent_create(
                         {
                             "reason": "instance_invalid",
                             "placement_id": request.placement_id,
+                        },
+                    )
+                except PersonaChatPersistenceError as exc:
+                    # The mint could not make this agent's chat root durable, so
+                    # it bound NOTHING — ``_durable_chat_root`` raises on the way
+                    # into ``open_chat``'s ``session_id`` argument, before the
+                    # instance row is written. Nothing to compensate, therefore,
+                    # and deliberately no half-created agent: the alternative
+                    # this replaces was binding a phantom root and answering
+                    # ``ok`` — the agent appeared in the office and every message
+                    # to it was refused ``unknown_chat_session`` forever (live
+                    # 2026-08-20).
+                    #
+                    # Same typed vocabulary as the argv open-chat lane's
+                    # ``chat_session_persist_failed`` frame, so a launcher that
+                    # already decodes that kind from ``mission-chat`` reads this
+                    # refusal too, and a retry with the SAME idempotency key is
+                    # the right next step: the reservation is still ``reserved``
+                    # and no write happened under it.
+                    from .mission_chat_outcome import ChatErrorKind
+
+                    return _refused(
+                        ERR_HANDLER_FAILED,
+                        exc,
+                        {
+                            "reason": str(ChatErrorKind.CHAT_SESSION_PERSIST_FAILED),
+                            "persistence_operation": exc.operation,
+                            "placement_id": request.placement_id,
+                            "next_expected": (
+                                "restore canonical persona chat transcript storage "
+                                "and retry with the same idempotency_key"
+                            ),
                         },
                     )
                 # The argv lane's own provenance stamp, matched so the two lanes

@@ -1886,10 +1886,29 @@ class PersonaInstanceStore:
     ) -> PersonaInstance:
         normalized_persona = _normalize_instance_source_persona(persona_id)
         instance_id = persona_instance_id_for(normalized_persona)
+        root = session_id or persona_chat_session_id_for(instance_id)
+        # Refusals FIRST, durable writes second — the ordering
+        # ``PersonaChatMintReceiptStore.mint`` already learned. Persisting the
+        # root before the bind is checked would leave a titled Mission Control
+        # thread behind every retirement/sibling-steal refusal; ``open_chat``
+        # re-asserts this, so the pre-flight only moves the answer earlier.
+        self.assert_bindable(
+            persona_id=normalized_persona,
+            session_id=root,
+            persona_instance_id=instance_id,
+        )
         return self.open_chat(
             persona_id=normalized_persona,
             persona_instance_id=instance_id,
-            session_id=session_id or persona_chat_session_id_for(instance_id),
+            session_id=_durable_chat_root(
+                root,
+                persona_id=normalized_persona,
+                # An explicit ``display_name`` is authoritative in ``open_chat``,
+                # so this is exactly the title the argv lane's post-hoc ensure
+                # would have written — and that ensure never overwrites an
+                # existing title, so the two lanes agree by construction.
+                display_name=display_name,
+            ),
             display_name=display_name,
             profile_id=_profile_id_for_persona_or_template(normalized_persona),
             kill_active=kill_active,
@@ -1920,6 +1939,28 @@ class PersonaInstanceStore:
         normalized_session = safe_assignment_text(session_id, limit=200) if session_id is not None else None
         if normalized_session and self._session_owned_by_other_instance(normalized_session, instance_id):
             normalized_session = None
+        # Reproduce ``open_chat``'s naming rule HERE so the chat title this mint
+        # writes is the one the argv lane's post-hoc ensure would have written:
+        # explicit name wins, an existing instance keeps its own, and the
+        # persona default only lands on a row that has no name yet.
+        bound_display_name = (
+            safe_assignment_text(display_name, limit=120)
+            or (
+                safe_assignment_text(getattr(existing, "display_name", None), limit=120)
+                if existing is not None
+                else ""
+            )
+            or safe_assignment_text(default_display_name, limit=120)
+        )
+        root = normalized_session or persona_chat_session_id_for(instance_id)
+        # See ``create_operator_chat``: every refusal this bind can raise is
+        # decidable without writing, so it is decided before the root is made
+        # durable rather than after.
+        self.assert_bindable(
+            persona_id=normalized_persona,
+            session_id=root,
+            persona_instance_id=instance_id,
+        )
         # ``display_name`` is the operator's AUTHORITATIVE placement name and
         # always wins; ``default_display_name`` is the persona's honest default,
         # stamped only when the instance has no name yet — never enough to clobber
@@ -1927,7 +1968,11 @@ class PersonaInstanceStore:
         return self.open_chat(
             persona_id=normalized_persona,
             persona_instance_id=instance_id,
-            session_id=normalized_session or persona_chat_session_id_for(instance_id),
+            session_id=_durable_chat_root(
+                root,
+                persona_id=normalized_persona,
+                display_name=bound_display_name,
+            ),
             display_name=display_name,
             default_display_name=default_display_name,
             profile_id=_profile_id_for_persona_or_template(normalized_persona),
@@ -2332,6 +2377,51 @@ def persona_chat_session_id_for(persona_instance_id: str) -> str:
     return f"persona_chat_{normalized}_{uuid.uuid4().hex[:12]}"
 
 
+def _durable_chat_root(
+    session_id: str,
+    *,
+    persona_id: str,
+    display_name: str | None = None,
+) -> str:
+    """The chat root, PERSISTED, on its way into the bind — or nothing binds.
+
+    ``persona_chat_session_id_for`` returns a bare ``uuid4`` string; it creates
+    nothing. Until 2026-08-20 the two mint fallbacks above handed that string
+    straight to :meth:`PersonaInstanceStore.open_chat`, and only the argv
+    handlers in ``hermes_cli`` ever made the row durable afterwards. The
+    one-call create lane (``agent_runtime.agent_create``, which is what the
+    launcher's drag-drop reaches over RPC) had no such step and could not have
+    one — the durability helper lived in a CLI part ``agent_runtime`` must not
+    import. So a dragged-in agent got a pointer to a transcript root that
+    existed in the instance row, the create reservation and the read-model, and
+    in no SessionDB at all; every send was then refused forever with
+    ``unknown_chat_session``, because
+    :func:`resolve_default_chat_session_id_for_instance` re-offers a
+    chat-shaped own-instance pointer without ever checking that it resolves.
+
+    Wrapping the id at the bind ARGUMENT (rather than calling an ensure step
+    beside it) is deliberate: the pointer cannot be bound without this function
+    having returned, so the ordering is structural rather than remembered.
+
+    Raises :class:`PersonaChatPersistenceError` when the transcript store
+    cannot be reached or the row cannot be written — the mint fails loudly and
+    binds nothing, which is what the argv lane's ``chat_session_persist_failed``
+    frame has always meant and what ``perform_agent_create`` now compensates.
+
+    Lazy import: ``persona_chat_durability`` imports this module, so a
+    module-level import here would close the cycle.
+    """
+
+    from .persona_chat_durability import ensure_durable_persona_chat_root
+
+    title = safe_assignment_text(display_name, limit=120)
+    return ensure_durable_persona_chat_root(
+        session_id,
+        persona_id=persona_id,
+        title=f"{title} chat" if title else None,
+    )
+
+
 # A chat session id is, by construction, ``persona_chat_<instance>_<hex>`` (see
 # ``persona_chat_session_id_for``) or a legacy ``persona_chat_*`` id. Reusing a
 # chat lane must never thread onto a task/worker session id, so the reuse guard
@@ -2558,6 +2648,61 @@ def _normalize_instance_source_persona(persona_or_template_id: str) -> str:
         profile = safe_assignment_token(raw.split(":", 1)[1])
         return f"profile:{profile}" if profile else "profile:persona"
     return safe_assignment_token(raw) or "persona"
+
+
+def normalize_persona_id(persona_id: str) -> str:
+    """The one persona-id tokenizer every chat entry point spends.
+
+    Moved here from ``hermes_cli/harness_parts/persona_commands.py`` (where it
+    was ``_normalize_cli_persona_id``) with its behaviour unchanged: it is a
+    pure function of this module's own primitives, and the durability step that
+    now runs inside ``add_instance``/``create_operator_chat`` needs it from
+    ``agent_runtime`` rather than from a CLI part that ``agent_runtime`` must
+    never import. The CLI keeps the old private name as an alias, so its call
+    sites are byte-identical.
+    """
+
+    value = safe_assignment_token(persona_id)
+    if not value:
+        raise ValueError(f"unsupported persona {persona_id!r}")
+    return value
+
+
+def persona_id_from_instance_id(persona_instance_id: str) -> str:
+    """Which persona does this instance id belong to? Row first, shape second."""
+
+    token = safe_assignment_token(persona_instance_id)
+    try:
+        return PersonaInstanceStore().get(token).persona_id
+    except Exception:
+        pass
+    if token.startswith("personainst_"):
+        raw = token.removeprefix("personainst_")
+        if raw.startswith("profile_"):
+            profile = safe_assignment_token(raw.removeprefix("profile_"))
+            if profile:
+                return f"profile:{profile}"
+        return normalize_persona_id(raw)
+    try:
+        return normalize_persona_id(token)
+    except ValueError as exc:
+        raise ValueError(f"unsupported persona instance {persona_instance_id!r}") from exc
+
+
+def normalize_persona_or_template_id(persona_id: str) -> str:
+    raw = str(persona_id or "").strip()
+    if raw.lower().startswith("profile:"):
+        profile = safe_assignment_token(raw.split(":", 1)[1])
+        if not profile:
+            raise ValueError(f"unsupported persona {persona_id!r}")
+        return f"profile:{profile}"
+    if safe_assignment_token(raw).startswith("personainst_"):
+        # Mission Control payloads, legacy SessionDB rows, and agent tool calls
+        # routinely leak persona INSTANCE ids into persona-id slots. Resolve
+        # them here — the one persona-id boundary — instead of rejecting, so
+        # every chat entry point accepts either form.
+        return persona_id_from_instance_id(raw)
+    return normalize_persona_id(raw)
 
 
 def _profile_id_for_persona_or_template(persona_or_template_id: str) -> str | None:

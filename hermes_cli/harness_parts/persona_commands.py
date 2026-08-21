@@ -81,8 +81,11 @@ from agent_runtime.persona_assignments import (
     canonical_persona_instance_id,
     chat_session_owner_instance_id,
     migrate_retired_persona_assignment_task_ids,
+    normalize_persona_id as _normalize_cli_persona_id,
+    normalize_persona_or_template_id as _normalize_cli_persona_or_template_id,
     persona_assignment_summary,
     persona_chat_session_id_for,
+    persona_id_from_instance_id as _persona_id_from_instance_id,
     persona_instance_id_for,
     persona_instance_summary,
     resolve_default_chat_session_id_for_instance,
@@ -99,6 +102,12 @@ from agent_runtime.persona_chat_continuity import (
     persona_chat_root_lease,
     persona_chat_runtime_registry,
     safe_native_history,
+)
+from agent_runtime.persona_chat_durability import (
+    PersonaChatPersistenceError,
+    default_persona_session_db as _default_persona_session_db,
+    ensure_persona_chat_session as _ensure_persona_chat_session,
+    persona_chat_persistence_failed as _persona_chat_persistence_failed,
 )
 from agent_runtime.persona_chat_mints import PersonaChatMintError, reserve_persona_chat_mint
 from agent_runtime.persona_runtime import GPTPersonaRuntime, chat_lane_capability_drops
@@ -605,6 +614,20 @@ def _cmd_persona_instance_create(args) -> int:
             data = _retired_persona_instance_payload(exc)
             print(emit_json(data) if args.json else data["error"])
             return 2
+        except PersonaChatPersistenceError as exc:
+            # The mint itself now refuses rather than binding a root it could not
+            # persist, so this frame arrives from INSIDE the store. Same shape as
+            # the post-bind one below; there is simply no instance yet to name.
+            data = {
+                "ok": False,
+                "error_kind": ChatErrorKind.CHAT_SESSION_PERSIST_FAILED,
+                "persistence_operation": exc.operation,
+                "error": str(exc),
+                "persona_id": persona_id,
+                "next_expected": "restore canonical persona chat transcript storage and retry",
+            }
+            print(emit_json(data) if args.json else data["error"])
+            return 2
         try:
             _ensure_persona_chat_session(
                 session_db=_default_persona_session_db(),
@@ -885,6 +908,20 @@ def _cmd_persona_instance_open_chat(args) -> int:
                 return 2
     except RetiredPersonaInstanceError as exc:
         data = _retired_persona_instance_payload(exc)
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    except PersonaChatPersistenceError as exc:
+        # ``add_instance``'s mint refuses rather than binding an unpersistable
+        # root, so the persist failure can now arrive BEFORE the bind. Same
+        # typed frame the post-bind arm below emits.
+        data = {
+            "ok": False,
+            "error_kind": ChatErrorKind.CHAT_SESSION_PERSIST_FAILED,
+            "persistence_operation": exc.operation,
+            "error": str(exc),
+            "persona_id": persona_id,
+            "next_expected": "restore canonical persona chat transcript storage and retry",
+        }
         print(emit_json(data) if args.json else data["error"])
         return 2
     try:
@@ -5018,80 +5055,14 @@ def _tool_name_from_progress(payload: dict[str, object]) -> str:
     return safe_assignment_token(payload.get("tool_name") or payload.get("tool")) or "tool"
 
 
-class PersonaChatPersistenceError(RuntimeError):
-    """A required canonical persona-chat transcript operation failed.
-
-    The underlying exception remains available through exception chaining for
-    logs, while the public message intentionally exposes only the operation and
-    exception type so CLI/stream failure frames cannot leak database details.
-    """
-
-    def __init__(self, operation: str, cause: BaseException | None = None):
-        self.operation = safe_assignment_token(operation) or "unknown"
-        self.cause_type = type(cause).__name__ if cause is not None else None
-        detail = f" ({self.cause_type})" if self.cause_type else ""
-        super().__init__(
-            f"canonical persona chat transcript {self.operation.replace('_', ' ')} failed{detail}"
-        )
-
-
-def _persona_chat_persistence_failed(
-    operation: str,
-    exc: BaseException | None,
-    *,
-    required: bool,
-) -> bool:
-    error = (
-        exc
-        if isinstance(exc, PersonaChatPersistenceError)
-        else PersonaChatPersistenceError(operation, exc)
-    )
-    if required:
-        if exc is None or error is exc:
-            raise error
-        raise error from exc
-    return False
-
-
-def _default_persona_session_db():
-    try:
-        from hermes_constants import get_hermes_home_override
-
-        from agent_runtime.chat_session_scope import (
-            open_chat_session_db,
-            resolve_process_chat_scope,
-        )
-
-        # The persona-chat SessionDB is the OPERATOR-visible transcript store —
-        # the exact DB ``persona_chat_history`` (the snapshot projection) reads.
-        # Under an in-process persona profile override it must bind to the
-        # operator home, never the active profile DB, or one shared
-        # persona-instance pointer splits across profile-local SessionDBs (the
-        # 2026-07-27 cockpit read-lane gap: bindings in the shared runtime root
-        # pointing at transcripts minted in ``profiles/alice/state.db``).
-        #
-        # Fail closed ONLY when NO authority resolved a head at all: with an
-        # override active and an AMBIENT scope, the "head" degenerates to the
-        # override itself and the operator home is unknown. An authoritative
-        # head that happens to EQUAL the override is the legitimate same-DB
-        # case — a persona bound to the head profile (e.g. Neko on the seeded
-        # base profile) relaying in-process. The former path-equality check
-        # conflated the two and killed every relay such a persona sent (live
-        # 2026-07-23, chat_session_db_unavailable).
-        # Default DB acquisition for the process: no session in hand. A
-        # caller that HAS one passes its own scope to open_chat_session_db.
-        scope = resolve_process_chat_scope()
-        override = get_hermes_home_override()
-        if override is not None and not scope.authoritative:
-            raise PersonaChatPersistenceError("session_db_acquire")
-        db = open_chat_session_db(scope)
-        if db is None:
-            raise PersonaChatPersistenceError("session_db_acquire")
-        return db
-    except PersonaChatPersistenceError:
-        raise
-    except Exception as exc:
-        raise PersonaChatPersistenceError("session_db_acquire", exc) from exc
+# ``PersonaChatPersistenceError``, ``_persona_chat_persistence_failed``,
+# ``_default_persona_session_db`` and ``_ensure_persona_chat_session`` used to be
+# defined HERE. They moved to ``agent_runtime.persona_chat_durability`` (imported
+# at the top of this part under the same private names) because chat-root
+# durability was a CLI-lane-only concern for as long as it lived in this file:
+# every call site was an argv handler, so ``agent_runtime``'s one-call create
+# lane — the one the launcher's drag-drop reaches over RPC — structurally could
+# not reach it and minted phantom roots. See that module's docstring.
 
 
 _CHAT_MODEL_OVERRIDE_CONFIG_KEY = "mission_control_chat_model_override"
@@ -5623,60 +5594,6 @@ def _persona_chat_native_revision(session_db, root_session_id: str) -> str:
             session_db, _persona_chat_native_tip(session_db, root_session_id)
         )
         return f"{root_session_id}:{hashlib.sha256(emit_json(history).encode('utf-8')).hexdigest()[:16]}"
-
-
-def _ensure_persona_chat_session(
-    *,
-    session_db,
-    session_id: str | None,
-    persona_id: str | None,
-    title: str | None = None,
-    required: bool = False,
-) -> bool:
-    if session_db is None or not session_id:
-        return _persona_chat_persistence_failed(
-            "session_create", None, required=required
-        )
-    try:
-        normalized_persona = _normalize_cli_persona_or_template_id(persona_id or "persona")
-    except Exception:
-        normalized_persona = safe_assignment_token(persona_id) or "persona"
-    owner_instance_id = chat_session_owner_instance_id(session_id)
-    ownership = {
-        "source": PERSONA_CHAT_SESSION_SOURCE,
-        "persona_id": normalized_persona,
-    }
-    if owner_instance_id:
-        ownership["persona_instance_id"] = owner_instance_id
-    try:
-        session_db.create_session(
-            session_id=session_id,
-            source=PERSONA_CHAT_SESSION_SOURCE,
-            model=None,
-            model_config=ownership,
-            system_prompt=f"Mission Control persona chat for {normalized_persona}",
-        )
-    except Exception as exc:
-        return _persona_chat_persistence_failed(
-            "session_create", exc, required=required
-        )
-
-    safe_title = safe_assignment_text(title, limit=120)
-    if not safe_title:
-        return True
-    try:
-        existing_title = session_db.get_session_title(session_id)
-    except Exception:
-        existing_title = None
-    if existing_title:
-        return True
-    try:
-        session_db.set_session_title(session_id, safe_title)
-    except Exception:
-        pass
-    return True
-
-
 
 
 _PERSONA_CHAT_SECRET_RE = re.compile(
@@ -6397,25 +6314,6 @@ def _mission_chat_bare_persona_target(
     return None
 
 
-def _persona_id_from_instance_id(persona_instance_id: str) -> str:
-    token = safe_assignment_token(persona_instance_id)
-    try:
-        return PersonaInstanceStore().get(token).persona_id
-    except Exception:
-        pass
-    if token.startswith("personainst_"):
-        raw = token.removeprefix("personainst_")
-        if raw.startswith("profile_"):
-            profile = safe_assignment_token(raw.removeprefix("profile_"))
-            if profile:
-                return f"profile:{profile}"
-        return _normalize_cli_persona_id(raw)
-    try:
-        return _normalize_cli_persona_id(token)
-    except ValueError as exc:
-        raise ValueError(f"unsupported persona instance {persona_instance_id!r}") from exc
-
-
 def _resolve_mission_chat_persona_id(persona_id, persona_instance_id) -> str:
     """Resolve the chat target persona from whichever identity the caller sent.
 
@@ -6433,24 +6331,9 @@ def _resolve_mission_chat_persona_id(persona_id, persona_instance_id) -> str:
         raise
 
 
-def _normalize_cli_persona_id(persona_id: str) -> str:
-    value = safe_assignment_token(persona_id)
-    if not value:
-        raise ValueError(f"unsupported persona {persona_id!r}")
-    return value
-
-
-def _normalize_cli_persona_or_template_id(persona_id: str) -> str:
-    raw = str(persona_id or "").strip()
-    if raw.lower().startswith("profile:"):
-        profile = safe_assignment_token(raw.split(":", 1)[1])
-        if not profile:
-            raise ValueError(f"unsupported persona {persona_id!r}")
-        return f"profile:{profile}"
-    if safe_assignment_token(raw).startswith("personainst_"):
-        # Mission Control payloads, legacy SessionDB rows, and agent tool calls
-        # routinely leak persona INSTANCE ids into persona-id slots. Resolve
-        # them here — the one persona-id boundary — instead of rejecting, so
-        # every chat entry point accepts either form.
-        return _persona_id_from_instance_id(raw)
-    return _normalize_cli_persona_id(raw)
+# ``_normalize_cli_persona_id``, ``_persona_id_from_instance_id`` and
+# ``_normalize_cli_persona_or_template_id`` were defined here. They are pure
+# functions of ``agent_runtime.persona_assignments`` primitives and moved into
+# that module (aliased back to these names in this part's import header) so the
+# chat-root durability step, which normalizes the persona id it stamps on the
+# session row, could stop being reachable only from a CLI part.
