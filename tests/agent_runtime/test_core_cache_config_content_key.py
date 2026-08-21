@@ -38,7 +38,35 @@ WHAT EACH GATE IS FOR, AND WHAT KILLS IT
    generalise away, asserted here for the config class;
 5. the read is BOUNDED. Over the ceiling an entry keeps its ordinary stat
    triple, so the boot path can never be made to read an unbounded file to
-   decide a cache key.
+   decide a cache key;
+6. the digest covers the WHOLE FILE, not a prefix of it — see below;
+7. the ceiling is a BOUNDARY and both of its sides are pinned: exactly
+   ``_CONFIG_CONTENT_MAX_BYTES`` stays content-keyed, one byte more falls back
+   to the stat triple.
+
+GATE 6 EXISTS BECAUSE GATES 1-5 PASSED UNDER A TRUNCATING MUTANT
+================================================================
+
+Sabotage recorded 2026-08-21, after the gates above were already green::
+
+    keyed = int.from_bytes(hashlib.sha256(body[:64]).digest()[:8], "big") >> 1
+
+**7 passed. No gate fired.** ``BODY`` is ~120 bytes and ``BODY_SAME_LENGTH``
+flips ``deepseek-chat`` at roughly offset 40 — *inside* the 64-byte window, so
+every case above was still measuring a byte the mutant happened to hash.
+
+What the suite proved was "the key reads BYTES instead of MTIME". What it did
+NOT prove is "the key covers the whole file". Those are different claims, and
+the gap is not academic: the operator's real ``profiles/alice/config.yaml`` is
+**23,255 bytes**, where essentially every real edit lands past any plausible
+prefix window. A truncating regression, a partial read, a buffered-read bug, or
+a future "only hash the head, it's faster" optimisation would all ship green
+while serving a stale cache for every config edit past the prefix — i.e. the
+exact defect this file was written to prevent, restored, invisibly.
+
+So gate 6 drives the mask at the LIVE FILE'S SIZE with the edit deliberately in
+the last few dozen bytes, and asserts the leading 4 KiB are byte-identical
+between the two revisions so it cannot pass for a head-of-file reason.
 """
 
 from __future__ import annotations
@@ -71,6 +99,34 @@ BODY = (
 #: Same length as ``BODY``, different bytes. Same length ON PURPOSE: a gate that
 #: only passes because the file grew is a gate on ``size``, not on content.
 BODY_SAME_LENGTH = BODY.replace("deepseek-chat", "deepseek-chaT")
+
+#: The operator's real ``profiles/alice/config.yaml``, measured 2026-08-21. Gate
+#: 6 drives the mask at this size because the small ``BODY`` above is what let a
+#: 64-byte-prefix mutant pass seven gates: at ~120 bytes there is no "past the
+#: prefix" to edit.
+LIVE_CONFIG_BYTES = 23_255
+
+#: The two revisions of the tail gate 6 flips between. Same length, one byte
+#: apart, and it is the LAST line of the file — the position a prefix digest
+#: cannot see and a whole-file digest cannot miss.
+TAIL_LIVE = "tail_marker: deepseek-chat\n"
+TAIL_EDITED = "tail_marker: deepseek-chaT\n"
+
+
+def _realistic_body(tail: str = TAIL_LIVE) -> str:
+    """A config of realistic SIZE, ending in *tail*. Padding is generated.
+
+    Generated rather than hand-authored: 23 KB of plausible prose would be 23 KB
+    of noise in a test file, and none of it is what the gate reads. The shape
+    that matters is only that the file is big and that the byte under test is at
+    the far end of it.
+    """
+
+    body = BODY + "padding:\n"
+    line = "  - " + ("p" * 60) + "\n"
+    while len(body) + len(tail) < LIVE_CONFIG_BYTES:
+        body += line
+    return body + tail
 
 
 @pytest.fixture(autouse=True)
@@ -413,4 +469,182 @@ def test_an_oversized_config_keeps_its_stat_triple(isolate_agent_runtime_root):
     assert _entry_for(after, config) != _entry_for(before, config), (
         "an oversized config was content-hashed anyway: the boot path can be "
         "made to read a file of unbounded size to decide a cache key"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 6. The digest covers the WHOLE FILE, not a prefix of it
+# --------------------------------------------------------------------------- #
+def test_an_edit_at_the_far_end_of_a_realistic_config_moves_the_key(
+    isolate_agent_runtime_root,
+):
+    """The gate every case above passed under a 64-byte-prefix mutant.
+
+    *Killing mutation:* hash a PREFIX instead of the body —
+    ``hashlib.sha256(body[:64])``, or any bounded first chunk. Gates 1-5 stay
+    green under it (their fixture is ~120 bytes and edits at offset ~40); this
+    one reds, and the failure message names truncation rather than leaving the
+    next reader to work out why a config edit was served from cache.
+
+    Also killed: a partial or buffered read that stops at the first chunk, and a
+    future "hash the head, it's faster" optimisation.
+    """
+
+    live = _realistic_body(TAIL_LIVE)
+    edited = _realistic_body(TAIL_EDITED)
+
+    # Anti-vacuity, all three halves, BEFORE anything is measured.
+    assert len(live) >= LIVE_CONFIG_BYTES, (
+        "the probe's own fixture is smaller than the file this gate exists for"
+    )
+    assert len(live) == len(edited), "the probe's own edit changed size"
+    offsets = [i for i, (a, b) in enumerate(zip(live, edited)) if a != b]
+    assert offsets, "the probe's own edit changed no byte"
+    assert len(live) - offsets[0] <= 40, (
+        f"the edited byte is at offset {offsets[0]} of {len(live)}, not near the "
+        "END — this case would not distinguish a prefix digest from a whole-file "
+        "one"
+    )
+    assert live[:4096] == edited[:4096], (
+        "the two revisions differ inside the first 4 KiB, so a prefix digest "
+        "would notice the edit and this gate would pass for the wrong reason"
+    )
+
+    config = _seed_profile_config("probe-profile", live)
+    before = core_cache.build_input_fingerprint()
+    assert before is not None
+
+    _atomic_rewrite(config, edited)
+
+    after = core_cache.build_input_fingerprint()
+    assert after is not None
+    assert _entry_for(after, config) != _entry_for(before, config), (
+        f"a {len(live)}-byte config was edited at offset {offsets[0]} — near its "
+        "END — and its fingerprint entry did not move. The key is being computed "
+        "from a PREFIX of the file, not the whole file: every edit past that "
+        "prefix will be served from a stale cache. (This is the defect the mtime "
+        "key never had.)"
+    )
+    assert after.digest != before.digest, (
+        "the whole input fingerprint did not move for a real config edit near "
+        "the end of the file — the config class is keyed on a truncated read"
+    )
+
+
+def test_the_whole_file_gate_still_reds_when_only_the_last_byte_changes(
+    isolate_agent_runtime_root,
+):
+    """The same claim reduced to its limit: ONE byte, the last content byte.
+
+    Separate from the case above because that one tolerates the edit landing
+    anywhere in the final 40 bytes; this one pins the extreme. A digest that
+    covered ``body[:-1]`` — an off-by-one on a chunked read, the single most
+    likely truncation — passes everything else in this file and reds here.
+    """
+
+    live = _realistic_body(TAIL_LIVE)
+    edited = live[:-2] + "X" + live[-1:]
+
+    assert len(live) == len(edited)
+    assert live[:-2] == edited[:-2], "the probe edited more than the last byte"
+    assert live[-1] == edited[-1] == "\n"
+
+    config = _seed_profile_config("probe-profile", live)
+    before = core_cache.build_input_fingerprint()
+    assert before is not None
+
+    _atomic_rewrite(config, edited)
+
+    after = core_cache.build_input_fingerprint()
+    assert after is not None
+    assert _entry_for(after, config) != _entry_for(before, config), (
+        "the LAST content byte of the config changed and the fingerprint entry "
+        "did not move — the read stops short of the end of the file"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 7. The ceiling is a boundary, and both sides of it are pinned
+# --------------------------------------------------------------------------- #
+#
+# Gate 5 proves "far over the ceiling falls back to stat". It says nothing about
+# WHERE the ceiling is, so every off-by-one in the guard ships green: ``>=``
+# instead of ``>`` silently stops content-keying a file that is exactly at the
+# limit, and ``>=`` in the post-read length check does the same one layer down.
+# A boundary nobody tests is the next version of the gate-6 finding.
+#
+# Both cases assert through the OBSERVABLE consequence, the same way gate 5
+# does — content-keyed means a content-identical rewrite does NOT move the
+# entry, stat-keyed means it DOES — so they survive any refactor of how the
+# ceiling is enforced.
+
+
+def _body_of_exactly(size: int) -> str:
+    """``size`` bytes of valid-ish YAML, ASCII throughout so bytes == chars."""
+
+    head = BODY + "padding: "
+    assert size > len(head) + 1
+    return head + ("p" * (size - len(head) - 1)) + "\n"
+
+
+def test_a_config_of_exactly_the_ceiling_is_still_content_keyed(
+    isolate_agent_runtime_root,
+):
+    """AT the limit is under it. The ceiling is ``>``, not ``>=``.
+
+    *Killing mutation:* either ``>`` in ``_config_input_is_content_keyed``
+    becomes ``>=`` (the size guard, or the post-read length check). Gate 5 stays
+    green under both — its file is 22 bytes over the ceiling.
+    """
+
+    ceiling = core_cache._CONFIG_CONTENT_MAX_BYTES
+    body = _body_of_exactly(ceiling)
+    config = _seed_profile_config("probe-profile", body)
+    assert config.stat().st_size == ceiling, "the probe did not hit the ceiling"
+
+    before = core_cache.build_input_fingerprint()
+    assert before is not None
+
+    mtime_before = config.stat().st_mtime_ns
+    _atomic_rewrite(config, body)
+    assert config.stat().st_mtime_ns != mtime_before, (
+        "the probe's own rewrite did not move mtime, so a stat-keyed entry "
+        "would look unchanged and this case would prove nothing"
+    )
+
+    after = core_cache.build_input_fingerprint()
+    assert after is not None
+    assert _entry_for(after, config) == _entry_for(before, config), (
+        f"a config of exactly {ceiling} bytes — AT the ceiling, not over it — "
+        "was keyed on its stat triple, so a content-identical rewrite of it "
+        "still costs a full rebuild. The bound is off by one."
+    )
+
+
+def test_a_config_one_byte_over_the_ceiling_falls_back_to_the_stat_triple(
+    isolate_agent_runtime_root,
+):
+    """...and one byte more is over it. The other side of the same boundary.
+
+    *Killing mutation:* ``>`` becomes ``>=`` in the reverse direction, or the
+    guard is widened/deleted. Gate 5 catches a deleted guard; only this case
+    catches a bound that moved by one.
+    """
+
+    ceiling = core_cache._CONFIG_CONTENT_MAX_BYTES
+    body = _body_of_exactly(ceiling + 1)
+    config = _seed_profile_config("probe-profile", body)
+    assert config.stat().st_size == ceiling + 1, "the probe missed the boundary"
+
+    before = core_cache.build_input_fingerprint()
+    assert before is not None
+
+    _atomic_rewrite(config, body)
+
+    after = core_cache.build_input_fingerprint()
+    assert after is not None
+    assert _entry_for(after, config) != _entry_for(before, config), (
+        f"a config of {ceiling + 1} bytes — one byte OVER the ceiling — was "
+        "content-hashed anyway. The bound is off by one in the direction that "
+        "lets the boot path read a file it does not control the size of."
     )
