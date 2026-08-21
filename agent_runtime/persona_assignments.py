@@ -793,11 +793,46 @@ class PersonaInstanceStore:
         * **It must not raise.** It runs inside the failure handler of a lane that
           already holds a typed error; this method lets ``update`` propagate, and a
           rollback that masks its caller's cause is worse than the litter it sweeps.
-        * **It must move the read model.** The retraction emits
-          ``emit_persona_instance_patch`` so connected launchers drop the phantom
-          pointer. This method emits the domain event ONLY — ``_event`` appends to
-          the log and does not produce a ``state.patched`` pair — so routing
-          through it would trade a false docstring for a stale client.
+        * **It must move the read model, and it is the ONLY thing that can.**
+          The retraction emits ``emit_persona_instance_patch`` and appends
+          nothing else — ``update`` is eventless — so with the patch removed the
+          row write is invisible to the stream entirely, while the ``chat_opened``
+          the failed bind already appended IS covered
+          (:data:`patch_coverage.LIVE_COVERED_DOMAIN_EVENT_TYPES`) and can promote
+          its batch to a patch frame. A connected client would fold the BIND and
+          never hear the unbind. This method's event is uncovered and demotes the
+          whole batch instead (see below), so routing the retraction through here
+          would trade a false docstring for a genuinely stale client.
+
+        Why this method emits NO ``state.patched``, measured rather than assumed
+        ---------------------------------------------------------------------
+        Not "because it emits a domain event" — the retraction's argument above
+        is not the mirror image of that, and the sibling emits one too. The
+        reason is what reaches the WIRE, and it was captured from a run:
+
+        * ``persona_instance.chat_binding_cleared`` is deliberately absent from
+          :data:`patch_coverage.COVERED_DOMAIN_EVENT_TYPES`. One uncovered event
+          makes the whole coalesced batch uncoverable
+          (:func:`patch_coverage.batch_is_patch_coverable`), so every frame
+          carrying a clear ships with a full ``core`` attached and the client
+          re-hydrates IN THAT SAME FRAME. There is no staleness window to close,
+          and a ``state.patched`` emitted here would be a producer whose rows are
+          discarded before the ``patches`` list is ever assembled — including
+          when ``read_model.delta_patches`` is off, where the lane is a full core
+          by design. This path is flag-independent; the retraction is not.
+        * The demote is LOAD-BEARING, not an oversight waiting to be optimised.
+          A clear also empties the instance's ``persona_chat_history`` row (the
+          projection keys chat rows by ``default_chat_session_id``; drop the
+          pointer and the row leaves the section outright), and there is no
+          ``persona_chat_history`` patch entity for that to ride. Covering this
+          event to make a patch reachable would therefore silently drop the
+          chat-row departure from every connected client — the exact failure the
+          ``persona_instance.chat_opened`` note in ``patch_coverage`` says the
+          producer and the coverage entry must land together to avoid.
+
+        Both halves are pinned as behaviour in ``test_persona_assignments.py``
+        (the clear's batch demotes; covering it would drop a chat-history row),
+        so this is a checkable claim rather than an assurance.
 
         The two paths are therefore both legitimate and both accounted for, and
         the count is fenced: ``test_persona_assignments.py`` walks this module's

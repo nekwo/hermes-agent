@@ -5047,6 +5047,14 @@ def test_the_two_unbind_paths_are_told_apart_by_what_they_emit():
     ``emit_persona_instance_patch`` and no domain event. Routing either through
     the other silently changes what every connected launcher receives, so the
     difference is asserted here rather than left as an assurance in a comment.
+
+    This is the SOURCE half of the difference. The tests at the bottom of
+    this file are the WIRE half -- what each shape actually costs a
+    connected client -- because a source grep cannot tell a deliberate
+    omission from a missing producer, and the question this asymmetry
+    provokes ("is the clear leaving every launcher stale?") is answerable
+    only from a run. It is not: the clear's event is uncovered, so its
+    batch ships the whole core.
     """
 
     import inspect
@@ -5063,3 +5071,228 @@ def test_the_two_unbind_paths_are_told_apart_by_what_they_emit():
 
     assert "emit_persona_instance_patch" in body_of(retract)
     assert "chat_binding_cleared" not in body_of(retract)
+
+
+# -- what each unbind path costs a CONNECTED client --------------------------
+#
+# The source-level difference above was read as a defect: the clear moves
+# ``mode`` and the session trio on ``persona_instance_summary`` and emits no
+# ``state.patched``, so "every connected launcher keeps rendering the chat
+# pointer the store no longer holds until a full snapshot refresh". Driven,
+# that is not what happens -- the full snapshot refresh arrives in the SAME
+# frame, because the event the clear does emit is uncovered and demotes its own
+# batch. The tests below pin that, and pin the reason it must stay that way, so
+# the next reader of the source-level asymmetry gets the measurement instead of
+# re-deriving the wrong conclusion from it.
+
+
+def _batch_since(offset: int):
+    return list(EventLog().iter_from_offset(0))[offset:]
+
+
+def _frames_for(batch, *, base_offset: int, delta_patches: bool = True):
+    from agent_runtime import stream as stream_mod
+
+    return list(
+        stream_mod._batch_frames_with_liveness(
+            batch,
+            base_offset=base_offset,
+            delta_patches=delta_patches,
+            resync=False,
+            heartbeat_interval_seconds=5.0,
+            fold_entities=None,
+        )
+    )
+
+
+def test_a_cleared_binding_is_not_stale_because_its_own_event_demotes_the_batch(
+    isolate_agent_runtime_root,
+):
+    """The clear ships the whole core, so there is nothing left stale to patch.
+
+    ``persona_instance.chat_binding_cleared`` is deliberately outside
+    ``patch_coverage.COVERED_DOMAIN_EVENT_TYPES``, and one uncovered event makes
+    the entire coalesced batch uncoverable. The frame a connected client
+    receives therefore carries a full ``core`` and no ``patches`` list at all --
+    the row is re-hydrated in the same frame that reports the clear.
+
+    A ``state.patched`` emitted here would be unreachable: the promotion gate
+    rejects the batch before the patches list is assembled. That is why
+    ``clear_chat_session_binding`` emits none, and this is the assertion that
+    keeps "it emits no patch" from drifting back into "it leaves clients stale".
+    """
+
+    from agent_runtime.patch_coverage import (
+        COVERED_DOMAIN_EVENT_TYPES,
+        batch_is_patch_coverable,
+    )
+
+    store = PersonaInstanceStore()
+    instance = store.open_chat(persona_id="dev", session_id="persona_chat_clear_wire")
+    base = len(list(EventLog().iter_from_offset(0)))
+
+    record = store.clear_chat_session_binding(
+        instance, session_id="persona_chat_clear_wire", reason="chat_deleted"
+    )
+    assert record is not None
+
+    batch = _batch_since(base)
+    assert [event.type for _, event in batch] == [
+        "persona_instance.chat_binding_cleared"
+    ]
+    assert "persona_instance.chat_binding_cleared" not in COVERED_DOMAIN_EVENT_TYPES
+    assert not batch_is_patch_coverable(event for _, event in batch), (
+        "the clear's batch became patch-coverable; a connected client will now "
+        "fold a field subset instead of re-hydrating, and the clear moves core "
+        "state no persona_instance patch can express (see the chat-history test)"
+    )
+
+    frames = _frames_for(batch, base_offset=base)
+    assert [frame.get("type") for frame in frames] == ["delta"]
+    assert frames[0].get("patches") is None
+    assert isinstance(frames[0].get("core"), dict), (
+        "the clear stopped shipping a full core; the row it moved now reaches "
+        "no connected client at all"
+    )
+    # The re-hydrated core carries the CLEARED row, which is the whole reason
+    # this path needs no patch of its own.
+    rebuilt = frames[0]["core"]["persona_instances"][instance.id]
+    assert rebuilt["default_chat_session_id"] is None
+    assert rebuilt["session_id"] is None
+    assert rebuilt["mode"] == "configured"
+
+
+def test_covering_the_clear_would_drop_the_chat_history_row_it_also_moves(
+    isolate_agent_runtime_root,
+):
+    """Why the demote is load-bearing rather than an un-done optimisation.
+
+    A clear does not only move ``persona_instance`` fields. The
+    ``persona_chat_history`` projection keys chat rows by
+    ``default_chat_session_id``, so nulling the pointer takes the instance's
+    chat row OUT of the section entirely -- and there is no
+    ``persona_chat_history`` patch entity for that departure to ride.
+
+    So the tempting symmetry with ``persona_instance.chat_opened`` (emit a
+    patch, add the event to the covered set, stop paying a full core per chat
+    delete) is a trade this wire cannot make yet: the promoted frame's only row
+    would be the persona-instance patch, and the chat row would sit on every
+    connected client for the rest of its session. The measurement is here so the
+    next person to notice the asymmetry finds the reason instead of the gap.
+    """
+
+    from agent_runtime.patch_coverage import (
+        COVERED_DOMAIN_EVENT_TYPES,
+        HISTORICAL_FOLD_ENTITIES,
+        normalize_fold_entities,
+    )
+
+    db = _TranscriptDB()
+    store = PersonaInstanceStore()
+    instance = store.open_chat(persona_id="dev", session_id="persona_chat_history_move")
+    db.create_session("persona_chat_history_move", "agent_runtime_persona_chat")
+
+    before = persona_chat_history_summary(
+        persona_instances=[store.get(instance.id)],
+        session_db=db,
+        persona_assignments=[],
+    )
+    assert [row["session_id"] for row in before] == ["persona_chat_history_move"]
+
+    store.clear_chat_session_binding(
+        store.get(instance.id),
+        session_id="persona_chat_history_move",
+        reason="chat_deleted",
+    )
+
+    after = persona_chat_history_summary(
+        persona_instances=[store.get(instance.id)],
+        session_db=db,
+        persona_assignments=[],
+    )
+    assert after == [], (
+        "the chat-history row survived the clear; if that is now true the "
+        "derivability argument below has changed and must be re-audited"
+    )
+
+    # Nothing a fielded client folds can carry that departure incrementally...
+    declared = normalize_fold_entities(None)
+    assert declared == normalize_fold_entities(HISTORICAL_FOLD_ENTITIES)
+    assert "persona_chat_history" not in declared
+    # ...so the event must stay uncovered, or the row is dropped silently.
+    assert "persona_instance.chat_binding_cleared" not in COVERED_DOMAIN_EVENT_TYPES, (
+        "the clear's event was added to the covered set, but its "
+        "persona_chat_history row still has no patch entity to ride -- a "
+        "promoted batch drops the chat row from every connected client"
+    )
+
+
+def test_both_live_clear_callers_reach_a_client_through_the_full_core(
+    monkeypatch, capsys, isolate_agent_runtime_root
+):
+    """The delete verb and the reconcile sweep, each driven, each demoting.
+
+    Two operator-visible callers reach ``clear_chat_session_binding``. Neither
+    is a special case: both append the same uncovered event, so both re-hydrate
+    the client in the frame that reports the clear. A caller that emitted a
+    patch INSTEAD of the event would pass the source-level test above and fail
+    here, which is the point of driving them rather than asserting the shared
+    code path.
+    """
+
+    from hermes_cli import harness
+
+    from agent_runtime.patch_coverage import batch_is_patch_coverable
+
+    cfg = _assignment_config()
+    db = _TranscriptDB()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+
+    store = PersonaInstanceStore()
+
+    # -- caller 1: the operator ``persona chat delete`` verb -----------------
+    deleted = store.create_operator_chat(
+        persona_id="profile:reviewer", display_name="Reviewer"
+    )
+    db.create_session(deleted.session_id, "agent_runtime_persona_chat")
+    base = len(list(EventLog().iter_from_offset(0)))
+    assert (
+        harness._cmd_persona_chat_delete(
+            SimpleNamespace(
+                session_id=deleted.session_id,
+                persona_id=deleted.persona_id,
+                persona_instance_id=deleted.id,
+                requested_by="test",
+                json=True,
+            )
+        )
+        == 0
+    )
+    capsys.readouterr()
+    delete_batch = _batch_since(base)
+    assert "persona_instance.chat_binding_cleared" in {
+        event.type for _, event in delete_batch
+    }
+    assert not batch_is_patch_coverable(event for _, event in delete_batch)
+    frames = _frames_for(delete_batch, base_offset=base)
+    assert frames and all(isinstance(frame.get("core"), dict) for frame in frames)
+
+    # -- caller 2: the reconcile sweep ---------------------------------------
+    orphan = store.open_chat(persona_id="qa", session_id="persona_chat_orphaned_root")
+    # The sweep clears only on a POSITIVE "absent" from an enumerating
+    # SessionDB, so the probe must see a live database that simply does not
+    # hold this root.
+    db.create_session("persona_chat_unrelated_live", "agent_runtime_persona_chat")
+    base = len(list(EventLog().iter_from_offset(0)))
+    result = PersonaInstanceStore().repair_missing_chat_session_bindings(
+        apply=True, session_db=db
+    )
+    assert orphan.id in {row["persona_instance_id"] for row in result["repaired"]}
+    sweep_batch = _batch_since(base)
+    assert "persona_instance.chat_binding_cleared" in {
+        event.type for _, event in sweep_batch
+    }
+    assert not batch_is_patch_coverable(event for _, event in sweep_batch)
+    frames = _frames_for(sweep_batch, base_offset=base)
+    assert frames and all(isinstance(frame.get("core"), dict) for frame in frames)

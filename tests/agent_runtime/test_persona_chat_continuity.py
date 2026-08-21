@@ -1751,3 +1751,28 @@ def test_the_retraction_tells_connected_clients_the_mode_moved_too(
     fields = json.dumps(patched[-1].payload)
     assert "mode" in fields
     assert "default_chat_session_id" in fields
+
+    # The FIELD LIST, not merely the presence of a patch. A substring probe over
+    # the serialised payload passes for a patch that names ``mode`` and ships a
+    # stale value, and it passes for one that names the pointer trio and drops
+    # ``mode`` while ``lifecycle_mode`` alone carries the word. The retraction's
+    # whole claim is which fields moved, so that claim is what is asserted:
+    # every wire name the store fields ``mode`` / ``default_chat_session_id`` /
+    # ``session_id`` project to, each carrying the RETRACTED value.
+    changed = patched[-1].payload["changed"]
+    assert {
+        "mode",
+        "lifecycle_mode",
+        "default_chat_session_id",
+        "chat_session_id",
+        "session_id",
+    } <= set(changed), (
+        "the retraction's patch dropped a wire field the retraction moved; a "
+        "connected client keeps the value the store no longer holds for "
+        f"exactly the names missing from {sorted(changed)}"
+    )
+    assert changed["mode"] == "configured"
+    assert changed["lifecycle_mode"] == "configured"
+    assert changed["default_chat_session_id"] is None
+    assert changed["chat_session_id"] is None
+    assert changed["session_id"] is None

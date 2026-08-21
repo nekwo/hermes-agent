@@ -282,6 +282,25 @@ LIVE_COVERED_DOMAIN_EVENT_TYPES: frozenset[str] = frozenset(
         # upsert chokepoint. Leaving them uncovered routes their batches down
         # the full-core lane with no new code and no new failure mode.
         #
+        # ``persona_instance.chat_binding_cleared`` is the PERSONA-side member
+        # of that must-stay-absent list, and it is the one whose absence reads
+        # like an oversight, so it is named here rather than left to inference.
+        # It is the mirror of ``chat_opened`` and it looks pairable — the clear
+        # moves ``mode`` and the session trio on ``persona_instance_summary``,
+        # exactly the fields the bind's patch already carries. What it ALSO
+        # moves is the instance's ``persona_chat_history`` row: that projection
+        # keys chat rows by ``default_chat_session_id``, so dropping the pointer
+        # takes the row out of the section entirely (measured — the section goes
+        # from one row to none), and there is no ``persona_chat_history`` patch
+        # entity for that departure to ride. Covering the event would promote
+        # the batch to a frame whose only row is the persona-instance patch, and
+        # the chat row would stay on every connected client for the rest of its
+        # session. The demote to a full core is what carries it, which is why
+        # ``clear_chat_session_binding`` deliberately emits no ``state.patched``
+        # at all — a patch there is unreachable, and the coverage entry that
+        # would reach it is unsafe. Both halves are pinned in
+        # ``test_persona_assignments.py``.
+        #
         # Every entry here is gated by ``test_stream_patch.py``'s both-ways
         # partition test: a live entry must have a registered contract, so none
         # of the four above could be added without a producer behind it.
