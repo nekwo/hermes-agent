@@ -2358,6 +2358,34 @@ def _cmd_mission_chat_message(args) -> int:
                 data = _retired_persona_instance_payload(exc)
                 _mission_chat_emit(args, data)
                 return 2
+            except PersonaChatPersistenceError as exc:
+                # The mint's OTHER typed refusal, and the newer one: the bind
+                # landed and the transcript row did not, so the mint retracted
+                # the bind and reports the failure rather than returning a root
+                # that dereferences nowhere. Same frame the commit phase below
+                # emits for the sticky lane — one ``chat_session_persist_failed``
+                # vocabulary for "the transcript store would not take it",
+                # whichever end of the lane hit it. Without this arm the typed
+                # error is merely a better-named traceback.
+                #
+                # No ``session_id``: the whole point is that this turn never
+                # established one. The receipt stays RESERVED, so a retry with
+                # the same idempotency key resolves the same root and completes.
+                data = {
+                    "ok": False,
+                    "capability_id": "mission.chat.message",
+                    "execution_state": ExecutionState.FAILED,
+                    "error_kind": ChatErrorKind.CHAT_SESSION_PERSIST_FAILED,
+                    "persistence_operation": exc.operation,
+                    "error": str(exc),
+                    "persona_id": normalized_persona,
+                    "persona_instance_id": persona_instance_id,
+                    "next_expected": (
+                        "restore canonical persona chat transcript storage and retry the message"
+                    ),
+                }
+                _mission_chat_emit(args, data)
+                return 2
             session_id = str(receipt["root_chat_session_id"])
             session_established = session_established_payload(
                 dispatch_decision,

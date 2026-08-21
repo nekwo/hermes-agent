@@ -985,6 +985,15 @@ class PersonaChatMintReceiptStore:
         used to be last, which is why a ``retire`` landing mid-lane still left a
         titled thread behind for a placement that no longer existed. See the
         early-bind comment below.
+
+        That ordering's own cost — a bound pointer standing for the instant
+        before its transcript row exists — is paid by RETRACTING the bind when
+        the row cannot be written (``rollback_chat_root_bind``), and the failure
+        then surfaces as :class:`PersonaChatPersistenceError` rather than as a
+        raw storage exception. The receipt stays ``reserved`` through that
+        failure on purpose: a same-key retry resolves the SAME root and
+        completes, so a crash in the same window (which no in-process rollback
+        can cover) is repaired rather than duplicated.
         """
 
         instance_id = safe_assignment_token(persona_instance_id)
@@ -1007,7 +1016,11 @@ class PersonaChatMintReceiptStore:
         # canonicalizing it here would re-key every in-flight receipt — a replay
         # would miss its own reservation and mint a SECOND thread for a task
         # that already has one.
-        instance_store.assert_bindable(
+        #
+        # The id it RESOLVES is kept: the retraction below has to name the row
+        # ``open_chat`` will write, and re-deriving it there would be the second
+        # derivation this seam exists to prevent.
+        bind_target_id = instance_store.assert_bindable(
             persona_id=persona_id, persona_instance_id=instance_id
         )
         path = self._path(instance_id, key)
@@ -1063,17 +1076,62 @@ class PersonaChatMintReceiptStore:
             # Mission Control row), and reserving first means a crash between the
             # two is repaired by a retry that resolves the same root instead of
             # minting a second one.
+            #
+            # …and the price of binding first is a WINDOW: from here until the
+            # row below is written, the instance points at a root no transcript
+            # store holds. That is the phantom
+            # ``agent_runtime.persona_chat_durability`` was written to make
+            # impossible on the create lane, and it is permanent —
+            # ``resolve_default_chat_session_id_for_instance`` re-offers a
+            # chat-shaped own-instance pointer forever without ever asking
+            # whether it resolves, so every later ``mission-chat message`` is
+            # refused ``unknown_chat_session``.
+            #
+            # The create lane closed it by persisting AT the bind argument. This
+            # lane cannot: the ordering above is load-bearing, and its
+            # ``session_db`` is the CALLER's handle (dispatch, relay and argv
+            # each pass their own), so routing through
+            # ``ensure_durable_persona_chat_root`` — which acquires the process
+            # DEFAULT store — would write the row into a different database from
+            # the one this mint's own reader dereferences. The window is closed
+            # from the other end instead: the bind is RETRACTED when the write it
+            # was ordered ahead of cannot be made.
+            #
+            # ``previous_row`` is the row as it stood BEFORE the bind, ``None``
+            # when the bind is what creates it; the retraction restores exactly
+            # that, and only while the live pointer still names OUR root.
+            try:
+                previous_row = instance_store.get(bind_target_id)
+            except Exception:
+                previous_row = None
             instance = instance_store.open_chat(
                 persona_id=persona_id,
                 persona_instance_id=instance_id,
                 session_id=root,
             )
-            session_db.create_session(
-                session_id=root,
-                source=PERSONA_CHAT_SESSION_SOURCE,
-                model=None,
-                system_prompt=f"Mission Control persona chat for {persona_id}",
-            )
+            try:
+                session_db.create_session(
+                    session_id=root,
+                    source=PERSONA_CHAT_SESSION_SOURCE,
+                    model=None,
+                    system_prompt=f"Mission Control persona chat for {persona_id}",
+                )
+            except Exception as exc:
+                instance_store.rollback_chat_root_bind(
+                    persona_instance_id=bind_target_id,
+                    root_session_id=root,
+                    previous=previous_row,
+                )
+                # Typed, and chained: this lane is reached over RPC and from
+                # argv, and a bare storage exception escaping it reaches the
+                # operator as a traceback instead of the persistence frame the
+                # chat lanes already speak. Lazy import —
+                # ``persona_chat_durability`` imports THIS module, so a
+                # module-level import would close the cycle.
+                from .persona_chat_durability import persona_chat_persistence_failed
+
+                persona_chat_persistence_failed("session_create", exc, required=True)
+                raise  # pragma: no cover — the helper always raises when required
             meta = {
                 "mission_chat_root_id": root,
                 "persona_instance_id": instance_id,

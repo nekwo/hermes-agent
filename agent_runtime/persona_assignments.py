@@ -1876,6 +1876,87 @@ class PersonaInstanceStore:
         self._event("persona_instance.chat_opened", updated, event_payload)
         return updated
 
+    def rollback_chat_root_bind(
+        self,
+        *,
+        persona_instance_id: str,
+        root_session_id: str,
+        previous: PersonaInstance | None,
+    ) -> bool:
+        """Undo an :meth:`open_chat` bind whose transcript row never landed.
+
+        The EARLY-BIND ordering in
+        :meth:`PersonaChatMintReceiptStore.mint` is deliberate — the bind is the
+        step that proves the target still live, so it must precede the first
+        SESSION-visible write (see the comment there; a retire landing mid-lane
+        would otherwise leave a titled thread for a dead placement). The cost of
+        that ordering is a window: if the ``create_session`` immediately after
+        the bind FAILS, the pointer is already on the instance and names a root
+        with no transcript row — the phantom
+        :mod:`agent_runtime.persona_chat_durability` exists to make impossible,
+        permanently undeliverable because
+        :func:`resolve_default_chat_session_id_for_instance` re-offers a
+        chat-shaped own-instance pointer forever without asking whether it
+        resolves.
+
+        This closes that window from the other side: the ordering stays, and the
+        bind is RETRACTED when the write it was guarding could not be made.
+
+        *previous* is the row as it stood BEFORE the bind, or ``None`` when the
+        bind created it. Restoring ``None`` clears both pointer fields, which is
+        the self-healing state — the resolver answers "no thread yet" and the
+        next mint makes a fresh, durable root. The legacy ``session_id`` mirror
+        is moved WITH the authority: ``PersonaInstance.__post_init__``
+        re-derives ``default_chat_session_id`` from a ``persona_chat_*``
+        ``session_id``, so clearing only the authority would resurrect the
+        phantom on the next read.
+
+        Retracts on IDENTITY, never on mere presence: if the live pointer no
+        longer names *root_session_id*, some other lane bound this instance
+        after ours did, and its pointer is not ours to revert. Returns whether a
+        retraction was written.
+        """
+
+        instance_id = safe_assignment_token(persona_instance_id)
+        root = safe_assignment_text(root_session_id, limit=200)
+        if not instance_id or not root:
+            return False
+        try:
+            live = self.get(instance_id)
+        except Exception:
+            # No row to retract (or the store is unreadable). Either way this
+            # must not raise: it runs inside the failure handler of a lane that
+            # already has a typed error to report, and a rollback that masks the
+            # original cause is worse than the litter it cleans.
+            return False
+        if safe_assignment_text(
+            getattr(live, "default_chat_session_id", None), limit=200
+        ) != root:
+            return False
+        restored_default = getattr(previous, "default_chat_session_id", None) if previous else None
+        restored_legacy = getattr(previous, "session_id", None) if previous else None
+        live.default_chat_session_id = restored_default
+        live.session_id = restored_legacy
+        try:
+            updated = self.update(live)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "could not retract the chat-root bind for %s; "
+                "its default chat pointer may name an unwritten transcript",
+                instance_id,
+                exc_info=True,
+            )
+            return False
+        # The bind emitted a create/patch onto the read model; the retraction
+        # must emit its counterpart or every connected client keeps showing the
+        # phantom pointer the store no longer holds.
+        emit_persona_instance_patch(
+            self.event_log,
+            updated,
+            ["default_chat_session_id", "session_id", "updated_at"],
+        )
+        return True
+
     def create_operator_chat(
         self,
         *,

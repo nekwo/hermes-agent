@@ -1327,3 +1327,265 @@ def test_the_mint_refusal_names_its_target_the_way_every_other_refusal_does(
 
     assert excinfo.value.persona_instance_id == placement.id
     assert str(excinfo.value.archive_path) == archived["archive_path"]
+
+
+# ---------------------------------------------------------------------------
+# The OTHER end of the early bind: the window it opens, and the retraction that
+# closes it. ``open_chat`` runs before ``create_session`` on purpose (above), so
+# for the instant between them the instance points at a root no transcript store
+# holds — the phantom ``persona_chat_durability`` closed on the CREATE lane by
+# persisting at the bind argument. This lane cannot borrow that fix: its
+# ``session_db`` is the CALLER's handle and the durability helper acquires the
+# process DEFAULT store, so it would write the row into a different database
+# from the one this mint's reader dereferences. The bind is retracted instead.
+# ---------------------------------------------------------------------------
+
+
+def test_a_transcript_write_that_fails_retracts_the_bind_it_was_ordered_behind(
+    isolate_agent_runtime_root, tmp_path
+):
+    """A failed ``create_session`` must leave NO bound phantom pointer.
+
+    Before this, the mint bound first and wrote the row second with nothing in
+    between: a ``create_session`` that raised left ``default_chat_session_id``
+    naming a root that exists in the instance row and in no SessionDB. That
+    pointer never heals — ``resolve_default_chat_session_id_for_instance``
+    re-offers a chat-shaped own-instance pointer forever without ever asking
+    whether it resolves — so every later ``mission-chat message`` to that agent
+    is refused ``unknown_chat_session``.
+    """
+
+    import sqlite3
+
+    from agent_runtime.persona_assignments import (
+        resolve_default_chat_session_id_for_instance,
+    )
+    from agent_runtime.persona_chat_durability import PersonaChatPersistenceError
+
+    bound: list[str] = []
+    attempted: list[str] = []
+
+    class _BindRecordingStore(PersonaInstanceStore):
+        def open_chat(self, **kwargs):
+            bound.append(kwargs["session_id"])
+            return super().open_chat(**kwargs)
+
+    class _RefusingDB(SessionDB):
+        def create_session(self, *args, **kwargs):
+            attempted.append(kwargs.get("session_id"))
+            raise sqlite3.OperationalError("disk I/O error")
+
+    store = _BindRecordingStore()
+    db = _RefusingDB(tmp_path / "state.db")
+
+    with pytest.raises(PersonaChatPersistenceError) as excinfo:
+        PersonaChatMintReceiptStore().mint(
+            instance_store=store,
+            session_db=db,
+            persona_id="dev",
+            persona_instance_id="personainst_dev",
+            idempotency_key="doomed",
+            title="Dev chat",
+        )
+
+    # TYPED, and chained — not a raw storage exception escaping into the
+    # dispatch lane, which is what an operator would otherwise be handed.
+    assert excinfo.value.operation == "session_create"
+    assert isinstance(excinfo.value.__cause__, sqlite3.OperationalError)
+    # IDENTITY, not mere existence: the row the lane tried to make durable is
+    # the very root it bound. A persistence step that "succeeded" for some other
+    # id would leave the bound pointer exactly as phantom as no write at all.
+    assert len(bound) == 1
+    assert attempted == bound
+
+    live = PersonaInstanceStore().get("personainst_dev")
+    pointer = live.default_chat_session_id
+    assert pointer is None, f"the failed mint left a phantom pointer: {pointer!r}"
+    # The legacy mirror moves WITH the authority:
+    # ``PersonaInstance.__post_init__`` re-derives ``default_chat_session_id``
+    # from a ``persona_chat_*`` ``session_id``, so a half-retraction would
+    # resurrect the phantom on the next read.
+    assert live.session_id is None
+    # And the read verbs answer the honest "no thread yet", so the next mint
+    # makes a fresh, durable root instead of re-offering the dead one.
+    assert (
+        resolve_default_chat_session_id_for_instance(
+            PersonaInstanceStore(), persona_id="dev"
+        )
+        is None
+    )
+
+
+def test_a_retraction_restores_the_pointer_the_instance_already_had(
+    isolate_agent_runtime_root, tmp_path
+):
+    """Retraction restores; it does not merely clear.
+
+    An instance that already had a working thread must keep it when a LATER
+    mint's transcript write fails. Clearing unconditionally would trade a
+    phantom for a silently orphaned conversation."""
+
+    from agent_runtime.persona_chat_durability import PersonaChatPersistenceError
+
+    class _SecondWriteFailsDB(SessionDB):
+        fail = False
+
+        def create_session(self, *args, **kwargs):
+            if self.fail:
+                raise RuntimeError("transcript store went away")
+            return super().create_session(*args, **kwargs)
+
+    db = _SecondWriteFailsDB(tmp_path / "state.db")
+    store = PersonaInstanceStore()
+    receipts = PersonaChatMintReceiptStore()
+
+    first = receipts.mint(
+        instance_store=store,
+        session_db=db,
+        persona_id="dev",
+        persona_instance_id="personainst_dev",
+        idempotency_key="first",
+        title="Dev chat",
+    )
+    good_root = first["root_chat_session_id"]
+    assert store.get("personainst_dev").default_chat_session_id == good_root
+
+    db.fail = True
+    with pytest.raises(PersonaChatPersistenceError):
+        receipts.mint(
+            instance_store=store,
+            session_db=db,
+            persona_id="dev",
+            persona_instance_id="personainst_dev",
+            idempotency_key="second",
+            title="Dev chat",
+        )
+
+    pointer = PersonaInstanceStore().get("personainst_dev").default_chat_session_id
+    assert pointer == good_root
+    assert db.get_session(pointer) is not None, "the restored pointer must resolve"
+
+
+def test_a_same_key_retry_after_a_failed_mint_still_resolves_the_same_root(
+    isolate_agent_runtime_root, tmp_path
+):
+    """The receipt property has to survive the retraction.
+
+    The retraction undoes the BIND, never the reservation: the receipt is what
+    makes the lane idempotent, and a failure that dropped it would let a retry
+    mint a SECOND thread for a dispatch that already has one. It is also the
+    only cover for the window no in-process rollback can reach — a crash
+    between the bind and the row."""
+
+    from agent_runtime.persona_chat_durability import PersonaChatPersistenceError
+
+    class _FirstWriteFailsDB(SessionDB):
+        fail = True
+
+        def create_session(self, *args, **kwargs):
+            if self.fail:
+                self.fail = False
+                raise RuntimeError("transcript store went away")
+            return super().create_session(*args, **kwargs)
+
+    db = _FirstWriteFailsDB(tmp_path / "state.db")
+    store = PersonaInstanceStore()
+    receipts = PersonaChatMintReceiptStore()
+
+    with pytest.raises(PersonaChatPersistenceError):
+        receipts.mint(
+            instance_store=store,
+            session_db=db,
+            persona_id="dev",
+            persona_instance_id="personainst_dev",
+            idempotency_key="retried",
+            title="Dev chat",
+        )
+
+    reserved = json.loads(
+        receipts._path("personainst_dev", "retried").read_text(encoding="utf-8")
+    )
+    assert reserved["state"] == "reserved"
+
+    replay = receipts.mint(
+        instance_store=store,
+        session_db=db,
+        persona_id="dev",
+        persona_instance_id="personainst_dev",
+        idempotency_key="retried",
+        title="Dev chat",
+    )
+
+    assert replay["root_chat_session_id"] == reserved["root_chat_session_id"]
+    assert replay["state"] == "completed"
+    assert db.get_session(replay["root_chat_session_id"]) is not None
+    assert (
+        PersonaInstanceStore().get("personainst_dev").default_chat_session_id
+        == replay["root_chat_session_id"]
+    )
+
+
+def test_a_retraction_never_reverts_a_pointer_another_lane_moved(
+    isolate_agent_runtime_root, tmp_path
+):
+    """The retraction is keyed on IDENTITY, not on a pointer being present.
+
+    Between our bind and our failure another lane can legitimately rebind this
+    instance. Reverting to the value WE saw before our bind would then erase a
+    newer, perfectly durable binding — trading this lane's phantom for someone
+    else's. The retraction fires only while the live pointer still names OUR
+    root."""
+
+    from agent_runtime.persona_assignments import persona_chat_session_id_for
+    from agent_runtime.persona_chat_durability import PersonaChatPersistenceError
+    from agent_runtime.persona_chat_history import PERSONA_CHAT_SESSION_SOURCE
+
+    other_root = persona_chat_session_id_for("personainst_dev")
+
+    class _HijackingDB(SessionDB):
+        hijack = False
+
+        def create_session(self, *args, **kwargs):
+            if not self.hijack:
+                return super().create_session(*args, **kwargs)
+            # The concurrent lane lands INSIDE our window and rebinds the
+            # instance to a root of its own — durable, written just below.
+            PersonaInstanceStore().open_chat(persona_id="dev", session_id=other_root)
+            raise RuntimeError("transcript store went away")
+
+    db = _HijackingDB(tmp_path / "state.db")
+    store = PersonaInstanceStore()
+    receipts = PersonaChatMintReceiptStore()
+
+    receipts.mint(
+        instance_store=store,
+        session_db=db,
+        persona_id="dev",
+        persona_instance_id="personainst_dev",
+        idempotency_key="first",
+        title="Dev chat",
+    )
+    db.create_session(
+        session_id=other_root,
+        source=PERSONA_CHAT_SESSION_SOURCE,
+        model=None,
+        system_prompt="Mission Control persona chat for dev",
+    )
+    db.hijack = True
+
+    with pytest.raises(PersonaChatPersistenceError):
+        receipts.mint(
+            instance_store=store,
+            session_db=db,
+            persona_id="dev",
+            persona_instance_id="personainst_dev",
+            idempotency_key="second",
+            title="Dev chat",
+        )
+
+    pointer = PersonaInstanceStore().get("personainst_dev").default_chat_session_id
+    assert pointer == other_root, (
+        "the retraction reverted a binding it did not make — it must key on the "
+        "root it bound, not on whatever pointer happens to be there"
+    )
+    assert db.get_session(pointer) is not None

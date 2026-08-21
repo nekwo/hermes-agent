@@ -1945,6 +1945,51 @@ def test_a_dispatch_to_a_retired_placement_mints_nothing(
     assert retired_id not in {row.id for row in store.list_all()}
 
 
+def test_a_dispatch_whose_transcript_write_fails_refuses_instead_of_binding_a_phantom(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    """The mint's OTHER failure, seen from where an operator sees it.
+
+    The mint binds the chat pointer BEFORE it writes the transcript row — the
+    ordering that keeps a mid-lane ``retire`` from leaving a titled thread. Its
+    cost is a window: a ``create_session`` that fails used to leave the
+    instance pointing at a root no SessionDB holds, which never heals
+    (``resolve_default_chat_session_id_for_instance`` re-offers a chat-shaped
+    own-instance pointer without asking whether it resolves), so every later
+    send to that agent was refused ``unknown_chat_session`` forever. And the
+    storage exception itself escaped this call site's typed handler as a
+    traceback.
+
+    Now the bind is retracted and the turn refuses in the vocabulary the chat
+    lanes already speak."""
+
+    db = _install_dispatch_handler_doubles(monkeypatch)
+
+    def _refuse_to_persist(self, *args, **kwargs):
+        raise RuntimeError("transcript store went away")
+
+    monkeypatch.setattr(type(db), "create_session", _refuse_to_persist)
+
+    refusal = _refused(
+        capsys, _dispatch_args("triage the flaky login test", "cm-persist-fail")
+    )
+
+    assert refusal["error_kind"] == "chat_session_persist_failed"
+    assert refusal["persistence_operation"] == "session_create"
+    # Nothing session-visible landed…
+    assert db.sessions == {}
+    # …and no phantom pointer survives to poison every later send.
+    assert (
+        resolve_default_chat_session_id_for_instance(
+            PersonaInstanceStore(), persona_id="dev"
+        )
+        is None
+    )
+    # The RESERVATION does survive, on purpose: it is what makes a retry
+    # resolve the same root instead of minting a second thread.
+    assert len(_mint_receipt_files()) == 1
+
+
 def test_a_dispatch_to_a_retired_placement_leaves_live_threads_alone(
     monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
 ):
