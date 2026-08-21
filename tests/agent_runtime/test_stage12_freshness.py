@@ -214,6 +214,273 @@ def test_scope_fingerprint_covers_running_work_stores():
     assert _scope_fingerprint() != before
 
 
+def _wal_mode_head_home_db():
+    """The head-home chat ``state.db`` in WAL mode, with NO connection left open.
+
+    WAL mode and the closed state both matter: the defect under test is a
+    connection-LIFETIME artefact, so a helper that leaves a handle open hides
+    it (measured while building this slice — an instrumentation connection held
+    open during the probe kept the WAL alive and made the UNFIXED code look
+    correct).
+    """
+
+    import sqlite3
+
+    from hermes_constants import get_hermes_head_home
+
+    db_path = get_hermes_head_home() / "state.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(db_path)
+    try:
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("CREATE TABLE IF NOT EXISTS probe (payload TEXT)")
+        con.commit()
+    finally:
+        con.close()
+    return db_path
+
+
+def test_scope_fingerprint_ignores_session_db_connection_lifetime():
+    """MERELY OPENING the chat database must not move the fingerprint.
+
+    The storm this pins (measured on the operator's runtime, 22.16 h to
+    2026-08-21 09:06): 2433 ``snapshot_build reason=demote`` against 35
+    hydrates - 2.29 h of CPU - and 1239 ``state.reconciled``, 96.9% of every
+    event appended in the window, at a median 9.0 s spacing. SQLite deletes the
+    ``-wal`` sibling on a clean last-close and re-creates it EMPTY on the next
+    open, so under a raw stat of the siblings a poll landing while any process
+    held the database open read a fresh ``mtime_ns`` and a poll landing at rest
+    read ``absent``. A database nobody wrote to flapped the fingerprint twice
+    per open, and each flap costs one synthetic ``state.reconciled`` -> one
+    UNCOVERED batch -> one full core rebuild.
+
+    This test asserts NOTHING about writes; that direction is
+    ``test_scope_fingerprint_moves_on_committed_chat_write``, and the pair is
+    the point - a fingerprint pinned constant would pass this one alone.
+    """
+
+    import sqlite3
+
+    from agent_runtime.stream import _scope_fingerprint
+
+    db_path = _wal_mode_head_home_db()
+    wal_path = db_path.with_name(db_path.name + "-wal")
+
+    at_rest = _scope_fingerprint()
+
+    reader = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        reader.execute("SELECT count(*) FROM probe").fetchall()
+        assert wal_path.exists(), (
+            "precondition: the open must have created the -wal sibling, or this "
+            "test is not exercising the flip it exists to catch"
+        )
+        assert _scope_fingerprint() == at_rest, (
+            "opening the chat SessionDB moved the scope fingerprint - a READ is "
+            "being keyed as a write, which is the 2433-rebuild storm"
+        )
+    finally:
+        reader.close()
+
+    assert (
+        _scope_fingerprint() == at_rest
+    ), "closing the chat SessionDB moved the scope fingerprint"
+
+
+def test_scope_fingerprint_ignores_checkpoint_without_data_change():
+    """A checkpoint that moves no rows must not move the fingerprint.
+
+    The second half of the same class: a WAL truncated back to zero length, and
+    its mtime moved, says only that frames already durable in ``state.db`` were
+    copied there. Under the mask a frameless WAL keys as one triple however it
+    got that way.
+    """
+
+    import os
+    import sqlite3
+
+    from agent_runtime.stream import _scope_fingerprint
+
+    db_path = _wal_mode_head_home_db()
+
+    con = sqlite3.connect(db_path)
+    try:
+        before = _scope_fingerprint()
+        con.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        os.utime(db_path.with_name(db_path.name + "-wal"), None)
+        assert (
+            _scope_fingerprint() == before
+        ), "a checkpoint/utime with no committed row moved the fingerprint"
+    finally:
+        con.close()
+
+
+def test_scope_fingerprint_moves_on_committed_chat_write():
+    """A REAL committed write from another connection MUST move the fingerprint.
+
+    The guarantee half, and the gate that convicts the cheapest wrong fix: a
+    fingerprint pinned to a constant kills the rebuild storm perfectly and
+    re-opens live incident 2026-07-25 (Chat History frozen ~36 h) in the same
+    stroke. Deliberately the WAL-mode, separate-connection, NOT-yet-checkpointed
+    case - the one a sibling mask has to be careful not to swallow, because
+    ``state.db``'s own mtime and size have not moved at all yet.
+    """
+
+    import sqlite3
+
+    from agent_runtime.stream import _scope_fingerprint
+
+    db_path = _wal_mode_head_home_db()
+
+    # Held open so the writer's own close cannot checkpoint the frames away and
+    # let ``state.db``'s triple carry the signal instead of the WAL's.
+    reader_side = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        before = _scope_fingerprint()
+        main_before = db_path.stat()
+
+        writer = sqlite3.connect(db_path)
+        try:
+            writer.execute("INSERT INTO probe (payload) VALUES (?)", ("minted",))
+            writer.commit()
+
+            assert _scope_fingerprint() != before, (
+                "a committed chat write did not move the scope fingerprint - the "
+                "watchdog is blind and Chat History freezes (incident 2026-07-25)"
+            )
+            main_after = db_path.stat()
+            assert (main_after.st_mtime_ns, main_after.st_size) == (
+                main_before.st_mtime_ns,
+                main_before.st_size,
+            ), (
+                "precondition drifted: the commit reached state.db directly, so "
+                "this run never exercised the uncheckpointed-WAL path"
+            )
+        finally:
+            writer.close()
+    finally:
+        reader_side.close()
+
+
+def test_scope_fingerprint_absent_session_db_is_stable_and_its_arrival_moves_it():
+    """Missing-database behaviour, pinned in both directions.
+
+    A database that does not exist yet must key STABLY (the behaviour the old
+    ``absent`` sentinel had), and a database that APPEARS must move the
+    fingerprint - the distinction the WAL mask suspends for the WAL sibling
+    alone and must not lose for the database itself.
+    """
+
+    import sqlite3
+
+    from hermes_constants import get_hermes_head_home
+
+    from agent_runtime.stream import _scope_fingerprint
+
+    db_path = get_hermes_head_home() / "state.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        candidate = db_path.with_name(db_path.name + suffix)
+        if candidate.exists():
+            candidate.unlink()
+
+    absent = _scope_fingerprint()
+    assert _scope_fingerprint() == absent, "an absent database is not keyed stably"
+
+    con = sqlite3.connect(db_path)
+    try:
+        con.execute("CREATE TABLE probe (payload TEXT)")
+        con.commit()
+    finally:
+        con.close()
+
+    assert (
+        _scope_fingerprint() != absent
+    ), "the chat database APPEARING did not move the fingerprint"
+
+
+def test_stream_delivers_eventless_chat_write_within_the_staleness_slo():
+    """End-to-end: a committed chat write with NO event reaches the consumer.
+
+    The in-process pin on the staleness SLO that incident 2026-07-25 bought. A
+    row is committed straight into the head-home SessionDB - no store call, no
+    EventLog append - and the stream must produce a ``state.reconciled`` delta
+    without the consumer asking for anything.
+    """
+
+    import sqlite3
+
+    from agent_runtime.stream import stream_frames
+
+    db_path = _wal_mode_head_home_db()
+
+    frames = stream_frames(poll_interval_seconds=0.01, heartbeat_interval_seconds=0.05)
+    assert drain_boot_liveness(frames)["type"] == "hydrate"
+
+    writer = sqlite3.connect(db_path)
+    try:
+        writer.execute("INSERT INTO probe (payload) VALUES (?)", ("eventless mint",))
+        writer.commit()
+    finally:
+        writer.close()
+
+    reconciled = None
+    for _ in range(80):
+        frame = next(frames)
+        if frame.get("type") != "delta":
+            continue
+        event = (frame.get("entity") or {}).get("event") or {}
+        if event.get("type") == "state.reconciled":
+            reconciled = event
+            break
+    frames.close()
+
+    assert reconciled is not None, (
+        "an event-less committed chat write never reached the stream consumer - "
+        "the staleness SLO incident 2026-07-25 bought is broken"
+    )
+    assert reconciled["payload"]["source"] == "stream_watchdog"
+
+
+def test_stream_stays_quiet_while_the_session_db_is_merely_opened():
+    """The storm, end to end: reading the chat database appends NO reconcile.
+
+    ``test_scope_fingerprint_ignores_session_db_connection_lifetime`` pins the
+    fingerprint; this pins the CONSEQUENCE, which is what actually cost 2.29 h
+    of CPU - every flap became a synthetic ``state.reconciled``, which
+    ``patch_coverage`` classifies UNCOVERED, which demotes the batch to a full
+    core rebuild (``snapshot_build reason=demote``).
+    """
+
+    import sqlite3
+
+    from agent_runtime.stream import stream_frames
+
+    db_path = _wal_mode_head_home_db()
+
+    frames = stream_frames(poll_interval_seconds=0.01, heartbeat_interval_seconds=0.03)
+    assert drain_boot_liveness(frames)["type"] == "hydrate"
+
+    kinds = []
+    for index in range(6):
+        # Open and close the database between polls, writing nothing - exactly
+        # what every projection read, drain tick and presence probe does. The
+        # alternating close order makes half the polls land with the WAL present
+        # and half with it gone, which is the flip itself.
+        probe = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        probe.execute("SELECT count(*) FROM probe").fetchall()
+        if index % 2:
+            probe.close()
+        kinds.append(next(frames)["type"])
+        probe.close()
+    frames.close()
+
+    assert set(kinds) == {"heartbeat"}, (
+        f"reading the chat SessionDB made the watchdog reconcile ({kinds}) - each "
+        "one costs a full core rebuild; this is the 2433-demote storm"
+    )
+
+
 def test_eventless_write_coincident_with_evented_batch_still_converges():
     """Live-proof regression (2026-07-09): the watchdog memo must be taken
     BEFORE the delta batch. A memo taken after the batch absorbed any

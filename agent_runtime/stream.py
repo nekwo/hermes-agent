@@ -1071,6 +1071,57 @@ def _scope_fingerprint() -> str:
     to drift. Note the background-work ``state.db`` can be a DIFFERENT file
     from the chat SessionDB statted above: the chat scope consults a durable
     head-home pointer the background-work writers do not.
+
+    Both SQLite stores are keyed through ``core_cache.sqlite_fingerprint_triples``
+    — the same masked triple the boot-cache lane keys them by — and NOT by a raw
+    stat of the three siblings, which is what this function did until
+    2026-08-21. The mask collapses "no ``-wal`` on disk" and "a zero-length
+    ``-wal`` on disk" into one triple, because SQLite deletes the WAL on a clean
+    last-close and re-creates it EMPTY on the next open: the difference between
+    those two states is the lifetime of somebody's connection, never content.
+    Under the raw stat a poll landing while any process merely HELD the database
+    open read a fresh ``mtime_ns``, and a poll landing at rest read ``absent`` —
+    so a database nobody was writing flapped the fingerprint twice per open, and
+    each flap costs one synthetic ``state.reconciled``, which ``patch_coverage``
+    classifies UNCOVERED, which demotes the whole batch to a full core rebuild.
+    Measured on the operator's runtime over the 22.16 h to 2026-08-21 09:06:
+    2 433 ``snapshot_build reason=demote`` against 35 hydrates (median build_ms
+    3 083, max 37 266 — 2.29 h of CPU), and 1 239 ``state.reconciled`` — 96.9 %
+    of every event appended in the window — at a median 9.0 s spacing, i.e. the
+    watchdog reconciling on roughly every other heartbeat, indefinitely, with
+    nothing to reconcile. 3 338 distinct fingerprints over 4 597 reconciles
+    against a recurring at-rest anchor is that flip's signature and not a
+    write's: real writes do not come back to the same value.
+
+    The narrowing is a NARROWING, not a disabling, and the line it holds is the
+    same one the turn-element exclusion above holds. A committed write still
+    moves this fingerprint within one poll, by one of two paths that SQLite's
+    durability rules leave no gap between: uncheckpointed, the ``-wal`` sibling
+    is non-empty and is keyed in full (mask suspended); checkpointed, the frames
+    are in ``state.db``, whose own mtime and size are the FIRST triple here. So
+    the ≤2×heartbeat staleness SLO that 2026-07-25 and 2026-08-11 bought is
+    intact — ``test_scope_fingerprint_covers_head_home_session_db`` and
+    ``test_scope_fingerprint_covers_running_work_stores`` still pin those two
+    incidents, and ``test_scope_fingerprint_moves_on_committed_chat_write``
+    pins the direction a constant fingerprint would trivially break.
+
+    ``PRAGMA data_version`` was evaluated first and REJECTED, recorded here so
+    it is not re-proposed as the obvious answer it looks like. Measured on
+    SQLite 3.45.3: (a) its value is only comparable WITHIN one connection — a
+    fresh connection per poll, which is the only shape a stateless fingerprint
+    can take, returns a constant and detects nothing; (b) making it work
+    therefore means the stream process holding a SessionDB connection open for
+    its whole lifetime, which is the exact shape of MCF-27 (every full snapshot
+    build leaked a chat SessionDB connection) two days after that was found;
+    (c) it is NOT checkpoint-immune as its reputation suggests — a
+    ``wal_checkpoint(TRUNCATE)`` with no data change bumps it, so it does not
+    even buy a clean answer for the case the mask leaves uncovered; and (d) it
+    buys nothing here anyway. Scenario-by-scenario against this mask — read-only
+    open/close, write-capable open/close with no write, WAL creation, WAL
+    deletion, ``utime`` on the WAL, uncommitted write, rollback, PASSIVE
+    checkpoint, committed write from another PROCESS — the two agree on every
+    state except the PASSIVE checkpoint, which cannot occur without a preceding
+    commit that both already reported.
     """
 
     parts: list[str] = []
@@ -1100,13 +1151,8 @@ def _scope_fingerprint() -> str:
         from .chat_session_scope import chat_session_db_path
 
         db_path = chat_session_db_path()
-        for suffix in ("", "-wal", "-journal"):
-            candidate = db_path.with_name(db_path.name + suffix)
-            try:
-                stat = candidate.stat()
-                parts.append(f"{candidate.name}:{stat.st_mtime_ns}:{stat.st_size}")
-            except OSError:
-                parts.append(f"{candidate.name}:absent")
+        for suffix, mtime_ns, size in core_cache.sqlite_fingerprint_triples(db_path):
+            parts.append(f"{db_path.name}{suffix}:{mtime_ns}:{size}")
     except Exception:  # noqa: BLE001 — chat persistence absence is itself stable
         parts.append("session_db:unresolved")
     try:
@@ -1122,17 +1168,21 @@ def _scope_fingerprint() -> str:
         for store_path in store_paths:
             # The checkpoint is plain JSON; the delegation store is SQLite,
             # whose mutations can land in the WAL without moving the main
-            # file's mtime — stat the siblings like the chat DB above.
-            suffixes = ("", "-wal", "-journal") if store_path.suffix == ".db" else ("",)
-            for suffix in suffixes:
-                candidate = store_path.with_name(store_path.name + suffix)
-                try:
-                    stat = candidate.stat()
-                    parts.append(
-                        f"bgwork:{candidate.name}:{stat.st_mtime_ns}:{stat.st_size}"
-                    )
-                except OSError:
-                    parts.append(f"bgwork:{candidate.name}:absent")
+            # file's mtime — key the siblings through the shared authority like
+            # the chat DB above.
+            if store_path.suffix == ".db":
+                for suffix, mtime_ns, size in core_cache.sqlite_fingerprint_triples(
+                    store_path
+                ):
+                    parts.append(f"bgwork:{store_path.name}{suffix}:{mtime_ns}:{size}")
+                continue
+            try:
+                stat = store_path.stat()
+                parts.append(
+                    f"bgwork:{store_path.name}:{stat.st_mtime_ns}:{stat.st_size}"
+                )
+            except OSError:
+                parts.append(f"bgwork:{store_path.name}:absent")
     except Exception:  # noqa: BLE001 — same posture as the chat DB above
         parts.append("running_work_stores:unresolved")
     return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:16]

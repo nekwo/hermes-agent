@@ -913,13 +913,50 @@ def _wal_without_frames_is_content_free(entry: FingerprintEntry) -> FingerprintE
     return FingerprintEntry(entry.path, 0, 0)
 
 
-def _db_entries(db_path: Any, out: list[FingerprintEntry]) -> None:
+def sqlite_fingerprint_triples(db_path: Any) -> tuple[tuple[str, int, int], ...]:
+    """``(suffix, mtime_ns, size)`` per journal sibling, under the WAL mask.
+
+    THE one authority for "how does a poll lane key a SQLite database", promoted
+    out of this module on 2026-08-21 because it had exactly one caller and three
+    lanes needed it. The other two keyed the same database by a raw stat triple
+    over the same three siblings, so the connection-lifetime flip
+    :func:`_wal_without_frames_is_content_free` was written to absorb — WAL
+    absent after a clean last-close, WAL present-and-empty the moment anything
+    opens the file — reached them undiminished:
+
+    * ``stream._scope_fingerprint`` (the Stage 12 watchdog, ~5 s cadence). Each
+      flip appended a synthetic ``state.reconciled``, which ``patch_coverage``
+      classifies UNCOVERED, which demotes the batch to a full core rebuild.
+      Measured on the operator's runtime over 22.16 h to 2026-08-21 09:06:
+      **2 433 ``snapshot_build reason=demote`` against 35 hydrates, median
+      build_ms 3 083, max 37 266 — 2.29 h of CPU**, while the event log took
+      1 239 ``state.reconciled`` (96.9 % of all events in the window) at a
+      median 9.0 s spacing. 3 338 DISTINCT fingerprints over 4 597 reconciles,
+      against a recurring at-rest anchor: the signature of one entry alternating
+      between a stable "absent" string and a fresh ``mtime_ns`` on every open.
+    * ``harness_parts.serve._runtime_state_fingerprint`` (the read-model cache),
+      where the same flip keeps the cache permanently cold — the defect a
+      2026-08-09 analysis named and nobody propagated the mask to.
+
+    Returned keyed by SUFFIX rather than by path so a caller can spell its own
+    label (the stream lane keys by basename, the cache lane by full path)
+    without a second stat list free to drift from :data:`_DB_SIBLINGS`.
+    """
+
     text = str(db_path)
+    triples: list[tuple[str, int, int]] = []
     for suffix in _DB_SIBLINGS:
         entry = _stat_entry(text + suffix)
         if suffix == _WAL_SIBLING:
             entry = _wal_without_frames_is_content_free(entry)
-        out.append(entry)
+        triples.append((suffix, entry.mtime_ns, entry.size))
+    return tuple(triples)
+
+
+def _db_entries(db_path: Any, out: list[FingerprintEntry]) -> None:
+    text = str(db_path)
+    for suffix, mtime_ns, size in sqlite_fingerprint_triples(db_path):
+        out.append(FingerprintEntry(text + suffix, mtime_ns, size))
 
 
 def _receipt_fingerprint_refused(*, scope: str, root: Any, bound: int) -> None:

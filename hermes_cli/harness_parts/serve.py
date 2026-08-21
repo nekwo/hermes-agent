@@ -579,10 +579,22 @@ def _runtime_state_fingerprint() -> tuple | None:
         # also stops the poll loop from opening — and potentially creating — a
         # database just to read its own filename.
         from agent_runtime.chat_session_scope import chat_session_db_path
+        from agent_runtime.core_cache import sqlite_fingerprint_triples
 
+        # Keyed through the SHARED SQLite authority, not a raw stat of the three
+        # siblings, since 2026-08-21. SQLite deletes the WAL on a clean
+        # last-close and re-creates it EMPTY on the next open, so under the raw
+        # stat this entry flipped between ``-1/-1`` and a fresh ``mtime_ns``
+        # every time any process merely OPENED the chat database — keeping this
+        # cache permanently cold for reasons that were never content. That is
+        # the defect the 2026-08-09 analysis named; the mask that answers it has
+        # existed in ``core_cache`` since MC-3b and had simply never been
+        # propagated to the two poll lanes. A real commit still moves this
+        # entry: uncheckpointed the WAL is non-empty and keyed in full,
+        # checkpointed the frames are in ``state.db`` whose own triple is here.
         db_path = str(chat_session_db_path())
-        for suffix in ("", "-wal", "-journal"):
-            _stat(db_path + suffix)
+        for suffix, mtime_ns, size in sqlite_fingerprint_triples(db_path):
+            parts.append((db_path + suffix, mtime_ns, size))
     except Exception:
         # Chat persistence unavailable → its absence is itself stable.
         parts.append(("session_db", -1, -1))
