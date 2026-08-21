@@ -11,6 +11,11 @@ from typing import Any, Callable, Iterator, TypeVar
 
 from . import paths
 from .persona_assignments import safe_assignment_text, safe_assignment_token
+from .mission_chat_phases import (
+    TURN_PHASES_KEY,
+    TURN_RECORD_SCHEMA_VERSION,
+    safe_turn_phases,
+)
 from .run_budget import (
     ACCOUNTING_KEY as RUN_BUDGET_ACCOUNTING_KEY,
     safe_accounting_block as safe_run_budget_accounting,
@@ -414,7 +419,7 @@ def persist_mission_chat_turn(
         prior = dict(existing) if isinstance(existing, dict) else {}
         session[message_key] = {
             **prior,
-            "schema_version": 2,
+            "schema_version": TURN_RECORD_SCHEMA_VERSION,
             "turn_id": safe_assignment_token(turn_id) or safe_assignment_token(message_key),
             "state": resolved_state,
             "updated_at": _utc_now_iso(),
@@ -469,7 +474,7 @@ def transition_mission_chat_turn(
             record["started_at"] = now_iso
         record.update(
             {
-                "schema_version": 2,
+                "schema_version": TURN_RECORD_SCHEMA_VERSION,
                 "turn_id": safe_assignment_token(turn_id) or safe_assignment_token(message_key),
                 "state": requested,
                 "updated_at": now_iso,
@@ -1216,6 +1221,15 @@ def _safe_journal_metadata(value: Any) -> dict[str, Any]:
     run_budget = safe_run_budget_accounting(value.get(_JOURNAL_RUN_BUDGET_FIELD))
     if run_budget is not None:
         result[_JOURNAL_RUN_BUDGET_FIELD] = run_budget
+    # Turn-latency phase spans (schema v3). Same absent-stays-absent rule the
+    # run-budget block states above, applied one level deeper: the block itself
+    # is absent on a v2 record, and INSIDE the block a phase the turn never
+    # reached has no key. ``safe_turn_phases`` drops what it cannot read and
+    # supplies nothing, so a reader can never mistake "did not happen" for
+    # "happened at millisecond zero".
+    phases = safe_turn_phases(value.get(TURN_PHASES_KEY))
+    if phases is not None:
+        result[TURN_PHASES_KEY] = phases
     for key in (
         "provider_submitted",
         "native_committed",

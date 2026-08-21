@@ -1,0 +1,464 @@
+"""Turn-record phase spans (schema v3) — the honesty contract, as executable rows.
+
+The operator's report was "my messaging feels slow", and answering it required
+hand-correlating ``agent.log`` prose, the turn record's wall stamps, the
+emitter's ``ttft_ms`` (whose clock starts ~1,100 lines into the handler) and the
+launcher's dateless local-time diag lines. The record now carries the breakdown.
+
+**What these rows defend is not the presence of numbers — it is the ABSENCE of
+the ones that were never measured.** A phase the turn did not reach has no key.
+Not ``0``, not ``null``, not present-and-empty. A ``0`` is a measurement; a
+phase that never happened was not measured, and a consumer that cannot tell
+those apart will report a turn that died before the provider as one that reached
+the provider instantaneously. That is the exact class of defect this whole plan
+exists to prevent, so the named sabotage for this stage is "make the writer emit
+``0`` for an unreached ``provider_first_byte``" and these rows must red on it.
+
+Driven end-to-end through the REAL handler wherever a fact is about the handler
+(which phases a live turn marks, what lands on the durable record), and at the
+``TurnPhaseMarks`` unit wherever a fact is about the clock (exact values,
+first-mark-wins), because only the unit can be given a scripted clock without
+putting a test seam on a live chat path.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from agent_runtime import mission_chat_phases
+from agent_runtime.mission_chat_phases import (
+    PHASE_ORDER,
+    TURN_PHASES_KEY,
+    TURN_RECORD_SCHEMA_VERSION,
+    TurnPhaseMarks,
+    safe_turn_phases,
+)
+
+from tests.hermes_cli.test_mission_chat_budget_payload import (  # type: ignore
+    _SESSION_ID,
+    _seed,
+    isolate_agent_runtime_root,  # noqa: F401  (re-exported fixture)
+)
+
+
+# --------------------------------------------------------------------------- #
+# Scripted clock                                                               #
+# --------------------------------------------------------------------------- #
+class _TickClock:
+    """A monotonic clock that advances exactly one second per READ.
+
+    Deterministic ORDER without pinning a call count: asserting "context_built
+    == 3000" would break the moment an unrelated edit takes one more clock
+    reading, which is a test that fails for a reason that is not a defect. What
+    a scripted clock is actually for here is proving that the marks come out in
+    the order the turn passes through them, and that ``request_received`` is the
+    anchor rather than a measurement.
+    """
+
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def __call__(self) -> float:
+        value = float(self.reads)
+        self.reads += 1
+        return value
+
+
+@pytest.fixture
+def scripted_marks(monkeypatch):
+    """Give the LIVE handler a scripted anchor.
+
+    ``persona_commands`` is exec'd into ``harness.py`` globals, so its import of
+    ``TurnPhaseMarks`` is function-local and re-executed on every turn — which
+    means patching the class on its owning module reaches the real handler
+    without any seam existing in the handler itself.
+    """
+
+    created: list[TurnPhaseMarks] = []
+
+    def _factory():
+        marks = TurnPhaseMarks(monotonic=_TickClock(), wall_now=lambda: "2026-08-21T21:17:43.400000Z")
+        created.append(marks)
+        return marks
+
+    monkeypatch.setattr(mission_chat_phases, "TurnPhaseMarks", _factory)
+    return created
+
+
+# --------------------------------------------------------------------------- #
+# Providers                                                                    #
+# --------------------------------------------------------------------------- #
+def _result(**timing):
+    return SimpleNamespace(
+        final_response="hello world",
+        input_tokens=1,
+        output_tokens=2,
+        total_tokens=3,
+        latency_ms=4,
+        profile_timing=dict(timing),
+        raw={},
+    )
+
+
+def _streaming_provider(*, profile_timing=None, deltas=("hello ", "world")):
+    """A provider that walks the real callback protocol: ready, then tokens."""
+
+    timing = dict(profile_timing or {})
+
+    class _Provider:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def mission_chat_reply(self, *args, **kwargs):
+            ready = kwargs.get("agent_ready_callback")
+            if ready is not None:
+                # The real runner swallows a raising ready-callback
+                # (`profile_runner._notify_agent_ready`); mirroring that here
+                # keeps the fake from being kinder OR harsher than production.
+                try:
+                    ready(SimpleNamespace(id="fake-agent"))
+                except Exception:
+                    pass
+            stream = kwargs.get("stream_callback")
+            if stream is not None:
+                for chunk in deltas:
+                    stream(chunk)
+            return _result(**timing)
+
+    return _Provider
+
+
+def _never_reaches_the_provider():
+    """The turn the absence rule exists for: it dies with no token ever seen."""
+
+    class _Provider:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def mission_chat_reply(self, *args, **kwargs):
+            raise RuntimeError("provider transport died before any byte")
+
+    return _Provider
+
+
+def _args(client_message_id: str, *, stream: bool):
+    return SimpleNamespace(
+        persona_id="dev",
+        persona_instance_id="personainst_dev",
+        session_id=_SESSION_ID,
+        message="please answer",
+        surface_prompt="",
+        intent_hint="chat",
+        requested_by="test",
+        client_message_id=client_message_id,
+        stream=stream,
+        max_seconds=5.0,
+        json=True,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Reading the DURABLE record (never the envelope — the record is the contract)  #
+# --------------------------------------------------------------------------- #
+def _record_on_disk(root: Path, client_message_id: str) -> dict:
+    store = Path(root) / "mission_chat_turns"
+    for path in sorted(store.glob("*.json")):
+        session = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(session, dict) and client_message_id in session:
+            return session[client_message_id]
+    raise AssertionError(
+        f"no turn record for {client_message_id!r} under {store} "
+        f"(files: {sorted(p.name for p in store.glob('*.json'))})"
+    )
+
+
+def _drive(monkeypatch, capsys, provider, *, turn_id, stream=True):
+    harness = _seed(monkeypatch, provider)
+    code = harness._cmd_mission_chat_message(_args(turn_id, stream=stream))
+    capsys.readouterr()  # stream frames + terminal envelope; the record is the subject
+    return code
+
+
+# --------------------------------------------------------------------------- #
+# 1. A live turn writes the block, on schema v3                                #
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def streamed_turn(monkeypatch, capsys, isolate_agent_runtime_root, scripted_marks):  # noqa: F811
+    _drive(
+        monkeypatch,
+        capsys,
+        _streaming_provider(profile_timing={"resident_actor_reused": 0}),
+        turn_id="phases_ok",
+    )
+    return _record_on_disk(isolate_agent_runtime_root, "phases_ok")
+
+
+def test_a_completed_turn_carries_a_phases_block_on_schema_v3(streamed_turn):
+    assert streamed_turn["schema_version"] == TURN_RECORD_SCHEMA_VERSION == 3
+    assert TURN_PHASES_KEY in streamed_turn, (
+        "the terminal persist must carry the phase block; without it the turn "
+        "record is back to wall stamps and prose"
+    )
+
+
+def test_the_block_carries_the_wall_anchor_as_a_STRING(streamed_turn):
+    """``anchored_at`` exists to cross-reference agent.log BY EYE.
+
+    It is a string precisely so that nothing can subtract it from anything. The
+    launcher stamps local time with no dates while the record stamps UTC, and
+    that hand-correlation hazard has already produced two misreads in a day.
+    """
+
+    phases = streamed_turn[TURN_PHASES_KEY]
+    assert isinstance(phases["anchored_at"], str)
+    for key, value in phases.items():
+        if key == "anchored_at":
+            continue
+        assert isinstance(value, (int, bool)), (
+            f"{key} must be an elapsed-ms int (or a bool flag), got {value!r}"
+        )
+
+
+def test_request_received_is_the_anchor_and_is_always_zero(streamed_turn):
+    assert streamed_turn[TURN_PHASES_KEY]["request_received"] == 0
+
+
+def test_a_streamed_turn_marks_every_phase_it_actually_passed_through(streamed_turn):
+    """The full walk, including the two marks that bracket profile bootstrap.
+
+    ``agent_ready`` / ``provider_request_started`` come from the runner's
+    ready-callback and ``provider_first_byte`` from the first delta, so a fake
+    that walks the real callback protocol proves the wiring, not the fake.
+    """
+
+    phases = streamed_turn[TURN_PHASES_KEY]
+    for phase in PHASE_ORDER:
+        assert phase in phases, f"a completed streamed turn must mark {phase}"
+
+
+def test_the_marks_are_non_decreasing_in_lifecycle_order(streamed_turn):
+    phases = streamed_turn[TURN_PHASES_KEY]
+    seen = [(phase, phases[phase]) for phase in PHASE_ORDER if phase in phases]
+    values = [value for _, value in seen]
+    assert values == sorted(values), (
+        f"phase marks are out of lifecycle order: {seen}"
+    )
+
+
+def test_the_scripted_clock_makes_every_phase_a_distinct_instant(streamed_turn):
+    """One tick per clock read, so no two phases can collapse onto one value.
+
+    A real turn may legitimately mark two phases in the same millisecond; the
+    scripted clock removes that ambiguity so "the ordering holds" is asserted
+    against a timeline where ordering is actually observable.
+    """
+
+    phases = streamed_turn[TURN_PHASES_KEY]
+    values = [phases[phase] for phase in PHASE_ORDER if phase in phases]
+    assert len(set(values)) == len(values), f"phases collapsed onto one instant: {values}"
+
+
+# --------------------------------------------------------------------------- #
+# 2. THE ABSENCE RULE — the row the named sabotage must red                     #
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def dead_before_provider(monkeypatch, capsys, isolate_agent_runtime_root, scripted_marks):  # noqa: F811
+    code = _drive(
+        monkeypatch, capsys, _never_reaches_the_provider(), turn_id="phases_dead"
+    )
+    assert code == 2
+    return _record_on_disk(isolate_agent_runtime_root, "phases_dead")
+
+
+@pytest.mark.parametrize("phase", ["provider_first_byte", "stream_done", "projected"])
+def test_a_phase_the_turn_never_reached_has_NO_KEY(dead_before_provider, phase):
+    """Absent means the key is not there. Zero is a measurement; this was not.
+
+    A turn whose provider transport died saw no byte. If ``provider_first_byte``
+    materialized as ``0`` the record would read as an instantaneous first token
+    — the single most misleading value the field could hold, and the reason the
+    honesty contract's first rule exists.
+    """
+
+    phases = dead_before_provider[TURN_PHASES_KEY]
+    assert phase not in phases, (
+        f"absent phase materialized as {phases.get(phase)!r}: {phase} was never "
+        f"reached by this turn and must have NO key on the record"
+    )
+
+
+def test_the_dead_turn_still_records_what_it_DID_reach(dead_before_provider):
+    """Absence is only honest if presence is real: the admission half is there."""
+
+    phases = dead_before_provider[TURN_PHASES_KEY]
+    for phase in ("request_received", "context_built", "observability_built",
+                  "emitter_created", "write_ahead"):
+        assert phase in phases, f"{phase} happened on this turn and must be recorded"
+
+
+def test_the_dead_turn_carries_no_stage_four_counters(dead_before_provider):
+    """``builds_overlapped`` is defined over anchor → stream_done.
+
+    No ``stream_done`` means no window, and no window means no count — not a
+    zero. A zero here would claim "no builds overlapped this turn", which is a
+    finding nobody made.
+    """
+
+    assert "builds_overlapped" not in dead_before_provider[TURN_PHASES_KEY]
+
+
+# --------------------------------------------------------------------------- #
+# 3. First mark wins — the rule that survives a per-token call site            #
+# --------------------------------------------------------------------------- #
+def test_a_second_mark_never_moves_the_first():
+    clock = _TickClock()
+    marks = TurnPhaseMarks(monotonic=clock, wall_now=lambda: "stamp")
+    first = marks.mark("provider_first_byte")
+    again = marks.mark("provider_first_byte")
+    assert first == again == marks.snapshot()["provider_first_byte"]
+
+
+def test_the_emitter_marks_the_first_byte_once_across_many_deltas(monkeypatch):
+    """``delta()`` runs per token; the phase must cost one mark for the turn."""
+
+    from hermes_cli import harness
+
+    marks = TurnPhaseMarks(monotonic=_TickClock(), wall_now=lambda: "stamp")
+    emitter = harness._ChatProtocolV2Emitter(
+        turn_id="turn_x",
+        client_message_id="client_x",
+        emit_frames=False,
+        turn_phases=marks,
+    )
+    for chunk in ("a", "b", "c", "d"):
+        emitter.delta(chunk)
+    first_byte = marks.snapshot()["provider_first_byte"]
+    emitter.delta("e")
+    assert marks.snapshot()["provider_first_byte"] == first_byte
+
+
+def test_an_empty_delta_is_not_a_first_byte():
+    """The emitter returns early on a falsy delta; no byte means no mark."""
+
+    from hermes_cli import harness
+
+    marks = TurnPhaseMarks(monotonic=_TickClock(), wall_now=lambda: "stamp")
+    emitter = harness._ChatProtocolV2Emitter(
+        turn_id="turn_y",
+        client_message_id="client_y",
+        emit_frames=False,
+        turn_phases=marks,
+    )
+    emitter.delta("")
+    emitter.delta(None)
+    assert "provider_first_byte" not in marks.snapshot()
+
+
+# --------------------------------------------------------------------------- #
+# 4. The store boundary                                                        #
+# --------------------------------------------------------------------------- #
+def _seed_session_file(tmp_path, monkeypatch, session_id: str, session: dict) -> None:
+    """Write one session file through the store's OWN path scheme.
+
+    Filenames are a sanitized prefix plus a sha256 suffix, so hand-naming the
+    file would produce a fixture the reader never opens — a test that passes by
+    finding nothing.
+    """
+
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    from agent_runtime import mission_chat_turns as store_module
+
+    path = store_module._session_file_path(session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(session), encoding="utf-8")
+
+
+def test_a_v2_record_with_no_phases_key_reads_back_unchanged(tmp_path, monkeypatch):
+    """Records already on disk are v2. They are not migrated and not rewritten.
+
+    "This turn predates phase spans" is a fact about it, and the reader must not
+    paper over it with an empty or defaulted block.
+    """
+
+    from agent_runtime.mission_chat_turns import mission_chat_turn_records
+
+    _seed_session_file(
+        tmp_path,
+        monkeypatch,
+        "legacy_session",
+        {
+            "client_legacy": {
+                "schema_version": 2,
+                "turn_id": "turn_legacy",
+                "state": "projected",
+                "elements": [],
+            }
+        },
+    )
+    records = mission_chat_turn_records(session_id="legacy_session")
+    assert [row["turn_id"] for row in records] == ["turn_legacy"], (
+        "the fixture must actually be readable, or this row proves nothing"
+    )
+    assert TURN_PHASES_KEY not in records[0]
+
+
+def test_a_v3_records_phase_block_survives_the_READ_boundary(tmp_path, monkeypatch):
+    """The consumer reads through ``mission_chat_turn_records``, not the file."""
+
+    from agent_runtime.mission_chat_turns import mission_chat_turn_records
+
+    _seed_session_file(
+        tmp_path,
+        monkeypatch,
+        "v3_session",
+        {
+            "client_v3": {
+                "schema_version": 3,
+                "turn_id": "turn_v3",
+                "state": "projected",
+                "elements": [],
+                TURN_PHASES_KEY: {
+                    "anchored_at": "2026-08-21T21:17:43.400000Z",
+                    "request_received": 0,
+                    "provider_first_byte": 5400,
+                    "builds_overlapped": 0,
+                },
+            }
+        },
+    )
+    phases = mission_chat_turn_records(session_id="v3_session")[0][TURN_PHASES_KEY]
+    assert phases["provider_first_byte"] == 5400
+    # A real zero survives; it is a measurement, and the sanitizer's job is to
+    # drop the unreadable, never to prune the honest.
+    assert phases["builds_overlapped"] == 0
+    assert "stream_done" not in phases
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        {"anchored_at": "s", "provider_first_byte": None},
+        {"anchored_at": "s", "provider_first_byte": "12"},
+        {"anchored_at": "s", "provider_first_byte": -1},
+        {"anchored_at": "s", "provider_first_byte": True},
+    ],
+)
+def test_the_sanitizer_DROPS_what_it_cannot_read_rather_than_defaulting(block):
+    """Defensive in one direction only: drop, never supply.
+
+    ``True`` is called out because ``bool`` is an ``int`` subclass — a truthy
+    value that landed in an elapsed-ms slot is corruption, not a one-millisecond
+    phase, and a naive ``isinstance(x, int)`` would admit it as ``1``.
+    """
+
+    cleaned = safe_turn_phases(block) or {}
+    assert "provider_first_byte" not in cleaned
+
+
+def test_the_sanitizer_never_invents_the_anchor():
+    assert safe_turn_phases({}) is None
+    assert "request_received" not in (safe_turn_phases({"anchored_at": "s"}) or {})

@@ -1927,6 +1927,54 @@ def _stamp_turn_visibility(data: dict, reply_text, *, chat_result=None) -> dict:
     return data
 
 
+def _registry_probe_rounds():
+    """This thread's cumulative tool-registry probe rounds, or ``None``.
+
+    ``None`` is the honest answer when the registry cannot be consulted at all
+    (an import shape this file cannot assume — it is exec'd into ``harness.py``
+    globals, so every import here is function-local by contract). The caller
+    turns an unknown END or an unknown BASELINE into an ABSENT
+    ``registry_probe_rounds`` rather than a zero, because "the registry probed
+    nothing" is a finding and "I could not ask" is not.
+    """
+
+    try:
+        from tools.registry import probe_rounds_this_thread
+
+        return int(probe_rounds_this_thread())
+    except Exception:
+        return None
+
+
+def _snapshot_builds_overlapped(marks, *, until_ms):
+    """Stage 4: snapshot builds whose span intersects ``anchor → until_ms``.
+
+    ``until_ms`` is a mark off the same monotonic anchor (``stream_done``), so
+    the window is reconstructed on the build ledger's own clock — never from
+    wall stamps, and never across processes.
+
+    Returns ``None`` — leaving the key ABSENT — for a window that was never
+    marked (the turn did not reach ``stream_done``) or for a process that has
+    never led a build and therefore cannot see the lane. A ``0`` from here is a
+    real measurement: builds happened in this process and none of them touched
+    this turn. That distinction is the entire point of the counter, because the
+    warm sample turn stayed fast WITH a concurrent build and the remedy
+    decision turns on whether that generalizes.
+    """
+
+    if until_ms is None:
+        return None
+    try:
+        from agent_runtime import snapshot_build_ledger
+
+        anchor = marks.anchor_monotonic
+        return snapshot_build_ledger.overlapping_builds(
+            start=anchor, end=anchor + (float(until_ms) / 1000.0)
+        )
+    except Exception:
+        return None
+
+
 def _cmd_mission_chat_message(args) -> int:
     # Function-local: this file is exec'd into harness.py's globals, so a
     # module-level import here would need a matching harness.py import or it
@@ -1938,6 +1986,26 @@ def _cmd_mission_chat_message(args) -> int:
         MissionChatDeferredFinalization,
         MissionChatTurnPlan,
     )
+    from agent_runtime.mission_chat_phases import TurnPhaseMarks
+
+    # ── the turn's monotonic anchor ────────────────────────────────────────
+    # FIRST statement of the handler, ahead of the capability bind, the config
+    # load and every resolution below, because everything below is admission
+    # cost the operator is waiting through. The emitter's own ``ttft_ms`` clock
+    # does not start until ~1,100 lines from here (after replay checks, the
+    # native-history load, the turn-context build and the observability row),
+    # so on a cold turn it cannot see the profile bootstrap at all — that gap
+    # is what this anchor closes. ``ttft_ms`` is unchanged and still means what
+    # it always meant; these phases are a superset of it.
+    #
+    # One ``time.monotonic()`` read. See ``agent_runtime.mission_chat_phases``
+    # for the honesty contract every mark below obeys.
+    turn_phases = TurnPhaseMarks()
+    # Baseline for Stage 4's ``registry_probe_rounds``. The registry's counter
+    # is cumulative and thread-local (serve reuses pooled threads across turns),
+    # so the turn's number is a DELTA and the near end of it has to be sampled
+    # here, on the turn's own thread, before any of the turn's work runs.
+    turn_phases.set_baseline("registry_probe_rounds", _registry_probe_rounds())
     # Per-request capability binding, at the very top so every path below —
     # including the refusals — runs with the truthful answer bound.
     _bind_mission_chat_delivery_capability()
@@ -2437,6 +2505,7 @@ def _cmd_mission_chat_message(args) -> int:
         turn_relay_chain=turn_relay_chain,
         relay_chain_in=relay_chain_in,
         relay_deadline=relay_deadline,
+        phases=turn_phases,
     )
     # The lease covers the WRITES and nothing else. Post-emit decoration — the
     # auxiliary-LLM auto-title and the metadata event that reports it — is
@@ -2529,6 +2598,9 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
         FinalizationWarningKind,
         classify_turn_failure,
     )
+    from agent_runtime.mission_chat_phases import (
+        TURN_PHASES_KEY as MISSION_CHAT_TURN_PHASES_KEY,
+    )
 
     args = plan.args
     cfg = plan.cfg
@@ -2547,6 +2619,11 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
     turn_relay_chain = plan.turn_relay_chain
     relay_chain_in = plan.relay_chain_in
     relay_deadline = plan.relay_deadline
+    # The turn's monotonic timeline, anchored at handler entry (see the plan's
+    # ``phases`` field). Marked below at the boundaries the operator's TTFT is
+    # actually made of; serialized onto the record by the persists that already
+    # happen. Nothing in this function reads a mark back to decide anything.
+    turn_phases = plan.phases
     # ── finalization accounting ────────────────────────────────────────────
     # Bookkeeping that fails AFTER the reply is durable does not fail the turn —
     # and used to leave no trace at all. Two classes of silence lived here:
@@ -3013,6 +3090,7 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
         agents_file=getattr(args, "agents_file", None),
         surface_prompt=getattr(args, "surface_prompt", "") or "",
     )
+    turn_phases.mark("context_built")
     # The same object the runner's checkpoint clamp is armed from below, so the
     # number the agent was told and the number the runtime enforces cannot drift.
     wall_budget = turn_context.wall_budget
@@ -3051,6 +3129,7 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
             else None
         ),
     )
+    turn_phases.mark("observability_built")
     # The envelope is rendered last because it needs the observability row's
     # context_id; body and volatile tail both come from the one built context.
     situational_hud_content = turn_context.runtime_context_envelope(
@@ -3071,7 +3150,14 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
             turn_id=emitter.turn_id,
             elements=emitter.elements,
         ),
+        # The emitter owns exactly ONE phase mark: the first token off the
+        # provider. It is taken there because `delta()` is the first site in
+        # this process that has seen a provider byte, and taking it there costs
+        # no provider-client surgery. Guarded by a boolean read so the cost is
+        # per TURN, not per token.
+        turn_phases=turn_phases,
     )
+    turn_phases.mark("emitter_created")
 
     # C8: the legacy `chat.delta` lane is RETIRED (ruling 0 — one wire shape per
     # token). Deltas ride the v2 `segment.delta` frame only; the emitter runs
@@ -3087,17 +3173,37 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
         stream_emitter.progress(payload)
 
     def _agent_ready_for_steer(agent):
-        if not getattr(args, "stream", False):
-            return None
-        handle = start_active_mission_chat_turn(
-            runtime_root=paths.store_root(),
-            session_id=session_id,
-            agent=agent,
-            persona_id=normalized_persona,
-            persona_instance_id=instance.id,
-            client_message_id=client_message_id,
-        )
-        return handle.close
+        # ── the two marks that bracket profile bootstrap ───────────────────
+        # The runner calls this the instant the agent object exists and
+        # IMMEDIATELY starts the conversation when it returns, so `agent_ready`
+        # is the end of profile bootstrap (tool-registry probe rounds, plugin
+        # discovery, auxiliary-client probes — the ~5.4 s that gap G1 said
+        # nothing on the record could see) and `provider_request_started` is
+        # the handoff to the model turn.
+        #
+        # Stated exactly, because the name is generous: prompt assembly inside
+        # ``run_conversation`` happens AFTER this mark, so it lands inside the
+        # provider span rather than before it. Closing that would mean a hook
+        # inside the provider client, which this stage deliberately does not
+        # take. Both marks are ABSENT when the runner never reached agent
+        # construction — a cold-init failure reports no agent_ready, which is
+        # the truth about it.
+        turn_phases.mark("agent_ready")
+        turn_phases.count_delta("registry_probe_rounds", _registry_probe_rounds())
+        try:
+            if not getattr(args, "stream", False):
+                return None
+            handle = start_active_mission_chat_turn(
+                runtime_root=paths.store_root(),
+                session_id=session_id,
+                agent=agent,
+                persona_id=normalized_persona,
+                persona_instance_id=instance.id,
+                client_message_id=client_message_id,
+            )
+            return handle.close
+        finally:
+            turn_phases.mark("provider_request_started")
 
     provider_submitted = False
     try:
@@ -3105,6 +3211,12 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
             session_id=session_id,
             active_client_message_id=client_message_id,
         )
+        # Marked BEFORE the write it names, on purpose: the write-ahead record
+        # is the first durable trace of this turn, and it has to be able to
+        # describe its own admission. Every phase mark that names a PERSIST is
+        # taken at the moment the persist is issued, so the block a record
+        # carries is always complete as of that record.
+        turn_phases.mark("write_ahead")
         write_ahead_outcome = transition_mission_chat_turn(
             session_id=session_id,
             client_message_id=client_message_id,
@@ -3117,6 +3229,10 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
                 "persona_instance_id": instance.id,
                 "pending_user_message": message,
                 "provider_submitted": False,
+                # Rides the persist that already happens — no new write. On a
+                # turn that dies before the provider this is the ONLY phase
+                # block that ever lands, and its provider_* keys are absent.
+                MISSION_CHAT_TURN_PHASES_KEY: turn_phases.snapshot(),
             },
         )
         # Live-log mirror, at the write-ahead point ON PURPOSE: this lane does
@@ -3251,6 +3367,28 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
         finally:
             relay_policy.RELAY_CHAIN.reset(_relay_chain_token)
             relay_policy.RELAY_DEADLINE.reset(_relay_deadline_token)
+        # The model turn is over — every token that was going to arrive has.
+        # Only reached when the run RETURNED; a turn that raised (wall budget,
+        # provider failure) leaves `stream_done` absent, and with it the Stage 4
+        # overlap count whose window it defines.
+        turn_phases.mark("stream_done")
+        _profile_timing = getattr(chat_result, "profile_timing", None) or {}
+        # Cold/warm, from the runner's own receipt rather than a guess here.
+        # `resident_actor_reused` is written by the resident-actor registry on
+        # every acquire; a turn whose runner reported none (no registry on this
+        # path) leaves `agent_init_cold` ABSENT rather than claiming either.
+        turn_phases.flag(
+            "agent_init_cold",
+            (not bool(_profile_timing.get("resident_actor_reused")))
+            if "resident_actor_reused" in _profile_timing
+            else None,
+        )
+        turn_phases.count(
+            "builds_overlapped",
+            _snapshot_builds_overlapped(
+                turn_phases, until_ms=turn_phases.get("stream_done")
+            ),
+        )
         final_model_input = (getattr(chat_result, "raw", {}) or {}).get("model_input_observability")
         # C1 build-once: the row was built ONCE before the turn (record-at-
         # injection: history, skills, context files, the very situational_hud
@@ -3325,6 +3463,12 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
                     or "wall_budget_hard_wall",
                     "budget_summary": safe_assignment_text(str(exc), limit=400),
                     "stored_reply": checkpoint_summary,
+                    # However far the turn got. A wall-budget death usually
+                    # HAS provider_first_byte (the agent replied, then ran out
+                    # of clock) and never has stream_done — the two together
+                    # are what say "the tokens were flowing when the wall
+                    # closed", which no prose line has ever said.
+                    MISSION_CHAT_TURN_PHASES_KEY: turn_phases.snapshot(),
                     # The WHOLE accounting block, verbatim. A raised run has no
                     # result to carry it, so it rides the exception — and this
                     # is the only place it can become durable, because a pure
@@ -3342,7 +3486,11 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
                 # A non-wall budget trip (read/search loop, api calls, tokens)
                 # settles here, and it is bounded just as knowably. Yields {}
                 # for any other exception, so absence stays absence.
-                metadata={"provider_submitted": True, **turn_run_budget_metadata(error=exc)},
+                metadata={
+                    "provider_submitted": True,
+                    MISSION_CHAT_TURN_PHASES_KEY: turn_phases.snapshot(),
+                    **turn_run_budget_metadata(error=exc),
+                },
             )
         if runtime_registry is not None:
             runtime_registry.transition(session_id, "failed")
@@ -3435,6 +3583,7 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
             active_session_id=active_session_id,
             revision=native_revision,
         )
+    turn_phases.mark("native_committed")
     _settled = transition_mission_chat_turn(
         session_id=session_id,
         client_message_id=client_message_id,
@@ -3442,6 +3591,7 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
         state=TURN_STATE_NATIVE_COMMITTED,
         elements=stream_emitter.elements,
         metadata={
+            MISSION_CHAT_TURN_PHASES_KEY: turn_phases.snapshot(),
             "root_chat_session_id": session_id,
             "active_session_id": active_session_id,
             "continuity_runtime": (
@@ -3636,6 +3786,7 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
             output_tokens=data.get("output_tokens"),
             total_tokens=data.get("total_tokens"),
         )
+        turn_phases.mark("projected")
         terminal_outcome = transition_mission_chat_turn(
             session_id=session_id,
             client_message_id=client_message_id,
@@ -3643,6 +3794,10 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
             elements=stream_emitter.elements,
             state=TURN_STATE_PROJECTED,
             metadata={
+                # The complete block, on the terminal record. Every earlier
+                # persist carried a prefix of it; this is the one a latency
+                # audit reads.
+                MISSION_CHAT_TURN_PHASES_KEY: turn_phases.snapshot(),
                 "projection_committed": True,
                 "stored_reply": reply_text,
                 "active_session_id": active_session_id,
@@ -4716,6 +4871,7 @@ class _ChatProtocolV2Emitter:
         on_update=None,
         emit_frames: bool = True,
         clock=time.monotonic,
+        turn_phases=None,
     ):
         import contextvars as _contextvars
         import threading as _threading
@@ -4725,6 +4881,18 @@ class _ChatProtocolV2Emitter:
         self.client_message_id = safe_assignment_text(client_message_id, limit=200) or None
         self._on_update = on_update
         self._emit_frames = bool(emit_frames)
+        # The turn's phase timeline, or None for callers that do not keep one
+        # (tests, and any future emitter user outside the chat handler). The
+        # emitter takes exactly ONE mark from it — `provider_first_byte` — and
+        # never reads a mark back.
+        self._turn_phases = turn_phases
+        # Guard for that mark, and the reason the cost of this whole plan is
+        # per-turn rather than per-token: `delta()` runs once per delta, and
+        # this boolean is all it costs after the first one. `TurnPhaseMarks`
+        # enforces first-mark-wins on its own side too — belt and braces,
+        # because a guard at the call site is not a property anything can
+        # assert, and the mark rides a worker thread.
+        self._provider_first_byte_marked = False
         # Streaming deltas fire from the provider's worker thread. Under
         # `harness serve` the stdout proxy tags each line with a request-id
         # ContextVar that new threads do NOT inherit, so frames written from
@@ -4760,6 +4928,15 @@ class _ChatProtocolV2Emitter:
     def delta(self, delta: str | None) -> None:
         if not delta:
             return
+        if not self._provider_first_byte_marked:
+            # FIRST provider byte this process has seen. Marked here rather
+            # than inside the provider client because this is the earliest site
+            # the turn owns, and the plan explicitly declines provider-client
+            # surgery for it. An empty delta is not a byte — the guard above
+            # already returned.
+            self._provider_first_byte_marked = True
+            if self._turn_phases is not None:
+                self._turn_phases.mark("provider_first_byte")
         segment = self._ensure_segment()
         text = str(delta)
         segment["text"] = str(segment.get("text") or "") + text

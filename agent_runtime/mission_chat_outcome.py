@@ -336,6 +336,16 @@ class MissionChatTurnPlan:
     turn_relay_chain: object
     relay_chain_in: object
     relay_deadline: object
+    #: The turn's monotonic timeline (``mission_chat_phases.TurnPhaseMarks``),
+    #: anchored at command-handler ENTRY — before the plan phase resolves
+    #: anything — because "how long did admission take?" must include the
+    #: resolution work, not start after it. That is the whole of gap G1.
+    #:
+    #: It is a MUTABLE object on a frozen plan, and that is deliberate rather
+    #: than an exception being smuggled: the plan is frozen so no phase
+    #: DECISION can change after the lease is taken, and a clock records
+    #: nothing the turn reads back. Nothing downstream may branch on a mark.
+    phases: object
 
 
 @dataclass(slots=True)
