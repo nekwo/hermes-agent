@@ -171,7 +171,32 @@ class ProjectionAccountant:
         return [record.as_dict() for record in self._drops]
 
 
-def events_watermark(*, last_event_ts: Any = None) -> dict[str, Any]:
+def events_position() -> dict[str, Any]:
+    """Capture the event log's source position **now**, with no `last_event_ts`.
+
+    Split out of :func:`events_watermark` so a producer whose CONTENT is read
+    over a long window can capture its position BEFORE it starts reading and
+    stamp that, instead of a stat taken after it finished. See
+    :func:`events_watermark`'s "which instant does the offset describe" block —
+    the two directions are not symmetric, and only one of them is safe.
+
+    Carries ``captured_at`` so the instant travels WITH the offset: a position
+    handed across a multi-second build must not be re-dated at the far end, or
+    the envelope would claim a freshness the number does not have.
+    """
+
+    try:
+        offset = event_rotation.log_end_offset()
+    except OSError as exc:
+        return {
+            "event_offset": None,
+            "event_offset_error": _safe_text(f"{type(exc).__name__}: {exc}"),
+            "captured_at": now(),
+        }
+    return {"event_offset": offset, "captured_at": now()}
+
+
+def events_watermark(*, last_event_ts: Any = None, position: dict[str, Any] | None = None) -> dict[str, Any]:
     """Source-position marker for the append-only event log.
 
     ``event_offset`` is the log's total byte size — the cursor a streaming tailer
@@ -196,18 +221,48 @@ def events_watermark(*, last_event_ts: Any = None) -> dict[str, Any]:
     ``None`` + ``event_offset_error`` is the typed unknown (the ``cron``
     orphan-sweep shape): a reader that cannot act without a position has to say
     so and resync, rather than guess a plausible one.
+
+    **Which instant the offset describes, and why the two directions are not
+    symmetric.** A consumer reads this number as "the core beside it contains
+    everything up to here". For a producer that assembles its content over a
+    window rather than in an instant, that claim is only honest if the offset is
+    captured BEFORE the first section is read:
+
+    * offset captured BEFORE the content — the offset is a LOWER bound. Content
+      may be newer than the offset, so events after it replay as deltas the
+      client has already folded. Idempotent, and the direction
+      ``_full_core_batch_frames`` already takes (it drains the batch, then
+      builds).
+    * offset captured AFTER the content — the offset counts events the content
+      does NOT carry. The client folds the core, advances its watermark past
+      those events, and the stream resumes its tail from that offset, so they
+      are never replayed. Whatever they created is **gone from the client until
+      an unrelated full core happens by.**
+
+    Measured 2026-08-21: an agent dropped onto the office canvas while a
+    snapshot build was in flight vanished from Mission Control by exactly this
+    route, while every agent that predated the build survived.
+
+    ``build_snapshot``'s cache write-back already states this rule for its OWN
+    stat set, in as many words: "PRE-build, deliberately: a stat set taken after
+    the build would absorb any write that landed while the build ran, and the
+    next process would then serve a core missing that write as authoritative"
+    (see ``core_cache.write_back``). This producer took the opposite reading of
+    the same log for the same build. Pass ``position`` from
+    :func:`events_position` to capture the honest end.
     """
 
-    try:
-        offset = event_rotation.log_end_offset()
-    except OSError as exc:
+    captured = dict(position) if position is not None else events_position()
+    offset = captured.get("event_offset")
+    captured_at = captured.get("captured_at")
+    if offset is None:
         return {
             "event_offset": None,
-            "event_offset_error": _safe_text(f"{type(exc).__name__}: {exc}"),
+            "event_offset_error": captured.get("event_offset_error"),
             "last_event_ts": last_event_ts,
-            "captured_at": now(),
+            "captured_at": captured_at,
         }
-    return {"event_offset": offset, "last_event_ts": last_event_ts, "captured_at": now()}
+    return {"event_offset": offset, "last_event_ts": last_event_ts, "captured_at": captured_at}
 
 
 def _safe_text(value: Any) -> str | None:

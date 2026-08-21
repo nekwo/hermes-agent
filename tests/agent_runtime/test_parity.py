@@ -287,3 +287,73 @@ def test_parity_envelope_warns_when_the_frame_has_no_source_position(
     assert snapshot["parity"]["watermark"]["event_offset"] is None
     detail = next(w["detail"] for w in warnings if w["code"] == "event_offset_unknown")
     assert "resync" in detail
+
+
+def test_the_parity_watermark_does_not_count_events_appended_during_the_build(
+    isolate_agent_runtime_root, monkeypatch
+):
+    """The offset is captured BEFORE the first section is read, so it is a LOWER
+    bound on what the core carries.
+
+    THE DEFECT THIS NAMES (measured 2026-08-21). The offset used to be stat'd
+    inside ``_parity_envelope``, at the END of a multi-second build whose content
+    was read at the start. An operator who dropped a QA agent onto the office
+    canvas while a build was in flight got a core that COUNTED the agent's
+    creation events in its offset but did not CARRY the agent in its content. The
+    launcher folded it, advanced its watermark past those events, and the stream
+    resumed its tail from that offset -- so they were never replayed and the
+    agent vanished from Mission Control. Every agent that predated the build
+    survived, which is the asymmetry that identified this as the producer's half.
+
+    The append below stands in for that drop: it lands strictly between
+    build-start and the watermark stamp. The post-build reading counted it; the
+    pre-build reading must not.
+    """
+
+    import pytest
+    from hermes_time import now
+
+    from agent_runtime import snapshot as snapshot_mod
+    from agent_runtime.events import EventLog
+    from agent_runtime.models import Event
+    from agent_runtime.parity import events_position
+
+    log = EventLog()
+    log.append(Event(ts=now(), type="persona_instance.created", task_id=None, run_id=None, persona_id="qa"))
+    before = events_position()["event_offset"]
+    assert before is not None and before > 0
+
+    appended: dict[str, int] = {}
+
+    # SCOPED, never `monkeypatch.undo()` — that drops the SHARED stack, taking
+    # tests/conftest.py's autouse root/credential pins with it and running the
+    # rest of the body against the operator's live .hermes (the 2026-08-17 EG-0.1
+    # leak the conftest witness now catches).
+    with pytest.MonkeyPatch.context() as patched:
+        original = snapshot_mod._parity_envelope
+
+        def _append_then_stamp(data, **kwargs):
+            # Mid-build write: the agent the operator just dropped.
+            EventLog().append(
+                Event(ts=now(), type="office.actor.upserted", task_id=None, run_id=None, persona_id="qa")
+            )
+            appended["after"] = events_position()["event_offset"]
+            return original(data, **kwargs)
+
+        patched.setattr(snapshot_mod, "_parity_envelope", _append_then_stamp)
+
+        offset = build_snapshot()["parity"]["watermark"]["event_offset"]
+
+    assert appended["after"] > before, "the fixture's mid-build append must move the log"
+    assert offset == before, (
+        "the parity watermark counted an event appended DURING the build "
+        f"(stamped {offset}, log was {before} when the build started, "
+        f"{appended['after']} when it ended). A client that folds this core "
+        "advances past that event and never replays it."
+    )
+
+    # NARROWED, NOT DISABLED. The pre-build capture is still a LIVE reading: a
+    # build that starts after that append reports the GROWN offset. A watermark
+    # that had merely been pinned (or frozen at a first reading) would satisfy
+    # the assertion above and fail this one.
+    assert build_snapshot()["parity"]["watermark"]["event_offset"] == appended["after"]

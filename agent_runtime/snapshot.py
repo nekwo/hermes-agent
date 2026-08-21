@@ -52,7 +52,7 @@ from .persona_instance_identity import (
     identity_aliases_for_rows,
 )
 from .persona_lifecycle import is_runtime_persona
-from .parity import PARITY_ENVELOPE_VERSION, ProjectionAccountant, events_watermark
+from .parity import PARITY_ENVELOPE_VERSION, ProjectionAccountant, events_position, events_watermark
 from .resolution import resolution_payload, resolve_runtime, runtime_resolution_scope, suspect_default_root
 from .personas import effective_toolsets
 from .prompt_observability import _SkillObservabilityResolver, snapshot_prompt_observability
@@ -673,6 +673,15 @@ def _build_snapshot_in_runtime_scope(
     session_db,
 ) -> dict:
     _build_started = time.perf_counter()
+    # THE SOURCE POSITION IS CAPTURED HERE, BEFORE THE FIRST SECTION IS READ —
+    # not in ``_parity_envelope`` at the end of the build. Every section below
+    # is read after this stat, so the offset is a LOWER bound on what the core
+    # carries: anything appended during the build is newer than the offset and
+    # replays to the client as a delta. The end-of-build reading this replaces
+    # made the opposite, unrecoverable claim — see ``parity.events_watermark``'s
+    # "which instant the offset describes" block for the measured 2026-08-21
+    # failure (an agent dropped mid-build vanished from every connected client).
+    _build_start_position = events_position()
     _sections_ms: dict[str, int] = {}
     agent_store = agent_store or AgentStore()
     # A snapshot calls for_task/for_session/tail dozens of times on the same log;
@@ -969,6 +978,7 @@ def _build_snapshot_in_runtime_scope(
     data["parity"] = _parity_envelope(
         data,
         build_started=_build_started,
+        build_start_position=_build_start_position,
         last_event=recent_events[-1] if recent_events else None,
         recent_events=recent_events,
         completeness=completeness,
@@ -981,7 +991,7 @@ def _build_snapshot_in_runtime_scope(
     return data
 
 
-def _parity_envelope(data, *, build_started, last_event, completeness, drop_samples, recent_events=None, sections_ms=None):
+def _parity_envelope(data, *, build_started, last_event, completeness, drop_samples, recent_events=None, sections_ms=None, build_start_position=None):
     """The S0 observability envelope: provenance + completeness + parity warnings.
 
     Additive and self-describing — turns the snapshot's silent drops into reported
@@ -990,7 +1000,7 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
     """
 
     last_ts = getattr(last_event, "ts", None) if last_event is not None else None
-    watermark = events_watermark(last_event_ts=last_ts)
+    watermark = events_watermark(last_event_ts=last_ts, position=build_start_position)
     resolution = resolve_runtime()
     cfg = load_agent_runtime_config()
     warnings = _parity_warnings(data)
