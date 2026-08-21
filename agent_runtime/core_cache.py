@@ -185,8 +185,9 @@ same fact. There is exactly one: the snapshot's own ``parity`` envelope, which
 | ``snapshot_core_cache core_source=rebuilt`` (INFO, ``_log_demote``) | the snapshot payload, PARTIALLY | ``parity.core_source == "rebuilt"`` carries THAT the cache was demoted; the ``reason=`` never leaves this logger, and ``CoreDecision.reason`` is read by no caller today. So a field census of WHY a cache demoted has exactly one source: this line. Reasons ``unreadable`` ``core_digest_mismatch`` ``fingerprint_unavailable`` ``fingerprint_mismatch`` ``build_stamp_unknown`` ``build_stamp_mismatch`` ``contract_mismatch`` ``runtime_root_mismatch`` ``home_mismatch``. **CENSUS RULE (MC-2): ``home_mismatch`` is not an ordinary miss.** The other reasons say the STORE moved, the install changed, or the pair is unbound — all facts about the thing being cached. This one says the persisted pair was keyed under a different Hermes home than the reading process resolved, i.e. the two runs asked different QUESTIONS, and it is emitted INSTEAD of ``fingerprint_mismatch`` so the distinction is countable rather than inferred. On a multi-home install (an operator who really does run two roots) it is ordinary. On a SINGLE-PROFILE operator boot it is evidence that a persona scope was live while a build stat'd — the capture in ``core_cache.resolved_fingerprint_home`` was taken too late — which is a defect to go fix, not noise to tune out. A pair carrying no ``sidecar.fingerprint_home`` at all (every one written before MC-2) is skipped rather than demoted, so this reason can never fire for an install that simply predates the field. ``absent`` is deliberately NOT logged (the ordinary cold start would print a line on every build in every process), so its only trace is the ABSENCE of a line and a census must not read "no demote line" as "no demote". **CENSUS RULE (MC-3): ``fingerprint_mismatch`` ALONE grows a tail**, and the tail is ``changed=`` then ``diff=`` LAST (paths may contain spaces, so nothing can be field-parsed after it; the tail is additive, so an existing ``reason=`` grep is unaffected). No other reason carries one, deliberately: a diff on a ``build_stamp_mismatch`` would name every file the operator's upgrade touched and read as store churn. **The scope is ``last_pair`` BY CONSTRUCTION and that caveat is the row's most important sentence:** a demote diff is the delta since the LAST WRITE-BACK, so on a busy store it legitimately names files that are simply moving, and the receipt is TRUE without naming a defect. It is self-perturbation evidence — the A1-b/A2 class worth acting on — ONLY when the named paths are ones the runtime itself writes (``dispatch_delivery_drain.json``, ``serve_socket.owner.json``, ``state.db-wal``, ``serve_socket.lock``); when they are store paths the operator's own writes touched, the miss is legitimate and the cache is working as designed. An arm that could not compute the diff says so in its own words rather than emitting an empty list, which would read as "we looked and nothing moved": ``diff_scope=none changed=0 diff_reason=`` ``no_entries`` (nothing persisted yet, or an install predating MC-3) / ``entries_unbound`` (the entries file in the live generation is not the one that write-back put there — MCF-21 made a torn trio unrepresentable, so this now reads as tampering or corruption rather than as a failed diagnostic write) / ``digest_without_entry_delta`` (the digests disagreed and no triple did), then ``diff=diff_unavailable`` |
 | ``snapshot_core_cache_write ok=true`` (INFO) | none | ``inputs=`` ``fingerprint=`` ``offset=`` |
 | ``snapshot_core_cache_write ok=false`` (INFO/WARNING) | none | reasons ``serialize`` ``build_stamp_unknown`` ``fingerprint_unavailable`` ``io``. **COLLISION:** ``build_stamp_unknown`` and ``fingerprint_unavailable`` are ALSO demote reasons on the row above. Grep the family token with them, never the reason alone |
-| ``snapshot_core_shadow ok=true`` (INFO) | none | ``caller=`` ``divergence=none`` — the shadow build agreed with the cache |
-| ``snapshot_core_shadow ok=false`` (WARNING) | none | ``caller=`` ``reason=build`` — the shadow build itself raised |
+| ``snapshot_core_shadow ok=true`` (INFO) | none | ``caller=`` ``divergence=none`` — the shadow build agreed with the cache. **CENSUS RULE (MCF-Q1): this line ALSO closes the armed window**, exactly as the divergence row below does. It used to be the one full build in the process that changed nothing, and that is what made the memo's boot bound vacuous on a cache-hit boot; counting this line is counting boots whose cache was confirmed, never boots that kept serving it |
+| ``snapshot_core_shadow ok=false`` (WARNING) | none | ``caller=`` ``reason=build`` — the shadow build itself raised. Closes the armed window too: a validation that could not run is not a licence to keep serving the core it failed to validate |
+| ``snapshot_core_cache_lane_closed`` (WARNING) | none | ``caller=`` ``reason=`` then a free-form detail span LAST. One reason today, ``core_behind_frame``, whose detail is ``core_offset=`` ``frame_offset=``. **CENSUS RULE (MCF-Q1): this line is not a cache miss and must not be counted with the demotes.** A demote is the fingerprint deciding a persisted pair is not current; this is a CONSUMER reporting that a core the lane already served reaches an earlier offset than the frame about to carry it — the "authoritative-for-an-offset-it-predates" shape that erased a just-created agent from Mission Control on 2026-08-21. Its presence means the lane was still armed when a store change raced it, which is expected only inside a boot's shadow-validation window; a nonzero count OUTSIDE that window says the window is not closing and is worth acting on |
 | ``snapshot_core_shadow_divergence`` (WARNING) | none | ``caller=`` ``section=`` (the first section that disagreed). Its own family token rather than a field on the row above, because retiring the shadow lane is keyed on counting exactly this |
 | ``snapshot_core_shadow adopt failed`` (WARNING) | none | **NO EVENT TOKEN — the one uncountable line in this lane.** It is prose after the family token, so a census can only grep the sentence. Named here rather than quietly renamed: the rename is a one-line change with a consumer question attached, and this row is the record that it is owed |
 
@@ -2670,7 +2671,14 @@ _shadow_done = False
 #: bound that, and they are the reason this is sound rather than merely cheap:
 #:
 #: 1. the window is a BOOT — it ends at the first completed full build of the
-#:    process, which is the same instant the lane closes;
+#:    process, which is the same instant the lane closes. **That bound is only
+#:    true because every full build closes the lane, INCLUDING the shadow
+#:    validation's** (:func:`shadow_validate`). While only a DIVERGENT shadow
+#:    closed it, this clause was vacuous on precisely the boots this memo
+#:    optimizes — a cache-HIT boot completes no build through ``build_snapshot``,
+#:    so the window never ended and the memo answered every later build in the
+#:    process with the boot-time core. See :func:`shadow_validate` for the
+#:    incident and the numbers;
 #: 2. the askers were already disagreeing, which is worse. Today rider 1 can be
 #:    served the cache while rider 2 walks, misses and pays a full build, on one
 #:    store, in one process, seconds apart — the divergence the 2026-08-18
@@ -2825,6 +2833,53 @@ def note_full_build_completed() -> None:
 
     if getattr(_LANE, "shadow", False):
         return
+    global _lane_armed
+    with _lane_lock:
+        _lane_armed = False
+    _drop_consult_memo()
+
+
+#: The one reason :func:`close_cache_lane` is called with today: a core this
+#: lane served reaches an offset EARLIER than the one a frame was about to stamp
+#: it with. Its own constant so the channel table can name it and a census can
+#: count it, rather than a sentence assembled at the call site.
+REFUSAL_CORE_BEHIND_FRAME = "core_behind_frame"
+
+
+def close_cache_lane(*, reason: str, caller: str, detail: str = "") -> None:
+    """Stop serving the persisted core in this process, with a reason on the log.
+
+    :func:`note_full_build_completed` says "this process now owns its own truth".
+    This says something different and rarer: **a core this lane served has been
+    shown to be unusable by the consumer that asked for it**, so the lane stops,
+    whatever the fingerprint thinks. It exists for exactly one caller — the
+    stream's full-core batch lane, which is the one place that holds a core AND
+    the offset that core is about to be stamped with, and can therefore see a
+    content-vs-position violation the cache cannot see from the inside.
+
+    Not a second validity authority (the module header's standing rule): nothing
+    here decides that a persisted pair MATCHES. It can only refuse, and only
+    after a core has already been served and found wanting.
+
+    Idempotent, and the receipt is emitted whether or not the lane was still
+    armed — "we asked for this to stop" is the fact worth reading, and gating the
+    line on the lane's state would make the second of two racing frames silent.
+
+    ``reason`` is a TYPED token, and ``detail`` carries the numbers behind it, so
+    the line is countable by family+reason exactly like every other receipt on
+    this logger (C22). Free text in the reason field would put a fourth
+    vocabulary on one logger, which is the defect the channel table exists to
+    have retired.
+    """
+
+    logger.warning(
+        "snapshot_core_cache_lane_closed caller=%s reason=%s %s — a served core "
+        "could not answer for the offset it was about to be stamped with; this "
+        "process will rebuild from here.",
+        caller,
+        reason,
+        detail or "-",
+    )
     global _lane_armed
     with _lane_lock:
         _lane_armed = False
@@ -3124,6 +3179,53 @@ def shadow_validate(cached: dict, *, caller: str, build: Callable[[], dict], ado
 
     Retirement is receipts-based and is NOT this stage's call: zero divergence
     receipts across the agreed window (TC-3's shape).
+
+    **THE WINDOW CLOSES HERE, ON EVERY VERDICT (MCF-Q1).** This build IS the
+    process's own full build — the one the lane's whole docstring says the armed
+    window ends at. It was excluded from that rule while only the DIVERGENT
+    verdict closed the lane, and the exclusion made the memo's stated safety
+    bound ("the window is a BOOT — it ends at the first completed full build")
+    vacuously false on exactly the boots the memo optimizes: on a cache-HIT boot
+    no build ever completes through :func:`agent_runtime.snapshot.build_snapshot`,
+    so nothing ever called :func:`note_full_build_completed` and every later
+    ``build_snapshot()`` in that serve process was answered with the boot-time
+    core — for the rest of the process's life. Measured on the operator's runtime
+    2026-08-21: a second QA agent dropped onto the canvas at 15:33 was erased by
+    four ``role=cache reason=demote`` frames stamped 89,849,656 / 89,849,871 /
+    89,851,071 / 89,851,462, every one of them carrying a core whose OWN
+    ``offset=89843335`` the ``core_source=cache`` receipt prints beside them.
+
+    **WHAT TODAY'S CONFIG CONTENT-KEY FIX DID AND DID NOT DO.** It did not arm
+    this trap; the trap was already live. The same log carries the same shape on
+    2026-08-20 — a cache hit at ``offset=89567980`` at 18:30:05, then
+    ``reason=demote role=cache offset=89568195`` at 18:30:11, and the pair again
+    at 18:38 — a day before ``2f98eef3ee``. What that commit changed is the
+    VERDICT. Those 2026-08-20 boots ended in ``snapshot_core_shadow_divergence
+    section=parity.event_log_bytes`` about ten seconds in, and a divergence
+    already closed the lane, so the exposure was ~10 s per boot and an erasing
+    frame had to land inside it. With the flapping input content-keyed the shadow
+    now says ``ok=true`` (15:24:11, 15:25:22) — and an agreeing verdict closed
+    nothing, so the window went from ten seconds to the life of the process. The
+    log only reaches back to 2026-08-20 10:56, so the honest bound is "at least a
+    day older than the report, and structurally as old as the lane (EG-3.1,
+    2026-08-17)".
+
+    That history is also why this is not the whole fix. Closing the window on
+    agreement retires the 2026-08-21 shape; the 2026-08-20 shape landed INSIDE a
+    window that was going to close anyway, and only the frame-level guard in
+    ``stream._full_core_batch_frames`` refuses that one — the frame-level half of
+    this invariant, and the reason both halves shipped together.
+
+    Closing here costs the boot NOTHING and that is why it is the right place:
+    the riders this cache exists for (prewarm, hydrate, hub, cli) all arrive
+    within about a second of each other and are answered from the shared consult
+    long before this background build finishes (measured 6.5–7.6 s). What ends is
+    the part that was never a saving — serving a boot-time core to builds issued
+    minutes later.
+
+    An ok=true verdict closes it, a divergence closes it, and a build that RAISED
+    closes it too: a validation that could not run is not a licence to keep
+    serving the thing it failed to validate.
     """
 
     try:
@@ -3131,10 +3233,12 @@ def shadow_validate(cached: dict, *, caller: str, build: Callable[[], dict], ado
             rebuilt = build()
     except Exception:
         logger.warning("snapshot_core_shadow ok=false caller=%s reason=build", caller, exc_info=True)
+        note_full_build_completed()
         return None
     section = compare_cores(cached, rebuilt)
     if section is None:
         logger.info("snapshot_core_shadow ok=true caller=%s divergence=none", caller)
+        note_full_build_completed()
         return None
     # ADOPTION, in the order that matters: the divergent copy stops being
     # servable to the NEXT process first (the write-back), then this process

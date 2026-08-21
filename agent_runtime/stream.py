@@ -597,6 +597,33 @@ def _build_with_liveness(
             next_heartbeat = current + heartbeat_interval
 
 
+def _core_event_offset(snapshot: dict[str, Any] | None) -> int | None:
+    """The offset a CORE says its own content reaches, or ``None`` if unknown.
+
+    The core's intrinsic position, not the frame's: ``parity.watermark.
+    event_offset`` is captured at the instant the build starts reading (that is
+    what ``7204896978`` pinned), so it is a LOWER bound on the content — events
+    after it may already be folded in, but nothing before it can be missing.
+    That direction is what makes it usable as a floor below.
+
+    ``None`` for a core with no watermark (an unreadable log at build time, a
+    pair persisted before the field existed) and it must stay ``None`` rather
+    than ``0``: zero is a real position and would make every such core look
+    infinitely behind — see ``parity.events_watermark`` on the same trap.
+    """
+
+    if not isinstance(snapshot, dict):
+        return None
+    parity = snapshot.get("parity")
+    if not isinstance(parity, dict):
+        return None
+    watermark = parity.get("watermark")
+    if not isinstance(watermark, dict):
+        return None
+    value = watermark.get("event_offset")
+    return None if value is None else int(value)
+
+
 def _full_core_batch_frames(
     batch: list[tuple[int, Event]],
     *,
@@ -612,6 +639,32 @@ def _full_core_batch_frames(
     is what makes the emitted ``snapshot_build`` line actionable. ``caller``
     names WHO is paying, which this function likewise cannot re-derive: the same
     generator serves the serve hub and a terminal.
+
+    **THE CORE MUST REACH THE OFFSET IT IS ABOUT TO BE STAMPED WITH (MCF-Q1).**
+    This lane is the designated CARRIER of everything the patch lane cannot
+    express (``patch_coverage``: "The demote to a full core is what carries
+    it"), and that design assumes the core it demotes to is FRESH. When it is
+    not, the frame is the worst shape this producer can emit: a ``delta`` at an
+    offset strictly ahead of the client's, whose core the launcher applies
+    WHOLESALE — so a section present only via folded patches (a persona instance
+    dragged onto the canvas seconds ago) is replaced away by the older core's
+    complete copy of that section, while everything that predates the core
+    survives. That asymmetry is the 2026-08-21 "the new agent disappears, the old
+    one does not" report.
+
+    The producer of a stale core here is the boot cache lane, and closing that
+    lane's window correctly (``core_cache.shadow_validate``) is the root fix — but
+    it is NOT sufficient, which is why this guard is not belt-and-braces. The
+    operator's log shows the same shape on 2026-08-20 at 18:30:11 and 18:38:43,
+    where the boot's shadow validation DIVERGED and closed the window about ten
+    seconds in: the erasing frames landed inside a window that was going to close
+    anyway. Only a check at the frame — where the core and the offset it is about
+    to be stamped with are both in hand — refuses that one.
+
+    ``7204896978`` established this invariant INSIDE a build (an offset stamped
+    ahead of the content it was read from); this is the same invariant one layer
+    out, over a core the builder handed back rather than built. The check costs
+    two dict lookups and fires only when the invariant is already broken.
     """
 
     job = _SnapshotBuildJob(caller=caller)
@@ -628,6 +681,32 @@ def _full_core_batch_frames(
         raise job.error
     if job.snapshot is None:
         raise RuntimeError("snapshot build completed without a result")
+    last_offset = int(batch[-1][0] or 0)
+    core_offset = _core_event_offset(job.snapshot)
+    if core_offset is not None and core_offset < last_offset:
+        # The ONE reachable producer of this shape is the boot cache lane: a
+        # genuine build in this lane cannot be behind, because the batch was
+        # DRAINED before the build started and this job never rides an in-flight
+        # one (``accept_inflight`` is default-off here, deliberately). So the
+        # answer is to stop the lane and pay for the build once, rather than to
+        # ship a frame whose watermark is a lie about its own core.
+        core_cache.close_cache_lane(
+            reason=core_cache.REFUSAL_CORE_BEHIND_FRAME,
+            caller=caller,
+            detail=f"core_offset={core_offset} frame_offset={last_offset}",
+        )
+        job = _SnapshotBuildJob(caller=caller)
+        yield from _build_with_liveness(
+            job,
+            heartbeat_offset=base_offset,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
+        )
+        if request_cancelled():
+            return
+        if job.error is not None:
+            raise job.error
+        if job.snapshot is None:
+            raise RuntimeError("snapshot build completed without a result")
     frame = delta_batch_frame(batch, snapshot=job.snapshot)
     if job.elapsed_ms is not None:
         _log_snapshot_build(
