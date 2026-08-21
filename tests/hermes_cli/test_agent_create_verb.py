@@ -546,3 +546,49 @@ def test_the_verb_is_reachable_and_its_siblings_are_untouched():
 
     # The slot was free and stays free-standing: `agent list` still routes.
     assert root.parse_args(["harness", "agent", "list"]).func is harness._cmd_agent_list
+
+
+# ── the refused create's own claim about itself ──────────────────────────────
+
+
+def test_a_chat_store_refusal_backs_the_verbs_wrote_nothing_sentence(
+    qa_persona, seeded_workspace, capsys, monkeypatch
+):
+    """This verb PROMISES the reader a ``rolled_back`` field, so it must exist.
+
+    The refusal envelope this verb prints ends with "a refused create wrote
+    nothing unless it says rolled_back: false" — an instruction to read a key.
+    The ``chat_session_persist_failed`` arm shipped without one, so on the argv
+    lane the reader had to infer "wrote nothing" from an ABSENT field, while
+    the launcher's parser reads that same absence as the opposite ("not rolled
+    back", its deliberate fail-safe) and told the operator to go check the
+    runtime for an orphan. One payload, two readers, opposite conclusions, and
+    both of them guessing. Stamping the field makes the sentence checkable.
+    """
+
+    import hashlib
+
+    from agent_runtime import persona_chat_durability
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    def _no_store():
+        raise persona_chat_durability.PersonaChatPersistenceError("session_db_acquire")
+
+    monkeypatch.setattr(
+        persona_chat_durability, "default_persona_session_db", _no_store
+    )
+
+    code, data = _create(
+        capsys, "--idempotency-key", "verb-nostore", "--placement-id", "qa_nostore"
+    )
+
+    assert code == 1  # -32000
+    assert data["reason"] == "chat_session_persist_failed"
+    assert data["rolled_back"] is True
+    assert "rolled_back: false" in data["next_expected"]
+
+    # And the claim is true on disk: no roster row, no placement, no receipt.
+    assert PersonaInstanceStore().list_all() == []
+    assert _actors() == {}
+    digest = hashlib.sha256("verb-nostore".encode("utf-8")).hexdigest()
+    assert not paths.agent_create_reservation_path(digest).exists()

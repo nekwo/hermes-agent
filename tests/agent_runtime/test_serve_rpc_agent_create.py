@@ -760,3 +760,156 @@ def test_a_chat_store_that_cannot_persist_leaves_no_agent_behind(
     # failure row here asserts.
     assert "personainst_qa_agent_no_store" not in _instances()
     assert _actors() == {}
+
+
+# ── and the refusal must not INVENT wreckage either ──────────────────────────
+#
+# The rows above proved the refusal leaves nothing behind. What they did not
+# check is what the refusal SAYS about that, and the two had drifted apart.
+#
+# The launcher reads ``data.rolled_back`` off every error frame and defaults it
+# to `false` when absent — deliberately, as a fail-safe
+# (``mission_agent_create_rpc.dart``: "a missing or non-boolean field must read
+# as NOT rolled back, which is the safe direction"). This arm carried no such
+# key, so a -32000 with an unmapped reason fell through to ``handlerRaised``
+# with ``rolledBack: false``, and ``mission_control_page.dart`` told the
+# operator:
+#
+#   Could not place QA Agent — the placement was refused and the roster row
+#   could not be undone. Check the runtime.
+#
+# There is no roster row. There is no reservation receipt. There is nothing in
+# that runtime to check. A refusal that sends an operator hunting an orphan
+# that was never minted is its own defect, and it is exactly as expensive as
+# the phantom chat root these rows were added for.
+
+
+def _refuse_the_chat_store(monkeypatch, operation: str = "session_db_acquire"):
+    """Make the operator chat store unacquirable, the way the live fault did."""
+
+    from agent_runtime import persona_chat_durability
+
+    def _no_store():
+        raise persona_chat_durability.PersonaChatPersistenceError(operation)
+
+    monkeypatch.setattr(
+        persona_chat_durability, "default_persona_session_db", _no_store
+    )
+
+
+def test_the_chat_store_refusal_says_nothing_survives_it(qa_persona, monkeypatch):
+    """The honest signal, in the vocabulary the client already branches on.
+
+    ``rolled_back`` is checked for the BOOLEAN ``True`` and not for mere
+    presence: the launcher compares ``== true`` rather than coercing, so a
+    string ``"true"`` or a ``1`` would decode as "not rolled back" and print
+    the orphan sentence again while looking correct from this side.
+    """
+
+    _refuse_the_chat_store(monkeypatch)
+    _seed_workspace()
+
+    data = _call(_params(placement_id="qa_agent_signal"))["error"]["data"]
+
+    assert data["reason"] == "chat_session_persist_failed"
+    assert data["rolled_back"] is True, (
+        "this refusal wrote nothing, but without rolled_back: true the launcher "
+        "tells the operator the roster row could not be undone and to go check "
+        "the runtime for an orphan that was never minted"
+    )
+
+
+def test_the_chat_store_refusal_spells_it_like_its_siblings(qa_persona):
+    """One vocabulary for "nothing survives", not two.
+
+    The compensated placement arm answers with this exact key and type. A
+    refusal that invented a second spelling (``nothing_written``, say) would be
+    just as true and just as useless: the client reads ``rolled_back`` and
+    nothing else.
+
+    The two arms are driven under SEPARATE monkeypatch scopes on purpose. With
+    one shared scope the chat-store refusal stays installed through the second
+    call, that call takes the persist arm too, and the comparison degenerates
+    into comparing this arm with itself — a parity witness that would pass no
+    matter how far the two arms drifted.
+    """
+
+    from agent_runtime.office_store import OfficeStore
+
+    _seed_workspace()
+
+    with pytest.MonkeyPatch.context() as patch:
+        _refuse_the_chat_store(patch)
+        persist = _call(_params(placement_id="qa_agent_vocab"))["error"]["data"]
+    assert persist["reason"] == "chat_session_persist_failed"
+
+    # The sibling: a placement that failed and WAS compensated. Its chat store
+    # is healthy, so it gets past the mint and fails where it means to.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            OfficeStore,
+            "upsert_actor",
+            lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("nope")),
+        )
+        compensated = _call(
+            _params(
+                placement_id="qa_agent_vocab_sibling", idempotency_key="gesture-sib"
+            )
+        )["error"]["data"]
+    assert compensated["reason"] == "placement_failed"
+
+    assert type(persist["rolled_back"]) is type(compensated["rolled_back"])
+    assert persist["rolled_back"] is compensated["rolled_back"] is True
+
+
+def test_the_chat_store_refusal_leaves_no_durable_trace_at_all(
+    qa_persona, monkeypatch
+):
+    """What the honest signal is a claim ABOUT, pinned independently of it.
+
+    ``rolled_back: true`` is only honest while this holds, so the two rows are
+    kept together: if a later change makes this arm write something — a roster
+    row, a placement, or a reservation receipt it then abandons — this fails
+    and the claim above has to be re-argued rather than silently becoming the
+    next false sentence the operator reads.
+    """
+
+    from agent_runtime import paths
+
+    _refuse_the_chat_store(monkeypatch)
+    _seed_workspace()
+
+    reply = _call(_params(placement_id="qa_agent_no_trace"))
+    assert reply["error"]["data"]["reason"] == "chat_session_persist_failed"
+
+    assert _instances() == {}
+    assert _actors() == {}
+    # Not merely "no receipt for this key": the reservation module's first
+    # durable write is ``mark_instance_minted``, which this arm is reached
+    # before, so the directory itself is never authored.
+    assert not paths.agent_create_reservations_dir().exists()
+    assert not paths.persona_instances_dir().exists()
+
+
+def test_the_chat_store_refusal_asks_for_a_retry_the_client_can_make(
+    qa_persona, monkeypatch
+):
+    """``next_expected`` has to be reachable from the only client on this lane.
+
+    It used to read "retry with the same idempotency_key". The launcher mints a
+    fresh micros-stamped key per gesture on purpose — a re-click must mint a
+    second agent — so that instruction was unreachable there, and it implied
+    the key carried state worth preserving. It carries none: this arm is
+    reached before the first durable write, so a same-key retry and a
+    fresh-key retry are the same operation.
+    """
+
+    _refuse_the_chat_store(monkeypatch)
+    _seed_workspace()
+
+    data = _call(_params(placement_id="qa_agent_next"))["error"]["data"]
+
+    assert data["next_expected"] == (
+        "restore canonical persona chat transcript storage and retry the "
+        "gesture; nothing was recorded under this idempotency_key"
+    )

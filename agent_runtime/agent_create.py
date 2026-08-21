@@ -815,9 +815,42 @@ def perform_agent_create(
                     # Same typed vocabulary as the argv open-chat lane's
                     # ``chat_session_persist_failed`` frame, so a launcher that
                     # already decodes that kind from ``mission-chat`` reads this
-                    # refusal too, and a retry with the SAME idempotency key is
-                    # the right next step: the reservation is still ``reserved``
-                    # and no write happened under it.
+                    # refusal too.
+                    #
+                    # ``rolled_back: True`` — and it is the LITERAL truth, not a
+                    # courtesy. Nothing was written under this key at all: this
+                    # arm is reached before ``mark_instance_minted``, which
+                    # ``reserve_agent_create`` names as "the first durable
+                    # write", so not even the reservation receipt exists (there
+                    # is no ``reserved`` state in that module; ``_VALID_STATES``
+                    # is instance_minted/done/rolled_back). Inventoried on a
+                    # throwaway store root: the only path this refusal leaves
+                    # behind is the empty ``locks/agent_creates/<digest>.lock``
+                    # every attempt takes, and there is no
+                    # ``persona_instances/`` directory, no office actor and no
+                    # reservation directory.
+                    #
+                    # Stamping it matters because the launcher's parser reads
+                    # ``data.rolled_back`` off EVERY error frame and defaults it
+                    # to ``false`` as a fail-safe
+                    # (``mission_agent_create_rpc.dart``). Without the key this
+                    # -32000 fell through to ``handlerRaised`` with
+                    # ``rolledBack: false``, and the operator was told "the
+                    # roster row could not be undone. Check the runtime." —
+                    # sent to look for wreckage that does not exist. Same
+                    # spelling as the sibling refusals
+                    # (:func:`compensate_failed_placement` and the
+                    # ``STATE_ROLLED_BACK`` replay arm above) because it is the
+                    # field a client branches on and a second vocabulary for
+                    # "nothing survives" is a field no client reads.
+                    #
+                    # ``next_expected`` does NOT ask for the same idempotency
+                    # key. It used to, and that was unreachable advice: the only
+                    # client on this lane mints a fresh micros-stamped key per
+                    # gesture, deliberately, so a re-click is a new agent. Since
+                    # no receipt was recorded under this key, same-key and
+                    # fresh-key retries are the SAME operation and the key
+                    # discipline the old sentence implied bought nothing.
                     from .mission_chat_outcome import ChatErrorKind
 
                     return _refused(
@@ -827,9 +860,11 @@ def perform_agent_create(
                             "reason": str(ChatErrorKind.CHAT_SESSION_PERSIST_FAILED),
                             "persistence_operation": exc.operation,
                             "placement_id": request.placement_id,
+                            "rolled_back": True,
                             "next_expected": (
                                 "restore canonical persona chat transcript storage "
-                                "and retry with the same idempotency_key"
+                                "and retry the gesture; nothing was recorded under "
+                                "this idempotency_key"
                             ),
                         },
                     )
