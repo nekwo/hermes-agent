@@ -21,6 +21,7 @@ import logging
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set
 
@@ -223,6 +224,61 @@ _check_fn_cache: Dict[Callable, tuple[float, bool]] = {}
 _check_fn_last_good: Dict[Callable, float] = {}
 _check_fn_cache_lock = threading.Lock()
 
+# ── probe-round accounting ────────────────────────────────────────────────
+#
+# A cold profile bootstrap sweeps these checks, and the sweep is expensive
+# enough to be a remedy candidate for chat-turn latency: the ``check_fn ...
+# returned False`` warnings below are the visible half of the bootstrap storm a
+# first-turn-per-profile chat pays for. Whether the sweep runs MORE THAN ONCE
+# per turn has only ever been read off repetition patterns in a shared,
+# pid-less ``agent.log`` — correlation, not proof, and no line carries a pid to
+# settle it. So the count is taken here, where the work happens.
+#
+# THREAD-LOCAL on purpose. ``harness serve`` runs concurrent chat turns in one
+# process; a module-global counter would attribute another turn's bootstrap to
+# whichever turn happened to sample around it. Agent construction runs on the
+# turn's own thread, so a thread-local delta across the construction window is
+# exactly "what this turn's init probed" and nothing else.
+#
+# A ROUND is one availability pass (``get_definitions``, or one
+# ``_toolset_has_exposable_tools`` call) in which at least one ``check_fn`` was
+# genuinely EXECUTED. A pass served entirely from the 30 s TTL cache costs
+# nothing and is not a round: counting it would inflate exactly the number the
+# remedy decision turns on.
+_probe_state = threading.local()
+
+
+def _note_check_fn_probe() -> None:
+    _probe_state.probes = int(getattr(_probe_state, "probes", 0)) + 1
+
+
+@contextmanager
+def _probe_round():
+    before = int(getattr(_probe_state, "probes", 0))
+    try:
+        yield
+    finally:
+        if int(getattr(_probe_state, "probes", 0)) > before:
+            _probe_state.rounds = int(getattr(_probe_state, "rounds", 0)) + 1
+
+
+def probe_rounds_this_thread() -> int:
+    """Rounds this THREAD has run since the process started.
+
+    A cumulative counter, never reset by the runtime: callers take the
+    difference across the window they care about. Resetting it here would make
+    two overlapping observers destroy each other's measurement.
+    """
+
+    return int(getattr(_probe_state, "rounds", 0))
+
+
+def reset_probe_rounds_for_tests() -> None:
+    """Zero this thread's probe accounting. Tests only."""
+
+    _probe_state.probes = 0
+    _probe_state.rounds = 0
+
 
 def _check_fn_cached(fn: Callable) -> bool:
     """Return bool(fn()), TTL-cached across calls.
@@ -241,6 +297,9 @@ def _check_fn_cached(fn: Callable) -> bool:
             if now - ts < _CHECK_FN_TTL_SECONDS:
                 return value
 
+    # Past the TTL cache: this call is about to do real work (subprocess
+    # probes, socket dials, SDK imports). That is what a "probe round" counts.
+    _note_check_fn_probe()
     raised = False
     try:
         value = bool(fn())
@@ -333,16 +392,17 @@ class ToolRegistry:
         must not be gated solely by the first registered ``check_fn``.
         """
         check_results: Dict[Callable, bool] = {}
-        for entry in entries:
-            if entry.toolset != toolset:
-                continue
-            if not entry.check_fn:
-                return True
-            if entry.check_fn not in check_results:
-                check_results[entry.check_fn] = _check_fn_cached(entry.check_fn)
-            if check_results[entry.check_fn]:
-                return True
-        return False
+        with _probe_round():
+            for entry in entries:
+                if entry.toolset != toolset:
+                    continue
+                if not entry.check_fn:
+                    return True
+                if entry.check_fn not in check_results:
+                    check_results[entry.check_fn] = _check_fn_cached(entry.check_fn)
+                if check_results[entry.check_fn]:
+                    return True
+            return False
 
     def get_entry(self, name: str) -> Optional[ToolEntry]:
         """Return a registered tool entry by name, or None."""
@@ -607,36 +667,37 @@ class ToolRegistry:
         # TTL clock.
         check_results: Dict[Callable, bool] = {}
         entries_by_name = {entry.name: entry for entry in self._snapshot_entries()}
-        for name in sorted(tool_names):
-            entry = entries_by_name.get(name)
-            if not entry:
-                continue
-            if entry.check_fn:
-                if entry.check_fn not in check_results:
-                    check_results[entry.check_fn] = _check_fn_cached(entry.check_fn)
-                if not check_results[entry.check_fn]:
-                    if not quiet:
-                        logger.debug("Tool %s unavailable (check failed)", name)
+        with _probe_round():
+            for name in sorted(tool_names):
+                entry = entries_by_name.get(name)
+                if not entry:
                     continue
-            # Ensure schema always has a "name" field — use entry.name as fallback
-            schema_with_name = {**entry.schema, "name": entry.name}
-            # Apply runtime-dynamic overrides (e.g. delegate_task description
-            # depends on current delegation.max_concurrent_children /
-            # max_spawn_depth). Caller side (model_tools.get_tool_definitions)
-            # already keys its memo on config.yaml mtime + size, so changes
-            # to delegation.* in config invalidate the cache automatically.
-            if entry.dynamic_schema_overrides is not None:
-                try:
-                    overrides = entry.dynamic_schema_overrides()
-                    if isinstance(overrides, dict):
-                        schema_with_name.update(overrides)
-                except Exception as exc:
-                    logger.warning(
-                        "dynamic_schema_overrides for tool %s raised %s; "
-                        "using static schema",
-                        name, exc,
-                    )
-            result.append({"type": "function", "function": schema_with_name})
+                if entry.check_fn:
+                    if entry.check_fn not in check_results:
+                        check_results[entry.check_fn] = _check_fn_cached(entry.check_fn)
+                    if not check_results[entry.check_fn]:
+                        if not quiet:
+                            logger.debug("Tool %s unavailable (check failed)", name)
+                        continue
+                # Ensure schema always has a "name" field — use entry.name as fallback
+                schema_with_name = {**entry.schema, "name": entry.name}
+                # Apply runtime-dynamic overrides (e.g. delegate_task description
+                # depends on current delegation.max_concurrent_children /
+                # max_spawn_depth). Caller side (model_tools.get_tool_definitions)
+                # already keys its memo on config.yaml mtime + size, so changes
+                # to delegation.* in config invalidate the cache automatically.
+                if entry.dynamic_schema_overrides is not None:
+                    try:
+                        overrides = entry.dynamic_schema_overrides()
+                        if isinstance(overrides, dict):
+                            schema_with_name.update(overrides)
+                    except Exception as exc:
+                        logger.warning(
+                            "dynamic_schema_overrides for tool %s raised %s; "
+                            "using static schema",
+                            name, exc,
+                        )
+                result.append({"type": "function", "function": schema_with_name})
         return result
 
     # ------------------------------------------------------------------

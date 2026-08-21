@@ -20,7 +20,7 @@ from hermes_cli.profiles import available_profile_template_summaries as availabl
 from hermes_time import now
 from utils import atomic_json_write
 
-from . import core_cache, paths
+from . import core_cache, paths, snapshot_build_ledger
 from .board_store import BoardStore
 from .office_store import OfficeStore
 from .config import load_agent_runtime_config, load_root_runtime_config
@@ -577,6 +577,12 @@ def build_snapshot(
             _BUILD_COALESCE.wait()
             state["waiters"] -= 1
     result = None
+    # Stage 4 attribution (chat-turn latency): the LEADER's span, on the same
+    # monotonic clock a chat turn anchors on, so "did a build overlap this
+    # turn?" is a counted fact instead of a log correlation. Only the leader —
+    # a rider paid a wait, not a build, and recording both would double every
+    # coalesced build. See ``agent_runtime.snapshot_build_ledger``.
+    build_span_started = time.monotonic()
     try:
         # PRE-build, deliberately: a stat set taken after the build would absorb
         # any write that landed while the build ran, and the next process would
@@ -630,6 +636,11 @@ def build_snapshot(
         core_cache.note_full_build_completed()
         return result
     finally:
+        # Recorded even when the build RAISED: it occupied this process for the
+        # span either way, and a turn that overlapped it paid the same price.
+        snapshot_build_ledger.record_build(
+            started=build_span_started, ended=time.monotonic()
+        )
         with _BUILD_COALESCE:
             state["running"] = False
             if result is not None:
