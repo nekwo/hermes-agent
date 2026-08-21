@@ -112,6 +112,11 @@ def test_a_pass_that_really_probes_counts_one_round_and_a_cached_pass_counts_non
         probes["n"] += 1
         return True
 
+    # A private registry instance and a closure nothing else holds: this row
+    # must not reach for ``invalidate_check_fn_cache()``, which would clear the
+    # TTL cache the WHOLE process shares and hand every later test in the run a
+    # cold re-probe of docker/playwright/sockets. The closure is unique, so its
+    # cache entry starts absent and is evicted by name below.
     reg = registry_module.ToolRegistry()
     reg.register(
         "phase_probe_tool",
@@ -120,24 +125,24 @@ def test_a_pass_that_really_probes_counts_one_round_and_a_cached_pass_counts_non
         lambda **kw: "ok",
         check_fn=_check,
     )
-    registry_module.invalidate_check_fn_cache()
-    registry_module.reset_probe_rounds_for_tests()
+    before = registry_module.probe_rounds_this_thread()
 
     reg.get_definitions({"phase_probe_tool"})
-    assert registry_module.probe_rounds_this_thread() == 1
+    assert registry_module.probe_rounds_this_thread() == before + 1
     assert probes["n"] == 1
 
     reg.get_definitions({"phase_probe_tool"})
-    assert registry_module.probe_rounds_this_thread() == 1, (
+    assert registry_module.probe_rounds_this_thread() == before + 1, (
         "a pass served entirely from the TTL cache did no probing and is not a round"
     )
     assert probes["n"] == 1
 
-    registry_module.invalidate_check_fn_cache()
+    registry_module._check_fn_cache.pop(_check, None)
     reg.get_definitions({"phase_probe_tool"})
-    assert registry_module.probe_rounds_this_thread() == 2
-    registry_module.invalidate_check_fn_cache()
-    registry_module.reset_probe_rounds_for_tests()
+    assert registry_module.probe_rounds_this_thread() == before + 2
+    assert probes["n"] == 2
+    registry_module._check_fn_cache.pop(_check, None)
+    registry_module._check_fn_last_good.pop(_check, None)
 
 
 def test_the_counter_is_cumulative_so_overlapping_observers_cannot_reset_each_other():

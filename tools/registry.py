@@ -273,13 +273,6 @@ def probe_rounds_this_thread() -> int:
     return int(getattr(_probe_state, "rounds", 0))
 
 
-def reset_probe_rounds_for_tests() -> None:
-    """Zero this thread's probe accounting. Tests only."""
-
-    _probe_state.probes = 0
-    _probe_state.rounds = 0
-
-
 def _check_fn_cached(fn: Callable) -> bool:
     """Return bool(fn()), TTL-cached across calls.
 
