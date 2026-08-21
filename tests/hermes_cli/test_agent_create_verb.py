@@ -592,3 +592,64 @@ def test_a_chat_store_refusal_backs_the_verbs_wrote_nothing_sentence(
     assert _actors() == {}
     digest = hashlib.sha256("verb-nostore".encode("utf-8")).hexdigest()
     assert not paths.agent_create_reservation_path(digest).exists()
+
+
+# ── the verb's own sentence, now redeemable on every arm ────────────────────
+#
+# This verb overwrites ``next_expected`` with one generic instruction:
+#
+#   fix the named field and re-run; a refused create wrote nothing unless it
+#   says rolled_back: false
+#
+# That is an instruction to READ A KEY, and until this lane it was answerable on
+# exactly one arm — every other refusal carried no ``rolled_back`` at all, so an
+# argv reader inferred "wrote nothing" from an absent field while the launcher's
+# parser read the same absence as the opposite (its deliberate fail-safe). One
+# payload, two readers, opposite conclusions, both guessing.
+#
+# The interesting half is that the sentence is now answerable in BOTH directions
+# from this lane: ``workspace_not_found`` says ``false``-is-wrong (nothing
+# survives) and ``create_lock_unavailable`` says exactly ``false`` (another
+# process owns this key and we cannot see what it wrote). A gate that only ever
+# saw ``true`` would have been satisfied by a constant.
+
+
+@pytest.mark.parametrize(
+    "arm,expected_rolled_back",
+    [("workspace_not_found", True), ("create_lock_unavailable", False)],
+)
+def test_the_verbs_rolled_back_sentence_is_answerable_both_ways(
+    qa_persona, seeded_workspace, capsys, monkeypatch, arm, expected_rolled_back
+):
+    from agent_runtime import agent_create_reservations
+    from agent_runtime.locks import HarnessLockUnavailable
+
+    if arm == "create_lock_unavailable":
+        monkeypatch.setattr(
+            agent_create_reservations,
+            "agent_create_lock",
+            lambda digest: (_ for _ in ()).throw(HarnessLockUnavailable("busy")),
+        )
+        code, data = _create(
+            capsys, "--idempotency-key", "verb-lock", "--placement-id", "qa_lock"
+        )
+        assert code == 4  # 4090
+    else:
+        code, data = _create(
+            capsys,
+            "--idempotency-key",
+            "verb-nows",
+            "--placement-id",
+            "qa_nows",
+            workspace="ws_never_authored",
+        )
+        assert code == 3  # 4001
+
+    assert data["reason"] == arm
+    assert data["rolled_back"] is expected_rolled_back
+    # The bool TYPE, for the reason the RPC-side rows spell out: the other
+    # reader of this payload compares ``== true`` in Dart, where ``1`` is not
+    # ``true``, and a value that satisfies a Python ``if`` would look correct
+    # from here while printing the orphan sentence over there.
+    assert type(data["rolled_back"]) is bool
+    assert "rolled_back: false" in data["next_expected"]

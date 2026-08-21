@@ -773,10 +773,36 @@ class PersonaInstanceStore:
         (store mutations always emit an event). Returns the repair record, or
         ``None`` when the instance never pointed at that session.
 
-        Every unbind — the operator ``persona chat delete`` verb and the
-        ``repair_missing_chat_session_bindings`` reconcile sweep — goes through
-        here so a stale binding can never be cleared silently by one path and
-        loudly by another.
+        Every STALE-binding clear — the operator ``persona chat delete`` verb and
+        the ``repair_missing_chat_session_bindings`` reconcile sweep — goes
+        through here, so a binding whose session is gone can never be reaped
+        silently by one path and loudly by another.
+
+        Why that claim is narrower than it used to be
+        ---------------------------------------------
+        It used to say "every unbind", and since ``b912cce88a`` that was false:
+        :meth:`rollback_chat_root_bind` also nulls chat pointers, and it emits no
+        ``chat_binding_cleared``. The sentence was corrected rather than made true
+        by routing the retraction through here, because the retraction cannot
+        become a call to this method without losing three properties it needs:
+
+        * **It restores, it does not clear.** A retraction puts the row's PREVIOUS
+          pointer back (a later mint failing must not orphan the conversation the
+          instance already had). This method only ever nulls, and only the fields
+          that match one ``session_id``.
+        * **It must not raise.** It runs inside the failure handler of a lane that
+          already holds a typed error; this method lets ``update`` propagate, and a
+          rollback that masks its caller's cause is worse than the litter it sweeps.
+        * **It must move the read model.** The retraction emits
+          ``emit_persona_instance_patch`` so connected launchers drop the phantom
+          pointer. This method emits the domain event ONLY — ``_event`` appends to
+          the log and does not produce a ``state.patched`` pair — so routing
+          through it would trade a false docstring for a stale client.
+
+        The two paths are therefore both legitimate and both accounted for, and
+        the count is fenced: ``test_persona_assignments.py`` walks this module's
+        AST and fails if a THIRD function ever writes ``default_chat_session_id``
+        or ``session_id`` on an instance.
         """
 
         target = safe_assignment_text(session_id, limit=200)
@@ -1909,7 +1935,13 @@ class PersonaInstanceStore:
         is moved WITH the authority: ``PersonaInstance.__post_init__``
         re-derives ``default_chat_session_id`` from a ``persona_chat_*``
         ``session_id``, so clearing only the authority would resurrect the
-        phantom on the next read.
+        phantom on the next read. ``mode`` moves with them for the same reason —
+        ``open_chat`` stamps ``chat`` as part of the bind, and a row left in that
+        mode with no chat pointer is the very half-state
+        :meth:`clear_chat_session_binding` demotes.
+
+        Deliberately NOT routed through :meth:`clear_chat_session_binding`; see
+        the "why the two paths stay separate" note in that method's docstring.
 
         Retracts on IDENTITY, never on mere presence: if the live pointer no
         longer names *root_session_id*, some other lane bound this instance
@@ -1937,6 +1969,34 @@ class PersonaInstanceStore:
         restored_legacy = getattr(previous, "session_id", None) if previous else None
         live.default_chat_session_id = restored_default
         live.session_id = restored_legacy
+        # ``mode`` is restored WITH the pointers, because ``open_chat`` sets it
+        # (``instance.mode = "chat"``) in the same breath as the bind this is
+        # retracting. Reverting the pointers alone left the row in precisely the
+        # state :meth:`clear_chat_session_binding` exists to demote away from —
+        # ``mode == "chat"`` with no chat to be in — and that is not a cosmetic
+        # inconsistency: ``persona_instance_summary`` ships ``mode`` on the wire,
+        # the launcher decodes ``chat`` to ``MissionAgentInstanceMode.chatHistory``
+        # (``mission_agent_instance.dart``), and its persona-best election ranks
+        # ``chatHistory`` ABOVE ``configuredIdle``
+        # (``mission_instance_resolution.dart``). A retracted fresh mint would
+        # out-rank a genuinely idle sibling on the strength of a conversation
+        # that was never written.
+        #
+        # ``previous.mode`` rather than a flat demotion, because this method
+        # restores — it does not clear. A row that already had a working thread
+        # keeps ``chat`` alongside the pointer being put back; a row the bind
+        # CREATED has no previous mode, so it takes the store default
+        # (``PersonaInstance.mode = "configured"``), which is the same value
+        # ``clear_chat_session_binding`` demotes to.
+        #
+        # It rides the SAME staleness contract the pointers already ride, and no
+        # stronger one: the identity guard above proves nothing re-bound the
+        # POINTER since ``previous`` was read, not that nothing touched ``mode``.
+        # A concurrent mode-only write inside that window would be reverted —
+        # which is exactly what already happens to a concurrent pointer write
+        # that kept our root, so this is the method's existing posture applied to
+        # the field the bind set, not a new risk introduced beside it.
+        live.mode = getattr(previous, "mode", None) or "configured"
         try:
             updated = self.update(live)
         except Exception:
@@ -1953,7 +2013,7 @@ class PersonaInstanceStore:
         emit_persona_instance_patch(
             self.event_log,
             updated,
-            ["default_chat_session_id", "session_id", "updated_at"],
+            ["mode", "session_id", "default_chat_session_id", "updated_at"],
         )
         return True
 

@@ -4957,3 +4957,109 @@ def test_retire_cli_coordinator_operator_placed_needs_confirm(monkeypatch, capsy
     assert payload["status"] == "needs_operator_confirm"
 
 
+
+
+# ── how many paths may move an instance's chat pointers ─────────────────────
+#
+# ``clear_chat_session_binding`` used to claim "every unbind … goes through
+# here so a stale binding can never be cleared silently by one path and loudly
+# by another". Since ``b912cce88a`` that was false: ``rollback_chat_root_bind``
+# nulls the same two fields and emits no ``chat_binding_cleared``.
+#
+# The claim was corrected rather than made true, because the retraction cannot
+# route through the clear without losing three properties it needs (restores
+# instead of clearing, must not raise inside a failure handler, must emit a
+# ``state.patched`` the clear does not emit) — the argument is spelled out in
+# ``clear_chat_session_binding``'s docstring.
+#
+# A corrected sentence is only worth what enforces it, so this is the fence: a
+# prose claim about "two paths" is checkable only if the count is checked. It
+# reads the module's AST rather than grepping, so a rename or a reformat does
+# not silently widen it.
+
+
+def _chat_pointer_writers() -> dict[str, set[str]]:
+    """Every function in ``persona_assignments`` that assigns a chat pointer.
+
+    Maps function name -> the pointer fields it writes. Attribute targets only
+    (``<something>.default_chat_session_id = …``): the local rebinds inside the
+    module's own helpers are not writes to a row.
+    """
+
+    import ast
+    import inspect
+
+    from agent_runtime import persona_assignments
+
+    pointers = {"default_chat_session_id", "session_id"}
+    tree = ast.parse(inspect.getsource(persona_assignments))
+    writers: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for inner in ast.walk(node):
+            # ``AnnAssign``/``AugAssign`` too, not just ``Assign``: a gate that
+            # only recognises one assignment node is a gate a third path walks
+            # past by writing ``instance.session_id: str | None = None``.
+            if isinstance(inner, ast.Assign):
+                targets = list(inner.targets)
+            elif isinstance(inner, (ast.AnnAssign, ast.AugAssign)):
+                targets = [inner.target]
+            else:
+                continue
+            for target in targets:
+                if isinstance(target, ast.Attribute) and target.attr in pointers:
+                    writers.setdefault(node.name, set()).add(target.attr)
+    return writers
+
+
+def test_only_two_paths_may_move_an_instances_chat_pointers():
+    """One bind, one clear, one restore — and the module says which is which.
+
+    If a THIRD unbind path appears, this fails and names it. That is the whole
+    point: the docstring in ``clear_chat_session_binding`` now enumerates the
+    exception instead of denying it, and an enumeration nobody counts drifts
+    back into the sentence it replaced within one commit.
+
+    A new writer is not automatically wrong — it is unreviewed. The cure is to
+    decide whether it belongs behind ``clear_chat_session_binding`` (a stale
+    binding being reaped) or beside ``rollback_chat_root_bind`` (a bind this
+    same lane made being retracted), say so in that docstring, and add it here.
+    """
+
+    assert _chat_pointer_writers() == {
+        # THE bind. Writes both pointers to the root it is opening.
+        "open_chat": {"default_chat_session_id", "session_id"},
+        # THE clear: nulls only pointers matching one session id, demotes the
+        # mode, and emits ``persona_instance.chat_binding_cleared``.
+        "clear_chat_session_binding": {"default_chat_session_id", "session_id"},
+        # THE retraction: restores the pre-bind values (which may be ``None``),
+        # keyed on the root identity it bound, and never raises.
+        "rollback_chat_root_bind": {"default_chat_session_id", "session_id"},
+    }
+
+
+def test_the_two_unbind_paths_are_told_apart_by_what_they_emit():
+    """The reason they are allowed to stay separate, pinned as behaviour.
+
+    ``clear_chat_session_binding`` emits the domain event and NO
+    ``state.patched`` (``_event`` only appends to the log). The retraction emits
+    ``emit_persona_instance_patch`` and no domain event. Routing either through
+    the other silently changes what every connected launcher receives, so the
+    difference is asserted here rather than left as an assurance in a comment.
+    """
+
+    import inspect
+
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    clear = inspect.getsource(PersonaInstanceStore.clear_chat_session_binding)
+    retract = inspect.getsource(PersonaInstanceStore.rollback_chat_root_bind)
+
+    body_of = lambda src: src.split('"""', 2)[-1]  # noqa: E731 - drop the docstring
+
+    assert "chat_binding_cleared" in body_of(clear)
+    assert "emit_persona_instance_patch" not in body_of(clear)
+
+    assert "emit_persona_instance_patch" in body_of(retract)
+    assert "chat_binding_cleared" not in body_of(retract)

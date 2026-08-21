@@ -532,6 +532,64 @@ ERR_HANDLER_FAILED = -32000
 ERR_NOT_FOUND = 4001
 ERR_CONFLICT = 4090
 
+# ── ``data.phase``: WHICH half of the two-write sequence a refusal failed in ──
+#
+# The launcher's ``MissionAgentCreateFault.phase`` documents exactly three
+# values — ``instance | placement | null`` — and its parser is
+# ``dataMap?['phase']?.toString()``, i.e. it accepts any string and renders it
+# verbatim into the drop log (``mission_control_page.dart``:
+# ``phase=${fault.phase ?? 'none'}``). That is precisely why the vocabulary is
+# closed HERE: a value the enum does not document would decode without
+# complaint and print a word nobody can grep the client for.
+#
+# Only the two placement arms ever spelled a phase, so every mint-phase refusal
+# logged ``phase=none`` and the whole point of the field — telling the operator
+# whether the roster row or the desk was the half that failed — was carried by
+# exactly the arms where the answer was already obvious from ``rolled_back``.
+#
+# ``null`` is a value, not an omission, and the arms that carry no phase below
+# carry none DELIBERATELY: ``workspace_not_found`` and the reservation faults
+# are refused before either half is attempted, so naming one of them would be a
+# third false claim in a payload this lane is here to make honest.
+PHASE_INSTANCE = "instance"
+PHASE_PLACEMENT = "placement"
+
+# ── ``data.rolled_back`` for the reservation faults, one code at a time ───────
+#
+# :class:`AgentCreateReservationError` is raised by ``reserve_agent_create``
+# BEFORE ``perform_agent_create`` writes anything, so it is tempting to answer
+# every code with "nothing survives". Two of the three codes make that a lie
+# about the world rather than about this attempt, and the launcher's sentence is
+# about the world: ``rolled_back: true`` prints "the placement was refused and
+# nothing was written."
+#
+# ``idempotency_conflict``
+#     The receipt on disk was READ and validated against this request, and it
+#     names a DIFFERENT persona or workspace — so it is another gesture's, and
+#     nothing belonging to this one exists. Inventoried: zero paths change.
+#     ``True``.
+# ``create_lock_unavailable``
+#     Another process holds this key's file lock and is mid-sequence. This
+#     attempt wrote nothing, but the holder may be between its mint and its
+#     placement right now, and we cannot read its receipt — that is what "lock
+#     unavailable" means. ``False`` is not a claim that something survived; it
+#     is a refusal to claim that nothing did, which is the direction the
+#     launcher's parser already calls "the safe direction".
+# ``reservation_corrupt``
+#     The receipt file EXISTS and will not decode. Its state is unknown and by
+#     construction unknowable, so it may name a minted roster row. ``False`` —
+#     and this is the one arm on the whole method where "Check the runtime" is
+#     the literally correct instruction.
+#
+# A code missing from this table is answered with NO ``rolled_back`` key, which
+# the launcher reads as ``false``. That is deliberate: a new fault whose
+# inventory nobody has established must not inherit an optimistic default.
+_RESERVATION_ROLLED_BACK: dict[str, bool] = {
+    "idempotency_conflict": True,
+    "create_lock_unavailable": False,
+    "reservation_corrupt": False,
+}
+
 
 @dataclass(frozen=True)
 class AgentCreateRefusal:
@@ -718,10 +776,25 @@ def perform_agent_create(
     # typo would be answered with its own stale error under the same key. Mirrors
     # ``runtime.office.upsert``'s refusal to lazily author a surface for a typo.
     if not store.surface_exists(request.workspace_id):
+        # Inventoried on a throwaway store root, every path under
+        # ``store_root()`` diffed across the call: this arm changes NOTHING —
+        # not even the ``locks/agent_creates/<digest>.lock`` its siblings take,
+        # because it refuses before ``reserve_agent_create`` is entered and the
+        # lock lives inside that context manager. It is the emptiest refusal on
+        # the method, and ``rolled_back: True`` is its literal reading.
+        #
+        # No ``phase``: the surface check runs before the mint is attempted, so
+        # neither half of the sequence has a verdict to report. The launcher
+        # documents ``null`` for exactly that, and its own taxonomy comment for
+        # this reason already says "a CREATE refused for it wrote nothing".
         return _refused(
             ERR_NOT_FOUND,
             f"unknown workspace: {request.workspace_id}",
-            {"reason": "workspace_not_found", "workspace_id": request.workspace_id},
+            {
+                "reason": "workspace_not_found",
+                "workspace_id": request.workspace_id,
+                "rolled_back": True,
+            },
         )
 
     try:
@@ -764,12 +837,55 @@ def perform_agent_create(
                         record.persona_instance_id or request.persona_instance_id
                     )
                 except Exception as exc:  # noqa: BLE001
+                    # THE arm whose honest answer is the opposite of its
+                    # siblings', and the reason this lane is a sweep rather
+                    # than a one-line copy.
+                    #
+                    # Reaching here means ``record.state`` was
+                    # ``instance_minted``, and that state is only ever written
+                    # by ``mark_instance_minted`` (or ``mark_rollback_failed``,
+                    # which deliberately keeps it) — the module's own "first
+                    # durable write". So a receipt naming a roster row is on
+                    # disk BEFORE this attempt begins, and this attempt does not
+                    # remove it: inventoried on a throwaway root, the call
+                    # changes nothing at all, and the ``instance_minted``
+                    # receipt plus whatever the earlier attempt left are still
+                    # there afterwards.
+                    #
+                    # ``rolled_back: True`` here would therefore be the same lie
+                    # the absent field was telling, only pointed the other way:
+                    # the operator would be told "nothing was written" while a
+                    # receipt this key cannot get past sits on disk naming a row
+                    # nothing can read. ``False`` is the truth, and it is also
+                    # the value that makes the launcher publish
+                    # ``persona_instance_id`` as ``orphanInstanceId`` (it reads
+                    # that key only when ``rolled_back`` is not ``true``), which
+                    # is exactly the id an operator needs.
+                    #
+                    # This lane is NOT a compensation site, and that is a
+                    # decision rather than an omission. Retiring the row is
+                    # impossible — it is the row we could not read — and marking
+                    # the receipt ``rolled_back`` would BURN the placement id
+                    # (D-A3: a rolled-back key is answered with its recorded
+                    # refusal forever) over an instance that may simply be
+                    # unreadable for a minute. Left at ``instance_minted`` the
+                    # key stays resumable, which is why ``next_expected`` offers
+                    # the same-key cure FIRST.
                     return _refused(
                         ERR_NOT_FOUND,
                         f"reserved instance is gone: {exc}",
                         {
                             "reason": "reserved_instance_missing",
                             "persona_instance_id": record.persona_instance_id,
+                            "phase": PHASE_INSTANCE,
+                            "rolled_back": False,
+                            "next_expected": (
+                                "this idempotency_key's receipt still names a minted "
+                                "persona instance that cannot be read; restore that "
+                                "instance and retry with the SAME idempotency_key to "
+                                "resume the placement, or retire it and retry the "
+                                "gesture with a NEW idempotency_key"
+                            ),
                         },
                     )
             else:
@@ -784,21 +900,48 @@ def perform_agent_create(
                         realm_id=request.realm_id,
                     )
                 except RetiredPersonaInstanceError as exc:
+                    # ``add_instance`` decides this in ``assert_bindable``,
+                    # which runs before ``_durable_chat_root`` and before
+                    # ``open_chat`` — "every refusal this bind can raise is
+                    # decidable without writing, so it is decided before the
+                    # root is made durable" (``persona_assignments.py``). The
+                    # reservation record is still unwritten here: the three
+                    # states that mean "on disk" are all handled above, so this
+                    # branch is only reached with a brand-new key.
+                    #
+                    # Inventoried against a REAL retirement tombstone (create,
+                    # retire, re-create under a new key): the single path this
+                    # refusal adds under ``store_root()`` is the empty
+                    # ``locks/agent_creates/<digest>.lock`` every attempt takes.
+                    # The tombstone that caused the refusal is older than the
+                    # gesture, so it is not this refusal's residue.
                     return _refused(
                         ERR_CONFLICT,
                         exc,
                         {
                             "reason": "instance_retired",
                             "placement_id": request.placement_id,
+                            "phase": PHASE_INSTANCE,
+                            "rolled_back": True,
                         },
                     )
                 except ValueError as exc:
+                    # Same inventory, same reason: every ``ValueError``
+                    # ``add_instance`` raises is raised from its validation
+                    # prologue — a blank placement token, or a placement id that
+                    # already belongs to another persona — all of it above
+                    # ``assert_bindable`` and therefore above the first write.
+                    # Inventoried with a REAL collision (``dev`` re-using
+                    # ``qa``'s placement id), not just an injected raise: one
+                    # empty lock file, nothing else.
                     return _refused(
                         ERR_INVALID_PARAMS,
                         exc,
                         {
                             "reason": "instance_invalid",
                             "placement_id": request.placement_id,
+                            "phase": PHASE_INSTANCE,
+                            "rolled_back": True,
                         },
                     )
                 except PersonaChatPersistenceError as exc:
@@ -860,6 +1003,7 @@ def perform_agent_create(
                             "reason": str(ChatErrorKind.CHAT_SESSION_PERSIST_FAILED),
                             "persistence_operation": exc.operation,
                             "placement_id": request.placement_id,
+                            "phase": PHASE_INSTANCE,
                             "rolled_back": True,
                             "next_expected": (
                                 "restore canonical persona chat transcript storage "
@@ -924,7 +1068,7 @@ def perform_agent_create(
                     instance_id=instance.id,
                     failure={
                         "reason": "placement_failed",
-                        "phase": "placement",
+                        "phase": PHASE_PLACEMENT,
                         "placement_reason": "class_key_collision",
                         "workspace_id": request.workspace_id,
                         "reasons": exc.safe_details["reasons"],
@@ -939,7 +1083,7 @@ def perform_agent_create(
                     instance_id=instance.id,
                     failure={
                         "reason": "placement_failed",
-                        "phase": "placement",
+                        "phase": PHASE_PLACEMENT,
                         "placement_reason": type(exc).__name__,
                         "workspace_id": request.workspace_id,
                     },
@@ -955,7 +1099,7 @@ def perform_agent_create(
                     instance_id=instance.id,
                     failure={
                         "reason": "placement_failed",
-                        "phase": "placement",
+                        "phase": PHASE_PLACEMENT,
                         "placement_reason": type(exc).__name__,
                         "workspace_id": request.workspace_id,
                     },
@@ -983,10 +1127,20 @@ def perform_agent_create(
             reservation.mark_done(result)
             return AgentCreateOutcome(result={**result, "idempotent_replay": False})
     except AgentCreateReservationError as exc:
+        # One ``except`` for three faults that do NOT agree about what survives
+        # them — see :data:`_RESERVATION_ROLLED_BACK` for the per-code argument.
+        # Answering them with one value would have been the same shortcut this
+        # lane exists to undo, one level up.
+        #
+        # No ``phase`` on any of them: ``reserve_agent_create`` raises before the
+        # mint is attempted, so neither half has a verdict.
+        refusal_data: dict[str, Any] = {"reason": exc.code}
+        if exc.code in _RESERVATION_ROLLED_BACK:
+            refusal_data["rolled_back"] = _RESERVATION_ROLLED_BACK[exc.code]
         return _refused(
             ERR_CONFLICT
             if exc.code in {"idempotency_conflict", "create_lock_unavailable"}
             else ERR_HANDLER_FAILED,
             exc,
-            {"reason": exc.code},
+            refusal_data,
         )

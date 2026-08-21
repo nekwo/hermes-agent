@@ -913,3 +913,522 @@ def test_the_chat_store_refusal_asks_for_a_retry_the_client_can_make(
         "restore canonical persona chat transcript storage and retry the "
         "gesture; nothing was recorded under this idempotency_key"
     )
+
+
+# ── every OTHER refusal's claim about itself ─────────────────────────────────
+#
+# 33b11d9516 fixed one arm. The rest still answered with no ``rolled_back`` at
+# all, and the launcher's parser reads that key off EVERY error frame with a
+# ``false`` default (``mission_agent_create_rpc.dart``: "a missing or
+# non-boolean field must read as NOT rolled back, which is the safe
+# direction"), so every one of them printed:
+#
+#   Could not place QA Agent — the placement was refused and the roster row
+#   could not be undone. Check the runtime.
+#
+# The interesting result of inventorying them one at a time is that the sentence
+# was not uniformly wrong. Most of these arms genuinely leave nothing — but
+# ``reserved_instance_missing`` is reached ONLY from a durable
+# ``instance_minted`` receipt, and ``reservation_corrupt`` only with an
+# undecodable receipt already on disk, so for those the operator really does
+# have something to check and ``rolled_back: true`` would have been a fresh lie
+# pointed the other way.
+#
+# Each arm therefore gets TWO rows: what it stamps, and — pinned independently
+# of the stamp — the durable inventory that stamp is a claim about. The second
+# row is the one that keeps the first honest when someone later changes what an
+# arm writes.
+
+
+def _store_paths() -> set[str]:
+    """Every path under ``store_root()``, relative and slash-normalised."""
+
+    from agent_runtime import paths
+
+    root = paths.store_root()
+    return {
+        str(path.relative_to(root)).replace("\\", "/") for path in root.rglob("*")
+    }
+
+
+def _only_the_create_lock(added: set[str]) -> bool:
+    """The empty cross-process lock every attempt inside the reservation takes.
+
+    ``agent_create_lock`` authors it on the way IN, before any arm can run, and
+    nothing ever removes it — success or failure. So "this refusal wrote
+    nothing" means "nothing but this", and saying which path is excused is what
+    stops a future roster row from hiding inside a vague assertion.
+    """
+
+    return added == {path for path in added if path.startswith("locks/agent_creates")}
+
+
+def _minted_but_unplaceable(placement_id: str, idempotency_key: str) -> None:
+    """Drive a create to a durable ``instance_minted`` receipt and stop there.
+
+    The placement is refused AND the compensation is refused, which is the §6
+    worst case ``mark_rollback_failed`` names: the state deliberately STAYS
+    ``instance_minted``, so the key stays resumable and the receipt is real.
+    """
+
+    from agent_runtime.office_store import OfficeStore
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            OfficeStore,
+            "upsert_actor",
+            lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("no desk")),
+        )
+        patch.setattr(
+            PersonaInstanceStore,
+            "retire",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no retire")),
+        )
+        _call(_params(placement_id=placement_id, idempotency_key=idempotency_key))
+
+
+# ── workspace_not_found: the emptiest refusal on the method ──────────────────
+
+
+def test_the_unknown_workspace_refusal_says_nothing_survives_it(qa_persona):
+    _seed_workspace()  # a real office exists; this create names another one.
+
+    data = _call(
+        _params(workspace_id="ws_never_authored", placement_id="qa_nows")
+    )["error"]["data"]
+
+    assert data["reason"] == "workspace_not_found"
+    assert data["rolled_back"] is True
+    # The bool TYPE, not truthiness: the launcher compares ``== true`` and
+    # coerces nothing, and Dart does not read ``1`` as ``true`` — so a
+    # ``rolled_back: 1`` that satisfies a Python ``if`` would print the orphan
+    # sentence again while looking correct from this side.
+    assert type(data["rolled_back"]) is bool
+
+
+def test_the_unknown_workspace_refusal_touches_no_path_at_all(qa_persona):
+    """Not "no roster row" — no path. This arm does not even take the lock.
+
+    ``surface_exists`` is checked BEFORE ``reserve_agent_create`` is entered and
+    the create lock lives inside that context manager, so unlike every other
+    refusal below this one leaves ``store_root()`` exactly as it found it. If a
+    later change moves the workspace check inside the reservation, this row is
+    what says so.
+    """
+
+    _seed_workspace()
+    before = _store_paths()
+
+    reply = _call(_params(workspace_id="ws_never_authored", placement_id="qa_nows"))
+
+    assert reply["error"]["data"]["reason"] == "workspace_not_found"
+    assert _store_paths() == before
+
+
+# ── instance_retired / instance_invalid: one empty lock, nothing else ────────
+
+
+def test_the_retired_placement_refusal_says_nothing_survives_it(qa_persona):
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    _seed_workspace()
+    _call(_params(placement_id="qa_ret"))
+    PersonaInstanceStore().retire(
+        "personainst_qa_ret", reason="test", requested_by="test"
+    )
+
+    data = _call(
+        _params(placement_id="qa_ret", idempotency_key="gesture-after-retire"),
+        rid="c2",
+    )["error"]["data"]
+
+    assert data["reason"] == "instance_retired"
+    assert data["rolled_back"] is True
+    assert type(data["rolled_back"]) is bool
+    assert data["phase"] == "instance"
+
+
+def test_the_retired_placement_refusal_leaves_only_the_lock_it_took(qa_persona):
+    """The claim above, pinned against a REAL tombstone rather than a stub.
+
+    ``add_instance`` decides retirement in ``assert_bindable``, which the store
+    documents as running before the chat root is made durable. This proves it
+    from the outside: after a genuine create + retire + re-create, the only new
+    path is the create lock. The tombstone and the FIRST create's rows are
+    excluded by construction — the snapshot is taken after them.
+    """
+
+    from agent_runtime import paths
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    _seed_workspace()
+    _call(_params(placement_id="qa_ret"))
+    PersonaInstanceStore().retire(
+        "personainst_qa_ret", reason="test", requested_by="test"
+    )
+    before = _store_paths()
+    receipts_before = set(paths.agent_create_reservations_dir().glob("*"))
+
+    reply = _call(
+        _params(placement_id="qa_ret", idempotency_key="gesture-after-retire"),
+        rid="c2",
+    )
+
+    assert reply["error"]["data"]["reason"] == "instance_retired"
+    added = _store_paths() - before
+    assert _only_the_create_lock(added), added
+    # And no receipt for the refused key: this arm runs before
+    # ``mark_instance_minted``, the module's own "first durable write".
+    assert set(paths.agent_create_reservations_dir().glob("*")) == receipts_before
+
+
+def test_the_invalid_placement_refusal_says_nothing_survives_it(
+    qa_persona, dev_persona
+):
+    _seed_workspace()
+    _call(_params(placement_id="qa_taken"))
+
+    # A REAL ValueError out of ``add_instance``: ``dev`` claiming a placement id
+    # that already belongs to ``qa``. Injecting the raise would prove only that
+    # the arm is reachable, not that the store had written nothing when it
+    # raised.
+    data = _call(
+        _params(
+            persona_id="dev", placement_id="qa_taken", idempotency_key="gesture-dev"
+        ),
+        rid="c2",
+    )["error"]["data"]
+
+    assert data["reason"] == "instance_invalid"
+    assert data["rolled_back"] is True
+    assert type(data["rolled_back"]) is bool
+    assert data["phase"] == "instance"
+
+
+def test_the_invalid_placement_refusal_leaves_only_the_lock_it_took(
+    qa_persona, dev_persona
+):
+    from agent_runtime import paths
+
+    _seed_workspace()
+    _call(_params(placement_id="qa_taken"))
+    before = _store_paths()
+    receipts_before = set(paths.agent_create_reservations_dir().glob("*"))
+
+    reply = _call(
+        _params(
+            persona_id="dev", placement_id="qa_taken", idempotency_key="gesture-dev"
+        ),
+        rid="c2",
+    )
+
+    assert reply["error"]["data"]["reason"] == "instance_invalid"
+    added = _store_paths() - before
+    assert _only_the_create_lock(added), added
+    assert set(paths.agent_create_reservations_dir().glob("*")) == receipts_before
+    # The colliding placement still belongs to ``qa`` — the refusal did not
+    # half-rewrite the row it refused to take.
+    assert _instances()["personainst_qa_taken"].persona_id == "qa"
+
+
+# ── reserved_instance_missing: the arm whose honest answer is the opposite ───
+
+
+def test_the_missing_reserved_instance_refusal_admits_what_it_leaves(qa_persona):
+    """``rolled_back: False``, and that is the FIX, not the absence of one.
+
+    This arm is reachable only from ``record.state == instance_minted``, and
+    that state is written by ``mark_instance_minted`` — the reservation
+    module's first durable write. So a receipt naming a roster row is on disk
+    before the call begins and is still there when it returns. Stamping ``true``
+    here would have told the operator "nothing was written" over the top of a
+    receipt that can never complete.
+
+    ``False`` also unlocks the launcher's ``orphanInstanceId``, which it reads
+    only when ``rolled_back`` is not ``true``, so the drop log NAMES the row
+    instead of merely asserting one exists.
+    """
+
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    _seed_workspace()
+    _minted_but_unplaceable("qa_resv", "gesture-resv")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            PersonaInstanceStore,
+            "get",
+            lambda self, instance_id: (_ for _ in ()).throw(KeyError(instance_id)),
+        )
+        data = _call(
+            _params(placement_id="qa_resv", idempotency_key="gesture-resv"), rid="c3"
+        )["error"]["data"]
+
+    assert data["reason"] == "reserved_instance_missing"
+    assert data["rolled_back"] is False, (
+        "this arm is reached over a durable instance_minted receipt it does not "
+        "remove; claiming a rollback would be the same false sentence pointed "
+        "the other way"
+    )
+    assert type(data["rolled_back"]) is bool
+    assert data["phase"] == "instance"
+    # The id the launcher republishes as ``orphanInstanceId``.
+    assert data["persona_instance_id"] == "personainst_qa_resv"
+    # The same-key cure comes FIRST and is real: the receipt is left at
+    # ``instance_minted``, so a retry once the row is readable RESUMES into the
+    # placement instead of minting a second agent. Burning the key here (by
+    # marking it rolled_back) would have made the second sentence the only one.
+    assert "SAME idempotency_key" in data["next_expected"]
+    assert "NEW idempotency_key" in data["next_expected"]
+
+
+def test_the_missing_reserved_instance_refusal_really_does_leave_a_receipt(
+    qa_persona,
+):
+    """The inventory the ``False`` is a claim about.
+
+    Two facts, both read off disk rather than off the reply: the receipt is
+    still there, and it is still ``instance_minted`` — this refusal neither
+    swept the key nor burned it. If a later change makes the arm compensate
+    (mark the receipt rolled_back, retire the row), THIS row goes red and the
+    ``False`` above has to be re-argued rather than quietly becoming the next
+    false sentence an operator reads.
+    """
+
+    import json as _json
+
+    from agent_runtime import paths
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    _seed_workspace()
+    _minted_but_unplaceable("qa_resv", "gesture-resv")
+
+    receipts = sorted(paths.agent_create_reservations_dir().glob("*.json"))
+    assert len(receipts) == 1
+    before = _store_paths()
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            PersonaInstanceStore,
+            "get",
+            lambda self, instance_id: (_ for _ in ()).throw(KeyError(instance_id)),
+        )
+        reply = _call(
+            _params(placement_id="qa_resv", idempotency_key="gesture-resv"), rid="c3"
+        )
+
+    data = reply["error"]["data"]
+    assert data["reason"] == "reserved_instance_missing"
+    assert _store_paths() == before
+    record = _json.loads(receipts[0].read_text(encoding="utf-8"))
+    assert record["state"] == "instance_minted"
+    assert record["persona_instance_id"] == "personainst_qa_resv"
+
+    # …and the CROSS-CHECK, which is what makes this an honesty gate rather
+    # than a second copy of the assertion above: the value is compared against
+    # what was just read off disk, not against a literal. A future edit that
+    # stamps ``True`` here "for consistency with its siblings" cannot pass this
+    # row without also making the receipt disappear.
+    assert data.get("rolled_back") is not True, (
+        "the refusal claimed a rollback while its reservation receipt is still "
+        f"{record['state']!r} on disk and still names "
+        f"{record['persona_instance_id']!r}"
+    )
+
+
+# ── the reservation faults, which do NOT agree with each other ───────────────
+
+
+def test_a_key_spent_on_another_persona_says_nothing_survives_this_gesture(
+    qa_persona, dev_persona
+):
+    """The receipt under this key is READ and is provably another create's.
+
+    ``_validate_scope`` refuses only when the stored persona/workspace differ
+    from the request — a same-scope reuse is a replay, not a conflict — so what
+    survives belongs to a gesture that is not this one, and this one wrote
+    nothing.
+    """
+
+    _seed_workspace()
+    _call(_params(placement_id="qa_scope"))
+    before = _store_paths()
+
+    data = _call(
+        _params(persona_id="dev", placement_id="dev_scope"), rid="c2"
+    )["error"]["data"]
+
+    assert data["reason"] == "idempotency_conflict"
+    assert data["rolled_back"] is True
+    assert type(data["rolled_back"]) is bool
+    assert _store_paths() == before
+
+
+def test_a_key_another_process_is_holding_refuses_to_claim_it_is_clean(qa_persona):
+    """``False`` here is a refusal to answer, not a claim that state survives.
+
+    "Lock unavailable" means another process is inside this key's sequence and
+    its receipt is exactly what we cannot read — it may be between its mint and
+    its placement right now. The launcher's parser calls ``false`` the safe
+    direction; this arm now says it out loud instead of leaning on the default,
+    which is what makes it distinguishable from an arm nobody thought about.
+    """
+
+    from agent_runtime import agent_create_reservations
+    from agent_runtime.locks import HarnessLockUnavailable
+
+    _seed_workspace()
+
+    def _busy(digest):
+        raise HarnessLockUnavailable("held by another create")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(agent_create_reservations, "agent_create_lock", _busy)
+        data = _call(_params(placement_id="qa_lock"))["error"]["data"]
+
+    assert data["reason"] == "create_lock_unavailable"
+    assert data["rolled_back"] is False
+    assert type(data["rolled_back"]) is bool
+
+
+def test_an_unreadable_receipt_is_the_one_arm_that_means_check_the_runtime(
+    qa_persona,
+):
+    """A receipt that exists and will not decode may name a minted row.
+
+    Its state is unknown and, by construction, unknowable from here — so
+    ``false`` is the honest answer, and the launcher's "Check the runtime"
+    sentence is, for this one reason on this whole method, literally correct.
+    """
+
+    import hashlib
+
+    from agent_runtime import paths
+
+    _seed_workspace()
+    digest = hashlib.sha256(b"gesture-1").hexdigest()
+    receipt = paths.agent_create_reservation_path(digest)
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text("{not json", encoding="utf-8")
+
+    data = _call(_params(placement_id="qa_corrupt"))["error"]["data"]
+
+    assert data["reason"] == "reservation_corrupt"
+    assert data["rolled_back"] is False
+    assert type(data["rolled_back"]) is bool
+    # And the arm did not tidy away the thing it cannot read.
+    assert receipt.read_text(encoding="utf-8") == "{not json"
+
+
+def test_the_three_reservation_faults_do_not_all_answer_the_same_way():
+    """The table exists BECAUSE the three codes disagree.
+
+    A parity witness in reverse: if a later edit collapses
+    :data:`_RESERVATION_ROLLED_BACK` to one value "for consistency", this fails
+    and names the collapse. It reads the table rather than re-driving the three
+    arms because the rows above already prove each arm spends what the table
+    says; this one is about the policy staying three-valued.
+    """
+
+    from agent_runtime.agent_create import _RESERVATION_ROLLED_BACK
+
+    assert _RESERVATION_ROLLED_BACK == {
+        "idempotency_conflict": True,
+        "create_lock_unavailable": False,
+        "reservation_corrupt": False,
+    }
+    assert all(type(value) is bool for value in _RESERVATION_ROLLED_BACK.values())
+    # A code nobody has inventoried inherits NOTHING: the launcher's fail-safe
+    # default is better than an optimistic guess made by a table lookup.
+    assert "idempotency_key_required" not in _RESERVATION_ROLLED_BACK
+
+
+# ── phase: a value the launcher actually parses ──────────────────────────────
+
+
+def test_the_phase_vocabulary_is_the_one_the_launcher_documents():
+    """``instance | placement | null`` and nothing else.
+
+    The launcher does not validate this field — it is
+    ``dataMap?['phase']?.toString()``, rendered verbatim into the drop log
+    (``phase=${fault.phase ?? 'none'}``) — so a mis-spelling would ship silently
+    and print a word nobody can grep the client for. The vocabulary is closed on
+    THIS side or nowhere.
+    """
+
+    from agent_runtime import agent_create
+
+    assert agent_create.PHASE_INSTANCE == "instance"
+    assert agent_create.PHASE_PLACEMENT == "placement"
+
+
+@pytest.mark.parametrize(
+    "arm,expected_phase",
+    [
+        ("instance_retired", "instance"),
+        ("instance_invalid", "instance"),
+        ("chat_session_persist_failed", "instance"),
+        ("placement_failed", "placement"),
+        ("workspace_not_found", None),
+        ("create_lock_unavailable", None),
+    ],
+)
+def test_each_refusal_names_the_half_it_failed_in(
+    qa_persona, dev_persona, arm, expected_phase
+):
+    """Before this, only the two placement arms spelled a phase.
+
+    Every mint-phase refusal therefore logged ``phase=none`` — the launcher's
+    rendering of ``null`` — so the field said "neither half" for refusals that
+    had a perfectly good answer, and an operator reading the drop log could not
+    tell a roster-row failure from a desk failure without decoding ``reason``.
+
+    ``None`` below is an ASSERTION, not a skip: the two pre-sequence arms must
+    keep saying "neither half", because inventing a third phase word for them
+    would be a new false claim in the same payload.
+    """
+
+    from agent_runtime import agent_create_reservations
+    from agent_runtime.locks import HarnessLockUnavailable
+    from agent_runtime.office_store import OfficeStore
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    _seed_workspace()
+
+    with pytest.MonkeyPatch.context() as patch:
+        if arm == "instance_retired":
+            _call(_params(placement_id="qa_phase"))
+            PersonaInstanceStore().retire(
+                "personainst_qa_phase", reason="test", requested_by="test"
+            )
+            params = _params(placement_id="qa_phase", idempotency_key="k-phase")
+        elif arm == "instance_invalid":
+            _call(_params(placement_id="qa_phase"))
+            params = _params(
+                persona_id="dev", placement_id="qa_phase", idempotency_key="k-phase"
+            )
+        elif arm == "chat_session_persist_failed":
+            _refuse_the_chat_store(patch)
+            params = _params(placement_id="qa_phase", idempotency_key="k-phase")
+        elif arm == "placement_failed":
+            patch.setattr(
+                OfficeStore,
+                "upsert_actor",
+                lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("no desk")),
+            )
+            params = _params(placement_id="qa_phase", idempotency_key="k-phase")
+        elif arm == "workspace_not_found":
+            params = _params(workspace_id="ws_nope", idempotency_key="k-phase")
+        else:
+            patch.setattr(
+                agent_create_reservations,
+                "agent_create_lock",
+                lambda digest: (_ for _ in ()).throw(HarnessLockUnavailable("busy")),
+            )
+            params = _params(placement_id="qa_phase", idempotency_key="k-phase")
+
+        data = _call(params, rid="c9")["error"]["data"]
+
+    assert data["reason"] == arm
+    assert data.get("phase") == expected_phase

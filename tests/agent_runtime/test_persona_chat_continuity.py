@@ -1589,3 +1589,165 @@ def test_a_retraction_never_reverts_a_pointer_another_lane_moved(
         "root it bound, not on whatever pointer happens to be there"
     )
     assert db.get_session(pointer) is not None
+
+
+# ── the half of the bind the retraction used to forget ──────────────────────
+#
+# ``open_chat`` sets ``instance.mode = "chat"`` in the same breath as it writes
+# the pointer. The retraction put the pointers back and left the mode, so a
+# retracted FRESH mint produced a row in ``mode == "chat"`` with no chat at all
+# — the exact state ``clear_chat_session_binding`` exists to demote away from,
+# reached by the one unbind path that does not go through it.
+#
+# That is not cosmetic. ``persona_instance_summary`` ships ``mode`` on the wire,
+# the launcher decodes ``chat`` to ``MissionAgentInstanceMode.chatHistory``
+# (``mission_agent_instance.dart``), and its persona-best election ranks
+# ``chatHistory`` ABOVE ``configuredIdle``
+# (``mission_instance_resolution.dart``'s tier table) — so a retracted mint
+# out-ranks a genuinely idle sibling on the strength of a conversation that was
+# never written.
+
+
+def test_a_retracted_fresh_mint_does_not_leave_a_chat_mode_with_no_chat(
+    isolate_agent_runtime_root, tmp_path
+):
+    """The pointers and the mode are ONE fact and move together.
+
+    Asserted through ``persona_instance_summary`` as well as off the row,
+    because the wire projection is what the launcher's tier table reads — a fix
+    that healed the store field and not the projection would leave the election
+    misreading exactly as before.
+    """
+
+    import sqlite3
+
+    from agent_runtime.persona_assignments import persona_instance_summary
+    from agent_runtime.persona_chat_durability import PersonaChatPersistenceError
+
+    class _RefusingDB(SessionDB):
+        def create_session(self, *args, **kwargs):
+            raise sqlite3.OperationalError("disk I/O error")
+
+    store = PersonaInstanceStore()
+    db = _RefusingDB(tmp_path / "state.db")
+
+    with pytest.raises(PersonaChatPersistenceError):
+        PersonaChatMintReceiptStore().mint(
+            instance_store=store,
+            session_db=db,
+            persona_id="dev",
+            persona_instance_id="personainst_dev",
+            idempotency_key="doomed",
+            title="Dev chat",
+        )
+
+    live = PersonaInstanceStore().get("personainst_dev")
+    assert live.default_chat_session_id is None
+    assert live.session_id is None
+    assert live.mode == "configured", (
+        "the retracted bind left mode='chat' on a row with no chat pointer — "
+        "the launcher ranks that row above a genuinely idle sibling when it "
+        "elects the instance that represents this persona"
+    )
+    assert persona_instance_summary(live)["mode"] == "configured"
+    assert persona_instance_summary(live)["lifecycle_mode"] == "configured"
+
+
+def test_a_retracted_rebind_restores_the_mode_it_found_not_a_flat_demotion(
+    isolate_agent_runtime_root, tmp_path
+):
+    """RESTORE, not clear — the mode follows the same rule as the pointer.
+
+    An instance that already had a working thread keeps ``chat`` when a LATER
+    mint's transcript write fails, because the pointer it keeps is a real
+    conversation. Demoting unconditionally would have traded one inconsistent
+    row for another: a live thread whose instance claims to be idle.
+    """
+
+    from agent_runtime.persona_chat_durability import PersonaChatPersistenceError
+
+    class _SecondWriteFailsDB(SessionDB):
+        fail = False
+
+        def create_session(self, *args, **kwargs):
+            if self.fail:
+                raise RuntimeError("transcript store went away")
+            return super().create_session(*args, **kwargs)
+
+    db = _SecondWriteFailsDB(tmp_path / "state.db")
+    store = PersonaInstanceStore()
+    receipts = PersonaChatMintReceiptStore()
+
+    first = receipts.mint(
+        instance_store=store,
+        session_db=db,
+        persona_id="dev",
+        persona_instance_id="personainst_dev",
+        idempotency_key="first",
+        title="Dev chat",
+    )
+    good_root = first["root_chat_session_id"]
+    assert PersonaInstanceStore().get("personainst_dev").mode == "chat"
+
+    db.fail = True
+    with pytest.raises(PersonaChatPersistenceError):
+        receipts.mint(
+            instance_store=store,
+            session_db=db,
+            persona_id="dev",
+            persona_instance_id="personainst_dev",
+            idempotency_key="second",
+            title="Dev chat",
+        )
+
+    live = PersonaInstanceStore().get("personainst_dev")
+    assert live.default_chat_session_id == good_root
+    assert live.mode == "chat", (
+        "the retraction demoted a row that still owns a live thread; it "
+        "restores the pre-bind state, it does not clear"
+    )
+
+
+def test_the_retraction_tells_connected_clients_the_mode_moved_too(
+    isolate_agent_runtime_root, tmp_path
+):
+    """A store field the read model never hears about is a stale client.
+
+    The retraction already emitted a ``state.patched`` for the two pointers,
+    for exactly this reason ("or every connected client keeps showing the
+    phantom pointer"). ``mode`` had to join that list or the launcher would
+    keep the ``chatHistory`` classification the store no longer holds — the
+    same defect, one field over.
+    """
+
+    import sqlite3
+
+    from agent_runtime.events import EventLog
+    from agent_runtime.persona_chat_durability import PersonaChatPersistenceError
+
+    class _RefusingDB(SessionDB):
+        def create_session(self, *args, **kwargs):
+            raise sqlite3.OperationalError("disk I/O error")
+
+    store = PersonaInstanceStore()
+    db = _RefusingDB(tmp_path / "state.db")
+
+    with pytest.raises(PersonaChatPersistenceError):
+        PersonaChatMintReceiptStore().mint(
+            instance_store=store,
+            session_db=db,
+            persona_id="dev",
+            persona_instance_id="personainst_dev",
+            idempotency_key="doomed",
+            title="Dev chat",
+        )
+
+    patched = [
+        event
+        for event in EventLog().tail(200)
+        if getattr(event, "type", None) == "state.patched"
+    ]
+    assert patched, "the retraction emitted no read-model patch at all"
+    fields = json.dumps(patched[-1].payload)
+    assert "mode" in fields
+    assert "default_chat_session_id" in fields
