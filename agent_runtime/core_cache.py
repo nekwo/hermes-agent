@@ -913,6 +913,137 @@ def _wal_without_frames_is_content_free(entry: FingerprintEntry) -> FingerprintE
     return FingerprintEntry(entry.path, 0, 0)
 
 
+#: Ceiling on a config input this module is willing to READ rather than stat.
+#:
+#: Every path routed through :func:`_config_input_entry` is hand-authored YAML —
+#: the operator's live one is 23 KB, the base seed 8 KB — so a megabyte is three
+#: orders of magnitude of headroom and still a hard stop. Over it the entry
+#: keeps its ordinary mtime triple: a config that large is not the class this
+#: mask was measured against, and reading an unbounded file on the boot path to
+#: decide a cache key would trade one demote for a worse cost.
+_CONFIG_CONTENT_MAX_BYTES = 1 << 20
+
+
+def _config_input_is_content_keyed(entry: FingerprintEntry) -> FingerprintEntry:
+    """A hand-authored YAML config keys on its CONTENT, never on its mtime.
+
+    Second member of the same family as
+    :func:`_wal_without_frames_is_content_free`, and the same shape: one input
+    class whose stat triple moves for reasons that are NOT content, masked at
+    the one line where it enters the closure, with the measurement written down
+    so the next person does not have to re-earn it.
+
+    WHAT WAS MEASURED (operator's runtime, 2026-08-21)
+    =================================================
+
+    Every Mission Control boot demoted with::
+
+        reason=fingerprint_mismatch inputs=2225 changed=1
+        diff=X:\\Eternia\\.hermes\\profiles\\alice\\config.yaml
+
+    and paid a full rebuild — 6,467 ms on the 13:17 boot, of which
+    ``agents_readiness`` was 3,266 ms. The named file's mtime was minutes old on
+    each miss and its NTFS creation time moved with it, i.e. the file is
+    ATOMICALLY REPLACED (temp + ``os.replace``), not appended to.
+
+    The convicting measurement is not the mtime. It is that
+    ``profiles/alice/config.yaml`` was, at the moment of the miss, **byte-for-byte
+    identical to a copy taken two days earlier** — same 23,255 bytes, same
+    SHA-256 — while its mtime had moved repeatedly in between. So the writer
+    re-serialises the document and lands the same bytes; the mtime triple
+    reports a change that does not exist, and the persisted core is thrown away
+    for it.
+
+    WHY THIS IS THE LAYER, AND NOT "STOP THE WRITE"
+    ==============================================
+
+    Stopping the needless write is the narrower fix and would be preferable IF
+    the writer were on this repo's boot path. It is not, and that was
+    established by instrumentation rather than by reading: a tracer on
+    ``os.replace`` / ``os.rename`` / ``open(w)`` / ``Path.write_*`` / ``os.utime``
+    / ``shutil.copyfile`` around a real ``build_snapshot()`` — and around
+    ``harness snapshot|status|agents|personas|doctor|chats|board|office``,
+    ``profile list``, ``auth status``, ``config get`` and ``doctor``, each in a
+    sandboxed home seeded with a structural copy of the operator's own config —
+    recorded ZERO writes to any ``config.yaml``. On the live machine the 13:51
+    boot demoted naming the same file while that file's mtime did not move
+    during the boot at all. The rewrite is real, repeated, and OUTSIDE the
+    snapshot build.
+
+    A cache that can be invalidated by any writer anywhere re-writing a byte
+    for byte identical document is a cache with no floor. Keying the class on
+    content gives it one, and does so for every future writer of these four
+    files rather than for the one that happened to be caught.
+
+    WHAT IS DELIBERATELY NOT WEAKENED
+    =================================
+
+    * **A genuine edit still invalidates.** The digest is over the bytes, so any
+      content change flips the key — including one that leaves ``size``
+      unchanged, which the mtime triple could only catch by timestamp.
+    * **Appearance and disappearance still count.** An absent path keeps
+      :func:`_stat_entry`'s ``-1/-1`` and a directory keeps ``_DIR_MARK``;
+      neither is read, so the "an appearing config is a content event" rule that
+      :func:`_wal_without_frames_is_content_free` explicitly refuses to
+      generalise away is untouched here too.
+    * **The class is four CALL SITES, named where they enter the closure.** Per
+      profile ``config.yaml`` and ``profile.yaml`` (class 4), plus the pinned
+      ambient config authority and the harness root config (class 5). Nothing
+      else in this module reaches the mask. NOT the ``active_profile`` pointer (written
+      only by an explicit profile switch, and its whole content is the switch),
+      NOT the store subtree, NOT the skill roots — those are walked, unbounded,
+      and hashing them would be the expensive shape this mask is careful not to
+      become.
+
+    COST, MEASURED rather than asserted: one bounded read per entry, so
+    ``2 * <profiles> + 2`` reads — 22 files on the operator's ten-profile home.
+    Benchmarked at the live file size (23,255 B), 20 warm passes: the same 22
+    paths cost a median **1.3 ms** stat-only and **9.9 ms** content-keyed, i.e.
+    **+8.6 ms** per fingerprint. That buys back a 6,467 ms rebuild on every boot
+    that would otherwise demote, and it is small beside the 2,225-entry stat
+    closure the same pass already walks. If a home ever grows profiles by an
+    order of magnitude this is the number to re-measure.
+
+    A read that fails (permissions, a mount that went away mid-pass) falls back
+    to the stat triple rather than refusing: degrading to today's behaviour for
+    one entry is strictly better than refusing to fingerprint the whole install.
+    """
+
+    if entry.size < 0 or entry.mtime_ns == _DIR_MARK:
+        # Absent, or a directory. Both are already content-free and stable.
+        return entry
+    if entry.size > _CONFIG_CONTENT_MAX_BYTES:
+        return entry
+    try:
+        with open(entry.path, "rb") as handle:
+            body = handle.read(_CONFIG_CONTENT_MAX_BYTES + 1)
+    except OSError:
+        return entry
+    if len(body) > _CONFIG_CONTENT_MAX_BYTES:
+        return entry
+    # The leading bits of the same digest the fingerprint itself is built from,
+    # taken as a NON-NEGATIVE, SIGNED-64-REPRESENTABLE int. Two constraints, both
+    # deliberate:
+    #
+    # * non-negative, so it can never collide with ``-1`` (absent) or
+    #   ``_DIR_MARK`` (-2) — the two sentinels this field already carries;
+    # * 63 bits and no more, because this value is persisted verbatim into
+    #   ``entries.json`` (:func:`_entries_payload`) as a JSON number. Nothing
+    #   outside Python reads that file today, and a bignum would be correct if
+    #   one never did — but a fingerprint entry is not the place to plant a
+    #   value the next consumer's integer type cannot hold. 63 bits over a
+    #   two-dozen-entry class is collision-free for every practical purpose;
+    #   a collision would cost one stale serve of one config, not corruption.
+    keyed = int.from_bytes(hashlib.sha256(body).digest()[:8], "big") >> 1
+    return FingerprintEntry(entry.path, keyed, entry.size)
+
+
+def _config_input_entry(path: Any) -> FingerprintEntry:
+    """:func:`_stat_entry` for a config input, under the content mask above."""
+
+    return _config_input_is_content_keyed(_stat_entry(path))
+
+
 def sqlite_fingerprint_triples(db_path: Any) -> tuple[tuple[str, int, int], ...]:
     """``(suffix, mtime_ns, size)`` per journal sibling, under the WAL mask.
 
@@ -1149,13 +1280,17 @@ def build_input_fingerprint() -> CoreFingerprint | None:
        ``active_profile`` pointer that decides which one a bare invocation
        resolves. NOT pinned: ``_get_profiles_root`` anchors to
        ``get_default_hermes_root()``, which maps ``<root>/profiles/<name>`` back
-       to ``<root>``, so a profile flip resolves the SAME directory — measured;
+       to ``<root>``, so a profile flip resolves the SAME directory — measured.
+       The two YAML files are CONTENT-KEYED
+       (:func:`_config_input_is_content_keyed`); the profiles root and the
+       ``active_profile`` pointer are not;
     5. the config inputs — ``get_config_path()``, taken PINNED (it is literally
        ``get_hermes_home() / "config.yaml"``, so a persona scope swaps the file
        being stat'd), and the ROOT ``harness_root_config_path()`` left ambient
        because it anchors to the hermes root like class 4. Two authorities in
        production because the CLI profile redirect makes them genuinely
-       different files;
+       different files. Both CONTENT-KEYED, with class 4's two: these four are
+       the whole of that mask's class;
     6. the skill registries — ``get_all_skills_dirs()`` (local profile skills,
        the shared canonical root, configured external roots) walked per root,
        plus the in-repo harness-skill source root the hash comparison reads.
@@ -1244,8 +1379,12 @@ def build_input_fingerprint() -> CoreFingerprint | None:
             except OSError:
                 continue
             entries.append(_stat_entry(entry.path))
-            entries.append(_stat_entry(Path(entry.path) / "profile.yaml"))
-            entries.append(_stat_entry(Path(entry.path) / "config.yaml"))
+            # CONTENT-KEYED, not mtime-keyed — see _config_input_is_content_keyed.
+            # These two are re-serialised in place by writers outside this build,
+            # landing identical bytes under a fresh mtime; keying them on the
+            # timestamp made the persisted core unreachable on every boot.
+            entries.append(_config_input_entry(Path(entry.path) / "profile.yaml"))
+            entries.append(_config_input_entry(Path(entry.path) / "config.yaml"))
     except Exception:
         return None
 
@@ -1267,10 +1406,11 @@ def build_input_fingerprint() -> CoreFingerprint | None:
         # half of this class's exposure is SECOND-ORDER and lands in class 6:
         # ``agent.skill_utils.get_external_skills_dirs()`` reads this very file
         # to decide which external skill roots exist.
+        # CONTENT-KEYED, like class 4's two — same writers, same file class.
         with _pinned_to_fingerprint_home():
-            entries.append(_stat_entry(get_config_path()))
+            entries.append(_config_input_entry(get_config_path()))
         # NOT pinned: anchored to the hermes ROOT, like class 4.
-        entries.append(_stat_entry(harness_root_config_path()))
+        entries.append(_config_input_entry(harness_root_config_path()))
     except Exception:
         return None
 
