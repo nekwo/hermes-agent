@@ -481,3 +481,84 @@ def test_a_failure_inside_the_warm_never_reaches_the_caller(persona_factory):
     assert ran == ["prewarm_after_boom"], (
         "the worker did not survive the failed warm"
     )
+
+
+# -- the pacing receipt (W2-H3) ----------------------------------------------
+
+
+def test_a_finished_warm_logs_a_done_line_with_its_elapsed_cost(
+    persona_factory, caplog
+):
+    """The receipt that makes this module's central claim falsifiable.
+
+    The claim is "the memos are filled before the drop arrives", which is a race
+    against the operator's gesture. With a start and no finish, the only way to
+    ask "did the warm win, and by how much?" was to read the create's own cost --
+    the number the warm exists to change. A start with no finish measures nothing.
+
+    Format-pinned deliberately: an operator joins this line to the drop log by
+    grepping it, so the token order is a contract, not an implementation detail.
+    TIMINGS ONLY -- the assertion below also pins what must NOT be on the line.
+    """
+
+    import logging
+    import re
+
+    persona = persona_factory("prewarm_receipt")
+
+    with caplog.at_level(logging.INFO, logger=persona_prewarm.__name__):
+        _prewarm({"persona_id": "prewarm_receipt"})
+        _drained()
+
+    done = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("persona_prewarm done ")
+    ]
+    assert len(done) == 1, f"expected exactly one done receipt, got {done}"
+    match = re.fullmatch(
+        r"persona_prewarm done persona=(\S+) elapsed_ms=(\d+)", done[0]
+    )
+    assert match is not None, f"receipt format moved: {done[0]!r}"
+    assert match.group(1) == "prewarm_receipt"
+    assert int(match.group(2)) >= 0
+    # Timings only. The display name is the nearest thing to a body this warm
+    # ever holds, and it must not be on the wire to the log.
+    assert persona.display_name not in done[0]
+
+
+def test_a_failed_warm_still_reports_how_long_it_occupied_the_worker(
+    persona_factory, caplog
+):
+    """A pacing census that could only see successes would under-count.
+
+    There is ONE worker. A warm that failed after seconds of probing held it for
+    exactly those seconds, and the queue behind it waited exactly that long. The
+    failure path already warned; it now carries the elapsed cost too, and emits
+    NO done line -- a receipt for work that did not finish would be a lie the
+    census could not detect.
+    """
+
+    import logging
+    import re
+
+    persona_factory("prewarm_receipt_boom")
+
+    def _exploding_warm(persona):
+        raise RuntimeError("readiness probe blew up")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(persona_prewarm, "warm_persona_memos", _exploding_warm)
+        with caplog.at_level(logging.INFO, logger=persona_prewarm.__name__):
+            _prewarm({"persona_id": "prewarm_receipt_boom"})
+            _drained()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert not [m for m in messages if m.startswith("persona_prewarm done ")], (
+        "a warm that raised reported itself done"
+    )
+    failed = [m for m in messages if "persona prewarm failed" in m]
+    assert len(failed) == 1, messages
+    assert re.search(r"after \d+ ms", failed[0]), (
+        f"the failure path lost its elapsed cost: {failed[0]!r}"
+    )

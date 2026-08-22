@@ -70,6 +70,32 @@ registry cache and every warm behind it is cheap. The in-flight set makes a
 repeat call for a persona already queued a no-op rather than a second entry, so
 "call it on every palette open" cannot grow the queue.
 
+W2-H3 re-opened that as a question and MEASURED it rather than re-arguing it.
+A fresh process, isolated home, six synthetic personas warmed back to back::
+
+    warm #1  elapsed_ms=2172
+    warm #2  elapsed_ms=0
+    warm #3  elapsed_ms=16
+    warm #4  elapsed_ms=0
+    warm #5  elapsed_ms=16
+    warm #6  elapsed_ms=0
+
+That shape settles it, and against a second worker rather than for one. The
+queue's whole cost is ONE item: the memos the first warm fills are keyed on the
+callable and the toolset tuple, not on the persona, so every warm behind it is
+already free. A second worker cannot shorten a 2,172 ms item; it can only run a
+SECOND cold sweep beside it — the herd this section opens by refusing — and
+would buy, at best, 16 ms. **Bounded concurrency is therefore NOT implemented,
+and this paragraph is why**; the number to re-measure before anyone revisits it
+is warm #2, not warm #1.
+
+Against the pacing question the stage actually asked — can the warm beat a drop
+roughly 100 s after boot — 2.2 s cold plus ~10 ms per additional persona wins by
+about 98 s. (W2-H1's grace-window backoff does not move warm #1: with no prior
+success recorded, a cold process has no grace to serve from and honours its
+failures immediately. It moves the steady state, where a flapping probe used to
+re-run at full cost on every call.)
+
 The worker is a daemon: a serve process shutting down must not wait on a cache
 fill, and there is nothing to flush.
 """
@@ -79,10 +105,26 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+#: The worker's completion receipt, format-pinned by
+#: ``tests/agent_runtime/test_persona_prewarm.py``. One INFO line per warm the
+#: worker finishes, with the elapsed cost of THAT warm.
+#:
+#: Why it exists: this module's whole claim is "the memos are filled before the
+#: drop arrives", and that claim is a race against the operator's gesture. It was
+#: unfalsifiable — a single FIFO worker with no completion line means the pacing
+#: question ("did the warm finish first, and how much slack was there?") could
+#: only be answered by inferring from the create's own cost, which is exactly the
+#: number the warm is supposed to change. A start with no finish measures nothing.
+#:
+#: TIMINGS ONLY. Never a persona display name, never a resolved toolset, never
+#: anything the warm read — the receipt says how long, about which id, and stops.
+PREWARM_DONE_RECEIPT = "persona_prewarm done persona=%s elapsed_ms=%d"
 
 #: A warm was queued for this persona by THIS call.
 PREWARM_STATE_STARTED = "started"
@@ -191,16 +233,31 @@ def _drain() -> None:
 
     while True:
         persona_id, persona = _queue.get()
+        # Started AFTER the get, so the receipt measures the warm and not the
+        # idle wait for work — a queue that sat empty for a minute must not
+        # report a minute-long warm.
+        started = time.monotonic()
         try:
             warm_persona_memos(persona)
         except Exception:
             # Swallowed on purpose: the caller was answered long ago, and a
-            # cache that did not fill costs latency, never correctness.
+            # cache that did not fill costs latency, never correctness. The
+            # elapsed cost rides this line too: a warm that failed after seconds
+            # of probing occupied the single worker for exactly that long, and a
+            # pacing census that could only see the successes would under-count
+            # the queue's real service time.
             logger.warning(
-                "persona prewarm failed for %s; the next create pays the cold "
-                "cost it would have avoided",
+                "persona prewarm failed for %s after %d ms; the next create "
+                "pays the cold cost it would have avoided",
                 persona_id,
+                int(max(0.0, time.monotonic() - started) * 1000),
                 exc_info=True,
+            )
+        else:
+            logger.info(
+                PREWARM_DONE_RECEIPT,
+                persona_id,
+                int(max(0.0, time.monotonic() - started) * 1000),
             )
         finally:
             with _lock:
