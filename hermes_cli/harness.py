@@ -2895,6 +2895,30 @@ def _installed_pet_gallery_row(pet) -> dict:
         "zipUrl": "",
         "curated": False,
         "generated": pet.generated,
+        # The producer the launcher's revision-keyed sprite-cache eviction has
+        # been waiting for. That eviction (``PetdexSpriteCache
+        # .noteSpritesheetRevision``) was built and gated on 2026-08-21 with no
+        # writer on this side: hermes stamped ``spritesheetRevision`` only on the
+        # ``pets sprite`` payload, which the launcher reads AFTER it has already
+        # decided whether its resident decode is stale. A cache key nothing
+        # produces is a cache key that never fires, so the only live
+        # invalidation writers were the explicit clear paths.
+        #
+        # Same ``_pet_sheet_revision`` the sprite payload uses, deliberately: two
+        # producers of one key would drift, and the launcher compares the value
+        # from THIS row against the one the sprite payload stamped into its
+        # resident decode. Different arithmetic here would evict every sheet on
+        # every gallery read.
+        #
+        # REMOTE manifest rows above stay unstamped, and that is the honest
+        # answer rather than an omission: their sheet is the one behind
+        # ``spritesheetUrl``, which this process cannot stat. A revision
+        # fabricated from something else would be a key that means nothing, and
+        # the launcher — which correctly treats an unstamped sheet as "no
+        # evidence of staleness" rather than as stale — would start evicting on
+        # it. A sheet that cannot be stat'd at all lands here as the empty
+        # string, which that same reader already handles as unstamped.
+        "spritesheetRevision": _pet_sheet_revision(pet.spritesheet),
     }
 
 
