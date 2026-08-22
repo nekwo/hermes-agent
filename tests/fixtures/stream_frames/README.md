@@ -12,16 +12,15 @@ and parses them through its real decode + read-model pipeline
 split is structural, not an oversight, and the script names both halves
 (`GENERATED_FRAME_FILES` / `PINNED_ONLY_FILES`).
 
-> **CROSS-STACK COPY OWED (BO-1, 2026-08-21).** `hydrate_stale_first.json` and
-> `hydrate_authoritative_same_offset.json` are new on the hermes side and are
-> **not yet mirrored** into the launcher's `test/fixtures/harness_stream/`. Until
-> they are, `tool/test_quality/check_producer_contracts.py` reds on manifest
-> membership — correctly; that is the tripwire doing its job, not a flake. The
-> launcher half of BO-1 owes: copy both files byte-for-byte, insert the two rows
-> into `test/fixtures/harness_stream/MANIFEST.sha256` **in this manifest's order**
-> (after `hydrate_running_work_owner.json`, before `patch.json` — the checker
-> compares membership AND order before bytes), and add the pair's cases to
-> `mission_stream_contract_fixture_test.dart`.
+> **CROSS-STACK COPY STATUS (BO-1, settled 2026-08-22).** `hydrate_stale_first.json`
+> and `hydrate_authoritative_same_offset.json` were mirrored byte-for-byte into the
+> launcher's `test/fixtures/harness_stream/` (launcher `37762bc0e`), rows inserted at
+> this manifest's exact position, plus the pair's convergence case in
+> `mission_stream_contract_fixture_test.dart`. The launcher's
+> `tool/test_quality/check_producer_contracts.py` (note: that checker lives in the
+> LAUNCHER repo, invoked with `--hermes-root`; its default mode runs this repo's
+> generators — use `--no-generate` for a read-only comparison) reports both manifests
+> matching. That debt is settled.
 
 > **CROSS-STACK COPY STATUS (2026-08-16).** The O-H3 wave's two entries —
 > `patch_coverage_manifest.json`'s changed bytes and the new
