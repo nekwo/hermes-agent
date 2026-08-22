@@ -27,7 +27,7 @@ sentinel meaning **"no opinion — defer to the configured runtime default"**.
 That dual role is load-bearing: the live ``tool_permissions.json`` contains
 expiry writebacks that wrote ``profile_default`` to mean "the grant lapsed", and
 under an unbounded default those stale rows must not silently pin those sessions
-to the bounded tier forever (see ``UNBOUNDED_DEFAULT_PLAN_2026-08-09.md`` §3.1).
+to the bounded tier forever (see ``archive/2026-08-22-pre-consolidation/UNBOUNDED_DEFAULT_PLAN_2026-08-09.md`` §3.1).
 
 ``bounded`` is therefore the EXPLICIT spelling an operator uses to restrict a
 session to the old bounded tier. It resolves exactly as ``profile_default`` used

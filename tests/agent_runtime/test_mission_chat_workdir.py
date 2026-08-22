@@ -2,7 +2,7 @@
 
 ``mission_chat_reply`` built its ``AgentRunRequest`` with no ``workdir``, so a
 turn ran in whatever cwd the serve process happened to hold and every relative
-path the agent used resolved against *that* (mission-chat-lane-gap-audit.md G6).
+path the agent used resolved against *that* (archive/2026-08-22-pre-consolidation/mission-chat-lane-gap-audit.md G6).
 The fix reuses the existing seam — ``AgentRunRequest.workdir``, which
 ``profile_runner`` already honors with chdir + ``TERMINAL_CWD`` — and adds no
 parallel one.

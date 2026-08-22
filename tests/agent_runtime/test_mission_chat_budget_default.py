@@ -5,7 +5,7 @@
 time — and it was hardcoded in the mission-chat parser. The lane is now the
 primary home for agent work, so the default becomes
 ``agent_runtime.mission_chat.default_max_seconds`` in the ROOT config
-(mission-chat-lane-gap-audit.md G10).
+(archive/2026-08-22-pre-consolidation/mission-chat-lane-gap-audit.md G10).
 
 The rules pinned here: an ABSENT stanza keeps today's behavior byte for byte,
 an explicit ``--max-seconds`` always wins, and a configured value is clamped to

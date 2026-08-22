@@ -4,7 +4,7 @@ The policy itself is by design (``test_chat_lane_toolsets.py`` pins it). Its
 INVISIBILITY was the defect: a mission-chat agent asked to run a command found
 no ``terminal`` tool, and both it and the operator read the plain absence as a
 permission problem — the same failure ``mcp_lane`` retired for MCP, recurring
-one module over (mission-chat-lane-gap-audit.md §6 / G5).
+one module over (archive/2026-08-22-pre-consolidation/mission-chat-lane-gap-audit.md §6 / G5).
 
 These tests pin the ACCOUNTING, never the policy: nothing here should ever grow
 an assertion that a dropped toolset comes back. The two rules they exist to

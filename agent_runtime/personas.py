@@ -18,7 +18,7 @@ class AgentRole(StrEnum):
     this runtime, S61/S64 made profile/persona declarations the sole capability
     authority, and ``coerce_agent_role`` returns a plain ``str`` for every role
     a persona really carries today. It survives because ``docs/agent-runtime-
-    harness/02-execution-engine.md`` still names it and because the legacy
+    harness/archive/2026-08-22-pre-consolidation/02-execution-engine.md`` still names it and because the legacy
     ``pm`` spelling has to keep resolving on persisted rows — not because a
     role belongs here.
     """

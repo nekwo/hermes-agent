@@ -16,7 +16,7 @@ Three hollow rings go with them:
   the permanent ``TaskStoreStub``, whose ``.get()`` always raises ``NotFound``).
   The ``mission_hud`` HUD field row goes with the producer.
 * ``_delivery_directive_line`` — residue per the liveness ruling in
-  ``docs/agent-runtime-harness/delivery-directive.md``: with no ``Task`` to
+  ``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/delivery-directive.md``: with no ``Task`` to
   declare one, it always rendered ``DEFAULT_DELIVERY_DIRECTIVE``.
 * ``_RECENT_CONTEXT_EVENT_TYPES`` — seven of its eight rows name event types
   S15 de-registered, so no surviving code can emit them.

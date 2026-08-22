@@ -13,7 +13,7 @@ persona that already declares ``launcher_qa`` in three places can actually run
 ``mcp__launcher_qa__*`` tools AS ITSELF on the mission-chat lane, with its
 chats, trace and roster presence all native.
 
-Design (canonical): ``docs/agent-runtime-harness/mission-chat-mcp-admission.md``.
+Design (canonical): ``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/mission-chat-mcp-admission.md``.
 Read that before changing anything here.
 
 The invariants this module exists to hold

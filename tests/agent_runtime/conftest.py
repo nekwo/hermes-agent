@@ -44,7 +44,7 @@ def bounded_chat_session():
     """Pin one chat session to the pre-2026-08-09 BOUNDED tier.
 
     The runtime default is ``unbounded`` (operator ruling 2026-08-09 — see
-    ``docs/agent-runtime-harness/UNBOUNDED_DEFAULT_PLAN_2026-08-09.md``), so a
+    ``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/UNBOUNDED_DEFAULT_PLAN_2026-08-09.md``), so a
     test whose SUBJECT is the bounded tier — the chat-lane cost policy, the
     persona-safety block set, the envelope grants table — has to say so instead
     of leaning on a default that no longer means what it used to. Leaning on it
@@ -216,7 +216,7 @@ def no_serve_stream_producer_outlives_the_test(isolate_agent_runtime_root):
     read resolved against the OPERATOR's live store. Observed while building
     EG-4.1 as a ``producer_error:JSONDecodeError`` — the producer reading a
     foreign event log mid-line — and recorded as debt in
-    ``docs/agent-runtime-harness/SINGLE_TRANSPORT_COLLAPSE_PLAN_2026-08-16.md``
+    ``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/SINGLE_TRANSPORT_COLLAPSE_PLAN_2026-08-16.md``
     (TC-1, "Debt found, not fixed"). Read-only today, by luck rather than by
     design: nothing about the route made it a read.
 

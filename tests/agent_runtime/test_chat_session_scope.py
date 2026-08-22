@@ -15,7 +15,7 @@ into the SHARED store — and the cockpit, reading the head database, dropped th
 row as ``session_not_in_db``.
 
 Neither of the two latent defects the design doc had already found
-(``chat-session-presence-authority.md`` D1/D2) explains that: under the
+(``archive/2026-08-22-pre-consolidation/chat-session-presence-authority.md`` D1/D2) explains that: under the
 Launcher's own environment ``HERMES_HOME == HERMES_HEAD_HOME``, so both were
 dormant. This is a third member of the same class, and it was the live one.
 D1/D2 are fixed here too, and pinned below.

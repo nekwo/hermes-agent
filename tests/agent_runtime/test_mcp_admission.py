@@ -3,7 +3,7 @@
 ``mcp_lane`` (R0) made the harness lane's MCP drop honest. R1 lets a NARROW,
 declared, config-flagged set of personas actually register their declared
 servers for one run. Design:
-``docs/agent-runtime-harness/mission-chat-mcp-admission.md``.
+``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/mission-chat-mcp-admission.md``.
 
 These tests pin the security floor first and the happy path second, because the
 failure modes are asymmetric: denying costs a QA agent its visual proof for the

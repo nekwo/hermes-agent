@@ -3,7 +3,7 @@
 Why this file exists
 --------------------
 The goal/task mission lane is being removed (``docs/agent-runtime-harness/
-16-mission-lane-removal.md``). Every fork-owned caller of ``TaskStore`` goes with
+archive/2026-08-22-pre-consolidation/16-mission-lane-removal.md``). Every fork-owned caller of ``TaskStore`` goes with
 it — but **one upstream-owned caller does not**::
 
     tools/board_tool.py::_resolve_board_target

@@ -394,7 +394,7 @@ ACCOUNTING_KEY = "run_budget"
 def safe_accounting_block(value: Any) -> dict[str, Any] | None:
     """The WHOLE accounting block, kept structured — or ``None``.
 
-    See ``docs/agent-runtime-harness/run-budget-accounting.md`` §3 for the shape
+    See ``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/run-budget-accounting.md`` §3 for the shape
     (``bounded_by`` / ``trip_reason`` / ``enforcement`` / ``tripped`` /
     ``budgets``). The block is carried **verbatim**: this reader bounds it and
     drops non-string keys, it never renames, reshapes or fills anything in, so

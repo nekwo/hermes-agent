@@ -21,7 +21,7 @@ whose emitters are confirmed LIVE:
 * ``worktree.orphans_reaped`` — ``reap_orphan_worktrees``
   (``agent_runtime/delivery_directive.py``), the LIVE janitor with two
   production callers (``harness_doctor`` and the ``worktree reap`` CLI verb);
-  see docs/agent-runtime-harness/delivery-directive.md for the liveness ruling
+  see docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/delivery-directive.md for the liveness ruling
   that separates it from that module's residue half.
 
 Each contract below is derived from the ACTUAL emit call, not invented: the

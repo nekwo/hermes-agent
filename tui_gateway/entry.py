@@ -444,7 +444,7 @@ def main():
     # (server.py's process_registry.drain_notifications watcher) — explicit
     # at startup, never as an import side effect (same #16856 class as MCP
     # discovery above; see
-    # docs/agent-runtime-harness/eager-tool-discovery-audit-2026-08-09.md).
+    # docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/eager-tool-discovery-audit-2026-08-09.md).
     try:
         from tools.process_registry import process_registry
 

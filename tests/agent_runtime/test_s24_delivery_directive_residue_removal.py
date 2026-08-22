@@ -1,6 +1,6 @@
 """S24 sweeps the residue half of ``delivery_directive.py``; the live half stays.
 
-The liveness ruling in ``docs/agent-runtime-harness/delivery-directive.md``
+The liveness ruling in ``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/delivery-directive.md``
 split this module in two. Wave 1 removed the last two callers of the declared
 directive (``context_builder._delivery_directive_line``, ``snapshot._task_summary``).
 This stage removes what those callers were the last consumers of:

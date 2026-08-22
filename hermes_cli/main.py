@@ -11154,7 +11154,7 @@ def _prepare_agent_startup(args) -> None:
     # Rehydrate durable delegation completions for the CLI process loop's
     # drain — explicit at agent-capable startup, never as an import side
     # effect (same #16856 class as the MCP discovery above; see
-    # docs/agent-runtime-harness/eager-tool-discovery-audit-2026-08-09.md).
+    # docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/eager-tool-discovery-audit-2026-08-09.md).
     try:
         from tools.process_registry import process_registry
 

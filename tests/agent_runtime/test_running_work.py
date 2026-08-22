@@ -883,7 +883,7 @@ def test_a_cold_process_asked_a_read_only_question_creates_no_state_db(tmp_path)
     per the no-source-grep-assertions gate.
 
     History: landed as ``xfail(strict=True)`` against the filed defect
-    (docs/agent-runtime-harness/eager-tool-discovery-audit-2026-08-09.md —
+    (docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/eager-tool-discovery-audit-2026-08-09.md —
     ``ProcessRegistry.__init__`` ran delegation recovery, creating ``state.db``
     as an import side effect of the ``model_tools`` discovery chain), and
     promoted to an always-on invariant in the same wave that moved the restore

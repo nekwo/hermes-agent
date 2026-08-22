@@ -7,7 +7,7 @@ The harness terminal safety envelope (``tools/terminal_tool.py`` —
 blocks ``git push``, destructive git, recursive delete, credential reads,
 production operations and non-localhost network egress. It activates on the mere
 PRESENCE of ``HERMES_AGENT_RUNTIME_ROOT`` and reads no permission state at
-all — see ``docs/agent-runtime-harness/mission-chat-lane-gap-audit.md`` G4/G5b.
+all — see ``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/mission-chat-lane-gap-audit.md`` G4/G5b.
 
 That produced a lane that behaves two opposite ways for the same command, and
 BOTH were observed live on 2026-07-26 on the mission-chat Dev lane:
@@ -73,7 +73,7 @@ like a config grant. Nothing runs unaudited.
 This note exists because the section below is true of the grants table and
 says nothing about the mode door, and a reader who stops here concludes the
 opposite of the live posture. A doc did exactly that for weeks
-(``docs/agent-runtime-harness/mission-chat-terminal-envelope-grants.md``,
+(``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/mission-chat-terminal-envelope-grants.md``,
 corrected 2026-08-14) while quoting rule 2 accurately.
 
 Grants are ROOT-config only

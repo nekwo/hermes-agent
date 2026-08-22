@@ -1,7 +1,7 @@
 """S47 cuts the two snapshot-wire fields that could only ever report constants.
 
 Both are operator-ruled removals from the 2026-07-31 deferred-debt ledger
-(``docs/agent-runtime-harness/19-deferred-debt-ledger.md`` items 8 and 5). They
+(``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/19-deferred-debt-ledger.md`` items 8 and 5). They
 land together because they are the same defect on the same wire: a field an
 operator can read, whose value no code path can move.
 
@@ -36,7 +36,7 @@ non-test caller set is empty is a closed loop, not covered code.
 **Contract:** unlike S18/S27/S29 (which removed unreachable internals and
 therefore explicitly asserted "not a contract move"), this removes FIELDS from
 the emitted frame. That is the S9/S10 shape — ``docs/agent-runtime-harness/
-16-mission-lane-removal.md:188`` bumped ``contract_version`` 44 -> 45 for the
+archive/2026-08-22-pre-consolidation/16-mission-lane-removal.md:188`` bumped ``contract_version`` 44 -> 45 for the
 same reason and S10 bumped the Launcher's ``kSupportedMissionContractVersion``
 in lockstep. So: **45 -> 46**, with the Launcher lockstep landing beside it.
 

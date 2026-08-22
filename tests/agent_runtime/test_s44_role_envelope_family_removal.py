@@ -1,6 +1,6 @@
 """S44 retires the role_envelopes / role_checklists STORE family.
 
-The ledger item this closes (docs/agent-runtime-harness/19-deferred-debt-ledger.md
+The ledger item this closes (docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/19-deferred-debt-ledger.md
 item 1) sat on an operator ruling, not on missing work: the family was already
 production-caller-free, but cutting it retires six registered event contracts and
 therefore moves the absolute event count and ``contract_hash()``. The operator

@@ -1,6 +1,6 @@
 """S45 removes the four whole modules whose only importers were their own tests.
 
-Ledger item 2 (docs/agent-runtime-harness/19-deferred-debt-ledger.md) asked for a
+Ledger item 2 (docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/19-deferred-debt-ledger.md) asked for a
 ruling on whether test-only-anchored counts as KEEP. The operator ruled CUT on
 2026-07-31. The rule this settles, stated once so future waves do not re-derive
 it: **a module whose entire importer set is the test file written to exercise it

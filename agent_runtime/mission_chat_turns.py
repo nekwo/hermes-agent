@@ -1172,7 +1172,7 @@ _JOURNAL_TEXT_FIELDS = {
 #: ``run_budget.RunBudgetLedger.accounting()`` — the whole "what bounded this
 #: turn?" block (``bounded_by`` / ``trip_reason`` / ``enforcement`` /
 #: ``tripped`` / ``budgets``), documented in
-#: ``docs/agent-runtime-harness/run-budget-accounting.md`` §3.
+#: ``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/run-budget-accounting.md`` §3.
 #:
 #: A pure chat turn produces NO run record (``runs/`` is the goal/task lane), so
 #: before this the ledger reached the live envelope and then evaporated: the

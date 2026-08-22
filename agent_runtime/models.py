@@ -327,9 +327,14 @@ class PersonaInstance:
     # honestly instead of inventing scope.
     realm_id: str | None = None
     workspace_id: str | None = None
-    # Legacy scalar parent. Retained as a denormalized back-compat MIRROR of the
-    # primary steer parent (``steered_by[0]``); the PersonaInstanceStore is the
-    # single writer that keeps it in sync. New code reads ``steered_by``.
+    # Legacy scalar, now PROVENANCE: who caused this instance to exist. Two
+    # live writers stamp a principal here — ``agent_create`` writes
+    # ``"operator"`` and ``_maybe_stamp_spawned_by`` writes
+    # ``coordinator_id or "operator"`` — so it is NOT a mirror of
+    # ``steered_by[0]`` and no store keeps it in sync with steering. Steering
+    # truth is ``steered_by``; read-side graph filters drop non-instance
+    # tokens (``looks_like_persona_instance_id``), which is what keeps a
+    # principal from ever rendering as a parent edge.
     spawned_by: str | None = None
     # Authoritative living-graph parent SET (Stage 77 multi-parent fan-in): the
     # persona-instance ids that steer this child. Empty = standalone owner.

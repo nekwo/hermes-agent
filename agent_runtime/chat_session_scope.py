@@ -1,6 +1,6 @@
 """ONE authority for *which* chat ``SessionDB`` is the operator-visible one.
 
-Background: ``docs/agent-runtime-harness/chat-session-presence-authority.md``
+Background: ``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/chat-session-presence-authority.md``
 (stage P1 — "one acquisition, zero policy change"). This module is the single
 place the runtime decides which ``state.db`` holds persona-chat transcripts, so
 a new consumer can no longer re-decide it wrongly.

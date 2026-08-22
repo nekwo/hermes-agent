@@ -3,7 +3,7 @@
 Mission Control's read path is watermark-gated on the EventLog offset, so any
 store mutation that changes client-visible snapshot state without appending an
 event is invisible to every stream consumer (docs/agent-runtime-harness/
-12-read-path-freshness-hardening.md). These tests pin the Stage 12 fixes:
+archive/2026-08-22-pre-consolidation/12-read-path-freshness-hardening.md). These tests pin the Stage 12 fixes:
 event-coupled mutations at the store chokepoint, the blueprint-save event, the
 stream fingerprint backstop, and contract-validated appends.
 """

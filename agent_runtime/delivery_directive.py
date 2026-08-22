@@ -5,7 +5,7 @@ directive DECLARED on a goal, stored on the ``Task``, and executed at terminal
 settle by ``ArchiveStore.archive_tasks``. The goal/task lane, its request field,
 and that choke point were all removed with the mission lane (S4-S12); S24 swept
 the executors, the declaration path, and the delivery-time patch capture that
-had no producer left. ``docs/agent-runtime-harness/delivery-directive.md``
+had no producer left. ``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/delivery-directive.md``
 records what the contract was and what survived.
 
 What remains has live callers:

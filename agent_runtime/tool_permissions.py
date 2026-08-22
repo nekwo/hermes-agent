@@ -1,7 +1,7 @@
 """Chat-scoped tool permissions: the ONE place the runtime's default is decided.
 
 Since the 2026-08-09 operator ruling (``docs/agent-runtime-harness/
-UNBOUNDED_DEFAULT_PLAN_2026-08-09.md``) this module answers TWO questions that
+archive/2026-08-22-pre-consolidation/UNBOUNDED_DEFAULT_PLAN_2026-08-09.md``) this module answers TWO questions that
 used to be one:
 
 * **What is the standing posture?** ``default_permission_mode()`` — the

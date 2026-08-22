@@ -1,6 +1,6 @@
 """Unbounded-by-default tool access — the 2026-08-09 operator ruling, pinned.
 
-Plan: ``docs/agent-runtime-harness/UNBOUNDED_DEFAULT_PLAN_2026-08-09.md``.
+Plan: ``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/UNBOUNDED_DEFAULT_PLAN_2026-08-09.md``.
 
 What is actually at stake in this file, so a future reader does not "tidy" one
 of these away:

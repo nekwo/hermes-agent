@@ -162,7 +162,7 @@ delegation is not reclassified) in ``tests/agent_runtime/test_running_work.py``.
 ``model_tools``' module-scope ``discover_builtin_tools()`` call itself remains
 eager — still an import-cost weakness, filed with measurements and a lazy-
 discovery plan in
-``docs/agent-runtime-harness/eager-tool-discovery-audit-2026-08-09.md``.
+``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/eager-tool-discovery-audit-2026-08-09.md``.
 """
 
 from __future__ import annotations

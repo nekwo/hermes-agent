@@ -13,7 +13,7 @@ model:
 So a mission-chat agent asked to run a command found no ``terminal`` tool, read
 the plain absence as a permission problem, and improvised — the exact failure
 class ``mcp_lane`` was written to retire, recurring (lane gap audit §6 / G5,
-and ``mission-chat-terminal-envelope-grants.md`` §7.2 "turn-start visibility").
+and ``archive/2026-08-22-pre-consolidation/mission-chat-terminal-envelope-grants.md`` §7.2 "turn-start visibility").
 
 These tests pin the fix and, more importantly, its CONTRACT: the account rides
 the runtime-context envelope's volatile tail exactly like the wall-budget line

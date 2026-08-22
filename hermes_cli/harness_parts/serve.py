@@ -6,7 +6,7 @@ EXISTING harness argparse tree and ``_cmd_*`` handlers, unchanged — argv
 arrives verbatim as the bridge already builds it, so intent→argv mapping,
 the capability registry, and the per-call CLI fallback stay byte-identical.
 
-Design doc: ``docs/agent-runtime-harness/harness-serve-design.md``
+Design doc: ``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/harness-serve-design.md``
 (settled 2026-07-08). Explicit non-goals: no network listener, not the
 mission daemon, no second chat pipeline. "No auth (a local stdio child IS
 the security model)" held while the transport was an inherited pipe; the
@@ -102,7 +102,7 @@ Protocol (NDJSON, one frame per line):
 
              The method name above is ONE example, deliberately not a list:
              the ``@method`` registry in ``agent_runtime/serve_rpc.py`` is the
-             authority for the advertised set (currently eight). This block
+             authority for the advertised set (count it there). This block
              used to name ``get`` | ``upsert`` and stayed at two while the
              registry grew — a docstring that copies a register starts lying
              the first time the register moves, and nothing reports it.
@@ -574,7 +574,7 @@ def _runtime_state_fingerprint() -> tuple | None:
         # chat write goes to the resolved chat scope; whenever the two diverge a
         # cached snapshot could serve a frozen Chat History for the life of the
         # serve process (defect D1 in
-        # ``docs/agent-runtime-harness/chat-session-presence-authority.md``,
+        # ``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/chat-session-presence-authority.md``,
         # the serve twin of the stream-lane fix 639242901). Resolving the PATH
         # also stops the poll loop from opening — and potentially creating — a
         # database just to read its own filename.
@@ -1820,7 +1820,7 @@ def serve_loop(
             # will deliver them starts — explicit at serve boot, never as an
             # import side effect (same #16856 class as module-scope MCP
             # discovery; see
-            # docs/agent-runtime-harness/eager-tool-discovery-audit-2026-08-09.md).
+            # docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/eager-tool-discovery-audit-2026-08-09.md).
             from tools.process_registry import process_registry
 
             process_registry.restore_durable_completions()

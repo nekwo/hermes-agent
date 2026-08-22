@@ -159,7 +159,7 @@ class MissionChatConfig:
     work, but 240 s is a *conversation*-shaped window (the last
     ``max(60s, 15%)`` is reserved for the graceful checkpoint, so a default turn
     has ~180 s of tool-using time — see ``turn_budget`` and G10 of
-    ``docs/agent-runtime-harness/mission-chat-lane-gap-audit.md``). A deployment
+    ``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/mission-chat-lane-gap-audit.md``). A deployment
     that runs real work here raises the floor once, in one place, instead of
     teaching every caller to pass a flag.
 
@@ -292,7 +292,7 @@ class McpAdmissionConfig:
     budget exists to prevent.
 
     Root ``config.yaml`` shape (see
-    ``docs/agent-runtime-harness/mission-chat-mcp-admission.md``)::
+    ``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/mission-chat-mcp-admission.md``)::
 
         agent_runtime:
           mcp_admission:
@@ -311,7 +311,7 @@ class ToolPermissionConfig:
     """The runtime-wide DEFAULT chat tool-permission mode.
 
     Operator ruling 2026-08-09 (``docs/agent-runtime-harness/
-    UNBOUNDED_DEFAULT_PLAN_2026-08-09.md``): every persona/agent in this runtime
+    archive/2026-08-22-pre-consolidation/UNBOUNDED_DEFAULT_PLAN_2026-08-09.md``): every persona/agent in this runtime
     gets full tool access by default. Before it, the default was hardcoded twice
     in ``tool_permissions.py`` and liftable only by a per-session operator
     ritual; this block is the ONE knob that answers it, resolved at the ONE
@@ -359,7 +359,7 @@ class TerminalEnvelopeConfig:
     else is a typed config error rather than a silent grant.
 
     Root ``config.yaml`` shape (see
-    ``docs/agent-runtime-harness/mission-chat-terminal-envelope-grants.md``)::
+    ``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/mission-chat-terminal-envelope-grants.md``)::
 
         agent_runtime:
           terminal_envelope:

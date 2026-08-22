@@ -138,7 +138,7 @@ def test_a_payload_key_reaches_entity_correlation_id_on_the_delta_lane():
     """DELIVERED behaviour, asserted before this stage's producers exist.
 
     ``stream._delta_entity`` lifts ``payload["correlation_id"]`` onto the frame's
-    entity block, and the contract (`mission-control-stream.md`) names it. This
+    entity block, and the contract (`archive/2026-08-22-pre-consolidation/mission-control-stream.md`) names it. This
     test is what makes "60% of the pipe already shipped" a fact rather than a
     reading of the code — and it is why CI-1 attaches the id to a PAYLOAD instead
     of inventing an envelope field.

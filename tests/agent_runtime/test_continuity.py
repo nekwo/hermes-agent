@@ -24,7 +24,7 @@ def test_return_summary_posts_bounded_parent_message_and_records_lineage():
     # and reader on one file, which is also what makes the read below a real
     # routing assertion: the summary must land in the ambient operator-visible
     # database, not in a profile-scoped one (defect D2,
-    # docs/agent-runtime-harness/chat-session-presence-authority.md).
+    # docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/chat-session-presence-authority.md).
     store = PersonaInstanceStore()
     parent = store.ensure_for_persona(_persona("neko_supervisor"))
     child = store.ensure_for_persona(_persona("dev"))

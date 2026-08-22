@@ -25608,7 +25608,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # Rehydrate durable delegation completions for this gateway's drain —
     # explicit at startup, never as an import side effect (same #16856 class
     # as the MCP discovery above; see
-    # docs/agent-runtime-harness/eager-tool-discovery-audit-2026-08-09.md).
+    # docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/eager-tool-discovery-audit-2026-08-09.md).
     # In an executor because the restore runs the delegation-recovery sweep,
     # which probes owner PIDs and opens state.db.
     try:

@@ -1,7 +1,7 @@
 """Live half of ``delivery_directive``: the orphan-worktree janitor.
 
 S24 removed the Task-declared directive path and the terminal-settle executors
-(see ``docs/agent-runtime-harness/delivery-directive.md``). What this file covers
+(see ``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/delivery-directive.md``). What this file covers
 is what still has production callers:
 
 * ``reap_orphan_worktrees`` — ``hermes harness worktree reap`` and

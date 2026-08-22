@@ -33,8 +33,9 @@ later is a cross-stack change under the fixture README's update rule. The
 
 What this script writes, and what it only pins
 ----------------------------------------------
-:func:`main` regenerates the frames in :data:`GENERATED_FRAME_FILES`. The four
-files in :data:`PINNED_ONLY_FILES` are hand-authored and are only HASHED into
+:func:`main` regenerates the frames in :data:`GENERATED_FRAME_FILES`. The
+files in :data:`PINNED_ONLY_FILES` (that tuple is the authority for the count)
+are hand-authored and are only HASHED into
 ``MANIFEST.sha256``; see that tuple's comment for why they cannot be generated
 from the current production builders.
 

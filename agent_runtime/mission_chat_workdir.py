@@ -8,7 +8,7 @@ Why this module exists
 whatever cwd the serve (or CLI) process happened to hold, and every relative
 path the agent used resolved against *that*. The worker lane had its own repo
 grounding and ``hermes chat`` runs in the operator's own cwd; only this lane had
-none — see ``docs/agent-runtime-harness/mission-chat-lane-gap-audit.md`` G6.
+none — see ``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/mission-chat-lane-gap-audit.md`` G6.
 
 That comparison has since gone one-sided, so read it as history: S5 removed the
 worker lane and S29 removed the helper it grounded through

@@ -62,7 +62,7 @@ The exclusions above are by DESIGN. Their INVISIBILITY was the defect: a
 mission-chat agent asked to run a command finds no ``terminal`` tool, and both
 it and the operator read the plain absence as a permission problem — the exact
 failure class ``mcp_lane`` was written to retire for MCP, recurring here (see
-``docs/agent-runtime-harness/mission-chat-lane-gap-audit.md`` §6 / G5).
+``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/mission-chat-lane-gap-audit.md`` §6 / G5).
 
 So every dropper below returns **what it removed**, not only what remains:
 :func:`chat_lane_toolset_drops` and :func:`chat_lane_tool_drops` produce typed

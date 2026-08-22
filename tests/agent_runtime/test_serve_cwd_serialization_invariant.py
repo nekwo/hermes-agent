@@ -29,7 +29,7 @@ This test locks three things:
 
 Widening turn concurrency therefore starts by failing this test — which is the
 point. The doc section that must be satisfied first:
-``docs/agent-runtime-harness/env-determinism-audit.md`` § "The serve-cwd
+``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/env-determinism-audit.md`` § "The serve-cwd
 concurrency invariant". The fix shape recorded there is per-run resolved
 absolute paths handed to the tools instead of a process-global ``chdir``; this
 test is the tripwire that makes anyone widening concurrency read it.
@@ -119,7 +119,7 @@ def test_every_chdir_in_profile_runner_is_guarded_by_the_workdir_lock() -> None:
     assert chdir_calls, (
         "No os.chdir found in profile_runner. If process-global chdir was "
         "replaced (e.g. by per-run resolved paths), update "
-        "docs/agent-runtime-harness/env-determinism-audit.md and this test "
+        "docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/env-determinism-audit.md and this test "
         "together — do not delete the guard silently."
     )
 

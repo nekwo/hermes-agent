@@ -134,7 +134,7 @@ def _session_db():
     minted a phantom parent-session row there. A phantom row is worse than a
     missing one: a misrouted presence probe reading that database answers
     "present" for a session the operator cannot see. (Defect D2 in
-    ``docs/agent-runtime-harness/chat-session-presence-authority.md``.)
+    ``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/chat-session-presence-authority.md``.)
     """
 
     from .chat_session_scope import open_chat_session_db

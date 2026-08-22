@@ -237,7 +237,7 @@ def test_no_tools_function_body_reads_an_import_time_frozen_root() -> None:
         "call-time accessor, so it keeps resolving against whichever profile was "
         "active at import. Call `_skills_dir()` / `_hermes_home()` / "
         "`_manifest_file()` instead. See MCF-90 and "
-        "docs/agent-runtime-harness/env-determinism-audit.md §7.2. Offenders: "
+        "docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/env-determinism-audit.md §7.2. Offenders: "
         + "; ".join(surviving)
     )
 
@@ -294,7 +294,7 @@ def test_agent_runtime_never_imports_a_frozen_root_constant_from_tools() -> None
     assert offenders == [], (
         "agent_runtime imported an import-time-frozen skills-root constant from "
         "tools/. Resolve the root at call time instead. See "
-        "docs/agent-runtime-harness/env-determinism-audit.md §3. Offenders: "
+        "docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/env-determinism-audit.md §3. Offenders: "
         + ", ".join(offenders)
     )
 

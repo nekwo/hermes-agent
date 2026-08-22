@@ -1,6 +1,6 @@
 """S48 retires the five hand-rolled CLI entity-row projections.
 
-Ledger item 4 (`docs/agent-runtime-harness/19-deferred-debt-ledger.md`) was an
+Ledger item 4 (`docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/19-deferred-debt-ledger.md`) was an
 operator ruling: `hermes harness`'s entity rows adopt the snapshot-grade
 builders even though that deliberately CHANGES CLI output (card prose gains the
 wire's masking; card/actor lists gain the wire's bounds).

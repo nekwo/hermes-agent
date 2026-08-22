@@ -6,7 +6,7 @@ profile-local skill packages become canonical in the shared skills root
 (:func:`classify_promotion`) plus a guarded, atomic, never-delete executor
 (:func:`execute_promotion`).
 
-Design authority: ``docs/agent-runtime-harness/SKILL_INBOX_PROMOTION_DESIGN_2026-07-24.md``.
+Design authority: ``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/SKILL_INBOX_PROMOTION_DESIGN_2026-07-24.md``.
 
 Invariants enforced here:
 

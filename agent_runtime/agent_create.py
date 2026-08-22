@@ -25,7 +25,7 @@ that rule; :func:`honest_default_display_name` is what both lanes call.
 
 Where this deviates from the plan, out loud
 -------------------------------------------
-``AGENT_CREATE_ONE_CALL_PLAN_2026-08-16.md`` AC-0 says the extraction goes
+``archive/2026-08-22-pre-consolidation/AGENT_CREATE_ONE_CALL_PLAN_2026-08-16.md`` AC-0 says the extraction goes
 "UPWARD, not downward" — into the CLI's ``persona_commands.py``. That direction
 is not available: ``persona_commands.py`` is not an importable module. It is
 ``exec``'d into ``hermes_cli/harness.py``'s globals

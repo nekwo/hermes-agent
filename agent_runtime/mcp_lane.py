@@ -173,7 +173,7 @@ def mcp_lane_requirement_failures(
 
     Row shape is ``{code, server, summary, fix_hint}`` — deliberately the same
     shape as ``machine_roots.PathTokenIssue.row()``, per
-    ``docs/agent-runtime-harness/mission-chat-mcp-admission.md`` §D, so operator
+    ``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/mission-chat-mcp-admission.md`` §D, so operator
     surfaces that already render typed issue rows need no new case.
     ``entry_point_lane`` rides along because "not registered" is only actionable
     once you know WHERE it was not registered.

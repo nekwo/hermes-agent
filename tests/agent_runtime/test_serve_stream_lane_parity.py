@@ -3,7 +3,7 @@
 The lane has existed and been dialled by NOBODY: no ``{"op":"subscribe"}`` is
 sent from anywhere in the launcher's Dart tree, so every claim about it has been
 a claim about code nothing exercises. Plan
-``SINGLE_TRANSPORT_COLLAPSE_PLAN_2026-08-16.md`` §V2 lists what has to be TRUE
+``archive/2026-08-22-pre-consolidation/SINGLE_TRANSPORT_COLLAPSE_PLAN_2026-08-16.md`` §V2 lists what has to be TRUE
 before a client may be pointed at it, and this file is that list turned into
 tests. Nothing here changes a default: the launcher still runs the argv stream,
 and EG-4.2 is the stage that subscribes this lane.
@@ -236,7 +236,7 @@ def _stream_frames_from(sink: _Sink) -> list[dict]:
     """Only the STREAM frames on a sink: the ones carrying a top-level ``type``.
 
     Serve's own frames are keyed on ``event``, so this is the same split the
-    contract doc tells a consumer to make (``mission-control-stream.md`` —
+    contract doc tells a consumer to make (``archive/2026-08-22-pre-consolidation/mission-control-stream.md`` —
     "count only decoded protocol frames as stream liveness").
     """
 
@@ -724,7 +724,7 @@ def test_the_two_lanes_encode_the_same_frame_with_different_whitespace():
     FRAME, and a consumer that compared raw lines across the two lanes would be
     comparing whitespace.
 
-    Harmless by the contract's own terms — ``mission-control-stream.md`` tells a
+    Harmless by the contract's own terms — ``archive/2026-08-22-pre-consolidation/mission-control-stream.md`` tells a
     consumer to parse each line independently and branch on ``type`` — and
     recorded rather than fixed, because changing either encoder would move bytes
     on a lane in the field for no consumer's benefit.

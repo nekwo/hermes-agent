@@ -111,7 +111,7 @@ def test_harness_lane_names_every_declared_server():
 def test_row_shape_matches_the_typed_issue_contract():
     # Same key contract as machine_roots.PathTokenIssue.row(), so the operator
     # surfaces that already render typed issue rows need no new case
-    # (mission-chat-mcp-admission.md section D).
+    # (archive/2026-08-22-pre-consolidation/mission-chat-mcp-admission.md section D).
     visibility = resolve_tool_visibility(
         _mcp_declaring_persona("launcher_qa"),
         ToolVisibilityOptions(entry_point_lane=HARNESS_LANE),

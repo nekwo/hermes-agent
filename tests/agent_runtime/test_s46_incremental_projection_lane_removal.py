@@ -1,6 +1,6 @@
 """S46 retires the INCREMENTAL projection lane; the full rebuild stays.
 
-Ledger item 9 (docs/agent-runtime-harness/19-deferred-debt-ledger.md) asked for a
+Ledger item 9 (docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/19-deferred-debt-ledger.md) asked for a
 direction call: finish the read-model lane (wire the RD3 ticker chokepoint) or
 retire it. The operator ruled **RETIRE** on 2026-08-01.
 
@@ -9,7 +9,7 @@ lease it takes were never unreachable *code* — they were reachable only from
 tests. Repo-wide, the sole production entry to the projector is
 ``full_rebuild()`` from ``_cmd_rebuild_read_model``
 (``hermes_cli/harness_parts/runtime_commands.py:478``). The RD3 design
-(``docs/agent-runtime-harness/05-runtime-data-enterprise-storage.md:348``)
+(``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/05-runtime-data-enterprise-storage.md:348``)
 specified a "ticker chokepoint" that would call ``apply_pending()`` while the
 lease was held. It was never wired, so the two SLO tests were timing a lane
 nothing runs — ledger item 2's closed loop one level down: not a module whose

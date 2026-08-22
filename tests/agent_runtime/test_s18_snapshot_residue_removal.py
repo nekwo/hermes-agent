@@ -13,7 +13,7 @@ not refactored.
 Cutting ``_task_summary`` also removes the snapshot-side caller of
 ``delivery_directive.task_delivery_directive``, which is the prerequisite for the
 separate delivery-directive residue pass (see
-``docs/agent-runtime-harness/delivery-directive.md``).
+``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/delivery-directive.md``).
 
 The keep-side names that merely *look* like this set are pinned below so a future
 bare-word grep cannot take them out with the residue (doc 16 §Hazards: ``goal``,

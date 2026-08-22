@@ -9,7 +9,7 @@ answer five seconds after the turn settled.
 
 The mission-chat turn journal IS the chat lane's run record, so the block lives
 there, under the SAME key and in the SAME verbatim shape every other carrier
-uses (``docs/agent-runtime-harness/run-budget-accounting.md`` §3).
+uses (``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/run-budget-accounting.md`` §3).
 
 Three claims, and the file is organised around them:
 

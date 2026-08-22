@@ -196,7 +196,7 @@ class ProcessRegistry:
         # module-import side effect (the module-scope singleton below), and
         # the restore opens/creates state.db and runs delegation RECOVERY, a
         # mutation no read-only importer may reach (see
-        # docs/agent-runtime-harness/eager-tool-discovery-audit-2026-08-09.md;
+        # docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/eager-tool-discovery-audit-2026-08-09.md;
         # same class as the #16856 module-scope MCP discovery).
         self._durable_restore_lock = threading.Lock()
         self._durable_completions_restored = False
@@ -246,7 +246,7 @@ class ProcessRegistry:
         touched the tool tree — including read-only projections — opened (and
         created) ``state.db`` and ran ``recover_abandoned_delegations()``, a
         real mutation, before a single verb executed. See
-        ``docs/agent-runtime-harness/eager-tool-discovery-audit-2026-08-09.md``.
+        ``docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/eager-tool-discovery-audit-2026-08-09.md``.
 
         Idempotent per process: a second call returns 0 without touching the
         store, because re-running the restore would re-enqueue every pending

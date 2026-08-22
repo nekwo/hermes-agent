@@ -1,7 +1,7 @@
 """S48 — characterization of the five CLI entity-row projections, across the
 deliberate output change that consolidated them onto the snapshot builders.
 
-Ledger item 4 (`docs/agent-runtime-harness/19-deferred-debt-ledger.md`) was an
+Ledger item 4 (`docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/19-deferred-debt-ledger.md`) was an
 operator ruling, not a cleanup: `hermes harness` rendered entity rows through
 five hand-written projections that BYPASSED `agent_runtime/snapshot.py`'s
 builders, so the CLI printed values the wire masks and lists the wire bounds.

@@ -3143,7 +3143,7 @@ def load_config_readonly() -> Dict[str, Any]:
     ``~/.hermes`` (11 directories plus ``SOUL.md``) is a reader in name only,
     and it was reachable from import side effects — pytest COLLECTION with an
     exported ``HERMES_HOME`` scaffolded that home before any fixture ran (see
-    docs/agent-runtime-harness/eager-tool-discovery-audit-2026-08-09.md).
+    docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/eager-tool-discovery-audit-2026-08-09.md).
     ``load_config()`` — the mutate-then-``save_config`` path — still ensures
     the home, as do all write paths.
     """

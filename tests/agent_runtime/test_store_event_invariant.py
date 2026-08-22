@@ -10,7 +10,7 @@ This test makes the convention structural: every function in
 ``agent_runtime/store.py`` that writes store state must either couple an
 event append in its own body or be explicitly classified below with a
 written justification. A new write path fails CI until consciously
-classified. See docs/agent-runtime-harness/12-read-path-freshness-hardening.md.
+classified. See docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/12-read-path-freshness-hardening.md.
 """
 
 from __future__ import annotations

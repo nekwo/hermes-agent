@@ -1,6 +1,6 @@
 """Tests for ``hermes harness serve --ndjson`` (serve_loop mechanics + one
 real-dispatch integration pass). Design contract:
-docs/agent-runtime-harness/harness-serve-design.md."""
+docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/harness-serve-design.md."""
 
 from __future__ import annotations
 

@@ -1852,7 +1852,7 @@ def test_the_chat_sessiondb_class_is_resolved_through_its_own_authority(
     them is a shipped defect: a bare ``SessionDB()`` keyed the serve read cache on
     ``HERMES_HOME/state.db`` while every chat write went to the RESOLVED chat
     scope, freezing Chat History for the life of the serve process (defect D1,
-    ``chat-session-presence-authority.md``).
+    ``archive/2026-08-22-pre-consolidation/chat-session-presence-authority.md``).
 
     So the probe points the chat-scope authority somewhere unmistakably its own
     and asserts the fingerprint followed it.
