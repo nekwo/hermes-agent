@@ -675,9 +675,14 @@ def project_persona_instance_full_wire_row(instance: Any) -> dict[str, Any]:
     ``test_state_patches.py`` is what holds that claim.
     """
 
+    from .agent_create_phases import timed_create_subphase
     from .persona_assignments import persona_instance_summary
 
-    return persona_instance_summary(instance, _resolve_persona_for(instance))
+    # W3-H1: the projection alone, so the create receipt can separate it from
+    # the ``state.patched`` append that ``emit_persona_instance_create`` performs
+    # around it. Free for every other caller — see ``timed_create_subphase``.
+    with timed_create_subphase("wire_row_ms"):
+        return persona_instance_summary(instance, _resolve_persona_for(instance))
 
 
 def emit_persona_instance_create(

@@ -747,6 +747,12 @@ def perform_agent_create(
 
     import time
 
+    from .agent_create_phases import (
+        CreateSubphases,
+        log_create_subphases,
+        timed_create_subphase,
+        using_create_subphases,
+    )
     from .agent_create_reservations import (
         STATE_DONE,
         STATE_INSTANCE_MINTED,
@@ -890,15 +896,26 @@ def perform_agent_create(
                     )
             else:
                 mint_started = time.monotonic()
+                # W3-H1: ``instance_ms`` below is ONE number for everything in
+                # this arm, and W3 arrived unable to say which of its half-dozen
+                # cost blocks owned the ~2 s a first-of-session drop pays. This
+                # recorder collects named spans from the sites inside
+                # ``add_instance`` (and from the ``spawned_by`` write below) and
+                # bills them to a LOG receipt — never to the ``phases`` block on
+                # the result, which is a client-visible shape whose last
+                # observability addition landed as a cross-stack fixture change.
+                # See ``agent_create_phases``.
+                subphases = CreateSubphases()
                 try:
-                    instance = PersonaInstanceStore().add_instance(
-                        persona_id=request.persona_id,
-                        placement_id=request.placement_id,
-                        display_name=request.display_name,
-                        default_display_name=request.default_display_name,
-                        workspace_id=request.workspace_id,
-                        realm_id=request.realm_id,
-                    )
+                    with using_create_subphases(subphases):
+                        instance = PersonaInstanceStore().add_instance(
+                            persona_id=request.persona_id,
+                            placement_id=request.placement_id,
+                            display_name=request.display_name,
+                            default_display_name=request.default_display_name,
+                            workspace_id=request.workspace_id,
+                            realm_id=request.realm_id,
+                        )
                 except RetiredPersonaInstanceError as exc:
                     # ``add_instance`` decides this in ``assert_bindable``,
                     # which runs before ``_durable_chat_root`` and before
@@ -1018,8 +1035,19 @@ def perform_agent_create(
                 # while this names who the agent was spawned by, and no
                 # coordinator reaches either lane that calls this function.
                 instance.spawned_by = "operator"
-                instance = PersonaInstanceStore().update(instance)
+                with using_create_subphases(subphases), timed_create_subphase(
+                    "spawned_by_write_ms"
+                ):
+                    instance = PersonaInstanceStore().update(instance)
                 instance_ms = int((time.monotonic() - mint_started) * 1000)
+                # Emitted here rather than beside the result: this is where the
+                # mint's span CLOSES, and every arm between here and the return
+                # is a placement failure whose cost belongs to ``placement_ms``.
+                log_create_subphases(
+                    subphases,
+                    persona_id=request.persona_id,
+                    instance_ms=instance_ms,
+                )
                 reservation.mark_instance_minted(
                     persona_instance_id=instance.id,
                     placement_id=request.placement_id,

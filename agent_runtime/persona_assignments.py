@@ -13,6 +13,7 @@ from hermes_time import now
 from utils import atomic_json_write
 
 from . import paths
+from .agent_create_phases import timed_create_subphase
 from .errors import AgentRuntimeError, PersonaInstancesUnreadable
 from .events import EventLog
 from .models import (
@@ -1885,7 +1886,8 @@ class PersonaInstanceStore:
             event_payload["chat_head_home"] = instance.chat_head_home
         if previous_chat_head and previous_chat_head != instance.chat_head_home:
             event_payload["previous_chat_head_home"] = previous_chat_head
-        updated = self.update(instance)
+        with timed_create_subphase("instance_write_ms"):
+            updated = self.update(instance)
         # S7-A producer: the PAIR ``persona_instance.chat_opened`` never had.
         #
         # Covering that event without this would be a silent data drop, not a
@@ -1922,7 +1924,8 @@ class PersonaInstanceStore:
         #   any row that does not fit LOSSLESSLY, so the pre-D3 behaviour remains
         #   the floor rather than the norm.
         if created:
-            emit_persona_instance_create(self.event_log, updated)
+            with timed_create_subphase("create_patch_ms"):
+                emit_persona_instance_create(self.event_log, updated)
         else:
             moved = [
                 field
@@ -1934,7 +1937,8 @@ class PersonaInstanceStore:
             emit_persona_instance_patch(
                 self.event_log, updated, [*moved, "updated_at"]
             )
-        self._event("persona_instance.chat_opened", updated, event_payload)
+        with timed_create_subphase("event_append_ms"):
+            self._event("persona_instance.chat_opened", updated, event_payload)
         return updated
 
     def rollback_chat_root_bind(
@@ -2132,11 +2136,12 @@ class PersonaInstanceStore:
         # See ``create_operator_chat``: every refusal this bind can raise is
         # decidable without writing, so it is decided before the root is made
         # durable rather than after.
-        self.assert_bindable(
-            persona_id=normalized_persona,
-            session_id=root,
-            persona_instance_id=instance_id,
-        )
+        with timed_create_subphase("bindable_ms"):
+            self.assert_bindable(
+                persona_id=normalized_persona,
+                session_id=root,
+                persona_instance_id=instance_id,
+            )
         # ``display_name`` is the operator's AUTHORITATIVE placement name and
         # always wins; ``default_display_name`` is the persona's honest default,
         # stamped only when the instance has no name yet — never enough to clobber
@@ -2591,11 +2596,15 @@ def _durable_chat_root(
     from .persona_chat_durability import ensure_durable_persona_chat_root
 
     title = safe_assignment_text(display_name, limit=120)
-    return ensure_durable_persona_chat_root(
-        session_id,
-        persona_id=persona_id,
-        title=f"{title} chat" if title else None,
-    )
+    # Timed HERE rather than around the call site, because the call site is an
+    # ARGUMENT expression and hoisting it into a local to wrap it would undo the
+    # structural ordering this function's docstring is about.
+    with timed_create_subphase("chat_root_ms"):
+        return ensure_durable_persona_chat_root(
+            session_id,
+            persona_id=persona_id,
+            title=f"{title} chat" if title else None,
+        )
 
 
 # A chat session id is, by construction, ``persona_chat_<instance>_<hex>`` (see
@@ -2956,22 +2965,24 @@ def persona_instance_summary(
     )
     tool_options = None
     if visibility_persona is not None:
-        tool_options = permission_options_for_chat(
-            visibility_persona,
-            session_id=instance.default_chat_session_id,
-            task_id=instance.current_task_id,
-            goal_id=instance.goal_id,
-            runtime_root=instance.runtime_root,
-        )
+        with timed_create_subphase("permission_options_ms"):
+            tool_options = permission_options_for_chat(
+                visibility_persona,
+                session_id=instance.default_chat_session_id,
+                task_id=instance.current_task_id,
+                goal_id=instance.goal_id,
+                runtime_root=instance.runtime_root,
+            )
         # T9b: this preview is the persona instance's operator CHAT lane, so it
         # must reflect the chat-lane scoping (augmentation + cost cuts + restore
         # knob + registry hygiene) — not the raw effective_toolsets. Lazy import
         # avoids a module-load cycle; the chat-lane authority stays single.
         from .persona_runtime import apply_chat_lane_tool_scope
 
-        apply_chat_lane_tool_scope(
-            visibility_persona, tool_options, session_id=instance.default_chat_session_id
-        )
+        with timed_create_subphase("chat_lane_scope_ms"):
+            apply_chat_lane_tool_scope(
+                visibility_persona, tool_options, session_id=instance.default_chat_session_id
+            )
     summary = {
         "agent_profile_id": instance.id,
         "agent_profile_display_name": instance.display_name,
@@ -3055,11 +3066,12 @@ def persona_instance_summary(
         # single HUD authority now). The always-visible agents drawer renders only
         # the head SCALARS below, derived at emit from the same tool-visibility
         # resolution (never from the retired hud state).
-        tool_resolution = resolve_tool_visibility(
-            visibility_persona,
-            tool_options,
-            profile_readiness=profile_readiness,
-        )
+        with timed_create_subphase("tool_visibility_ms"):
+            tool_resolution = resolve_tool_visibility(
+                visibility_persona,
+                tool_options,
+                profile_readiness=profile_readiness,
+            )
         # Fallback follows the RUNTIME DEFAULT (see snapshot._agent_summary).
         summary["permission_mode"] = tool_resolution.get("permission_mode") or default_permission_mode()
         summary["mutation_boundary"] = tool_resolution["mutation_boundary"]
