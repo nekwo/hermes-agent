@@ -400,6 +400,48 @@ def _log_snapshot_build_core(*, caller: str, generation: int | None, snapshot: A
     )
 
 
+#: The ``agents_readiness`` split receipt, format-pinned by
+#: ``tests/agent_runtime/test_agents_readiness_attribution.py``.
+#:
+#: ``sections_ms["agents_readiness"]`` times TWO different walks and always has.
+#: Its NAME says readiness, so every remedy plan that read the section off a
+#: build log convicted ``profile_readiness_for_persona`` — and on this section
+#: that is the smaller half. Measured against the operator's own profiles root
+#: (5 runtime personas, 2026-08-22): the first build in a process costs 4,001 ms,
+#: of which the summary/tool-visibility half is 3,054 ms and the readiness walk
+#: 947 ms; every build after it in the same process costs 183 ms, split 36 / 146.
+#: The halves also move for unrelated reasons — the visibility half is the tool
+#: registry populate and the ``check_fn`` sweep, the walk is profile config plus
+#: skill resolution — so one number over both cannot attribute either.
+#:
+#: A LOG line rather than two parity keys: see the argument at the call site.
+#: Timings only, and it rides beside ``snapshot_build_core`` in ``agent.log`` so
+#: the two join on ``pid`` without a wall-clock match.
+AGENTS_READINESS_SPLIT_RECEIPT = (
+    "snapshot_agents_readiness walk_ms=%d tool_visibility_ms=%d pid=%d"
+)
+
+
+def _log_agents_readiness_split(split: dict[str, int]) -> None:
+    """Emit the section's two halves — or nothing at all if it never ran.
+
+    An empty ``split`` means the section did not execute, which is not the same
+    fact as "both halves cost 0 ms" and must not be spelled the same way. A
+    section that RAN and cost nothing does report its two zeros: that is a
+    measurement, and suppressing it would make a cheap build indistinguishable
+    from a skipped one in the other direction.
+    """
+
+    if not split:
+        return
+    logger.info(
+        AGENTS_READINESS_SPLIT_RECEIPT,
+        int(split.get("walk_ms", 0)),
+        int(split.get("tool_visibility_ms", 0)),
+        os.getpid(),
+    )
+
+
 def _record_build_info(
     build_info: dict | None,
     *,
@@ -767,20 +809,32 @@ def _build_snapshot_in_runtime_scope(
     # registry populate and the ``check_fn`` sweep, the walk is profile config
     # plus skill resolution — so one number over both cannot attribute either.
     #
-    # The two sub-keys are ADDITIVE and the outer key keeps its exact meaning:
-    # a number an operator already quoted from a past log still means what it
-    # meant. Nothing is renamed, nothing shrinks.
+    # The split is a LOG RECEIPT, not two new ``sections_ms`` keys, and the
+    # reason is a contract boundary rather than taste. ``sections_ms`` rides the
+    # parity envelope, which rides the hydrate frame, which is byte-pinned by the
+    # committed stream goldens AND by the Launcher's mirror of them
+    # (``test/fixtures/harness_stream/``) — "stream goldens change only in a
+    # cross-stack landing", as their own gate puts it. Two extra keys there would
+    # have been a cross-stack fixture landing for an observability nicety, and a
+    # hermes-only half of one is precisely the failure this repo already paid for
+    # once: hermes green, the Launcher's producer-contract byte-compare red on
+    # every push. The number an operator actually reads is ``sections_top`` on
+    # the ``snapshot_build_core`` line in ``agent.log`` — a log line, not a frame
+    # — so the attribution belongs there, where it costs no contract at all.
+    #
+    # ``agents_readiness`` therefore keeps its exact span, meaning and key.
+    _readiness_split: dict[str, int] = {}
     with _timed_section(_sections_ms, "agents_readiness"):
         from .profile_readiness import profile_readiness_for_persona
 
-        with _timed_section(_sections_ms, "agents_readiness_walk"):
+        with _timed_section(_readiness_split, "walk_ms"):
             readiness_by_persona_id = {
                 str(getattr(agent, "id", "") or ""): profile_readiness_for_persona(
                     agent, skill_resolver=skill_resolver
                 )
                 for agent in agents
             }
-        with _timed_section(_sections_ms, "agents_readiness_tool_visibility"):
+        with _timed_section(_readiness_split, "tool_visibility_ms"):
             agent_summaries = [
                 _agent_summary(
                     agent,
@@ -791,6 +845,7 @@ def _build_snapshot_in_runtime_scope(
                 )
                 for agent in agents
             ]
+    _log_agents_readiness_split(_readiness_split)
     available_personas = _available_persona_summary(agents)
     personas_by_id = {str(getattr(agent, "id", "") or ""): agent for agent in agents}
     # S56: the persona-instance roster is UNCONDITIONAL. It was gated on
@@ -1007,11 +1062,6 @@ def _build_snapshot_in_runtime_scope(
     # can rely on a stable shape.
     for _section_key in (
         "agents_readiness",
-        # The two halves of agents_readiness, always present for the same reason
-        # the parent is: a consumer must be able to tell "this half cost zero"
-        # from "this build does not report the split at all".
-        "agents_readiness_walk",
-        "agents_readiness_tool_visibility",
         "prompt_observability",
         "events",
         "persona_chat",

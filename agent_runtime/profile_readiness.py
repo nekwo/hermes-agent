@@ -76,8 +76,9 @@ _SEVERITY = {
 # The cost the drop actually feels lives in the OTHER half of the
 # ``agents_readiness`` section (3,054 ms of the 4,001 ms first build): the
 # tool-visibility resolve and its ``check_fn`` sweep. That half is now timed
-# separately (``agents_readiness_tool_visibility`` in ``sections_ms``) and is
-# what W2-H1's grace-window backoff addresses.
+# separately and reported on the ``snapshot_agents_readiness`` receipt in
+# ``agent.log`` (``snapshot._log_agents_readiness_split``), and it is what
+# W2-H1's grace-window backoff addresses.
 def profile_readiness_for_persona(
     persona, *, task=None, stage=None, skill_resolver=None
 ) -> dict[str, Any]:
