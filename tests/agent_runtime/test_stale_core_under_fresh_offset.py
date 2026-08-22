@@ -225,6 +225,26 @@ def test_a_demoting_batch_never_ships_a_core_that_predates_its_offset(
     frame then carries the 14:56 core under a 15:33 offset, ``WS_NEW`` is absent,
     and the launcher — which applies a ``delta`` core wholesale — erases the
     agent the operator just dragged in.
+
+    WHY THE STALE CORE HAS TO BE ARRANGED NOW (R1, 2026-08-21)
+    =========================================================
+
+    It did not, when this case was written: an append moved the store, the boot
+    memo could not see it, and ``build_snapshot()`` on the demote lane handed
+    back the boot-time core all by itself. R1 put the event log's logical tail
+    into the consult stamp, so the very append that produces this batch now drops
+    the memo and the demote lane pays for a real build — the shape this case
+    reproduces has **no naturally reachable producer left in this scenario.**
+
+    That is exactly what makes the frame-level guard belt-and-braces rather than
+    dead, and it is why the arrangement below is a pin and not a stub: freezing
+    the position core_cache reads restores the pre-R1 memo behaviour BYTE FOR
+    BYTE — the same judgement, answering the same riders, about a store that has
+    moved underneath it — which is the 15:33 producer and equally any future
+    stale-core source (a shadow gap, a coalescer handing back an older build, the
+    next cache bug). The guard has to refuse it whatever produced it. Everything
+    downstream of the pin — the drain, the build, the guard, the frame — is the
+    production path unmodified.
     """
 
     _seed_workspace(WS_PRE, "the-agent-that-was-already-here")
@@ -245,14 +265,23 @@ def test_a_demoting_batch_never_ships_a_core_that_predates_its_offset(
     assert _workspace_ids(hydrate["core"]) == {WS_PRE}
     assert shadow_requests, "the shadow-validation window was never requested"
 
+    # The boot's view of the store's position — what the memo recorded, and what
+    # the pre-R1 stamp would keep answering from for the rest of the window.
+    boot_position = core_cache._store_position()
+    assert boot_position is not None
+
     # The operator's gesture: a durable row that did not exist at boot, and the
     # events that carry it into the stream.
     _seed_workspace(WS_NEW, "the-agent-dragged-in-at-15-33")
     _append_uncoverable_event(0)
     _append_uncoverable_event(1)
 
-    with caplog.at_level(logging.WARNING, logger="agent_runtime.core_cache"):
-        delta = next(frames)
+    with pytest.MonkeyPatch.context() as pre_r1_memo:
+        pre_r1_memo.setattr(
+            core_cache, "events_position", lambda: {"event_offset": boot_position}
+        )
+        with caplog.at_level(logging.WARNING, logger="agent_runtime.core_cache"):
+            delta = next(frames)
     assert delta["type"] == "delta", delta["type"]
 
     # The refusal is on the record with both numbers, because "the agent came
@@ -478,3 +507,160 @@ def test_the_memo_is_dropped_the_moment_the_window_closes(
         request["cached"], caller=request["caller"], build=request["build"]
     )
     assert core_cache._consult_memo is None
+
+
+# --------------------------------------------------------------------------- #
+# 4. R1 — the memo may not answer "current" about a store it never consulted
+# --------------------------------------------------------------------------- #
+def test_an_append_inside_the_armed_window_drops_the_boot_consult_memo(
+    isolate_agent_runtime_root, shadow_requests, monkeypatch
+):
+    """The other half of §1's chain, and the half the window fix does not reach.
+
+    Closing the armed window on an agreeing shadow bounds the memo's LIFETIME; it
+    says nothing about what the memo may claim INSIDE that window. A boot's
+    riders arrive over about a second — the stale-first read, then prewarm,
+    hydrate, hub and cli — and the store is live the whole time. A memo keyed on
+    the persisted pair's own stat cannot see an append: the pair does not move
+    when the log does, so the judgement computed for the first rider keeps
+    answering ``matched`` for every rider behind it, about a store that has since
+    moved. That is the mtime anti-pattern keyed on the ARTIFACT rather than on
+    the source — one step worse than the classic one, because the artifact is not
+    even the thing being asked about.
+
+    The witness is a COUNT of reads of the persisted pair, the same observable
+    the memo's own perf case uses, because "did this ask look again" is exactly
+    what a memo decides and it cannot be forged by a provenance label.
+
+    *Kill:* drop the event log's logical tail out of the consult stamp. The
+    second ask is then answered from the pre-append judgement — one read for two
+    asks, across a write — which is the 15:33 shape at boot scale.
+    """
+
+    _seed_workspace(WS_PRE, "the-agent-that-was-already-here")
+    converge_persisted_core()
+
+    reads: list[int] = []
+    real_read_pair = core_cache._read_pair
+
+    def counted_read_pair():
+        reads.append(1)
+        return real_read_pair()
+
+    monkeypatch.setattr(core_cache, "_read_pair", counted_read_pair)
+
+    first = core_cache.consult(caller="hydrate")
+    assert first.core is not None, (
+        "the boot's first consult was not a cache hit, so there is no warm memo "
+        "here for an append to have to invalidate"
+    )
+    assert len(reads) == 1, reads
+
+    # The operator's gesture, mid-boot: the store moves, the persisted pair does
+    # not. Nothing republishes the cache, so the pair's three stats are
+    # byte-identical to what the memo recorded.
+    before = core_cache._pair_stamp()
+    _append_uncoverable_event(0)
+    assert core_cache._pair_stamp() == before, (
+        "the append moved the persisted pair, so this case would pass on the "
+        "pre-R1 stamp and proves nothing about the store being consulted"
+    )
+
+    core_cache.consult(caller="hub")
+    assert len(reads) == 2, (
+        f"the persisted pair was read {len(reads)} time(s) across an append: the "
+        "second rider was answered by a judgement taken before the write, so the "
+        "memo is claiming 'current' about a store it never consulted"
+    )
+
+
+def test_the_reconsult_after_an_append_is_a_fresh_look_not_a_forced_rebuild(
+    isolate_agent_runtime_root, shadow_requests, monkeypatch
+):
+    """R1 re-CONSULTS. It does not make the event log a validity authority.
+
+    The module header's standing rule is that the fingerprint decides validity
+    full stop and ``event_offset`` is never an input to the match decision. The
+    stamp obeys it: the position decides whether the memoised ANSWER may be
+    reused, and when it may not, the walk runs and the walk decides. So a store
+    whose log moved while no build input the walk cares about did gets a fresh
+    judgement and, if that judgement matches, a cache HIT — not a rebuild.
+
+    Driven by moving the position alone: the append lands in a store the
+    fingerprint has been asked to ignore, so the two questions are separated on
+    real bytes rather than by argument.
+
+    *Kill:* invalidate on position by DEMOTING instead of by re-judging. Every
+    boot on a live store then pays a full rebuild and the ~2 s cache-hit boot is
+    gone.
+    """
+
+    _seed_workspace(WS_PRE, "the-agent-that-was-already-here")
+    converge_persisted_core()
+
+    reads: list[int] = []
+    real_read_pair = core_cache._read_pair
+
+    def counted_read_pair():
+        reads.append(1)
+        return real_read_pair()
+
+    monkeypatch.setattr(core_cache, "_read_pair", counted_read_pair)
+
+    assert core_cache.consult(caller="hydrate").core is not None
+    assert len(reads) == 1, reads
+
+    # A position that moved without any build input moving. Real bytes on the
+    # real authority the stamp reads through, so the two questions are told apart
+    # by the code under test rather than by the test's own arrangement.
+    moved = int(core_cache._store_position() or 0) + 4096
+    with pytest.MonkeyPatch.context() as position:
+        position.setattr(
+            core_cache, "events_position", lambda: {"event_offset": moved}
+        )
+        again = core_cache.consult(caller="hub")
+
+    assert len(reads) == 2, (
+        "the moved position did not force a fresh look, so this case is not "
+        "exercising the invalidation it is written about"
+    )
+    assert again.core is not None and not again.demoted, (
+        "a store position that moved while no build input did was answered with "
+        "a demote: the event log has become a second validity authority, which "
+        "is the design this module's header refuses"
+    )
+    assert WS_PRE in _workspace_ids(again.core)
+
+
+def test_a_build_key_is_never_inherited_across_an_append(
+    isolate_agent_runtime_root, shadow_requests
+):
+    """``pre_build_fingerprint`` reuses the consult's key — but only its OWN store.
+
+    The key a build persists is deliberately taken BEFORE the build, so it is at
+    worst older than the core it describes. Inheriting it from a judgement made
+    before an append breaks that direction in the one way the function's own
+    docstring calls unsafe: the persisted key would describe a store the build
+    was no longer reading, and the NEXT process would be served a core missing
+    the write as authoritative.
+
+    *Kill:* compare only the pair's stats here. The pre-append key is then handed
+    to a post-append build.
+    """
+
+    _seed_workspace(WS_PRE, "the-agent-that-was-already-here")
+    converge_persisted_core()
+
+    assert core_cache.consult(caller="hydrate").core is not None
+    inherited = core_cache.pre_build_fingerprint()
+    assert inherited is not None
+
+    _append_uncoverable_event(0)
+    after = core_cache.pre_build_fingerprint()
+
+    assert after is not None
+    assert after.digest != inherited.digest, (
+        "the build was handed the key computed before the append: that key "
+        "describes a store this build is not reading, and write_back would "
+        "persist it as the description of the core it produces"
+    )

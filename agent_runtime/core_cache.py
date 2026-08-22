@@ -226,6 +226,7 @@ from typing import Any, Callable, Iterator, NamedTuple
 from utils import atomic_json_write
 
 from .dispatch_delivery import DRAIN_STATE_FILENAME
+from .parity import events_position
 from .paths import DELETED_ARCHIVE_DIRNAME, OFFICE_ARCHIVE_DIRNAME
 from .serve_auth import SERVE_AUTH_TOKEN_FILENAME
 from .serve_registry import SERVE_INSTANCES_DIRNAME
@@ -2657,8 +2658,9 @@ _shadow_done = False
 #:
 #: They are one question, so they get one answer. The memo holds the
 #: ``CacheRead`` the first asker computed, keyed on the STAT TRIPLES of the
-#: persisted pair itself, and is dropped when the lane disarms — that is, the
-#: moment this process owns its own truth.
+#: persisted pair itself PLUS the event log's logical tail (:class:`_ConsultStamp`),
+#: and is dropped when the lane disarms — that is, the moment this process owns
+#: its own truth.
 #:
 #: WHAT THIS DOES NOT CHANGE. A hit still means the fingerprint matched the
 #: sidecar; a demote still carries its own reason and its own receipt per caller.
@@ -2692,14 +2694,41 @@ _shadow_done = False
 #: lane's own or another process's — invalidates the memo immediately: the pair
 #: is written through ``atomic_json_write``, and a rename always moves mtime.
 #:
+#: **AND THE STORE'S POSITION IS RE-TAKEN WITH IT (R1, 2026-08-21).** Bound 1
+#: above is now true by code, but it bounds the WINDOW, not what may be said
+#: inside it: an append that lands between the boot's stale-first read and its
+#: riders' consults is still inside the armed window, and a memo keyed on the
+#: cached artifact's own stat cannot see it. Keying on the artifact rather than
+#: on the source is the mtime anti-pattern one step worse than the classic one,
+#: and it is what let a 14:56 core answer "current" at 15:33 while the store had
+#: moved 8,000 bytes past it. So the log's logical tail rides in the stamp and
+#: any append drops the memo. What the next asker then does is WALK, not
+#: rebuild: the fingerprint is still the only validity authority and an append
+#: that changed no build input is still a cache hit — see :func:`_store_position`
+#: for why this is not the refused event-offset cache key.
+#:
 #: The lock is held ACROSS the computation, deliberately. Riders arrive within
 #: milliseconds of each other; a lock released before the walk would let all of
 #: them start their own and the memo would record the last one to finish, buying
 #: nothing. Blocking is the mechanism, not a side effect. Nothing inside the
 #: computed region takes :data:`_lane_lock`, and no holder of the lane lock takes
 #: this one — the two never nest.
+class _ConsultStamp(NamedTuple):
+    """What the memo was taken against: the cached ARTIFACT and the STORE.
+
+    Two halves because they answer two different questions, and the memo needs
+    both. ``pair`` says "the thing I memoised has not been republished under me";
+    ``event_offset`` says "the source of truth has not moved since I looked".
+    A memo missing the second half answers "current" about a store it never
+    consulted — the 2026-08-21 15:33 mechanism, and R1's whole subject.
+    """
+
+    pair: tuple[FingerprintEntry, ...]
+    event_offset: int | None
+
+
 class _ConsultMemo(NamedTuple):
-    stamp: tuple[FingerprintEntry, ...]
+    stamp: _ConsultStamp
     raw_core: str
     read: CacheRead
 
@@ -2709,7 +2738,7 @@ _consult_memo: _ConsultMemo | None = None
 
 
 def _pair_stamp() -> tuple[FingerprintEntry, ...]:
-    """The pointer and the pair it names — the memo's whole invalidation rule.
+    """The pointer and the pair it names — half of the memo's invalidation rule.
 
     The POINTER is in the stamp, and it is the load-bearing third stat. A
     generation flip is already visible in the other two — a
@@ -2718,6 +2747,9 @@ def _pair_stamp() -> tuple[FingerprintEntry, ...]:
     pointer's own mtime moves on every publish by the same ``os.replace`` argument
     the whole module rests on, so the memo drops on a republish whatever the
     generations are called.
+
+    The OTHER half is :func:`_store_position`; the two are taken together by
+    :func:`_consult_stamp`, which is what every memo comparison uses.
     """
 
     generation = _live_generation_dir()
@@ -2726,6 +2758,74 @@ def _pair_stamp() -> tuple[FingerprintEntry, ...]:
         _stat_entry(generation / SIDECAR_FILENAME),
         _stat_entry(generation / CORE_FILENAME),
     )
+
+
+def _store_position() -> int | None:
+    """The event log's LOGICAL tail — the store's own position, right now.
+
+    =========================================================================
+    THIS IS NOT AN EVENT-OFFSET CACHE KEY (read the module header first)
+    =========================================================================
+
+    The header's standing rule is absolute and unchanged: **the fingerprint
+    decides validity, full stop** — ``event_offset`` is never an input to the
+    MATCH decision, there is no event-tail replay, and there must never be a
+    second validity authority beside the walk. Nothing here decides that a
+    persisted pair matches or does not.
+
+    What this decides is narrower by one whole layer: whether a judgement
+    computed for an EARLIER ask may be reused to answer THIS one without looking
+    again. That is a memoisation question, not a validity question, and the two
+    have opposite failure directions — a dropped memo costs a walk (~300–355 ms
+    measured, and only on a boot whose store is moving under it), while a memo
+    kept too long serves an answer about a store that has since changed. The
+    fingerprint walk still runs and still decides; this only stops the memo from
+    speaking for a walk that was never taken.
+
+    **Why the store's position and not the pair's stat.** The pair's stat can
+    only see the cache writing itself back. It is blind by construction to the
+    thing the cache is a projection OF, so a memo keyed on it alone answers
+    ``matched=True`` for as long as nobody republishes — measured 2026-08-21: a
+    cache-hit boot filled the memo at 15:24 with a 14:56 core, an agent was
+    created at 15:33, and the memo answered "current" four more times because
+    the pair had not moved. Appends move the log; the log is in the stamp; the
+    memo drops.
+
+    **Cost, stated because the audit bounded it.** One ``stat`` of the live
+    slice, plus one ``exists`` probe of the rotation manifest (two, once the
+    store has rotated) — ``event_rotation.log_end_offset`` reads no event bytes
+    and scans nothing. Per ask, on a path that already pays three stats.
+
+    ``None`` is the typed unknown, exactly as ``parity.events_watermark``
+    defines it, and :func:`_stamp_still_stands` refuses to answer from a memo on
+    either side of one: a position that could not be read cannot vouch that the
+    store stood still. That is the same direction the whole module takes — a
+    missing answer is "never cache", never "nothing changed".
+    """
+
+    return events_position().get("event_offset")
+
+
+def _consult_stamp() -> _ConsultStamp:
+    """Both halves, taken together — the only stamp a memo is ever compared on."""
+
+    return _ConsultStamp(_pair_stamp(), _store_position())
+
+
+def _stamp_still_stands(memo_stamp: _ConsultStamp, now_stamp: _ConsultStamp) -> bool:
+    """May a memo taken at ``memo_stamp`` answer an ask at ``now_stamp``?
+
+    Equality of both halves is required. The store half additionally refuses an
+    UNKNOWN position on either side rather than letting two unknowns compare
+    equal: ``None == None`` would read as "the log did not move" when what it
+    actually says is "nobody could tell", which is the fail-quiet default
+    ``events_watermark``'s own docstring exists to forbid. An install whose log
+    cannot be stat'd re-walks per ask — the expensive direction, deliberately.
+    """
+
+    if memo_stamp.event_offset is None or now_stamp.event_offset is None:
+        return False
+    return memo_stamp == now_stamp
 
 
 def _drop_consult_memo() -> None:
@@ -2741,13 +2841,21 @@ def _armed_window_read() -> CacheRead:
     The build coalescer already deep-copies its result for exactly this reason:
     :func:`label_core` stamps provenance IN PLACE, so one shared dict would let
     the third rider's label land on the first rider's already-emitted frame.
+
+    The stamp is taken OUTSIDE the memo lock and both halves come from
+    :func:`_consult_stamp`, so an append that lands between the boot's stale-read
+    and its riders' consults drops the memo and the next asker walks the store
+    again. It re-CONSULTS; it does not force a rebuild. The walk it pays for is
+    the content check, and if the fingerprint still matches the answer is still a
+    cache hit — the append simply no longer gets to be answered by a judgement
+    taken before it.
     """
 
     global _consult_memo
-    stamp = _pair_stamp()
+    stamp = _consult_stamp()
     with _memo_lock:
         memo = _consult_memo
-        if memo is not None and memo.stamp == stamp:
+        if memo is not None and _stamp_still_stands(memo.stamp, stamp):
             return memo.read._replace(core=json.loads(memo.raw_core))
         pair = _read_pair()
         if pair is None:
@@ -2777,12 +2885,20 @@ def pre_build_fingerprint() -> CoreFingerprint | None:
 
     Falls through to a full walk whenever there is no standing consult: a cold
     store (nothing to consult), a disarmed lane (every later build in the
-    process), or a pair that moved since.
+    process), a pair that moved since, or a STORE that moved since. The last one
+    is new with R1 and costs this caller a walk it used to skip — which is the
+    direction this function's own rule already demanded: a key that predates the
+    build is safe, and a key inherited from a judgement taken before an append
+    would describe a store the build is no longer reading.
     """
 
     with _memo_lock:
         memo = _consult_memo
-    if memo is not None and memo.read.fingerprint is not None and memo.stamp == _pair_stamp():
+    if (
+        memo is not None
+        and memo.read.fingerprint is not None
+        and _stamp_still_stands(memo.stamp, _consult_stamp())
+    ):
         return memo.read.fingerprint
     return build_input_fingerprint()
 
