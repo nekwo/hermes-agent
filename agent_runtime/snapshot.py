@@ -756,25 +756,41 @@ def _build_snapshot_in_runtime_scope(
             build_context.skill_root_registries if build_context is not None else None
         )
     )
+    # ``agents_readiness`` times TWO different walks and always has. Its name
+    # says readiness, so a remedy plan reading the section off a build log
+    # convicts ``profile_readiness_for_persona`` — and on this section that is
+    # the SMALLER half. Measured against the operator's own profiles root
+    # (5 runtime personas, 2026-08-22): first build in a process 4,001 ms, of
+    # which the summary/tool-visibility half is 3,054 ms and the readiness walk
+    # 947 ms; steady state in the same process 183 ms, split 36 / 146. The two
+    # halves also move for unrelated reasons — the visibility half is the
+    # registry populate and the ``check_fn`` sweep, the walk is profile config
+    # plus skill resolution — so one number over both cannot attribute either.
+    #
+    # The two sub-keys are ADDITIVE and the outer key keeps its exact meaning:
+    # a number an operator already quoted from a past log still means what it
+    # meant. Nothing is renamed, nothing shrinks.
     with _timed_section(_sections_ms, "agents_readiness"):
         from .profile_readiness import profile_readiness_for_persona
 
-        readiness_by_persona_id = {
-            str(getattr(agent, "id", "") or ""): profile_readiness_for_persona(
-                agent, skill_resolver=skill_resolver
-            )
-            for agent in agents
-        }
-        agent_summaries = [
-            _agent_summary(
-                agent,
-                include_tool_details=True,
-                readiness=readiness_by_persona_id.get(
-                    str(getattr(agent, "id", "") or "")
-                ),
-            )
-            for agent in agents
-        ]
+        with _timed_section(_sections_ms, "agents_readiness_walk"):
+            readiness_by_persona_id = {
+                str(getattr(agent, "id", "") or ""): profile_readiness_for_persona(
+                    agent, skill_resolver=skill_resolver
+                )
+                for agent in agents
+            }
+        with _timed_section(_sections_ms, "agents_readiness_tool_visibility"):
+            agent_summaries = [
+                _agent_summary(
+                    agent,
+                    include_tool_details=True,
+                    readiness=readiness_by_persona_id.get(
+                        str(getattr(agent, "id", "") or "")
+                    ),
+                )
+                for agent in agents
+            ]
     available_personas = _available_persona_summary(agents)
     personas_by_id = {str(getattr(agent, "id", "") or ""): agent for agent in agents}
     # S56: the persona-instance roster is UNCONDITIONAL. It was gated on
@@ -991,6 +1007,11 @@ def _build_snapshot_in_runtime_scope(
     # can rely on a stable shape.
     for _section_key in (
         "agents_readiness",
+        # The two halves of agents_readiness, always present for the same reason
+        # the parent is: a consumer must be able to tell "this half cost zero"
+        # from "this build does not report the split at all".
+        "agents_readiness_walk",
+        "agents_readiness_tool_visibility",
         "prompt_observability",
         "events",
         "persona_chat",

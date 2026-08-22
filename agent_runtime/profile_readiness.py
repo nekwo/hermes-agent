@@ -42,6 +42,42 @@ _SEVERITY = {
 }
 
 
+# WHY THERE IS NO PER-PERSONA MEMO OVER THIS WALK (W2-H2, refused 2026-08-22).
+#
+# The obvious remedy for "the snapshot re-runs this per persona per build" is a
+# memo keyed on the persona's inputs. It is refused, and the refusal is written
+# here rather than left to be re-derived by the next person who reaches for it.
+#
+# What the walk READS: the persona's own fields; the profile binding (profiles
+# root, ``profile.yaml``, the ``active_profile`` pointer); ``config.yaml``'s
+# content; ``machine_roots.json``; and — this is the one that decides it — the
+# CONTENT of every resolved skill package, because ``content_hash`` /
+# ``installed_hash`` / ``hash_matches_expected`` / ``skill_hash_mismatches`` are
+# in the returned row. A memo that skipped that input would serve a stale hash
+# verdict after a skill edit: the artifact-stat anti-pattern (a key over fewer
+# inputs than the body reads), which this repo has already paid for once.
+#
+# What an HONEST key would therefore cost: the resolver walk to learn which
+# packages are selected, then the per-package stat set over each. That is
+# precisely the key ``agent.skill_utils.skill_package_content_hash`` already
+# computes and already caches for the process (``_CONTENT_HASH_CACHE``, keyed on
+# every package file's mtime_ns+size), one layer below this function — so the
+# memo's key would duplicate, at this layer, the majority of the work it was
+# added to skip.
+#
+# The measurement says the same thing in milliseconds. Against the operator's
+# real profiles root, 5 runtime personas, 2026-08-22: this walk costs 947 ms on
+# the first build in a process and 146 ms on every build after it, of which the
+# skill term (resolve + content hashes + compatibility) is 770 ms cold and about
+# 99 ms steady — and the parts an honest key would have to re-do are ~102 of
+# those 146 ms. A new cache class that saves ~44 ms and can go stale is a
+# liability, not a remedy.
+#
+# The cost the drop actually feels lives in the OTHER half of the
+# ``agents_readiness`` section (3,054 ms of the 4,001 ms first build): the
+# tool-visibility resolve and its ``check_fn`` sweep. That half is now timed
+# separately (``agents_readiness_tool_visibility`` in ``sections_ms``) and is
+# what W2-H1's grace-window backoff addresses.
 def profile_readiness_for_persona(
     persona, *, task=None, stage=None, skill_resolver=None
 ) -> dict[str, Any]:
