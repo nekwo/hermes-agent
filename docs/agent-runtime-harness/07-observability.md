@@ -1,0 +1,401 @@
+# 07 — Observability: the receipts, their contracts, their consumers
+
+How this runtime is measured, and by what. Every receipt below was read out of
+its emitter before it was written down: it appears here in the format string the
+emitter holds, with that emitter's `path:line`. Three surfaces carry the whole
+picture — hermes log receipts in `<HERMES_HOME>/logs/agent.log`, the durable
+turn record's `phases` block, and the launcher's diag log. They join by **id**,
+never by time, and each has a consumer that fails loudly when it reads nothing.
+
+## The honesty contract
+
+This is the canonical statement. Every timing surface in either repo inherits
+it; the launcher's `mission_boot_timeline.dart` is where it was first written
+down, and `agent_runtime/mission_chat_phases.py:18-50` is the hermes copy that
+the create receipt (`agent_create_phases.py:23-24`) then inherited verbatim.
+
+1. **Absent is never zero.** A phase that did not happen has no key — not `0`,
+   not `null`, not present-and-empty. `safe_turn_phases`
+   (`agent_runtime/mission_chat_phases.py:387`) drops keys it
+   cannot read rather than defaulting them; `_format_ttfb_token`
+   (`agent/conversation_loop.py:382-394`) emits no `ttfb=` token rather than
+   `ttfb=0.0s`, "which reads as an instantaneous provider and is a lie no
+   downstream reader can detect"; `_log_agents_readiness_split`
+   (`snapshot.py:437-454`) prints nothing when the section never ran, and two
+   honest zeros when it ran and cost nothing. **Absent-as-zero is the canonical
+   lie of this codebase** — it is how a census once MEASURED A FALSE ZERO
+   (`core_cache.py:169-172`).
+2. **Monotonic only.** `time.monotonic` / `time.perf_counter` by construction,
+   never a wall-clock delta: `BootTimeline` (`boot_timeline.py:16-17`),
+   `TurnPhaseMarks` (`mission_chat_phases.py:29-32`), `_first_delta_recorder`
+   (`conversation_loop.py:402-413`). A clamped `0` beats a nonsense `-3` where a
+   span must still be emitted (`boot_timeline.py:181-184`) — clamping a measured
+   span is not the same act as inventing an unmeasured one.
+3. **First mark wins.** `provider_first_byte` is marked from a callback that
+   fires once per token; a second mark must not move the first, and the guard
+   lives in the marks object, not at the call site, "because 'the call site
+   remembered to guard' is not a property anything asserts" (`:33-36`; items
+   4-8 below cite the same file).
+4. **Release-visible.** Durable records and ordinary INFO log lines, not debug
+   aids behind a flag: the phases block rides persists the turn already performs
+   (`:37-39`), the snapshot receipts ride the ordinary `Logger` family so
+   `hermes serve` lands them in `agent.log` with no extra flag
+   (`snapshot.py:397-398`, `stream.py:126-127`), and the launcher's lines reach
+   the diag tee in release too.
+5. **Never subtract wall stamps across processes.** `anchored_at` is the single
+   wall stamp on a turn record, and exists only for eyeballing the turn against
+   `agent.log`. "Subtracting it from anything is a bug" (`:13-16`).
+6. **Join by id, never by time.** The launcher diag log stamped dateless local
+   time before BO-3 and UTC after; turn records were always UTC, and two lanes
+   misread across that boundary in one day. The keys are `turn_id`
+   (`agent-chat-send-<uuid4>`, echoed byte-equal by hermes as both
+   `client_message_id` and `turn_id`), `pid` for the boot families
+   (`stream.py:108-117`), and `correlation_id` for the gesture chain
+   (`office_store.py:173-196`). See `mission_chat_latency_audit.dart:23-40`.
+7. **A span boundary is a fact about bytes, not intent.** The "provider
+   first_byte" span opened before `run_conversation` had begun and so wore the
+   provider's name over hermes assembly; `request_assembled` (`:84`, marked
+   at `:384`, emitted as a run-progress marker at
+   `conversation_loop.py:347-379`) splits it: `provider_request_started →
+   request_assembled` is hermes, `request_assembled → provider_first_byte` is
+   the client plus the wire.
+8. **One authority per span.** A second measurement is a second authority, and
+   the two will drift. `build_receipt_facts` (`snapshot.py:324-336`) READS
+   `build_ms` off the envelope the build stamped rather than re-timing it;
+   `snapshot_build`'s deprecated `elapsed_ms=` carries the identical value as
+   `waited_ms=` (`stream.py:142-145`); `agent_create_phases` repeats
+   `instance_ms` from the RPC result (`agent_create_phases.py:83-87`).
+
+## Wire safety: receipts ride the LOG, never the envelope
+
+**Observability never adds a key to the parity envelope.** Parity rides the
+hydrate frame, and the hydrate frame is byte-pinned by the committed stream
+goldens AND by the launcher's mirror of them — so two extra keys there is a
+cross-stack fixture landing. Not theory: the `agents_readiness` split was first
+written as two `sections_ms` keys and had to be pulled back out (`0e4567f5fd`,
+2026-08-21), leaving hermes green and the launcher's producer-contract
+byte-compare red on every push in between. Argument at `snapshot.py:824-837`;
+`agent_create_phases.py:14-21` cites it as why the create's spans are a log line
+instead. The exception that proves the rule: `phases` on the create's RPC result
+and on the turn record are client-visible, but both are additive keys on
+surfaces that are NOT byte-pinned. Anything on the hydrate frame is — which is
+what the fixture mirror below enforces.
+
+## The receipt census
+
+| receipt (grep this) | emitter | consumer |
+|---|---|---|
+| `snapshot_build_core role=… caller=… generation=… build_ms=… offset=… sections_top=… pid=…` | `agent_runtime/snapshot.py:403-411` (fn `:373`, call site `:687`) | operator grep (`role=led` is the build count); `tests/agent_runtime/test_snapshot_build_logging.py:758` pins the prefix |
+| `snapshot_build reason=… waited_ms=… elapsed_ms=… build_ms=… role=… caller=… generation=… offset=… events=…` (+`sections_top=`, +`core_source=`, then `pid=` last) | `agent_runtime/stream.py:135-173` | operator grep; a launcher in the field still parses `elapsed_ms` (`stream.py:100-101`); `tests/agent_runtime/test_stream_build_timing_log.py` |
+| `snapshot_agents_readiness walk_ms=… tool_visibility_ms=… pid=…` | const `snapshot.py:432-434`, emitted `:449-454` | joins `snapshot_build_core` on `pid`; pinned by regex at `tests/agent_runtime/test_agents_readiness_attribution.py:51` |
+| `stream_attach op=… purpose=… … pid=…` | `agent_runtime/stream.py:212-218` | boot-investigation join (third `pid=`-bearing family) |
+| `snapshot_core_cache …` / `snapshot_core_cache_write …` / `snapshot_core_shadow …` / `snapshot_core_cache_lane_closed …` | `agent_runtime/core_cache.py` — see the channel table below | `agent_runtime/core_cache_census.py` via `scripts/core_cache_demote_census.py` |
+| `persona_prewarm done persona=… elapsed_ms=…` | const `persona_prewarm.py:127`, emitted `:276-280` | pacing census; pinned at `tests/agent_runtime/test_persona_prewarm.py:520` |
+| `agent_create_phases persona=… instance_ms=… phases=… pid=…` | const `agent_create_phases.py:88-90`, emitted `:232-237` | drop-latency attribution; pinned at `tests/agent_runtime/test_agent_create_subphases.py:152` |
+| `harness serve boot timeline: <k=v …>` | `hermes_cli/harness_parts/serve.py:1765-1767`, line built by `boot_timeline.py:173-178` | operator grep; the same block also rides the `ready` frame (`serve.py:1705`) |
+| `API call #N: model=… provider=… in=… out=… total=… latency=…s[ cache=…][ ttfb=…s]` | `agent/conversation_loop.py:3473-3479` | provider-vs-hermes attribution; `tests/run_agent/test_api_call_ttfb.py` |
+| turn-record `phases` block (schema v3) | `agent_runtime/mission_chat_phases.py`; the key lands via `_safe_journal_metadata` (`mission_chat_turns.py:428`, `:487`) → `safe_turn_phases` (`:1230`) | `tool/mission_chat_latency_audit.dart` |
+| `[MissionChatTiming]` / `[MissionChatOutcome]` / `[MissionDropTiming]` | launcher — see the launcher section below | `tool/mission_chat_latency_audit.dart`; drop line read by eye |
+| `prompt_observability` rows + `trace_events` | `agent_runtime/prompt_observability.py:108`, persisted `:1198-1233` | `harness prompt-context show --context-id` (`hermes_cli/harness.py:1935`) and the slimmed `chat.final` echo |
+
+### The snapshot build family
+
+`snapshot_build_core` is ONE line per ACTUAL build, emitted by the caller that
+ran it, on the thread that paid for it, before its waiters are notified
+(`snapshot.py:682-689`). Every other line about a build is a WAIT
+(`stream.py`'s `snapshot_build`). Until the two were separated, the 2026-08-17
+boot's "three concurrent builds" were one build plus two riders logging their
+waits, and the most expensive build of that boot — the serve prewarm — logged
+nothing at all (`snapshot.py:374-381`). A build that raised logs nothing: "the
+exception is the receipt" (`:685-686`). An injected-store (fixture) build emits
+no receipt (`:570-573`). `sections_top` rides every `snapshot_build_core`, and a
+WAIT line only when the build under it crossed `BUILD_SECTIONS_WAIT_THRESHOLD_MS`
+(`stream.py:153-158`). `pid=` goes LAST on
+all three join families so no adjacency moves — an additive field, never a
+formatter change, because `%(process)d` would re-shape every line the runtime
+emits and break every grep anchored on a neighbour (`stream.py:118-124`).
+
+### The core-cache family and its census
+
+`agent_runtime/core_cache.py:152-195` is **the authority** — a per-receipt
+channel table naming, for every line, its family token, whether a second channel
+(the `parity` envelope) carries the same fact, and the census rules a counter
+must honour. Not duplicated here; amend it there.
+
+The emitters: `snapshot_core_cache core_source=cache …` (`:3155`), the demote
+`core_source=rebuilt caller=… reason=… inputs=…` (`_log_demote`, `:3088`), the
+stale variant (`:3211`), `snapshot_core_cache_write ok=true` (`:1872`) and its
+four `ok=false` reasons (`:1786`, `:1790`, `:1794`, `:1864`),
+`fingerprint_refused` (`:1114`), `generation_residue` (`:2000`),
+`never_converged` (`:2303`), `..._lane_closed` (`:2996`).
+
+Three facts a reader must carry. **A cache hit deliberately does NOT emit
+`snapshot_build_core`** (`:3112-3119`) — there was no build, and a receipt
+claiming one would put the log back where a wait and a build are
+indistinguishable. **`reason=absent` is deliberately never logged** (the
+ordinary cold start would print a line on every build in every process), so its
+only trace is the ABSENCE of a line and "no demote line" must never be read as
+"no demote". **Two reason spellings collide across two events** —
+`fingerprint_unavailable` and `build_stamp_unknown` are emitted by the write
+lane and the read lane alike, so grep the family token with the reason, never
+the reason alone. The census that executes those rules is code, not prose:
+`agent_runtime/core_cache_census.py` (family token at `:97`), driven by
+`scripts/core_cache_demote_census.py` — exit `0` reported, `1` **nothing parsed
+or log unreadable (a failure, not a pass)**, `2` a demote named a path the
+runtime itself writes, the self-perturbation finding it exists for (`:10-25`).
+
+### Create, prewarm, boot
+
+`agent_create_phases` bills ten named spans of one mint — `bindable_ms`,
+`chat_root_ms`, `instance_write_ms`, `create_patch_ms`, `wire_row_ms`,
+`permission_options_ms`, `chat_lane_scope_ms`, `tool_visibility_ms`,
+`event_append_ms`, `spawned_by_write_ms` (`agent_create_phases.py:103-127`) —
+rendered `name:ms,name:ms` in that order, or the token `-` when nothing was
+recorded (`NO_PHASES`, `:96`), so a parser never has to tell "no such key" from
+"nothing ran". Spans ride a `ContextVar`, so a concurrent snapshot build on
+another thread cannot land in a create's receipt (`:60-62`).
+
+`persona_prewarm done` is the completion half of an otherwise unfalsifiable
+claim — "a start with no finish measures nothing" (`persona_prewarm.py:118-123`).
+The clock starts AFTER the queue `get`, so an idle worker never reports a
+minute-long warm (`:255-258`); a warm that RAISED logs a WARNING carrying the
+same elapsed cost, because a census blind to the failures would under-count the
+queue's real service time (`:262-274`). `harness serve boot timeline:` renders
+`BootTimeline.stamps()` as `key=value` pairs: `interpreter_ms` (psutil-derived,
+ABSENT when the platform will not report a creation time), the segments that
+decompose it — `interpreter_boot_ms`, `main_import_ms`, `dispatch_ms`,
+`bytecode_sweep_ms`, `harness_parser_ms` (`hermes_cli/_boot_clock.py:112-152`)
+— then the phases in completion order
+(`chat_registry_ms`, `head_publish_ms`, `root_anchor_ms`, `store_root_ms`,
+`service_foundations_ms`, `orphaned_turn_sweep_ms`, `dispatch_restore_ms`), then
+`elapsed_ms` and `total_ms`. A phase recorded twice ACCUMULATES
+(`boot_timeline.py:140-151`) and is stamped as it COMPLETES, so a boot that
+wedges before `ready` still carries everything it finished.
+
+### The turn record's `phases` block (schema v3)
+
+`TURN_RECORD_SCHEMA_VERSION = 3` (`mission_chat_phases.py:70`) is the version
+that carries `phases`. A v2 record is NOT migrated — bumping is how a reader
+tells "this turn predates phase spans" from "this turn was instrumented and
+never reached that phase", two facts a silent version would collapse. Marks, in
+the order a healthy turn passes them (`:76-89`): `request_received` (0 by
+definition — the anchor, and the only always-present key), `context_built`,
+`observability_built`, `emitter_created`, `write_ahead`, `agent_ready`,
+`provider_request_started`, `request_assembled`, `provider_first_byte`,
+`stream_done`, `native_committed`, `projected`. Plus the flag `agent_init_cold`
+and the counters `registry_probe_rounds` / `builds_overlapped` (`:92-96`), all
+three absent when the fact could not be established honestly — populated at
+`hermes_cli/harness_parts/persona_commands.py:2008`, `:3203`, `:3392`, `:3398`,
+overlap counted by `agent_runtime/snapshot_build_ledger.py`.
+
+Persisted at `<store>/mission_chat_turns/<safe_session_key>.json`
+(`mission_chat_turns.py:28-43`) with `sort_keys=True` (`:1073`), so the on-disk order is
+alphabetical and **nothing may depend on ordering** — the join contract is the
+key names and their meaning (`mission_chat_phases.py:98-105`). A "phase" more
+than 24 h after the anchor is rejected on READ as corrupt; the writer cannot
+produce one (`:128-132`). The emitter's own `ttft_ms` keeps its meaning: it is
+constructed only after replay checks, native history load, turn-context build
+and the prompt-observability row build, so its clock cannot see the profile
+bootstrap before it. `phases` is a SUPERSET, not a replacement (`:41-46`).
+
+### The launcher's three lines
+
+All three ride `Logger` into `<temp>/eternia_launcher_diag.log` in debug AND
+release, stamped `[<UTC ISO-8601>] <level> <logger> — <message>`
+(`lib/core/telemetry/diag_log_file.dart:278-283`). Bullet paths below are
+relative to `lib/features/mission_control/`.
+
+* `[MissionChatTiming] turn_id=<id> send_to_admit_ms=… admit_to_first_delta_ms=…
+  first_delta_to_end_ms=… end_to_settle_ms=…` —
+  `data/mission_chat_turn_timeline.dart:266-273`, marker const `:296`. One line
+  per turn, at settle. Absent fields omitted entirely; no `unresolved=` clause,
+  because the field set is CLOSED unlike the open-ended boot receipt (`:255-265`).
+* `[MissionChatOutcome] turn_id=… status=… [error_kind=…] message="…"` —
+  `agent_chat/mission_agent_chat_runtime_controller.dart:1566-1571`. Landed
+  because the 2026-08-22 01:00:47Z new-chat rejection settled leaving NO
+  envelope anywhere on disk: the timing line printed bare (correct — no phases
+  happened) and the refusal lived only in widget state. Harness error prose only,
+  truncated at 220 chars, never operator text.
+* `[MissionDropTiming] correlation=… persona=… slug=… layout_mutate_ms=…
+  rpc_ms=… rpc_instance_ms=… roster_confirmed_ms=… sprite_ms=…
+  sprite_source=cold|warm|absent sprite_lane=serve|cli first_paint_ms=…` —
+  `data/mission_drop_timeline.dart:351-368`, marker const `:376`. Closed and
+  ordered; `roster_confirmed_ms` went in additively, disturbing no `key=value`
+  reader.
+
+### prompt_observability rows and trace_events
+
+Per-turn prompt provenance, not timing: what the model was actually shown. Built
+by `mission_chat_prompt_observability` (`prompt_observability.py:108`), turn
+results attached at `:551`, persisted through **one** chokepoint —
+`persist_prompt_observability_context` (`:1198-1233`) — which ref-transforms the
+skills catalogs, writes compactly, updates the latest-pointer index and applies
+retention. Layout: `<store>/prompt_observability/<context_id>.json`,
+`prompt_observability_catalogs/<hash>.json`, `prompt_observability_archive/`,
+`prompt_observability_index.json` (`agent_runtime/paths.py:306-328`). Retention
+keeps the newest 2 rows per `(persona_instance_id, session_id)` lane and ARCHIVES
+the rest, never deletes (`:1185-1187`); an absent catalog is honest absence,
+never a fake empty list (`:1217-1220`). Two consumers: the live `chat.final`
+echo carries a slimmed projection (`slim_chat_final_observability`,
+`persona_commands.py:3522`); evicted rows are
+fetched by `harness prompt-context show --context-id <id> [--json]`
+(`hermes_cli/harness.py:634-645`, handler `:1935-1957`) — read-only, honest
+`not_found` on absence. `trace_events` are the turn's tool-call trace, passed at
+`persona_commands.py:3416` and read by `used_skills_context`
+(`prompt_observability.py:2675-2700`) to report which skills were actually
+loaded — `skill_view` entries only, redaction-safe.
+
+## The consumers
+
+A timeline with no consumer is a file, not observability: the boot receipts were
+honest and release-visible for days while nothing read them, which is how the
+2026-08-21 convergence defect survived (`mission_boot_receipt_audit.dart:1-16`).
+
+* **`tool/mission_chat_latency_audit.dart`** (launcher repo; reads only, safe
+  while the launcher is open). Joins `[MissionChatTiming]` to the turn record's
+  `phases` **by `turn_id`**. Exit codes (`:53-62`, computed at `:384-389`): `0`
+  every parsed turn joined a record carrying phase data; `1` log or turn dir
+  missing/unreadable; `2` a timing line matched NO record — a broken join key;
+  `3` **zero-scan, no timing line parsed**; `4` lines parsed but none joined a
+  record carrying `phases`; `64` bad arguments. The unmeasured span — launcher
+  dispatch leaving the process to hermes `request_received` — is a BOUNDED
+  residual from two same-side durations, never printed as a measurement
+  (`:37-40`).
+* **`tool/mission_boot_receipt_audit.dart`**. One assertion: a boot whose
+  receipt shows `spawn_to_ready` resolved while `authoritative` is still listed
+  under `unresolved=` is a defect. Exit `0`/`1`/`2`/`3`/`64` (`:34-42`), where
+  `3` covers TWO guards — zero `[MissionBoot]` receipts parsed, or the audited
+  phase key matched nothing anywhere in the file. One constant serves all four
+  positions that token can occupy, so a misspelling produces exit 3, not a quiet
+  green (`:64-70`).
+* **`tool/test_quality/check_producer_contracts.py`** (launcher repo, invoked
+  with `--hermes-root`). Compares manifest membership AND ORDER before bytes —
+  the logic is `compare_family` (`:54-75`), over the two fixture families the
+  `FAMILIES` tuple declares (`:23-35`). Default mode RUNS this repo's
+  generators first; `--no-generate` compares committed bytes read-only
+  (`:101-105`). CI runs it in default mode, in job `hermes-cli-contract`
+  (`.github/workflows/ci.yml:42`), at the step `:82-85`.
+* **`scripts/core_cache_demote_census.py`** — see the core-cache section.
+
+## The BO-1 fixture mirror
+
+Two families, each a producer directory in hermes mirrored byte-for-byte into a
+consumer directory in the launcher: stream frames
+(`tests/fixtures/stream_frames` ↔ `test/fixtures/harness_stream`) and response
+envelopes (`tests/fixtures/response_envelopes` ↔
+`test/fixtures/hermes_responses`). The launcher parses its copies through the
+real decode + read-model pipeline (`mission_stream_contract_fixture_test.dart`).
+`MANIFEST.sha256` pins fourteen stream files while the generator writes seven —
+a structural split named in the script as `GENERATED_FRAME_FILES` /
+`PINNED_ONLY_FILES` (`tests/fixtures/stream_frames/README.md:8-13`). BO-1
+settled 2026-08-22: `hydrate_stale_first.json` and
+`hydrate_authoritative_same_offset.json` mirrored into the launcher
+(`37762bc0e`) at this manifest's exact row position, plus the pair's convergence
+case in the launcher test (`README.md:15-24`); both manifests match. Adding a
+key to `parity` means regenerating these files and landing them in both repos in
+one wave — the wire-safety invariant in its concrete form.
+
+## The zero-scan lesson (MCF-53 class)
+
+A scanner that silently matches nothing reports a clean bill of health for a log
+it never read. Every consumer above encodes the lesson: the chat audit splits it
+in TWO on purpose — `3` "the launcher wrote nothing" versus `4` "the launcher
+wrote and hermes did not" — because folding them would make "the other repo has
+not landed yet" look identical to "the join is broken"
+(`mission_chat_latency_audit.dart:64-80`); the boot audit guards the marker AND
+the audited key separately, both watched failing before the tool is trusted
+(`mission_boot_receipt_audit.dart:44-62`); the demote census exits `1` on an
+empty scan, because `absent` is deliberately unlogged and a `0` there would be
+indistinguishable from a healthy runtime — "exactly how a self-invalidating
+cache went unnoticed for months" (`scripts/core_cache_demote_census.py:13-19`).
+
+## The swallow audit, and what it changed
+
+The 2026-08-17 lane-ambiguity scout (archived, full text preserved) ranked four
+findings. **All four are fixed today — verified by reading the current code,
+not by trusting the audit's own status.**
+
+| finding | then | now |
+|---|---|---|
+| `serve_rpc.py` baseline `or 0` — an unreadable event log became watermark 0, killing the sink's baseline gate and re-opening the resync↔restart loop | `baseline_offset = int(...) or 0` | typed absence: `baseline_offset = event_offset_of(watermark)` then an explicit `is None` arm — `agent_runtime/serve_rpc.py:822-823` |
+| empty `patches` shipped as a `patch` frame — the client advanced its watermark having folded nothing | coverable ⇒ promoted | promotion now also requires `batch_carries_patch_rows(batch)`; the honest answer for a pair-less batch is the full core — `agent_runtime/stream.py:808-819`, argued at `:424-452` |
+| `office_surface` could never satisfy the office scope gate, so every folder-only patch frame was dropped with no patch and no resync | `entity == OFFICE_ACTOR_ENTITY` and a slash-prefixed id | one predicate: `office_patch_scope(patch) == workspace_id` — `agent_runtime/serve_office_subscriptions.py:486` |
+| `_usage_lane_detected` — a credential fault DELETED the lane from the Limits panel, and an empty envelope rendered as a positive claim that no provider is signed in | `except Exception: return False` | three outcomes, not two: true / false / **raise**, with the raise caught per provider and the lane emitted `unavailable` naming the exception class — `hermes_cli/harness.py:3704-3721`, `:3952-3955` |
+
+The highest-value read-side swallow also closed: `_read_actor_dir` skipped
+undecodable files and returned a shorter list that described itself as complete,
+so `actors_truncated` computed 0 over it. It now returns a typed
+`ActorScan(actors, unreadable)` so the two facts travel together
+(`agent_runtime/office_store.py:60-79`, `:542-552`).
+
+## Invariants
+
+1. **A receipt's format string is a contract.** Most are pinned by a test that
+   greps the prefix or regex (`test_snapshot_build_logging.py:758`,
+   `test_agents_readiness_attribution.py:51`, `test_persona_prewarm.py:520`,
+   `test_agent_create_subphases.py:152`, `test_core_cache_channel_table.py`).
+2. **`pid=` is last; variable-length tails are last.** `generations=`, `diff=`
+   and `_lane_closed`'s free-form detail span go last because nothing can be
+   field-parsed after them (paths may contain spaces).
+3. **Every receipt leads with a family token**, then `key=value`. A census greps
+   tokens, never the prose after them (`core_cache.py:156-160`).
+4. **Observability must never be the reason something fails.** Instruments are
+   defensive by construction (`snapshot.py:333-335`), the boot-timeline
+   annotation is wrapped in a bare `except` (`serve.py:1057-1058`), and
+   `log_create_subphases` never raises and never measures
+   (`agent_create_phases.py:230`).
+5. **Receipts carry timings and ids only.** Never a display name, never a
+   resolved toolset, never operator message text (`persona_prewarm.py:125-126`,
+   `agent_create_phases.py:64-66`,
+   `mission_agent_chat_runtime_controller.dart:1562`).
+6. **Observability rides log receipts, never new keys on the parity envelope.**
+   See the wire-safety section.
+7. **A scanner that matches nothing must exit nonzero.**
+
+## Open rows
+
+* **Nothing schedules the three live-log consumers** — the two `dart run` audits
+  and the demote census run only when a human remembers.
+  → `planned/observability-consumer-runner.md`
+* **Residual split, named rather than fixed:** the cache line says `stale=true`
+  while the payload says `parity.core_stale` / `parity.freshness.state` — a
+  consumer contract predating the lane (`core_cache.py:184`). A census reads both.
+* **`reason=absent` has no receipt by design**, so demote counts are lower
+  bounds; nothing lifts that without a line per build, per process.
+* **The new-chat first-send rejection is still open.** `[MissionChatOutcome]`
+  landed to name the next occurrence; it has not yet caught one.
+* **C3 is instrumented but unread**: whether a drop followed by a first message
+  pays a cold MCP spawn is answerable from the `phases` counters today.
+
+## Supersedes
+
+All under `archive/2026-08-22-pre-consolidation/`:
+
+* `SCOUT_HERMES_SWALLOW_AUDIT_2026-08-17.md` — its four top findings and the
+  `_read_actor_dir` swallow are fixed; retained as the pre-fix record.
+* `CORRELATION_ID_PLAN_2026-08-16.md` — the gesture-token threading landed
+  (EG-2.3 / §V2); `correlation_id` is a join key here, not a plan.
+* `MISSION_BOOT_WINDOW_PLAN_2026-08-17.md`, `EG0_2_RECEIPTS_2026-08-17.md` — the
+  receipts they specified are censused above at their live formats.
+* `14-snapshot-core-build-performance.md` — build/cache receipts moved here;
+  `core_cache.py:152-195` holds the channel table.
+* `MC_DROPS_SNAPSHOT_CACHE_INVESTIGATION_2026-08-18.md` — origin of MCF-53 and
+  MCF-54(ii); both are now encoded rules (`generation_residue` exists, the
+  zero-scan exits exist).
+
+## Unverified carry-forward
+
+Field numbers relayed from live runs. The receipts that produced them are
+verified above; the numbers cannot be re-derived from the tree. First two from
+`Launcher_Brain/20 — Active Initiatives/chat-provider-timing-and-speed-2026-08-22.md`.
+
+* **~13% of one turn's "provider first_byte" span was hermes work** — turn
+  `c59ab99e`, 2026-08-22 02:00Z: 1,762 ms of 13,532 ms. This is the measurement
+  `request_assembled` was added to attribute.
+* **The felt gateway-vs-Mission-Control gap is mostly the MODEL** —
+  `gpt-5.6-luna` on openai-codex 0.7–1.6 s TTFB; `big-pickle` on opencode-zen
+  (FREE tier) 10.7–12.5 s total, `429 FreeUsageLimitError` under a probe burst.
+* **First-build cost, 5 runtime personas, 2026-08-22**: 4,001 ms (3,054 tool
+  visibility / 947 readiness walk); later builds in the same process 183 ms
+  (36 / 146). A code comment at `agent_runtime/snapshot.py:422-424` — verified
+  as written there, not re-measured here.
