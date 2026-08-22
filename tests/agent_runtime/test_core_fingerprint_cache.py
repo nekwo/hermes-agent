@@ -1282,6 +1282,92 @@ def test_a_mismatch_serves_labeled_stale_first_then_authoritative(
     assert _served_workspace_name(frames[1]["core"]) == "alpha-two"
 
 
+def test_the_authoritative_follow_up_re_emits_at_the_stale_frames_own_offset(
+    isolate_agent_runtime_root, seeded_cache
+):
+    """BO-1: on an IDLE store the pair converges at ONE offset, and must.
+
+    The case above pins that the authoritative frame arrives and carries the new
+    value. It asserts nothing about the two frames' OFFSETS, and that absence is
+    the scariest unguarded edge the 2026-08-21 boot survey found: the launcher's
+    ordinary sequence gate is strict ``>``, so a same-offset re-hydrate is
+    normally a DUPLICATE and is dropped. Only ``staleHeldAwaitsAuthoritative``
+    exempts it, and that exemption is the only path off a stale canvas when the
+    log has not moved.
+
+    So the plausible future "optimization" — dedupe the follow-up when the built
+    core reaches the same offset the stale one already carried, because it looks
+    like a re-send of a frame the client has — would freeze every launcher on a
+    permanently stale paint and, before this case, would have reddened ZERO
+    tests in either repo.
+
+    The store is idle by construction: ``_rewrite_workspace_name`` moves the row
+    with no EventLog event, which is both what makes the fingerprint miss and
+    what keeps the log's tail where it was. That is not a contrivance — it is
+    the ordinary boot shape, because a store whose log is quiet between two
+    builds is what a machine looks like most of the time.
+
+    *Kill (watched):* ``return`` out of ``stream_frames`` after the stale yield
+    when the built core's offset equals the stale core's — the dedupe named
+    above. One frame arrives instead of two and this reds on the count.
+
+    **The case above reds on that sabotage too, and this one is still not
+    redundant** — stated because "two tests fail together" is usually a sign one
+    of them is spare. They fail together on the DELIVERY question and diverge on
+    the OFFSET question: the case above would stay green for a producer that
+    delivered the follow-up at a different, higher offset (it asserts only that
+    frame 2 arrived carrying the new value), and that producer freezes nothing —
+    but it also is not the shape the launcher's exemption is written against, so
+    the exemption would rot untested while both repos stayed green. The last two
+    assertions here are the half nothing else in either repo makes.
+    """
+
+    from agent_runtime.parity import events_watermark
+    from agent_runtime.stream import stream_frames
+
+    _rewrite_workspace_name("alpha-two")
+    _new_context()
+
+    idle_offset = events_watermark().get("event_offset")
+    assert idle_offset is not None
+
+    frames = [
+        frame
+        for frame in stream_frames(
+            max_frames=2,
+            poll_interval_seconds=0.01,
+            heartbeat_interval_seconds=60,
+            wants_stale_first=True,
+        )
+        if frame.get("type") == "hydrate"
+    ]
+
+    assert len(frames) == 2, (
+        "the boot delivered "
+        f"{[frame.get('type') for frame in frames]} — a stale paint with no "
+        "authoritative follow-up leaves a launcher holding a declared-stale "
+        "core forever, because its sequence gate drops the only frame that "
+        "could replace it"
+    )
+    assert frames[0]["core"]["parity"]["freshness"]["state"] == "stale"
+    assert frames[1]["core"]["parity"]["freshness"]["state"] == "fresh"
+    assert _served_workspace_name(frames[0]["core"]) == "alpha-one"
+    assert _served_workspace_name(frames[1]["core"]) == "alpha-two"
+
+    assert frames[1]["watermark"]["event_offset"] == frames[0]["watermark"][
+        "event_offset"
+    ], (
+        "the authoritative hydrate re-emitted at a DIFFERENT offset than the "
+        "stale paint it replaces, so this case is no longer exercising the "
+        "same-offset convergence the launcher's one sequence-gate exemption "
+        "exists for"
+    )
+    assert frames[0]["watermark"]["event_offset"] == idle_offset, (
+        "the log moved during the boot, so the pair above converged for a "
+        "reason other than the idle store this case is written about"
+    )
+
+
 def test_a_stale_labeled_core_is_never_live_to_the_launchers_own_predicate(
     isolate_agent_runtime_root, seeded_cache
 ):

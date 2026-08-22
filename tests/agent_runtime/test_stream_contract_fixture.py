@@ -146,12 +146,19 @@ def _live_generated_frames() -> dict[str, dict]:
     # rebuilds. Order matches the generator — everything above is built before
     # the seed lands, so only the last frame carries running work.
     _generator_module()._seed_running_work_owner()
+    owner_hydrate = hydrate_frame()
+    # LAST, and again through the generator's own function: this one converges a
+    # persisted core and pays for a gated rebuild, so running it earlier would
+    # rebuild every frame above against a store it had moved.
+    stale_first, authoritative = _generator_module()._build_stale_first_convergence_pair()
     return {
         "hydrate.json": hydrate,
         "delta.json": delta_frame(first, offset=batch[0][0], snapshot=core),
         "heartbeat.json": heartbeat_frame(offset=7),
         "delta_batch.json": delta_batch_frame(batch, snapshot=core),
-        "hydrate_running_work_owner.json": hydrate_frame(),
+        "hydrate_running_work_owner.json": owner_hydrate,
+        "hydrate_stale_first.json": stale_first,
+        "hydrate_authoritative_same_offset.json": authoritative,
     }
 
 
@@ -226,6 +233,11 @@ def test_manifest_pins_fixture_bytes():
         "heartbeat.json",
         "delta_batch.json",
         "hydrate_running_work_owner.json",
+        # BO-1's same-offset convergence pair (2026-08-21): the boot's stale
+        # paint and its authoritative replacement, both at the idle store's one
+        # offset. Read as a PAIR — the relation between them is the contract.
+        "hydrate_stale_first.json",
+        "hydrate_authoritative_same_offset.json",
         "patch.json",
         "patch_upsert_profile.json",
         "patch_remove.json",
@@ -313,6 +325,8 @@ def test_every_frame_bearing_golden_pins_contract_version(isolate_agent_runtime_
             "delta.json",
             "delta_batch.json",
             "hydrate_running_work_owner.json",
+            "hydrate_stale_first.json",
+            "hydrate_authoritative_same_offset.json",
         )
     )
     for frame, origin in frames:
@@ -392,6 +406,52 @@ def test_every_frame_bearing_golden_carries_the_generated_core(
         assert golden_core["parity"]["capabilities"] == live_core["parity"][
             "capabilities"
         ], f"{name} core.parity.capabilities drifted"
+
+
+def test_the_stale_first_pair_is_same_offset_and_carries_both_freshness_tokens():
+    """BO-1's cross-repo pin, asserted on the committed BYTES.
+
+    The producer-side behaviour is pinned separately against the live builders
+    (``test_core_fingerprint_cache``'s stale-then-authoritative case). This one
+    is about the goldens the launcher mirrors: a manifest hash proves the bytes
+    did not move, and proves nothing about what they SAY. If the pair ever
+    regenerates to two different offsets — or to two frames wearing the same
+    freshness token — the launcher's convergence case would be driving a shape
+    that no longer exists on the wire, green in both repos.
+
+    The equal offset is the exemption's whole precondition: the launcher's
+    ordinary sequence gate is strict ``>``, and only
+    ``staleHeldAwaitsAuthoritative`` lets frame 2 land at frame 1's offset. The
+    token pair is BO-6's fixture-drift finding closed on real bytes — the
+    non-stale spelling is ``fresh`` here, while the launcher's wiring-test
+    fixtures had drifted to ``live`` with nothing comparing them.
+    """
+
+    stale = _fixture("hydrate_stale_first.json")
+    authoritative = _fixture("hydrate_authoritative_same_offset.json")
+
+    assert stale["type"] == authoritative["type"] == "hydrate"
+    assert (
+        stale["watermark"]["event_offset"]
+        == authoritative["watermark"]["event_offset"]
+    ), (
+        "the convergence pair is no longer same-offset, so the launcher's "
+        "stale-held exemption is not what these goldens exercise"
+    )
+
+    stale_parity = stale["core"]["parity"]
+    authoritative_parity = authoritative["core"]["parity"]
+    assert stale_parity["freshness"]["state"] == "stale"
+    assert stale_parity["core_stale"] is True
+    assert stale_parity["core_source"] == "cache"
+    assert authoritative_parity["freshness"]["state"] == "fresh"
+    assert "core_stale" not in authoritative_parity
+    assert authoritative_parity["core_source"] == "rebuilt"
+
+    assert stale["core"] != authoritative["core"], (
+        "both frames carry the same core, so a launcher that dropped frame 2 "
+        "entirely would still satisfy every content assertion downstream"
+    )
 
 
 # --------------------------------------------------------------------------- #

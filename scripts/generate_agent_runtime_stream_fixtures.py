@@ -43,6 +43,13 @@ frames: it is a SECOND hydrate taken after the isolated root is seeded with a
 persona instance and two background delegations, and it is the only golden that
 carries ``running_work`` rows. It exists to pin the producer/consumer JOIN on
 ``running_work.rows[].owner`` — see :func:`_seed_running_work_owner`.
+
+``hydrate_stale_first.json`` and ``hydrate_authoritative_same_offset.json`` are
+the other odd ones, and they are odd TOGETHER: neither says anything alone. They
+are EG-3.1's mismatch half off the real producer — the boot's stale paint and the
+authoritative hydrate that replaces it — and their contract is that both carry
+the SAME ``watermark.event_offset``, because the store's log is idle between
+them. See :func:`_build_stale_first_convergence_pair`.
 """
 
 from __future__ import annotations
@@ -68,6 +75,11 @@ GENERATED_FRAME_FILES = (
     "heartbeat.json",
     "delta_batch.json",
     "hydrate_running_work_owner.json",
+    # BO-1's convergence pair. See :func:`_build_stale_first_convergence_pair`
+    # for what produces them and why they must be read as a PAIR: their whole
+    # contract is a relation between the two frames, not a property of either.
+    "hydrate_stale_first.json",
+    "hydrate_authoritative_same_offset.json",
 )
 
 #: Identities the running-work owner fixture seeds. They are FIXTURE constants,
@@ -233,6 +245,167 @@ def _normalize(value: Any, *, isolated_root: Path, key: str = "") -> Any:
     return value
 
 
+def _fixture_persona_instance():
+    """The seeded persona-instance row, built once and written by two callers.
+
+    :func:`_seed_running_work_owner` writes it to CREATE the row;
+    :func:`_build_stale_first_convergence_pair` writes it again to move a
+    fingerprinted input's mtime without appending an event. Constructing it in
+    one place is what keeps the second write byte-identical in intent to the
+    first — a second copy of this constructor would drift and the pair would then
+    be perturbing something the running-work golden never carried.
+    """
+
+    from agent_runtime import paths
+    from agent_runtime.models import PersonaInstance, WorkerSessionState
+
+    return PersonaInstance(
+        id=FIXTURE_INSTANCE_ID,
+        persona_id=FIXTURE_PERSONA_ID,
+        role="specialist",
+        display_name="Fixture Agent",
+        profile_id=None,
+        runtime_root=str(paths.store_root()),
+        state=WorkerSessionState.IDLE,
+    )
+
+
+#: How many builds :func:`_build_stale_first_convergence_pair` will pay for
+#: before declaring the persisted key non-convergent. Two are normally needed on
+#: a virgin store (the build is not a pure reader — it materializes
+#: persona-instance rows and creates the chat SessionDB — while the key is taken
+#: PRE-build on purpose), so a bound of four leaves headroom and still fails
+#: loudly rather than looping. Same shape and same reason as the
+#: ``converge_persisted_core`` helper the cache tests use.
+_CONVERGENCE_BUILDS = 4
+
+
+def _build_stale_first_convergence_pair() -> tuple[dict, dict]:
+    """BO-1: the boot's stale paint and its authoritative replacement, same offset.
+
+    =========================================================================
+    WHAT THE PAIR PINS, AND WHY IT IS A PAIR
+    =========================================================================
+
+    EG-3.1's mismatch half: a boot whose persisted core does not match the store
+    paints that core IMMEDIATELY wearing ``parity.freshness.state = "stale"``,
+    and replaces it with an authoritative hydrate when the full build finishes.
+    The launcher converges on the second frame through
+    ``MissionReadModel.staleHeldAwaitsAuthoritative`` / ``_convergesStaleHeld``.
+
+    **The offsets are EQUAL, and that is the whole contract.** The launcher's
+    ordinary sequence gate is strict ``>``; the stale-held convergence is its
+    ONE exemption. So a producer "optimization" that deduped the same-offset
+    re-hydrate would freeze every launcher on a permanently stale canvas — and,
+    before these goldens, would have reddened zero tests in either repo (the
+    2026-08-21 boot-observability survey's scariest unguarded edge). Neither
+    frame alone says anything; the relation between them is the fixture.
+
+    =========================================================================
+    THE REAL PRODUCER PATH, AND THE ONE ARRANGEMENT
+    =========================================================================
+
+    Both frames come out of ``stream.hydrate_frame`` exactly as
+    ``stream_frames`` calls it at its head: frame 1 wraps
+    ``core_cache.take_stale_first_core``'s labelled core, frame 2 is a real
+    gated build (lane armed, ``consult`` demotes on the mismatch, the build runs
+    and ``label_core`` stamps ``core_source="rebuilt"``). Nothing is hand-shaped.
+
+    The single arrangement is HOW the mismatch is produced, and the choice is
+    forced rather than convenient: it must move a fingerprinted input WITHOUT
+    appending an event, because an append would move the log's tail and the two
+    frames would no longer be a same-offset pair. That writer class is not
+    hypothetical — it is the one ``core_cache``'s own header names as the reason
+    the refused event-offset key could never have worked ("two shipped incidents
+    came from writers that mutate durable state with NO EventLog event"), and it
+    is exactly what produces this boot shape in the field: the store's durable
+    state moved, the log did not, so the boot's stale paint and its replacement
+    describe the same log position. Here it is a real writer doing a real write
+    — ``PersonaInstanceStore._write`` re-persisting the seeded row through
+    ``atomic_json_write``, whose rename always moves mtime.
+
+    Returns ``(stale_frame, authoritative_frame)``. Every producer fact the pair
+    exists to carry is asserted HERE, at generation time: a silently-fresh first
+    frame or a silently-advanced second offset would otherwise be committed as a
+    golden and pin the bug instead of the contract.
+    """
+
+    from agent_runtime import core_cache
+    from agent_runtime.parity import events_position
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+    from agent_runtime.snapshot import build_snapshot
+    from agent_runtime.stream import hydrate_frame
+
+    # 1. Settle the persisted key against the store, so the mismatch below is
+    #    the one this fixture arranges and not leftover build-time churn.
+    for _ in range(_CONVERGENCE_BUILDS):
+        core_cache.core_path().unlink(missing_ok=True)
+        core_cache.sidecar_path().unlink(missing_ok=True)
+        core_cache.reset_process_state()
+        build_snapshot()
+        if core_cache.read_persisted_core().matched:
+            break
+    else:
+        raise AssertionError(
+            "the persisted core's fingerprint never converged, so there is no "
+            "cache-hit baseline for the stale-first pair to diverge from"
+        )
+
+    # 2. A durable write that appends NO event: the store moves, the log does
+    #    not. See the docstring for why this class and no other.
+    idle_offset = events_position()["event_offset"]
+    PersonaInstanceStore()._write(_fixture_persona_instance())
+    assert events_position()["event_offset"] == idle_offset, (
+        "the perturbation appended an event, so the log's tail moved and the "
+        "two frames below cannot be a SAME-OFFSET pair — which is the only "
+        "thing this fixture exists to pin"
+    )
+    assert not core_cache.read_persisted_core().matched, (
+        "the persisted core still matches, so the boot below would serve it "
+        "authoritative and there would be no stale paint to pin"
+    )
+
+    # 3. A fresh serve boot over that store: the stale paint, then the real
+    #    gated build, through the production constructor both times.
+    core_cache.reset_process_state()
+    stale_core = core_cache.take_stale_first_core(caller="cli")
+    assert stale_core is not None, (
+        "take_stale_first_core declined, so this fixture would pin an empty "
+        "canvas rather than EG-3.1's mismatch half"
+    )
+    stale_frame = hydrate_frame(snapshot=stale_core, caller="cli")
+    authoritative_frame = hydrate_frame(caller="cli")
+
+    stale_parity = stale_frame["core"]["parity"]
+    authoritative_parity = authoritative_frame["core"]["parity"]
+    assert stale_parity["freshness"]["state"] == "stale", stale_parity["freshness"]
+    assert stale_parity["core_stale"] is True, stale_parity
+    assert stale_parity["core_source"] == "cache", stale_parity
+    # The non-stale token, pinned on real producer bytes for the first time. The
+    # launcher's wiring-test fixtures spell it ``live``; nothing compared it, so
+    # the drift was free. This golden makes ``fresh`` the byte on the wire.
+    assert authoritative_parity["freshness"]["state"] == "fresh", authoritative_parity[
+        "freshness"
+    ]
+    assert "core_stale" not in authoritative_parity, authoritative_parity
+    assert authoritative_parity["core_source"] == "rebuilt", authoritative_parity
+
+    stale_offset = stale_frame["watermark"]["event_offset"]
+    authoritative_offset = authoritative_frame["watermark"]["event_offset"]
+    assert stale_offset == authoritative_offset == idle_offset, (
+        f"the pair is not same-offset: stale={stale_offset} "
+        f"authoritative={authoritative_offset} idle store at {idle_offset}. "
+        "A launcher holding the stale core converges on the second frame only "
+        "through the equal-offset exemption; at different offsets these goldens "
+        "would pin the ordinary sequence path and prove nothing"
+    )
+    assert stale_frame["core"] != authoritative_frame["core"], (
+        "the two cores are identical, so this pair could not tell a converging "
+        "client from a frozen one"
+    )
+    return stale_frame, authoritative_frame
+
+
 def _seed_running_work_owner() -> None:
     """Seed one OWNED and one UNOWNED background delegation into the isolated root.
 
@@ -250,23 +423,11 @@ def _seed_running_work_owner() -> None:
     NULL ``owner_started_at`` — see below.
     """
 
-    from agent_runtime import paths
-    from agent_runtime.models import PersonaInstance, WorkerSessionState
     from agent_runtime.persona_assignments import PersonaInstanceStore
     from tools import async_delegation
 
     store = PersonaInstanceStore()
-    store._write(
-        PersonaInstance(
-            id=FIXTURE_INSTANCE_ID,
-            persona_id=FIXTURE_PERSONA_ID,
-            role="specialist",
-            display_name="Fixture Agent",
-            profile_id=None,
-            runtime_root=str(paths.store_root()),
-            state=WorkerSessionState.IDLE,
-        )
-    )
+    store._write(_fixture_persona_instance())
 
     for delegation_id, session in (
         ("deleg_fixture_owned", OWNED_CHAT_SESSION),
@@ -382,12 +543,20 @@ def main() -> int:
         assert unowned_owner["persona_id"] is None, unowned_owner
         assert unowned_owner["persona_instance_id"] is None, unowned_owner
 
+        # LAST of all, and after every frame above is closed: this one builds
+        # real cores of its own (a convergence loop, then a gated rebuild) and
+        # re-persists the seeded persona instance, so running it earlier would
+        # churn the goldens above for reasons that have nothing to do with them.
+        stale_first, authoritative_same_offset = _build_stale_first_convergence_pair()
+
         frames = {
             "hydrate.json": hydrate,
             "delta.json": delta_frame(first, offset=batch[0][0], snapshot=core),
             "heartbeat.json": heartbeat_frame(offset=7),
             "delta_batch.json": delta_batch_frame(batch, snapshot=core),
             "hydrate_running_work_owner.json": owner_hydrate,
+            "hydrate_stale_first.json": stale_first,
+            "hydrate_authoritative_same_offset.json": authoritative_same_offset,
         }
         # A frame that silently drops out of the built set while staying in
         # MANIFEST_FILES would become hand-maintained without anyone saying so —
