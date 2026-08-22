@@ -13,7 +13,7 @@ from hermes_time import now
 from . import core_cache, demote_core_reuse, paths
 from .events import EventLog
 from .models import Event
-from .parity import events_watermark
+from .parity import core_event_offset, events_watermark
 from .patch_coverage import batch_is_patch_coverable, normalize_fold_entities
 from .redaction import ENV_SECRET_ASSIGNMENT_RE
 from .request_control import request_cancelled
@@ -650,33 +650,6 @@ def _build_with_liveness(
             next_heartbeat = current + heartbeat_interval
 
 
-def _core_event_offset(snapshot: dict[str, Any] | None) -> int | None:
-    """The offset a CORE says its own content reaches, or ``None`` if unknown.
-
-    The core's intrinsic position, not the frame's: ``parity.watermark.
-    event_offset`` is captured at the instant the build starts reading (that is
-    what ``7204896978`` pinned), so it is a LOWER bound on the content — events
-    after it may already be folded in, but nothing before it can be missing.
-    That direction is what makes it usable as a floor below.
-
-    ``None`` for a core with no watermark (an unreadable log at build time, a
-    pair persisted before the field existed) and it must stay ``None`` rather
-    than ``0``: zero is a real position and would make every such core look
-    infinitely behind — see ``parity.events_watermark`` on the same trap.
-    """
-
-    if not isinstance(snapshot, dict):
-        return None
-    parity = snapshot.get("parity")
-    if not isinstance(parity, dict):
-        return None
-    watermark = parity.get("watermark")
-    if not isinstance(watermark, dict):
-        return None
-    value = watermark.get("event_offset")
-    return None if value is None else int(value)
-
-
 def _full_core_batch_frames(
     batch: list[tuple[int, Event]],
     *,
@@ -776,7 +749,7 @@ def _full_core_batch_frames(
         raise job.error
     if job.snapshot is None:
         raise RuntimeError("snapshot build completed without a result")
-    core_offset = _core_event_offset(job.snapshot)
+    core_offset = core_event_offset(job.snapshot)
     if core_offset is not None and core_offset < last_offset:
         # The ONE reachable producer of this shape is the boot cache lane: a
         # genuine build in this lane cannot be behind, because the batch was

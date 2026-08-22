@@ -63,7 +63,7 @@ import threading
 from typing import Any
 
 from . import paths
-from .parity import events_position
+from .parity import core_event_offset, events_position
 
 #: The provenance token for a core this module handed back, on the reusing
 #: caller's ``snapshot_build`` receipt. Spelled in the ``core_source`` vocabulary
@@ -105,26 +105,6 @@ def _store_root() -> str | None:
         return None
 
 
-def _core_position(core: Any) -> int | None:
-    """The offset a core says its own content reaches, or ``None``.
-
-    ``None`` for a core with no watermark and it must stay ``None`` rather than
-    ``0``: zero is a real position, and a core that claimed it would be treated
-    as matching an empty log.
-    """
-
-    if not isinstance(core, dict):
-        return None
-    parity = core.get("parity")
-    if not isinstance(parity, dict):
-        return None
-    watermark = parity.get("watermark")
-    if not isinstance(watermark, dict):
-        return None
-    value = watermark.get("event_offset")
-    return None if value is None else int(value)
-
-
 def remember(core: Any) -> bool:
     """Hold ``core`` for the next demote build, keyed on its OWN position.
 
@@ -141,7 +121,7 @@ def remember(core: Any) -> bool:
     """
 
     global _entry
-    position = _core_position(core)
+    position = core_event_offset(core)
     if position is None or not isinstance(core, dict):
         return False
     root = _store_root()

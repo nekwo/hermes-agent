@@ -101,8 +101,21 @@ def test_stream_batch_cap_splits_frames(isolate_agent_runtime_root, monkeypatch)
     assert (
         second["watermark"]["event_offset"] > first["watermark"]["event_offset"]
     )
-    # 300 events, exactly two rebuilds — one per emitted frame.
-    assert counter.calls == calls_after_hydrate + 2
+    # 300 events, ONE rebuild — it was two until W3-H2 (2026-08-22).
+    #
+    # The cap splits the FRAMES; it used to split the BUILD too. Every one of
+    # the 300 appends landed before either frame drained, so the core built for
+    # the first frame was stamped at the log's end offset — which is exactly the
+    # offset the second frame's batch reaches. The demote lane now checks that
+    # (``demote_core_reuse``: equality of ``parity.events_position``) and hands
+    # the core back instead of rebuilding state it built milliseconds ago. Not a
+    # freshness loss in either direction: the reused core reaches the offset its
+    # frame is stamped with, which is what MCF-Q1 requires of it.
+    assert counter.calls == calls_after_hydrate + 1
+    # BO-1: the reuse is of the CORE, never a dedupe of emissions. Both frames
+    # are still emitted, both still carry a core, and each carries its OWN dict.
+    assert first["core"] is not second["core"]
+    assert first["core"] == second["core"]
 
 
 def test_stream_single_event_keeps_delta_batch_golden_shape(

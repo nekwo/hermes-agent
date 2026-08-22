@@ -171,6 +171,40 @@ class ProjectionAccountant:
         return [record.as_dict() for record in self._drops]
 
 
+def core_event_offset(core: Any) -> int | None:
+    """The offset a CORE says its own content reaches, or ``None`` if unknown.
+
+    The core's INTRINSIC position, not the frame's: ``parity.watermark.
+    event_offset`` is captured at the instant the build starts reading (that is
+    what ``7204896978`` pinned), so it is a LOWER bound on the content — events
+    after it may already be folded in, but nothing before it can be missing.
+    That direction is what makes it usable as a floor.
+
+    ``None`` for a core with no watermark (an unreadable log at build time, a
+    pair persisted before the field existed) and it must stay ``None`` rather
+    than ``0``: zero is a real position and would make every such core look
+    infinitely behind — see :func:`events_watermark` on the same trap.
+
+    It lives HERE, beside the producer of the field it reads, because two
+    consumers need the same answer and had grown two spellings of it: the
+    stream's MCF-Q1 frame guard (``stream._full_core_batch_frames``) and the
+    same-offset demote reuse (``demote_core_reuse``). A second spelling of "how
+    far does this core reach" is how two guards come to disagree about the one
+    question the whole read-model turns on.
+    """
+
+    if not isinstance(core, dict):
+        return None
+    parity = core.get("parity")
+    if not isinstance(parity, dict):
+        return None
+    watermark = parity.get("watermark")
+    if not isinstance(watermark, dict):
+        return None
+    value = watermark.get("event_offset")
+    return None if value is None else int(value)
+
+
 def events_position() -> dict[str, Any]:
     """Capture the event log's source position **now**, with no `last_event_ts`.
 
