@@ -562,3 +562,76 @@ def test_a_failed_warm_still_reports_how_long_it_occupied_the_worker(
     assert re.search(r"after \d+ ms", failed[0]), (
         f"the failure path lost its elapsed cost: {failed[0]!r}"
     )
+
+
+def test_the_warm_fills_the_exact_toolset_key_the_create_reads(
+    persona_factory, tmp_path, monkeypatch
+):
+    """The scope application inside ``warm_persona_memos`` is key ALIGNMENT.
+
+    Measured 2026-08-22: the module's original claim ("warming without it
+    primes nothing the create reads") was false in every dimension that was
+    checked — the expensive inputs are process/callable-keyed and warm either
+    way, and a per-session BOUNDED record can never reach this pair
+    (``ChatToolPermissionStore.get`` answers ``None`` for the warm's
+    ``session_id=None`` and for a create's fresh session alike). Under the
+    UNBOUNDED runtime default even the ``(toolsets, blocked)`` name-cache key
+    coincides, so no gate can hold the claim there — this test measured that
+    too (a deleted scope call stayed green under the default posture).
+
+    The configuration where the call IS load-bearing is an install whose
+    RUNTIME DEFAULT is the bounded posture (root ``config.yaml``
+    ``default_mode: profile_default`` — install-level, so it governs both the
+    warm and the create, unlike session records). There the chat-lane cost cut
+    makes the scoped key genuinely different from the unscoped neighbour, and
+    a warm without the scope application fills the wrong one. This gate pins
+    exactly that: under a bounded runtime default, a create-shaped resolve
+    after a warm takes CACHE HITS ONLY on ``_cached_tool_names_for_toolsets``.
+    Remove ``apply_chat_lane_tool_scope`` from the warm and this reds.
+    """
+
+    import textwrap
+
+    from agent_runtime import tool_visibility
+    from agent_runtime.parse_cache import clear_parse_cache
+    from agent_runtime.persona_runtime import apply_chat_lane_tool_scope
+    from agent_runtime.tool_permissions import permission_options_for_chat
+
+    root = tmp_path / "hermes-root"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "config.yaml").write_text(
+        textwrap.dedent(
+            """
+            agent_runtime:
+              tool_permissions:
+                default_mode: profile_default
+            """
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(root))
+    clear_parse_cache()
+
+    persona = persona_factory("prewarm_keyalign")
+    persona_prewarm.warm_persona_memos(persona)
+
+    # The create's shape: a freshly minted session id, which has no permission
+    # record — the same runtime-default posture the warm's ``None`` resolves.
+    fresh_session = "persona_chat_personainst_prewarm_keyalign_fresh01"
+    options = permission_options_for_chat(persona, session_id=fresh_session)
+    apply_chat_lane_tool_scope(persona, options, session_id=fresh_session)
+
+    before = tool_visibility._cached_tool_names_for_toolsets.cache_info()
+    tool_visibility.resolve_tool_visibility(persona, options)
+    after = tool_visibility._cached_tool_names_for_toolsets.cache_info()
+
+    assert after.misses == before.misses, (
+        "under the bounded runtime default, the create-shaped resolve MISSED "
+        f"the toolset-name key after a warm: misses {before.misses} -> "
+        f"{after.misses} — the warm filled the unscoped neighbour instead of "
+        "the key the create reads"
+    )
+    assert after.hits > before.hits, (
+        "the create-shaped resolve never consulted the toolset-name cache — "
+        "this gate would be vacuous; find where the resolve reads names"
+    )

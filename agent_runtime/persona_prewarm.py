@@ -204,11 +204,30 @@ def warm_persona_memos(persona: Any) -> None:
 
     options = permission_options_for_chat(persona, session_id=None)
     # The same chat-lane scoping ``persona_instance_summary`` applies before it
-    # resolves (``persona_assignments.py:2972``). Not optional: it is what sets
-    # ``chat_lane_blocked_tool_names``, and ``_cached_tool_names_for_toolsets``
-    # is keyed on (toolsets, BLOCKED). Warming without it fills a neighbouring
-    # key — under the unbounded default the toolset half would still match, so
-    # the warm would look like it worked and prime nothing the create reads.
+    # resolves (``persona_assignments.py:2972``). What this buys, precisely —
+    # the original claim here ("primes nothing the create reads" without it)
+    # was measured FALSE on 2026-08-22 and is corrected:
+    #
+    # * It aligns this warm onto the EXACT ``(toolsets, blocked)`` key
+    #   ``_cached_tool_names_for_toolsets`` serves the create from. Without it
+    #   the warm fills the unscoped neighbour and the create pays one key
+    #   re-sweep — cheap today, because the registry populate, the plugin
+    #   discovery and every ``check_fn`` probe are process/callable-keyed and
+    #   are warmed by ``resolve_tool_visibility`` either way. The alignment is
+    #   pinned by ``test_the_warm_fills_the_exact_toolset_key_the_create_reads``
+    #   (cache-introspection: the create-shaped resolve after a warm takes
+    #   HITS only), which is the gate that reds if this line is removed.
+    # * WHERE the alignment is load-bearing: an install whose RUNTIME DEFAULT
+    #   is the bounded posture (root ``config.yaml`` ``default_mode:
+    #   profile_default``) — install-level, so it governs both this warm and
+    #   the create, and the chat-lane cost cut makes the scoped key genuinely
+    #   different from the unscoped neighbour. That is the configuration the
+    #   gate pins. Under the UNBOUNDED default the two keys coincide and the
+    #   call is free. A per-session BOUNDED record can never diverge this
+    #   pair: ``ChatToolPermissionStore.get`` answers ``None`` both for
+    #   ``session_id=None`` (this warm) and for any freshly minted session
+    #   (the create) — a session restriction is applied AFTER a chat exists
+    #   and is out of reach of this path by construction.
     apply_chat_lane_tool_scope(persona, options, session_id=None)
     resolve_tool_visibility(persona, options)
 
