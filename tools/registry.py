@@ -212,6 +212,14 @@ class ToolEntry:
 # we serve the last-good True instead of caching the failure. A failure that
 # persists past the grace window is honored normally, so a backend that really
 # went down stops advertising its tools.
+#
+# The grace verdict is itself cached, on a much shorter backoff than the normal
+# TTL. It originally was not: "do not cache the failure" was implemented as "do
+# not cache anything", so every call inside the 60 s grace window re-ran the
+# FULL probe and re-logged the transient warning. That is a storm, not a grace
+# period — measured live at 40 full probes and 40 warning lines in 2 s for a
+# single check_fn, 759 such lines in one serve log — and it fired DURING the
+# persona prewarm walk it was supposed to make cheap.
 # ---------------------------------------------------------------------------
 
 _CHECK_FN_TTL_SECONDS = 30.0
@@ -219,7 +227,20 @@ _CHECK_FN_TTL_SECONDS = 30.0
 # as a flake (last-good True is served) rather than a real outage. Kept short
 # so a genuinely-down backend is reflected within a couple of turns.
 _CHECK_FN_FAILURE_GRACE_SECONDS = 60.0
-_check_fn_cache: Dict[Callable, tuple[float, bool]] = {}
+# How long a grace-served last-good True is cached before the probe is allowed
+# to run again. This is the storm bound: inside the grace window the probe (and
+# its warning) fires once per backoff interval instead of once per call. Kept
+# far below _CHECK_FN_FAILURE_GRACE_SECONDS so the grace window itself still
+# expires on schedule — a backoff longer than the remaining grace would let a
+# cached True outlive the grace it was served under — and short enough that a
+# real recovery is picked up within a couple of seconds.
+_CHECK_FN_GRACE_REPROBE_SECONDS = 5.0
+# fn -> (probe timestamp, verdict, monotonic deadline past which the entry must
+# be re-probed). The deadline is stored per entry rather than derived from one
+# global TTL because the two kinds of entry expire differently: a genuine
+# verdict rides _CHECK_FN_TTL_SECONDS, a grace-served True rides the much
+# shorter _CHECK_FN_GRACE_REPROBE_SECONDS above.
+_check_fn_cache: Dict[Callable, tuple[float, bool, float]] = {}
 # Monotonic timestamp of the most recent True result per check_fn.
 _check_fn_last_good: Dict[Callable, float] = {}
 _check_fn_cache_lock = threading.Lock()
@@ -278,16 +299,19 @@ def _check_fn_cached(fn: Callable) -> bool:
 
     Exceptions are swallowed as False. A transient False/exception within
     ``_CHECK_FN_FAILURE_GRACE_SECONDS`` of the last True is suppressed (the
-    last-good True is returned and the failure is NOT cached, so the next call
-    re-probes) to keep flaky external checks (Docker daemon busy, socket
-    contention, probe timeout) from silently stripping tools mid-session.
+    last-good True is returned and the FAILURE is never cached) to keep flaky
+    external checks (Docker daemon busy, socket contention, probe timeout) from
+    silently stripping tools mid-session. The served True is cached for
+    ``_CHECK_FN_GRACE_REPROBE_SECONDS`` so a burst of calls inside the grace
+    window costs one probe, not one probe each; past that backoff the next call
+    re-probes, and past the grace window the failure is honored as it always was.
     """
     now = time.monotonic()
     with _check_fn_cache_lock:
         cached = _check_fn_cache.get(fn)
         if cached is not None:
-            ts, value = cached
-            if now - ts < _CHECK_FN_TTL_SECONDS:
+            _ts, value, expires_at = cached
+            if now < expires_at:
                 return value
 
     # Past the TTL cache: this call is about to do real work (subprocess
@@ -303,14 +327,29 @@ def _check_fn_cached(fn: Callable) -> bool:
     with _check_fn_cache_lock:
         if value:
             _check_fn_last_good[fn] = now
-            _check_fn_cache[fn] = (now, True)
+            _check_fn_cache[fn] = (now, True, now + _CHECK_FN_TTL_SECONDS)
             return True
 
         last_good = _check_fn_last_good.get(fn)
         if last_good is not None and now - last_good < _CHECK_FN_FAILURE_GRACE_SECONDS:
             # Recent success → treat this failure as a flake. Serve last-good
-            # True and do NOT cache the failure, so the next call re-probes
-            # rather than pinning a stale verdict for the full TTL.
+            # True; the FAILURE is still never cached (a recovery is never
+            # blocked by a pinned False) but the served True is, on the short
+            # re-probe backoff, so the next caller a millisecond later reads a
+            # cache entry instead of re-running the whole probe. _last_good is
+            # deliberately NOT restamped: the grace window keeps counting from
+            # the real success, so it still expires on schedule. The backoff is
+            # clamped to that window's end so a True served at second 59 cannot
+            # be read back at second 62 — the cache may delay the re-probe, it
+            # may never outlive the grace it was served under.
+            _check_fn_cache[fn] = (
+                now,
+                True,
+                min(
+                    now + _CHECK_FN_GRACE_REPROBE_SECONDS,
+                    last_good + _CHECK_FN_FAILURE_GRACE_SECONDS,
+                ),
+            )
             logger.warning(
                 "check_fn %s failed (%s) within %.0fs of last success; "
                 "treating as transient and keeping tool(s) available",
@@ -327,7 +366,7 @@ def _check_fn_cached(fn: Callable) -> bool:
             getattr(fn, "__qualname__", fn),
             "raised" if raised else "returned False",
         )
-        _check_fn_cache[fn] = (now, False)
+        _check_fn_cache[fn] = (now, False, now + _CHECK_FN_TTL_SECONDS)
         return False
 
 
