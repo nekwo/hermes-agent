@@ -112,7 +112,7 @@ beside the argv lane rather than replacing it.
 (stdio's greeting), `hello_ok` (the socket's), and the re-askable `version`
 reply. **The method list is elided on purpose.** The `@method` registry in
 `agent_runtime/serve_rpc.py` is the authority for the advertised set — read it
-rather than this document. It is currently **eight**. This sentence used to
+rather than this document. It is currently **nine**. This sentence used to
 enumerate the first four and stayed at four while the set grew, which is the
 precise failure mode eliding it prevents: a document that hardcodes a register
 starts lying the first time the register moves, and nothing reports it.
@@ -174,6 +174,21 @@ pointed at the one cure that cannot work. A refused registration now carries
 either `push_lane_unavailable` (no hub at all) or `push_lane_draining` (bound,
 stopping, reconnect), plus `prior_subscription_released` when the re-baseline's
 teardown had already run.
+
+`runtime.persona.prewarm` `{persona_id}` is the ninth, and the only one whose
+reply is not an answer to a question — it is an ACK that a background warm was
+accepted. Stage 3a of the agent-drop-latency plan: the first
+`runtime.agent.create` of a persona type this process has not resolved recently
+pays 1.9–3.2s inside `phases.instance_ms`, because the wire-row projection
+resolves tool visibility inline and every memo behind it (toolset lru, 15s
+readiness, 60s provider, 30s registry `check_fn`) misses. This verb runs that
+same resolution on a worker thread and discards it, so the create that follows
+finds the memos filled. It writes no store state, emits no event and mints
+nothing — which is what lets it be fire-and-forget, with no completion channel
+and no compensation path. A failure inside the warm is swallowed and logged: it
+warms caches or it does nothing. Idempotent by construction — a repeat call for
+a persona already warming acks `state:"already_running"` and queues nothing —
+because the intended trigger is "call it for every chip on every palette open".
 
 Errors carry `data.reason`; clients branch on the reason, never on message
 prose. `4090` is the one code minted rather than borrowed — upstream has no

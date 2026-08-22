@@ -970,6 +970,7 @@ def test_the_method_set_grew_and_the_contract_integer_did_not_move():
             "runtime.office.surface.update",
             "runtime.office.unsubscribe",
             "runtime.office.upsert",
+            "runtime.persona.prewarm",
     ]}
     assert serve_rpc.manifest() == expected
     assert serve_rpc.RPC_CONTRACT_VERSION == 1
@@ -1092,6 +1093,7 @@ def test_the_write_method_is_transport_agnostic_and_answers_on_the_socket():
                     "runtime.office.surface.update",
                     "runtime.office.unsubscribe",
                     "runtime.office.upsert",
+                    "runtime.persona.prewarm",
                 ],
             }
 

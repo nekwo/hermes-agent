@@ -2001,3 +2001,64 @@ def _runtime_agent_create(
         refusal = outcome.refusal
         return err(rid, refusal.code, refusal.message, refusal.data)
     return ok(rid, outcome.result)
+
+
+# ── runtime.persona.prewarm ──────────────────────────────────────────────────
+
+
+@method("runtime.persona.prewarm")
+def _runtime_persona_prewarm(
+    rid: Any, params: dict, context: RpcContext | None = None
+) -> dict:
+    """Fill this persona type's visibility memos BEFORE a create needs them.
+
+    Params: ``persona_id`` (required); ``correlation_id`` (optional, echoed).
+
+    Result::
+
+        {persona_id, accepted: true, state: "started" | "already_running",
+         correlation_id?}
+
+    Fire-and-forget by contract. The reply says a warm was ACCEPTED, never that
+    it finished — the whole point is that the caller (the launcher, on palette
+    open) is doing something else while it runs, and a caller that awaited the
+    warm would have moved the cold cost rather than removed it. So there is no
+    completion field to wait on and none is coming: the observable effect is the
+    NEXT ``runtime.agent.create``'s ``phases.instance_ms``, which the drop log
+    already prints.
+
+    Additive in the strongest sense. It registers a new method rather than
+    changing one, it writes no store state, emits no event and mints no id, and
+    a runtime nobody ever calls it on behaves exactly as it does today. A client
+    that does not find ``runtime.persona.prewarm`` in the ``rpc`` manifest block
+    simply keeps paying the cold create — which is why the contract integer does
+    not move for it (see :func:`manifest`).
+
+    Why the refusals are the CREATE's refusals. ``persona_not_found`` /
+    ``persona_roster_unavailable`` come out of ``agent_create``'s own spellings,
+    codes included, so a launcher that prewarms an id and then creates it can
+    never be told two different stories about that id. The one reason this verb
+    owns alone is ``profile_persona_not_prewarmable`` — the D-U1 carve-out the
+    create accepts and a prewarm provably cannot serve; the service docstring
+    says why.
+
+    A failure INSIDE the warm never reaches here. It happens on the worker,
+    after this frame is already on the wire, and is swallowed-and-logged there:
+    a cache that did not fill costs latency, never correctness.
+
+    On the inline-dispatch budget. ``serve.py`` answers this lane on the reader
+    loop itself, on the stated grounds that a method touches a handful of small
+    JSON files and is done before the loop misses anything. That still holds:
+    the only synchronous work here is the roster read that decides accept-vs-
+    refuse, which is the same read ``runtime.agent.create`` already performs
+    inline on the same loop. The seconds — registry populate, toolset sweep,
+    readiness — are exactly what moves to the worker, which is the point.
+    """
+
+    from agent_runtime.persona_prewarm import request_persona_prewarm
+
+    outcome = request_persona_prewarm(params)
+    if outcome.refusal is not None:
+        refusal = outcome.refusal
+        return err(rid, refusal.code, refusal.message, refusal.data)
+    return ok(rid, outcome.result)
