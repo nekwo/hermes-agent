@@ -379,6 +379,48 @@ def _emit_request_assembled_marker(agent: Any, **extra: Any) -> None:
         logger.debug("request-assembled marker callback failed", exc_info=True)
 
 
+def _format_ttfb_token(first_byte_s: Optional[float]) -> str:
+    """Render the ``ttfb=`` token for the ``API call #N`` line, or nothing.
+
+    Absent is not zero. ``None`` means no first-byte instant was observed for
+    this response — a non-streaming call, or a stream whose first-delta
+    callback never fired — and an unobserved measurement must vanish from the
+    line rather than print ``ttfb=0.0s``, which reads as an instantaneous
+    provider and is a lie no downstream reader can detect.
+    """
+
+    if first_byte_s is None:
+        return ""
+    return f" ttfb={first_byte_s:.1f}s"
+
+
+def _first_delta_recorder(
+    cell: List[Optional[float]],
+    dispatch_started: float,
+    on_first_delta: Any,
+) -> Any:
+    """Wrap ``on_first_delta`` so the first firing also times provider TTFB.
+
+    ``dispatch_started`` and the instant taken here are both
+    :func:`time.perf_counter` readings, so the difference is monotonic and
+    cannot go negative or jump on a wall-clock correction.
+
+    First firing wins: providers are free to invoke the delta callback once per
+    token, and TTFB is the FIRST byte, not the latest one. The measurement is
+    taken before the wrapped callback runs so spinner teardown and any
+    thinking-callback work is never charged to the provider — and so the
+    instant survives a callback that raises.
+    """
+
+    def _record() -> None:
+        if cell[0] is None:
+            cell[0] = time.perf_counter() - dispatch_started
+        if on_first_delta is not None:
+            on_first_delta()
+
+    return _record
+
+
 def _billing_or_entitlement_message(
     *,
     capability: str,
@@ -2367,6 +2409,14 @@ def _run_conversation(
                     if agent.thinking_callback:
                         agent.thinking_callback("")
 
+                # Provider TTFB for every lane that has no ``phases`` block —
+                # gateway, cron, CLI — where the only record of the turn is the
+                # "API call #N" line below. The dispatch, the first-delta
+                # callback and that log line are three separate closures in
+                # this scope, so the measurement rides a one-slot mutable cell
+                # between them.
+                _first_byte_s: List[Optional[float]] = [None]
+
                 _use_streaming = True
                 # Provider signaled "stream not supported" on a previous
                 # attempt — switch to non-streaming for the rest of this
@@ -2423,11 +2473,25 @@ def _run_conversation(
                         provider=agent.provider,
                         model=agent.model,
                     )
+                    # Cleared per PHYSICAL attempt. The retry ladder re-enters
+                    # here for each attempt while the "API call #N" line is
+                    # logged once, for whichever response finally came back —
+                    # without this reset a fast attempt A that died could lend
+                    # its first-byte instant to the slow attempt B that is
+                    # actually being logged. Non-streaming dispatch clears it
+                    # too and never sets it, which is why that lane prints no
+                    # token at all.
+                    _first_byte_s[0] = None
                     provider_dispatch_started = time.perf_counter()
                     try:
                         if _use_streaming:
                             result = agent._interruptible_streaming_api_call(
-                                next_api_kwargs, on_first_delta=_stop_spinner
+                                next_api_kwargs,
+                                on_first_delta=_first_delta_recorder(
+                                    _first_byte_s,
+                                    provider_dispatch_started,
+                                    _stop_spinner,
+                                ),
                             )
                         else:
                             from agent import relay_llm
@@ -3407,10 +3471,11 @@ def _run_conversation(
                     if canonical_usage.cache_read_tokens and prompt_tokens:
                         _cache_pct = f" cache={canonical_usage.cache_read_tokens}/{prompt_tokens} ({100*canonical_usage.cache_read_tokens/prompt_tokens:.0f}%)"
                     logger.info(
-                        "API call #%d: model=%s provider=%s in=%d out=%d total=%d latency=%.1fs%s",
+                        "API call #%d: model=%s provider=%s in=%d out=%d total=%d latency=%.1fs%s%s",
                         agent.session_api_calls, agent.model, agent.provider or "unknown",
                         prompt_tokens, completion_tokens, total_tokens,
                         api_duration, _cache_pct,
+                        _format_ttfb_token(_first_byte_s[0]),
                     )
 
                     # On the MoA path, agent.model/provider are the virtual
