@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import threading
 import time
 from collections.abc import Iterable, Iterator
@@ -92,6 +93,24 @@ def _log_snapshot_build(
     names the lane that paid (``hydrate`` / ``demote`` / ``resync`` /
     ``full_core``). A number with no anchor is barely better than no number.
 
+    ``pid`` is the JOIN KEY across the repo boundary (BO-3). A launcher boot
+    receipt and a serve's ``agent.log`` had no common identifier at all: the
+    only joins available were wall-clock matching — across a live zone trap, the
+    diag log's header being UTC while its per-line stamps are local
+    time-of-day — and ``build_ms``+``sections_top`` equality, the deliberate
+    weak join the launcher's own ``mission_boot_timeline`` documents as weak.
+    The launcher already holds this number three ways (the spawn's
+    ``process.pid``, and the ``booting``/``ready`` frames' ``pid``); hermes
+    logged it nowhere.
+
+    **An additive field, not a formatter change.** ``%(process)d`` on the
+    formatter was considered and rejected: it re-shapes EVERY line this runtime
+    emits, so every existing grep that anchors on the family token's neighbour
+    breaks at once. ``pid=`` goes LAST on all three of the families a boot
+    investigation joins on (this one, ``snapshot_build_core``,
+    ``stream_attach``), so no existing adjacency moves and a reader that ignores
+    the key behaves exactly as before.
+
     Rides the ordinary ``Logger`` family, so ``hermes serve`` (mode ``gui``)
     lands it in ``<HERMES_HOME>/logs/agent.log`` at INFO with no extra flag.
     """
@@ -125,6 +144,11 @@ def _log_snapshot_build(
     if build_ms is not None and int(build_ms) >= BUILD_SECTIONS_WAIT_THRESHOLD_MS:
         line += " sections_top=%s"
         values.append(facts["sections_top"])
+    # LAST, after the conditional split, so "pid is the last field" holds on
+    # both shapes of this line — see the docstring for why it is additive here
+    # rather than a formatter change.
+    line += " pid=%d"
+    values.append(os.getpid())
     logger.info(line, *values)
 
 
@@ -147,6 +171,13 @@ def log_stream_attach(*, op: str, purpose: str, **fields: Any) -> None:
     purpose (the office lane and the legacy stream both fold patches) and one op
     serves several (``subscribe`` is the boot hydrate and every resubscribe).
 
+    ``pid`` rides LAST (BO-3), the same additive field the two build families
+    carry, so an attachment and the builds it paid for join on one key instead
+    of on wall clocks across a timezone boundary. It is emitted here rather than
+    left to each caller's ``**fields`` precisely because the callers are three
+    different modules: a field each of them had to remember is a field one of
+    them would eventually not.
+
     Single-homed here, next to the build lines a reader greps alongside it, and
     imported function-locally by the two non-stream callers so this module's
     projection-import weight stays off their import paths. Never raises: an
@@ -158,10 +189,11 @@ def log_stream_attach(*, op: str, purpose: str, **fields: Any) -> None:
             f"{key}={'-' if value is None else value}" for key, value in fields.items()
         )
         logger.info(
-            "stream_attach op=%s purpose=%s%s",
+            "stream_attach op=%s purpose=%s%s pid=%d",
             op,
             purpose,
             f" {extras}" if extras else "",
+            os.getpid(),
         )
     except Exception:  # pragma: no cover - observability must never fail a lane
         pass

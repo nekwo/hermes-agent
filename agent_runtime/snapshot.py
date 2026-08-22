@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -371,19 +372,31 @@ def _log_snapshot_build_core(*, caller: str, generation: int | None, snapshot: A
     (tests, doctors, a detail-fetch catalog capture) is a fixture, not a boot,
     and printing one line per unit test would bury the boot's own lines.
 
+    ``pid`` rides LAST (BO-3): this line, ``stream.py``'s ``snapshot_build`` and
+    ``stream_attach`` are the three families a boot investigation joins on, and
+    until this field existed a launcher boot receipt and a serve's ``agent.log``
+    shared no identifier at all — the joins available were wall-clock matching
+    across the diag log's UTC-header/local-lines zone trap, and
+    ``build_ms``+``sections_top`` equality, which the launcher's own
+    ``mission_boot_timeline`` documents as a deliberately weak join. Additive,
+    never a formatter change: ``%(process)d`` re-shapes every line this runtime
+    emits and breaks every grep that anchors on a field's neighbour.
+
     Rides the ordinary ``Logger`` family, so ``hermes serve`` lands it in
     ``<HERMES_HOME>/logs/agent.log`` at INFO with no extra flag.
     """
 
     facts = build_receipt_facts(snapshot)
     logger.info(
-        "snapshot_build_core role=%s caller=%s generation=%s build_ms=%s offset=%s sections_top=%s",
+        "snapshot_build_core role=%s caller=%s generation=%s build_ms=%s offset=%s "
+        "sections_top=%s pid=%d",
         BUILD_ROLE_LED,
         caller,
         "-" if generation is None else int(generation),
         "unknown" if facts["build_ms"] is None else int(facts["build_ms"]),
         "unknown" if facts["offset"] is None else int(facts["offset"]),
         facts["sections_top"],
+        os.getpid(),
     )
 
 

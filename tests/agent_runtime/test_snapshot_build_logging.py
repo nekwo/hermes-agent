@@ -33,6 +33,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -532,6 +533,7 @@ def test_the_socket_subscribe_logs_its_attachment(build_log):
     assert attaches[0]["op"] == "subscribe"
     assert attaches[0]["purpose"] == "stream_lane"
     assert attaches[0]["connection"] == "stdio"
+    assert attaches[0]["pid"] == str(os.getpid())
 
 
 def test_the_hub_producer_names_itself_the_caller(monkeypatch, build_log):
@@ -616,6 +618,7 @@ def test_the_office_subscribe_logs_its_attachment(build_log):
     # derive, and the one that separates a fold-fence ladder from a full_core one.
     assert attaches[0]["reason"] == "push:full_core"
     assert attaches[0]["producer_restarted"] == "True"
+    assert attaches[0]["pid"] == str(os.getpid())
 
 
 def test_the_office_attach_line_names_the_method_clients_actually_call():
@@ -654,3 +657,104 @@ def test_the_cli_stream_command_logs_its_attachment(monkeypatch, build_log):
     assert len(attaches) == 1
     assert attaches[0]["op"] == "harness_stream"
     assert attaches[0]["purpose"] == "cli_stream"
+    assert attaches[0]["pid"] == str(os.getpid())
+
+
+# ── 5. the join key: one pid across the three families (BO-3) ───────────────
+
+
+@pytest.mark.parametrize(
+    "build_ms",
+    [
+        snapshot_mod.BUILD_SECTIONS_WAIT_THRESHOLD_MS - 1,
+        snapshot_mod.BUILD_SECTIONS_WAIT_THRESHOLD_MS + 1,
+    ],
+    ids=["fast-build-no-sections-tail", "slow-build-with-sections-tail"],
+)
+def test_both_build_families_carry_this_process_pid(monkeypatch, build_log, build_ms):
+    """A launcher boot receipt and a serve's ``agent.log`` had NO common key.
+
+    The joins available before this field were wall-clock matching — across a
+    live zone trap, the diag log's header being UTC while its per-line stamps
+    are local time-of-day with the date stripped, which produced a hand-matching
+    error once — and ``build_ms``+``sections_top`` equality, which the
+    launcher's own ``mission_boot_timeline`` documents as deliberately weak. The
+    launcher holds the child's pid three ways; hermes logged it nowhere.
+
+    Both threshold arms are driven because the WAIT line has two shapes: the
+    ``sections_top`` tail is conditional, and ``pid`` goes after it. An
+    implementation that appended the field inside that conditional would carry
+    it on slow builds only — i.e. would be missing from exactly the boots that
+    were fast enough not to be worth investigating until they were.
+
+    *Kill:* hard-code ``pid=0`` in ``_log_snapshot_build`` (watched: reds on the
+    mismatch with ``os.getpid()``); append the field inside the ``sections_top``
+    branch (reds the fast arm).
+    """
+
+    monkeypatch.setattr(
+        snapshot_mod,
+        "_build_snapshot_uncoalesced",
+        lambda **_kwargs: _core(
+            build_ms=build_ms, offset=99, sections={"agents_readiness": build_ms}
+        ),
+    )
+
+    stream_mod.hydrate_frame(caller="cli")
+
+    waits = _lines(build_log, _WAIT_PREFIX)
+    receipts = _lines(build_log, _CORE_PREFIX)
+    assert len(waits) == 1 and len(receipts) == 1
+
+    # Compared against THIS process rather than against "some digits": a field
+    # that shipped a constant would join every boot to every other one, which is
+    # worse than no join at all because it looks like an answer.
+    assert waits[0]["pid"] == str(os.getpid()), waits[0]
+    assert receipts[0]["pid"] == str(os.getpid()), receipts[0]
+
+    # Additive, not a formatter change. These are parsed off the RECORD's own
+    # message, so a ``%(process)d`` on the formatter — the rejected alternative,
+    # which re-shapes every line this runtime emits — would satisfy nothing
+    # here.
+    assert " pid=" in [
+        record.getMessage()
+        for record in build_log.records
+        if record.getMessage().startswith(_CORE_PREFIX)
+    ][0]
+
+
+def test_the_pid_field_did_not_displace_the_fields_already_grepped(
+    monkeypatch, build_log
+):
+    """The additive claim, made falsifiable.
+
+    ``pid=`` was chosen over a formatter change because a formatter change
+    breaks every grep that anchors on a family token's neighbour. That argument
+    is worth nothing if the field then landed in the MIDDLE of these lines, so
+    it goes last — and this is the case that reds if a later edit moves it.
+
+    The two adjacencies pinned are the ones the 2026-08-21 audit note quotes
+    verbatim from the operator's own log (``snapshot_build reason=demote``) and
+    the one the build census greps (``snapshot_build_core role=led``).
+    """
+
+    monkeypatch.setattr(
+        snapshot_mod,
+        "_build_snapshot_uncoalesced",
+        lambda **_kwargs: _core(build_ms=120, offset=7),
+    )
+
+    stream_mod.hydrate_frame(caller="cli")
+
+    messages = [record.getMessage() for record in build_log.records]
+    wait = next(
+        message
+        for message in messages
+        if message.startswith(_WAIT_PREFIX) and not message.startswith(_CORE_PREFIX)
+    )
+    receipt = next(message for message in messages if message.startswith(_CORE_PREFIX))
+
+    assert wait.startswith("snapshot_build reason="), wait
+    assert receipt.startswith("snapshot_build_core role=led "), receipt
+    assert wait.rstrip().endswith(f"pid={os.getpid()}"), wait
+    assert receipt.rstrip().endswith(f"pid={os.getpid()}"), receipt
