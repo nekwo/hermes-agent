@@ -2600,6 +2600,7 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
     )
     from agent_runtime.mission_chat_phases import (
         TURN_PHASES_KEY as MISSION_CHAT_TURN_PHASES_KEY,
+        mark_from_trace_payload as _mark_turn_phase_from_trace_payload,
     )
 
     args = plan.args
@@ -3170,6 +3171,13 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
     def _stream_progress(payload: dict[str, object] | None) -> None:
         if payload:
             trace_payloads.append(payload)
+            # The conversation loop's dispatch-start marker becomes the
+            # `request_assembled` phase mark here — the loop cannot hold the
+            # turn's TurnPhaseMarks itself (it lives a layer below the
+            # harness), so the mark rides the trace payload it already emits.
+            # Same-process, synchronous callback chain: the receipt instant IS
+            # the emission instant to within the callback's own cost.
+            _mark_turn_phase_from_trace_payload(turn_phases, payload)
         stream_emitter.progress(payload)
 
     def _agent_ready_for_steer(agent):
@@ -3183,11 +3191,14 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
         #
         # Stated exactly, because the name is generous: prompt assembly inside
         # ``run_conversation`` happens AFTER this mark, so it lands inside the
-        # provider span rather than before it. Closing that would mean a hook
-        # inside the provider client, which this stage deliberately does not
-        # take. Both marks are ABSENT when the runner never reached agent
-        # construction — a cold-init failure reports no agent_ready, which is
-        # the truth about it.
+        # span this mark opens. `request_assembled` (marked from the loop's
+        # dispatch-start trace payload in `_stream_progress`) closes that
+        # honestly WITHOUT provider-client surgery: request_started →
+        # request_assembled is hermes assembly, request_assembled →
+        # provider_first_byte is client init + network + provider. Both marks
+        # here are ABSENT when the runner never reached agent construction — a
+        # cold-init failure reports no agent_ready, which is the truth about
+        # it.
         turn_phases.mark("agent_ready")
         turn_phases.count_delta("registry_probe_rounds", _registry_probe_rounds())
         try:

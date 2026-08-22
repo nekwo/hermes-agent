@@ -35,8 +35,10 @@ from agent_runtime.mission_chat_phases import (
     TURN_PHASES_KEY,
     TURN_RECORD_SCHEMA_VERSION,
     TurnPhaseMarks,
+    mark_from_trace_payload,
     safe_turn_phases,
 )
+from hermes_constants import CONVERSATION_REQUEST_ASSEMBLED_STEP
 
 from tests.hermes_cli.test_mission_chat_budget_payload import (  # type: ignore
     _SESSION_ID,
@@ -123,6 +125,22 @@ def _streaming_provider(*, profile_timing=None, deltas=("hello ", "world")):
                     ready(SimpleNamespace(id="fake-agent"))
                 except Exception:
                     pass
+            # The conversation loop announces the dispatch instant as a trace
+            # payload right before the provider call — after the ready
+            # callback, before the first delta. The fake walks the same
+            # protocol so the wiring (payload → `request_assembled` mark) is
+            # what the tests prove, not the fake.
+            trace = kwargs.get("trace_callback")
+            if trace is not None:
+                trace(
+                    {
+                        "type": "run.progress",
+                        "phase": "timing",
+                        "step": CONVERSATION_REQUEST_ASSEMBLED_STEP,
+                        "status": "reached",
+                        "summary": "Provider request assembled; dispatching.",
+                    }
+                )
             stream = kwargs.get("stream_callback")
             if stream is not None:
                 for chunk in deltas:
@@ -274,7 +292,9 @@ def dead_before_provider(monkeypatch, capsys, isolate_agent_runtime_root, script
     return _record_on_disk(isolate_agent_runtime_root, "phases_dead")
 
 
-@pytest.mark.parametrize("phase", ["provider_first_byte", "stream_done", "projected"])
+@pytest.mark.parametrize(
+    "phase", ["request_assembled", "provider_first_byte", "stream_done", "projected"]
+)
 def test_a_phase_the_turn_never_reached_has_NO_KEY(dead_before_provider, phase):
     """Absent means the key is not there. Zero is a measurement; this was not.
 
@@ -356,6 +376,84 @@ def test_an_empty_delta_is_not_a_first_byte():
     emitter.delta("")
     emitter.delta(None)
     assert "provider_first_byte" not in marks.snapshot()
+
+
+# --------------------------------------------------------------------------- #
+# 3b. `request_assembled` — the honest split of the "provider" span            #
+# --------------------------------------------------------------------------- #
+# Measured live (turn c59ab99e, 2026-08-22): 1,762 ms of the 13,532 ms span
+# the audit rendered as "provider first_byte" elapsed before the per-request
+# client even existed — turn-context prologue, tool-schema serialization,
+# middleware, hooks. `request_assembled` is the mark that separates that
+# hermes work from the genuine client-init + network + provider wait. The
+# named sabotage for this stage is "emit the marker under a misspelled step"
+# — the mark must then vanish from the record, and these rows must red.
+def test_request_assembled_lands_between_request_started_and_first_byte(streamed_turn):
+    phases = streamed_turn[TURN_PHASES_KEY]
+    assert "request_assembled" in phases, (
+        "the dispatch-start trace payload must become the request_assembled "
+        "mark; without it the whole run_conversation prologue is billed to "
+        "the provider"
+    )
+    assert (
+        phases["provider_request_started"]
+        <= phases["request_assembled"]
+        <= phases["provider_first_byte"]
+    )
+
+
+def test_the_trace_mapper_takes_only_the_step_it_names():
+    """Unknown payloads take nothing — the mapper is an instrument, and the
+    trace stream carries many other payload shapes (tool events, spans)."""
+
+    marks = TurnPhaseMarks(monotonic=_TickClock(), wall_now=lambda: "stamp")
+    mark_from_trace_payload(marks, None)
+    mark_from_trace_payload(marks, "not a dict")
+    mark_from_trace_payload(marks, {"phase": "timing", "step": "conversation_request_build"})
+    mark_from_trace_payload(
+        marks, {"phase": "tool", "step": CONVERSATION_REQUEST_ASSEMBLED_STEP}
+    )
+    assert "request_assembled" not in marks.snapshot()
+    mark_from_trace_payload(
+        marks, {"phase": "timing", "step": CONVERSATION_REQUEST_ASSEMBLED_STEP}
+    )
+    assert "request_assembled" in marks.snapshot()
+
+
+def test_the_loop_marker_and_the_mapper_agree_on_the_step():
+    """The producer/consumer contract, held at the seam.
+
+    ``_emit_request_assembled_marker`` (agent/conversation_loop.py) is what a
+    live turn fires; feeding its ACTUAL payload through the mapper proves the
+    two sides spell the step identically — the drift this row exists to catch,
+    because a misspelling fails silently as an absent (never-wrong) mark.
+    """
+
+    from agent.conversation_loop import _emit_request_assembled_marker
+
+    captured: list[dict] = []
+    agent = SimpleNamespace(status_callback=captured.append)
+    _emit_request_assembled_marker(agent, api_call_count=1)
+    assert len(captured) == 1
+    marks = TurnPhaseMarks(monotonic=_TickClock(), wall_now=lambda: "stamp")
+    mark_from_trace_payload(marks, captured[0])
+    assert "request_assembled" in marks.snapshot()
+    # An instant, not a span: it must not carry a timing_key, or the profile
+    # timing collector would record a meaningless 0ms duration for it.
+    assert "timing_key" not in captured[0]
+    assert "duration_ms" not in captured[0]
+
+
+def test_the_retry_ladder_keeps_the_first_dispatch_instant():
+    """Two dispatch attempts, one mark: first-mark-wins at the mapper too."""
+
+    clock = _TickClock()
+    marks = TurnPhaseMarks(monotonic=clock, wall_now=lambda: "stamp")
+    payload = {"phase": "timing", "step": CONVERSATION_REQUEST_ASSEMBLED_STEP}
+    mark_from_trace_payload(marks, payload)
+    first = marks.snapshot()["request_assembled"]
+    mark_from_trace_payload(marks, payload)
+    assert marks.snapshot()["request_assembled"] == first
 
 
 # --------------------------------------------------------------------------- #

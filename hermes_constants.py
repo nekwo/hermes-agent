@@ -1384,6 +1384,21 @@ PARTIAL_STREAM_STUB_ID = "partial-stream-stub"
 
 FINISH_REASON_LENGTH = "length"
 
+# The conversation loop's dispatch-start marker (a run.progress payload with
+# phase="timing"). Emitted the instant the outbound provider request is fully
+# assembled — everything before it is hermes work (prompt/history build, tool
+# schema serialization, prompt-cache decoration, request middleware, the
+# pre_api_request hook, and the codex transport preflight); everything after
+# it is client construction + network + provider. (Routine OAuth refresh
+# happens earlier still, at credential resolution — runtime_provider.py; only
+# a mid-turn 401-driven refresh can land after this mark, on the retry path.)
+# Consumed by the mission-chat turn handler to take the ``request_assembled``
+# phase mark (agent_runtime/mission_chat_phases.py). Lives here because the
+# producer (agent/conversation_loop.py) and the consumer (agent_runtime/) sit
+# on opposite sides of a layering boundary and must never disagree on the
+# spelling.
+CONVERSATION_REQUEST_ASSEMBLED_STEP = "conversation_request_assembled"
+
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_MODELS_URL = f"{OPENROUTER_BASE_URL}/models"

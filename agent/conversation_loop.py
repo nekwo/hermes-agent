@@ -81,7 +81,10 @@ from agent.retry_utils import (
 )
 from agent.trajectory import has_incomplete_scratchpad
 from agent.usage_pricing import estimate_usage_cost, normalize_usage, record_api_call_usage
-from hermes_constants import PARTIAL_STREAM_STUB_ID
+from hermes_constants import (
+    CONVERSATION_REQUEST_ASSEMBLED_STEP,
+    PARTIAL_STREAM_STUB_ID,
+)
 from hermes_logging import set_session_context
 from tools.skill_provenance import set_current_write_origin
 from utils import base_url_host_matches, env_var_enabled
@@ -339,6 +342,41 @@ def _emit_conversation_timing(
         except Exception:
             logger.debug("conversation timing callback failed", exc_info=True)
     return duration_ms
+
+
+def _emit_request_assembled_marker(agent: Any, **extra: Any) -> None:
+    """Announce the dispatch instant: every byte hermes will send now exists.
+
+    Not an :func:`_emit_conversation_timing` span — it names an INSTANT, not a
+    duration, so it carries no ``duration_ms``/``timing_key`` (which also keeps
+    it out of the profile-timing dict, whose collector only reads ``*_ms``
+    keys). The mission-chat handler converts it into the ``request_assembled``
+    phase mark (``agent_runtime/mission_chat_phases.py:mark_from_trace_payload``)
+    that splits the turn record's "provider" span into hermes assembly vs
+    genuine client-init + network + provider wait.
+
+    Fired once per PHYSICAL dispatch attempt, right after the transport
+    preflight (so a codex token refresh lands on the hermes side of the split)
+    and right before the provider call. On a retry ladder the consumer's
+    first-mark-wins keeps the first attempt's instant.
+    """
+
+    callback = getattr(agent, "status_callback", None)
+    if callback is None:
+        return
+    try:
+        callback(
+            {
+                "type": "run.progress",
+                "phase": "timing",
+                "step": CONVERSATION_REQUEST_ASSEMBLED_STEP,
+                "status": "reached",
+                "summary": "Provider request assembled; dispatching.",
+                **extra,
+            }
+        )
+    except Exception:
+        logger.debug("request-assembled marker callback failed", exc_info=True)
 
 
 def _billing_or_entitlement_message(
@@ -2374,6 +2412,17 @@ def _run_conversation(
                             allow_stream=False,
                             is_github_responses=agent._is_copilot_url(),
                         )
+                    # The honest boundary between "hermes assembled a request"
+                    # and "hermes is waiting on client init + network +
+                    # provider". Everything above this line — including the
+                    # codex preflight and its token refresh — is hermes work.
+                    _emit_request_assembled_marker(
+                        agent,
+                        api_call_count=api_call_count,
+                        api_mode=agent.api_mode,
+                        provider=agent.provider,
+                        model=agent.model,
+                    )
                     provider_dispatch_started = time.perf_counter()
                     try:
                         if _use_streaming:

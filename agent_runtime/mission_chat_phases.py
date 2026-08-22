@@ -81,6 +81,7 @@ PHASE_ORDER: tuple[str, ...] = (
     "write_ahead",
     "agent_ready",
     "provider_request_started",
+    "request_assembled",
     "provider_first_byte",
     "stream_done",
     "native_committed",
@@ -111,6 +112,7 @@ _BLOCK_ORDER: tuple[str, ...] = (
     "agent_ready",
     "agent_init_cold",
     "provider_request_started",
+    "request_assembled",
     "provider_first_byte",
     "stream_done",
     "native_committed",
@@ -345,6 +347,41 @@ class TurnPhaseMarks:
         # Clamped at zero rather than trusted: an injected test clock is free to
         # be silly, and a negative "elapsed" is not a fact about any turn.
         return max(0, int((float(self._monotonic()) - self._anchor) * 1000))
+
+
+def mark_from_trace_payload(marks: TurnPhaseMarks, payload: Any) -> None:
+    """Take the phase mark a conversation trace payload names, or take nothing.
+
+    **Why this mark rides a payload instead of a call.** The span the launcher
+    audit renders as "provider first_byte" opens at ``provider_request_started``
+    — the instant the runner's ready-callback returns — but the conversation
+    loop then does real hermes work INSIDE that span before any byte leaves the
+    process: the turn-context prologue, tool-schema serialization, prompt-cache
+    decoration, request middleware, the ``pre_api_request`` hook, and the
+    per-request client build. Measured live (turn ``c59ab99e``, 2026-08-22):
+    1,762 ms of the 13,532 ms "provider" span elapsed before the request client
+    even existed. The loop sits a layer below the harness and cannot hold this
+    turn's :class:`TurnPhaseMarks`, so it announces the dispatch instant as a
+    ``run.progress`` timing payload and the mission-chat handler — which does
+    hold the marks — converts it here. ``request_assembled`` therefore splits
+    the old span honestly: ``provider_request_started → request_assembled`` is
+    hermes assembly, ``request_assembled → provider_first_byte`` is client
+    init + network + provider.
+
+    First-mark-wins (enforced by :meth:`TurnPhaseMarks.mark`) keeps the FIRST
+    dispatch attempt's instant when the loop's retry ladder re-dispatches.
+    Unknown or malformed payloads take nothing — this is an instrument, and an
+    instrument must not be a reason a turn fails.
+    """
+
+    if not isinstance(payload, dict):
+        return
+    if payload.get("phase") != "timing":
+        return
+    from hermes_constants import CONVERSATION_REQUEST_ASSEMBLED_STEP
+
+    if payload.get("step") == CONVERSATION_REQUEST_ASSEMBLED_STEP:
+        marks.mark("request_assembled")
 
 
 def safe_turn_phases(value: Any) -> dict[str, Any] | None:
