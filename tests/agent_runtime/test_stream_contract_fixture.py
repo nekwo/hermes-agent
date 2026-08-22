@@ -49,6 +49,30 @@ REGENERATE = f"python {GENERATOR.relative_to(REPO_ROOT).as_posix()}"
 LAUNCHER_LOAD_BEARING_KEYS = {"type", "watermark"}
 
 
+@pytest.fixture(autouse=True)
+def _reset_core_cache_lane():
+    """This file now BUILDS cores, so it owns the lane it leaves behind.
+
+    ``_build_stale_first_convergence_pair`` converges a persisted core and then
+    pays for a gated rebuild, and a completed build closes the process's cache
+    lane. Before BO-1 nothing in this file touched that state; now it ends every
+    generating case with the lane DISARMED, which would hand the next file a
+    process that can never be served a cache — a case elsewhere asserting a
+    cache-hit boot would fail for a reason with no connection to itself.
+
+    The conftest already resets the captured fingerprint home for exactly this
+    class of leak; the lane and its memo are the same kind of process-global
+    state and get the same treatment, here rather than globally because this is
+    the file that started building.
+    """
+
+    from agent_runtime import core_cache
+
+    core_cache.reset_process_state()
+    yield
+    core_cache.reset_process_state()
+
+
 def _fixture(name: str) -> dict:
     return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 

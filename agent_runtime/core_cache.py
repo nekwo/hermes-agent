@@ -2791,10 +2791,14 @@ def _store_position() -> int | None:
     the pair had not moved. Appends move the log; the log is in the stamp; the
     memo drops.
 
-    **Cost, stated because the audit bounded it.** One ``stat`` of the live
-    slice, plus one ``exists`` probe of the rotation manifest (two, once the
-    store has rotated) — ``event_rotation.log_end_offset`` reads no event bytes
-    and scans nothing. Per ask, on a path that already pays three stats.
+    **Cost, stated precisely because the audit bounded it at "one stat per
+    ask".** ``event_rotation.log_end_offset`` reads no EVENT bytes and scans no
+    log: on a pristine store it is one ``exists`` probe of the absent rotation
+    manifest plus one ``stat`` of the live slice. On a ROTATED store it also
+    reads and parses the manifest — a few KB of JSON listing the sealed slices,
+    not the log — so the honest bound is "two stats, plus a small JSON read once
+    the store has rotated", per ask, on a path that already pays three stats and
+    (on a miss) a full store walk.
 
     ``None`` is the typed unknown, exactly as ``parity.events_watermark``
     defines it, and :func:`_stamp_still_stands` refuses to answer from a memo on

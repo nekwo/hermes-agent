@@ -31,6 +31,12 @@ import logging
 import pytest
 
 from agent_runtime import core_cache
+# One of the four names the channel table lists verbatim as runtime-authored.
+# Taken from the module that OWNS it, never spelled, for the reason
+# ``core_cache``'s exclusion set records: a comment naming a constant is not a
+# reference to it, and the last hand-spelling in this family named a file that
+# had never existed.
+from agent_runtime.dispatch_delivery import DRAIN_STATE_FILENAME
 from agent_runtime.core_cache_census import (
     DIFF_TAIL_ABSENT,
     PATH_RUNTIME_AUTHORED,
@@ -46,13 +52,6 @@ from agent_runtime.core_cache_census import (
 )
 
 _LOGGER = "agent_runtime.core_cache"
-
-#: One of the four names the channel table lists verbatim as runtime-authored.
-#: Taken from the module that OWNS it, never spelled, for the reason
-#: ``core_cache``'s exclusion set records: a comment naming a constant is not a
-#: reference to it, and the last hand-spelling in this family named a file that
-#: had never existed.
-from agent_runtime.dispatch_delivery import DRAIN_STATE_FILENAME  # noqa: E402
 
 
 def _emit(caplog, **kwargs) -> list[str]:
