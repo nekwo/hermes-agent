@@ -293,6 +293,18 @@ BUILD_ROLE_SHARED_NEXT = "shared_next"
 #: :func:`agent_runtime.core_cache.first_core` for the receipt it emits instead.
 BUILD_ROLE_CACHE = "cache"
 
+#: The fifth role (W3-H2): this caller ran no build, rode no build and consulted
+#: no persisted pair — the core of the PREVIOUS demote build at this same event
+#: offset was still valid and was handed back
+#: (:mod:`agent_runtime.demote_core_reuse`). Never produced by this module: the
+#: reuse happens one layer out, in the stream's demote lane, and the token lives
+#: here so the role vocabulary stays single. It exists for the same reason
+#: ``cache`` does — the build COUNT is the count of ``led`` lines, and a reuse
+#: printing ``led`` would put the log straight back into the state where a
+#: rebuild and a hand-back are indistinguishable, which is the state the three
+#: identical builds at offset 89961793 were found in.
+BUILD_ROLE_REUSED = "reused"
+
 #: A caller that named itself nothing. Kept as a token rather than an empty
 #: value so the receipt line's key is never absent — a parser reading
 #: ``caller=`` off the line must not have to tell "no such key" apart from

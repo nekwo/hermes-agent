@@ -10,7 +10,7 @@ from typing import Any
 
 from hermes_time import now
 
-from . import core_cache, paths
+from . import core_cache, demote_core_reuse, paths
 from .events import EventLog
 from .models import Event
 from .parity import events_watermark
@@ -20,6 +20,7 @@ from .request_control import request_cancelled
 from .serde import optional_text, section_rows, to_jsonable
 from .snapshot import (
     BUILD_CALLER_UNKNOWN,
+    BUILD_ROLE_REUSED,
     BUILD_SECTIONS_WAIT_THRESHOLD_MS,
     build_receipt_facts,
     build_snapshot,
@@ -53,6 +54,16 @@ _SECRET_ASSIGNMENT_RE = ENV_SECRET_ASSIGNMENT_RE
 DEFAULT_STREAM_CALLER = "cli"
 
 
+#: The ``reason=`` a batch bills when the patch lane could not express it and a
+#: foldable update paid for a whole snapshot — the case worth grepping for, and
+#: the ONLY lane :mod:`agent_runtime.demote_core_reuse` participates in. A
+#: constant rather than a literal at both sites because the reuse gate and the
+#: receipt must name the same lane: a resync is a re-baseline the client asked
+#: for and a ``full_core`` is what every batch is with the patch lane off, and
+#: neither is a repeated build of state somebody already built.
+BATCH_REASON_DEMOTE = "demote"
+
+
 def _log_snapshot_build(
     *,
     reason: str,
@@ -61,6 +72,7 @@ def _log_snapshot_build(
     events: int | None = None,
     snapshot: dict[str, Any] | None = None,
     build_info: dict[str, Any] | None = None,
+    core_source: str | None = None,
 ) -> None:
     """Record one caller's WAIT for a ``build_snapshot()`` and what it cost.
 
@@ -144,6 +156,15 @@ def _log_snapshot_build(
     if build_ms is not None and int(build_ms) >= BUILD_SECTIONS_WAIT_THRESHOLD_MS:
         line += " sections_top=%s"
         values.append(facts["sections_top"])
+    # W3-H2: present ONLY when this caller ran no build at all because the core
+    # of the previous demote build at this same offset was still valid. Absent
+    # on every ordinary line, so no existing adjacency moves and a reader that
+    # does not know the key behaves exactly as before. ``build_ms`` above stays
+    # the ORIGINAL build's cost — the build underneath this frame — because a
+    # ``build_ms=0`` would be a lie about a build that really did cost seconds.
+    if core_source is not None:
+        line += " core_source=%s"
+        values.append(str(core_source))
     # LAST, after the conditional split, so "pid is the last field" holds on
     # both shapes of this line — see the docstring for why it is additive here
     # rather than a formatter change.
@@ -697,7 +718,49 @@ def _full_core_batch_frames(
     ahead of the content it was read from); this is the same invariant one layer
     out, over a core the builder handed back rather than built. The check costs
     two dict lookups and fires only when the invariant is already broken.
+
+    **W3-H2: the second demote at one offset does not build again.** Three
+    ``role=led`` demote builds landed at offset 89961793 in the operator's log
+    on 2026-08-22, each ~3 s, each writing back the same fingerprint. The
+    coalescer cannot merge them because they are SEQUENTIAL, not concurrent —
+    see ``demote_core_reuse`` for why a positional check makes reuse safe where
+    riding an in-flight build is not. The reuse is of the CORE only: this
+    function still builds and yields a complete frame for every caller, which is
+    what the BO-1 convergence-pair invariant requires.
     """
+
+    last_offset = int(batch[-1][0] or 0)
+    reused = (
+        demote_core_reuse.consult(floor=last_offset)
+        if reason == BATCH_REASON_DEMOTE
+        else None
+    )
+    if reused is not None:
+        if request_cancelled():
+            # The same probe the build arm makes on the way out. A reuse has no
+            # wait to interrupt, but a consumer that cancelled before this batch
+            # was reached must not be handed a frame just because answering it
+            # became cheap.
+            return
+        # No build, no worker, no liveness: there is nothing to be live DURING.
+        # ``build_ms`` rides from the reused core's own envelope so the receipt
+        # still names what the frame's core cost to make.
+        frame = delta_batch_frame(batch, snapshot=reused)
+        _log_snapshot_build(
+            reason=reason,
+            waited_ms=0,
+            offset=(frame.get("watermark") or {}).get("event_offset"),
+            events=len(batch),
+            snapshot=reused,
+            build_info={
+                "caller": caller,
+                "role": BUILD_ROLE_REUSED,
+                "generation": None,
+            },
+            core_source=demote_core_reuse.CORE_SOURCE_REUSED_SAME_OFFSET,
+        )
+        yield frame
+        return
 
     job = _SnapshotBuildJob(caller=caller)
     # Keep the watermark at the last APPLIED core — see ``_build_with_liveness``
@@ -713,7 +776,6 @@ def _full_core_batch_frames(
         raise job.error
     if job.snapshot is None:
         raise RuntimeError("snapshot build completed without a result")
-    last_offset = int(batch[-1][0] or 0)
     core_offset = _core_event_offset(job.snapshot)
     if core_offset is not None and core_offset < last_offset:
         # The ONE reachable producer of this shape is the boot cache lane: a
@@ -740,6 +802,11 @@ def _full_core_batch_frames(
         if job.snapshot is None:
             raise RuntimeError("snapshot build completed without a result")
     frame = delta_batch_frame(batch, snapshot=job.snapshot)
+    if reason == BATCH_REASON_DEMOTE:
+        # Held for the NEXT demote build only, and keyed on this core's own
+        # pre-build watermark rather than on a stat taken now — see
+        # ``demote_core_reuse.remember`` for the direction argument.
+        demote_core_reuse.remember(job.snapshot)
     if job.elapsed_ms is not None:
         _log_snapshot_build(
             reason=reason,
@@ -789,7 +856,11 @@ def _batch_frames_with_liveness(
         batch,
         base_offset=base_offset,
         heartbeat_interval_seconds=heartbeat_interval_seconds,
-        reason="resync" if resync else ("demote" if delta_patches else "full_core"),
+        reason=(
+            "resync"
+            if resync
+            else (BATCH_REASON_DEMOTE if delta_patches else "full_core")
+        ),
         caller=caller,
     )
 
