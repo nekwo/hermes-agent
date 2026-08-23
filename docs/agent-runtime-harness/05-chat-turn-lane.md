@@ -188,6 +188,23 @@ first recorded `resident_rebuild_runtime_signature_changed` + `resident_actor_re
 constructed actor IS. Allowlists, not denylists: a new field on either record is presumed
 bookkeeping until someone names it.
 
+**And a refused reuse now NAMES the input that moved (2026-08-23).** The allowlist fix was not
+enough on its own: three consecutive turns of one neko chat at `19:03:10/23/40Z`, on a root the
+boot prewarm had warmed nine seconds earlier, each still recorded
+`resident_rebuild_runtime_signature_changed` — and the composite key can only say that *something*
+changed, so the diagnosis was a hand archaeology of the live store. The signature is now composed
+once as a flat dict (`mission_chat_runtime_signature_components`) and folded twice: `sha256` of the
+whole thing is the key, and one digest per component rides with it to `acquire`, which diffs them
+and writes `resident_rebuild_component_<name>` per moved component onto the turn record (plus one
+`resident_signature_diff root=… components=…` log line). NAMES only — the digests are one-way and
+no value is ever emitted. Two components lost their operator-shaped halves in the same pass:
+`permissions` folds `{mode, source, expired}` instead of the whole `permission_state_for_chat`
+answer (its `blocked_tools` list is resolved over every tool registered in the process, and the
+actor is built from `tool_contract`'s two lists, not from that projection), and `current_chat_goal`
+left `INSTANCE_IDENTITY_FIELDS` for the reason `goal_id` was never in it. `tool_contract` stays and
+may not be dropped — the actor IS constructed from it and `_prepare_resident_persona_chat_agent`
+does not re-apply it on reuse. Full receipt: `planned/chat-turn-prep-cost.md` §5 Stage 2a.
+
 ### 4b. The resident actor is built before the first turn (2026-08-23)
 
 With reuse finally working, the whole of §2.3's construction cost collapsed onto the FIRST turn

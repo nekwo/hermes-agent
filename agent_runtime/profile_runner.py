@@ -176,6 +176,11 @@ class AgentRunRequest:
     root_chat_session_id: str | None = None
     persona_chat_runtime_registry: Any | None = None
     persona_chat_runtime_signature: str | None = None
+    #: The per-component digest map the signature above was folded from
+    #: (``mission_chat_turn_context.mission_chat_runtime_signature_digests``).
+    #: Optional and receipt-only: reuse is decided by the composite signature,
+    #: and this exists so a refused reuse can NAME the component that moved.
+    persona_chat_runtime_signature_components: dict[str, str] | None = None
     persona_chat_native_revision: str | None = None
     # Explicit one-turn proof/debug seam. Normal persona-chat turns leave these
     # unset and inherit the model/profile compressor configuration.
@@ -1025,12 +1030,17 @@ class ProfileAgentRunner:
                 # so `agent_construct_ms` is ABSENT rather than reporting the
                 # cost of work that was thrown away — `resident_actor_reused`
                 # says why, so the absence is typed, never silent.
-                entry, reused, rebuild_reason = request.persona_chat_runtime_registry.acquire(
-                    root_session_id=request.root_chat_session_id,
-                    active_session_id=active_id,
-                    signature=request.persona_chat_runtime_signature or "default",
-                    revision=request.persona_chat_native_revision or "unknown",
-                    factory=_construct_agent,
+                entry, reused, rebuild_reason, signature_diff = (
+                    request.persona_chat_runtime_registry.acquire(
+                        root_session_id=request.root_chat_session_id,
+                        active_session_id=active_id,
+                        signature=request.persona_chat_runtime_signature or "default",
+                        revision=request.persona_chat_native_revision or "unknown",
+                        factory=_construct_agent,
+                        signature_components=(
+                            request.persona_chat_runtime_signature_components
+                        ),
+                    )
                 )
                 if reused:
                     _prepare_resident_persona_chat_agent(entry.agent, turn_state)
@@ -1038,6 +1048,16 @@ class ProfileAgentRunner:
                 timing["resident_actor_reused"] = 1 if reused else 0
                 if rebuild_reason:
                     timing[f"resident_rebuild_{rebuild_reason}"] = 1
+                # One flag per moved component, inside the `resident_rebuild_*`
+                # vocabulary the turn record already admits
+                # (`mission_chat_turns.safe_turn_profile_timing`: `*_ms`,
+                # `resident_actor_reused`, `resident_rebuild_*`, every value an
+                # int). A joined string would be free text and would be dropped
+                # at that gate by construction — so the diff rides as flags,
+                # which is also what makes it queryable across turns. NAMES
+                # only: no digest and no value ever reaches the record.
+                for component in signature_diff:
+                    timing[f"resident_rebuild_component_{component}"] = 1
             else:
                 agent = _construct_agent()
                 # This run BUILT its agent — there was no resident registry to

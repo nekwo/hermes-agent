@@ -373,6 +373,81 @@ def test_a_run_with_no_chat_registry_REPORTS_that_it_constructed(stub_runtime):
     )
 
 
+def test_a_signature_rebuild_names_the_components_on_the_turn_record(stub_runtime):
+    """The 19:03Z receipt gap closed end to end.
+
+    Three live turns of one neko chat each recorded
+    ``resident_rebuild_runtime_signature_changed`` and nothing else, so the
+    diagnosis had to be done by hand against the store. The runner now writes
+    one flag per moved component -- inside the ``resident_rebuild_*`` vocabulary
+    the durable record already admits, because that gate takes ints and drops
+    free text by construction.
+    """
+
+    from agent_runtime.mission_chat_turns import safe_turn_profile_timing
+
+    registry = PersonaChatRuntimeRegistry()
+    runner = ProfileAgentRunner(agent_factory=_BoundaryAgent)
+
+    runner.run(
+        _chat_request(
+            registry=registry,
+            signature="sig-1",
+            persona_chat_runtime_signature_components={
+                "persona_revision": "aa",
+                "tool_contract": "bb",
+            },
+        )
+    )
+    result = runner.run(
+        _chat_request(
+            registry=registry,
+            signature="sig-2",
+            persona_chat_runtime_signature_components={
+                "persona_revision": "aa",
+                "tool_contract": "CHANGED",
+            },
+        )
+    )
+
+    timing = result.profile_timing
+    assert timing["resident_rebuild_runtime_signature_changed"] == 1
+    assert timing["resident_rebuild_component_tool_contract"] == 1
+    assert "resident_rebuild_component_persona_revision" not in timing
+
+    # ...and it survives the durable record's admission gate rather than being
+    # dropped there, which is the whole point of spelling the diff as flags.
+    block = safe_turn_profile_timing(timing)
+    assert block["resident_rebuild_component_tool_contract"] == 1
+
+
+def test_a_reused_actor_writes_no_component_flags(stub_runtime):
+    """The flags belong to a rebuild. A warm turn that names components would
+    read as a rebuild that did not happen."""
+
+    registry = PersonaChatRuntimeRegistry()
+    runner = ProfileAgentRunner(agent_factory=_BoundaryAgent)
+    components = {"persona_revision": "aa", "tool_contract": "bb"}
+
+    runner.run(
+        _chat_request(
+            registry=registry, persona_chat_runtime_signature_components=components
+        )
+    )
+    result = runner.run(
+        _chat_request(
+            registry=registry, persona_chat_runtime_signature_components=components
+        )
+    )
+
+    assert result.profile_timing["resident_actor_reused"] == 1
+    assert not [
+        key
+        for key in result.profile_timing
+        if key.startswith("resident_rebuild_component_")
+    ]
+
+
 # ---------------------------------------------------------------------------
 # T6 — the runtime resolves once for an unchanged profile
 # ---------------------------------------------------------------------------

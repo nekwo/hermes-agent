@@ -3405,6 +3405,10 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
                 client_message_id=client_message_id,
                 runtime_registry=runtime_registry,
                 runtime_signature=turn_context.runtime_signature,
+                # Receipt-only: lets a refused reuse name the component that
+                # moved (`resident_rebuild_component_*` on the turn record)
+                # rather than only reporting that the composite key changed.
+                runtime_signature_components=turn_context.runtime_signature_digests,
                 native_revision=native_revision_before,
                 compression_threshold_tokens_override=getattr(
                     args, "compression_threshold_tokens", None

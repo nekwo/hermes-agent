@@ -388,6 +388,77 @@ def test_the_assembled_request_carries_the_signature_the_turn_would_ship(
     )
 
     assert request.persona_chat_runtime_signature == context.runtime_signature
+    # ...and the per-component map it was folded from rides along, so the FIRST
+    # real turn's refusal (a workspace-bound chat's, say) names the component
+    # that moved instead of only reporting that the composite did. An entry
+    # seeded with no map can answer nothing about the prewarm-vs-turn half of
+    # the diff — which is exactly the half the 2026-08-23T19:03Z receipt needed.
+    assert (
+        request.persona_chat_runtime_signature_components
+        == context.runtime_signature_digests
+    )
+
+
+def test_a_workspace_bound_chats_first_turn_NAMES_the_workspace_as_the_cause(
+    persisted_persona_samples, bundled_persona_profiles
+):
+    """The prewarm's one honest blind spot, now self-reporting.
+
+    ``--agents-file`` is the operator's client-side selection and the prewarm
+    cannot know it, so a workspace-bound chat's first turn rebuilds. That was
+    already written down; what the live 19:03 receipts could not say is whether
+    a given rebuild WAS this documented case or a defect. Now the turn record
+    carries ``resident_rebuild_component_workspace_agents`` and says which.
+    """
+
+    from agent_runtime.mission_chat_turn_context import (
+        mission_chat_runtime_signature_components,
+        mission_chat_runtime_signature_digests,
+    )
+    from agent_runtime.persona_chat_continuity import _signature_component_diff
+
+    root, instance, session_db = _live_chat_root(persona_id="dev")
+    request, _runner = prewarm_module._prepare(root, None)
+
+    from agent_runtime.config import load_agent_runtime_config
+    from agent_runtime.models import apply_instance_model_overrides
+    from hermes_cli.harness_parts.persona_commands import (
+        _chat_effective_model_payload,
+        _chat_model_override_from_config,
+        _persona_by_id,
+        _session_model_config,
+    )
+
+    cfg = load_agent_runtime_config()
+    persona = apply_instance_model_overrides(_persona_by_id(cfg, "dev"), instance)
+    session_model_config = _session_model_config(session_db, root)
+    turn = mission_chat_runtime_signature_digests(
+        mission_chat_runtime_signature_components(
+            persona=persona,
+            instance=instance,
+            config=cfg,
+            session_id=root,
+            session_model_config=session_model_config,
+            model_selection=_chat_effective_model_payload(
+                persona=persona,
+                config=cfg,
+                override=_chat_model_override_from_config(session_model_config),
+                instance=instance,
+            ),
+            workspace_agents_receipt={
+                "path": "X:/workspace/AGENTS.md",
+                "included": True,
+                "status": "loaded",
+                "sha256": "ABCD",
+                "bytes": 4,
+            },
+            surface_prompt="",
+        )
+    )
+
+    assert _signature_component_diff(
+        request.persona_chat_runtime_signature_components, turn
+    ) == ("workspace_agents",)
 
 
 def test_the_assembled_request_keys_acquire_on_the_root_the_tip_and_the_revision(
@@ -490,7 +561,7 @@ def test_the_prewarm_runs_no_conversation_and_no_agent_ready(stub_runtime):
         )
     )
 
-    entry, reused, _ = registry.acquire(
+    entry, reused, _, _ = registry.acquire(
         root_session_id="chat_root_1",
         active_session_id="session_1",
         signature="sig-1",
@@ -525,7 +596,7 @@ def test_a_prewarmed_actor_is_handed_over_with_no_turn_local_handles(stub_runtim
 
     runner.prewarm(_request(prewarm_only=True, registry=registry))
 
-    entry, _, _ = registry.acquire(
+    entry, _, _, _ = registry.acquire(
         root_session_id="chat_root_1",
         active_session_id="session_1",
         signature="sig-1",

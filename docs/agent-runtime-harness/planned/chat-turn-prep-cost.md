@@ -1,6 +1,6 @@
 # Planned — chat-turn prep cost (the ~4 s of hermes between admission and the provider)
 
-**Status:** Stages 0–2 LANDED 2026-08-23 (`60c7f46ec1` / `7f2c82f090` / `bfde53b4ae`); live steady-state re-take receipts owed for 1 and 2; Stages 3–5 not started. **Owner doc:**
+**Status:** Stages 0–2 LANDED 2026-08-23 (`60c7f46ec1` / `7f2c82f090` / `bfde53b4ae`), Stage 2a in the working tree; live steady-state re-take receipts owed for 1, 2 and 2a; Stages 3–5 not started. **Owner doc:**
 [`../05-chat-turn-lane.md`](../05-chat-turn-lane.md).
 **Question this answers** (operator, 2026-08-22): *"maybe something we are doing with the
 chat isn't initializing fully or fast enough?"* — the answer is **yes, twice over**: the
@@ -304,7 +304,7 @@ dispatch" cost worth chasing.
 
 ---
 
-## 5. Stages (ordered by value; Stages 0, 1 and 2 have landed, Stages 3–5 not started)
+## 5. Stages (ordered by value; Stages 0, 1, 2 and 2a have landed, Stages 3–5 not started)
 
 **Stage 0 — restore the instrument before touching anything (opening gate, §6).**
 **Code half LANDED 2026-08-23, commit `60c7f46ec1`**; the live re-take is still
@@ -502,6 +502,105 @@ work performed earlier: (1) `resolve_runtime_provider` reads credentials — a l
 pool may refresh an expired agent key, and its result is cached for the turn behind it;
 (2) MCP admission spawns this persona's declared servers and tears them down on the way out.
 
+**Stage 2a — a refused reuse NAMES the input that moved. CODE LANDED 2026-08-23**
+(working tree); the live re-take is owed. Not a latency stage: it is the instrument
+Stage 2's claim could not be checked without, plus the two identity fixes it convicted.
+
+*The receipt that forced it (2026-08-23T19:03Z, serve on `bfde53b4ae`+docs).* The boot
+prewarm warmed root `persona_chat_personainst_neko_supervisor_agent_f6f7a51b_3b7230c1b8d2`
+at `19:03:01Z` (`outcome=warmed elapsed_ms=469`). The next THREE turns of that one root —
+`19:03:10` / `19:03:23` / `19:03:40`, an `agent-chat-send` relay each — recorded
+`resident_actor_reused=0` and `resident_rebuild_runtime_signature_changed=1`. Every one.
+Construction was cheap on those turns (`agent_construct_ms` 10 / 15 / 12, warm TTLs), so
+nothing looked broken — but reuse never happened, which is the entire benefit Stage 1's
+allowlist fix and Stage 2's prewarm exist to buy. The composite key could only say that
+*something* moved, so the diagnosis had to be done by hand against the live store.
+
+*What the store could and could not settle.* Read-only, from the two persisted
+observability rows for that root plus the turn records:
+
+| suspect | live answer |
+|---|---|
+| `surface_prompt` | EMPTY on both turns (`surface_prompt_is_blank: true`) — not the mover |
+| `workspace_agents` receipt | byte-identical across both turns (`AGENTS.md`, `sha256 682CC0E9…`, 1,859 B) — not the turn-to-turn mover, but IS the prewarm→turn-1 mover, since the prewarm cannot know `--agents-file` |
+| `model_selection`, `session_model_config`, `skill_manifest_hash`, HUD revision | identical across both turns |
+| persona / instance identity revisions, tool contract, permission state | byte-stable at rest, computed twice 3 s apart |
+| `visibility_bundle_builds` | `0` / **`2`** / `0` — the chat-lane bundle's own key moved twice INSIDE the middle turn |
+
+That last row is the one that pointed: turns 1 and 3 were memo HITS on the bundle, turn 2
+rebuilt it twice, and the bundle's content is what the signature folds as `tool_contract`
+and `permissions`. The bundle key carries `tools.registry.registry_epoch`, and under the
+shipped default permission mode (`unbounded`, `SHIPPED_DEFAULT_PERMISSION_MODE`; the live
+root config sets no `tool_permissions` block and the chat has no stored grant)
+`_enabled_toolsets_for_chat` resolves `all_registered_toolsets()` and
+`permission_state_for_chat` resolves `blocked_tools` over EVERY tool registered in the
+process. In a warm multi-persona `harness serve` — which is what this is; the same log
+window shows a full plugin-discovery pass (`54 found, 47 enabled`) at `15:03:02` local,
+between the prewarm and turn 1 — that set moves whenever anything registers or
+deregisters.
+
+*What landed.*
+
+1. **The signature is composed once and folded twice.**
+   `mission_chat_runtime_signature_components` returns the flat component dict;
+   `mission_chat_runtime_signature_from_components` is the ONE fold to the composite key;
+   `mission_chat_runtime_signature_digests` turns the same dict into a per-component
+   digest map, which rides `MissionChatTurnContext.runtime_signature_digests` →
+   `mission_chat_reply(runtime_signature_components=)` →
+   `AgentRunRequest.persona_chat_runtime_signature_components` →
+   `PersonaChatRuntimeRegistry.acquire`. The prewarm seeds the same map on the entry it
+   registers, so the prewarm-vs-turn half of the diff is answerable too.
+2. **`acquire` diffs the map and reports NAMES.** It returns a fourth element (the moved
+   component names) and logs one line, `resident_signature_diff root=<id>
+   components=<a,b>`. Reuse is still decided by the composite alone — a second authority
+   for "is this the same actor" is how two answers drift. A caller that supplied no map
+   gets `()`, not a guess.
+3. **The names reach the durable record inside the existing vocabulary.** The runner
+   writes `resident_rebuild_component_<name> = 1` per moved component, which
+   `safe_turn_profile_timing` already admits (`resident_rebuild_*`, ints). A joined
+   string would be free text and would be dropped at that gate by construction — so the
+   diff rides as flags, which is also what makes it queryable across turns. NAMES only:
+   the digests are one-way and no value is ever emitted, because the components include
+   prompt- and policy-adjacent material (`surface_prompt_sha256`, the tool contract).
+4. **Convicted and removed: the operator-shaped half of `permissions`.** The key folded
+   the whole `permission_state_for_chat` answer — `blocked_tools` entries, `workdir`,
+   `repo_scope`, `can_run_terminal` / `can_mutate_files`, `expires_at`,
+   `turns_remaining`. None of it reaches the agent factory: `_execute_agent_run` builds
+   an actor from `enabled_toolsets` and `blocked_tool_names`, which the key already
+   carries verbatim as `tool_contract`, plus scopes derived from the permission MODE. So
+   the projection was the row-liveness defect of `7f2c82f090` wearing different clothes,
+   and under `unbounded` its `blocked_tools` list is exactly the registry-shaped thing
+   that moves in a warm multi-persona process. What stays is `{mode, source, expired}` —
+   the facts that decide what is constructed. A grant decrementing 5 → 4 changes nothing
+   about the actor; the turn it reaches 0 flips `expired`, which is still in the key.
+5. **Convicted and removed: `current_chat_goal` from `INSTANCE_IDENTITY_FIELDS`.** Read
+   the allowlist's own rule consistently — `goal_id` is excluded because it "renders into
+   the HUD, which rides the volatile tail and is therefore not part of the cached actor at
+   all", and `current_chat_goal`'s only readers are the chat-list TITLE
+   (`persona_chat_history`) and the operator projections / situational HUD. A
+   `persona instance steer --goal` changes what the next turn SAYS, not what its actor IS.
+   (Not the live churn source — the chat send never writes it — but a rebuild nobody
+   should ever have paid.)
+6. **`tool_contract` STAYS, and the doctrine says why.** However volatile it is, the actor
+   is constructed from those two lists and `_prepare_resident_persona_chat_agent` does not
+   re-apply them on reuse — it refreshes callbacks, the cache scope and the iteration cap
+   and nothing else. An actor whose tool surface moved is stale, so that rebuild is
+   correct behaviour. The receipt's job is to say so by name instead of leaving it
+   indistinguishable from a defect.
+
+*What this does NOT claim.* The live turns were not re-run — the serve is still on
+`bfde53b4ae` and was not restarted. Removals 4 and 5 are convicted on what the actor is
+built from, which is a code fact and does not need a live re-take; whether they are
+sufficient to make the 19:03 chat reuse its actor is exactly what the next serve restart
+answers, and the new `resident_rebuild_component_*` flags are what will answer it in one
+read instead of a store archaeology session.
+
+*Receipt to take on the next restart:* on the second turn of one chat, either
+`resident_actor_reused=1`, or a `resident_rebuild_component_<name>` naming the remaining
+mover. A first turn of a workspace-bound chat is EXPECTED to show
+`resident_rebuild_component_workspace_agents` — that is the prewarm's documented blind
+spot finally self-reporting rather than being indistinguishable from a defect.
+
 **Stage 3 — prologue diet, gated on the Stage-0 split data.** Cache tool-schema
 serialization per toolset tuple and verify the system-prompt restore path actually hits
 on turn 2+ (both live inside the `provider_request_started→request_assembled` span).
@@ -568,6 +667,50 @@ Secondary gates, inherited:
   `planned/mission-chat-admission-latency.md` §5).
 
 ## 7. Uncertain / unverified, stated plainly
+
+### 7.4 `visibility_bundle_builds=2` inside one turn — diagnosed, deliberately NOT changed
+
+Live: `0` / `2` / `0` across the three 19:03 turns of one root (and `2` on the 17:33:17
+turn before Stage 2 landed). Two builds means the chat-lane bundle's key moved once
+mid-turn, between the context builder's first bundle read and a later one. The key carries
+`tools.registry.registry_epoch`, which is bumped by every registration change — including
+the turn's own MCP admission register/deregister cycle (turn 3 recorded
+`mcp_admission_ms=45`) and any concurrent run's, since `harness serve` runs turns from
+several personas on pooled threads in one process.
+
+The tempting fix is to read a registration generation that EXCLUDES the per-turn MCP
+scope's own cycle. **Refused, and the reason is a correctness rule, not taste.** It would
+be admissible only if the bundle's content did not depend on registry state — but under
+`unbounded` its `enabled_toolsets` IS `all_registered_toolsets()`, and
+`scope_toolsets_to_admission` recognizes another persona's MCP toolsets through a LIVE
+alias read of the same registry. A bundle pinned across a registration change can
+therefore hand the next turn a toolset name that is no longer registered, or miss one that
+is. That is a wrong answer about what the turn may do, traded for a memo hit; the epoch
+stays in the key. The cost is bounded and now visible: at most one extra resolve on a turn
+that touches MCP registration.
+
+### 7.5 `runtime_resolve_ms` 878 / 0 / 1589 — the memo's TTL is write-time, not use-time
+
+`_resolve_request_runtime` (`profile_runner.py:1756-1785`) memoizes on
+`(HERMES_HOME, provider, model, (mtime_ns,size) of the profile's config.yaml and .env)`
+for `RUNTIME_RESOLVE_CACHE_TTL_SECONDS = 30`. Nothing in production calls
+`reset_runtime_resolve_cache` — the docstring's "profile teardown" has no caller — so a
+cross-persona turn cannot be wiping it. The stamp is written at the COLD resolve and is
+never refreshed on a hit, so the entry dies 30 s after that resolve however heavily it is
+used: turn 1 at `19:03:10` resolved cold (878 ms), turn 2 at `19:03:23` hit (0 ms), turn 3
+at `19:03:40` — **30.3 s after turn 1's write** — missed by three tenths of a second and
+paid 1,589 ms.
+
+**Not fixed, on purpose.** A sliding window (restamping on a hit) makes the cached
+credential's effective age unbounded, and the constant's own doctrine pins the opposite
+invariant: it must stay well under the refresh skew so a served credential has ≥ 90 s of
+validity left. The honest options are a shorter TTL with a *separate* freshness floor, or
+leaving it — and neither belongs in this stage. The remaining unexplained gap is
+prewarm→turn 1 (9 s apart, should have hit): either the prewarm thread resolved under a
+different `HERMES_HOME` than the turn's profile context, or one of the two stamped files
+was rewritten between them. Both are one restart's worth of receipts away, and the memo
+already writes `runtime_resolve_cached=0/1` to tell them apart.
+
 
 - The **second plugin-discovery walk** at 22:04:18 (139 ms,
   `Plugin discovery complete: 54 found, 47 enabled`) during the 4a80f05e window: the log

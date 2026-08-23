@@ -118,6 +118,11 @@ class GPTPersonaRuntime:
         client_message_id: str | None = None,
         runtime_registry=None,
         runtime_signature: str | None = None,
+        # Receipt-only companion to ``runtime_signature``: the per-component
+        # digest map it was folded from, so a refused reuse can name the
+        # component that moved instead of only the composite. Never consulted
+        # to decide reuse.
+        runtime_signature_components: dict[str, str] | None = None,
         native_revision: str | None = None,
         compression_threshold_tokens_override: int | None = None,
         compression_protect_first_n_override: int | None = None,
@@ -272,6 +277,7 @@ class GPTPersonaRuntime:
                 turn_id=turn_id,
                 persona_chat_runtime_registry=runtime_registry,
                 persona_chat_runtime_signature=runtime_signature,
+                persona_chat_runtime_signature_components=runtime_signature_components,
                 persona_chat_native_revision=native_revision,
                 compression_threshold_tokens_override=compression_threshold_tokens_override,
                 compression_protect_first_n_override=compression_protect_first_n_override,

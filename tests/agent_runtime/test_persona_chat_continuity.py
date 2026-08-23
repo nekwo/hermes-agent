@@ -256,22 +256,22 @@ def test_safe_history_deduplicates_compression_lineage_turn_copies():
 
 def test_20_registry_reuses_same_root_and_revision():
     registry = PersonaChatRuntimeRegistry()
-    one, reused, _ = registry.acquire(root_session_id="root", active_session_id="tip", signature="sig", revision="rev", factory=object)
-    two, reused_again, _ = registry.acquire(root_session_id="root", active_session_id="tip", signature="sig", revision="rev", factory=object)
+    one, reused, _, _ = registry.acquire(root_session_id="root", active_session_id="tip", signature="sig", revision="rev", factory=object)
+    two, reused_again, _, _ = registry.acquire(root_session_id="root", active_session_id="tip", signature="sig", revision="rev", factory=object)
     assert not reused and reused_again and one.agent is two.agent
 
 
 def test_21_registry_rebuilds_on_signature_change():
     registry = PersonaChatRuntimeRegistry()
     registry.acquire(root_session_id="root", active_session_id="tip", signature="one", revision="rev", factory=object)
-    _, reused, reason = registry.acquire(root_session_id="root", active_session_id="tip", signature="two", revision="rev", factory=object)
+    _, reused, reason, _ = registry.acquire(root_session_id="root", active_session_id="tip", signature="two", revision="rev", factory=object)
     assert not reused and reason == "runtime_signature_changed"
 
 
 def test_22_registry_rebuilds_on_disk_revision_change():
     registry = PersonaChatRuntimeRegistry()
     registry.acquire(root_session_id="root", active_session_id="tip", signature="sig", revision="one", factory=object)
-    _, reused, reason = registry.acquire(root_session_id="root", active_session_id="tip", signature="sig", revision="two", factory=object)
+    _, reused, reason, _ = registry.acquire(root_session_id="root", active_session_id="tip", signature="sig", revision="two", factory=object)
     assert not reused and reason == "disk_revision_changed"
 
 
@@ -1776,3 +1776,103 @@ def test_the_retraction_tells_connected_clients_the_mode_moved_too(
     assert changed["default_chat_session_id"] is None
     assert changed["chat_session_id"] is None
     assert changed["session_id"] is None
+
+
+# -- the rebuild receipt: WHICH component moved ------------------------------
+#
+# Live defect, 2026-08-23T19:03Z: three consecutive turns of one neko chat each
+# recorded ``resident_rebuild_runtime_signature_changed``, and that receipt is
+# where the diagnosis stopped -- the composite key can only say that something
+# moved. ``acquire`` now diffs the per-component digest map the caller folded
+# the key from, so the same rebuild names the component instead.
+
+
+def _acquire(registry, *, signature, components=None, root="root"):
+    return registry.acquire(
+        root_session_id=root,
+        active_session_id="tip",
+        signature=signature,
+        revision="rev",
+        factory=object,
+        signature_components=components,
+    )
+
+
+def test_25_registry_names_the_signature_components_that_moved(caplog):
+    """NAMES, never values: the components include prompt- and policy-adjacent
+    material (the surface-prompt hash, the resolved tool contract), and the
+    diagnostic question is which input moved."""
+
+    import logging
+
+    registry = PersonaChatRuntimeRegistry()
+    before = {"persona_revision": "aa", "tool_contract": "bb", "permissions": "cc"}
+    after = {"persona_revision": "aa", "tool_contract": "ZZ", "permissions": "YY"}
+    _acquire(registry, signature="one", components=before)
+    with caplog.at_level(logging.INFO, logger="agent_runtime.persona_chat_continuity"):
+        _, reused, reason, moved = _acquire(registry, signature="two", components=after)
+
+    assert not reused and reason == "runtime_signature_changed"
+    assert moved == ("permissions", "tool_contract")
+    lines = [
+        record.getMessage()
+        for record in caplog.records
+        if "resident_signature_diff" in record.getMessage()
+    ]
+    assert lines == ["resident_signature_diff root=root components=permissions,tool_contract"]
+    assert "ZZ" not in lines[0] and "YY" not in lines[0]
+
+
+def test_26_a_component_that_appeared_or_vanished_counts_as_moved():
+    """A composition that GAINED or LOST a component is exactly the change this
+    receipt exists to surface; treating an absent digest as unchanged would hide
+    a whole input arriving or leaving the key."""
+
+    registry = PersonaChatRuntimeRegistry()
+    _acquire(registry, signature="one", components={"root": "aa"})
+    _, _, _, moved = _acquire(
+        registry, signature="two", components={"root": "aa", "workspace_agents": "bb"}
+    )
+    assert moved == ("workspace_agents",)
+
+
+def test_27_no_component_map_reports_no_diff_rather_than_a_guess():
+    """A caller that supplied no map gets the composite answer and nothing more.
+    Fabricating a component list from one side would name inputs nobody
+    compared."""
+
+    registry = PersonaChatRuntimeRegistry()
+    _acquire(registry, signature="one")
+    _, _, reason, moved = _acquire(registry, signature="two", components={"root": "aa"})
+    assert reason == "runtime_signature_changed" and moved == ()
+
+
+def test_28_reuse_and_a_disk_revision_rebuild_report_no_component_diff():
+    """The diff belongs to ONE outcome. A reused actor moved nothing, and a
+    revision rebuild is the chat's history moving, not its identity."""
+
+    registry = PersonaChatRuntimeRegistry()
+    components = {"root": "aa"}
+    _acquire(registry, signature="one", components=components)
+    _, reused, _, moved = _acquire(registry, signature="one", components=components)
+    assert reused and moved == ()
+
+    _, _, reason, moved = registry.acquire(
+        root_session_id="root",
+        active_session_id="tip",
+        signature="one",
+        revision="rev-2",
+        factory=object,
+        signature_components=components,
+    )
+    assert reason == "disk_revision_changed" and moved == ()
+
+
+def test_29_the_stored_entry_carries_the_map_its_key_was_folded_from():
+    """The map is stored per ENTRY, so the comparison is always against the
+    signature that actually built the resident actor -- never against whatever
+    the last caller happened to pass."""
+
+    registry = PersonaChatRuntimeRegistry()
+    entry, _, _, _ = _acquire(registry, signature="one", components={"root": "aa"})
+    assert entry.signature_components == {"root": "aa"}

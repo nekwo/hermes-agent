@@ -282,7 +282,11 @@ def _prepare(root: str, instance: Any) -> tuple[Any, Any]:
     from .chat_lane_bundle import chat_lane_bundle
     from .config import load_agent_runtime_config
     from .mcp_admission import LANE_MISSION_CHAT
-    from .mission_chat_turn_context import mission_chat_runtime_signature
+    from .mission_chat_turn_context import (
+        mission_chat_runtime_signature_components,
+        mission_chat_runtime_signature_digests,
+        mission_chat_runtime_signature_from_components,
+    )
     from .mission_chat_workdir import mission_chat_workdir_for_persona
     from .models import apply_instance_model_overrides
     from .persona_chat_durability import default_persona_session_db
@@ -336,7 +340,12 @@ def _prepare(root: str, instance: Any) -> tuple[Any, Any]:
         # cannot use is work for nobody. Reported, not raised.
         raise _PrewarmRefused(OUTCOME_SKIPPED_PROFILE_UNREADY)
 
-    signature = mission_chat_runtime_signature(
+    # Composed, then folded exactly as the turn folds it: the composite is the
+    # reuse key, the per-component digests ride along so the first real turn's
+    # refusal (if any) names the component that moved. Seeding them HERE is
+    # what makes the prewarm-vs-turn half of that diff answerable at all — an
+    # entry with no component map can only report that the composite changed.
+    signature_components = mission_chat_runtime_signature_components(
         persona=persona,
         instance=instance,
         config=cfg,
@@ -345,10 +354,12 @@ def _prepare(root: str, instance: Any) -> tuple[Any, Any]:
         model_selection=model_selection,
         # No ``--agents-file``: see the module docstring's "what it will not do".
         # A chat with no workspace selection matches exactly; a workspace-bound
-        # one rebuilds on its first turn and costs what it costs today.
+        # one rebuilds on its first turn and costs what it costs today — and now
+        # says so, as ``resident_rebuild_component_workspace_agents``.
         workspace_agents_receipt=None,
         surface_prompt="",
     )
+    signature = mission_chat_runtime_signature_from_components(signature_components)
     # The tip and the revision the FIRST turn will pass to ``acquire``. Both are
     # read here, from the same helpers that turn calls; a chat that is written
     # between this read and that turn rebuilds, which is correct — its history
@@ -391,6 +402,9 @@ def _prepare(root: str, instance: Any) -> tuple[Any, Any]:
         root_chat_session_id=root,
         persona_chat_runtime_registry=persona_chat_runtime_registry(),
         persona_chat_runtime_signature=signature,
+        persona_chat_runtime_signature_components=(
+            mission_chat_runtime_signature_digests(signature_components)
+        ),
         persona_chat_native_revision=native_revision,
         runtime_root=paths.store_root(),
         workdir=Path(workdir.path) if workdir.grounded else None,

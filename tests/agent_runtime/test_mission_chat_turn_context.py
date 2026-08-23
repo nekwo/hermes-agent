@@ -753,3 +753,294 @@ def test_the_default_resolvers_bind_the_canonical_authorities():
             assert authority in bundle_calls, f"the bundle no longer calls {authority}"
         else:
             assert authority in called, f"{field} no longer calls {authority}"
+
+
+# -- (7) which component moved: the 2026-08-23T19:03Z diagnosis --------------
+#
+# The receipt this section answers to. Serve running with hot sessions on and
+# the Stage 2 boot prewarm live; the prewarm warmed this exact chat root at
+# 19:03:01Z (``outcome=warmed elapsed_ms=469``); THREE consecutive turns of that
+# one root at 19:03:10 / 19:03:23 / 19:03:40 each recorded
+# ``resident_rebuild_runtime_signature_changed`` and ``resident_actor_reused=0``.
+# Construction was cheap on those turns (10-15 ms, warm TTLs) so nothing looked
+# broken -- but reuse NEVER happened, which is exactly the cost the prewarm and
+# hot sessions exist to remove, unpaid.
+#
+# The composite key could only say "something moved". These tests drive the REAL
+# builder twice across a real turn's worth of change and assert on the
+# per-COMPONENT digests, which is the grain the diagnosis actually needs.
+
+
+def _digests(**overrides):
+    return _build(**overrides).runtime_signature_digests
+
+
+def _moved(before, after):
+    missing = object()
+    return {
+        name
+        for name in set(before) | set(after)
+        if before.get(name, missing) != after.get(name, missing)
+    }
+
+
+def test_the_signature_is_folded_from_the_components_it_publishes():
+    """One composition, two folds. If the digests were taken from a SECOND
+    composition they could name a component the key was never built from -- and
+    a receipt that names the wrong input is worse than none."""
+
+    from agent_runtime.mission_chat_turn_context import (
+        mission_chat_runtime_signature_components,
+        mission_chat_runtime_signature_digests,
+        mission_chat_runtime_signature_from_components,
+    )
+
+    context = _build()
+    components = mission_chat_runtime_signature_components(
+        persona=_persona(),
+        instance=_instance(),
+        config=_Config(),
+        session_id="chat-root-1",
+        session_model_config={},
+        model_selection={"effective_provider": "anthropic", "effective_model": "opus"},
+        workspace_agents_receipt=None,
+        surface_prompt="",
+        resolvers=_resolvers(),
+    )
+    assert context.runtime_signature == mission_chat_runtime_signature_from_components(
+        components
+    )
+    assert context.runtime_signature_digests == mission_chat_runtime_signature_digests(
+        components
+    )
+    # EVERY component the key was folded from is named. A digest map that
+    # silently omits one leaves a whole input able to move the composite while
+    # the diff reports nothing moved — which is the receipt gap this stage
+    # exists to close, reintroduced one component at a time.
+    assert set(context.runtime_signature_digests) == set(components)
+
+
+def test_two_consecutive_turn_builds_of_one_chat_move_no_component(tmp_path):
+    """THE diagnosis, run through the real builder: same chat, one turn between.
+
+    Everything an ordinary turn does happens between the two builds -- a native
+    history row is appended, the instance is restamped and has its
+    ``skill_manifest_hash`` written back, a goal is steered onto it, and the
+    operator's workspace ``AGENTS.md`` is re-read from disk through the REAL
+    loader (the suspect nobody had checked: does its receipt embed an mtime that
+    moves?). The caller's ``surface_prompt`` and ``model_selection`` are the
+    values the live launcher sent on both turns -- the 19:03 rows recorded an
+    EMPTY surface prompt and byte-identical model selection.
+
+    Not one of those may move a signature component. A single name in this diff
+    is a chat that can never reuse its actor.
+    """
+
+    from datetime import datetime, timedelta, timezone
+
+    from agent_runtime.prompt_observability import load_workspace_agents_context
+    from agent_runtime.states import WorkerSessionState
+
+    agents_file = tmp_path / "AGENTS.md"
+    agents_file.write_text("# Workspace\nBuild the launcher.\n", encoding="utf-8")
+
+    persona, instance = _live_records()
+    instance.state = WorkerSessionState.RUNNING
+    instance.updated_at = datetime(2026, 8, 23, 19, 3, 10, tzinfo=timezone.utc)
+    instance.last_heartbeat_at = instance.updated_at
+    instance.skill_manifest_hash = "manifest-turn-1"
+
+    resolvers = _resolvers(load_workspace_agents=load_workspace_agents_context)
+    common = dict(
+        persona=persona,
+        config=_Config(),
+        session_id="chat-root-1",
+        session_model_config={
+            "source": "agent_runtime_persona_chat",
+            "persona_instance_id": "personainst_dev",
+            "model": "opus",
+        },
+        model_selection={"effective_provider": "anthropic", "effective_model": "opus"},
+        agents_file=str(agents_file),
+        surface_prompt="",
+        resolvers=resolvers,
+    )
+    first = _build(instance=instance, native_history=[], **common)
+    # The workspace receipt is really in the key -- otherwise this test would
+    # pass by never having loaded the file it claims to guard.
+    assert first.workspace_agents_receipt
+    before = first.runtime_signature_digests
+
+    # ...one turn happens.
+    instance.state = WorkerSessionState.IDLE
+    instance.updated_at = instance.updated_at + timedelta(seconds=13)
+    instance.last_heartbeat_at = instance.updated_at
+    instance.skill_manifest_hash = "manifest-turn-2"
+    instance.current_chat_goal = "Land the resident-actor fix"
+    instance.token_budget_used = 21004
+    history = [
+        {"role": "user", "content": "status?"},
+        {"role": "assistant", "content": "landing it."},
+    ]
+
+    after = _digests(instance=instance, native_history=history, **common)
+    assert _moved(before, after) == set(), (
+        "a turn of this chat moved the resident-actor reuse key; hot sessions "
+        "and the boot prewarm buy nothing for it"
+    )
+
+
+def test_a_registry_shaped_permission_answer_does_not_rotate_the_key():
+    """The convicted component, pinned.
+
+    ``permission_state_for_chat`` is the OPERATOR's spelled-out answer, and under
+    the shipped default permission mode (``unbounded``) its ``blocked_tools``
+    list is resolved over EVERY tool registered in the process. In a warm
+    multi-persona ``harness serve`` that set moves whenever anything registers or
+    deregisters -- another persona's MCP admission, a profile bootstrap's plugin
+    pass. None of it changes what THIS chat's actor is: the agent factory is
+    called with ``enabled_toolsets`` / ``blocked_tool_names``, which the key
+    already carries verbatim as ``tool_contract``.
+    """
+
+    state = {
+        "mode": "unbounded",
+        "source": "runtime_default",
+        "expired": False,
+        "workdir": None,
+        "repo_scope": None,
+        "can_mutate_files": True,
+        "can_run_terminal": True,
+        "expires_at": None,
+        "turns_remaining": None,
+        "blocked_tools": [{"name": "kanban_task", "reason": "registry_hygiene"}],
+    }
+    before = _digests(
+        resolvers=_resolvers(permission_state=lambda _p, **_kw: dict(state))
+    )
+
+    churned = {
+        **state,
+        "blocked_tools": [
+            {"name": "kanban_task", "reason": "registry_hygiene"},
+            {"name": "feishu_send", "reason": "registry_hygiene"},
+        ],
+        "turns_remaining": 4,
+        "expires_at": "2026-08-23T20:00:00Z",
+    }
+    after = _digests(
+        resolvers=_resolvers(permission_state=lambda _p, **_kw: dict(churned))
+    )
+    assert _moved(before, after) == set()
+
+
+def test_a_real_permission_decision_still_rotates_the_key():
+    """The other half. Mode, its provenance, and whether the grant behind it has
+    lapsed all decide what is CONSTRUCTED (admission mode, terminal-envelope
+    scope, toolset resolution), so each must still rebuild."""
+
+    base = {"mode": "unbounded", "source": "operator", "expired": False}
+    before = _digests(
+        resolvers=_resolvers(permission_state=lambda _p, **_kw: dict(base))
+    )
+    for name, value in (
+        ("mode", "read_only"),
+        ("source", "runtime_default"),
+        ("expired", True),
+    ):
+        edited = {**base, name: value}
+        after = _digests(
+            resolvers=_resolvers(permission_state=lambda _p, **_kw: dict(edited))
+        )
+        assert _moved(before, after) == {"permissions"}, (
+            f"a permission {name} change no longer rotates the reuse key"
+        )
+
+
+def test_the_tool_contract_is_named_and_still_rotates_the_key():
+    """``tool_contract`` may NOT be dropped, however volatile it is.
+
+    ``_construct_agent`` builds the actor from these two lists and
+    ``_prepare_resident_persona_chat_agent`` does not re-apply them on reuse --
+    it refreshes callbacks, the cache scope and the iteration cap and nothing
+    else. An actor whose tool surface moved is stale, so this rebuild is correct
+    behaviour; the receipt's job is to say so by NAME.
+    """
+
+    before = _digests()
+    after = _digests(
+        resolvers=_resolvers(
+            tool_contract=lambda _p, **_kw: {
+                "enabled_toolsets": ["search", "mcp-launcher_qa"]
+            }
+        )
+    )
+    assert _moved(before, after) == {"tool_contract"}
+
+
+def test_each_signature_input_is_named_by_exactly_one_component():
+    """A diff is only useful if the name points at ONE input. Every suspect the
+    19:03 diagnosis had to consider gets its own component."""
+
+    baseline = _digests()
+    cases = {
+        "surface_prompt_sha256": dict(surface_prompt="operator surface"),
+        "root": dict(session_id="chat-root-2"),
+        "root_model_config_revision": dict(session_model_config={"model": "sonnet"}),
+        "model": dict(
+            model_selection={
+                "effective_provider": "anthropic",
+                "effective_model": "sonnet",
+            }
+        ),
+        "provider": dict(
+            model_selection={
+                "effective_provider": "openai-codex",
+                "effective_model": "opus",
+            }
+        ),
+        "relevant_config_revision": dict(config=_Config(default_model="sonnet")),
+        "runtime_root": dict(resolvers=_resolvers(store_root=lambda: "X:/other/root")),
+        "instance_revision": dict(instance=_instance(display_name="Renamed")),
+        # NOT ``hermes_profile``: that one input is deliberately named twice —
+        # by ``persona_revision`` and by the standalone ``profile`` — because
+        # the profile binding is read directly as well as through the record.
+        # Two names for one input is fine for a receipt; two inputs sharing one
+        # name is not, which is what this table actually guards.
+        "persona_revision": dict(persona=_persona(skills=("harness-qa-verdict",))),
+    }
+    for component, override in cases.items():
+        assert _moved(baseline, _digests(**override)) == {component}, (
+            f"{component} is no longer the one component that names this input"
+        )
+
+
+def test_a_steered_chat_goal_is_hud_content_not_actor_identity():
+    """``current_chat_goal`` left ``INSTANCE_IDENTITY_FIELDS`` for the reason
+    ``goal_id`` was never in it: its readers are the chat-list title and the
+    situational HUD, and the HUD reaches the model as per-turn ENVELOPE content
+    a resident actor is handed fresh every turn. A steer changes what the next
+    turn SAYS, not what its actor IS."""
+
+    from agent_runtime.mission_chat_turn_context import INSTANCE_IDENTITY_FIELDS
+
+    assert "current_chat_goal" not in INSTANCE_IDENTITY_FIELDS
+    persona, instance = _live_records()
+    before = _digests(persona=persona, instance=instance)
+    instance.current_chat_goal = "Ship the chat-turn prep cost stage"
+    assert _moved(before, _digests(persona=persona, instance=instance)) == set()
+
+
+def test_the_digests_carry_no_component_VALUES():
+    """The map is one-way by construction. The components include
+    prompt-adjacent material (the surface-prompt hash, the resolved tool
+    contract); the diagnostic is which one moved, never what it moved to."""
+
+    context = _build(surface_prompt="a secret operator surface prompt")
+    digests = context.runtime_signature_digests
+    blob = "".join(digests.values())
+    assert "secret" not in blob and "search" not in blob
+    assert all(
+        len(value) == 64 and set(value) <= set("0123456789abcdef")
+        for value in digests.values()
+    )

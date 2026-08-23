@@ -69,6 +69,16 @@ Pinned semantics (do not "tidy" these)
   :mod:`agent_runtime.persona_chat_actor_prewarm` must compute the SAME key
   (not an equal one) when it builds a chat's resident actor ahead of the first
   turn — see its docstring.
+* **A rebuild NAMES the input that moved.** The signature is composed once as a
+  flat dict (:func:`mission_chat_runtime_signature_components`) and folded two
+  ways: ``sha256`` of the whole thing is the reuse key, and one digest per
+  component (:func:`mission_chat_runtime_signature_digests`) rides with it to
+  ``PersonaChatRuntimeRegistry.acquire``. A key that refuses to match therefore
+  reports ``resident_rebuild_component_<name>`` per moved component instead of
+  only ``resident_rebuild_runtime_signature_changed``. NAMES only — the digests
+  are one-way and no value is ever emitted, because the components include
+  prompt- and policy-adjacent material (``surface_prompt_sha256``, the tool
+  contract) and "which one moved" is the whole diagnostic.
 
 Impurity is confined to :class:`MissionChatTurnResolvers`
 ---------------------------------------------------------
@@ -85,8 +95,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from dataclasses import asdict, dataclass, is_dataclass
-from typing import Any, Callable, Iterable, Sequence
+from dataclasses import asdict, dataclass, field, is_dataclass
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .cli_format import emit_json
 from .runtime_hud import (
@@ -309,6 +319,13 @@ class MissionChatTurnContext:
     workspace_agents_receipt: dict[str, Any] | None
     runtime_signature: str
     volatile_tail: VolatileTail
+    #: One digest per :func:`mission_chat_runtime_signature` component, in the
+    #: same composition the composite above was folded from. Carried so a
+    #: rebuild can NAME the input that moved instead of only reporting that the
+    #: composite did — see :func:`mission_chat_runtime_signature_digests`.
+    #: Defaulted so a caller that only wants the composite (and every test that
+    #: constructs this object by hand) is unchanged.
+    runtime_signature_digests: dict[str, str] = field(default_factory=dict)
 
     # — convenience projections the CLI body used to hold as locals —
 
@@ -405,7 +422,12 @@ def build_mission_chat_turn_context(
         # channel for prompt text.
         workspace_agents_receipt.pop("preview", None)
 
-    runtime_signature = mission_chat_runtime_signature(
+    # Composed ONCE, then folded two ways: the composite is the reuse key the
+    # registry compares, the per-component digests are what let a mismatch name
+    # the input that moved. Deriving them from the same components dict is what
+    # keeps the diff honest — a second composition could name a component the
+    # key was never built from.
+    signature_components = mission_chat_runtime_signature_components(
         persona=persona,
         instance=instance,
         config=config,
@@ -415,6 +437,12 @@ def build_mission_chat_turn_context(
         workspace_agents_receipt=workspace_agents_receipt,
         surface_prompt=surface_prompt,
         resolvers=resolvers,
+    )
+    runtime_signature = mission_chat_runtime_signature_from_components(
+        signature_components
+    )
+    runtime_signature_digests = mission_chat_runtime_signature_digests(
+        signature_components
     )
 
     # Wall budget for this turn, resolved ONCE (single authority: the same object
@@ -465,6 +493,7 @@ def build_mission_chat_turn_context(
         workspace_agents_receipt=workspace_agents_receipt,
         runtime_signature=runtime_signature,
         volatile_tail=volatile_tail,
+        runtime_signature_digests=runtime_signature_digests,
     )
 
 
@@ -704,9 +733,17 @@ PERSONA_IDENTITY_FIELDS: tuple[str, ...] = (
 #: as ``root``), and the graph edges ``spawned_by`` / ``steered_by`` /
 #: ``returned_to`` / ``goal_id`` (they render into the HUD, which rides the
 #: volatile tail and is therefore not part of the cached actor at all).
+#:
+#: ``current_chat_goal`` was here and is not any more (2026-08-23), by that same
+#: last rule read consistently: its only readers are the chat-list TITLE
+#: (``persona_chat_history``) and the operator projections / situational HUD, and
+#: the HUD reaches the model as per-turn ENVELOPE content, never as anything the
+#: agent factory is called with. A ``persona instance steer --goal`` therefore
+#: changes what the next turn SAYS, not what its actor IS — and paying a full
+#: rebuild for it was the same category error ``goal_id``'s exclusion already
+#: names one line above.
 INSTANCE_IDENTITY_FIELDS: tuple[str, ...] = (
     "api_mode",
-    "current_chat_goal",
     "display_name",
     "id",
     "mode",
@@ -748,6 +785,130 @@ def _identity_revision(value: Any, fields: tuple[str, ...]) -> str:
     return _revision_hash({"fields": projected, "absent": absent})
 
 
+# ── the permission projection the ACTOR is built from ────────────────────────
+#
+# ``permission_state_for_chat`` answers the OPERATOR's question ("what may this
+# chat do, spelled out"): a resolved ``blocked_tools`` entry list, ``workdir``,
+# ``repo_scope``, ``can_run_terminal`` / ``can_mutate_files``, and the grant's
+# ``expires_at`` / ``turns_remaining`` counters. None of that reaches the agent
+# factory. ``ProfileAgentRunner._execute_agent_run`` builds an actor from
+# ``enabled_toolsets`` and ``blocked_tool_names`` — which this signature already
+# carries VERBATIM as ``tool_contract``, composed from the same one bundle
+# resolve — plus scopes derived from the permission MODE.
+#
+# So the whole projection in the key was the row-liveness defect of
+# ``7f2c82f090`` wearing different clothes. Under the shipped default permission
+# mode (``unbounded``: ``SHIPPED_DEFAULT_PERMISSION_MODE``) the resolved
+# ``blocked_tools`` list is computed over EVERY tool registered in the process,
+# so in a warm multi-persona ``harness serve`` it moves whenever anything
+# registers or deregisters — another persona's MCP admission, a profile
+# bootstrap's plugin pass — none of which changes what THIS chat's actor is.
+#
+# What stays is what decides the constructed actor and is not already stated by
+# ``tool_contract``: the mode itself (it selects the admission mode, the
+# terminal-envelope scope and the toolset resolution), where the mode came from,
+# and whether the grant behind it has lapsed. ``turns_remaining`` decrementing
+# 5 → 4 changes nothing about the actor; the turn it reaches 0 flips ``expired``,
+# which is here, so the key still rotates exactly when the answer changes.
+_ACTOR_PERMISSION_FIELDS: tuple[str, ...] = ("mode", "source", "expired")
+
+
+def _actor_permission_identity(state: Any) -> dict[str, Any]:
+    """The permission facts a CONSTRUCTED actor depends on. See the note above."""
+
+    source = state if isinstance(state, dict) else {}
+    return {name: source.get(name) for name in _ACTOR_PERMISSION_FIELDS}
+
+
+def mission_chat_runtime_signature_components(
+    *,
+    persona: Any,
+    instance: Any,
+    config: Any,
+    session_id: str,
+    session_model_config: dict[str, Any],
+    model_selection: dict[str, Any],
+    workspace_agents_receipt: dict[str, Any] | None,
+    surface_prompt: str,
+    resolvers: MissionChatTurnResolvers = DEFAULT_RESOLVERS,
+) -> dict[str, Any]:
+    """The reuse key's COMPONENTS, before they are folded into one digest.
+
+    Public for the same reason ``chat_lane_bundle.chat_lane_bundle_key_material``
+    is: a digest is unreadable evidence. When ``acquire`` refuses to reuse an
+    actor, the only useful question is WHICH input moved, and that cannot be
+    answered from the composite. :func:`mission_chat_runtime_signature` is
+    exactly ``sha256(this)``; :func:`mission_chat_runtime_signature_digests`
+    turns it into the per-component map a rebuild diffs.
+
+    Every value here is either an id, a bounded scalar, or already a hash —
+    config objects are HASHED before inclusion rather than embedded, so neither
+    this dict nor the digests taken from it can become an observability channel
+    for prompt/config text.
+    """
+
+    return {
+        "persona_revision": _identity_revision(persona, PERSONA_IDENTITY_FIELDS),
+        "instance_revision": _identity_revision(instance, INSTANCE_IDENTITY_FIELDS),
+        "root": session_id,
+        "root_model_config_revision": _revision_hash(session_model_config),
+        "provider": model_selection.get("effective_provider"),
+        "model": model_selection.get("effective_model"),
+        "api_mode": model_selection.get("effective_api_mode")
+        or getattr(persona, "api_mode", None),
+        "reasoning_effort": model_selection.get("effective_reasoning_effort"),
+        "profile": getattr(persona, "hermes_profile", None),
+        # STAYS, and may not be dropped: the actor is CONSTRUCTED from these two
+        # lists (``profile_runner._enabled_toolsets_for_run`` /
+        # ``_blocked_tool_names_for_run``) and
+        # ``_prepare_resident_persona_chat_agent`` does not re-apply them on
+        # reuse — it refreshes callbacks, the cache scope and the iteration cap
+        # and nothing else. A resident actor whose tool surface moved is stale,
+        # so a rebuild here is correct behaviour, not churn.
+        "tool_contract": resolvers.tool_contract(persona, session_id=session_id),
+        "permissions": _actor_permission_identity(
+            resolvers.permission_state(persona, session_id=session_id)
+        ),
+        "relevant_config_revision": _revision_hash(_as_plain(config)),
+        "workspace_agents": workspace_agents_receipt,
+        "surface_prompt_sha256": hashlib.sha256(
+            str(surface_prompt or "").encode("utf-8")
+        ).hexdigest(),
+        "runtime_root": resolvers.store_root(),
+        "prompt_contract_revision": PROMPT_CONTRACT_REVISION,
+    }
+
+
+def mission_chat_runtime_signature_from_components(
+    components: Mapping[str, Any],
+) -> str:
+    """Fold composed components into the composite reuse key.
+
+    The ONE fold. Both callers that need the key compose the components first
+    (the turn builder, so it can keep the digests; the prewarm, for the same
+    reason) and would otherwise each spell the hash themselves — which is the
+    drift :func:`mission_chat_runtime_signature` already exists to prevent, one
+    level down.
+    """
+
+    return _revision_hash(dict(components))
+
+
+def mission_chat_runtime_signature_digests(
+    components: Mapping[str, Any],
+) -> dict[str, str]:
+    """One digest per component — the map a rebuild diffs to NAME what moved.
+
+    Names only ever leave this map as names: the digests are one-way, and the
+    receipt that consumes them (``PersonaChatRuntimeRegistry.acquire``) emits
+    component NAMES and never values. ``surface_prompt_sha256`` and the tool
+    contract are prompt- and policy-adjacent, and "which component moved" is the
+    whole diagnostic — "what it moved to" is not.
+    """
+
+    return {str(name): _revision_hash(value) for name, value in components.items()}
+
+
 def mission_chat_runtime_signature(
     *,
     persona: Any,
@@ -768,7 +929,8 @@ def mission_chat_runtime_signature(
     The persona and instance contribute their ACTOR-IDENTITY projection, not
     their whole row — see :data:`PERSONA_IDENTITY_FIELDS` /
     :data:`INSTANCE_IDENTITY_FIELDS` and the 2026-08-23T14:45:14Z receipt
-    recorded there.
+    recorded there. The chat permission answer contributes the same way — see
+    :data:`_ACTOR_PERMISSION_FIELDS` and the 2026-08-23T19:03Z receipt.
 
     PUBLIC because a second caller now needs the SAME key rather than an equal
     one: :mod:`agent_runtime.persona_chat_actor_prewarm` builds a chat's
@@ -780,28 +942,18 @@ def mission_chat_runtime_signature(
     is only to reproduce the INPUTS.
     """
 
-    return _revision_hash(
-        {
-            "persona_revision": _identity_revision(persona, PERSONA_IDENTITY_FIELDS),
-            "instance_revision": _identity_revision(instance, INSTANCE_IDENTITY_FIELDS),
-            "root": session_id,
-            "root_model_config_revision": _revision_hash(session_model_config),
-            "provider": model_selection.get("effective_provider"),
-            "model": model_selection.get("effective_model"),
-            "api_mode": model_selection.get("effective_api_mode")
-            or getattr(persona, "api_mode", None),
-            "reasoning_effort": model_selection.get("effective_reasoning_effort"),
-            "profile": getattr(persona, "hermes_profile", None),
-            "tool_contract": resolvers.tool_contract(persona, session_id=session_id),
-            "permissions": resolvers.permission_state(persona, session_id=session_id),
-            "relevant_config_revision": _revision_hash(_as_plain(config)),
-            "workspace_agents": workspace_agents_receipt,
-            "surface_prompt_sha256": hashlib.sha256(
-                str(surface_prompt or "").encode("utf-8")
-            ).hexdigest(),
-            "runtime_root": resolvers.store_root(),
-            "prompt_contract_revision": PROMPT_CONTRACT_REVISION,
-        }
+    return mission_chat_runtime_signature_from_components(
+        mission_chat_runtime_signature_components(
+            persona=persona,
+            instance=instance,
+            config=config,
+            session_id=session_id,
+            session_model_config=session_model_config,
+            model_selection=model_selection,
+            workspace_agents_receipt=workspace_agents_receipt,
+            surface_prompt=surface_prompt,
+            resolvers=resolvers,
+        )
     )
 
 
@@ -820,4 +972,7 @@ __all__ = [
     "MissionChatTurnResolvers",
     "build_mission_chat_turn_context",
     "mission_chat_runtime_signature",
+    "mission_chat_runtime_signature_components",
+    "mission_chat_runtime_signature_digests",
+    "mission_chat_runtime_signature_from_components",
 ]
