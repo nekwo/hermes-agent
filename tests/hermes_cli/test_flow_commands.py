@@ -30,10 +30,11 @@ def _run(capsys, *argv):
 def _instances(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     from agent_runtime.persona_assignments import PersonaInstanceStore
+    from tests.agent_runtime.persona_instance_mint import mint_free_floating
 
     store = PersonaInstanceStore()
-    lead = store.create_free_floating("profile:lead")
-    dev = store.create_free_floating("profile:dev")
+    lead = mint_free_floating("profile:lead", store=store)
+    dev = mint_free_floating("profile:dev", store=store)
     return store, lead, dev
 
 

@@ -32,6 +32,7 @@ from agent_runtime.flow_graph import (
     reconcile_flow_graph_steering,
 )
 from agent_runtime.persona_assignments import PersonaInstanceStore
+from tests.agent_runtime.persona_instance_mint import mint_free_floating
 
 
 def _doc(nodes, edges, graph_id="runtime:personainst_lead"):
@@ -122,9 +123,9 @@ def test_owner_scoped_children_flags_only_owner_edges():
 
 def _three_instances():
     store = PersonaInstanceStore()
-    lead = store.create_free_floating("profile:lead")
-    dev = store.create_free_floating("profile:dev")
-    qa = store.create_free_floating("profile:qa")
+    lead = mint_free_floating("profile:lead", store=store)
+    dev = mint_free_floating("profile:dev", store=store)
+    qa = mint_free_floating("profile:qa", store=store)
     return store, lead, dev, qa
 
 
@@ -216,9 +217,9 @@ def test_two_maps_compose_fan_in_on_one_child(isolate_agent_runtime_root):
     # maps compose into fan-in [A, B] instead of clobbering each other — the fix
     # for "two Neko instances show the SAME blueprint".
     store = PersonaInstanceStore()
-    a = store.create_free_floating("profile:a")
-    b = store.create_free_floating("profile:b")
-    c = store.create_free_floating("profile:c")
+    a = mint_free_floating("profile:a", store=store)
+    b = mint_free_floating("profile:b", store=store)
+    c = mint_free_floating("profile:c", store=store)
 
     # A's map: A -> C.
     ingest_flow_graph(
@@ -363,7 +364,7 @@ def test_ingest_stores_doc_and_reports_owner(isolate_agent_runtime_root):
 def test_ingest_removed_node_strips_only_owner_edge(isolate_agent_runtime_root):
     store, lead, dev, qa = _three_instances()
     # A foreign parent set outside the map + a goal on qa.
-    foreign = store.create_free_floating("profile:foreign")
+    foreign = mint_free_floating("profile:foreign", store=store)
     ingest_flow_graph(
         json.dumps(
             {

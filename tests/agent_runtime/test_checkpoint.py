@@ -23,14 +23,15 @@ from agent_runtime.checkpoint import (
 from agent_runtime.events import EventLog
 from agent_runtime.flow_graph import ingest_flow_graph
 from agent_runtime.persona_assignments import PersonaInstanceStore
+from tests.agent_runtime.persona_instance_mint import mint_free_floating
 
 
 def _seed_actors():
     """Persist one of each tested class through the REAL store, return their ids."""
 
     store = PersonaInstanceStore()
-    lead = store.create_free_floating("profile:lead")
-    dev = store.create_free_floating("profile:dev")
+    lead = mint_free_floating("profile:lead", store=store)
+    dev = mint_free_floating("profile:dev", store=store)
 
     graph = {
         "graph_id": "chart_main",
@@ -101,7 +102,7 @@ def test_checkpoint_tolerates_corrupt_file():
 def test_checkpoint_row_cap_truncation_is_accounted():
     store = PersonaInstanceStore()
     for template in ("profile:a", "profile:b", "profile:c"):
-        store.create_free_floating(template)
+        mint_free_floating(template, store=store)
 
     capped = build_checkpoint(classes=["persona_instances"], row_cap=2)
 

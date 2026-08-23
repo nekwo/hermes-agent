@@ -42,6 +42,7 @@ from agent_runtime.states import RunState, TaskState, WorkerSessionState
 from agent_runtime.status import build_status
 from agent_runtime.store import AgentStore, RunStore, TaskStore
 from tests.agent_runtime.conftest import release_to_implementation
+from tests.agent_runtime.persona_instance_mint import mint_free_floating
 from utils import atomic_json_write
 
 
@@ -230,10 +231,10 @@ def test_task_archive_moves_task_bound_persona_instance_evidence(isolate_agent_r
     _assert_task_store_stub()
 
 
-def test_create_free_floating_instance_reuses_canonical_idle_placement(isolate_agent_runtime_root):
+def test_free_floating_instance_mint_reuses_canonical_idle_placement(isolate_agent_runtime_root):
     store = PersonaInstanceStore()
-    first = store.create_free_floating("profile:reviewer")
-    second = store.create_free_floating("profile:reviewer")
+    first = mint_free_floating("profile:reviewer", store=store)
+    second = mint_free_floating("profile:reviewer", store=store)
 
     assert first.id == second.id == persona_instance_id_for("profile:reviewer")
     assert first.persona_id == "profile:reviewer"
@@ -530,7 +531,7 @@ def test_status_and_snapshot_expose_persona_instances_unconditionally(monkeypatc
 def test_snapshot_exposes_operator_created_idle_persona_instance(monkeypatch, isolate_agent_runtime_root):
     cfg = _assignment_config()
     monkeypatch.setattr("agent_runtime.snapshot.load_agent_runtime_config", lambda: cfg)
-    created = PersonaInstanceStore().create_free_floating("profile:reviewer")
+    created = mint_free_floating("profile:reviewer")
 
     snapshot = build_snapshot()
     by_id = {item["persona_instance_id"]: item for item in list(snapshot["persona_instances"].values())}

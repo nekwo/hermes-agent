@@ -423,42 +423,16 @@ class PersonaInstanceStore:
     def __init__(self, event_log: EventLog | None = None):
         self.event_log = event_log or EventLog()
 
-    def create_free_floating(self, persona_or_template: AgentPersona | str) -> PersonaInstance:
-        persona_id, role, display_name, profile_id = _free_floating_identity(persona_or_template)
-        instance_id = persona_instance_id_for(persona_id)
-        try:
-            instance = self.get(instance_id)
-        except Exception:
-            instance = PersonaInstance(
-                id=instance_id,
-                persona_id=persona_id,
-                role=role,
-                display_name=display_name,
-                profile_id=profile_id,
-                runtime_root=str(paths.store_root()),
-                state=WorkerSessionState.IDLE,
-                mode="free_floating",
-                updated_at=now(),
-            )
-            self._write(instance)
-            self._event("persona_instance.created", instance, {"mode": "free_floating"})
-            return self.get(instance_id)
-        changed = False
-        for attr, value in {
-            "persona_id": persona_id,
-            "role": role,
-            "display_name": display_name,
-            "profile_id": profile_id,
-            "runtime_root": str(paths.store_root()),
-            "mode": "free_floating",
-        }.items():
-            if getattr(instance, attr) != value:
-                setattr(instance, attr, value)
-                changed = True
-        if changed:
-            instance.updated_at = now()
-            self._write(instance)
-        return self.get(instance_id)
+    # S-DUP4 removed ``create_free_floating`` (and its only helper,
+    # ``_free_floating_identity``). It was production-callerless — the
+    # free-floating queue verb chain that used to call it left with the mission
+    # lane — and its only remaining callers were test suites that needed a pair
+    # of cheap instance rows. The mint moved to
+    # ``tests/agent_runtime/persona_instance_mint.py::mint_free_floating``;
+    # the tombstone row is in ``tests/agent_runtime/test_tombstone_registry.py``.
+    # ``mode="free_floating"`` itself is NOT retired: it is still read here
+    # (``_CHAT_MODES``), in ``operator_channels``, ``persona_chat_history`` and
+    # ``persona_instance_identity``, and rows carrying it exist on disk.
 
     def ensure_for_persona(self, persona: AgentPersona) -> PersonaInstance:
         instance_id = persona_instance_id_for(persona.id)
@@ -2804,23 +2778,6 @@ def resolve_default_chat_session_id_for_instance(
         ):
             return existing_session
     return None
-
-
-def _free_floating_identity(persona_or_template: AgentPersona | str) -> tuple[str, str, str, str | None]:
-    if isinstance(persona_or_template, AgentPersona):
-        return (
-            persona_or_template.id,
-            str(persona_or_template.role),
-            persona_or_template.display_name,
-            persona_or_template.hermes_profile,
-        )
-    raw = str(persona_or_template or "").strip()
-    if raw.lower().startswith("profile:"):
-        profile = safe_assignment_token(raw.split(":", 1)[1])
-        persona_id = f"profile:{profile}" if profile else "profile:persona"
-        return (persona_id, "profile", _display_name_for_template(profile), profile or None)
-    persona_id = safe_assignment_token(raw) or "persona"
-    return (persona_id, persona_id, persona_id, None)
 
 
 def _display_name_for_template(profile: str) -> str:

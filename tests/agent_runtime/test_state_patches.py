@@ -50,6 +50,7 @@ from agent_runtime.state_patches import (
 )
 from agent_runtime.states import TaskState
 from agent_runtime.store import AgentStore, TaskStore
+from tests.agent_runtime.persona_instance_mint import mint_free_floating
 
 
 # --------------------------------------------------------------------------- #
@@ -97,8 +98,8 @@ def _patches() -> list[Event]:
 
 def _steered_child(store: PersonaInstanceStore):
     """A fresh child steered under a fresh parent — the flagship steer case."""
-    parent = store.create_free_floating("profile:parent")
-    child = store.create_free_floating("profile:child")
+    parent = mint_free_floating("profile:parent", store=store)
+    child = mint_free_floating("profile:child", store=store)
     store.set_parents(child.id, [parent.id])
     return store.get(child.id), parent
 
@@ -230,7 +231,7 @@ def test_persona_instance_projection_parity_with_summary(isolate_agent_runtime_r
     skip the side-effecting full summary call."""
 
     store = PersonaInstanceStore()
-    instance = store.create_free_floating("profile:reviewer")
+    instance = mint_free_floating("profile:reviewer", store=store)
     instance = store.update_profile(instance.id, model="claude-opus-4-8", provider="anthropic")
     agents = AgentStore().list_all()
     persona = {p.id: p for p in agents}.get(str(instance.persona_id or ""))
@@ -297,7 +298,7 @@ def test_flag_on_steer_patch_fits_cap(set_delta_patches, isolate_agent_runtime_r
 def test_flag_on_profile_display_name_emits_upsert_with_mirror(set_delta_patches, isolate_agent_runtime_root):
     set_delta_patches(True)
     store = PersonaInstanceStore()
-    instance = store.create_free_floating("profile:reviewer")
+    instance = mint_free_floating("profile:reviewer", store=store)
 
     store.update_profile(instance.id, display_name="Renamed Reviewer")
 
@@ -313,7 +314,7 @@ def test_flag_on_profile_display_name_emits_upsert_with_mirror(set_delta_patches
 def test_flag_on_profile_model_override_ships_recomputed_derived_fields(set_delta_patches, isolate_agent_runtime_root):
     set_delta_patches(True)
     store = PersonaInstanceStore()
-    instance = store.create_free_floating("profile:reviewer")
+    instance = mint_free_floating("profile:reviewer", store=store)
 
     store.update_profile(instance.id, model="claude-opus-4-8", provider="anthropic")
 
@@ -331,7 +332,7 @@ def test_flag_on_profile_model_override_ships_recomputed_derived_fields(set_delt
 def test_flag_off_profile_update_emits_no_patch(set_delta_patches, isolate_agent_runtime_root):
     set_delta_patches(False)
     store = PersonaInstanceStore()
-    instance = store.create_free_floating("profile:reviewer")
+    instance = mint_free_floating("profile:reviewer", store=store)
     store.update_profile(instance.id, display_name="Renamed Reviewer")
     assert _patches() == []
 

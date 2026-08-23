@@ -31,9 +31,9 @@ Protocol (NDJSON, one frame per line):
 - request:   ``{"id":"req-7","argv":["harness","status","--json"]}``
 - reply:     ``{"id":"req-7","event":"line","line":…}`` × N then
              ``{"id":"req-7","event":"exit","code":0}``
-             (a status/snapshot poll replayed from the read-model cache adds
-             ``"served_from_cache": true, "cache_age_ms": N`` to its exit
-             frame — additive; see _ReadModelCache below)
+             (a status/snapshot poll replayed from the poll response cache
+             adds ``"served_from_cache": true, "cache_age_ms": N`` to its exit
+             frame — additive; see _PollResponseCache below)
 - stderr:    ``{"id":<request id or null>,"event":"stderr","line":…}``
 - ping:      ``{"op":"ping"}`` → ``{"event":"busy","chat_turns":N,"pending":M}``
              (the Launcher supervisor must NEVER recycle serve while
@@ -378,7 +378,11 @@ _DRAIN_ABANDON_GRACE_SECONDS = 5.0
 # shapes mark a request as an in-flight chat turn for the busy/ping frame.
 _CHAT_TURN_COMMANDS = (("mission-chat", "message"), ("mission-chat", "steer"))
 
-# ── Read-model cache (follow-up slice 1 of the serve design doc) ─────────────
+# ── Poll response cache (follow-up slice 1 of the serve design doc) ──────────
+#
+# NOT the read model (``agent_runtime/read_model.py``) and NOT the serve core
+# cache (``<store_root>/serve_read_model/``). This is a per-serve-loop replay
+# cache for the stdout payload of the two read-only poll commands.
 #
 # The Launcher polls `harness status --json` / `harness snapshot --json` on a
 # fixed cadence; each build recomputes the full projection (~1.7s status /
@@ -418,8 +422,9 @@ _FINGERPRINT_STORE_DIRS = (
     "incidents",
     "agents",
     # S57 dropped "repo_bundles" here with the store: this list exists to
-    # invalidate the read cache when a store directory changes, and no code path
-    # can write that tree any more (S52 took the last writer, S57 the module).
+    # invalidate the poll response cache when a store directory changes, and no
+    # code path can write that tree any more (S52 took the last writer, S57 the
+    # module).
     # Stat'ing it every poll was cost against a directory that cannot move. Same
     # rule S56 applied to "worker_sessions".
     "runtime_instances",
@@ -429,7 +434,7 @@ _FINGERPRINT_STORE_DIRS = (
     "realms",
     # DELIBERATELY ABSENT: "serve_instances". Its entries appear and vanish at
     # every serve boot/exit, and the ``serve_auth_token`` file appears at first
-    # boot — inside a fingerprint either one would cold the read-model cache
+    # boot — inside a fingerprint either one would cold the poll response cache
     # exactly when a fresh runtime is warming up, and make the stream emit
     # ``state.reconciled`` on every restart. Same standing precedent as
     # ``dispatch_delivery.DRAIN_STATE_FILENAME``; the rule is restated at both
@@ -499,7 +504,7 @@ def _stat_turn_store_tree(root: Any, _stat) -> None:
 
 
 def _runtime_state_fingerprint() -> tuple | None:
-    """Cheap stat-based sequence check over the harness read-model inputs.
+    """Cheap stat-based sequence check over the harness poll-payload inputs.
 
     Returns None when the runtime root cannot be resolved — callers must
     treat None as "never cache"."""
@@ -601,7 +606,7 @@ def _runtime_state_fingerprint() -> tuple | None:
     return tuple(parts)
 
 
-class _ReadModelCacheEntry:
+class _PollResponseCacheEntry:
     __slots__ = ("fingerprint", "lines", "code", "built_monotonic")
 
     def __init__(
@@ -613,17 +618,24 @@ class _ReadModelCacheEntry:
         self.built_monotonic = built_monotonic
 
 
-class _ReadModelCache:
-    """Per-serve-loop response cache for the read-only poll commands."""
+class _PollResponseCache:
+    """Per-serve-loop stdout-payload replay cache for the read-only polls.
+
+    Keyed by :func:`_runtime_state_fingerprint` and bounded by
+    ``_READ_CACHE_MAX_AGE_SECONDS``. It caches RESPONSE BYTES — it is neither
+    the read model (``agent_runtime/read_model.py``) nor the serve core cache
+    (``<store_root>/serve_read_model/``), which is why it is not named for
+    either.
+    """
 
     def __init__(self, max_age_seconds: float = _READ_CACHE_MAX_AGE_SECONDS):
-        self._entries: dict[str, _ReadModelCacheEntry] = {}
+        self._entries: dict[str, _PollResponseCacheEntry] = {}
         self._lock = threading.Lock()
         self._max_age = max_age_seconds
 
     def get(
         self, key: str, fingerprint: tuple | None, now_monotonic: float
-    ) -> _ReadModelCacheEntry | None:
+    ) -> _PollResponseCacheEntry | None:
         if fingerprint is None:
             return None
         with self._lock:
@@ -647,7 +659,7 @@ class _ReadModelCache:
         if fingerprint is None or code != 0:
             return
         with self._lock:
-            self._entries[key] = _ReadModelCacheEntry(
+            self._entries[key] = _PollResponseCacheEntry(
                 fingerprint, lines, code, now_monotonic
             )
 
@@ -758,7 +770,7 @@ class _LineFrameProxy(io.TextIOBase):
         return None
 
     def begin_capture(self, rid: str | None) -> None:
-        """Start mirroring [rid]'s emitted lines for the read-model cache."""
+        """Start mirroring [rid]'s emitted lines for the poll response cache."""
         with self._lock:
             self._captures[self._slot(rid)] = []
 
@@ -1218,7 +1230,7 @@ def serve_loop(
     timeline.mark("root_anchor_ms")
     stdout_proxy = _LineFrameProxy(frames, "line")
     stderr_proxy = _LineFrameProxy(frames, "stderr")
-    read_cache = _ReadModelCache(read_cache_max_age)
+    read_cache = _PollResponseCache(read_cache_max_age)
     from agent_runtime.snapshot import SnapshotBuildContext
 
     read_build_context = SnapshotBuildContext()

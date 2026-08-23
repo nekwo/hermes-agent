@@ -2759,7 +2759,8 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     # envelope advertised as next step never existed), the `--auto-run`
     # in-process runner was a second, parallel turn authority beside
     # `mission-chat message`, and the display-name branch of `create`
-    # silently DISCARDED the required `--message` (verified live 2026-08-09:
+    # silently DISCARDED the then-required `--message` (the flag survives as
+    # optional-and-ignored launcher wire-compat; verified live 2026-08-09:
     # create --add-instance --message --auto-run landed no turn anywhere).
     # The READ/CLOSE store side, the `persona_assignments` wire block and the
     # close/archive maintenance verbs survive for residual rows (ledger S70).
@@ -3243,6 +3244,47 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         Form.ATTR,
         "dead-code audit pass 2 HB-4 — callerless assignment-state coercion",
         "safe_assignment_state",
+        scope=("agent_runtime.persona_assignments",),
+    ),
+    # -- S73 = duplicate-implementation retirement, Stage 4 (2026-08-22). --
+    # `PersonaInstanceStore.create_free_floating` minted `mode="free_floating"`
+    # instance rows for the free-floating queue verb chain S70 removed. What was
+    # left was a production method whose ONLY callers were eight test files
+    # needing a pair of cheap instance rows to point flow-graph edges and patch
+    # batches at — the closed loop this registry's scope tuple excludes `tests`
+    # to expose. The mint moved verbatim to
+    # `tests/agent_runtime/persona_instance_mint.py::mint_free_floating`, so
+    # nothing was lost from the suites and nothing survives in production.
+    #
+    # CLASS_ATTR, not ATTR: the row's subject is a METHOD on a live class, and
+    # this file's own HB-3 note records what an ATTR row does with a dotted
+    # spelling (asks `hasattr(module, "Class.attr")`, which is False for every
+    # tree that ever existed — a row that passes vacuously).
+    #
+    # `mode="free_floating"` itself is NOT tombstoned and must not be: it is
+    # still read by `persona_assignments._CHAT_MODES`, `operator_channels`,
+    # `persona_chat_history` and `persona_instance_identity`, and rows carrying
+    # it exist on disk. What is retired is the production MINT, not the mode.
+    *rows(
+        "s73",
+        "HEAD",
+        Form.CLASS_ATTR,
+        "duplicate-implementation retirement Stage 4 — the free-floating "
+        "instance mint lost its last production caller with S70's queue verb "
+        "chain and survived only as a test fixture; the mint now lives in "
+        "tests/agent_runtime/persona_instance_mint.py and production may not "
+        "re-grow a callerless second door onto persona-instance creation",
+        "persona_assignments.PersonaInstanceStore.create_free_floating",
+        scope=_AR,
+    ),
+    *rows(
+        "s73",
+        "HEAD",
+        Form.ATTR,
+        "duplicate-implementation retirement Stage 4 — the mint's only helper, "
+        "orphaned by the same cut; rowed because its resurrection would be the "
+        "first half of re-growing the mint",
+        "_free_floating_identity",
         scope=("agent_runtime.persona_assignments",),
     ),
 )

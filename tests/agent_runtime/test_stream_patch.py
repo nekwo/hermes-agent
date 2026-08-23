@@ -45,6 +45,7 @@ from agent_runtime.stream import (
     patch_batch_frame,
     stream_frames,
 )
+from tests.agent_runtime.persona_instance_mint import mint_free_floating
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "stream_frames"
 
@@ -162,8 +163,8 @@ def test_patch_batch_frame_carries_remove_op():
 # End-to-end stream_frames (seeded root)
 # --------------------------------------------------------------------------- #
 def _instances(store: PersonaInstanceStore):
-    parent = store.create_free_floating("profile:parent")
-    child = store.create_free_floating("profile:child")
+    parent = mint_free_floating("profile:parent", store=store)
+    child = mint_free_floating("profile:child", store=store)
     return parent, child
 
 
@@ -212,7 +213,7 @@ def test_stream_flag_on_steer_emits_patch_frame(set_delta_patches, isolate_agent
 def test_stream_flag_on_profile_update_emits_patch_frame(set_delta_patches, isolate_agent_runtime_root):
     set_delta_patches(True)
     store = PersonaInstanceStore()
-    instance = store.create_free_floating("profile:reviewer")
+    instance = mint_free_floating("profile:reviewer", store=store)
 
     frames = _stream(max_frames=2)
     assert next(frames)["type"] == "hydrate"

@@ -1374,14 +1374,14 @@ def test_store_paths_are_the_single_authority_the_serve_cache_fingerprints(home)
     )
 
 
-def test_a_process_starting_invalidates_the_serve_read_model_cache(
+def test_a_process_starting_invalidates_the_serve_poll_response_cache(
     home, isolate_agent_runtime_root
 ):
     """Neither store emits an EventLog event, so only a stat can catch them.
 
-    Without this the 20s read-model cache would keep replaying a HUD that says
-    "nothing running" for twenty seconds after an agent kicked off a long build
-    — and "3 running" for twenty seconds after they all exited.
+    Without this the serve's 20s poll response cache would keep replaying a HUD
+    that says "nothing running" for twenty seconds after an agent kicked off a
+    long build — and "3 running" for twenty seconds after they all exited.
     """
 
     from hermes_cli.harness_parts import serve

@@ -47,6 +47,7 @@ from agent_runtime.state_patches import (
     STATE_PATCHED_EVENT_TYPE,
 )
 from agent_runtime.stream import hydrate_frame, stream_frames
+from tests.agent_runtime.persona_instance_mint import mint_free_floating
 
 #: An entity NO client folds today. Every "undeclared" case below uses it, so a
 #: test can never accidentally pass by naming something the historical default
@@ -364,8 +365,8 @@ def test_absence_still_promotes_a_persona_instance_batch_to_a_patch_frame(
 
     set_delta_patches(True)
     store = PersonaInstanceStore()
-    parent = store.create_free_floating("profile:parent")
-    child = store.create_free_floating("profile:child")
+    parent = mint_free_floating("profile:parent", store=store)
+    child = mint_free_floating("profile:child", store=store)
 
     frames = _stream(max_frames=2)
     hydrate = next(frames)
@@ -389,7 +390,7 @@ def test_an_undeclared_entity_demotes_the_frame_to_a_full_core(
     exists, not a new lane."""
 
     set_delta_patches(True)
-    PersonaInstanceStore().create_free_floating("profile:a")
+    mint_free_floating("profile:a")
 
     frames = _stream(max_frames=2, fold_entities=["persona_instance"])
     assert next(frames)["type"] == "hydrate"
@@ -409,7 +410,7 @@ def test_the_same_batch_is_promoted_once_the_client_declares_the_entity(
     """
 
     set_delta_patches(True)
-    PersonaInstanceStore().create_free_floating("profile:a")
+    mint_free_floating("profile:a")
 
     frames = _stream(max_frames=2, fold_entities=["persona_instance", UNFOLDED_ENTITY])
     assert next(frames)["type"] == "hydrate"
@@ -427,8 +428,8 @@ def test_an_explicit_empty_declaration_takes_every_batch_to_a_full_core(
 
     set_delta_patches(True)
     store = PersonaInstanceStore()
-    parent = store.create_free_floating("profile:parent")
-    child = store.create_free_floating("profile:child")
+    parent = mint_free_floating("profile:parent", store=store)
+    child = mint_free_floating("profile:child", store=store)
 
     frames = _stream(max_frames=2, fold_entities=[])
     hydrate = next(frames)
