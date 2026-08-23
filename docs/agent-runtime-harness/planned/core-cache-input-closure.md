@@ -87,10 +87,85 @@ instant, over the *named* inputs. Two candidate moves, neither yet ruled:
    build keys identically. `_wal_without_frames_is_content_free`
    (`core_cache.py:856`) is the existing precedent for a content-free WAL state.
 
+## Reader audit — DONE (2026-08-22, read-only evidence lane)
+
+The gate's audit obligation is discharged; the findings reshape the plan.
+
+1. **`realm_sync/*/.git/` has zero build readers** — every section builder
+   resolves realm-sync state to `realm_sync_state/<realm>.json`
+   (`realm_sync.py:1870`; design intent written at `snapshot.py:2493-2496`:
+   the build "must never shell out to git"). BUT the build DOES read two
+   siblings one directory up: `realm_sync/<realm>/board_baseline.json`
+   (`snapshot.py:1610` → `paths.py:129`) and `office_baseline.json`
+   (`snapshot.py:1837` → `paths.py:214`). The exclusion must target the
+   literal `.git` name only — and note `_sync_repo_path` keys worktrees by
+   SERVER token while baselines key by realm id, so a realm-id-keyed skip
+   would be wrong.
+2. **The walk excludes top-level names only** (`_walk_tree` `exclude_top`,
+   `core_cache.py:830-832`; doctrine pinned at `:638-646` with a test).
+   `.git` sits at depth ≥2 — a nested-exclusion mechanism is new code, and
+   the doctrine block plus its pinning test must be amended in the same
+   commit.
+3. **The build is not a pure reader — five proven self-perturbation writes:**
+   (a) `snapshot.py:871` → `ensure_for_personas` recreates any
+   missing/UNREADABLE persona-instance row on EVERY build
+   (`persona_assignments.py:441-454` — the bare `except Exception` means a
+   corrupt row re-mints a file write + a `persona_instance.created` event
+   per pass, a non-converging trigger); (b) drift rewrites (`:463-465`);
+   (c) stale-binding resets stamping fresh `updated_at` (`:2219-2235`);
+   (d) the build's own SessionDB close drains token deltas and runs a
+   TRUNCATE WAL checkpoint (`snapshot.py:2350-2356` →
+   `hermes_state.py:2542-2548`) — moving `state.db`'s main-file triple with
+   zero logical change, the 08-21 17:18 shape; (e) DB opens during the build
+   flip the stream scope fingerprint, appending synthetic `state.reconciled`
+   to the live events slice (`stream.py:1359-1368`; measured 96.9% of all
+   events at 9s median spacing, `stream.py:1240-1249`) — a genuine
+   build→event→key-flip→demote→build feedback loop.
+4. **WAL mask soundness bounds:** collapsing two different UNCHECKPOINTED
+   frame sets is forbidden (`core_cache.py:696-698` — hides a commit
+   invisible in the main file). Collapsing frames-present with
+   post-checkpoint-frameless is sound ONLY because the checkpoint moves
+   `state.db`'s own triple. Content-keying the WAL by raw-read frame digest
+   (precedent: `_config_input_is_content_keyed`, `:929`) is sound in the
+   invalidation direction — but **no WAL mask alone converges this store
+   while (d) runs a TRUNCATE checkpoint on every build's close**.
+5. `agent_create_reservations/` is unread by the build and low-churn — leave
+   it in the walk (excluding it buys nothing and costs an audit obligation).
+
+## Staged implementation (coordinator, 2026-08-22)
+
+- **IC-1 — nested `.git` exclusion.** New nested-exclusion support in
+  `_walk_tree` scoped to the literal `.git` name under `realm_sync/*`;
+  amend the top-level-only doctrine (`:638-646`) and its pinning test in the
+  same commit; add the obligation comment (pattern `:545-552`). Kills the
+  60-entry class from the 08-20 18:21 firing. Mechanical.
+- **IC-2 — key the write-back on post-build reality.** `write_back` persists
+  the CONSULT-time `pre_build_fingerprint` (`core_cache.py:2892-2902`), so
+  the build's own writes (3a-3e) guarantee the persisted key disagrees with
+  the next consult's stat — the exact `never_converged` mechanism. Re-stat
+  the self-perturbed inputs (DB triples, live slice, persona_instances) at
+  write-back time, AFTER the SessionDB close, so the persisted key matches
+  what the next consult will see. The equivalence golden
+  (`test_core_fingerprint_cache.py:1501`) is the authority that this does
+  not serve stale: the re-stat happens only on the write path, never widens
+  what a consult accepts. Needs a design note answering `core_cache.py:20-40`
+  in writing.
+- **IC-3 — stop the corrupt-row rebuild loop.** Narrow
+  `persona_assignments.py:441`'s bare `except Exception`: an unreadable row
+  should surface a warning receipt and re-mint ONCE, not silently re-mint
+  every build.
+- **IC-4 — WAL raw-content keying** for the mtime-moved-bytes-identical
+  class, after IC-2 (measure first — IC-2 may make it unnecessary).
+- **Deliberately out of scope:** suppressing the build-close TRUNCATE
+  checkpoint (a SessionDB lifecycle change owned elsewhere), and the
+  `state.reconciled` feedback loop's stream half (3e) — record its census
+  numbers here, but the fix belongs to the stream scope-fingerprint lane.
+
 ## The gate to open this
 
-- Every candidate exclusion has a named reader audit proving nothing in
-  `build_snapshot()` reads it.
+- ~~Every candidate exclusion has a named reader audit proving nothing in
+  `build_snapshot()` reads it.~~ DONE above for `.git`; any FURTHER exclusion
+  re-arms this obligation.
 - The equivalence golden stays green —
   `test_the_cache_served_core_equals_the_rebuilt_core_field_for_field`
   (`tests/agent_runtime/test_core_fingerprint_cache.py:1501`, filed under

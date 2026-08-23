@@ -70,6 +70,16 @@ Two sections dominate and they alternate for the top slot, which is itself a fin
    (1) lands, because until then every boot is a cold boot and the measurement cannot
    separate the two populations.
 
+## Staging (coordinator, 2026-08-22)
+
+Direction (1) is chosen and is not this file's work: it is
+[`core-cache-input-closure.md`](core-cache-input-closure.md) stages IC-1..IC-4
+plus [`core-cache-home-capture-timing.md`](core-cache-home-capture-timing.md)
+HC-1..HC-3. This plan stays PARKED until those land and a week of operator
+boots shows the hit rate; only then does direction (2) — making the cold build
+itself cheaper — get measured against the boots that remain legitimately cold.
+Opening (2) before (1) cannot separate the populations (its own § above).
+
 ## Gate
 
 Whichever direction is taken, the number that must move is

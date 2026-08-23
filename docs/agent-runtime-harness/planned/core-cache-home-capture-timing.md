@@ -72,6 +72,20 @@ entry point, before any persona scope can exist — rather than lazily on first
 fingerprint use. `reset_fingerprint_home()` (`:1195`) already exists as the tests-only
 inverse, so the seam is present.
 
+## Staged implementation (coordinator, 2026-08-22)
+
+- **HC-1**: add an explicit capture call (`capture_fingerprint_home()` or an
+  eager first-use at a named site) invoked from the serve entry point before
+  any persona scope can install a context-local override; the CLI one-shot
+  path captures at command dispatch, same rule. The lazy path stays as the
+  fallback but logs that it fired (a lazy capture in a serve process is the
+  defect recurring — make it loud).
+- **HC-2**: a test that reds if the serve path regresses to lazy first-use
+  capture (gate 2), plus the existing multi-home demote behavior pinned
+  unchanged (gate 3) and the no-sidecar skip pinned (gate 4).
+- **HC-3**: the live proof is gate 1 — ten operator boots, zero
+  `reason=home_mismatch`, reported by the census, after deploy.
+
 ## Gate
 
 1. Ten consecutive serve boots on the operator's single-profile install produce **zero**
