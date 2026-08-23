@@ -62,10 +62,13 @@ Pinned semantics (do not "tidy" these)
   unchanged and are exactly the functions the bundle calls. See
   :mod:`agent_runtime.chat_lane_bundle` for the key and its staleness surface.
 * **The reuse key is a function of actor IDENTITY, never of row liveness.**
-  ``_runtime_signature`` folds the persona and the instance through explicit
-  field allowlists (:data:`PERSONA_IDENTITY_FIELDS`,
+  :func:`mission_chat_runtime_signature` folds the persona and the instance
+  through explicit field allowlists (:data:`PERSONA_IDENTITY_FIELDS`,
   :data:`INSTANCE_IDENTITY_FIELDS`) rather than hashing the whole record. See
-  those constants for the live receipt that forced it.
+  those constants for the live receipt that forced it. It is PUBLIC because
+  :mod:`agent_runtime.persona_chat_actor_prewarm` must compute the SAME key
+  (not an equal one) when it builds a chat's resident actor ahead of the first
+  turn — see its docstring.
 
 Impurity is confined to :class:`MissionChatTurnResolvers`
 ---------------------------------------------------------
@@ -402,7 +405,7 @@ def build_mission_chat_turn_context(
         # channel for prompt text.
         workspace_agents_receipt.pop("preview", None)
 
-    runtime_signature = _runtime_signature(
+    runtime_signature = mission_chat_runtime_signature(
         persona=persona,
         instance=instance,
         config=config,
@@ -629,7 +632,7 @@ def _as_plain(value: Any) -> Any:
 
 # ── actor identity vs. row liveness ──────────────────────────────────────────
 #
-# ``_runtime_signature`` is a REUSE key: two turns share a resident actor only
+# ``mission_chat_runtime_signature`` is a REUSE key: two turns share an actor only
 # when every input that decides what that actor IS is identical. It used to fold
 # ``asdict(persona)`` and ``asdict(instance)`` whole, which quietly made it a key
 # over the ROWS rather than over the actor — and a persona-instance row is
@@ -745,7 +748,7 @@ def _identity_revision(value: Any, fields: tuple[str, ...]) -> str:
     return _revision_hash({"fields": projected, "absent": absent})
 
 
-def _runtime_signature(
+def mission_chat_runtime_signature(
     *,
     persona: Any,
     instance: Any,
@@ -755,7 +758,7 @@ def _runtime_signature(
     model_selection: dict[str, Any],
     workspace_agents_receipt: dict[str, Any] | None,
     surface_prompt: str,
-    resolvers: MissionChatTurnResolvers,
+    resolvers: MissionChatTurnResolvers = DEFAULT_RESOLVERS,
 ) -> str:
     """Reuse key for a resident actor: identical inputs ⇒ reusable actor.
 
@@ -766,6 +769,15 @@ def _runtime_signature(
     their whole row — see :data:`PERSONA_IDENTITY_FIELDS` /
     :data:`INSTANCE_IDENTITY_FIELDS` and the 2026-08-23T14:45:14Z receipt
     recorded there.
+
+    PUBLIC because a second caller now needs the SAME key rather than an equal
+    one: :mod:`agent_runtime.persona_chat_actor_prewarm` builds a chat's
+    resident actor before its first turn arrives, and a pre-built actor whose
+    signature does not BYTE-MATCH the next turn's is discarded by
+    ``PersonaChatRuntimeRegistry.acquire`` — which would make the prewarm pure
+    cost. Re-deriving the composition there (rather than calling this) is
+    exactly the drift this export exists to make impossible; the prewarm's job
+    is only to reproduce the INPUTS.
     """
 
     return _revision_hash(
@@ -807,4 +819,5 @@ __all__ = [
     "MissionChatTurnContext",
     "MissionChatTurnResolvers",
     "build_mission_chat_turn_context",
+    "mission_chat_runtime_signature",
 ]

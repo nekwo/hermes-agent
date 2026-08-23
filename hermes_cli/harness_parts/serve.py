@@ -1057,6 +1057,38 @@ def _prewarm_provider_runtime() -> None:
         pass
 
 
+def _prewarm_persona_chat_actors() -> None:
+    """Best-effort background construction of the resident chat actors.
+
+    THIRD on the one prewarm thread, behind the read-model build and the
+    provider warmup, and the ordering is load-bearing in both directions: the
+    launcher's canvas is waiting on the build, and an agent construction that
+    runs after ``_load_openai_cls``/``shared_ssl_context`` does not pay the SDK
+    import itself (which is the single largest item in a cold construct).
+
+    Inert unless the root config turns hot sessions on — with no resident
+    registry there is nowhere to put a pre-built actor, and that is the ONLY
+    gate (a ``prewarm_on_boot`` knob was written and withdrawn: every
+    ``PersonaChatConfig`` field rides the read-model wire, so a new key is a
+    cross-stack golden change — see the note on that class). The pass QUEUES;
+    the constructions run on
+    ``persona_chat_actor_prewarm``'s own single daemon worker, which stands down
+    for any real turn in flight, so a chat sent during the boot window is never
+    behind a warm.
+    """
+
+    try:
+        from agent_runtime.persona_chat_actor_prewarm import prewarm_chat_actors_on_boot
+
+        prewarm_chat_actors_on_boot()
+    except Exception:
+        import logging as _logging
+
+        _logging.getLogger(__name__).debug(
+            "serve chat-actor prewarm did not complete", exc_info=True
+        )
+
+
 def _annotate_import_tax(timeline: Any) -> None:
     """Decompose ``interpreter_ms`` into named segments on the boot block (BW-0).
 
@@ -1100,6 +1132,7 @@ def serve_loop(
     boot_timeline: Any = None,
     snapshot_prewarm: Callable[[], None] | None = None,
     provider_prewarm: Callable[[], None] | None = None,
+    actor_prewarm: Callable[[], None] | None = None,
     root_anchor: Callable[[], Any] | None = None,
     drain_deadline_seconds: float = DEFAULT_DRAIN_DEADLINE_SECONDS,
     drain_socket_minimum_deadline_seconds: float = (
@@ -1155,6 +1188,10 @@ def serve_loop(
     imported the OpenAI SDK. It runs on the snapshot prewarm's thread, after it
     (EG-3.2); see the comment at the thread start below for why the ordering is
     the whole stage.
+
+    ``actor_prewarm`` is the persona-chat resident-actor pass and rides the same
+    thread THIRD, on the same injection contract: it queues real agent
+    constructions, so a loop unit test must never fire it by default.
     """
 
     from agent_runtime.boot_timeline import BootTimeline
@@ -1804,13 +1841,23 @@ def serve_loop(
         # contract. If receipts show first-turn misses, the refinement is
         # "provider prewarm starts at first-request-enqueue OR build-completion,
         # whichever is first", not a revert.
-        if snapshot_prewarm is not None or provider_prewarm is not None:
+        # Since 2026-08-23 a THIRD step rides the same thread, last: the
+        # persona-chat actor prewarm (Stage 2 of `planned/chat-turn-prep-cost`).
+        # Last on purpose — it queues agent constructions, and a construction
+        # that runs after the provider warmup does not pay the SDK import it
+        # would otherwise pay itself. It only QUEUES here; the constructions run
+        # on that module's own worker, which stands down for any live turn.
+        if (
+            snapshot_prewarm is not None
+            or provider_prewarm is not None
+            or actor_prewarm is not None
+        ):
 
             def _prewarm_worker() -> None:
                 # Sequential, and each step isolated: a build that raised must
                 # still leave the providers warm (HY-H2), and an injected fake
                 # that raises must not silently cancel the step after it.
-                for step in (snapshot_prewarm, provider_prewarm):
+                for step in (snapshot_prewarm, provider_prewarm, actor_prewarm):
                     if step is None:
                         continue
                     try:
@@ -3370,6 +3417,10 @@ def _cmd_serve(args) -> int:
             # a loop unit test must not import the OpenAI SDK to observe a ready
             # frame.
             provider_prewarm=_prewarm_provider_runtime,
+            # Third and last on that one thread. Injected here for the same
+            # reason the provider warmup is: it is policy, and a loop unit test
+            # must not construct a persona agent to observe a ready frame.
+            actor_prewarm=_prewarm_persona_chat_actors,
             root_anchor=publish_store_root_anchor,
             drain_wakeup=_wake_reader,
             # ``os._exit``, not ``sys.exit``: after a drain TIMEOUT the

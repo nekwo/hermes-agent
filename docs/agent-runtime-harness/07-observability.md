@@ -91,6 +91,8 @@ what the fixture mirror below enforces.
 | `stream_attach op=… purpose=… … pid=…` | `agent_runtime/stream.py:212-218` | boot-investigation join (third `pid=`-bearing family) |
 | `snapshot_core_cache …` / `snapshot_core_cache_write …` / `snapshot_core_shadow …` / `snapshot_core_cache_lane_closed …` | `agent_runtime/core_cache.py` — see the channel table below | `agent_runtime/core_cache_census.py` via `scripts/core_cache_demote_census.py` |
 | `persona_prewarm done persona=… elapsed_ms=…` | const `persona_prewarm.py:127`, emitted `:276-280` | pacing census; pinned at `tests/agent_runtime/test_persona_prewarm.py:520` |
+| `persona_chat_actor_prewarm root=… outcome=… elapsed_ms=…` | const `persona_chat_actor_prewarm.py` (`CHAT_ACTOR_PREWARM_DONE_RECEIPT`), emitted in `_drain` | did the chat's actor get built before its first message; format pinned at `tests/agent_runtime/test_persona_chat_actor_prewarm.py` |
+| `persona_chat_actor_prewarm pass candidates=… queued=… skipped=… elapsed_ms=…` | const `persona_chat_actor_prewarm.py` (`CHAT_ACTOR_PREWARM_PASS_RECEIPT`), emitted in `prewarm_chat_actors_on_boot` | one line per boot pass; the `candidates`/`queued` gap is `max_hot_sessions` doing its job |
 | `agent_create_phases persona=… instance_ms=… phases=… pid=…` | const `agent_create_phases.py:88-90`, emitted `:232-237` | drop-latency attribution; pinned at `tests/agent_runtime/test_agent_create_subphases.py:152` |
 | `harness serve boot timeline: <k=v …>` | `hermes_cli/harness_parts/serve.py:1765-1767`, line built by `boot_timeline.py:173-178` | operator grep; the same block also rides the `ready` frame (`serve.py:1705`) |
 | `API call #N: model=… provider=… in=… out=… total=… latency=…s[ cache=…][ ttfb=…s]` | `agent/conversation_loop.py:3473-3479` | provider-vs-hermes attribution; `tests/run_agent/test_api_call_ttfb.py` |
@@ -167,7 +169,20 @@ claim — "a start with no finish measures nothing" (`persona_prewarm.py:118-123
 The clock starts AFTER the queue `get`, so an idle worker never reports a
 minute-long warm (`:255-258`); a warm that RAISED logs a WARNING carrying the
 same elapsed cost, because a census blind to the failures would under-count the
-queue's real service time (`:262-274`). `harness serve boot timeline:` renders
+queue's real service time (`:262-274`).
+
+`persona_chat_actor_prewarm` (2026-08-23) is the same discipline for the lane that constructs a
+real agent, at a finer grain because its claim is finer: the PASS line is emitted when the boot
+pass has QUEUED, and the worker owns one DONE line per item, because a pass line with only totals
+cannot answer "which chat took four seconds" and the module's whole claim is a race against the
+operator's first message. `outcome=` is a closed set — `warmed`, `already_resident`,
+`registry_off`, `skipped_turn_active`, `skipped_no_chat_root`, `skipped_persona_unresolved`,
+`skipped_profile_unready`, `skipped_construct_failed` — so a reader never has to tell "it did not
+run" from "it ran and found nothing to do". `already_resident` is a SUCCESS: a real turn (or an
+earlier warm) got there first and `acquire` handed the entry back. Ids and timings only, on the
+same rule as `persona_prewarm`: never a display name, never a resolved toolset.
+
+`harness serve boot timeline:` renders
 `BootTimeline.stamps()` as `key=value` pairs: `interpreter_ms` (psutil-derived,
 ABSENT when the platform will not report a creation time), the segments that
 decompose it — `interpreter_boot_ms`, `main_import_ms`, `dispatch_ms`,

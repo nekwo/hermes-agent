@@ -7,7 +7,7 @@ asker walked the whole resolution independently:
 
 * ``build_mission_chat_turn_context`` → ``capability_block`` (→
   ``chat_lane_capability_drops``) and ``admission_line``;
-* the same builder's ``_runtime_signature`` → ``tool_contract`` (→
+* the same builder's ``mission_chat_runtime_signature`` → ``tool_contract`` (→
   ``_enabled_toolsets_for_chat`` + ``_blocked_tool_names_for_chat``) and
   ``permission_state`` (→ ``resolve_tool_visibility``);
 * ``GPTPersonaRuntime.mission_chat_reply`` → ``_enabled_toolsets_for_chat`` and
@@ -67,7 +67,7 @@ The key is the bundle's own inputs — not a clock:
 **The instance revision is deliberately absent**, and that is not an oversight:
 no component here reads the persona INSTANCE. An instance edit (``set-model``,
 a placement move, the per-turn ``skill_manifest_hash`` writeback) changes
-``mission_chat_turn_context._runtime_signature``, which folds the instance
+``mission_chat_turn_context.mission_chat_runtime_signature``, which folds the instance
 directly and is computed per turn from this bundle's OUTPUT — so a resident
 actor still stops being reusable exactly when it should. Folding the instance in
 here would only cost hit rate on every turn, because the manifest hash is

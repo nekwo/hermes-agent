@@ -142,6 +142,17 @@ class PersonaChatConfig:
     hot_sessions_enabled: bool = False
     max_hot_sessions: int = 8
     idle_ttl_seconds: int = 1800
+    # NO `prewarm_on_boot` KNOB, and that is a decision rather than an omission
+    # (Stage 2, 2026-08-23). The background chat-actor prewarm
+    # (``agent_runtime.persona_chat_actor_prewarm``) is gated on
+    # ``hot_sessions_enabled`` alone: with no resident registry there is nowhere
+    # to put a pre-built actor, so the switch that turns reuse off already turns
+    # the prewarm off. A separate key was written and then withdrawn — every
+    # field of this dataclass is projected onto the read-model wire
+    # (``core.runtime_config.persona_chat.*``), so adding one is a cross-stack
+    # golden landing (regenerate the stream fixtures, mirror the bytes into the
+    # Launcher, update both manifests). That ceremony is the right price for a
+    # contract change and the wrong price for a switch this lane already has.
 
 
 @dataclass(slots=True)

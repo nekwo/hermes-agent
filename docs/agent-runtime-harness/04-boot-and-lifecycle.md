@@ -139,10 +139,16 @@ warmup queues a redundant second one behind it. Starting a daemon thread costs m
 **ONE thread, and the ordering is the whole stage** (code spells it `EG-3.2`; the same fix is
 `HY-H2`, and `serve.py:1715-1716` records two independent investigations reaching it). The
 read-model build runs first, the provider warmup (`_load_openai_cls`, `shared_ssl_context`,
-`verify_ca_bundle`, `get_tool_definitions`) second, on the same thread (`serve.py:999-1027`).
-They used to be two threads; under the GIL the provider's ~5-8 s of CPU was subtracted from the
-build the launcher's canvas is waiting on, and nothing it warms is consumable before that
-canvas is authoritative. Each step is failure-isolated. Named cost, carried rather than hidden:
+`verify_ca_bundle`, `get_tool_definitions`) second, and since 2026-08-23 the persona-chat
+actor prewarm (Stage 9a) third — all on the same thread (`serve.py:999-1027`, `:1060-1086`).
+The first two used to be two threads; under the GIL the provider's ~5-8 s of CPU was
+subtracted from the build the launcher's canvas is waiting on, and nothing it warms is
+consumable before that canvas is authoritative. The third step inherits that reasoning twice
+over: it is behind the build for the canvas's sake, and behind the provider warmup because an
+agent construction that runs after `_load_openai_cls` does not pay the SDK import itself —
+which is the largest single item in a cold construct. All three are injected (a loop unit test
+must not import the OpenAI SDK, and must not construct a persona agent, to observe a ready
+frame) and each step is failure-isolated. Named cost, carried rather than hidden:
 a chat turn sent inside the boot window pays the cold SDK import inline. The boot line then
 lands on `agent.log` (`serve.py:1761-1768`):
 
@@ -295,6 +301,56 @@ the BOUNDED posture, root `config.yaml` `agent_runtime.tool_permissions.default_
 profile_default` (`config.py:1015-1047`). The shipped default is `unbounded`, under which the two
 keys coincide and the call is free; `test_the_warm_fills_the_exact_toolset_key_the_create_reads`
 is the gate that reds if the line is removed.
+
+## Stage 9a — persona-chat actor prewarm (2026-08-23)
+
+`agent_runtime/persona_chat_actor_prewarm.py`. Both a boot stage and a gesture-triggered one,
+and the only warmup in the harness that constructs a real agent.
+
+**What it removes.** `write_ahead → agent_ready` is bimodal: 60-600 ms on turn 2+ of a chat
+root, **3.0-3.6 s on turn 1**, because that is where `ProfileRunner._execute_agent_run`
+builds the agent (OpenAI client, tool-definition build with its own `check_fn` sweep,
+`tool_search` activation). Live pair, 2026-08-23 with `persona_chat.hot_sessions_enabled: true`:
+`17:33:01Z` (first message after the boot) `agent_init_cold=true`, bootstrap 3,782 ms of which
+`agent_construct_ms=3000`, first byte 10.0 s; `17:33:17Z` (second message, same chat)
+`resident_actor_reused=1`, bootstrap **62 ms**, first byte 3.4 s. The registry and the factory
+already existed; nothing called them off the turn.
+
+**Boot pass** — third on the one prewarm thread (Stage 6), warming at most
+`persona_chat.max_hot_sessions` chats, most-recently-active first, from instances with a bound
+`default_chat_session_id`. It only QUEUES; the constructions run on this module's own single
+daemon worker. **Chat-open** — both arms of `persona instance open-chat`
+(`_cmd_persona_instance_open_chat`, and the mint arm `_cmd_persona_instance_open_new_chat`,
+which is the higher-value one: a freshly minted root has no turn that is not its first).
+Deliberately NOT `PersonaInstanceStore.open_chat`, which the send path re-enters on every turn.
+Gated on `hot_sessions_enabled` alone and inert without it — no registry, nowhere to put an
+actor, no thread started; that is the state of every CLI one-shot.
+
+**Three properties it is built around**, each of which is the difference between a saving and
+a pure cost:
+
+1. **The construction runs the REAL path.** `AgentRunRequest.prewarm_only` re-enters
+   `_execute_agent_run`, so the agent is built inside `_WORKDIR_LOCK`,
+   `persona_profile_context`, the workdir and tool/terminal/skill scopes, and this persona's
+   MCP admission — with the same teardown on the way out. It stops immediately after the
+   `acquire()` bookkeeping: no `agent_ready`, no conversation.
+2. **The signature is the turn's own.** `acquire` reuses only on a byte-equal signature and
+   revision, and a mismatch CLOSES the entry and rebuilds. So the prewarm calls the turn's
+   own `mission_chat_turn_context.mission_chat_runtime_signature` (made public for this) and
+   reproduces each input through the turn's own resolver, with the tip and revision read via
+   `_persona_chat_native_tip` / `_persona_chat_native_revision`.
+3. **It yields.** `profile_runner.agent_runs_in_flight()` counts real runs from `run()`'s
+   entry, not from the lock; the prewarm stands down as `skipped_turn_active` rather than
+   holding `_WORKDIR_LOCK` while an operator message waits.
+
+**Named residue.** `--agents-file` — the operator's workspace `AGENTS.md`, attached per turn
+from a launcher-side selection — cannot be known here, so a workspace-bound chat mismatches on
+its first turn and rebuilds: wasted background work, never a wrong answer.
+
+Receipts: `persona_chat_actor_prewarm root=… outcome=… elapsed_ms=…` per item and
+`persona_chat_actor_prewarm pass candidates=… queued=… skipped=… elapsed_ms=…` per boot pass
+(07-observability's census). **No live receipt has been read yet** — the code landed
+2026-08-23 and the first-turn re-take is owed (`planned/chat-turn-prep-cost.md` §7).
 
 ## Stage 10 — demote builds and same-offset core reuse
 

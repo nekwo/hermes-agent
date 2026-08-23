@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from threading import Event, RLock, Timer
+from threading import Event, Lock, RLock, Timer
 import time
 from typing import Any, Callable
 import re
@@ -212,6 +212,19 @@ class AgentRunRequest:
     # the persona profile context and before agent construction, so the decision
     # (policy) and the side effect (spawn) stay separable and separately tested.
     mcp_admission: Any | None = None
+    # Build this run's agent, register it in the resident-chat registry, and
+    # STOP — no conversation, no provider call, no `agent_ready` notification.
+    # Set only by `agent_runtime.persona_chat_actor_prewarm`, which pays §2.3's
+    # 3.0-3.6 s construction on a background worker so the operator's first
+    # message of a chat finds an already-registered resident entry. The whole
+    # point is that it rides the SAME `_execute_agent_run` body — same
+    # `_WORKDIR_LOCK`, same `persona_profile_context`, same workdir/tool/
+    # terminal/skill scopes, same MCP admission and teardown, same `acquire()`
+    # with the same signature and revision — because a construction performed
+    # under different scopes is a different agent, and an actor built under a
+    # signature the next turn does not reproduce is discarded on arrival.
+    # Reached through `ProfileAgentRunner.prewarm`, never through `run`.
+    prewarm_only: bool = False
     # Lane/role identity for the terminal safety envelope
     # (agent_runtime.terminal_envelope.TerminalEnvelopeScope). Set ONLY by
     # lanes the envelope grant policy governs — mission-chat today. Left None
@@ -569,8 +582,49 @@ class ProfileAgentRunner:
         """
         from tools.lazy_deps import deny_venv_installs
 
-        with deny_venv_installs(f"an agent turn (profile={request.profile!r})"):
+        # ``_counted_agent_run`` is OUTSIDE the deny scope and covers the whole
+        # method: a background prewarm must see this run from its first
+        # instruction, not from the point it reaches the workdir lock.
+        with _counted_agent_run(), deny_venv_installs(
+            f"an agent turn (profile={request.profile!r})"
+        ):
             return self._run(request)
+
+    def prewarm(self, request: AgentRunRequest) -> dict[str, Any]:
+        """Construct and register this chat root's resident actor. No turn runs.
+
+        The ONLY entry point for ``prewarm_only`` requests, and deliberately not
+        ``run``: ``run`` normalizes a result, finishes the resident agent and
+        enforces post-run budgets, none of which exist for a construction. What
+        it DOES share is everything that decides what the agent IS —
+        ``_execute_agent_run``'s whole scope stack and its ``acquire()`` call —
+        so the actor this leaves in the registry is the actor the next real turn
+        would have built for itself.
+
+        Returns the run's ``profile_timing`` dict; ``resident_actor_reused``
+        tells the caller whether it built (``0``) or found one already resident
+        (``1``). Raises exactly what a run raises — the caller owns the swallow,
+        because a prewarm failure is latency, never correctness.
+
+        NOT counted by ``_counted_agent_run``: this is the work a real run is
+        allowed to displace, so counting it would make one prewarm suppress the
+        next and (worse) make a prewarm look like a turn to anything reading
+        that gauge.
+        """
+
+        if not request.prewarm_only:
+            raise ProfileRunnerError("prewarm requires a prewarm_only request")
+        from tools.lazy_deps import deny_venv_installs
+
+        _validate_workdir(request.workdir)
+        binding = _binding_for_profile(request.profile)
+        if binding.readiness != "ready":
+            raise ProfileRunnerError(binding.summary)
+        with deny_venv_installs(
+            f"a chat-actor prewarm (profile={request.profile!r})"
+        ):
+            _, _, profile_timing = self._execute_agent_run(binding, request)
+        return profile_timing
 
     def _run(self, request: AgentRunRequest) -> AgentRunResult:
         _validate_workdir(request.workdir)
@@ -998,6 +1052,22 @@ class ProfileAgentRunner:
                 # `agent_init_cold` while every one of those turns had paid full
                 # cold construction.
                 timing["resident_actor_reused"] = 0
+            if request.prewarm_only:
+                # Everything above this line is what a real turn does before it
+                # has an agent; everything below is what it does WITH one. A
+                # prewarm stops exactly here — no turn-scoped attributes, no
+                # compression threshold, no MCP steer notice, no `agent_ready`
+                # callback and no conversation. The `with` block still unwinds
+                # normally on the way out, so this run's admitted MCP scope is
+                # torn down while it still holds `_WORKDIR_LOCK`, exactly as a
+                # real run's is.
+                #
+                # `_finish_resident_persona_chat_agent` detaches the (already
+                # empty) prewarm-local handles, so a resident actor is handed to
+                # its first real turn in the same state a completed turn leaves
+                # it in — one state for a warm actor, not two.
+                _finish_resident_persona_chat_agent(agent)
+                return None, agent, timing
             if request.root_chat_session_id:
                 agent._persona_chat_root_session_id = request.root_chat_session_id
                 agent._persona_chat_client_message_id = request.client_message_id
@@ -1444,6 +1514,45 @@ def _agent_workdir(workdir: Path | None):
 # requires first context-scoping every reader listed in profile_context.py and
 # deleting the env writes. Do not shrink it before that.
 _WORKDIR_LOCK = RLock()
+
+#: Real agent runs currently between ``ProfileAgentRunner.run``'s entry and its
+#: return, in THIS process. Not a lock and never waited on — a background
+#: prewarm reads it to decide whether to stand down.
+#:
+#: Why it exists: ``_WORKDIR_LOCK`` serializes every run in the process, so a
+#: prewarm construction that holds it while an operator message arrives ADDS the
+#: full construction cost to that turn instead of removing it. The lock itself
+#: cannot answer "is anyone about to want this" — by the time a run blocks on it
+#: the damage is done — so the yield decision is taken BEFORE the prewarm enters
+#: the scope stack, on this counter.
+#:
+#: Deliberately counted at ``run`` rather than at the lock: the window that
+#: matters starts when a turn enters the runner (it still has admission,
+#: profile-context install and MCP admission to do before it needs the agent),
+#: not when it reaches the lock. A prewarm that stands down for a turn that
+#: turns out to be for the SAME chat root loses nothing — that turn builds the
+#: actor it would have built, and registers it in the same registry.
+_ACTIVE_RUNS_LOCK = Lock()
+_ACTIVE_RUNS = 0
+
+
+def agent_runs_in_flight() -> int:
+    """How many real agent runs this process is inside right now."""
+
+    with _ACTIVE_RUNS_LOCK:
+        return _ACTIVE_RUNS
+
+
+@contextmanager
+def _counted_agent_run():
+    global _ACTIVE_RUNS
+    with _ACTIVE_RUNS_LOCK:
+        _ACTIVE_RUNS += 1
+    try:
+        yield
+    finally:
+        with _ACTIVE_RUNS_LOCK:
+            _ACTIVE_RUNS -= 1
 
 
 def _positive_int(value: Any) -> int | None:

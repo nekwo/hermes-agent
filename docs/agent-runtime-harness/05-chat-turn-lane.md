@@ -155,7 +155,7 @@ configured set (under unbounded it sets `configured_toolsets = all_registered_to
 
 Those resolvers were being walked **four times per turn** — `capability_block` and `admission_line`
 from `build_mission_chat_turn_context`, `tool_contract` and `permission_state` from inside its
-`_runtime_signature`, and `_enabled_toolsets_for_chat`/`_blocked_tool_names_for_chat` again in
+`mission_chat_runtime_signature`, and `_enabled_toolsets_for_chat`/`_blocked_tool_names_for_chat` again in
 `mission_chat_reply` for the request itself. Each walk re-ran `permission_options_for_chat` →
 `effective_toolsets`/`all_registered_toolsets` → the registry `check_fn` sweep, and the caches
 underneath expire on 15/30 s TTLs tuned for one snapshot build rather than for operator cadence.
@@ -172,8 +172,10 @@ down backend still loses its TOOLS at construction because `registry.get_definit
 its own TTL; what can go stale is the toolset NAME in the lane's accounting until the epoch moves.
 `invalidate_chat_lane_bundles()` is the explicit hatch. A bundle whose best-effort components
 faulted is served to that turn and never stored. Scope is the turn path only — the preview lane,
-snapshot builder and prewarm still resolve live, because those are routinely driven with a
-monkeypatched resolver a config-keyed memo cannot see. Receipt: `visibility_bundle_builds` (§2).
+snapshot builder and `persona_prewarm`'s memo warm still resolve live, because those are routinely
+driven with a monkeypatched resolver a config-keyed memo cannot see. (The chat-ACTOR prewarm of
+§4b is not an exception: it reads the bundle deliberately, because it is assembling the same
+request a turn assembles.) Receipt: `visibility_bundle_builds` (§2).
 
 **The reuse key stopped keying on row liveness at the same time.** `_runtime_signature` hashed
 `asdict(instance)` whole, and a chat turn WRITES that row (`state` flips, `updated_at` /
@@ -184,6 +186,26 @@ first recorded `resident_rebuild_runtime_signature_changed` + `resident_actor_re
 `INSTANCE_IDENTITY_FIELDS` (`mission_chat_turn_context.py`) — of the fields that decide what a
 constructed actor IS. Allowlists, not denylists: a new field on either record is presumed
 bookkeeping until someone names it.
+
+### 4b. The resident actor is built before the first turn (2026-08-23)
+
+With reuse finally working, the whole of §2.3's construction cost collapsed onto the FIRST turn
+of each chat root — the one turn an operator is watching, and the only turn a new chat ever has.
+`agent_runtime/persona_chat_actor_prewarm.py` moves it off: at serve boot (third on the one
+prewarm thread) and at chat-open (both arms of `persona instance open-chat`), a background worker
+builds that root's agent through `ProfileAgentRunner.prewarm` and registers it under the same
+`acquire()`, so the first message arrives to an already-resident entry. Full mechanism and its
+residue: **04-boot-and-lifecycle Stage 9a**.
+
+Two facts belong here rather than there. First, the reuse key: the prewarm calls
+`mission_chat_runtime_signature` — the SAME function the builder calls, which is why it is public
+— because `acquire` compares digests for byte equality and rebuilds on a miss, so an actor warmed
+under a re-derived key would be worse than no warm at all. Second, it cannot go through
+`build_mission_chat_turn_context`: that builder CONSUMES the queued-skill list, and warming through
+it would steal the operator's queued skills from the turn being warmed for.
+
+Receipt on the turn record: `agent_init_cold=false` with `agent_ready − write_ahead < 700 ms` on a
+chat's first message. **Owed, not yet observed** (`planned/chat-turn-prep-cost.md` §7).
 
 ## 5. MCP admission — the profile declares the server
 

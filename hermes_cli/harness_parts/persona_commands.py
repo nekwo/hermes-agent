@@ -945,6 +945,10 @@ def _cmd_persona_instance_open_chat(args) -> int:
         }
         print(emit_json(data) if args.json else data["error"])
         return 2
+    # Placed AFTER the transcript row is durable (the ensure above) so the warm
+    # can read the root's native tip and revision — the two values that decide
+    # whether the first turn REUSES the actor or rebuilds it. See the helper.
+    _prewarm_chat_actor_for_open(instance.default_chat_session_id)
     previous_session_id = (
         safe_assignment_text(
             getattr(previous_instance, "default_chat_session_id", None)
@@ -1125,6 +1129,11 @@ def _cmd_persona_instance_open_new_chat(args, *, persona_id: str, coordinator_sc
             persona_instance_id=target_instance_id,
         )
 
+    # The highest-value prewarm in the harness: a freshly minted root has no
+    # turn that is not its first, so without this EVERY new chat pays the cold
+    # construction on the operator's opening message. The mint is bound and the
+    # transcript row is durable by this line.
+    _prewarm_chat_actor_for_open(receipt.session_id)
     selected = instance.session_id == receipt.session_id
     data = {
         "ok": True,
@@ -1152,6 +1161,35 @@ def _cmd_persona_instance_open_new_chat(args, *, persona_id: str, coordinator_sc
         else f"opened {instance.id} on new chat {receipt.session_id}"
     )
     return 0
+
+
+def _prewarm_chat_actor_for_open(session_id) -> None:
+    """Queue this chat root's resident actor for background construction.
+
+    Stage 2 of ``planned/chat-turn-prep-cost``: the FIRST turn of a chat root
+    pays ~3 s of agent construction on the operator's critical path, and a
+    freshly minted chat has no turn that is not its first. Building the actor
+    when the chat is OPENED moves that cost off the turn.
+
+    Called from the two open-chat arms and NOWHERE else — in particular not from
+    ``PersonaInstanceStore.open_chat``, which the send path re-enters on every
+    turn: hooking the store method would fire a background construction against
+    every live turn, which is the contention the prewarm's yield rule exists to
+    avoid. These two arms are the operator's gesture; the launcher fires
+    ``persona.instance.open_chat`` when a chat is opened or created and never
+    when a message is sent.
+
+    Inert without a resident registry — every CLI one-shot, and any serve with
+    ``persona_chat.hot_sessions_enabled`` off — and best effort by contract: an
+    open must never fail because a warm could not be queued.
+    """
+
+    try:
+        from agent_runtime.persona_chat_actor_prewarm import request_chat_actor_prewarm
+
+        request_chat_actor_prewarm(session_id)
+    except Exception:
+        pass
 
 
 def _emit_persona_open_chat_error(

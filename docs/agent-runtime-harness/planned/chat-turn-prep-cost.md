@@ -177,11 +177,12 @@ terminal-family probes fire *during construction*, a second probe population bey
 
 The resident-actor registry (`:967-986`) makes turn 2+ of the same chat root cheap
 (`agent_ready` 110–625 ms, factory never called, `resident_actor_reused=1`), which is
-exactly why the span is bimodal. **Nothing pre-constructs the actor before turn 1** —
+exactly why the span is bimodal. **Nothing pre-constructed the actor before turn 1** —
 not `persona_prewarm` (visibility memos only, §3), not serve boot
 (`_prewarm_provider_runtime`, `hermes_cli/harness_parts/serve.py:1029-1057`, warms the
 SDK import, the SSL context, and the *shared* parts of `get_tool_definitions` — not a
-persona-shaped agent).
+persona-shaped agent). **Stage 2 (§5) is the thing that now does**, at serve boot and at
+chat-open, through the same `acquire()`; this paragraph describes the state it changed.
 
 ### 2.4 `provider_request_started → provider_first_byte` (hermes share ~1.1–1.8 s)
 
@@ -293,7 +294,7 @@ dispatch" cost worth chasing.
 |---|---|---|---|
 | Toolset/check_fn sweeps, ≥4 resolver walks/turn | §2.1.4 + §2.3 construction | **(d) waste** within a turn, **(a)** across turns (TTL-expired memos) | ~0.8–1.5 s spread over ctx + agent_ready |
 | Prompt-observability row rebuild | §2.2 | **(a)** (15 s TTL memos; key stable across turns) | ~0.4–0.6 s |
-| Agent construction on chat-root turn 1 | §2.3 | **(b)** per-chat-root lazy; no prewarm covers it | ~3.0–3.6 s (once per chat root, and again on signature change) |
+| Agent construction on chat-root turn 1 | §2.3 | **(b)** per-chat-root lazy; **covered by Stage 2's prewarm since 2026-08-23** — the cost still exists, it moved off the turn | ~3.0–3.6 s (once per chat root, and again on signature change) |
 | Profile `.env` + context install | §2.3 | **(b)** | ~0.2–0.8 s |
 | SessionDB cold open ×1 + history read ×2 | §2.1.1/2.2 | **(a)/(d)** | unmeasured |
 | Prologue + request assembly | §2.4 | mix **(a)** (schemas, system prompt) + **(c)** (hooks, message) | ~1.1–1.8 s |
@@ -303,7 +304,7 @@ dispatch" cost worth chasing.
 
 ---
 
-## 5. Stages (ordered by value; Stage 0 and Stage 1 have landed, Stages 2–5 not started)
+## 5. Stages (ordered by value; Stages 0, 1 and 2 have landed, Stages 3–5 not started)
 
 **Stage 0 — restore the instrument before touching anything (opening gate, §6).**
 **Code half LANDED 2026-08-23** (uncommitted working tree); the live re-take is still
@@ -399,24 +400,107 @@ invalidation". Residue after the epoch: a backend that dies with nobody calling
 registration. Both are named in the module's doctrine.
 
 **Stage 2 — pre-construct the resident actor at chat-open (or first prewarm after
-placement).** The registry + factory already exist (`profile_runner.py:967-986`); an
-`open_chat`/placement hook that runs `_construct_agent` through the same
-`acquire()` off the turn's critical path converts §2.3's 3.0–3.6 s first-turn cost into
-background boot cost. *Expected: −2.5–3.5 s on every first turn of a chat (the exact
-turn an operator is watching). Receipt: `agent_init_cold=false` + `agent_ready−write_ahead
-< 700 ms` on the FIRST turn of a freshly opened chat.* Risk: **medium** — construction
-touches `_WORKDIR_LOCK`/cwd and MCP admission; must run under the same scopes as a real
-run and must not race a genuinely concurrent turn (the registry's signature check
-already guards reuse correctness).
+placement). CODE LANDED 2026-08-23** (uncommitted working tree); the live re-take is
+owed. The registry + factory already existed (`profile_runner.py:967-986`); nothing called
+them off the turn's critical path. *Expected: −2.5–3.5 s on every first turn of a chat (the
+exact turn an operator is watching). Receipt: `agent_init_cold=false` +
+`agent_ready−write_ahead < 700 ms` on the FIRST turn of a freshly opened chat.* Risk:
+**medium** — construction touches `_WORKDIR_LOCK`/cwd and MCP admission.
 
 **Two of this stage's preconditions were cleared on 2026-08-23 and both were invisible
 until the other moved.** The operator turned `persona_chat.hot_sessions` on and restarted,
 which finally made the resident-actor registry exist — and the very first pair of turns
 proved the registry alone buys nothing, because `_runtime_signature` was keyed on
 persona-instance row liveness and could not match twice (Stage 1, §5). With the identity
-allowlist in, reuse is possible for the first time; *verify `resident_actor_reused=1` on
-turn 2 of one chat before building anything on top of it*, because a pre-constructed
-actor discarded on first use is worse than none.
+allowlist in, reuse is possible for the first time — and the live pair that opened this
+stage's window confirms it: `17:33:01Z` (first message after a boot) `agent_init_cold=true`,
+bootstrap 3,782 ms of which `agent_construct_ms=3000`, first byte 10.0 s; `17:33:17Z`
+(second message, same chat) `resident_actor_reused=1`, bootstrap **62 ms**, first byte 3.4 s.
+So the remaining defect is exactly and only the FIRST turn.
+
+What landed:
+
+1. **`agent_runtime/persona_chat_actor_prewarm.py`** — the whole lane. `prewarm_chat_actor`
+   assembles the request one chat's first turn would build and runs it; a single daemon
+   worker serializes the constructions; `request_chat_actor_prewarm` is the queueing hook
+   and answers `registry_off` (no thread, no queue entry) whenever
+   `persona_chat_runtime_registry()` is `None` — the state of every CLI one-shot.
+2. **The construction runs the REAL path, not a copy.**
+   `AgentRunRequest.prewarm_only` + `ProfileAgentRunner.prewarm` re-enter
+   `_execute_agent_run`, so the agent is built inside `_WORKDIR_LOCK`,
+   `persona_profile_context`, the workdir, the tool-execution / chat-root /
+   terminal-envelope / skill scopes and this persona's MCP admission — and the `with`
+   block unwinds normally, so the admitted MCP scope is torn down while the run still
+   holds the lock, exactly as a real run's is. The early return sits immediately after
+   the `acquire()` bookkeeping: no turn-scoped attributes, no compression threshold, no
+   `agent_ready` notification, no conversation.
+3. **Signature parity is by SHARED FUNCTION, not by agreement.** `_runtime_signature`
+   became public as
+   `mission_chat_turn_context.mission_chat_runtime_signature`; the prewarm calls it with
+   the same arguments the builder passes, and reproduces every input through the turn's
+   own authority (`_persona_by_id`, `apply_instance_model_overrides`,
+   `_chat_effective_model_payload`, `_session_model_config`, `load_agent_runtime_config`,
+   `chat_lane_bundle`). The tip and revision `acquire` compares come from
+   `_persona_chat_native_tip` / `_persona_chat_native_revision` — the send path's own
+   helpers, so a match is a REUSE and not a `disk_revision_changed` rebuild. The gate is
+   an end-to-end test that asserts the prewarm's digest is byte-equal to the one
+   `build_mission_chat_turn_context` puts on the turn context for the same chat, through
+   real stores.
+   *It cannot call the builder itself*: `build_mission_chat_turn_context` CONSUMES the
+   queued-skill list, so warming through it would steal the operator's queued skills from
+   the turn it is warming for.
+4. **Two triggers.** *Boot* — `_prewarm_persona_chat_actors` runs THIRD on serve's one
+   existing prewarm thread, behind the read-model build (the launcher's canvas waits on
+   it) and behind the provider warmup (whose SDK import every construction would otherwise
+   pay itself), warming at most `persona_chat.max_hot_sessions` chats,
+   most-recently-active first, chosen from instances with a bound
+   `default_chat_session_id`. *Chat-open* — both arms of `persona instance open-chat`
+   (`_cmd_persona_instance_open_chat` and the mint arm
+   `_cmd_persona_instance_open_new_chat`, which is the higher-value one: a freshly minted
+   root has no turn that is not its first). Deliberately NOT
+   `PersonaInstanceStore.open_chat`, which the send path re-enters on every turn — hooking
+   there would fire a background construction against every live turn. A call-site census
+   test pins exactly those two sites.
+5. **Yielding is a rule, not a hope.** `profile_runner.agent_runs_in_flight()` counts real
+   runs from `run()`'s entry (not from the lock — by the time a turn blocks on the lock the
+   damage is done); the prewarm reads it before assembling and again before entering the
+   scope stack, and stands down as `skipped_turn_active` rather than queueing behind a
+   turn. One construction at a time, on one worker. The residual race — a turn arriving
+   DURING a construction — is bounded by that one construction and is a NO-OP when the turn
+   is for the same chat root, which is the common case at chat-open: that turn would have
+   built this exact actor itself.
+6. **Receipts** (07-observability's census): `persona_chat_actor_prewarm root=<id>
+   outcome=<token> elapsed_ms=<n>` per item, and `persona_chat_actor_prewarm pass
+   candidates=<n> queued=<n> skipped=<n> elapsed_ms=<n>` per boot pass. Outcomes are a
+   closed set: `warmed`, `already_resident`, `registry_off`, `skipped_turn_active`,
+   `skipped_no_chat_root`, `skipped_persona_unresolved`, `skipped_profile_unready`,
+   `skipped_construct_failed`. Ids and timings only — never a display name, never a
+   resolved toolset.
+7. **No new config key, and that is a decision.** A `prewarm_on_boot` flag was written and
+   withdrawn: every field of `PersonaChatConfig` is projected onto the read-model wire
+   (`core.runtime_config.persona_chat.*`), so adding one reds the stream-contract goldens
+   and is a cross-stack landing (regenerate fixtures, mirror bytes into the Launcher,
+   update both manifests). `hot_sessions_enabled` already gates the lane end to end — with
+   no registry there is nowhere to put a pre-built actor. The refusal is pinned by a field
+   census on the dataclass so it is re-taken rather than drifted into.
+
+**The one input it cannot know, stated rather than guessed:** `--agents-file`, the
+operator's workspace `AGENTS.md`, which the launcher attaches per turn from a client-side
+selection. The prewarm warms with no workspace file. A WORKSPACE-BOUND chat therefore
+mismatches on its first turn and `acquire` rebuilds — that turn pays exactly what it pays
+today and the prewarmed actor is discarded, so the residue is wasted background work, never
+a wrong answer. Fabricating a path instead would ground a real agent's terminal at a
+directory the operator never chose.
+
+**Nothing is sent to a model.** Construction builds an OpenAI client object
+(`OpenAI client created (agent_init, shared=True)`) over already-resolved credentials; the
+first byte on the wire is `codex_stream_request`, inside `run_conversation`, on the far side
+of the early return. No prompt, no completion, no token spend. Two side effects ARE inherited
+from the real path and are named rather than denied, because both are the first turn's own
+work performed earlier: (1) `resolve_runtime_provider` reads credentials — a local
+`auth.json` read on `openai-codex`, but a Vertex persona mints an OAuth2 token and a Nous
+pool may refresh an expired agent key, and its result is cached for the turn behind it;
+(2) MCP admission spawns this persona's declared servers and tears them down on the way out.
 
 **Stage 3 — prologue diet, gated on the Stage-0 split data.** Cache tool-schema
 serialization per toolset tuple and verify the system-prompt restore path actually hits
@@ -490,6 +574,17 @@ Secondary gates, inherited:
   yet on any record.
 - `send_to_admit`'s ~110 ms transport share is derived from ONE turn's
   launcher-vs-record reconciliation; other turns may differ under launcher load.
+- **Stage 2's own receipt is OWED, on the same terms as Stage 1's.** The lane is pinned by
+  tests — the prewarmed actor being REUSED by the next real turn rather than rebuilt, the
+  end-to-end signature parity against real stores, the stand-down under a genuinely
+  concurrent run, the call-site census that keeps the hook off the per-turn seam, the boot
+  cap and ordering — but no live turn record written by a serve running it has been read.
+  Until one first-turn record of a freshly opened chat shows `agent_init_cold=false` and
+  `agent_ready − write_ahead < 700 ms`, the −2.5–3.5 s is a prediction. The second thing to
+  read on that serve is the `persona_chat_actor_prewarm` lines themselves: a pass whose
+  items all read `skipped_turn_active` means the yield rule is firing too eagerly, and a
+  first turn that still reads `agent_init_cold=true` next to a `warmed` line for its root
+  means a signature input the prewarm cannot reproduce (check for `--agents-file` first).
 - **Stage 1's own receipt is OWED.** The code landed and is pinned by tests (memo hit,
   every keyed input rebuilding, the degraded-bundle rule, the copy-on-read rule, the
   actor-identity allowlist, the new counter reaching the record), but no live turn record
