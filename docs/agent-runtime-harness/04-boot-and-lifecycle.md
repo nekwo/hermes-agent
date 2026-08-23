@@ -452,8 +452,10 @@ deliberately, because a process on its way down must not wait on a cache fill.
 
 Nothing below is implemented. Each links to a plan carrying its own evidence and gate.
 
-- **The boot core cache never converges here** — `never_converged` 10× since 2026-08-20 plus
-  Stage 8's five shadow divergences; the closure admits runtime-authored churn, so cache-hit
+- **The boot core cache never converges here** — `never_converged` 10× 2026-08-20→22, and
+  post-IC-1..3 five MORE on 2026-08-23 naming the chat-turn sidecar family
+  (`mission_chat_turns/`, `mission_chat_steer/`, `persona_chat_leases/`,
+  `prompt_observability/`); the closure admits runtime-authored churn, so cache-hit
   boots are luck. → [`planned/core-cache-input-closure.md`](planned/core-cache-input-closure.md)
 - **`home_mismatch` demotes on a single-profile install** — fired 2026-08-21 16:04:32 and again
   2026-08-22 13:36, both the same one-boot/three-caller shape; the census executes the rule

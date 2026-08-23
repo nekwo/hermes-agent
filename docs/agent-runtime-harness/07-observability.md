@@ -417,9 +417,12 @@ verified above; the numbers cannot be re-derived from the tree. First two from
 * **~13% of one turn's "provider first_byte" span was hermes work** — turn
   `c59ab99e`, 2026-08-22 02:00Z: 1,762 ms of 13,532 ms. This is the measurement
   `request_assembled` was added to attribute.
-* **The felt gateway-vs-Mission-Control gap is mostly the MODEL** —
-  `gpt-5.6-luna` on openai-codex 0.7–1.6 s TTFB; `big-pickle` on opencode-zen
-  (FREE tier) 10.7–12.5 s total, `429 FreeUsageLimitError` under a probe burst.
+* **The felt gateway-vs-Mission-Control gap was mostly the MODEL** —
+  `gpt-5.6-luna` on openai-codex 0.7–1.6 s probe TTFB; `big-pickle` on
+  opencode-zen (FREE tier) 10.7–12.5 s total, `429 FreeUsageLimitError` under a
+  probe burst. CLOSED 2026-08-23: mission chats ride luna via instance
+  overrides. Live luna TTFB expectation (2.2–3.5 s, reasoning at
+  effort=medium): see the canonical note on doc 08's luna row.
 * **First-build cost, 5 runtime personas, 2026-08-22**: 4,001 ms (3,054 tool
   visibility / 947 readiness walk); later builds in the same process 183 ms
   (36 / 146). A code comment at `agent_runtime/snapshot.py:422-424` — verified

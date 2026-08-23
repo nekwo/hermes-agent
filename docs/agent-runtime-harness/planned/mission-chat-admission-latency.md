@@ -98,9 +98,11 @@ session's receipts, not re-measured here.
 - **Any fix must keep the honesty contract.** Absent-never-zero, monotonic-only,
   first-mark-wins, release-visible (`mission_chat_phases.py:18-50`). An optimisation that
   makes a phase unmeasurable has made the problem worse.
-- **Operator ruling still owed** on the alice-lane provider half (moving that lane off
-  the free-tier default). That is a config decision, not an engineering one, and it is
-  the larger single win on that lane.
+- **Operator ruling CLOSED 2026-08-23**: the operator ruled the alice lane onto
+  gpt-5.6-luna/openai-codex, applied as instance-level `set-model` overrides on both
+  alice instances (`model_override_issued_at: 2026-08-22T14:49:24Z` on the live rows).
+  It was, as predicted, the larger single win on that lane (~13 s big-pickle calls →
+  luna's 2.2–3.5 s TTFB).
 
 ## 6. Related
 

@@ -25,7 +25,7 @@ week re-deriving a decision that was already paid for.
 | `agents_readiness` halves, steady | walk **663–1,918 ms** / tool_visibility **25–2,081 ms** over all 22 receipts on the pid; excluding the cold first build, walk 663–1,151 and tool_visibility mostly ≤28 BUT spiking to 110/692/760/778 on four separate steady builds — tool_visibility is NOT a cold-only cost | 2026-08-22, pid 32164 | same receipt |
 | `agents_readiness`, bench (5 personas, operator profiles root) | first build in a process **4,001 ms** (tv 3,054 / walk 947); steady **183 ms** (tv 36 / walk 146) | 2026-08-22 | commit body `25cd488d33` |
 | boot: ready→authoritative, cache hit vs rebuild | **911 ms** vs **11,980 ms** (authoritative wall 9,740 vs 19,626) | 2026-08-21 evening | `tool/mission_boot_receipt_audit.dart`, quoted in the launcher Brain |
-| core-cache convergence | **10 × `never_converged`**, 08-20 18:21 → 08-22 13:42; 5 carry `diff_scope=every_pass` | 2026-08-20→22 | agent.log WARNING `snapshot_core_cache never_converged` |
+| core-cache convergence | **10 × `never_converged`**, 08-20 18:21 → 08-22 13:42; 5 carry `diff_scope=every_pass`. **2026-08-23, post IC-1..3: five NEW firings name the chat-turn sidecar family** (`mission_chat_turns/*.json`, `mission_chat_steer/*/active.json`, `persona_chat_leases/*.owner.json`, `prompt_observability/*`) — a runtime-authored churn class recorded in `planned/core-cache-input-closure.md` | 2026-08-20→23 | agent.log WARNING `snapshot_core_cache never_converged` |
 | agent drop, cold → warm | rpc **2,466 → 178 ms** (`rpc_instance_ms` 2,406 → 110); second pair **2,086 → 121** (instance 2,030 → 78) | 2026-08-21/22 | `[MissionDropTiming]` |
 | agent drop, roster confirmed | cold **8,309 ms** (08-21, pre demote-reuse) → **4,645 ms** (08-22 17:43Z, first cold drop after the same-offset reuse landed); warm 506 | 2026-08-21/22 | `[MissionDropTiming] roster_confirmed_ms` |
 | create phases, cold | `instance_ms=1046` — create_patch 984 / wire_row 984 / chat_lane_scope 859 / tool_visibility 125 (phases overlap; they are spans, not a partition) | 2026-08-22 13:43:53 | agent.log `agent_create_phases` |
@@ -35,7 +35,7 @@ week re-deriving a decision that was already paid for.
 | chat TTFT, qa | **9,231 ms**; components admit 1,966 / agent_ready 4,078 / provider 3,140 / residual 153 (same two-clock caveat) | 2026-08-22, turn `1f31e082` | same tool |
 | hermes admission per warm turn | anchor→`agent_ready` **4,046 ms** (alice) / **5,891 ms** (qa) | 2026-08-22 | turn record `phases` |
 | provider: **big-pickle / opencode-zen** (base profile default) | total call **10.7–12.5 s** at in≈10k (4 turns); the probe's 9 requests (3-per-leg burst, then 45–90 s spaced retries) ALL returned `429 FreeUsageLimitError` in 172–531 ms — it is the FREE tier and the cap is a usage window, not burst protection | 2026-08-21/22 | turn records + live probe |
-| provider: **gpt-5.6-luna / openai-codex** (alice profile default) | TTFB **0.7–1.6 s**; total **1.8–5.8 s** at in=13,301–29,794 across 13 live calls | 2026-08-22 | live probe through the runtime's own client resolution |
+| provider: **gpt-5.6-luna / openai-codex** (alice profile default) | TTFB **0.7–1.6 s**; total **1.8–5.8 s** at in=13,301–29,794 across 13 live calls. **CANONICAL EXPECTATION NOTE (2026-08-23): the raw floor is 0.74–0.92 s at ANY reasoning effort, but LIVE mission-chat TTFB runs 2.2–3.5 s — the surplus is the model REASONING at effort=medium over the ~17.5k-token rule/tool frame before its first visible token (a 96%-prompt-cache turn still showed 6.1 s ttfb, so it is not ingestion). Every other doc quoting luna TTFB points here.** | 2026-08-22/23 | live probe + A/B effort probe + turn records |
 | tool-schema payload cost | +39,772 B (probe leg: 30 tools) moved luna TTFB 0.7–1.1 s → 1.3–1.6 s; the live turn carried 31 tools / 39,016 B | 2026-08-22 | probe legs 2 vs 3 |
 | event log | rotated: archive base 81,417,412 B + live slice 8.6 MB; logical offset ≈ 90.0 M | 2026-08-22 | `events_archive/` + build `offset=` |
 
@@ -46,8 +46,11 @@ is paid on every boot that the core cache cannot serve, which on this install is
 boot (see open row 2).
 
 Live model defaults, read 2026-08-22: `profiles/base/config.yaml` → `big-pickle` on
-`opencode-zen`; `profiles/alice/config.yaml` → `gpt-5.6-luna` on `openai-codex`. Mission
-Control rides base.
+`opencode-zen`; `profiles/alice/config.yaml` → `gpt-5.6-luna` on `openai-codex`.
+**Superseded for mission chats 2026-08-23:** both alice instances (and the roster
+personas already) carry tier-2 instance `set-model` overrides to
+`gpt-5.6-luna`/`openai-codex`, which beat the profile default — no mission chat speaks
+big-pickle any more. Only the `base` persona still cascades to the base default.
 
 ---
 
@@ -64,6 +67,9 @@ Measured before→after, each with the commit that carries the proof in its body
 | **Persona prewarm** — receipts, then the claim gated | `9d695aa762`, `a9445fd5c6`, `55f35937a9` | the first drop of a persona type paid 1.9–3.2 s of cold memo misses inside the create RPC. The prewarm had a start and no finish, so "the memos were filled" was untimeable; `a9445fd5c6` added `persona_prewarm done`. `55f35937a9` measured the "not optional" comment on the scope call FALSE under the unbounded default and TRUE under `default_mode: profile_default`, and gated the test to the config where it holds |
 | **`request_assembled` split** — the provider span opened before `run_conversation` began | `785a35beae` | 1,762 ms of the alice turn's 13,532 ms "provider first_byte" re-billed to hermes; ~11,770 ms is genuinely the provider |
 | **TTFB token for every lane** | `74702c193e` | mission-chat turns get provider TTFB from phase marks; before this, every other lane's first byte survived only as prose |
+| **Phase-timing marker through the progress sink + `profile_timing` on the record** | `60c7f46ec1` | `request_assembled`/`agent_init_cold` never reached a live record (the sink's Trace-noise filter ate the marker; the resident registry never existed so the flag had no source); recovers 0 ms, makes Stages 1–2 checkable |
+| **Chat-lane visibility bundle** — one resolve per turn, memoized on identity + registry epoch | `7f2c82f090` | `registry_probe_rounds` 23–27/turn → 0 on warm turns; the resident-actor reuse key stopped hashing row liveness (turn 2 reuse receipt: bootstrap 62 ms) |
+| **Resident-actor prewarm at boot + chat-open** | `bfde53b4ae` | first-turn construction (~3 s, `agent_construct_ms=3000` on the 17:33:01Z first-after-boot turn) moved off the operator's path; receipt owed: first turn of a fresh chat with `agent_init_cold=false` |
 | **Catalog TTL memos** (`_installed_skill_catalog`, `_profile_templates_cached`) | archived doc 14 §Slice 1 | `build_ms` 3,700 → 2,943 warm (~20%) |
 | **Coalesced concurrent builds** | archived doc 14 §Slice 2 | three concurrent builds were 8.8 s EACH; boot-storm first response 8.2 → 3.6 s |
 | **Build-scoped batch skill resolver** | archived doc 14 §first-message hardening | full core **36.622 s → 5.949 s** on the same live store (~84%); 502 exhaustive `resolve_skill` calls collapsed to one walk |
@@ -131,17 +137,21 @@ size)` key doc 14 asked for, but applied it to YAML/frontmatter leaves only.
 `raw_decode`, 13,748 `nt.stat`, 5,652 `io.open` per build) is from 2026-07-09 and
 predates the batch resolver, rotation and `parse_cache` — **do not cite it as current.**
 
-### 4. hermes admission, 4–6 s per warm turn — CONVICTED
+### 4. hermes admission, 4–6 s per warm turn — REMEDIATED 2026-08-23, re-take owed
 
 **Evidence:** anchor→`agent_ready` 4,046 ms (alice) / 5,891 ms (qa) on a warm serve,
 2026-08-22 turn records. Registry `check_fn` availability re-probes run per turn
 (agent.log 22:00:17.8–18.8 — ~1 s of the window), and they land *after*
 `provider_request_started`, so before `785a35beae` they were billed to the provider.
 
-**Gate:** none — the remedies (prewarm pacing, probe dedupe, build deprioritization) are
-owned by the drop-latency and observability plans in the launcher Brain, and duplicating
-them here would create the second disagreeing copy those plans already ban. The numbers
-to beat are 4.0 s and 5.9 s.
+**Remediated in THIS repo** by `planned/chat-turn-prep-cost.md` Stages 0–2
+(`60c7f46ec1`/`7f2c82f090`/`bfde53b4ae`): the visibility bundle ended the per-turn
+probe storms, hot sessions + the identity-allowlist reuse key ended per-turn agent
+construction, and the actor prewarm moved first-turn construction off the operator's
+path. First live receipt: bootstrap 3,782 ms → **62 ms** on the 17:33:01Z/17:33:17Z
+pair. The numbers to beat were 4.0 s and 5.9 s; the row CLOSES when three consecutive
+warm turns show `registry_probe_rounds=0` + `visibility_bundle_builds=0` +
+`context_built<500`.
 
 ### 5. The turn prologue — CONVICTED at n=2, diet GATED
 
@@ -164,7 +174,7 @@ big-pickle the effect is invisible under the 11 s baseline.
 number on the board — trimming the chat lane's 31 admitted tools requires measuring which
 tools turns actually call (the turn store's `elements` name them) before cutting any.
 
-### 7. The model default — OPERATOR-OWED, worth ~10 s per turn
+### 7. The model default — RULED AND APPLIED 2026-08-23 (was: operator-owed, ~10 s per turn)
 
 **Evidence:** the base profile that Mission Control rides defaults to `big-pickle` on
 `opencode-zen`, measured at 10.7–12.5 s per first call at in≈10k and 429-limited under a
@@ -174,7 +184,12 @@ calls at *larger* prompts. This is the largest single number on the board and it
 config value, but which model Mission Control speaks with is an operator's decision, not
 an optimization.
 
-**Gate:** an operator ruling. Nothing here changes a default on its own authority.
+**Gate: DISCHARGED.** The operator ruled ("change it to luna") and the change was
+applied through `harness persona instance set-model` as instance-tier overrides on both
+alice instances (`model_override_issued_at: 2026-08-22T14:49:24Z` on the live rows);
+mission chats measured on luna the same day. The base persona still cascades to the
+profile default — offered to the operator, not yet ruled. Row 6's tool-schema diet is
+now unblocked (its gate was this row).
 
 ### Refusals with a measurement — do NOT re-propose
 

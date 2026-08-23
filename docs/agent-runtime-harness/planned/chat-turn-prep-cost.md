@@ -1,6 +1,6 @@
 # Planned — chat-turn prep cost (the ~4 s of hermes between admission and the provider)
 
-**Status:** measured and decomposed; Stage 0 (the instrument) fixed 2026-08-23, nothing else remediated. **Owner doc:**
+**Status:** Stages 0–2 LANDED 2026-08-23 (`60c7f46ec1` / `7f2c82f090` / `bfde53b4ae`); live steady-state re-take receipts owed for 1 and 2; Stages 3–5 not started. **Owner doc:**
 [`../05-chat-turn-lane.md`](../05-chat-turn-lane.md).
 **Question this answers** (operator, 2026-08-22): *"maybe something we are doing with the
 chat isn't initializing fully or fast enough?"* — the answer is **yes, twice over**: the
@@ -20,7 +20,7 @@ numbers are marked as such.
 
 Deltas in ms between consecutive marks of the v3 `phases` block
 (`agent_runtime/mission_chat_phases.py:76-89`; anchor = handler entry,
-`hermes_cli/harness_parts/persona_commands.py:2003`). All turns below are
+`hermes_cli/harness_parts/persona_commands.py:2059`). All turns below are
 `gpt-5.6-luna` / `openai-codex` mission chats read from the turn store on 2026-08-22.
 
 | turn (`started_at` UTC) | ctx | obs | emit/WA | →agent_ready | →first_byte | probe rounds | builds overlapped | note |
@@ -112,7 +112,7 @@ plus the log cross-reference above.
 
 One span, four owners, in execution order inside `_cmd_mission_chat_message`:
 
-1. **Admission guards + session resolution** (`persona_commands.py:2003-2470`): config
+1. **Admission guards + session resolution** (`persona_commands.py:2034-2530`): config
    load (mtime-cached, `agent_runtime/config.py:112-116` — fine), relay guard, target
    decision, clarify binding, **fresh SessionDB open**
    (`persona_commands.py:2076 _default_persona_session_db()` →
@@ -136,7 +136,7 @@ One span, four owners, in execution order inside `_cmd_mission_chat_message`:
    check_fn sweep).
 
 The `registry_probe_rounds` receipt (23–27 on most warm turns, baseline/delta at
-`persona_commands.py:2008`/`:3203`) proves the sweep runs **many times per turn**: a
+`persona_commands.py:2064`/`:3267`) proves the sweep runs **many times per turn**: a
 round is only counted when at least one `check_fn` actually EXECUTED
 (`tools/registry.py:264-283`), and the live log shows the interleaved doubled sweep in
 this exact window — e.g. turn `…e880b26e2c95`:
@@ -307,7 +307,7 @@ dispatch" cost worth chasing.
 ## 5. Stages (ordered by value; Stages 0, 1 and 2 have landed, Stages 3–5 not started)
 
 **Stage 0 — restore the instrument before touching anything (opening gate, §6).**
-**Code half LANDED 2026-08-23** (uncommitted working tree); the live re-take is still
+**Code half LANDED 2026-08-23, commit `60c7f46ec1`**; the live re-take is still
 owed. A serve restart was NOT the fix — see the resolved caveat in §1. Three changes:
 
 1. **The sink forwards a phase-timing marker past its own noise filter.**
@@ -319,7 +319,7 @@ owed. A serve restart was NOT the fix — see the resolved caveat in §1. Three 
    mirror**, so the Trace-lane rule at `progress.py:83-86` stays literally true. Nothing
    from the payload is forwarded verbatim except a `step` matched against the closed set
    and a bare `status` token — no free-text field crosses at all.
-2. **The runner reports the cold construct it performed.** `profile_runner.py:1000` writes
+2. **The runner reports the cold construct it performed.** `profile_runner.py:1054` writes
    `resident_actor_reused = 0` on the no-registry branch. That branch KNOWS it built an
    agent; absent-never-zero protects an unknown fact, and this one was never unknown.
    `agent_init_cold=true` now lands on a stock (hot-sessions-off) serve.
@@ -338,7 +338,7 @@ Test seam closed with it: the handler-level fake now emits its marker through th
 *Recovers 0 ms; makes every later claim checkable.* Risk: none (additive keys).
 
 **Stage 1 — one visibility resolve per turn, memoized on identity. CODE LANDED
-2026-08-23** (uncommitted working tree); the live re-take is owed.
+2026-08-23, commit `7f2c82f090`**; the live re-take is owed.
 
 What landed:
 
@@ -400,8 +400,8 @@ invalidation". Residue after the epoch: a backend that dies with nobody calling
 registration. Both are named in the module's doctrine.
 
 **Stage 2 — pre-construct the resident actor at chat-open (or first prewarm after
-placement). CODE LANDED 2026-08-23** (uncommitted working tree); the live re-take is
-owed. The registry + factory already existed (`profile_runner.py:967-986`); nothing called
+placement). CODE LANDED 2026-08-23, commit `bfde53b4ae`**; the live re-take is
+owed. The registry + factory already existed (`profile_runner.py:1021-1040`); nothing called
 them off the turn's critical path. *Expected: −2.5–3.5 s on every first turn of a chat (the
 exact turn an operator is watching). Receipt: `agent_init_cold=false` +
 `agent_ready−write_ahead < 700 ms` on the FIRST turn of a freshly opened chat.* Risk:
@@ -557,10 +557,15 @@ Secondary gates, inherited:
   regression.
 - **Do not re-quote `chat_lane_scope_ms=2421` as a turn cost.** Verified here (§3 H2):
   it is the *unwarmed create* subphase; the warm create is 859/15 ms. Doc 05's
-  carry-forward row should be annotated accordingly when doc 05 is next touched.
-- **The provider half stays out of scope**: luna TTFB 0.7–3.1 s here is the floor the
-  hermes work is measured against, and the alice-lane free-tier ruling is still owed to
-  the operator (see `planned/mission-chat-admission-latency.md` §5).
+  carry-forward row carries the annotation as of 2026-08-23.
+- **The provider half stays out of scope**: the raw luna floor is 0.74–0.92 s at any
+  effort; live mission-chat TTFB runs 2.2–3.5 s because the model REASONS at
+  effort=medium before its first visible token (canonical explanation: doc 08's luna
+  row — a 96%-prompt-cache turn still showed 6.1 s ttfb, so it is not ingestion). The
+  alice-lane free-tier ruling is CLOSED: the operator ruled 2026-08-23 and both alice
+  instances carry the gpt-5.6-luna/openai-codex instance override
+  (`model_override_issued_at: 2026-08-22T14:49:24Z`; see
+  `planned/mission-chat-admission-latency.md` §5).
 
 ## 7. Uncertain / unverified, stated plainly
 

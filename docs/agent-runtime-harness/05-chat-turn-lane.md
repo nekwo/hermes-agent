@@ -83,12 +83,13 @@ bundle holds.
    rides the emitter's per-token `delta()` and may arrive on a worker thread.
 4. **Release-visible.** No flag, no debug gate; the block rides persists the turn already performs.
 
-Construction IS the anchor, taken as the handler's first statement (`persona_commands.py:2003`),
-ahead of the capability bind and the config load, because everything below is admission cost the
-operator waits through. Marks land at `:3094`, `:3133`, `:3161`, `:3202`, `:3217`, `:3230`
-(write_ahead — deliberately *before* the write it names), `:3385`, `:3597`, `:3800` and `:4950`
-(provider_first_byte, on the emitter); `request_assembled` arrives as a trace payload, converted at
-`:3171-3181`. The emitter's older `ttft_ms` is unchanged; `phases` is a superset, because the
+Construction IS the anchor, taken as the handler's first statement (`persona_commands.py:2059`;
+the handler opens at `:2034`), ahead of the capability bind and the config load, because everything
+below is admission cost the operator waits through. Marks land at `:3158`, `:3197`, `:3225`,
+`:3266`, `:3282`, `:3295` (write_ahead — deliberately *before* the write it names), `:3450`,
+`:3662`, `:3880` and on the emitter (provider_first_byte, `~:4986`); `request_assembled` arrives as
+a trace payload, converted in `_stream_progress` (anchors re-read 2026-08-23 after the Stage 0–2
+edits moved this file). The emitter's older `ttft_ms` is unchanged; `phases` is a superset, because the
 emitter is built ~1,100 lines in and its clock cannot see the profile bootstrap.
 
 ## 3. Model selection
@@ -369,7 +370,7 @@ application already filled every shared cache it would have reached. The same cr
 `warm_persona_memos` bills 281 ms with `chat_lane_scope_ms` at 15 and zero probe rounds; the
 neighbouring-memo-key suspicion is ACQUITTED at HEAD. No test asserts a millisecond; the gate is the
 counted mechanism — the registry's probe-round counter (`tools/registry.py:286`), sampled as a
-per-turn delta (`persona_commands.py:2008`, `:3203`).
+per-turn delta (`persona_commands.py:2064`, `:3267`).
 
 ## 10. Provider dispatch, and the outcome line
 
@@ -438,8 +439,13 @@ operator's text.
 - **New-chat first send settled REJECTED — OPEN, unreproduced.** 2026-08-22 02:00:47Z; the mint is
   acquitted, the explicit-`session_id` lane implicated, and `[MissionChatOutcome]` (§10) stands
   guard for the next occurrence → [record](planned/new-chat-first-send-rejected.md).
-- **Hermes admission costs ~4–6 s of every warm turn**; convicted contributor is
-  `apply_chat_lane_tool_scope` (§9) → [plan](planned/mission-chat-admission-latency.md).
+- **Hermes admission cost — REMEDIATED 2026-08-23, steady-state re-take owed.** The
+  ~4–6 s warm-turn share was remediated by `planned/chat-turn-prep-cost.md` Stages 0–2
+  (`60c7f46ec1`/`7f2c82f090`/`bfde53b4ae`: visibility bundle, actor prewarm); first live
+  reuse receipt: bootstrap 3,782 ms → 62 ms (turns 17:33:01Z/17:33:17Z). The row closes
+  when three consecutive warm turns show `registry_probe_rounds=0` +
+  `visibility_bundle_builds=0` + `context_built<500` →
+  [plan](planned/mission-chat-admission-latency.md).
 - **Chat-lane context, memory and affordance gaps** — core-context/profile-memory knobs with no
   operator surface, no shell hooks, no slash commands, no attachment *input*, no per-turn worktree
   isolation, skill surface filter → [plan](planned/chat-lane-context-and-memory-gaps.md).
@@ -456,7 +462,8 @@ Mechanism exists in code; the NUMBER or live condition was not re-measured here.
 - **The 2,421 ms `chat_lane_scope_ms`** —
   `tests/agent_runtime/test_agent_create_subphases.py:17-24`, one machine, hermetic home. That file
   states no test asserts a millisecond and none can reproduce the magnitude; the enforced gate is
-  the probe-round count.
+  the probe-round count. **Annotated 2026-08-23 (prep-cost §3 H2): the 2,421 ms is the UNWARMED
+  CREATE subphase (warm create: 859/15 ms) — never re-quote it as a per-turn cost.**
 - **The 1,762 ms hermes share of turn `c59ab99e`** (`mission_chat_phases.py:420-421`) and the live
   phase-joined TTFT splits (alice 17.8 s, qa 9.2 s) — 2026-08-22 session receipts, read through the
   launcher's audit tooling; not reproducible from this repo.

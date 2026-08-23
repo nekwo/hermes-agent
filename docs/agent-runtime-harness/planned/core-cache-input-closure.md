@@ -185,6 +185,27 @@ The gate's audit obligation is discharged; the findings reshape the plan.
   `state.reconciled` feedback loop's stream half (3e) — record its census
   numbers here, but the fix belongs to the stream scope-fingerprint lane.
 
+## 2026-08-23 addendum — the chat-turn sidecar family (NEW churn class, post IC-1..3)
+
+Five `never_converged` firings on 2026-08-23 (10:29, 10:35, 10:40, 10:45, 13:33 local;
+first: `diff_scope=every_pass changed=1
+diff=…mission_chat_turns\persona_chat_personainst_profile_alice_agent_a408669a_….json`)
+name paths the runtime-authored class above never listed: the mission-chat TURN RECORD
+itself, `mission_chat_steer/*/active.json`, `persona_chat_leases/*.owner.json`, and
+`prompt_observability/*.json` + `prompt_observability_index.json`. All four are written
+by the chat lane on every operator turn — and Stage 0 of
+[`chat-turn-prep-cost.md`](chat-turn-prep-cost.md) (`60c7f46ec1`) now persists a
+`profile_timing` block onto the turn record on every turn, so this family churns at
+operator-message cadence by design.
+
+Candidate treatment, NOT yet ruled (the reader-audit obligation above re-arms for any
+exclusion): these sidecars are chat-lane state that the snapshot build reads through its
+own section builders — whether each is a genuine fingerprint input or an IC-2-style
+self-perturbation (re-stat at write-back) must be answered per path family before
+anything is excluded. Until then these firings are EXPECTED noise of the same class the
+IC-2 re-stat already absorbs for the DB triples; watch whether the weekly census still
+counts `every_pass` firings from this family after a week of post-`bfde53b4ae` boots.
+
 ## The gate to open this
 
 - ~~Every candidate exclusion has a named reader audit proving nothing in
