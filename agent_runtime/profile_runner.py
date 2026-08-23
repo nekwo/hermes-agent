@@ -986,6 +986,18 @@ class ProfileAgentRunner:
                     timing[f"resident_rebuild_{rebuild_reason}"] = 1
             else:
                 agent = _construct_agent()
+                # This run BUILT its agent — there was no resident registry to
+                # ask (the default: `persona_chat.hot_sessions_enabled` is off
+                # unless the root config turns it on), or no chat root to key
+                # one on. That is a fact this branch KNOWS, not an unknown, and
+                # writing it is what lets the turn record carry
+                # `agent_init_cold=true` instead of dropping the qualifier
+                # entirely. Absent-never-zero cuts both ways: a fact that was
+                # established must not read as unestablished. Live proof
+                # (2026-08-23): with hot sessions off, every turn record lacked
+                # `agent_init_cold` while every one of those turns had paid full
+                # cold construction.
+                timing["resident_actor_reused"] = 0
             if request.root_chat_session_id:
                 agent._persona_chat_root_session_id = request.root_chat_session_id
                 agent._persona_chat_client_message_id = request.client_message_id

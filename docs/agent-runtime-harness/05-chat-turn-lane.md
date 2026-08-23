@@ -321,7 +321,19 @@ the hermes side of the split) and right before the provider call; it carries no
 `duration_ms`/`timing_key` because it names an INSTANT, which also keeps it out of the
 profile-timing dict. Step constant: `CONVERSATION_REQUEST_ASSEMBLED_STEP =
 "conversation_request_assembled"` (`hermes_constants.py:1400`); `mark_from_trace_payload`
-(`mission_chat_phases.py:352-384`) is the only converter, and it takes nothing from a malformed one.
+(`mission_chat_phases.py:411-447`) is the only converter, and it takes nothing from a malformed one.
+
+**The payload has to survive the sink to reach that converter.** Its real route is
+`agent.status_callback → profile_runner._profile_status_callback (:1489) → ChatProgressSink.emit →
+on_trace → _stream_progress`, and the sink drops any `run.progress` payload carrying none of its
+Trace-lane signal keys (`progress.py:83-86`) — which a timing marker never carries, because it names
+an instant rather than work. That silently unmeasured `request_assembled` on every live turn through
+2026-08-23. `ChatProgressSink._forward_phase_timing_marker` (`progress.py:178-224`, called at `:137`
+ahead of the filter) now forwards the marker to `on_trace` ONLY: no EventLog row, no
+`before_first_trace` latch, no chat-log mirror, and only a `step` matched against the closed set of
+marker steps plus a bare `status` token — so the noise rule and the redaction boundary both stay
+intact. `phase_timing_marker_step` (`mission_chat_phases.py:378-409`) is the single authority both
+sides read, so producer and consumer cannot drift apart again.
 
 The live measurement that motivated the split (turn `c59ab99e`, 2026-08-22): **1,762 ms of a 13,532
 ms "provider" span elapsed before the request client existed** — prologue, tool-schema
@@ -385,7 +397,7 @@ Mechanism exists in code; the NUMBER or live condition was not re-measured here.
   `tests/agent_runtime/test_agent_create_subphases.py:17-24`, one machine, hermetic home. That file
   states no test asserts a millisecond and none can reproduce the magnitude; the enforced gate is
   the probe-round count.
-- **The 1,762 ms hermes share of turn `c59ab99e`** (`mission_chat_phases.py:360-363`) and the live
+- **The 1,762 ms hermes share of turn `c59ab99e`** (`mission_chat_phases.py:420-421`) and the live
   phase-joined TTFT splits (alice 17.8 s, qa 9.2 s) — 2026-08-22 session receipts, read through the
   launcher's audit tooling; not reproducible from this repo.
 - **Tool-schema census** (62 core tools / 93,075 bytes vs 34 deferrable / 32,182; 74% core) —

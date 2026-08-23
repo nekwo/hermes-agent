@@ -1,6 +1,6 @@
 # Planned — chat-turn prep cost (the ~4 s of hermes between admission and the provider)
 
-**Status:** measured and decomposed, not remediated. **Owner doc:**
+**Status:** measured and decomposed; Stage 0 (the instrument) fixed 2026-08-23, nothing else remediated. **Owner doc:**
 [`../05-chat-turn-lane.md`](../05-chat-turn-lane.md).
 **Question this answers** (operator, 2026-08-22): *"maybe something we are doing with the
 chat isn't initializing fully or fast enough?"* — the answer is **yes, twice over**: the
@@ -57,15 +57,44 @@ hermes** (prologue + assembly, §2.4) and 3.1 s the provider. Total hermes prep 
 turn: 0.34 + 0.45 + 3.02 + ~1.2 ≈ **5.0 s**; on the steadier warm turns the same sum is
 **~3.5–4.5 s** — the operator's "~4 s".
 
-**Vintage caveat (feeds the opening gate):** none of the sampled records carries
-`request_assembled` or `agent_init_cold`, though both are in HEAD
+**Vintage caveat — RESOLVED 2026-08-23, and it was not vintage.** None of the sampled
+records carries `request_assembled` or `agent_init_cold`, though both are in HEAD
 (`mission_chat_phases.py:84`, `:92`; emitter `agent/conversation_loop.py:2469`; flag site
-`persona_commands.py:3391-3396`). The running serve predates commits `74702c193e` /
-`785a35beae` (or the marker payload is not reaching `_stream_progress` — less likely,
-same wiring as the counters that DO appear). Until a restarted serve writes those keys,
-the assembly-vs-TTFB split inside `→first_byte` rests on the one measured carry-forward
-(1,762 ms, turn `c59ab99e`, quoted at `mission_chat_phases.py:360-369`) plus the log
-cross-reference above.
+`persona_commands.py:3394-3399`). This section originally offered two explanations and
+ranked them; **the serve-vintage arm is dead and the "less likely" arm was right** —
+twice over, by two independent mechanisms. The serve was restarted on HEAD (confirmed:
+`snapshot_core_cache_write … restat=` in the live log) and the two turns that followed
+(`03:57:37Z`, `03:57:52Z`, both in the store) still carried neither key.
+
+* **`request_assembled` — the payload never reached the handler.** The marker travels
+  `conversation_loop._emit_request_assembled_marker → agent.status_callback →
+  profile_runner._profile_status_callback → ChatProgressSink.emit → on_trace →
+  _stream_progress`. `ChatProgressSink.emit` drops any `run.progress` payload carrying
+  none of its Trace-lane signal keys (`progress.py:83-86`) — the rule that keeps bare
+  "Run progress update" rows out of the operator's console. A timing marker names an
+  INSTANT and carries no `tool_name`, no `command_label`, no work summary, so it was
+  filtered as noise on every turn. Every existing test agreed the wiring was healthy
+  because each drove the mark/emit ENDS directly and skipped the sink in the middle.
+* **`agent_init_cold` — the runner had nothing to report, and knew it.** The flag is
+  derived from `profile_timing["resident_actor_reused"]`, which `profile_runner` wrote
+  ONLY on the resident-actor branch (`:967-986`). That branch needs a registry, and
+  `persona_chat.hot_sessions_enabled` defaults to **False** (`runtime_config.py:142`)
+  with no `persona_chat` stanza in the live root config — so
+  `initialize_persona_chat_runtime_registry(enabled=False)` leaves the registry `None`
+  (`serve.py:1242`), the handler's `runtime_registry` is `None`, and every turn took the
+  `else: agent = _construct_agent()` branch, which recorded nothing. The handler then correctly refused
+  to guess. **Corollary: no sampled live turn reused a resident actor — none could.**
+  The fast second turn (`write_ahead → agent_ready` of 63 ms against turn 1's 2,000 ms on
+  the same 03:57Z pair) is the OTHER warm caches
+  (core-cache snapshot, runtime-resolve TTL, registry probe TTL), not actor reuse, and
+  §2.3's "bimodal 0.1–0.6 s reused" rows must be re-read as that. Stage 2's premise is
+  unaffected — a resident actor is not being reused because there is not one — but its
+  receipt (`agent_init_cold=false`) also requires the config stanza to be turned on.
+
+Both are fixed at Stage 0 (§5). Until a serve restarted on the fixed tree writes the
+keys, the assembly-vs-TTFB split inside `→first_byte` still rests on the one measured
+carry-forward (1,762 ms, turn `c59ab99e`, quoted at `mission_chat_phases.py:420-424`)
+plus the log cross-reference above.
 
 ---
 
@@ -160,7 +189,7 @@ persistence), then `request_build` (tool-schema serialization,
 — on the 4a80f05e turn the prologue's own `conversation turn:` line landed at
 22:04:24,241, 1.09 s after `agent_ready` at ~23.15). Measured once with the split
 instrument: **1,762 ms of a 13,532 ms "provider" span** (turn `c59ab99e`, quoted at
-`mission_chat_phases.py:360-369`). The `request_assembled` mark that makes this a
+`mission_chat_phases.py:420-424`). The `request_assembled` mark that makes this a
 standing distribution is in HEAD but absent from live records (§1 vintage caveat).
 
 ### 2.5 Cross-cutting: in-process snapshot builds
@@ -263,15 +292,37 @@ dispatch" cost worth chasing.
 
 ---
 
-## 5. Stages (ordered by value; none started)
+## 5. Stages (ordered by value; Stage 0's code has landed, Stages 1–5 not started)
 
 **Stage 0 — restore the instrument before touching anything (opening gate, §6).**
-Restart the serve on HEAD; confirm the next turn record carries `request_assembled` and
-`agent_init_cold`. Additionally persist the runner's timing dict
-(`runtime_resolve_ms`, `agent_construct_ms`, MCP admission ms,
-`conversation_call_ms` — built at `profile_runner.py:787,828,962,1051` and currently
-dropped after streaming) onto the turn record or the observability context, so Stages
-1–5 each have a before/after receipt that is not a log-grep.
+**Code half LANDED 2026-08-23** (uncommitted working tree); the live re-take is still
+owed. A serve restart was NOT the fix — see the resolved caveat in §1. Three changes:
+
+1. **The sink forwards a phase-timing marker past its own noise filter.**
+   `ChatProgressSink._forward_phase_timing_marker` (`agent_runtime/progress.py:178-224`,
+   called at `:137` BEFORE `_chat_progress_has_signal`) recognizes the marker through
+   `mission_chat_phases.phase_timing_marker_step` (`:378-409` — one authority, read by
+   both the sink and the converter) and hands it to `on_trace` only. It is an
+   instrument, not an event: **no EventLog row, no `before_first_trace` latch, no chat-log
+   mirror**, so the Trace-lane rule at `progress.py:83-86` stays literally true. Nothing
+   from the payload is forwarded verbatim except a `step` matched against the closed set
+   and a bare `status` token — no free-text field crosses at all.
+2. **The runner reports the cold construct it performed.** `profile_runner.py:1000` writes
+   `resident_actor_reused = 0` on the no-registry branch. That branch KNOWS it built an
+   agent; absent-never-zero protects an unknown fact, and this one was never unknown.
+   `agent_init_cold=true` now lands on a stock (hot-sessions-off) serve.
+3. **The runner's timing dict is persisted.** `profile_timing` rides the same
+   native-commit persist as `run_budget` (`persona_commands.py:3623-3638`) and is bounded
+   at the store boundary by `safe_turn_profile_timing`
+   (`mission_chat_turns.py:1190-1254`): `*_ms` ints, `resident_actor_reused`,
+   `resident_rebuild_*`, nothing else — the runner's dict is an open namespace that also
+   carries transport labels and real paths. Absent stays absent, and a REUSED actor still
+   has no `agent_construct_ms` (nothing was built, so there is no cost to report).
+
+Test seam closed with it: the handler-level fake now emits its marker through the REAL
+`_profile_status_callback` → `ChatProgressSink` chain
+(`tests/hermes_cli/test_mission_chat_turn_phases.py`), plus a whole-chain row in
+`tests/agent_runtime/test_progress.py`. Restoring the old sink filter reds five rows.
 *Recovers 0 ms; makes every later claim checkable.* Risk: none (additive keys).
 
 **Stage 1 — one visibility resolve per turn, memoized on the signature.**
@@ -329,13 +380,15 @@ without removing the per-turn re-composition that Stage 1 removes properly.
 
 ## 6. Opening gate
 
-**Do not start Stage 1+ until Stage 0 has landed and one restarted-serve turn record
-shows `request_assembled` and `agent_init_cold` present.** Every sampled live record
-lacks both keys (§1 vintage caveat), so today the assembly-vs-provider split and the
-cold/warm attribution inside `agent_ready` rest on one carry-forward turn and log
-eyeballing. Acting on Stage 1/2/3 without the restored instrument would repeat the
-exact failure mode this audit exists to end: remedies measured against numbers nobody
-can re-take.
+**Do not start Stage 1+ until one turn record from a serve running the Stage-0 tree
+shows `request_assembled`, `agent_init_cold` and `profile_timing` present.** The gate is
+half open: Stage 0's code has landed (§5), but a restart on that tree has not been taken,
+and a fix nobody has seen write a record is still a claim. Note what the first attempt at
+this gate proved — the serve HAD been restarted on HEAD and the keys still did not appear
+(§1), because the causes were a redaction/noise filter and a default-off config, not
+vintage. Acting on Stage 1/2/3 without the restored instrument would repeat the exact
+failure mode this audit exists to end: remedies measured against numbers nobody can
+re-take.
 
 Secondary gates, inherited:
 

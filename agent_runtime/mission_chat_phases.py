@@ -349,6 +349,65 @@ class TurnPhaseMarks:
         return max(0, int((float(self._monotonic()) - self._anchor) * 1000))
 
 
+#: The ``phase`` value that identifies a payload on the progress callback as a
+#: phase-timing INSTRUMENT rather than a Trace-lane event. See
+#: :func:`phase_timing_marker_step`.
+PHASE_TIMING_PHASE = "timing"
+
+_TRACE_MARKER_STEPS: dict[str, str] | None = None
+
+
+def _trace_marker_steps() -> dict[str, str]:
+    """``step`` → mark name, for the trace payloads this module converts.
+
+    Built lazily: the turn store imports this module on every read of a turn
+    record, and ``hermes_constants`` is not something a read path should pay
+    for. One dict per process, built on the first marker of the first turn.
+    """
+
+    global _TRACE_MARKER_STEPS
+    if _TRACE_MARKER_STEPS is None:
+        from hermes_constants import CONVERSATION_REQUEST_ASSEMBLED_STEP
+
+        _TRACE_MARKER_STEPS = {
+            CONVERSATION_REQUEST_ASSEMBLED_STEP: "request_assembled",
+        }
+    return _TRACE_MARKER_STEPS
+
+
+def phase_timing_marker_step(payload: Any) -> str | None:
+    """The recognized marker ``step`` this payload carries, or ``None``.
+
+    ONE authority for "is this progress payload a phase-timing marker?", read
+    by two callers that must never disagree:
+
+    * :func:`mark_from_trace_payload` — the consumer that converts it;
+    * :meth:`agent_runtime.progress.ChatProgressSink.emit` — the redaction
+      boundary the marker has to cross to REACH that consumer.
+
+    The second caller is here because of a live defect (2026-08-23): the sink
+    drops any ``run.progress`` payload carrying none of its Trace-lane signal
+    keys, and a timing marker carries none of them by construction. Every live
+    turn record therefore lacked ``request_assembled`` while the marker was
+    firing correctly one layer down. The sink now recognizes a marker through
+    this function and forwards it past that filter — as an instrument, not as a
+    Trace event.
+
+    Returns the payload's own step (not the mark name) so a caller can re-emit
+    a minimal marker shape built from a value it has just validated against a
+    closed set, rather than passing arbitrary payload text through.
+    """
+
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("phase") != PHASE_TIMING_PHASE:
+        return None
+    step = payload.get("step")
+    if not isinstance(step, str):
+        return None
+    return step if step in _trace_marker_steps() else None
+
+
 def mark_from_trace_payload(marks: TurnPhaseMarks, payload: Any) -> None:
     """Take the phase mark a conversation trace payload names, or take nothing.
 
@@ -372,16 +431,20 @@ def mark_from_trace_payload(marks: TurnPhaseMarks, payload: Any) -> None:
     dispatch attempt's instant when the loop's retry ladder re-dispatches.
     Unknown or malformed payloads take nothing — this is an instrument, and an
     instrument must not be a reason a turn fails.
+
+    **The payload has to survive the sink to get here.** On the mission-chat
+    lane the loop's marker travels
+    ``status_callback → profile_runner._profile_status_callback →
+    ChatProgressSink.emit → on_trace``; the sink is a redaction AND a noise
+    boundary, and it dropped the marker for lack of Trace-lane signal keys
+    until 2026-08-23. :func:`phase_timing_marker_step` is the shared
+    recognition both sides now use.
     """
 
-    if not isinstance(payload, dict):
+    step = phase_timing_marker_step(payload)
+    if step is None:
         return
-    if payload.get("phase") != "timing":
-        return
-    from hermes_constants import CONVERSATION_REQUEST_ASSEMBLED_STEP
-
-    if payload.get("step") == CONVERSATION_REQUEST_ASSEMBLED_STEP:
-        marks.mark("request_assembled")
+    marks.mark(_trace_marker_steps()[step])
 
 
 def safe_turn_phases(value: Any) -> dict[str, Any] | None:

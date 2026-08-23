@@ -2602,6 +2602,9 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
         TURN_PHASES_KEY as MISSION_CHAT_TURN_PHASES_KEY,
         mark_from_trace_payload as _mark_turn_phase_from_trace_payload,
     )
+    from agent_runtime.mission_chat_turns import (
+        TURN_PROFILE_TIMING_KEY as MISSION_CHAT_TURN_PROFILE_TIMING_KEY,
+    )
 
     args = plan.args
     cfg = plan.cfg
@@ -3617,6 +3620,21 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
             "native_committed": True,
             "stored_reply": reply_text,
             **budget_metadata,
+            # The runner's per-run timing breakdown, riding the SAME persist as
+            # the run-budget block above and bounded by the same store-side
+            # sanitizer (`mission_chat_turns.safe_turn_profile_timing`: `*_ms`
+            # ints, `resident_actor_reused`, `resident_rebuild_*`, nothing
+            # else). The phase block spans profile bootstrap in ONE number
+            # (`write_ahead → agent_ready`); this says which part of it was
+            # runtime resolution, MCP admission, or agent construction, so a
+            # prep-cost remedy has a before/after receipt on the record instead
+            # of a log-grep. Absent when the runner reported nothing — an empty
+            # dict would claim an accounting nobody took.
+            **(
+                {MISSION_CHAT_TURN_PROFILE_TIMING_KEY: dict(_profile_timing)}
+                if _profile_timing
+                else {}
+            ),
         },
     )
     _route_turn_write(_settled, step="native_commit")

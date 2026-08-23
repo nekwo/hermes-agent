@@ -352,6 +352,27 @@ def test_a_run_with_no_chat_registry_still_constructs(stub_runtime):
     assert _BoundaryAgent.constructed == 1
 
 
+def test_a_run_with_no_chat_registry_REPORTS_that_it_constructed(stub_runtime):
+    """The no-registry branch KNOWS it was cold, and has to say so.
+
+    ``persona_chat.hot_sessions_enabled`` is off by default, so this branch —
+    not the registry one — is what a stock serve actually runs, on every turn.
+    While it wrote nothing, the mission-chat handler read no
+    ``resident_actor_reused`` and honestly left ``agent_init_cold`` off the turn
+    record (``persona_commands.py``); every live record through 2026-08-23
+    therefore lacked the cold/warm qualifier while every one of those turns had
+    paid full construction. Absent-never-zero protects an UNKNOWN fact; this one
+    was never unknown.
+    """
+
+    result = ProfileAgentRunner(agent_factory=_BoundaryAgent).run(_request())
+
+    assert result.profile_timing["resident_actor_reused"] == 0
+    assert isinstance(result.profile_timing["agent_construct_ms"], int), (
+        "the branch that reports 'not reused' must be the branch that BUILT one"
+    )
+
+
 # ---------------------------------------------------------------------------
 # T6 — the runtime resolves once for an unchanged profile
 # ---------------------------------------------------------------------------

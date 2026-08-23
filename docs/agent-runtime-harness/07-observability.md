@@ -16,7 +16,7 @@ the create receipt (`agent_create_phases.py:23-24`) then inherited verbatim.
 
 1. **Absent is never zero.** A phase that did not happen has no key — not `0`,
    not `null`, not present-and-empty. `safe_turn_phases`
-   (`agent_runtime/mission_chat_phases.py:387`) drops keys it
+   (`agent_runtime/mission_chat_phases.py:450`) drops keys it
    cannot read rather than defaulting them; `_format_ttfb_token`
    (`agent/conversation_loop.py:382-394`) emits no `ttfb=` token rather than
    `ttfb=0.0s`, "which reads as an instantaneous provider and is a lie no
@@ -55,7 +55,7 @@ the create receipt (`agent_create_phases.py:23-24`) then inherited verbatim.
 7. **A span boundary is a fact about bytes, not intent.** The "provider
    first_byte" span opened before `run_conversation` had begun and so wore the
    provider's name over hermes assembly; `request_assembled` (`:84`, marked
-   at `:384`, emitted as a run-progress marker at
+   at `:447`, emitted as a run-progress marker at
    `conversation_loop.py:347-379`) splits it: `provider_request_started →
    request_assembled` is hermes, `request_assembled → provider_first_byte` is
    the client plus the wire.

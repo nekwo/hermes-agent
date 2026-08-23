@@ -29,6 +29,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent.conversation_loop import _emit_request_assembled_marker
 from agent_runtime import mission_chat_phases
 from agent_runtime.mission_chat_phases import (
     PHASE_ORDER,
@@ -38,6 +39,9 @@ from agent_runtime.mission_chat_phases import (
     mark_from_trace_payload,
     safe_turn_phases,
 )
+from agent_runtime.mission_chat_turns import TURN_PROFILE_TIMING_KEY
+from agent_runtime.persona_runtime import _chat_trace_callback
+from agent_runtime.profile_runner import AgentRunRequest, _profile_status_callback
 from hermes_constants import CONVERSATION_REQUEST_ASSEMBLED_STEP
 
 from tests.hermes_cli.test_mission_chat_budget_payload import (  # type: ignore
@@ -130,16 +134,33 @@ def _streaming_provider(*, profile_timing=None, deltas=("hello ", "world")):
             # callback, before the first delta. The fake walks the same
             # protocol so the wiring (payload → `request_assembled` mark) is
             # what the tests prove, not the fake.
+            #
+            # And it walks it through the REAL chain, not by calling the
+            # handler's `trace_callback` directly: on the live lane the payload
+            # crosses `profile_runner._profile_status_callback` and a REAL
+            # `ChatProgressSink`, and the sink dropped it — every live turn
+            # record through 2026-08-23 lacked `request_assembled` while a fake
+            # that skipped the sink reported the wiring healthy. Faking only the
+            # transport keeps that hole closed.
             trace = kwargs.get("trace_callback")
             if trace is not None:
-                trace(
-                    {
-                        "type": "run.progress",
-                        "phase": "timing",
-                        "step": CONVERSATION_REQUEST_ASSEMBLED_STEP,
-                        "status": "reached",
-                        "summary": "Provider request assembled; dispatching.",
-                    }
+                progress_callback = _chat_trace_callback(
+                    session_id=kwargs.get("permission_session_id") or _SESSION_ID,
+                    persona=args[0] if args else SimpleNamespace(id="dev"),
+                    turn_id=kwargs.get("turn_id"),
+                    on_trace=trace,
+                )
+                request = AgentRunRequest(
+                    profile=None,
+                    provider="openai-codex",
+                    model="gpt-5.6-luna",
+                    progress_callback=progress_callback,
+                )
+                _emit_request_assembled_marker(
+                    SimpleNamespace(
+                        status_callback=_profile_status_callback(request, {})
+                    ),
+                    api_call_count=1,
                 )
             stream = kwargs.get("stream_callback")
             if stream is not None:
@@ -454,6 +475,136 @@ def test_the_retry_ladder_keeps_the_first_dispatch_instant():
     first = marks.snapshot()["request_assembled"]
     mark_from_trace_payload(marks, payload)
     assert marks.snapshot()["request_assembled"] == first
+
+
+# --------------------------------------------------------------------------- #
+# 3c. The runner's timing dict, on the record                                  #
+# --------------------------------------------------------------------------- #
+# The phase block spans profile bootstrap in ONE number (`write_ahead →
+# agent_ready`, 3.0–3.6 s cold). The runner measures the pieces — runtime
+# resolve, MCP admission, agent construct — and until now dropped every one of
+# them when the stream ended, so "which part of the 3 s?" was a log-grep against
+# a serve nobody could re-run. Carried on the record, each prep-cost remedy gets
+# a before/after receipt.
+_RUNNER_TIMING = {
+    "runtime_resolve_ms": 310,
+    "agent_construct_ms": 1_480,
+    "mcp_admission_ms": 22,
+    "conversation_call_ms": 4_012,
+    "resident_actor_reused": 0,
+    "resident_rebuild_runtime_signature_changed": 1,
+    # Everything below is in the runner's dict too, and none of it may land:
+    # a nested accounting block (carried under its own key), transport labels,
+    # and a counter that is not a duration.
+    "run_budget": {"bounded_by": "wall", "budgets": []},
+    "mcp_admission_transport": ["stdio:C:/Users/beast/secret_server.exe"],
+    "mcp_admitted_servers": 3,
+}
+
+
+@pytest.fixture
+def timed_turn(monkeypatch, capsys, isolate_agent_runtime_root, scripted_marks):  # noqa: F811
+    _drive(
+        monkeypatch,
+        capsys,
+        _streaming_provider(profile_timing=_RUNNER_TIMING),
+        turn_id="phases_timing",
+    )
+    return _record_on_disk(isolate_agent_runtime_root, "phases_timing")
+
+
+def test_the_record_carries_the_runners_own_timing_breakdown(timed_turn):
+    block = timed_turn[TURN_PROFILE_TIMING_KEY]
+    assert block["runtime_resolve_ms"] == 310
+    assert block["agent_construct_ms"] == 1_480
+    assert block["mcp_admission_ms"] == 22
+    assert block["conversation_call_ms"] == 4_012
+    assert block["resident_actor_reused"] == 0
+    assert block["resident_rebuild_runtime_signature_changed"] == 1
+
+
+def test_the_persisted_timing_block_admits_nothing_but_its_three_shapes(timed_turn):
+    """Bounded by construction, not by scrubbing.
+
+    The runner's dict is an open namespace shared by admission receipts and
+    transport labels — real paths among them. Only ``*_ms`` durations,
+    ``resident_actor_reused`` and ``resident_rebuild_*`` are admitted, so no
+    free text can reach a durable record through this key.
+    """
+
+    block = timed_turn[TURN_PROFILE_TIMING_KEY]
+    assert "run_budget" not in block, "the accounting block has its own key"
+    assert "mcp_admission_transport" not in block
+    assert "mcp_admitted_servers" not in block
+    assert all(isinstance(value, int) for value in block.values())
+    assert "secret_server" not in repr(block)
+
+
+def test_the_accounting_block_still_rides_its_own_key(timed_turn):
+    """The new key is additive: it must not displace what the record carried."""
+
+    assert timed_turn["run_budget"]["bounded_by"] == "wall"
+    assert TURN_PHASES_KEY in timed_turn
+
+
+@pytest.fixture
+def warm_timed_turn(monkeypatch, capsys, isolate_agent_runtime_root, scripted_marks):  # noqa: F811
+    _drive(
+        monkeypatch,
+        capsys,
+        _streaming_provider(
+            profile_timing={"resident_actor_reused": 1, "conversation_call_ms": 900}
+        ),
+        turn_id="phases_timing_warm",
+    )
+    return _record_on_disk(isolate_agent_runtime_root, "phases_timing_warm")
+
+
+def test_a_reused_actor_constructed_NOTHING_and_the_record_says_so_by_absence(
+    warm_timed_turn,
+):
+    """No construction happened, so there is no construction cost to report.
+
+    A ``0`` here would read as "constructing the agent was free", which is the
+    opposite of what a reused resident actor proves.
+    """
+
+    block = warm_timed_turn[TURN_PROFILE_TIMING_KEY]
+    assert block["resident_actor_reused"] == 1
+    assert "agent_construct_ms" not in block
+
+
+def test_a_runner_that_reported_no_timing_leaves_the_key_off_entirely(
+    monkeypatch, capsys, isolate_agent_runtime_root, scripted_marks  # noqa: F811
+):
+    """Absent stays absent — an empty block would claim an accounting nobody took."""
+
+    _drive(
+        monkeypatch,
+        capsys,
+        _streaming_provider(profile_timing={}),
+        turn_id="phases_timing_blind",
+    )
+    record = _record_on_disk(isolate_agent_runtime_root, "phases_timing_blind")
+    assert TURN_PROFILE_TIMING_KEY not in record
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"agent_construct_ms": "1480"},
+        {"agent_construct_ms": None},
+        {"agent_construct_ms": -1},
+        {"agent_construct_ms": 24 * 60 * 60 * 1000 + 1},
+        {"profile_label": "openai-codex"},
+        "not a dict",
+        None,
+    ],
+)
+def test_the_timing_sanitizer_drops_what_it_cannot_read(value):
+    from agent_runtime.mission_chat_turns import safe_turn_profile_timing
+
+    assert safe_turn_profile_timing(value) is None
 
 
 # --------------------------------------------------------------------------- #

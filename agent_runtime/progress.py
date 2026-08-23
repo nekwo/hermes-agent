@@ -84,6 +84,10 @@ _CHAT_PROGRESS_SIGNAL_KEYS = (
     "tool_name", "tool", "command_label", "reasoning_summary",
     "changed_files", "patch_summary", "code_summary", "file_summary",
 )
+# A phase-timing marker's status is a bare state token ("reached"), never
+# prose. Anything else is dropped rather than truncated — see
+# ChatProgressSink._forward_phase_timing_marker.
+_MARKER_STATUS_RE = re.compile(r"[a-z_]{1,32}")
 
 
 class ChatProgressSink:
@@ -130,6 +134,8 @@ class ChatProgressSink:
             if event_type not in _CHAT_TRACE_EVENT_TYPES:
                 return None
             payload = payload or {}
+            if event_type == "run.progress" and self._forward_phase_timing_marker(payload):
+                return None
             if event_type == "run.progress" and not _chat_progress_has_signal(payload):
                 return None
             safe_payload = _safe_progress_payload(event_type, payload)
@@ -168,6 +174,57 @@ class ChatProgressSink:
             )
         except Exception:
             return None
+
+    def _forward_phase_timing_marker(self, payload: dict[str, Any]) -> bool:
+        """Pass a turn's phase-timing marker through to the trace OBSERVER only.
+
+        Returns True when the payload was a marker and this sink has finished
+        with it (the caller must then stop), False for every ordinary payload.
+
+        **Why this bypass exists.** The mission-chat handler's phase marks
+        (``agent_runtime/mission_chat_phases.py``) include one — the
+        conversation loop's ``request_assembled`` dispatch instant — that the
+        loop cannot take itself: it lives a layer below the harness and has no
+        access to the turn's ``TurnPhaseMarks``. It announces the instant on the
+        progress callback instead, and on this lane that callback IS this sink.
+        A timing marker names an instant; it carries no ``tool_name``, no
+        ``command_label``, no summary of work, so ``_chat_progress_has_signal``
+        below correctly judged it Trace-lane noise and dropped it — which also
+        dropped the mark. Live proof: every mission-chat turn record written
+        through 2026-08-23 lacks ``request_assembled`` while the marker fired on
+        every turn.
+
+        **What it deliberately does NOT do.** The marker is an instrument, not
+        an event: it is not appended to the :class:`EventLog`, does not latch
+        ``before_first_trace``, and is not mirrored into the live chat log. The
+        Trace-lane rule stated at :data:`_CHAT_PROGRESS_SIGNAL_KEYS` therefore
+        stays exactly true — no operator-visible row is added by this path.
+
+        **Redaction.** Nothing from the payload is forwarded verbatim except a
+        ``step`` that has just been matched against the closed set of marker
+        steps, and a ``status`` that must be a short bare token. There are no
+        free-text fields on the forwarded shape at all (the producer's fixed
+        ``summary`` is dropped rather than carried), so this bypass cannot
+        become a hole in the redaction boundary the rest of ``emit`` enforces.
+        """
+
+        from .mission_chat_phases import PHASE_TIMING_PHASE, phase_timing_marker_step
+
+        step = phase_timing_marker_step(payload)
+        if step is None:
+            return False
+        if self.on_trace is None:
+            return True
+        marker: dict[str, Any] = {
+            "type": "run.progress",
+            "phase": PHASE_TIMING_PHASE,
+            "step": step,
+        }
+        status = payload.get("status")
+        if isinstance(status, str) and _MARKER_STATUS_RE.fullmatch(status):
+            marker["status"] = status
+        self.on_trace(marker)
+        return True
 
     def _mirror_tool_line(self, event_type: str, safe_payload: dict[str, Any]) -> None:
         """Mirror tool starts/finishes into the session's live chat log.

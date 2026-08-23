@@ -538,3 +538,195 @@ def test_chat_progress_sink_survives_a_broken_mirror(isolate_agent_runtime_root,
     sink = ChatProgressSink(session_id="chat_1", persona_id="dev", event_log=log)
     sink.emit("run.tool.started", {"type": "run.tool.started", "tool_name": "terminal"})
     assert [event.type for event in log.for_session("chat_1")] == ["run.tool.started"]
+
+
+# --------------------------------------------------------------------------- #
+# The phase-timing marker bypass                                               #
+# --------------------------------------------------------------------------- #
+# The mission-chat turn record's `request_assembled` mark is taken by the
+# handler from a payload the CONVERSATION LOOP emits — the loop sits below the
+# harness and cannot hold the turn's TurnPhaseMarks itself. On that lane the
+# loop's status callback lands here, and a timing marker names an INSTANT: it
+# carries no tool, no command, no summary of work, so `_chat_progress_has_signal`
+# judged it Trace-lane noise and dropped it. Live proof (2026-08-23): every
+# mission-chat turn record written to that date lacks `request_assembled` while
+# the marker fired on every turn, so the whole `run_conversation` prologue was
+# billed to the provider. These rows pin the bypass AND its boundaries.
+def _marker_payload(**extra):
+    from hermes_constants import CONVERSATION_REQUEST_ASSEMBLED_STEP
+
+    return {
+        "type": "run.progress",
+        "phase": "timing",
+        "step": CONVERSATION_REQUEST_ASSEMBLED_STEP,
+        "status": "reached",
+        "summary": "Provider request assembled; dispatching.",
+        **extra,
+    }
+
+
+def test_a_phase_timing_marker_reaches_the_trace_observer(isolate_agent_runtime_root):
+    """The defect, as a row: the marker must survive the signal filter."""
+
+    from hermes_constants import CONVERSATION_REQUEST_ASSEMBLED_STEP
+
+    observed: list[dict] = []
+    sink = ChatProgressSink(
+        session_id="chat_1", persona_id="dev", event_log=EventLog(), on_trace=observed.append
+    )
+
+    sink.emit("run.progress", _marker_payload())
+
+    assert observed == [
+        {
+            "type": "run.progress",
+            "phase": "timing",
+            "step": CONVERSATION_REQUEST_ASSEMBLED_STEP,
+            "status": "reached",
+        }
+    ], "the phase-timing marker must reach the handler that converts it to a mark"
+
+
+def test_the_marker_adds_no_row_to_the_trace_lane(isolate_agent_runtime_root):
+    """An instrument, not an event.
+
+    The rule at `_CHAT_PROGRESS_SIGNAL_KEYS` — the operator's Trace lane carries
+    real work, never bare progress rows — stays exactly true: the bypass must
+    not buy the mark at the price of a phantom row on every turn.
+    """
+
+    log = EventLog()
+    latched: list[dict] = []
+    sink = ChatProgressSink(
+        session_id="chat_1",
+        persona_id="dev",
+        event_log=log,
+        before_first_trace=latched.append,
+        on_trace=lambda payload: None,
+    )
+
+    sink.emit("run.progress", _marker_payload())
+
+    assert log.for_session("chat_1") == []
+    assert latched == [], "the marker is not the turn's first tool work"
+    assert sink._did_emit_first_trace is False
+
+
+def test_the_marker_forward_carries_no_free_text(isolate_agent_runtime_root):
+    """The bypass skips `_safe_progress_payload`, so it carries nothing to scrub.
+
+    Only a `step` matched against the closed set of marker steps and a bare
+    `status` token are forwarded. A producer that hangs prose — or a secret — on
+    the marker cannot push it through this seam.
+    """
+
+    observed: list[dict] = []
+    sink = ChatProgressSink(
+        session_id="chat_1", persona_id="dev", event_log=EventLog(), on_trace=observed.append
+    )
+
+    sink.emit(
+        "run.progress",
+        _marker_payload(
+            status="reached because api_key=SECRET_TOKEN_VALUE",
+            summary="SECRET prose C:/Users/beast/private_token.txt",
+            detail="SECRET detail",
+            command_full="curl -H 'authorization: Bearer SECRET'",
+        ),
+    )
+
+    assert set(observed[0]) == {"type", "phase", "step"}, (
+        f"only the closed marker shape may be forwarded, got {observed[0]!r}"
+    )
+    assert "SECRET" not in repr(observed)
+
+
+def test_an_unrecognized_timing_step_is_still_dropped_as_noise(isolate_agent_runtime_root):
+    """The bypass is keyed on the CLOSED set of marker steps, not on `timing`.
+
+    `profile_runner`/`conversation_loop` emit many `phase: timing` spans that
+    nothing converts into a phase mark. Forwarding those would put a row per
+    span on the trace lane for no reader.
+    """
+
+    log = EventLog()
+    observed: list[dict] = []
+    sink = ChatProgressSink(
+        session_id="chat_1", persona_id="dev", event_log=log, on_trace=observed.append
+    )
+
+    sink.emit(
+        "run.progress",
+        {
+            "type": "run.progress",
+            "phase": "timing",
+            "step": "profile_agent_construct",
+            "status": "completed",
+            "duration_ms": 1200,
+            "timing_key": "profile_agent_construct_ms",
+        },
+    )
+
+    assert observed == []
+    assert log.for_session("chat_1") == []
+
+
+def test_ordinary_progress_still_obeys_the_signal_filter(isolate_agent_runtime_root):
+    """The bypass must not become a hole in the noise rule it stands beside."""
+
+    log = EventLog()
+    observed: list[dict] = []
+    sink = ChatProgressSink(
+        session_id="chat_1", persona_id="dev", event_log=log, on_trace=observed.append
+    )
+
+    sink.emit("run.progress", {"type": "run.progress", "summary": "Run progress update"})
+
+    assert observed == []
+    assert log.for_session("chat_1") == []
+
+
+def test_the_WHOLE_live_chain_carries_the_marker_from_the_loop_to_the_mark(
+    isolate_agent_runtime_root,
+):
+    """End to end across four modules — the seam every existing row skipped.
+
+    `tests/hermes_cli/test_mission_chat_turn_phases.py` proved the mark/emit
+    ENDS agreed, by handing the payload straight to the handler's callback. The
+    live lane runs
+    ``conversation_loop._emit_request_assembled_marker → agent.status_callback →
+    profile_runner._profile_status_callback → persona_runtime._chat_trace_callback
+    (a real ChatProgressSink) → on_trace → mark_from_trace_payload``,
+    and the sink in the middle silently ate the payload for weeks. This row
+    walks the real chain with only the transport faked, so the middle can never
+    go quiet again.
+    """
+
+    from types import SimpleNamespace
+
+    from agent.conversation_loop import _emit_request_assembled_marker
+    from agent_runtime.mission_chat_phases import TurnPhaseMarks, mark_from_trace_payload
+    from agent_runtime.persona_runtime import _chat_trace_callback
+    from agent_runtime.profile_runner import AgentRunRequest, _profile_status_callback
+
+    marks = TurnPhaseMarks()
+    progress_callback = _chat_trace_callback(
+        session_id="chat_1",
+        persona=SimpleNamespace(id="dev"),
+        turn_id="turn_1",
+        on_trace=lambda payload: mark_from_trace_payload(marks, payload),
+    )
+    request = AgentRunRequest(
+        profile=None,
+        provider="openai-codex",
+        model="gpt-5.6-luna",
+        progress_callback=progress_callback,
+    )
+    agent = SimpleNamespace(status_callback=_profile_status_callback(request, {}))
+
+    _emit_request_assembled_marker(agent, api_call_count=1)
+
+    assert "request_assembled" in marks.snapshot(), (
+        "the loop's dispatch marker did not survive the progress chain; the "
+        "turn record loses the hermes-assembly / provider-TTFB split"
+    )

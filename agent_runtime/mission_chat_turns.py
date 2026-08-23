@@ -1187,6 +1187,73 @@ _JOURNAL_TEXT_FIELDS = {
 #: them apart.
 _JOURNAL_RUN_BUDGET_FIELD = RUN_BUDGET_ACCOUNTING_KEY
 
+#: The runner's own per-run timing dict (``AgentRunResult.profile_timing``),
+#: carried onto the turn record beside ``phases``.
+#:
+#: WHY, given ``phases`` already exists: the phase block is the HANDLER's
+#: timeline (anchor → context → agent_ready → first byte), and its
+#: ``write_ahead → agent_ready`` span is one number covering everything
+#: ``profile_runner`` does inside it — runtime resolution, MCP admission, agent
+#: construction. The runner measures those separately and then threw the
+#: numbers away once the stream ended, so "which part of the 3 s bootstrap?"
+#: was a log-grep. Persisting them makes each prep-cost remedy checkable
+#: against a before/after receipt on the record itself.
+#:
+#: STRICTLY BOUNDED, and enforced here rather than trusted from the caller: the
+#: runner's dict is an open namespace that also carries the run-budget block,
+#: MCP transport labels and compaction receipts. Only three shapes are admitted
+#: — ``*_ms`` durations, ``resident_actor_reused``, and ``resident_rebuild_*``
+#: — every value coerced to a non-negative int. No free text can reach the
+#: record through this key, by construction rather than by scrubbing.
+TURN_PROFILE_TIMING_KEY = "profile_timing"
+
+#: Ceilings. A turn is bounded by its wall budget; a "duration" of a day is a
+#: corrupt row, not a slow one. Same reasoning as ``mission_chat_phases``.
+_PROFILE_TIMING_MAX_MS = 24 * 60 * 60 * 1000
+_PROFILE_TIMING_MAX_KEYS = 64
+_PROFILE_TIMING_FLAG_KEY = "resident_actor_reused"
+_PROFILE_TIMING_REBUILD_PREFIX = "resident_rebuild_"
+
+
+def safe_turn_profile_timing(value: Any) -> dict[str, Any] | None:
+    """Sanitize a runner timing dict for the durable record. ``None`` = no block.
+
+    Same one-directional defense as :func:`safe_turn_phases`: it drops what it
+    cannot read and supplies nothing. A key the runner never wrote stays absent
+    — notably ``agent_construct_ms``, which is ABSENT on a turn that reused a
+    resident actor because no construction happened, and must never be
+    backfilled with ``0``.
+    """
+
+    if not isinstance(value, dict):
+        return None
+    block: dict[str, Any] = {}
+    for key in sorted(value):
+        if len(block) >= _PROFILE_TIMING_MAX_KEYS:
+            break
+        if not isinstance(key, str):
+            continue
+        if key.endswith("_ms"):
+            ceiling = _PROFILE_TIMING_MAX_MS
+        elif key == _PROFILE_TIMING_FLAG_KEY or key.startswith(_PROFILE_TIMING_REBUILD_PREFIX):
+            ceiling = 1
+        else:
+            continue
+        raw = value[key]
+        # bool is an int subclass; the runner writes 1/0 for the flags, and a
+        # True that arrived from some other producer is still that fact.
+        if isinstance(raw, bool):
+            block[key] = int(raw)
+            continue
+        if not isinstance(raw, (int, float)):
+            continue
+        coerced = int(raw)
+        if coerced < 0 or coerced > ceiling:
+            continue
+        block[key] = coerced
+    return block or None
+
+
 #: Text fields whose EMPTY value is a recorded fact rather than an absence.
 #:
 #: Everything else above is dropped when empty, which is right for an id or a
@@ -1230,6 +1297,12 @@ def _safe_journal_metadata(value: Any) -> dict[str, Any]:
     phases = safe_turn_phases(value.get(TURN_PHASES_KEY))
     if phases is not None:
         result[TURN_PHASES_KEY] = phases
+    # The runner's own breakdown of the bootstrap the phase block spans in one
+    # number (see TURN_PROFILE_TIMING_KEY). Absent stays absent: a turn whose
+    # runner reported nothing gets no key rather than an empty dict.
+    profile_timing = safe_turn_profile_timing(value.get(TURN_PROFILE_TIMING_KEY))
+    if profile_timing is not None:
+        result[TURN_PROFILE_TIMING_KEY] = profile_timing
     for key in (
         "provider_submitted",
         "native_committed",
