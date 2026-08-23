@@ -353,11 +353,19 @@ def load_root_runtime_config() -> AgentRuntimeConfig:
 #:   profile copy is still reported here, because it is still inert and still
 #:   worth deleting — it just no longer decides whether the lane runs.
 #:
-#: Note ``read_model`` is SPLIT across both loaders and only the leaf is
-#: root-only: ``read_model.enabled`` is read profile-aware (``snapshot.py``
-#: consults the passed cfg), while ``read_model.delta_patches`` is root-only.
-#: So this list keys on LEAVES, never blocks — a block-level rule would raise a
-#: false positive on every profile that legitimately sets ``enabled``.
+#: Note ``read_model`` WAS split across both loaders and only the leaf was
+#: root-only: ``read_model.enabled`` was read profile-aware (``snapshot.py``
+#: consulted the passed cfg), while ``read_model.delta_patches`` is root-only.
+#: So this list keys on LEAVES, never blocks — a block-level rule would have
+#: raised a false positive on every profile that legitimately set ``enabled``.
+#:
+#: STAGE 6 (2026-08-22) removed the profile-aware half: ``read_model.enabled``
+#: has no reader at all now, because the lane it gated is retired. The
+#: leaf-keyed shape STAYS — not because ``read_model`` still needs it, but
+#: because it is the correct shape for any block whose leaves resolve at
+#: different scopes, and re-deriving that after the next such block appears is
+#: how the original defect got in. ``delta_patches`` remains the one live leaf
+#: and the one root-only row.
 ROOT_ONLY_CONFIG_KEYS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("read_model", "delta_patches"), "agent_runtime.state_patches.delta_patches_enabled"),
     (("mcp_admission",), "agent_runtime.mcp_admission.admission_config"),
@@ -614,6 +622,12 @@ def _string_list(value: Any) -> list[str]:
 
 
 def _read_model_config(raw: dict[str, Any]) -> ReadModelConfig:
+    # UNKNOWN KEYS ARE IGNORED, not rejected — every field is read through
+    # ``raw.get(key, default)``, the same property the top-level loader states at
+    # ``load_agent_runtime_config``. That is load-bearing for Stage 6: the live
+    # operator root still carries ``read_model.enabled: true``, and a config that
+    # sets a key the runtime no longer implements must load and be ignored rather
+    # than fault the whole runtime out of a boot.
     raw = raw if isinstance(raw, dict) else {}
     defaults = ReadModelConfig()
     filename = str(raw.get("db_filename", defaults.db_filename) or defaults.db_filename).strip()

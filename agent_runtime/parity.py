@@ -245,12 +245,18 @@ def events_watermark(*, last_event_ts: Any = None, position: dict[str, Any] | No
     this runtime's platform routinely, under AV scanning or a share violation —
     and it used to be swallowed into ``offset = 0``, indistinguishable from a
     genuinely empty log. Zero is the single most damaging value this field can
-    carry, because every reader treats it as a real position: the projector
-    reads "caught up, no new rows", the read model persists 0 as its stored
-    projection watermark, and the stream resumes a tailer from byte 0 —
-    replaying the ENTIRE log as fresh activity at the root of every Mission
-    Control surface. ``read_model.snapshot_watermark`` documents this exact
-    trap in its own docstring while this producer was still minting one.
+    carry, because every reader treats it as a real position: the stream
+    resumes a tailer from byte 0 — replaying the ENTIRE log as fresh activity at
+    the root of every Mission Control surface — and the checkpoint watermark
+    records it as a position actually reached.
+
+    Two of the readers that made this rule are gone: ``read_model.snapshot_watermark``
+    documented the exact trap in its own docstring while this producer was still
+    minting one, and the projector read a 0 offset as "caught up, no new rows".
+    Stage 6 (2026-08-22) deleted both with the ``read_model.db`` lane. The rule
+    did NOT go with them — it is a property of this producer, and this docstring
+    is now its only home, which is why the argument is stated here in full rather
+    than delegated to a module that no longer exists.
 
     ``None`` + ``event_offset_error`` is the typed unknown (the ``cron``
     orphan-sweep shape): a reader that cannot act without a position has to say

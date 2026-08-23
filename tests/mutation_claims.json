@@ -1,21 +1,6 @@
 {
   "claims": [
     {
-      "id": "rdh6-read-model-flag-resolves-profile-aware",
-      "path": "agent_runtime/read_model.py",
-      "symbol": "_read_model_scope",
-      "operator": "config-scope-swap",
-      "find": "    from .config import load_root_runtime_config\n\n    return load_root_runtime_config()",
-      "replace": "    from .config import load_agent_runtime_config\n\n    return load_agent_runtime_config()",
-      "test": [
-        "{python}",
-        "-m",
-        "pytest",
-        "-q",
-        "tests/agent_runtime/test_read_model_enabled_resolver.py::test_the_two_snapshot_entry_points_answer_the_flag_identically"
-      ]
-    },
-    {
       "id": "rdh6-cli-roster-read-unwrapped",
       "path": "hermes_cli/harness_parts/persona_commands.py",
       "symbol": "_cli_create_persona",

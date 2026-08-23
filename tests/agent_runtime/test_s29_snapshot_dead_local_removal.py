@@ -94,9 +94,14 @@ KEPT_LIVE_LOCALS = ()
 #: still live — the scope calls it — but it is no longer part of this module's
 #: EXTERNAL surface, and leaving it in this floor would have asserted a consumer
 #: that no longer exists. The floor tracks the surface; it does not preserve it.
+#: STAGE 6 (2026-08-22) removed ``write_snapshot`` from this floor, and it is the
+#: clean case of the rule stated just above — "the floor tracks the surface; it
+#: does not preserve it". The name is not merely no longer external: it is no
+#: longer DEFINED. Its one production caller was inside the retired read-model
+#: lane, the ``snapshot.json`` boot cache it wrote lost its launcher reader at
+#: MC-7 / P11, and the function was deleted with the lane. FOUR names now.
 VERIFIED_EXTERNAL_SURFACE = (
     "build_snapshot",
-    "write_snapshot",
     "_parity_envelope",
     "persona_session_db_scope",
     "persona_instance_detail_for_id",

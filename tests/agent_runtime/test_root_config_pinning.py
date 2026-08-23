@@ -131,24 +131,24 @@ def test_lock_acquire_timeout_reads_root_not_profile(tmp_path, monkeypatch):
     assert _lock_timeout_seconds(None) == 42.0
 
 
-def test_read_model_db_filename_reads_root_not_profile(tmp_path, monkeypatch):
-    from agent_runtime.read_model import ReadModel
-
-    _write_root_and_profile(
-        tmp_path,
-        monkeypatch,
-        root_yaml="""
-        agent_runtime:
-          read_model:
-            db_filename: root_rm.db
-        """,
-        profile_yaml="""
-        agent_runtime:
-          read_model:
-            db_filename: profile_rm.db
-        """,
-    )
-    assert ReadModel._read_model_db_path().name == "root_rm.db"
+# ``test_read_model_db_filename_reads_root_not_profile`` stood here. It pinned
+# ``ReadModel._read_model_db_path()`` resolving ``read_model.db_filename`` at ROOT
+# scope rather than through whichever profile the CLI bootstrap last redirected
+# into — a real defect class, and the reason the neighbouring
+# ``delta_patches`` pin exists.
+#
+# Stage 6 (duplicate-implementation retirement, 2026-08-22) deleted
+# ``agent_runtime/read_model.py``, so the resolver this test drove is gone and the
+# key it resolved has no reader left in the tree. It is REMOVED rather than
+# rewritten because there is nothing to point it at: the scope rule it protected
+# is still pinned for the leaf that matters — ``read_model.delta_patches`` — by
+# ``config.ROOT_ONLY_CONFIG_KEYS``, by
+# ``tests/agent_runtime/test_root_config_misplacement.py`` (which asserts that
+# exact row) and by ``test_root_config_hermetic.py``.
+#
+# The FIELD itself survives in ``runtime_config.ReadModelConfig`` for a reason
+# that has nothing to do with this test — it is on the snapshot wire, so
+# deleting it is a contract move. That deferral is argued at the dataclass.
 
 
 def test_neko_extension_cap_config_loads_and_is_ignored(tmp_path, monkeypatch):

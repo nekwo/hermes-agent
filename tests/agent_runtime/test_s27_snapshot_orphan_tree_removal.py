@@ -153,9 +153,17 @@ REMOVED_SNAPSHOT_IMPORTS = (
 #: both call sites. ``_default_persona_session_db`` is still live — the scope
 #: calls it — so it stays reachable from the walk below; it is simply no longer
 #: part of this module's EXTERNAL surface, and the scope that replaced it is.
+#: STAGE 6 (2026-08-22): ``write_snapshot`` LEFT this floor, and it left in the
+#: manner the paragraph above demands — said here, not patched silently. The
+#: consumer went first: its one production caller was
+#: ``read_model.resolve_snapshot_frame``, and the ``snapshot.json`` boot cache it
+#: wrote had already lost its launcher reader at MC-7 / P11. With the read-model
+#: lane retired, ``write_snapshot`` had no caller of any kind and was deleted from
+#: ``snapshot.py`` — so leaving it in this floor would have asserted a name the
+#: module does not define, which is the opposite failure to the one the floor
+#: guards. FOUR names now, not five.
 VERIFIED_EXTERNAL_SURFACE = (
     "build_snapshot",
-    "write_snapshot",
     "_parity_envelope",
     "persona_session_db_scope",
     "persona_instance_detail_for_id",

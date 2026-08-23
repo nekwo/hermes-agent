@@ -84,6 +84,34 @@ FALLBACK_DELTA_PATCHES = False
 
 @dataclass(slots=True)
 class ReadModelConfig:
+    # DEAD LANE, READERLESS SINCE STAGE 6 (2026-08-22). The three fields below
+    # governed the ``read_model.db`` cache: ``enabled`` gated the write,
+    # ``serve_snapshot_from_db`` the read, ``db_filename`` named the file. The
+    # module they configured (``agent_runtime/read_model.py``), its projector,
+    # its schema, and the two CLI verbs that were their only production callers
+    # are all deleted. Nothing in this repo reads any of the three any more.
+    #
+    # THEY ARE STILL HERE, AND THAT IS A DEFERRAL RATHER THAN A KEEP. Deleting
+    # them is not the grep-clean edit the retirement plan assumed: this dataclass
+    # reaches the WIRE. ``migrations.effective_config_summary`` does
+    # ``asdict(cfg)`` straight into ``snapshot.parity``-adjacent
+    # ``core.runtime_config``, so all three names are bytes in every snapshot
+    # core — verified in six committed goldens under
+    # ``tests/fixtures/stream_frames/``, each of which the EterniaLauncher repo
+    # commits a BYTE-IDENTICAL copy of under ``test/fixtures/harness_stream/``.
+    # Removing them therefore edits the emitted frame, which by this repo's own
+    # rule rides a ``SNAPSHOT_CONTRACT_VERSION`` bump (the S57 precedent:
+    # twenty-nine reader-less ``runtime_config`` scalars went at contract
+    # 47 -> 48) plus a lockstep regeneration of both repos' manifests.
+    #
+    # No launcher code PARSES them — ``mission_control_snapshot.dart`` reads only
+    # the four runtime-default scalars out of ``runtime_config`` and
+    # ``mission_control_bridge.dart`` forwards the block untouched — so the cut is
+    # safe on behaviour and blocked only on the golden lockstep. Whoever takes it
+    # needs the contract bump and both manifests in one cross-stack change.
+    #
+    # ``delta_patches`` below is NOT part of this: it gates the LIVE S7-A patch
+    # producer and its YAML key path is cross-repo wire in its own right.
     enabled: bool = False
     serve_snapshot_from_db: bool = True
     db_filename: str = "read_model.db"

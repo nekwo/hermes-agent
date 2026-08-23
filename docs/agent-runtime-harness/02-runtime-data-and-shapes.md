@@ -45,10 +45,15 @@ Directories present in the live root, with the module that owns each:
 
 `paths.py` also declares `runs/`, `runtime_instances/`, `incidents/` and
 `prompt_observability_archive/`. None exist in the live root — they are created
-on first write, and a store with no such write has no directory. Two more path
-helpers resolve to files absent live for a different reason (see Open rows):
-`paths.snapshot_path()` → `snapshot.json` (`paths.py:275`) and
-`ReadModel._read_model_db_path()` → `read_model.db` (`read_model.py:434`).
+on first write, and a store with no such write has no directory.
+
+One more path helper resolves to a file that can no longer exist:
+`paths.snapshot_path()` → `snapshot.json` (`paths.py:275`). Its writer was
+deleted at Stage 6 (2026-08-22) with the read-model lane, so the helper now
+answers *where a legacy copy would be* rather than where a live file is. It is
+kept deliberately: without it, a store that ran `harness snapshot` before the cut
+has an orphan nothing in the tree can name. `read_model.db` was the other such
+file and has no helper at all any more — `ReadModel` is deleted.
 
 ### mission_chat_turns
 
@@ -78,12 +83,15 @@ session files, 234 locks, beside 18 persona instances and 19 prompt contexts.
 `parity.events_watermark` (`agent_runtime/parity.py:233`) reads it via `stat`, in
 O(1), without scanning the log.
 
-**An unreadable log yields `None`, never `0`** (`parity.py:244-252`). Zero is the
+**An unreadable log yields `None`, never `0`** (`parity.py:244-256`). Zero is the
 single most damaging value the field can carry: every reader treats it as a real
 position, so a swallowed stat error replays the entire log as fresh activity.
-`read_model.snapshot_watermark` (`read_model.py:53`) enforces the same rule on
-the write side — the frame's own watermark when it has one, a freshly measured
-`events_watermark()` when it does not, and never `0`.
+
+`read_model.snapshot_watermark` used to restate this rule on the write side and
+was deleted with its module at Stage 6 (2026-08-22). The rule did not go with it
+— it is a property of the producer, and `parity.events_watermark`'s docstring is
+now its only home, which is why that docstring states the argument in full rather
+than pointing at a neighbour.
 
 ### Rotation preserves logical offsets
 
@@ -209,7 +217,9 @@ the cold boot (pid 30588) and `walk_ms=769 tool_visibility_ms=26` warm
 
 `agent_runtime/core_cache.py` persists the built core so the next process pays
 **validation** instead of reconstruction. Its module docstring is the design
-authority; this is the distillation. **It is not the read model below.**
+authority; this is the distillation. **The directory name is a historical trap:
+it is not, and never was, the `read_model.db` described below** — that lane is
+retired and this one is live.
 
 **A pair is a core plus the fingerprint of every input the build read.** The
 on-disk unit is a trio inside a generation directory: `core.json`,
@@ -286,29 +296,67 @@ default and is **not** cached, so a transient failure self-heals
 
 ---
 
-## The read model — `read_model.db`
+## The read model — `read_model.db` — RETIRED 2026-08-22
 
-`agent_runtime/read_model.py` + `read_model_schema.sql`: a SQLite database in
-`store_root()`, WAL journal, holding the whole compact frame as one
-`projections_misc` blob plus two row tables (`agent_instances`,
-`operator_channels`). `READ_MODEL_SCHEMA_VERSION = 3`; `read_projection` slices
-the blob rather than reading per-section rows — version 3's change
-(`read_model.py:19-31`).
+**There is no second cache of the snapshot core.** `serve_read_model/` above is
+the only one. This section is history, kept because the lane's name still appears
+on disk, in a live config file, and in six committed wire goldens.
 
-`FrameSource` (`read_model.py:34`) names where a served frame came from —
-`built` / `cache` / `cache_miss_rebuilt` — and `resolve_snapshot_frame` (`:153`)
-is the one place the cache preference is acted on. A never-populated database
-returns `None`, not `{}` (`render_snapshot`, `:262`). `agent_runtime/projector.py`
-survives as an operator-invoked cache warmer only: `Projector.full_rebuild()`
-behind `hermes harness rebuild-read-model`.
+**What it was.** `agent_runtime/read_model.py` + `read_model_schema.sql`: a
+SQLite database in `store_root()`, WAL journal, holding the whole compact frame
+as one `projections_misc` blob plus two row tables (`agent_instances`,
+`operator_channels`), at `READ_MODEL_SCHEMA_VERSION = 3`. A `FrameSource` enum
+named where a served frame came from (`built` / `cache` / `cache_miss_rebuilt`),
+`render_snapshot()` returned `None` rather than a lying `{}`, and
+`agent_runtime/projector.py` warmed it through `Projector.full_rebuild()` behind
+`hermes harness rebuild-read-model`. It was complete, careful work.
 
-`ReadModelConfig.enabled` defaults to `False` (`runtime_config.py:87`), resolved
-by the single reader `read_model_enabled()` (`read_model.py:107`). The live root
-`config.yaml` sets `enabled: true` and `delta_patches: true`.
+**Why it went.** Four findings, in the order that decided it:
 
-**`serve_read_model/` is not this.** The two are independent caches of the same
-object with different keys — a stat fingerprint versus a stored watermark — and
-only the core cache is on the serve path (see Open rows).
+1. `write_snapshot()` had exactly **one** non-test caller —
+   `read_model.resolve_snapshot_frame` — reached only from the `harness snapshot`
+   CLI verb. The serve path bypassed it by design and said so.
+2. `Projector.full_rebuild()` and `write_snapshot()`'s gated
+   `ReadModel().apply_full_rebuild(snapshot)` were **two production writers of
+   the same database over the same `build_snapshot()` output**, one gated on
+   `read_model_enabled()` and one not.
+3. `resolve_snapshot_frame` **built the full core first** and only then decided
+   whether to serve the cached frame, so a cache HIT cost one full build plus a
+   database read. The lane could not save work as shaped.
+4. `write_snapshot`'s other output, the `snapshot.json` boot cache, had lost its
+   consumer: the launcher's cold-paint reader was retired at MC-7 / P11
+   (`mission_control_snapshot.dart:187`), and no reader remains in the launcher's
+   `lib/`.
+
+Neither `read_model.db` nor `snapshot.json` existed in the live store root
+(verified 2026-08-22) — on a machine that boots the launcher and never runs
+`harness snapshot`, both stayed absent whatever the config said. Outcome (2),
+**retire**, was the operator ruling; outcome (1), wiring it to the serve path,
+would have added a second validity authority beside the fingerprint, which
+`core_cache.py:20-40` argues against for the core cache itself.
+
+**What was deleted:** `read_model.py`, `projector.py`, `read_model_schema.sql`,
+`snapshot.write_snapshot` (and its temp-file sweeper), and the two CLI verbs
+`harness rebuild-read-model` / `harness read`. `harness snapshot` calls
+`build_snapshot()` directly and still stamps `parity.frame_source` — now always
+`"built"`, because removing a key from the envelope is a contract change and the
+additive rule cuts one way only.
+
+**What survives, and why each one is not an oversight:**
+
+| Survivor | Why |
+| --- | --- |
+| `serve_read_model/` (`core_cache.py:244`) | the LIVE core cache. Never was the read model; the rename that would have de-collided the name is cancelled, because with the other one gone there is nothing left to collide with |
+| `read_model.delta_patches` (`runtime_config.py`) | gates the live S7-A patch producer. Its YAML key path is cross-repo wire — the launcher's base seed writes it |
+| `ReadModelConfig.enabled` / `.serve_snapshot_from_db` / `.db_filename` | reader-less, but on the snapshot WIRE via `asdict(cfg)` → `core.runtime_config`, in six goldens the launcher mirrors byte-for-byte. Deleting them is a contract bump plus a two-repo manifest change, not a grep-clean cut — see the Open row |
+| `paths.snapshot_path()` | the one authority for where a legacy `snapshot.json` lives, so an orphan left by an older build is still nameable |
+| `core_cache._EXCLUDED_STORE_ENTRIES`' `read_model.db` trio | a store written before the cut still holds those files; dropping the exclusion would fold them into that store's fingerprint |
+
+**Naming trap, still live.** `CORE_CACHE_DIRNAME = "serve_read_model"` is the
+core cache's on-disk home and has never had anything to do with the database
+above. Anyone reading this domain cold meets the phrase "read model" in a
+directory name whose contents are `core.json` / `sidecar.json` / `entries.json`.
+The warning outlives the module it used to disambiguate from.
 
 ---
 
@@ -370,19 +418,31 @@ log, 13:45–13:46). The `events` section is not the problem; the two walks are.
   (prewarm, generation 1, pid 30588). Every build re-projects the whole store;
   RD3's incremental lane was retired 2026-08-01 with no successor.
   → [planned/incremental-projection.md](planned/incremental-projection.md)
-- **2026-08-22 — `read_model.db` is enabled and never written.** The live root
-  config sets `read_model.enabled: true`, but `write_snapshot()` has exactly one
-  non-test caller (`read_model.py:167`, reached only from `harness snapshot`),
-  so neither `read_model.db` nor `snapshot.json` exists in the live store root.
-  → [planned/read-model-db-serve-population.md](planned/read-model-db-serve-population.md)
-- **2026-08-22 — no push invalidation.** RD4's change feed is absent from the
-  codebase; consumers still poll.
+- **2026-08-22 — CLOSED BY RETIREMENT: `read_model.db` was enabled and never
+  written.** The live root config set `read_model.enabled: true` while
+  `write_snapshot()` had exactly one non-test caller, reached only from
+  `harness snapshot`, so neither `read_model.db` nor `snapshot.json` existed in
+  the live store root. Ruled outcome (2), **retire**, and executed as Stage 6 of
+  [planned/duplicate-implementation-retirement.md](planned/duplicate-implementation-retirement.md);
+  the ruling file itself is deleted and its findings are folded into "The read
+  model — RETIRED" above. **One residue is still open and is not this row:** the
+  live operator `config.yaml` at `X:\Eternia\.hermes\` still carries
+  `read_model.enabled: true`, which is now an advertised-but-inert control. The
+  parser ignores unknown and retired keys by construction (`.get` per key), so it
+  costs nothing at boot — but this codebase has an explicit rule against inert
+  controls, and the line wants deleting by whoever owns that file.
+- **2026-08-22 — RD4's push invalidation is still absent.** No change feed in the
+  codebase; consumers poll. Unaffected by Stage 6 — the question is about the
+  LIVE core-cache lane, not the retired database.
   → [planned/read-model-change-feed.md](planned/read-model-change-feed.md)
-- **2026-08-22 — a schema bump clears the database.** There is no forward-only
-  migration lane and no `ReadModelSchemaTooNew`.
+- **2026-08-22 — MOOT: a schema bump clears the database.** RD6's forward-only
+  migration lane and `ReadModelSchemaTooNew` were never built, and the schema
+  they would have migrated is deleted. The planned file is left in place as the
+  record of a design that had no subject; nothing here is actionable.
   → [planned/read-model-schema-migrations.md](planned/read-model-schema-migrations.md)
-- **2026-08-22 — no certification gates.** The soak test, crash drill and
-  production-envelope entry RD8 specified do not exist.
+- **2026-08-22 — MOOT: no certification gates.** RD8's soak test, crash drill and
+  production-envelope entry were specified for the retired lane. Same disposition
+  as the row above.
   → [planned/read-model-certification-gates.md](planned/read-model-certification-gates.md)
 
 ---
@@ -405,8 +465,9 @@ against current code in this pass:
 
 - [archive/2026-08-22-pre-consolidation/05-runtime-data-enterprise-storage.md](archive/2026-08-22-pre-consolidation/05-runtime-data-enterprise-storage.md)
   — primary. Its SQLite DDL still creates `goals` / `runs` / `proofs` /
-  `incidents`; those tables were removed with the mission lane and are now
-  explicitly `DROP TABLE IF EXISTS`-ed on every connect (`read_model.py:330`).
+  `incidents`; those tables were removed with the mission lane, were then
+  explicitly `DROP TABLE IF EXISTS`-ed on every connect, and finally went with
+  the whole database at Stage 6 (2026-08-22).
   Its RD7 `(segment_seq, byte)` segmentation proposal was **not** built as
   specified — `event_rotation.py`'s manifest scheme shipped instead. Its header
   claim that the "NDJSON change feed … is live and current" is false.

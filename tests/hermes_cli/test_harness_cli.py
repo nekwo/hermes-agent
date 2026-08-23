@@ -492,7 +492,12 @@ def test_harness_cli_init_status_observe_snapshot_e2e(tmp_path, monkeypatch, cap
         assert args.func(args) == 0
 
     assert capsys.readouterr().out
-    assert (tmp_path / "runtime" / "snapshot.json").exists()
+    # Stage 6 (duplicate-implementation retirement): `harness snapshot` no
+    # longer writes ANY store state — write_snapshot and the snapshot.json
+    # boot cache went with the read_model.db lane (the launcher's cold-paint
+    # reader was retired at MC-7/P11). The inverse of the old assertion is
+    # the contract now.
+    assert not (tmp_path / "runtime" / "snapshot.json").exists()
 
 
 def _seed_rebind_fixture(tmp_path, monkeypatch):

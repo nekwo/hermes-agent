@@ -51,7 +51,7 @@ unit, published by replacing `live.json`).
 The archived plan's final step gates on ten consecutive green runs *of the gates
 above it*. That ordering stands, and one more precondition sits under all of it:
 gates certifying a lane that nothing populates certify nothing. The ruling in
-[read-model-db-serve-population.md](read-model-db-serve-population.md) comes
+`read-model-db-serve-population.md` (deleted; ruled RETIRE 2026-08-22) came
 first.
 
 ## The gate to open this

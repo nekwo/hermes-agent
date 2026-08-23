@@ -156,11 +156,16 @@ def test_the_package_still_imports_end_to_end():
     import agent_runtime
 
     importlib.reload(agent_runtime)
+    # ``agent_runtime.projector`` stood in this list until Stage 6 (2026-08-22)
+    # deleted it with the whole read_model.db lane. It is REPLACED rather than
+    # dropped: the point of the list is that a deletion must not strand the
+    # package import, and the module that most recently proved that is the one
+    # whose deletion this file did not make.
     for dotted in (
         "agent_runtime.snapshot",
         "agent_runtime.status",
         "agent_runtime.observability",
         "agent_runtime.checkpoint",
-        "agent_runtime.projector",
+        "agent_runtime.core_cache",
     ):
         assert importlib.import_module(dotted) is not None

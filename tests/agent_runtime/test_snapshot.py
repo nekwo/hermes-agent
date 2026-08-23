@@ -9,7 +9,6 @@ Task = SimpleNamespace
 from agent_runtime.snapshot import (
     SNAPSHOT_CONTRACT_VERSION,
     build_snapshot,
-    write_snapshot,
 )
 from agent_runtime.states import TaskState
 from agent_runtime.store import TaskStore
@@ -41,11 +40,29 @@ def test_snapshot_stage_projections_are_empty_after_graph_removal(isolate_agent_
         assert key not in snapshot
 
 
-def test_write_snapshot_remains_importable_and_persists(isolate_agent_runtime_root) -> None:
-    result = write_snapshot(build_snapshot())
+def test_building_a_snapshot_writes_no_store_state(isolate_agent_runtime_root) -> None:
+    """The INVERSE of the test that stood here, and the stronger claim.
 
-    assert result["parity"]["contract_version"] == SNAPSHOT_CONTRACT_VERSION
-    assert paths.snapshot_path().exists()
+    ``test_write_snapshot_remains_importable_and_persists`` asserted that
+    ``write_snapshot(build_snapshot())`` left a ``snapshot.json`` behind. Stage 6
+    (2026-08-22) deleted ``write_snapshot`` — its one production caller was
+    inside the retired read-model lane, and the launcher's cold-paint reader of
+    that file went at MC-7 / P11 — so the boot cache now has no writer at all.
+
+    That is asserted as a PROPERTY of the builder rather than left implicit:
+    building a frame must not touch the store root, because the serve lane builds
+    on every poll and a build with a write side is a build that cannot be made
+    concurrent. ``paths.snapshot_path()`` is still the authority for where a
+    legacy copy would live, which is what makes the check expressible.
+    """
+
+    snapshot = build_snapshot()
+
+    assert snapshot["parity"]["contract_version"] == SNAPSHOT_CONTRACT_VERSION
+    assert not paths.snapshot_path().exists(), (
+        "build_snapshot wrote the retired snapshot.json boot cache; nothing in "
+        "this repo may produce that file since Stage 6"
+    )
 
 
 def test_snapshot_carries_the_running_work_section(isolate_agent_runtime_root) -> None:

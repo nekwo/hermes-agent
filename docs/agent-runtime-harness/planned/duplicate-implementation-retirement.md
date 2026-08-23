@@ -1,8 +1,10 @@
 # Planned — duplicate-implementation retirement
 
-**Status:** audit complete, nothing executed. **Audited:** 2026-08-22 against
-HEAD `b2eb1a15db` (working tree clean). **Owner domain:** spans 01/02/08; this
-file is the delete schedule, the domain docs stay the truth of what exists.
+**Status:** audit complete. **Stage 2 renamed, Stage 4 folded, Stage 6 EXECUTED
+(this commit), Stage 7 CANCELLED by the Stage 6 ruling.** Stages 1, 3 and 5
+remain. **Audited:** 2026-08-22 against HEAD `b2eb1a15db` (working tree clean).
+**Owner domain:** spans 01/02/08; this file is the delete schedule, the domain
+docs stay the truth of what exists.
 
 Scope ruling for this audit: **fork-owned code only.** The fork boundary is the
 doc 17 §2 path filter — `agent/`, `agent_runtime/`, `hermes_cli/harness*` —
@@ -14,7 +16,8 @@ report-only and appears here only as an acquittal reason.
 
 This plan **links, and does not duplicate**, three sibling planned files that
 already carry half the docket:
-[read-model-db-serve-population.md](read-model-db-serve-population.md),
+`read-model-db-serve-population.md` (DELETED — its ruling was executed as
+Stage 6 and its residual truth folded into doc 02's retired-lane section),
 [task-bound-vocabulary-retirement.md](task-bound-vocabulary-retirement.md),
 [writerless-goal-lane-residue.md](writerless-goal-lane-residue.md). Where a
 stage below depends on one of their rulings, the stage says so instead of
@@ -158,7 +161,35 @@ the evidence, what breaks, the kill proof, and the class of decision it needs.
 - **FORK-OWNED:** `hermes_cli/harness.py` (doc 17 §2 filter). The launcher half
   is out of this repo and is the gate, not the work.
 
-### Stage 6 — the `read_model.db` lane: built, enabled, and serving no one
+### Stage 6 — the `read_model.db` lane: built, enabled, and serving no one — **EXECUTED (this commit)**
+
+> **EXECUTED, this commit.** Operator ruled outcome (2), **retire**. Deleted:
+> `agent_runtime/read_model.py`, `agent_runtime/projector.py`,
+> `agent_runtime/read_model_schema.sql`, `snapshot.write_snapshot` (plus its
+> orphaned `_sweep_stale_snapshot_tmp_files` / `_STALE_SNAPSHOT_TMP_AGE_SECONDS`),
+> the two CLI verbs and their handlers, and four lane-only test files.
+> `_cmd_snapshot` collapsed to `build_snapshot()` and keeps `frame_source`,
+> always `"built"`. Tombstoned as wave `s74` (two `MODULE` rows, three `ATTR`
+> rows on `agent_runtime.snapshot`); the S46 rows for the same modules are now
+> covered by the `MODULE` rows via the S66 meta-invariant.
+>
+> **ONE SUB-ITEM DEFERRED, and it is a correction to the CORRECTION below.**
+> The plan treated `ReadModelConfig`'s dead-lane fields — `enabled`,
+> `serve_snapshot_from_db`, `db_filename` — as a clean delete once
+> `delta_patches` was protected. They are not. `migrations.effective_config_summary`
+> does `asdict(cfg)` into `core.runtime_config`, so all three names are **bytes on
+> the snapshot wire**: they appear in six committed goldens under
+> `tests/fixtures/stream_frames/`, and the EterniaLauncher repo commits a
+> byte-identical copy of each under `test/fixtures/harness_stream/`. Removing them
+> edits the emitted frame, which by this repo's own rule rides a
+> `SNAPSHOT_CONTRACT_VERSION` bump (S57 precedent: 29 reader-less
+> `runtime_config` scalars went at contract 47 → 48) plus a lockstep manifest
+> regeneration in **both** repos. No launcher code parses the three — the Dart
+> snapshot mapper reads only the four runtime-default scalars out of
+> `runtime_config`, and the bridge forwards the block untouched — so the cut is
+> safe on behaviour and blocked only on the golden lockstep. The fields stay,
+> carrying the argument at the dataclass, until someone takes that cross-stack
+> change deliberately.
 
 - **WHAT:** the whole RD2 shell — `agent_runtime/read_model.py`,
   `agent_runtime/read_model_schema.sql` (sole reference `read_model.py:339`),
@@ -197,7 +228,7 @@ the evidence, what breaks, the kill proof, and the class of decision it needs.
   additive wire rule, no bump); `snapshot_watermark()`'s never-`0` rule
   (doc 02 invariant 1) must survive wherever its callers land.
 - **KILL PROOF:** the retirement gate already written in
-  [read-model-db-serve-population.md](read-model-db-serve-population.md) —
+  the sibling `read-model-db-serve-population.md` (now DELETED; ruling executed) —
   grep-clean including both CLI verbs and the test files — plus `MODULE`
   tombstone rows for `agent_runtime.read_model` and `agent_runtime.projector`
   in `test_tombstone_registry.py` (the S46 precedent row pattern).
@@ -221,7 +252,23 @@ the evidence, what breaks, the kill proof, and the class of decision it needs.
 - **FORK-OWNED:** every named file is under `agent_runtime/` or
   `hermes_cli/harness*` (doc 03 invariant 8; doc 17 §2).
 
-### Stage 7 — `serve_read_model/` dirname: contingent rename, sequenced after Stage 6
+### Stage 7 — `serve_read_model/` dirname: contingent rename — **CANCELLED**
+
+> **CANCELLED by the Stage 6 ruling (this commit).** This stage was explicitly
+> contingent: it runs only under outcomes (1) or (3), where two live "read
+> model"s would coexist. Outcome (2) was ruled, so `serve_read_model/` owns the
+> name unambiguously and the rename is churn that would orphan a live cache
+> directory and buy one demote-priced rebuild (11,980 ms vs 911 ms, open row 2)
+> to fix a collision that no longer exists. `CORE_CACHE_DIRNAME` is pinned
+> unchanged by
+> `tests/agent_runtime/test_s46_incremental_projection_lane_removal.py`, so a
+> later reader who lands on Stage 6 does not finish the job it looks like half
+> of. The naming-trap WARNING stays in doc 02 — the trap is that the directory
+> is named after something it is not, and deleting the other thing did not make
+> the name descriptive.
+>
+> The original argument is preserved below as the record of why the rename was
+> proposed and what it would have cost.
 
 - **WHAT:** `CORE_CACHE_DIRNAME = "serve_read_model"` (`core_cache.py:244`) —
   the core cache's on-disk home named after the unrelated read model.
@@ -316,7 +363,9 @@ Cleared with evidence, so nobody re-audits them.
 ## Operator rulings needed
 
 1. **The `read_model.db` lane's fate** (Stage 6) — the ruling itself lives in
-   [read-model-db-serve-population.md](read-model-db-serve-population.md).
+   `read-model-db-serve-population.md`. **RULED and EXECUTED (2026-08-22):**
+   outcome (2), retire. That file is deleted; see Stage 6's EXECUTED note and
+   doc 02's "The read model — RETIRED" section.
    This audit adds: the launcher-side check its "Note for whoever takes this"
    asked for is now done — the `snapshot.json` cold-paint lane was retired at
    MC-7/P11 and no launcher reader remains — and the cache path builds the full

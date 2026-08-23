@@ -853,25 +853,35 @@ def _office_actor_unpublished(actor: Any) -> bool | None:
 # What an office patch INVALIDATES on disk: nothing — and that is a measured
 # fact about a lane NOBODY owns, not a choice this leg made.
 #
-# The launcher paints from a disk-cached snapshot at boot before authoritative
-# truth arrives. That cache is ``paths.snapshot_path()`` (``snapshot.json`` in
-# the store root), and the question "what happens to it when a patch folds" has
-# a flat answer: it is not touched, it cannot be touched from here, and it was
-# already going stale before this leg existed.
+# The launcher used to paint from a disk-cached snapshot at boot before
+# authoritative truth arrived. That cache was ``paths.snapshot_path()``
+# (``snapshot.json`` in the store root), and the question "what happens to it
+# when a patch folds" had a flat answer: it is not touched, it cannot be touched
+# from here, and it was already going stale before this leg existed.
 #
-# * The ONLY writer is :func:`snapshot.write_snapshot`, reached from exactly one
-#   production call site — ``read_model.resolve_snapshot_frame``, i.e. the
-#   ``harness snapshot`` CLI verb. The stream lane calls ``build_snapshot()``
-#   and never ``write_snapshot``; a ``harness snapshot`` answered from serve's
-#   20-second read cache does not write either. EG-3.1 did NOT change this: the
-#   persisted read-model core serve now writes and reads lives somewhere else
-#   entirely (under ``<store_root>/serve_read_model/``, in a generation directory
-#   that ``agent_runtime.core_cache`` publishes through a pointer file — MCF-21.
-#   The filenames are deliberately not respelled here: ``core_cache.core_path``
-#   and ``sidecar_path`` are their one authority, and a second copy of a layout
-#   is a thing that goes stale), deliberately not this one — ``snapshot.json``
-#   has a consumer of its own in the launcher's cold-paint lane, and one file
-#   with two writers of different provenance could not say which produced it.
+# BOTH ENDS OF THAT LANE ARE NOW RETIRED — the launcher's reader at MC-7 / P11,
+# this repo's writer at Stage 6 (2026-08-22) — so the paragraphs below are kept
+# as the RECORD of a question that was asked and answered, not as a description
+# of live behaviour. They are worth keeping because the reasoning is what
+# retired the lane: a cache with a writer, no reader, and no staleness bound is
+# not a fast path, and the way that was established is by walking the writer set
+# rather than by trusting the config key that advertised it.
+#
+# * There is NO writer at all any more, which is stronger than what this note
+#   used to claim and reached by the same reasoning. The only writer was
+#   :func:`snapshot.write_snapshot`, reached from exactly one production call
+#   site — ``read_model.resolve_snapshot_frame``, i.e. the ``harness snapshot``
+#   CLI verb. Stage 6 (2026-08-22) deleted both, because the CONSUMER had already
+#   left: the launcher's cold-paint reader was retired at MC-7 / P11. So the file
+#   is now a legacy artifact of stores written before that cut, and nothing in
+#   this repo produces it. The stream lane called ``build_snapshot()`` and never
+#   ``write_snapshot`` throughout, and EG-3.1 did not change that: the persisted
+#   core serve writes and reads lives somewhere else entirely (under
+#   ``<store_root>/serve_read_model/``, in a generation directory that
+#   ``agent_runtime.core_cache`` publishes through a pointer file — MCF-21. The
+#   filenames are deliberately not respelled here: ``core_cache.core_path`` and
+#   ``sidecar_path`` are their one authority, and a second copy of a layout is a
+#   thing that goes stale).
 # * The launcher has NO writer at all — it only reads the file — and a folded
 #   core never reaches it (``MissionReadModel.commitFold`` mutates memory only).
 #   The cache is also never used as a fold BASE, so it can neither corrupt nor
@@ -890,15 +900,15 @@ def _office_actor_unpublished(actor: Any) -> bool | None:
 # cross-process file mutation on a drag's hot path, and deleting it would take
 # the boot-paint fast path away from every surface to fix one section of it.
 #
-# WHAT REMAINS OPEN, and it is not this slice's to close: the cached boot lane
-# has no defined staleness bound and no receipt saying which it painted. The
-# fix is one of (a) a freshness gate on the cached read — the file's
+# WHAT WAS OPEN HERE, and how it closed: the cached boot lane had no defined
+# staleness bound and no receipt saying which frame it painted. The two fixes
+# offered were (a) a freshness gate on the cached read — the file's
 # ``generated_at`` is already in it — or (b) a boot receipt naming the cache's
-# age, the same shape that made the READ leg verifiable. Whoever owns the
-# cached-boot lane must take it; nothing in the read, write, or push leg can.
-# Note the office is the one section where a client CAN already detect its own
-# staleness unaided: ``runtime.office.get`` puts the actor ``revision`` on every
-# item, so a cached canvas can be diffed against server truth for ~2.5 KB.
+# age. Neither was taken, and neither is needed now: the lane itself was retired
+# from both ends rather than bounded, which is the third answer this note did not
+# list. Note the office is the one section where a client can already detect its
+# own staleness unaided: ``runtime.office.get`` puts the actor ``revision`` on
+# every item, so a cached canvas can be diffed against server truth for ~2.5 KB.
 
 OFFICE_ACTOR_ENTITY = "office_actor"
 

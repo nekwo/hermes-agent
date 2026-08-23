@@ -408,12 +408,21 @@ MAX_SKILL_ENTRIES_PER_ROOT = 20_000
 #: RESIDUAL, stated rather than discovered later. FIVE names below are still
 #: literals because no writer module owns them as a constant: ``locks`` and
 #: ``snapshot.json`` are spelled inline inside their own path helpers in
-#: ``agent_runtime.paths``, and the ``read_model.db`` trio is a CONFIGURABLE
+#: ``agent_runtime.paths``, and the ``read_model.db`` trio was a CONFIGURABLE
 #: default (``runtime_config``'s ``read_model.db_filename``) — an install that
-#: renames it re-opens exactly the hole this comment block is about, one config
+#: renamed it re-opened exactly the hole this comment block is about, one config
 #: key away. Both are the same class as the drain defect and neither is fixed
 #: here; the gate below can only prove the names a WRITER produces, so it cannot
 #: see them either.
+#:
+#: STAGE 6 (2026-08-22) narrowed the read-model half of that residual without
+#: closing it. The lane that WROTE ``read_model.db`` is retired, so no install
+#: can produce the file any more and the config key that renamed it is dead —
+#: but the three literals stay in the set below, because a root that ran
+#: ``harness rebuild-read-model`` before the cut still has the trio on disk, and
+#: dropping the exclusion would fold those leftovers into the fingerprint of
+#: every such store. They are excluded as LEGACY ARTIFACTS now rather than as
+#: live outputs; the count is unchanged at five.
 #:
 #: (That count read "Four" until MC-8 and was simply wrong — ``locks`` plus
 #: ``snapshot.json`` plus a trio is five. Corrected in passing rather than left,
@@ -451,8 +460,11 @@ _EXCLUDED_STORE_ENTRIES = frozenset(
         # Lock files are created and removed INSIDE a build; a lock in the stat
         # set would make a build's own locking flip the key it just wrote.
         "locks",
-        # ``write_snapshot``'s boot cache and the projector's read model are
-        # OUTPUTS of the projection, never inputs to it.
+        # ``write_snapshot``'s boot cache and the projector's read model were
+        # OUTPUTS of the projection, never inputs to it. Stage 6 (2026-08-22)
+        # deleted both writers; the names stay excluded because a store written
+        # before that cut still holds the files (see the residual paragraph
+        # above), and an excluded name that nothing produces costs nothing.
         "snapshot.json",
         "read_model.db",
         "read_model.db-wal",
@@ -2572,8 +2584,10 @@ def label_core(core: dict, *, source: str, stale: bool) -> dict:
     """Stamp provenance onto the core's parity envelope, in place.
 
     ``parity`` is the frame's self-describing provenance block, and
-    ``read_model._resolved`` already stamps ``frame_source`` there for exactly
-    this reason — one location, additive, no contract bump.
+    ``frame_source`` is already stamped there for exactly this reason — one
+    location, additive, no contract bump. (The stamp used to live in
+    ``read_model._resolved``; Stage 6 retired that module and moved the one-line
+    stamp into ``runtime_commands._cmd_snapshot``, where the CLI frame is built.)
 
     ``core_source`` is emitted ONLY when a persisted core was available to
     decide between, which is why the committed fixtures do not move: a build in

@@ -470,27 +470,43 @@ def _cmd_persona_chat_history(args) -> int:
     return 0 if data.get("ok") is not False else 2
 
 
+#: The ONE value ``parity.frame_source`` can now carry, and the reason it still
+#: rides the envelope at all.
+#:
+#: STAGE 6 (2026-08-22) retired the ``read_model.db`` cache lane, so the three
+#: sources this field used to distinguish — ``built`` / ``cache`` /
+#: ``cache_miss_rebuilt`` — collapse to one: every frame is BUILT. The key is
+#: kept because removing a key from the envelope is a contract change, and the
+#: additive wire rule cuts only one way; a consumer that branches on
+#: ``frame_source`` keeps reading the value it always read on this path.
+#:
+#: It is NOT a constant masquerading as a measurement: the serve lane stamps its
+#: own provenance onto the same envelope through ``core_cache.label_core``
+#: (``core_source`` / ``core_stale``), which is where "where did this core come
+#: from" is answered for the path that actually has more than one answer.
+_SNAPSHOT_FRAME_SOURCE = "built"
+
+
 def _cmd_snapshot(args) -> int:
     # This module is exec'd into harness.py's globals — every new name is a
     # function-local import.
-    from agent_runtime.read_model import prefer_cached_snapshot, resolve_snapshot_frame
+    from agent_runtime.snapshot import build_snapshot
 
-    # RD-H6 item 1: this used to carry its own copy of the ``read_model.enabled``
-    # getattr ladder, so ``harness snapshot``'s cache preference could disagree
-    # with the WRITE-side gate in ``snapshot.write_snapshot`` for the same key —
-    # and a disagreement here renders as ``cache_miss_rebuilt``, i.e. as a cold
-    # cache rather than as a config read at two scopes. One resolver now answers
-    # it (``read_model.read_model_enabled`` / ``prefer_cached_snapshot``).
-    prefer_cache = prefer_cached_snapshot()
-    # The serve source (built / cache / cache_miss_rebuilt) rides the frame's
-    # parity envelope. The old branch replaced the freshly built frame with
-    # ``render_snapshot()`` unconditionally, so an unpopulated read model made
-    # ``harness snapshot --json`` print ``{}`` — an empty runtime, silently.
-    resolved = resolve_snapshot_frame(prefer_cache=prefer_cache)
+    # STAGE 6: this used to go through ``read_model.resolve_snapshot_frame``,
+    # which built the full core FIRST and only then decided whether to serve a
+    # cached frame instead — so ``FrameSource.CACHE`` cost one full build plus a
+    # database read, and the database it read was never populated on any machine
+    # that had not run this verb by hand. Straight to the builder now.
+    frame = build_snapshot()
+    parity = frame.get("parity")
+    if not isinstance(parity, dict):
+        parity = {}
+        frame["parity"] = parity
+    parity["frame_source"] = _SNAPSHOT_FRAME_SOURCE
     print(
-        emit_json(resolved.frame)
+        emit_json(frame)
         if args.json
-        else f"snapshot written (frame_source={resolved.source})"
+        else f"snapshot built (frame_source={_SNAPSHOT_FRAME_SOURCE})"
     )
     return 0
 
@@ -550,25 +566,12 @@ def _cmd_stream(args) -> int:
     return 0
 
 
-def _cmd_rebuild_read_model(args) -> int:
-    from agent_runtime.projector import Projector
-    from agent_runtime.read_model import ReadModel
-    from agent_runtime.config import load_root_runtime_config
-
-    read_model = ReadModel()
-    Projector(read_model, config=load_root_runtime_config()).full_rebuild()
-    watermark = read_model.projection_watermark("snapshot")
-    payload = {"ok": True, "watermark": watermark, "db_path": str(read_model.db_path)}
-    print(emit_json(payload) if args.json else f"read model rebuilt: {read_model.db_path}")
-    return 0
-
-
-def _cmd_read_projection(args) -> int:
-    from agent_runtime.read_model import ReadModel
-
-    payload = ReadModel().read_projection(args.projection, since_offset=args.since_offset)
-    print(emit_json(payload) if args.json else emit_json(payload))
-    return 0
+# STAGE 6 (2026-08-22): ``_cmd_rebuild_read_model`` and ``_cmd_read_projection``
+# stood here, the handlers behind ``harness rebuild-read-model`` and
+# ``harness read``. They were the whole production caller set of
+# ``agent_runtime/read_model.py`` and ``agent_runtime/projector.py``; both
+# modules are deleted and both verbs are unregistered in ``harness.py``. See
+# that registration site for the ruling.
 
 
 # --- `harness work` — running background work -------------------------------

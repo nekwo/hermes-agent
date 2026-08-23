@@ -1356,7 +1356,13 @@ def build_parser(parent_subparsers) -> None:
     skills.add_argument("--json", action="store_true")
     skills.set_defaults(func=_cmd_install_harness_skills)
 
-    snap = subs.add_parser("snapshot", help="Write redaction-safe snapshot.json")
+    # STAGE 6 (2026-08-22): the help text read "Write redaction-safe
+    # snapshot.json" until the boot-cache writer it named (``snapshot.write_snapshot``)
+    # was deleted with the read-model lane. This verb BUILDS a frame and prints
+    # it; it writes no store state. `--json` is the only flag it has ever had —
+    # the cache preference was resolved from config, never from argv, so there
+    # was no cache-lane flag to retire with the lane.
+    snap = subs.add_parser("snapshot", help="Build and print a redaction-safe runtime snapshot frame")
     snap.add_argument("--json", action="store_true")
     snap.set_defaults(func=_cmd_snapshot)
     stream = subs.add_parser("stream", help="Emit Mission Control hydrate/delta frames as NDJSON")
@@ -1410,14 +1416,16 @@ def build_parser(parent_subparsers) -> None:
     serve_connect.add_argument("--client", default=None, help="Client name recorded on the connection and in the service's logs (default: harness-serve-connect)")
     serve_connect.add_argument("--timeout", type=float, default=10.0, help="Socket connect/read timeout in seconds")
     serve_connect.set_defaults(func=_cmd_serve_connect)
-    rebuild_read_model = subs.add_parser("rebuild-read-model", help="Rebuild read_model.db from the current event-sourced store")
-    rebuild_read_model.add_argument("--json", action="store_true")
-    rebuild_read_model.set_defaults(func=_cmd_rebuild_read_model)
-    read_projection = subs.add_parser("read", help="Read one projection from read_model.db")
-    read_projection.add_argument("--projection", required=True)
-    read_projection.add_argument("--since-offset", type=int, default=None)
-    read_projection.add_argument("--json", action="store_true")
-    read_projection.set_defaults(func=_cmd_read_projection)
+    # STAGE 6 (duplicate-implementation retirement, 2026-08-22): the two
+    # `read_model.db` verbs stood here — `rebuild-read-model` (Projector.full_rebuild)
+    # and `read` (ReadModel.read_projection). Both were the ONLY production
+    # entries into `agent_runtime/read_model.py`, a lane that populated a
+    # database nothing on the serve path ever read: `hermes serve` builds cores
+    # through `build_snapshot()` and persists them under `<store_root>/serve_read_model/`
+    # via `core_cache.write_back()`, which is a different store with a different
+    # validity model. Operator ruling: RETIRE. Absence is pinned by
+    # `tests/agent_runtime/test_s46_incremental_projection_lane_removal.py` and
+    # by the `agent_runtime.read_model` / `.projector` MODULE tombstones.
 
     # `harness work` — the operator's view of background work in flight
     # (terminal processes, subagent delegations, in-flight chat turns, MCP

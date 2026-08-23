@@ -3287,6 +3287,50 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         "_free_floating_identity",
         scope=("agent_runtime.persona_assignments",),
     ),
+    # -- S74 — the read_model.db lane, retired whole ------------------------
+    #
+    # These two MODULE rows also DISCHARGE the S46 rows above. ``ProjectorResult``
+    # / ``LEASE_TTL_SECONDS`` are ATTR rows scoped to ``agent_runtime.projector``
+    # and the three ``Projector.*`` methods are CLASS_ATTR rows resolving through
+    # the same module; with the module deleted, ``_module_row_covers`` is what
+    # keeps them from becoming permanent passes. That is the S66 meta-invariant
+    # working as designed — a later wave taking the whole owner is the one
+    # legitimate reason a member row stops resolving, and it must be DECLARED.
+    *rows(
+        "s74",
+        "HEAD",
+        Form.MODULE,
+        "duplicate-implementation retirement Stage 6 — the read_model.db lane "
+        "was built, configured on, and served no one: write_snapshot's gated "
+        "apply_full_rebuild and Projector.full_rebuild were TWO production "
+        "writers of one database with zero production readers, both reachable "
+        "only from hand-run CLI verbs, into a resolver that built the full core "
+        "before consulting the cache. The serve path persists cores through "
+        "core_cache into serve_read_model/ instead, and the launcher's "
+        "snapshot.json cold-paint consumer was retired at MC-7/P11. Operator "
+        "ruling: RETIRE (outcome 2 of the read-model-db-serve-population "
+        "ruling). Production may not re-grow a second cache of the snapshot "
+        "core with a second validity authority beside the fingerprint",
+        "agent_runtime.read_model",
+        "agent_runtime.projector",
+    ),
+    *rows(
+        "s74",
+        "HEAD",
+        Form.ATTR,
+        "duplicate-implementation retirement Stage 6 — the snapshot.json boot "
+        "cache writer, orphaned when its only production caller "
+        "(read_model.resolve_snapshot_frame) went with the lane and its only "
+        "consumer (the launcher's cold-paint reader) had already gone at "
+        "MC-7/P11. Its temp-file sweeper went with it: the sweep ran at a "
+        "boot-cache write, and nothing stages a .snapshot_*.tmp any more. "
+        "paths.snapshot_path() deliberately SURVIVES as the one authority for "
+        "where a legacy copy lives",
+        "write_snapshot",
+        "_sweep_stale_snapshot_tmp_files",
+        "_STALE_SNAPSHOT_TMP_AGE_SECONDS",
+        scope=("agent_runtime.snapshot",),
+    ),
 )
 
 

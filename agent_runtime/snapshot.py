@@ -19,7 +19,6 @@ from typing import NamedTuple
 # Keep the local alias stable for existing monkeypatch seams/tests.
 from hermes_cli.profiles import available_profile_template_summaries as available_profile_templates
 from hermes_time import now
-from utils import atomic_json_write
 
 from . import core_cache, paths, snapshot_build_ledger
 from .board_store import BoardStore
@@ -2282,56 +2281,32 @@ def _event_summary_warnings(events) -> list[dict]:
     return warnings
 
 
-_STALE_SNAPSHOT_TMP_AGE_SECONDS = 3600.0
-
-
-def _sweep_stale_snapshot_tmp_files() -> None:
-    """Remove orphaned ``.snapshot_*.tmp`` files beside the boot cache.
-
-    ``atomic_json_write`` stages via ``tempfile.mkstemp(prefix=".snapshot_",
-    suffix=".tmp")`` in the store root; a crash between staging and
-    ``os.replace`` strands the temp file forever (live root had two, one 3MB).
-    Swept only at the next boot-cache write, age-gated so an in-flight writer's
-    fresh temp file is never touched. Best-effort: a locked/vanished file is
-    skipped, never raised.
-    """
-
-    try:
-        cutoff = time.time() - _STALE_SNAPSHOT_TMP_AGE_SECONDS
-        for tmp in paths.snapshot_path().parent.glob(".snapshot_*.tmp"):
-            try:
-                if tmp.stat().st_mtime < cutoff:
-                    tmp.unlink()
-            except OSError:
-                continue
-    except OSError:
-        return
-
-
-def write_snapshot(snapshot: dict | None = None) -> dict:
-    snapshot = snapshot or build_snapshot()
-    # Compact JSON: the boot cache is machine-read only (launcher boot decode +
-    # audits), and indent=2 inflated the 9MB-era cache by ~30%. sort_keys stays
-    # (stable diffs / byte-reproducible caches).
-    atomic_json_write(
-        paths.snapshot_path(),
-        to_jsonable(snapshot),
-        indent=None,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    _sweep_stale_snapshot_tmp_files()
-    from .read_model import read_model_enabled
-
-    if read_model_enabled():
-        from .read_model import ReadModel
-
-        # Watermark derivation lives in ``read_model.snapshot_watermark`` — this
-        # site used to fall back to ``{}`` where the projector fell back to a
-        # measured ``events_watermark()``, so one frame could be stamped
-        # caught-up-at-offset-0 or correctly depending on which writer got it.
-        ReadModel().apply_full_rebuild(snapshot)
-    return snapshot
+# STAGE 6 (duplicate-implementation retirement, 2026-08-22). Three names stood
+# here and went together, because they were one lane:
+#
+# * ``write_snapshot(snapshot)`` — the ``snapshot.json`` boot-cache writer, which
+#   also carried a ``read_model_enabled()``-gated ``ReadModel().apply_full_rebuild``
+#   call. It had exactly ONE production caller in the repo,
+#   ``read_model.resolve_snapshot_frame``, reached only from the ``harness
+#   snapshot`` CLI verb; the serve path bypassed it by design and said so.
+# * ``_sweep_stale_snapshot_tmp_files`` — swept ``.snapshot_*.tmp`` staging files
+#   left by ``atomic_json_write``. It ran ONLY at a boot-cache write, so with the
+#   writer gone it has neither a caller nor anything to sweep: nothing stages a
+#   ``.snapshot_*.tmp`` in the store root any more.
+# * ``_STALE_SNAPSHOT_TMP_AGE_SECONDS`` — that sweep's age gate.
+#
+# What made this a delete rather than a rewire: the CONSUMER had already left.
+# The launcher's cold-paint lane read ``snapshot.json`` until MC-7 / P11 retired
+# it (``mission_control_snapshot.dart:187`` records the retirement; a grep of the
+# launcher's ``lib/`` finds no reader), so the boot cache served no boot. The
+# live serve lane persists its cores somewhere else entirely — under
+# ``<store_root>/serve_read_model/`` through ``core_cache.write_back()`` — with a
+# stat fingerprint for validity rather than a stored watermark.
+#
+# ``paths.snapshot_path()`` SURVIVES this cut deliberately: it is the one
+# authority for where that file would live, it is what an operator or a migration
+# needs in order to find and remove a stale copy left by an older build, and it
+# is pinned by ``tests/agent_runtime/test_paths.py``.
 
 
 def _default_persona_session_db():

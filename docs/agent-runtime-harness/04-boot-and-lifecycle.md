@@ -371,6 +371,9 @@ deliberately, because a process on its way down must not wait on a cache fill.
 11. **A frozen `snapshot.json` / `read_model.db` mtime says nothing about liveness** — a live
     serve answers from in-memory lanes and a 20 s payload cache (`_CACHEABLE_ARGV`,
     `_READ_CACHE_MAX_AGE_SECONDS = 20.0`, `serve.py:404-408`). Check frames, not mtimes.
+    Stronger since Stage 6 (2026-08-22): both files now have NO writer at all —
+    the lane that produced them is retired — so a copy left on disk is a legacy
+    artifact and its mtime is not merely uninformative, it is meaningless.
 12. **A Windows `python.exe` under a base `Python311\` in the process tree is HEALTHY** — the venv
     trampoline's target, not a re-exec; `gateway.py::_filter_venv_launcher_stubs` (`:588`) already
     collapses the duplicate PID.

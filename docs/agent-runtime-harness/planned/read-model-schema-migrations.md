@@ -74,5 +74,6 @@ rendered envelope.
   production envelope, which is itself gated on
   [read-model-certification-gates.md](read-model-certification-gates.md).
 - Note the dependency: whether *any* of this is worth building depends on the
-  ruling in [read-model-db-serve-population.md](read-model-db-serve-population.md).
+  ruling in `read-model-db-serve-population.md` — RULED RETIRE 2026-08-22, so
+  this plan has no subject; the database it would migrate is deleted.
   If the read model is retired, both gaps close by deletion.

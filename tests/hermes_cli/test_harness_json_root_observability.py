@@ -98,7 +98,9 @@ LEDGER: dict[str, str] = {
         # harness_parts/runtime_commands.py
         "_cmd_worktree_reap", "_cmd_persona_instance_reconcile",
         "_cmd_health", "_cmd_config", "_cmd_migrate", "_cmd_observe",
-        "_cmd_contracts_dump", "_cmd_rebuild_read_model", "_cmd_read_projection",
+        # ``_cmd_rebuild_read_model`` / ``_cmd_read_projection`` stood here until
+        # Stage 6 (2026-08-22) retired the read_model.db lane with both verbs.
+        "_cmd_contracts_dump",
         "_cmd_work_list", "_cmd_work_peek", "_cmd_work_cancel",
     )
 }

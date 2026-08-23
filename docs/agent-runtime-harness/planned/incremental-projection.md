@@ -45,8 +45,16 @@ build in the same process 183 ms (36 / 146).
 
 ## What was retired, and why it must not simply be restored
 
-`agent_runtime/projector.py` still exists but holds only `full_rebuild()`. Its
-docstring records the ruling verbatim:
+`agent_runtime/projector.py` is **deleted** as of 2026-08-22. It survived S46
+holding only `full_rebuild()`, and Stage 6 of
+[duplicate-implementation-retirement.md](duplicate-implementation-retirement.md)
+took that too — along with `read_model.py`, the schema, and the two CLI verbs —
+when the operator ruled the whole `read_model.db` lane RETIRE. `full_rebuild`'s
+"production caller" turned out to be a verb an operator had to type, writing a
+database nothing read, and it was the SECOND of two writers doing it.
+
+That makes this file's lesson sharper, not weaker, so its docstring is quoted
+here as the historical record rather than lost with the module:
 
 > S46 retired the INCREMENTAL lane (ledger item 9, operator-ruled RETIRE
 > 2026-08-01). `apply_pending` — with the `meta.projector_lease` it took, the
@@ -59,11 +67,16 @@ docstring records the ruling verbatim:
 `tests/agent_runtime/test_read_model_slo.py:13` carries the matching scar:
 `SLO_INCREMENTAL_APPLY_MS = 150` was deleted because its only two assertions
 covered the retired lane. `SLO_FULL_BUILD_MS = 2000` and
-`SLO_CONSUMER_VISIBLE_LAG_MS = 1500` survive.
+`SLO_CONSUMER_VISIBLE_LAG_MS = 1500` survive — that file measures
+`build_snapshot()` directly and never touched the projector, which is how it
+outlived two retirements of the lane around it.
 
 **The lesson is the plan's first constraint: a projection lane with no
-production driver is dead code that reds nothing.** Any revival must name and
-wire its driver before it lands, not after.
+production driver is dead code that reds nothing.** S46 stated it and then kept
+`full_rebuild` on the strength of a caller that existed; Stage 6 had to make the
+finer distinction the first cut ducked — a hand-run CLI verb is a *user*, not a
+*driver*. Any revival must name and wire its driver, and the driver must be
+something the runtime invokes on its own, before it lands.
 
 ## The harder constraint
 

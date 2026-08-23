@@ -380,9 +380,16 @@ _CHAT_TURN_COMMANDS = (("mission-chat", "message"), ("mission-chat", "steer"))
 
 # ── Poll response cache (follow-up slice 1 of the serve design doc) ──────────
 #
-# NOT the read model (``agent_runtime/read_model.py``) and NOT the serve core
-# cache (``<store_root>/serve_read_model/``). This is a per-serve-loop replay
-# cache for the stdout payload of the two read-only poll commands.
+# NOT the serve core cache (``<store_root>/serve_read_model/``). This is a
+# per-serve-loop replay cache for the stdout payload of the two read-only poll
+# commands.
+#
+# The disambiguation used to name a THIRD thing, ``agent_runtime/read_model.py``,
+# because "read model" meant three unrelated things in this repo. Stage 6
+# (2026-08-22) deleted that module, so two remain — and the one that still
+# collides is the DIRECTORY NAME below, which is the core cache's on-disk home
+# and has nothing to do with either cache's contents. That naming trap is the
+# reason this comment survives the module it used to warn about.
 #
 # The Launcher polls `harness status --json` / `harness snapshot --json` on a
 # fixed cadence; each build recomputes the full projection (~1.7s status /
@@ -622,10 +629,10 @@ class _PollResponseCache:
     """Per-serve-loop stdout-payload replay cache for the read-only polls.
 
     Keyed by :func:`_runtime_state_fingerprint` and bounded by
-    ``_READ_CACHE_MAX_AGE_SECONDS``. It caches RESPONSE BYTES — it is neither
-    the read model (``agent_runtime/read_model.py``) nor the serve core cache
-    (``<store_root>/serve_read_model/``), which is why it is not named for
-    either.
+    ``_READ_CACHE_MAX_AGE_SECONDS``. It caches RESPONSE BYTES — it is not the
+    serve core cache (``<store_root>/serve_read_model/``), which is why it is not
+    named for it. (It was not the retired ``agent_runtime/read_model.py`` either;
+    that module went at Stage 6, 2026-08-22.)
     """
 
     def __init__(self, max_age_seconds: float = _READ_CACHE_MAX_AGE_SECONDS):
@@ -981,8 +988,10 @@ def _prewarm_read_model_snapshot() -> None:
     persists what it built under ``<store_root>/serve_read_model/``. So the
     prewarm is no longer read-only — it is the fastest place in the boot to
     discover which of the two this child is paying for. It still writes no STORE
-    state (``write_snapshot``, the ``snapshot.json`` boot-cache writer, remains
-    uninvolved), and the cache write is best-effort by contract. Concurrency is
+    state (it never called ``write_snapshot``, the ``snapshot.json`` boot-cache
+    writer — and Stage 6 deleted that writer outright, so the bypass this line
+    used to describe is now the only behaviour there is), and the cache write is
+    best-effort by contract. Concurrency is
     handled by the builder's own coalescing — a real request arriving mid-build
     joins it (hydrate) or waits and shares the next one; it never double-builds.
     Best effort by contract: a failure here surfaces on the first real request

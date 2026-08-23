@@ -89,12 +89,22 @@ def test_clean_profile_reports_ok(tmp_path, monkeypatch):
 
 
 def test_read_model_enabled_is_not_flagged(tmp_path, monkeypatch):
-    """``read_model`` is SPLIT across both loaders — only the leaf is root-only.
+    """The rule keys on LEAVES, never on blocks, and this is the proof.
 
-    ``read_model.enabled`` is read profile-aware (``snapshot.py`` consults the
-    passed cfg), so a profile setting it is legitimate. A block-level rule would
-    raise a false positive on every profile that sets it — which is most of
-    them — and train operators to ignore the finding.
+    ``read_model`` WAS split across both loaders: ``read_model.enabled`` was read
+    profile-aware (``snapshot.py`` consulted the passed cfg) while
+    ``read_model.delta_patches`` is root-only, so a block-level rule would have
+    raised a false positive on every profile that set ``enabled`` — which was
+    most of them — and trained operators to ignore the finding.
+
+    Stage 6 (2026-08-22) removed the profile-aware half: ``read_model.enabled``
+    has no reader at all now. This test is KEPT and re-aimed rather than deleted,
+    because what it actually gates is the leaf-vs-block shape of the rule, and
+    that shape is still what stops the next split block from false-positiving.
+    Note the finding it asserts absent is also still the RIGHT one: a profile
+    setting a reader-less key is inert, but it is not MISPLACED — nothing would
+    have read it at the root either — and reporting it here would be answering a
+    different question than this doctor asks.
     """
 
     report = _arrange(

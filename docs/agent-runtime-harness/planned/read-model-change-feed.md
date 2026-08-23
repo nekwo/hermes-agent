@@ -1,6 +1,13 @@
 # Planned — change feed / push invalidation (archived RD4)
 
-**Status:** not implemented. No code, no test, no file.
+**Status:** not implemented — and MOOT AS SPECIFIED since Stage 6 of the
+duplicate-implementation retirement (2026-08-22): the plan's producer was "the
+projector", and `agent_runtime/projector.py` is now DELETED with the whole
+`read_model.db` lane (doc 02 § the retired read model). Any revival must name
+a new producer; the feed-shape and watcher design below survive as reference
+only. Kept pending the same delete ruling as
+[read-model-certification-gates.md](read-model-certification-gates.md) and
+[read-model-schema-migrations.md](read-model-schema-migrations.md).
 **Domain:** runtime data and shapes. **Opened:** 2026-08-22.
 
 ## Verification
@@ -8,8 +15,9 @@
 Greps over the whole repo (`*.py`, `*.dart`) on 2026-08-22 return **zero** hits
 for `read_model.feed`, `read_model_feed`, `ReadModelFeed`, `change_feed`.
 `tests/agent_runtime/test_projector_feed.py` — the certification test the
-archived plan named — does not exist. `agent_runtime/projector.py` is 29 lines
-and contains only `full_rebuild()`.
+archived plan named — does not exist. (`agent_runtime/projector.py` was 29
+lines containing only `full_rebuild()` when this was verified; Stage 6 has
+since deleted the module entirely.)
 
 **Correction to the archived source.** The header of
 [05-runtime-data-enterprise-storage.md](../archive/2026-08-22-pre-consolidation/05-runtime-data-enterprise-storage.md)
