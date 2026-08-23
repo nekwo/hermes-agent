@@ -399,6 +399,134 @@ def test_the_assembled_request_carries_the_signature_the_turn_would_ship(
     )
 
 
+def test_prewarm_then_two_turns_REUSE_across_an_ambient_config_reresolve(
+    persisted_persona_samples, bundled_persona_profiles, tmp_path, monkeypatch
+):
+    """The whole point of the lane, end to end, against real stores: warm once,
+    then take two turns and build NOTHING.
+
+    The second turn re-resolves its config the way the live serve does — while
+    something else in the process has ``HERMES_HOME`` pointed at another profile.
+    That is not a hypothetical: ``persona_profile_context`` rewrites the variable
+    process-globally and the readiness walk behind every snapshot build enters it
+    per persona, on another thread, every few seconds. The 2026-08-23T21:38:29Z
+    receipt (``resident_signature_diff … components=relevant_config_revision``,
+    then again at 21:39:07 / 21:39:19 / 21:40:36 / 21:40:40) is what that did to
+    one neko chat: five turns, five rebuilds, one component every time.
+
+    *Killing mutation:* fold the loaded config document back into the key.
+    *Probed field:* ``reused`` on both acquires, and the construction count.
+    """
+
+    from agent_runtime.config import load_agent_runtime_config
+    from agent_runtime.mission_chat_turn_context import build_mission_chat_turn_context
+    from agent_runtime.models import apply_instance_model_overrides
+    from agent_runtime.persona_chat_continuity import PersonaChatRuntimeRegistry
+    from hermes_cli.harness_parts.persona_commands import (
+        _chat_effective_model_payload,
+        _chat_model_override_from_config,
+        _persona_by_id,
+        _persona_chat_native_history,
+        _persona_chat_native_revision,
+        _persona_chat_native_tip,
+        _session_model_config,
+    )
+
+    root, instance, session_db = _live_chat_root()
+    request, _runner = prewarm_module._prepare(root, None)
+    revision = _persona_chat_native_revision(session_db, root)
+
+    def _turn_signature(cfg):
+        persona = apply_instance_model_overrides(_persona_by_id(cfg, "dev"), instance)
+        session_model_config = _session_model_config(session_db, root)
+        return build_mission_chat_turn_context(
+            persona=persona,
+            instance=instance,
+            config=cfg,
+            session_id=root,
+            native_history=_persona_chat_native_history(
+                session_db, _persona_chat_native_tip(session_db, root)
+            ),
+            model_selection=_chat_effective_model_payload(
+                persona=persona,
+                config=cfg,
+                override=_chat_model_override_from_config(session_model_config),
+                instance=instance,
+            ),
+            session_model_config=session_model_config,
+            max_seconds=240.0,
+            relay_deadline_epoch=None,
+            relay_chain=(),
+            min_relay_seconds=45.0,
+            agents_file=None,
+            surface_prompt="",
+        ).runtime_signature
+
+    # Turn 1: an ordinary load, exactly as the send path does it.
+    turn_cfg = load_agent_runtime_config()
+    first = _turn_signature(turn_cfg)
+
+    # Turn 2: the SAME chat, but its config was resolved while the process was
+    # pointed at another profile home. Only the LOAD is taken under the flip —
+    # that is the live shape, where a background readiness walk holds the binding
+    # for the width of one resolve.
+    #
+    # The walked document keeps the runtime model DEFAULTS and changes
+    # everything else. That is not a convenience: the defaults feed the model
+    # cascade, which the key states as ``provider`` / ``model`` / ``api_mode``,
+    # and a chat whose effective model really changed SHOULD rebuild. What must
+    # not rebuild it is the rest of the document.
+    defaults = "\n".join(
+        f"  {key}: {value}"
+        for key, value in (
+            ("default_provider", turn_cfg.default_provider),
+            ("default_model", turn_cfg.default_model),
+            ("default_api_mode", turn_cfg.default_api_mode),
+        )
+        if value
+    )
+    walked_home = tmp_path / "profiles" / "walked"
+    walked_home.mkdir(parents=True)
+    (walked_home / "config.yaml").write_text(
+        "agent_runtime:\n"
+        f"{defaults}\n"
+        "  mission_chat:\n    default_max_seconds: 900\n"
+        "  supervision:\n    child_events_enabled: true\n"
+        "  personas:\n    walked_only:\n      display_name: Walked\n",
+        encoding="utf-8",
+    )
+    with monkeypatch.context() as walk:
+        walk.setenv("HERMES_HOME", str(walked_home))
+        ambient_cfg = load_agent_runtime_config()
+    assert ambient_cfg != turn_cfg, (
+        "the flip must really have produced a different config document"
+    )
+    second = _turn_signature(ambient_cfg)
+
+    assert request.persona_chat_runtime_signature == first == second
+
+    registry = PersonaChatRuntimeRegistry()
+    built: list[str] = []
+
+    def _acquire(signature):
+        return registry.acquire(
+            root_session_id=root,
+            active_session_id=root,
+            signature=signature,
+            revision=revision,
+            factory=lambda: built.append("actor") or "actor",
+            signature_components=request.persona_chat_runtime_signature_components,
+        )
+
+    _acquire(request.persona_chat_runtime_signature)  # the prewarm's entry
+    _entry, reused_first, reason_first, _diff = _acquire(first)
+    _entry, reused_second, reason_second, _diff = _acquire(second)
+
+    assert (reused_first, reason_first) == (True, None)
+    assert (reused_second, reason_second) == (True, None)
+    assert built == ["actor"], "a turn rebuilt an actor the prewarm already made"
+
+
 def test_a_workspace_bound_chats_first_turn_NAMES_the_workspace_as_the_cause(
     persisted_persona_samples, bundled_persona_profiles
 ):

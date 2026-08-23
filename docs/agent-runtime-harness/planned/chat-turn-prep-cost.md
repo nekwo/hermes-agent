@@ -1,6 +1,6 @@
 # Planned — chat-turn prep cost (the ~4 s of hermes between admission and the provider)
 
-**Status:** Stages 0–2 LANDED 2026-08-23 (`60c7f46ec1` / `7f2c82f090` / `bfde53b4ae`), Stage 2a in the working tree; live steady-state re-take receipts owed for 1, 2 and 2a; Stages 3–5 not started. **Owner doc:**
+**Status:** Stages 0–2 LANDED 2026-08-23 (`60c7f46ec1` / `7f2c82f090` / `bfde53b4ae`), Stage 2a landed in two parts (`14271f261f` = the instrument + convictions 4–6; conviction 7, the ambient config document, in the working tree — the instrument's first field validation); live steady-state re-take receipts owed for 1, 2 and 2a; Stages 3–5 not started. **Owner doc:**
 [`../05-chat-turn-lane.md`](../05-chat-turn-lane.md).
 **Question this answers** (operator, 2026-08-22): *"maybe something we are doing with the
 chat isn't initializing fully or fast enough?"* — the answer is **yes, twice over**: the
@@ -588,12 +588,76 @@ deregisters.
    correct behaviour. The receipt's job is to say so by name instead of leaving it
    indistinguishable from a defect.
 
-*What this does NOT claim.* The live turns were not re-run — the serve is still on
-`bfde53b4ae` and was not restarted. Removals 4 and 5 are convicted on what the actor is
-built from, which is a code fact and does not need a live re-take; whether they are
-sufficient to make the 19:03 chat reuse its actor is exactly what the next serve restart
-answers, and the new `resident_rebuild_component_*` flags are what will answer it in one
-read instead of a store archaeology session.
+7. **Convicted and removed: the whole config DOCUMENT from
+   `relevant_config_revision` — and this one the instrument caught in ONE READ.**
+
+   *The instrument's first field validation (2026-08-23T21:38:29Z, serve on
+   `14271f261f`).* Root
+   `persona_chat_personainst_neko_supervisor_agent_f6f7a51b_66a438245225`:
+
+   ```
+   21:38:29Z INFO agent_runtime.persona_chat_continuity: resident_signature_diff
+     root=persona_chat_personainst_neko_supervisor_agent_f6f7a51b_66a438245225
+     components=relevant_config_revision
+   ```
+
+   …and again at `21:39:07`, `21:39:19`, `21:40:36`, `21:40:40`. Five consecutive turns
+   of one chat, five rebuilds, ONE component named every time. No store archaeology, no
+   cross-referencing two persisted observability rows by hand: the line named the input
+   and the whole diagnosis started from a single grep. That is what items 1–3 were built
+   for, and it is the first time they were asked in the field.
+
+   *What it convicted.* Not a config edit: no config file was written in that window
+   (root `config.yaml` hours older, the profile's days older), and
+   `_revision_hash(_as_plain(load_agent_runtime_config()))` is deterministic — equal
+   twice in one process and equal across two fresh processes. What moved was not the
+   file, it was **which file**. `load_agent_runtime_config()` resolves
+   `get_hermes_home()/config.yaml`; with no context-local override on the turn's thread
+   that is the process-global `HERMES_HOME`, and `profile_context.persona_profile_context`
+   rewrites that variable for the width of a profile binding (its own docstring states
+   the invariant: sound only while runs are serialized by `profile_runner._WORKDIR_LOCK`).
+   The readiness walk behind every snapshot build enters it once per persona — in the
+   same `harness serve` process that hosts the chat turns, on another thread, every few
+   seconds (the same log window: `snapshot_agents_readiness` at 17:38:29 / :32 / :36 /
+   :39 / :45 / :48 local, pid `28624`, while turns ran on `harness-serve_1` and
+   `harness-serve_2`). So the document a turn hashed was whichever profile the walk
+   happened to be standing in, and two turns of an unchanged chat could not agree.
+
+   *The fix, by the doctrine items 4 and 5 already set.* `relevant_config_revision` now
+   hashes an ALLOWLIST projection (`ACTOR_CONFIG_IDENTITY_FIELDS`) through the same
+   `_identity_revision` the persona and instance use. The allowlist is EMPTY, and that is
+   a finding rather than a stub: every config block that reaches a constructed actor
+   reaches it RESOLVED, and each resolved form is already a component — the runtime model
+   defaults as `provider`/`model`/`api_mode`, `personas.<id>.*` as `persona_revision`,
+   `store_root` as `runtime_root`, `tool_permissions.default_mode` as `permissions.mode`,
+   and `mcp_admission` + the chat-lane toolset knobs as `tool_contract` (admission is an
+   input to the bundle's `_enabled_toolsets_for_chat`, so it is in those two lists
+   verbatim). `terminal_envelope.grants` binds a scope per run; `mission_chat.*` is
+   per-turn and its compaction cap is re-applied even on a reused actor; `persona_chat.*`
+   decides whether an actor is resident at all, never what one is. Empty is also the only
+   projection that is stable under an AMBIENT document: any non-empty projection can still
+   move for a reason that has nothing to do with this chat. A field that genuinely decides
+   what an actor IS goes there by name and the key rotates on it again —
+   `test_a_NAMED_actor_config_field_still_rotates_the_key` witnesses that the mechanism is
+   live rather than decorative.
+
+   *The hazard is NOT fixed here, and is stated as standing debt.* The reuse key no longer
+   depends on `HERMES_HOME` holding still, but everything else on a turn's thread still
+   resolves through it while a background walk rebinds the process: `chat_lane_bundle`'s
+   key carries the ACTIVE `config.yaml`'s `(mtime_ns, size)`, so the same race also forces
+   bundle rebuilds (the `visibility_bundle_builds` counter above is how that will show).
+   Retiring it means making the readiness walk stop writing process-global env — a change
+   to a documented, load-bearing seam whose own comment says the writes are pinned by live
+   readers (in-process plugins, `HERMES_AUTH_HOME`, `HOME`, the legacy envelope root), so
+   it is its own stage, not a line in this one.
+
+*What this does NOT claim.* The live turns were not re-run — the 19:03 serve was on
+`bfde53b4ae` and the 21:38 one on `14271f261f`; neither was restarted onto this tree.
+Removals 4, 5 and 7 are convicted on what the actor is built from, which is a code fact
+and does not need a live re-take; whether they are sufficient to make those chats reuse
+their actors is exactly what the next serve restart answers, and the
+`resident_rebuild_component_*` flags are what will answer it in one read instead of a
+store archaeology session — as removal 7 already demonstrates.
 
 *Receipt to take on the next restart:* on the second turn of one chat, either
 `resident_actor_reused=1`, or a `resident_rebuild_component_<name>` naming the remaining

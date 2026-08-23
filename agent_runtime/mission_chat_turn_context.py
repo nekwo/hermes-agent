@@ -61,11 +61,14 @@ Pinned semantics (do not "tidy" these)
   one bundle, memoized on the lane's own identity; the AUTHORITIES are
   unchanged and are exactly the functions the bundle calls. See
   :mod:`agent_runtime.chat_lane_bundle` for the key and its staleness surface.
-* **The reuse key is a function of actor IDENTITY, never of row liveness.**
-  :func:`mission_chat_runtime_signature` folds the persona and the instance
+* **The reuse key is a function of actor IDENTITY, never of row liveness — and
+  never of ambient process state.** :func:`mission_chat_runtime_signature` folds
+  the persona, the instance, the permission answer and the runtime config
   through explicit field allowlists (:data:`PERSONA_IDENTITY_FIELDS`,
-  :data:`INSTANCE_IDENTITY_FIELDS`) rather than hashing the whole record. See
-  those constants for the live receipt that forced it. It is PUBLIC because
+  :data:`INSTANCE_IDENTITY_FIELDS`, :data:`_ACTOR_PERMISSION_FIELDS`,
+  :data:`ACTOR_CONFIG_IDENTITY_FIELDS`) rather than hashing the whole record or
+  the whole document. See those constants for the live receipt that forced each.
+  It is PUBLIC because
   :mod:`agent_runtime.persona_chat_actor_prewarm` must compute the SAME key
   (not an equal one) when it builds a chat's resident actor ahead of the first
   turn — see its docstring.
@@ -820,6 +823,81 @@ def _actor_permission_identity(state: Any) -> dict[str, Any]:
     return {name: source.get(name) for name in _ACTOR_PERMISSION_FIELDS}
 
 
+# ── the config projection: an AMBIENT document is not an actor fact ───────────
+#
+# ``relevant_config_revision`` used to be ``_revision_hash(_as_plain(config))`` —
+# the WHOLE loaded ``AgentRuntimeConfig``. That is the row-liveness defect of
+# ``7f2c82f090`` and the permission defect of ``14271f261f`` in a third costume,
+# with one extra edge: the config object is not merely wider than the actor, it
+# is AMBIENT.
+#
+# **Live receipt (2026-08-23T21:38:29Z)**, root
+# ``persona_chat_personainst_neko_supervisor_agent_f6f7a51b_66a438245225``:
+# ``resident_signature_diff … components=relevant_config_revision`` — and again
+# at 21:39:07, 21:39:19, 21:40:36, 21:40:40. EVERY turn of that chat rebuilt its
+# actor on this ONE component, while no config file was written in the window
+# (root ``config.yaml`` hours older, the profile's days older) and the loader
+# hashes a static file identically twice in one process and across two.
+#
+# What moved was not the file — it was WHICH FILE.
+# ``load_agent_runtime_config()`` resolves ``get_hermes_home()/config.yaml``,
+# and with no context-local override on the turn's thread that is the
+# process-global ``HERMES_HOME``. ``profile_context.persona_profile_context``
+# rewrites that variable for the duration of a profile binding (its own
+# docstring states the invariant: sound only while runs are serialized by
+# ``profile_runner._WORKDIR_LOCK``), and the readiness walk behind every
+# snapshot build enters it once per persona — in the serve process that also
+# hosts chat turns, on another thread, every few seconds. So the document a turn
+# hashed was whichever profile the walk was standing in when the turn happened
+# to look, and two turns of one unchanged chat could not agree.
+#
+# The rule that answers it is the one this module already applies twice: key on
+# what the ACTOR IS, via an ALLOWLIST, and let a resolved component speak for
+# every input it already states.
+#
+#: Config fields an actor's CONSTRUCTION consumes and that no other component
+#: already states. It is EMPTY, and that is a finding rather than a stub — the
+#: audit, block by block, of what ``_construct_agent`` (``profile_runner``) is
+#: actually called with:
+#:
+#: * ``default_provider`` / ``default_model`` / ``default_api_mode`` — reach the
+#:   factory only through the model cascade, already keyed as ``provider`` /
+#:   ``model`` / ``api_mode`` / ``reasoning_effort``.
+#: * ``personas.<id>.*`` — resolved into the persona record before anything is
+#:   built, already keyed as ``persona_revision``.
+#: * ``store_root`` — already keyed as ``runtime_root``.
+#: * ``tool_permissions.default_mode`` — reaches the actor as the RESOLVED lane
+#:   mode, already keyed as ``permissions.mode``.
+#: * ``mcp_admission`` and the chat-lane toolset knobs
+#:   (``personas.<id>.chat_lane_restore_toolsets``) — folded into the bundle's
+#:   ``enabled_toolsets`` / ``blocked_tool_names`` by the SAME resolve the run
+#:   builds from (``chat_lane_bundle``: admission is an input to
+#:   ``_enabled_toolsets_for_chat``), already keyed verbatim as
+#:   ``tool_contract``.
+#: * ``terminal_envelope.grants`` — the run BINDS a scope per turn
+#:   (``profile_runner``: ``terminal_envelope_scope(request.…)``); nothing about
+#:   it is baked into the agent object.
+#: * ``mission_chat.*`` — per-turn budgets. The compaction cap is re-applied on
+#:   every turn INCLUDING a reused actor's (``profile_runner``, the
+#:   ``root_chat_session_id`` block runs after the registry hands one back), so
+#:   it cannot be stale on a resident actor.
+#: * ``persona_chat.*`` — the registry's own policy. It decides whether an actor
+#:   is resident at all, never what one IS.
+#: * ``read_model`` / ``event_log`` / ``supervision`` /
+#:   ``coordinator_permissions`` / ``redaction_mode`` /
+#:   ``lock_acquire_timeout_seconds`` / ``schema_version`` — no reader anywhere
+#:   in an actor's construction.
+#:
+#: Empty is therefore the complete answer, not a shortcut, and it is the only
+#: answer that also holds while the process is briefly pointed at another
+#: profile: any non-empty projection of an AMBIENT document can still move for a
+#: reason that has nothing to do with this chat. A field that genuinely decides
+#: what an actor IS goes here by name, and the key rotates on it again —
+#: ``test_a_NAMED_actor_config_field_still_rotates_the_key`` witnesses that the
+#: mechanism is live rather than decorative.
+ACTOR_CONFIG_IDENTITY_FIELDS: tuple[str, ...] = ()
+
+
 def mission_chat_runtime_signature_components(
     *,
     persona: Any,
@@ -869,7 +947,14 @@ def mission_chat_runtime_signature_components(
         "permissions": _actor_permission_identity(
             resolvers.permission_state(persona, session_id=session_id)
         ),
-        "relevant_config_revision": _revision_hash(_as_plain(config)),
+        # The config's ACTOR-IDENTITY projection, never the loaded document: the
+        # document is ambient (another thread's profile binding decides which
+        # file it is) and everything in it that reaches a constructed actor is
+        # already stated, resolved, by a component above. See
+        # ``ACTOR_CONFIG_IDENTITY_FIELDS`` and the 2026-08-23T21:38:29Z receipt.
+        "relevant_config_revision": _identity_revision(
+            config, ACTOR_CONFIG_IDENTITY_FIELDS
+        ),
         "workspace_agents": workspace_agents_receipt,
         "surface_prompt_sha256": hashlib.sha256(
             str(surface_prompt or "").encode("utf-8")
@@ -930,7 +1015,9 @@ def mission_chat_runtime_signature(
     their whole row — see :data:`PERSONA_IDENTITY_FIELDS` /
     :data:`INSTANCE_IDENTITY_FIELDS` and the 2026-08-23T14:45:14Z receipt
     recorded there. The chat permission answer contributes the same way — see
-    :data:`_ACTOR_PERMISSION_FIELDS` and the 2026-08-23T19:03Z receipt.
+    :data:`_ACTOR_PERMISSION_FIELDS` and the 2026-08-23T19:03Z receipt. So does
+    the runtime config — see :data:`ACTOR_CONFIG_IDENTITY_FIELDS` and the
+    2026-08-23T21:38:29Z receipt.
 
     PUBLIC because a second caller now needs the SAME key rather than an equal
     one: :mod:`agent_runtime.persona_chat_actor_prewarm` builds a chat's
@@ -958,6 +1045,7 @@ def mission_chat_runtime_signature(
 
 
 __all__ = [
+    "ACTOR_CONFIG_IDENTITY_FIELDS",
     "DEFAULT_RESOLVERS",
     "INSTANCE_IDENTITY_FIELDS",
     "PERSONA_IDENTITY_FIELDS",

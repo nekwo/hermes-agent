@@ -999,7 +999,14 @@ def test_each_signature_input_is_named_by_exactly_one_component():
                 "effective_model": "opus",
             }
         ),
-        "relevant_config_revision": dict(config=_Config(default_model="sonnet")),
+        # NOT ``relevant_config_revision``: a ``default_model`` edit is named by
+        # ``model`` (the cascade resolves it before anything is built), and the
+        # config component now hashes an ALLOWLIST projection rather than the
+        # loaded document — see ``ACTOR_CONFIG_IDENTITY_FIELDS`` and the
+        # 2026-08-23T21:38:29Z receipt. Its nameability is witnessed instead by
+        # ``test_a_NAMED_actor_config_field_still_rotates_the_key``, which is the
+        # only shape that can witness it: with the allowlist empty there is no
+        # config edit left that SHOULD move this component.
         "runtime_root": dict(resolvers=_resolvers(store_root=lambda: "X:/other/root")),
         "instance_revision": dict(instance=_instance(display_name="Renamed")),
         # NOT ``hermes_profile``: that one input is deliberately named twice —
@@ -1029,6 +1036,148 @@ def test_a_steered_chat_goal_is_hud_content_not_actor_identity():
     before = _digests(persona=persona, instance=instance)
     instance.current_chat_goal = "Ship the chat-turn prep cost stage"
     assert _moved(before, _digests(persona=persona, instance=instance)) == set()
+
+
+# ── (7) the config component: an AMBIENT document is not an actor fact ──────
+#
+# Live receipt (2026-08-23T21:38:29Z, root
+# ``persona_chat_personainst_neko_supervisor_agent_f6f7a51b_66a438245225``):
+# ``resident_signature_diff … components=relevant_config_revision`` — and then
+# again at 21:39:07, 21:39:19, 21:40:36 and 21:40:40. EVERY turn of that chat
+# rebuilt its actor, always on that ONE component, while no config file was
+# written in the window and the loader hashes a static file identically twice in
+# one process and across two processes.
+#
+# What moved was not the file: it was WHICH file. ``load_agent_runtime_config()``
+# resolves ``get_hermes_home()/config.yaml``, and with no context-local override
+# on the turn's thread that is the process-global ``HERMES_HOME`` — which the
+# snapshot builder's readiness walk rewrites every few seconds, once per persona,
+# via ``persona_profile_context``. The two tests below are that hazard and the
+# rule that answers it.
+
+
+def test_the_config_document_a_turn_resolves_is_AMBIENT(tmp_path, monkeypatch):
+    """The hazard, reproduced: another thread's profile binding decides which
+    ``config.yaml`` THIS thread loads.
+
+    ``persona_profile_context`` writes ``os.environ["HERMES_HOME"]``
+    process-globally (its own docstring states the invariant: sound only while
+    runs are serialized by ``profile_runner._WORKDIR_LOCK``), and the readiness
+    walk behind every snapshot build enters it per persona — in the same process
+    that serves chat turns, on another thread, every few seconds. A turn that
+    hashes the loaded config document is therefore hashing whichever profile the
+    walk happens to be standing in.
+
+    This test asserts the hazard rather than a fix: nothing here is going to stop
+    a background walk from rebinding the process. What must stop is the reuse key
+    depending on it.
+    """
+
+    import threading
+
+    from agent_runtime.config import load_agent_runtime_config
+    from agent_runtime.profile_context import (
+        PersonaProfileBinding,
+        persona_profile_context,
+    )
+
+    turn_home = tmp_path / "profiles" / "base"
+    walked_home = tmp_path / "profiles" / "qa"
+    for home, model in ((turn_home, "opus"), (walked_home, "sonnet")):
+        home.mkdir(parents=True)
+        (home / "config.yaml").write_text(
+            f"agent_runtime:\n  default_model: {model}\n", encoding="utf-8"
+        )
+
+    monkeypatch.setenv("HERMES_HOME", str(turn_home))
+    assert load_agent_runtime_config().default_model == "opus"
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _readiness_walk():
+        binding = PersonaProfileBinding(
+            persona_id="qa", hermes_profile="qa", profile_home=walked_home
+        )
+        with persona_profile_context(binding):
+            entered.set()
+            release.wait(10)
+
+    walker = threading.Thread(target=_readiness_walk, daemon=True)
+    walker.start()
+    try:
+        assert entered.wait(10), "the walker never entered the profile context"
+        # This thread asked for nothing. It gets the walker's profile anyway.
+        during_walk = load_agent_runtime_config()
+    finally:
+        release.set()
+        walker.join(10)
+
+    assert during_walk.default_model == "sonnet"
+    assert load_agent_runtime_config().default_model == "opus"
+
+
+def test_an_AMBIENT_config_document_cannot_rotate_the_reuse_key(tmp_path, monkeypatch):
+    """THE fix, stated as a rule: two different config DOCUMENTS, one actor.
+
+    Both objects here are real :func:`load_agent_runtime_config` results — the
+    same call the turn makes, on two different ambient homes. Nothing about the
+    chat, the persona, the instance, the model selection, the tool contract or
+    the permission answer differs between the two builds, so no component may
+    move: what the actor IS did not change when the process was briefly pointed
+    somewhere else.
+
+    *Killing mutation:* fold the whole config object back into the key
+    (``_revision_hash(_as_plain(config))``). *Probed field:* the moved-component
+    set of the two real builds.
+    """
+
+    from agent_runtime.config import load_agent_runtime_config
+
+    homes = {}
+    for name, body in (
+        ("base", "agent_runtime:\n  default_model: opus\n"),
+        (
+            "qa",
+            "agent_runtime:\n"
+            "  default_model: sonnet\n"
+            "  mission_chat:\n    default_max_seconds: 900\n"
+            "  personas:\n    qa:\n      display_name: QA\n",
+        ),
+    ):
+        home = tmp_path / "profiles" / name
+        home.mkdir(parents=True)
+        (home / "config.yaml").write_text(body, encoding="utf-8")
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        homes[name] = load_agent_runtime_config()
+
+    assert homes["base"] != homes["qa"], "the two documents must really differ"
+
+    persona, instance = _live_records()
+    before = _digests(persona=persona, instance=instance, config=homes["base"])
+    after = _digests(persona=persona, instance=instance, config=homes["qa"])
+    assert _moved(before, after) == set(), (
+        "the ambient config document rotated the resident-actor reuse key; every "
+        "turn taken while a background readiness walk holds another profile "
+        "rebuilds its actor"
+    )
+
+
+def test_a_NAMED_actor_config_field_still_rotates_the_key(monkeypatch):
+    """The allowlist is a live mechanism, not a decorative empty tuple.
+
+    ``ACTOR_CONFIG_IDENTITY_FIELDS`` is empty today because the audit above it
+    found no config field an actor's construction consumes that some other
+    component does not already state in RESOLVED form. The day one appears, it is
+    named there — and naming it must be all it takes.
+    """
+
+    from agent_runtime import mission_chat_turn_context as module
+
+    monkeypatch.setattr(module, "ACTOR_CONFIG_IDENTITY_FIELDS", ("default_model",))
+    before = _digests(config=_Config())
+    after = _digests(config=_Config(default_model="sonnet"))
+    assert _moved(before, after) == {"relevant_config_revision"}
 
 
 def test_the_digests_carry_no_component_VALUES():
