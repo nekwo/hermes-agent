@@ -1756,7 +1756,7 @@ def _sync_repo_path(realm: Realm) -> Path:
     if ref and not _looks_like_remote(ref):
         return Path(ref).expanduser()
     key = paths.safe_path_token(realm.server_id or "local")
-    return paths.store_root() / "realm_sync" / key
+    return paths.realm_sync_root() / key
 
 
 def _realm_subtree(repo: Path, realm_id: str) -> Path:

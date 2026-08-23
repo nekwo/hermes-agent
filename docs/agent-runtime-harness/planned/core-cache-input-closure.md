@@ -1,7 +1,31 @@
 # Planned — widen the core cache's fingerprint input closure
 
-**Status:** not implemented. **Domain:** runtime data and shapes.
+**Status:** IC-1, IC-2 and IC-3 implemented 2026-08-22; IC-4 not implemented and
+now gated on measurement (see below). **Domain:** runtime data and shapes.
 **Opened:** 2026-08-22, from live receipts.
+
+**What landed, and where its argument lives.** IC-1 —
+`core_cache._EXCLUDED_NESTED_STORE_NAMES` (nested exclusion, `realm_sync/**/.git`
+only) plus `_walk_tree`'s `exclude_nested`; the top-level-only doctrine block and
+both of its pinning tests are amended, and the four
+`realm_sync/<realm>/*_baseline.json` sidecars are pinned INSIDE the closure by
+`tests/agent_runtime/test_core_cache_exclusions.py`. IC-2 —
+`core_cache._restat_on_post_build_reality`, with the design note answering the
+module docstring's validity doctrine written at
+`core_cache.SELF_PERTURBED_SESSION_DB`; gated by
+`tests/agent_runtime/test_core_cache_post_build_restat.py`, whose safety half
+pins that a foreign write is NOT absorbed. IC-3 —
+`persona_assignments.ensure_for_persona` splits cold from unreadable and repairs
+an unreadable row once per process; gated by
+`tests/agent_runtime/test_persona_instance_unreadable_row.py`.
+
+**The gate below is only half-discharged.** The two FIELD conditions — a
+shadow-validation window over the live store showing zero divergence, and
+`never_converged diff_scope=every_pass` dropping to zero over a week of operator
+boots — are unmeasured. IC-4's "measure first" instruction now has an
+instrument: `snapshot_core_cache_write ok=true` carries `restat=`,
+`self_perturbed_refreshed=` and `foreign_moved=`, so whether a WAL mask is still
+needed is a reading of those fields rather than a guess.
 
 ## The problem
 

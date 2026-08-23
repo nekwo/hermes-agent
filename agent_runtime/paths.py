@@ -124,9 +124,37 @@ def board_idempotency_path(board_id: str, key: str) -> Path:
     return board_idempotency_dir(board_id) / f"{safe_path_token(key)}.json"
 
 
+#: The realm-sync tree's top-level directory name, under the store root.
+#:
+#: Promoted out of the four baseline helpers' bodies (and
+#: ``realm_sync._sync_repo_path``'s) for the reason
+#: :data:`DELETED_ARCHIVE_DIRNAME` and :data:`OFFICE_ARCHIVE_DIRNAME` were, and
+#: under the same rule: the read-model cache's fingerprint now keys a NESTED
+#: exclusion on this name (``core_cache._EXCLUDED_NESTED_STORE_NAMES`` — skip an
+#: entry literally called ``.git`` anywhere below it), so a second module's
+#: correctness depends on agreeing with this one, and a name in that position is
+#: IMPORTED there rather than re-typed.
+#:
+#: **TWO DIFFERENT KEYS LIVE UNDER IT, and confusing them inverts the argument.**
+#: ``realm_sync._sync_repo_path`` keys a synced WORKTREE by the realm's SERVER
+#: token; the four baseline helpers below key their sidecars by the REALM ID.
+#: Both land as children of this one directory. That is why the cache's nested
+#: exclusion keys on the literal child name ``.git`` and never on a realm or
+#: server token: a token-keyed skip would be wrong in both directions, and
+#: ``board_baseline.json`` / ``office_baseline.json`` ARE projection inputs
+#: (``snapshot.py`` reads both) that must stay inside the fingerprint.
+REALM_SYNC_DIRNAME = "realm_sync"
+
+
+def realm_sync_root() -> Path:
+    """The store root's realm-sync tree — worktrees and baseline sidecars alike."""
+
+    return store_root() / REALM_SYNC_DIRNAME
+
+
 def board_baseline_path(realm_id: str) -> Path:
     # realm-sync baseline sidecar; NEVER synced, NEVER published
-    return store_root() / "realm_sync" / safe_path_token(realm_id) / "board_baseline.json"
+    return realm_sync_root() / safe_path_token(realm_id) / "board_baseline.json"
 
 
 def office_root() -> Path:
@@ -211,18 +239,18 @@ def office_archived_surface_dir(workspace_id: str) -> Path:
 
 def office_baseline_path(realm_id: str) -> Path:
     # realm-sync baseline sidecar; NEVER synced, NEVER published
-    return store_root() / "realm_sync" / safe_path_token(realm_id) / "office_baseline.json"
+    return realm_sync_root() / safe_path_token(realm_id) / "office_baseline.json"
 
 
 def persona_config_baseline_path(realm_id: str) -> Path:
     # realm-sync baseline sidecar; NEVER synced, NEVER published
-    return store_root() / "realm_sync" / safe_path_token(realm_id) / "persona_config_baseline.json"
+    return realm_sync_root() / safe_path_token(realm_id) / "persona_config_baseline.json"
 
 
 def profile_artifact_baseline_path(realm_id: str) -> Path:
     # realm-sync baseline sidecar for the per-profile FILE family (MEMORY.md,
     # core-context files, persona prompts); NEVER synced, NEVER published.
-    return store_root() / "realm_sync" / safe_path_token(realm_id) / "profile_artifact_baseline.json"
+    return realm_sync_root() / safe_path_token(realm_id) / "profile_artifact_baseline.json"
 
 
 def agents_dir() -> Path:

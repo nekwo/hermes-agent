@@ -1668,6 +1668,16 @@ def test_a_failed_cache_write_leaves_the_build_path_byte_identical(
     part that has to be boring: a write that cannot land logs and changes
     nothing about the core that was just built, the receipt that was just
     emitted, or the value returned.
+
+    The persisted pair is REMOVED between the two builds, and that is fixture
+    plumbing rather than part of the claim: the subject here is a LED build whose
+    write-back fails, so the second build has to actually lead. Before IC-2 it
+    did so by accident — the first build's pre-build key could not describe the
+    rows that build had just minted, so the second consult demoted
+    ``fingerprint_mismatch``. IC-2 re-keys the write-back on post-build reality,
+    so a settled store now converges on the FIRST build and the second consult is
+    a HIT. Deleting the pair restores the demote this case has always depended
+    on, and says so out loud instead of relying on a defect.
     """
 
     _seed_workspace("alpha-one")
@@ -1677,6 +1687,8 @@ def test_a_failed_cache_write_leaves_the_build_path_byte_identical(
     def boom(*args, **kwargs):
         raise OSError("the cache directory is not writable")
 
+    core_cache.core_path().unlink(missing_ok=True)
+    core_cache.sidecar_path().unlink(missing_ok=True)
     monkeypatch.setattr(core_cache, "atomic_json_write", boom)
     _new_context()
     with caplog.at_level(logging.INFO):
@@ -2535,6 +2547,27 @@ def _count_lane_work(monkeypatch) -> tuple[list[str], list[str]]:
     return walks, reads
 
 
+def _count_post_build_restats(monkeypatch) -> list[str]:
+    """Count IC-2's POST-build re-stat, so it can be told from a PRE-build walk.
+
+    ``_restat_on_post_build_reality`` takes one ``build_input_fingerprint`` of
+    its own, which lands in :func:`_count_lane_work`'s tally like any other walk.
+    The two answer different questions — one keys the build, the other re-keys
+    what the build left behind — so a case about the pre-build half subtracts
+    this rather than widening its bound and losing the mutant.
+    """
+
+    restats: list[str] = []
+    real_restat = core_cache._restat_on_post_build_reality
+
+    def counted_restat(key):
+        restats.append("restat")
+        return real_restat(key)
+
+    monkeypatch.setattr(core_cache, "_restat_on_post_build_reality", counted_restat)
+    return restats
+
+
 def test_a_boots_riders_share_one_walk_and_one_core_read(
     isolate_agent_runtime_root, seeded_cache, monkeypatch, shadow_requests
 ):
@@ -2661,9 +2694,19 @@ def test_the_build_leader_reuses_the_consults_key_instead_of_rewalking(
     — and the consult's key already is: it was taken before this build started.
     Reusing it can only make the key OLDER, which costs the next process a
     rebuild it did not strictly need, never a served core missing a write.
+
+    **AMENDED BY IC-2, and the amendment is the reason the counting got sharper
+    rather than looser.** ``write_back`` now takes ONE walk of its own, AFTER the
+    build, to re-key the persisted stat set on the writes the build itself made
+    (``core_cache._restat_on_post_build_reality``). That is a different walk
+    answering a different question, and a case that simply relaxed the total to
+    two would stop convicting the mutant it exists for — a leader re-walking the
+    store for its PRE-build key. So the post-build walk is counted separately and
+    subtracted, and the original claim is asserted unchanged over what remains.
     """
 
     walks, _ = _count_lane_work(monkeypatch)
+    restats = _count_post_build_restats(monkeypatch)
     _rewrite_workspace_name("alpha-two")
     _new_context()
 
@@ -2671,10 +2714,15 @@ def test_the_build_leader_reuses_the_consults_key_instead_of_rewalking(
     assert core["parity"]["core_source"] == core_cache.CORE_SOURCE_REBUILT, (
         "this case needs the MISS path, where a leader actually builds"
     )
-    assert len(walks) == 1, (
-        f"the boot walked the store {len(walks)} times: the leader took its own "
-        "stat set milliseconds after its consult had taken one over the same "
-        "store"
+    assert len(restats) == 1, (
+        "the write-back's post-build re-stat did not run exactly once, so the "
+        f"subtraction below is measuring something else: {restats}"
+    )
+    assert len(walks) - len(restats) == 1, (
+        f"the boot walked the store {len(walks)} times, {len(restats)} of them "
+        "for the write-back's post-build re-stat: the leader took its own "
+        "PRE-build stat set milliseconds after its consult had taken one over "
+        "the same store"
     )
 
 

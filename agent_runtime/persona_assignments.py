@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+import threading
 import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -55,6 +56,48 @@ CHAT_BINDING_CLEARED_REASON_DELETED = "chat_deleted"
 #: (:meth:`PersonaScanRefusal.for_scan`) so no arm can quietly reuse another
 #: arm's sentence for a condition it does not describe (C16).
 PERSONA_ROWS_UNREADABLE = "persona_rows_unreadable"
+
+#: Which persona-instance ROWS this process has already re-minted for being
+#: unreadable (IC-3). Process state, exactly like the read-model cache's own
+#: convergence history, and for the same reason: "we already tried the repair
+#: once" is a fact about this process, so a fresh process is entitled to try
+#: again (the file may since have been fixed, or the disk unstuck).
+#:
+#: Keyed on the row's PATH so two stores — two profiles, two test roots — never
+#: share an entry. It only ever grows within a process, by one entry per corrupt
+#: row, which is bounded by the roster.
+_unreadable_instance_rows: set[str] = set()
+_unreadable_instance_lock = threading.Lock()
+
+
+def _note_unreadable_instance_row(row_path: Path) -> bool:
+    """Record an unreadable row; ``True`` the FIRST time this process sees it.
+
+    The caller re-mints on ``True`` and reports on ``False``. One authority for
+    "is this the first time", because a caller that re-derived the answer would
+    be a second rule for the question the whole arm turns on.
+    """
+
+    key = str(row_path)
+    with _unreadable_instance_lock:
+        if key in _unreadable_instance_rows:
+            return False
+        _unreadable_instance_rows.add(key)
+        return True
+
+
+def reset_unreadable_instance_rows() -> None:
+    """Forget the re-mint history, as a fresh process would. Tests only.
+
+    Same shape and same reason as ``core_cache.reset_process_state``: a property
+    of the PROCESS has to be resettable for a test to exercise a second
+    process's behaviour without spawning one — and, here, so that one case's
+    corrupt row cannot silence the next case's first legitimate repair when the
+    two happen to resolve the same path.
+    """
+
+    with _unreadable_instance_lock:
+        _unreadable_instance_rows.clear()
 
 
 class PersonaInstanceScan(NamedTuple):
@@ -435,24 +478,74 @@ class PersonaInstanceStore:
     # ``persona_instance_identity``, and rows carrying it exist on disk.
 
     def ensure_for_persona(self, persona: AgentPersona) -> PersonaInstance:
+        """Materialize the canonical row for ``persona``, minting a missing one.
+
+        TWO FAILURE SHAPES BEHIND ONE ``except``, SPLIT BY IC-3 (2026-08-22).
+
+        This used to catch bare ``Exception`` and mint, which is right for a row
+        that is not there and wrong for a row that is there and will not decode.
+        Every build calls this for every persona
+        (``snapshot.build_snapshot`` -> :meth:`ensure_for_personas`), so an
+        unreadable row produced a file write AND a ``persona_instance.created``
+        event on EVERY PASS, silently, forever. Measured consequence: that write
+        moves an input the read-model cache's pre-build key already recorded, so
+        the persisted key could never describe the store the next process stat'd
+        — one of the named triggers behind the ``snapshot_core_cache
+        never_converged`` receipt.
+
+        * **COLD (the row is not there)** — ``FileNotFoundError``, after
+          :meth:`get`'s id-drift resolution has failed to find one either. Mint,
+          write, emit. UNCHANGED, deliberately: this is the ordinary cold-store
+          and new-persona path and every suite pins it.
+        * **UNREADABLE (the row is there and will not decode)** — anything else:
+          malformed JSON, a payload :func:`from_jsonable` refuses, a permission
+          error, a flaky share. Re-mint ONCE per process per row, with a WARNING
+          naming the file and the error, because a corrupt row that repairs
+          itself on the next build is the behaviour every caller already depends
+          on. The SECOND time the same row will not decode in this process, the
+          re-mint provably did not take — the store is rejecting the write, or
+          something is corrupting the row behind us — and a third, fourth and
+          thousandth mint would only keep hiding it. So that arm logs at ERROR
+          and returns the row it WOULD have written, without touching the disk
+          and without emitting a create event. The projection still sees a row;
+          the store is left alone; the defect is on the log instead of in the
+          fingerprint.
+
+        The once-per-process memo is keyed on the row's PATH, not on the instance
+        id: the id is stable across stores, and a memo keyed on it would let one
+        test's or one profile's corrupt row silence another store's first
+        legitimate repair.
+        """
+
         instance_id = persona_instance_id_for(persona.id)
         try:
             existing = self.get(instance_id)
-        except Exception:
-            ts = now()
-            instance = PersonaInstance(
-                id=instance_id,
-                persona_id=persona.id,
-                role=str(persona.role),
-                display_name=persona.display_name,
-                profile_id=persona.hermes_profile,
-                runtime_root=str(paths.store_root()),
-                state=WorkerSessionState.IDLE,
-                updated_at=ts,
+        except FileNotFoundError:
+            return self._mint_instance(persona, instance_id)
+        except Exception as exc:
+            row_path = paths.persona_instance_path(instance_id)
+            if _note_unreadable_instance_row(row_path):
+                logging.getLogger(__name__).warning(
+                    "persona_instance_row_unreadable path=%s instance=%s error=%s — "
+                    "re-minting it once; a row that will not decode again after "
+                    "this is a real defect and will be reported instead of "
+                    "re-minted",
+                    row_path,
+                    instance_id,
+                    exc,
+                )
+                return self._mint_instance(persona, instance_id)
+            logging.getLogger(__name__).error(
+                "persona_instance_row_unreadable path=%s instance=%s error=%s "
+                "repeat=true — the re-mint did not take, so this build is NOT "
+                "writing another row or emitting another persona_instance.created. "
+                "Repair or remove the file; every build until then serves an "
+                "in-memory row for this persona.",
+                row_path,
+                instance_id,
+                exc,
             )
-            self._write(instance)
-            self._event("persona_instance.created", instance, {})
-            return instance
+            return self._instance_row(persona, instance_id)
         changed = False
         if existing.display_name != persona.display_name:
             existing.display_name = persona.display_name
@@ -464,6 +557,33 @@ class PersonaInstanceStore:
             existing.updated_at = now()
             self._write(existing)
         return self.get(instance_id)
+
+    def _instance_row(self, persona: AgentPersona, instance_id: str) -> PersonaInstance:
+        """The canonical row for a persona, as a VALUE — nothing is written here.
+
+        Split out of the mint so the repeat-unreadable arm can answer with a row
+        without also producing the durable write and the create event that arm
+        exists to stop.
+        """
+
+        return PersonaInstance(
+            id=instance_id,
+            persona_id=persona.id,
+            role=str(persona.role),
+            display_name=persona.display_name,
+            profile_id=persona.hermes_profile,
+            runtime_root=str(paths.store_root()),
+            state=WorkerSessionState.IDLE,
+            updated_at=now(),
+        )
+
+    def _mint_instance(self, persona: AgentPersona, instance_id: str) -> PersonaInstance:
+        """Write the canonical row and announce it — the cold path, unchanged."""
+
+        instance = self._instance_row(persona, instance_id)
+        self._write(instance)
+        self._event("persona_instance.created", instance, {})
+        return instance
 
     def steer(
         self,

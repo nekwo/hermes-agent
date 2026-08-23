@@ -502,17 +502,27 @@ def test_rewriting_a_graveyard_file_does_not_move_the_digest(
 def test_only_the_TOP_LEVEL_graveyard_is_excluded(
     isolate_agent_runtime_root,
 ):
-    """``exclude_top`` is top-level by contract, and the comment must not overclaim.
+    """``_EXCLUDED_STORE_ENTRIES`` is top-level by contract, and the comment must
+    not overclaim.
 
     The argument written at the constant is about the ONE graveyard at the store
     root — the only place ``paths.deleted_archive_dir()`` can put it. A directory
     that merely shares the name, nested inside a real store subtree, is somebody
     else's data and is fingerprinted in full.
 
+    **AMENDED BY IC-1.** ``_walk_tree`` now also has a NESTED mechanism
+    (``exclude_nested`` / ``_EXCLUDED_NESTED_STORE_NAMES``), so "the walk is
+    top-level only" stopped being true of the walk and is now a claim about THIS
+    SET. The second half of the case says so as a fact: the graveyard names must
+    not appear anywhere in the nested mapping either, because a nested rule that
+    named one would reach exactly the tree the first half proves is in.
+
     *Kill:* implement the exclusion as a name filter inside the recursive walk
     (skip any entry whose ``name`` is in the exclusion set, at every depth)
     rather than as ``_walk_tree``'s top-level ``exclude_top``. The nested tree
-    then vanishes from the closure too and this reds.
+    then vanishes from the closure too and this reds. *Second kill:* add
+    ``paths.DELETED_ARCHIVE_DIRNAME`` to any value of
+    ``_EXCLUDED_NESTED_STORE_NAMES``.
     """
 
     root = isolate_agent_runtime_root
@@ -535,6 +545,7 @@ def test_only_the_TOP_LEVEL_graveyard_is_excluded(
         "drop unrelated data out of the closure, which is a missed input — the "
         "failure direction this module calls the worst one."
     )
+    _assert_not_named_by_any_nested_rule(paths.DELETED_ARCHIVE_DIRNAME)
 
 
 def test_the_excluded_name_is_the_one_the_path_helper_actually_produces(
@@ -855,17 +866,24 @@ def test_the_per_workspace_actor_archive_is_STILL_in_the_closure(
 def test_only_the_TOP_LEVEL_office_archive_is_excluded(
     isolate_agent_runtime_root,
 ):
-    """``exclude_top`` is top-level by contract, and the comment must not overclaim.
+    """``_EXCLUDED_STORE_ENTRIES`` is top-level by contract, and the comment must
+    not overclaim.
 
     The argument written at the constant is about the ONE graveyard at the store
     root — the only place ``paths.office_surface_archive_root()`` can put it. A
     directory that merely shares the name, nested inside a real store subtree, is
     somebody else's data and is fingerprinted in full.
 
+    **AMENDED BY IC-1**, exactly as the ``deleted_archive`` case above: the walk
+    now has a nested mechanism too, so the second half pins that this name is not
+    in it.
+
     *Kill:* implement the exclusion as a name filter inside the recursive walk
     (skip any entry whose ``name`` is in the exclusion set, at every depth)
     rather than as ``_walk_tree``'s top-level ``exclude_top``. The nested tree
-    then vanishes from the closure too and this reds.
+    then vanishes from the closure too and this reds. *Second kill:* add
+    ``paths.OFFICE_ARCHIVE_DIRNAME`` to any value of
+    ``_EXCLUDED_NESTED_STORE_NAMES``.
     """
 
     root = isolate_agent_runtime_root
@@ -888,6 +906,7 @@ def test_only_the_TOP_LEVEL_office_archive_is_excluded(
         "would silently drop unrelated data out of the closure, which is a "
         "missed input — the failure direction this module calls the worst one."
     )
+    _assert_not_named_by_any_nested_rule(paths.OFFICE_ARCHIVE_DIRNAME)
 
 
 def test_the_excluded_name_is_the_one_the_surface_archive_helper_produces(
@@ -929,4 +948,278 @@ def test_the_excluded_name_is_the_one_the_surface_archive_helper_produces(
         "the per-workspace actor archive and the orphaned-surface graveyard "
         "resolve to the SAME directory, so the exclusion above now covers a tree "
         "the OfficeStore reads"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 4. IC-1 — the NESTED exclusion: ``realm_sync/**/.git`` only
+# --------------------------------------------------------------------------- #
+#
+# The nested mechanism is a different shape from ``_EXCLUDED_STORE_ENTRIES`` and
+# carries a different risk. The top-level set can only ever drop a store-root
+# entry the author looked at; a nested rule reaches DOWN, so the cases below are
+# written against two mutants at once:
+#
+#   * OVER-exclusion — the rule reaches a sibling it was never audited for. The
+#     one that matters is ``realm_sync/<realm>/board_baseline.json`` and its
+#     three sidecar siblings, which the projection genuinely READS. A
+#     fingerprint that ignored a baseline change would serve a stale publication
+#     verdict as authoritative, which is the failure class this whole lane
+#     exists to end.
+#   * UNDER-scoping — the rule is implemented as "skip ``.git`` anywhere", so a
+#     ``.git`` outside ``realm_sync/`` silently leaves the closure too.
+def _assert_not_named_by_any_nested_rule(name: str) -> None:
+    """No nested rule may name ``name`` — the amendment's other half.
+
+    Shared by the two top-level-only cases above, because "this name is not in
+    the nested mapping either" is the same claim for both graveyards and a
+    hand-copied assertion is how two claims drift into one being checked.
+    """
+
+    naming = sorted(
+        f"{top!r} -> {sorted(skipped)}"
+        for top, skipped in core_cache._EXCLUDED_NESTED_STORE_NAMES.items()
+        if name in skipped
+    )
+    assert not naming, (
+        f"{name!r} is skipped by a NESTED rule ({naming}), so the tree the case "
+        "above just proved is inside the closure leaves it again one level down. "
+        "The nested mapping is not a second home for top-level exclusions: every "
+        "entry in it needs its own reader audit, written at "
+        "core_cache._EXCLUDED_NESTED_STORE_NAMES."
+    )
+
+
+def _realm_sync_worktree(root, *, realm_id: str = "realm_alpha"):
+    """A realm-sync subtree shaped like the live one: a git worktree AND baselines.
+
+    Both halves on purpose. The worktree's ``.git`` is what the exclusion is for;
+    the baseline sidecars beside it are what the exclusion must not touch, and a
+    fixture that built only the first could not tell the two mutants apart.
+    """
+
+    realm_dir = root / paths.REALM_SYNC_DIRNAME / realm_id
+    (realm_dir / ".git" / "objects" / "pack").mkdir(parents=True, exist_ok=True)
+    (realm_dir / ".git" / "logs").mkdir(parents=True, exist_ok=True)
+    (realm_dir / "realms").mkdir(parents=True, exist_ok=True)
+    (realm_dir / "realms" / "manifest.json").write_text("{}", encoding="utf-8")
+    return realm_dir
+
+
+def _git_churn(realm_dir) -> None:
+    """What a fetch/checkout leaves behind — the 60-entry class, in miniature."""
+
+    (realm_dir / ".git" / "index").write_text("a", encoding="utf-8")
+    (realm_dir / ".git" / "logs" / "HEAD").write_text("a", encoding="utf-8")
+    (realm_dir / ".git" / "objects" / "pack" / "pack-a.pack").write_text("a", encoding="utf-8")
+
+
+def test_a_synced_worktrees_git_bookkeeping_is_outside_the_closure(
+    isolate_agent_runtime_root,
+):
+    """IC-1's whole point: git's own churn must not move the key.
+
+    The 2026-08-20 18:21 ``never_converged`` firing named 60 changed entries and
+    every one of them was under ``realm_sync/<realm>/.git/``. The projection is
+    forbidden to read any of it (Decision 7 — ``build_snapshot`` "must never
+    shell out to git"), so it is not an input and its churn is pure noise inside
+    the key.
+
+    *Kill:* drop ``REALM_SYNC_DIRNAME`` from
+    ``core_cache._EXCLUDED_NESTED_STORE_NAMES``, or hand ``_walk_tree`` no
+    ``exclude_nested`` at the store-root call site.
+    """
+
+    root = isolate_agent_runtime_root
+    realm_dir = _realm_sync_worktree(root)
+    _git_churn(realm_dir)
+    before = core_cache.build_input_fingerprint()
+    assert before is not None
+
+    # A whole fetch's worth of git bookkeeping: rewritten files AND new ones.
+    _git_churn(realm_dir)
+    (realm_dir / ".git" / "objects" / "pack" / "pack-b.pack").write_text("b", encoding="utf-8")
+    (realm_dir / ".git" / "ORIG_HEAD").write_text("b", encoding="utf-8")
+    after = core_cache.build_input_fingerprint()
+    assert after is not None
+
+    assert after.digest == before.digest, (
+        "a synced worktree's git bookkeeping moved the read-model cache's input "
+        f"digest ({before.count} entries -> {after.count}). Nothing in the "
+        "projection reads it, so every fetch the sync verbs run costs the next "
+        "process its cache hit — the largest oscillating class in the whole "
+        "never_converged receipt series."
+    )
+
+
+@pytest.mark.parametrize(
+    "helper",
+    [
+        "board_baseline_path",
+        "office_baseline_path",
+        "persona_config_baseline_path",
+        "profile_artifact_baseline_path",
+    ],
+)
+def test_a_realm_sync_baseline_stays_inside_the_closure(
+    isolate_agent_runtime_root, helper
+):
+    """THE OVER-EXCLUSION GATE. A baseline change MUST move the key.
+
+    ``realm_sync/<realm>/board_baseline.json`` and ``office_baseline.json`` are
+    read by ``build_snapshot`` (through ``board_sync.read_board_baseline`` /
+    ``office_sync.read_office_baseline``) to decide whether a card or an actor is
+    published; the other two sidecars are their siblings by the same helper
+    family. They sit ONE DIRECTORY UP from the ``.git`` the case above excludes,
+    inside the same top-level subtree, which is exactly the blast radius a nested
+    rule has and a top-level one does not.
+
+    Parametrized one sidecar per case so a rule that reached one of them reds the
+    case that names it, rather than a single "something moved" standing in for
+    four claims.
+
+    *Kill:* widen ``_EXCLUDED_NESTED_STORE_NAMES[REALM_SYNC_DIRNAME]`` to skip
+    the baseline's own name, or implement the nested rule as a suffix/prefix
+    match over the realm directory instead of the literal child name.
+    """
+
+    root = isolate_agent_runtime_root
+    _realm_sync_worktree(root)
+    path = getattr(paths, helper)("realm_alpha")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"card_a": "sha_one"}', encoding="utf-8")
+
+    before = core_cache.build_input_fingerprint()
+    assert before is not None
+    assert str(path) in {entry.path for entry in before.entries}, (
+        f"{helper}() resolved to {path}, and the fingerprint does not stat it at "
+        "all. The build reads this file; a core served across a change to it is "
+        "unlabeled stale served as authoritative."
+    )
+
+    path.write_text('{"card_a": "sha_two"}', encoding="utf-8")
+    after = core_cache.build_input_fingerprint()
+    assert after is not None
+    assert after.digest != before.digest, (
+        f"rewriting {path} did not move the read-model cache's input digest, so "
+        "the realm-sync baseline has left the input closure. The publication "
+        "verdict the projection computes from it can now be served from a core "
+        "built before the change."
+    )
+
+
+def test_the_nested_rule_does_not_reach_a_dot_git_outside_realm_sync(
+    isolate_agent_runtime_root,
+):
+    """UNDER-SCOPING. ``.git`` is excluded INSIDE one subtree, not everywhere.
+
+    The audit that opened this exclusion covers exactly one tree: the worktree
+    the realm-sync verbs create. A ``.git`` anywhere else in the store is
+    somebody else's data, carries no audit, and must be fingerprinted in full —
+    the same argument the two top-level-only cases make about the graveyards.
+
+    *Kill:* implement the skip as ``if name == ".git": continue`` inside
+    ``_walk_tree``, or consult ``exclude_nested`` at every depth instead of only
+    over the store root's own entry names.
+    """
+
+    root = isolate_agent_runtime_root
+    (root / "workspaces").mkdir(parents=True, exist_ok=True)
+    before = core_cache.build_input_fingerprint()
+    assert before is not None
+
+    stray = root / "workspaces" / ".git"
+    stray.mkdir(parents=True, exist_ok=True)
+    (stray / "index").write_text("a", encoding="utf-8")
+    after = core_cache.build_input_fingerprint()
+    assert after is not None
+
+    assert after.count == before.count + 2, (
+        f"a '.git' directory NESTED under another store subtree ({stray}) did "
+        f"not contribute its own entry plus its file ({before.count} -> "
+        f"{after.count}). The nested exclusion is declared for the realm-sync "
+        "subtree alone; applying it by name at every depth would drop unaudited "
+        "data out of the closure, which is a missed input."
+    )
+
+
+def test_a_nested_rule_is_not_activated_by_a_deep_directory_of_the_same_name(
+    isolate_agent_runtime_root,
+):
+    """The rule keys on a TOP-LEVEL entry name, not on any path segment.
+
+    ``exclude_nested`` is consulted over the store root's own entries and nowhere
+    else, so a directory that merely happens to be called ``realm_sync`` while
+    nested inside another store subtree activates nothing. Without this, the
+    mapping would silently grow into a claim about the name everywhere — the
+    defect the top-level-only doctrine block was written against, arriving
+    through the new door.
+
+    *Kill:* look ``exclude_nested`` up by ``entry.name`` at every depth in the
+    walk loop instead of once over ``root``'s own entries.
+    """
+
+    root = isolate_agent_runtime_root
+    (root / "workspaces").mkdir(parents=True, exist_ok=True)
+    before = core_cache.build_input_fingerprint()
+    assert before is not None
+
+    impostor = root / "workspaces" / paths.REALM_SYNC_DIRNAME / "child"
+    impostor.mkdir(parents=True, exist_ok=True)
+    (impostor / ".git").mkdir(parents=True, exist_ok=True)
+    (impostor / ".git" / "index").write_text("a", encoding="utf-8")
+    after = core_cache.build_input_fingerprint()
+    assert after is not None
+
+    assert after.count == before.count + 4, (
+        "a directory named "
+        f"{paths.REALM_SYNC_DIRNAME!r} NESTED under another store subtree "
+        f"activated the nested rule ({before.count} -> {after.count}; expected "
+        "+4 for the impostor, its child, the .git directory and its file). The "
+        "rule is declared for the STORE ROOT's own entry of that name."
+    )
+
+
+def test_the_nested_rule_names_the_directory_the_path_helpers_produce(
+    isolate_agent_runtime_root,
+):
+    """The mapping's key and the realm-sync tree's producers are ONE vocabulary.
+
+    Both producers are checked, because the two key their children differently
+    and the whole reason the rule skips the literal name ``.git`` is that neither
+    keying is usable as a skip: ``realm_sync._sync_repo_path`` keys a worktree by
+    the realm's SERVER token, ``paths.board_baseline_path`` keys a sidecar by the
+    REALM ID, and both land under the same top-level directory.
+
+    *Kill:* re-spell the literal ``"realm_sync"`` in ``core_cache``'s mapping
+    instead of importing ``paths.REALM_SYNC_DIRNAME``, then change the
+    constant's VALUE.
+    """
+
+    from agent_runtime import realm_sync
+
+    produced = paths.realm_sync_root().name
+    assert produced in core_cache._EXCLUDED_NESTED_STORE_NAMES, (
+        f"paths.realm_sync_root() resolves to a directory named {produced!r} and "
+        "core_cache._EXCLUDED_NESTED_STORE_NAMES does not key on it, so the walk "
+        "still stats every synced worktree's git internals. This is the MCF-2 "
+        "shape: an exclusion that agrees with a restated list rather than with "
+        "the code that produces the directory."
+    )
+    assert produced == paths.REALM_SYNC_DIRNAME
+    assert paths.board_baseline_path("realm_alpha").parent.parent == (
+        paths.realm_sync_root()
+    ), (
+        "the baseline sidecars no longer live under the directory the nested "
+        "rule is keyed on, so the over-exclusion gate above is testing a tree "
+        "the rule cannot reach"
+    )
+
+    class _Realm:
+        sync_manifest_ref = ""
+        server_id = "srv_token"
+
+    assert realm_sync._sync_repo_path(_Realm()).parent == paths.realm_sync_root(), (
+        "the synced worktree no longer lands under the directory the nested rule "
+        "is keyed on, so the exclusion skips nothing on a live store"
     )
