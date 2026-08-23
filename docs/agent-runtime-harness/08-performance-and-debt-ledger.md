@@ -115,8 +115,10 @@ carry the boot-side half).
 
 ### 3. Per-domain store read caches in the serve — OPEN, re-verified 2026-08-22
 
-Archived doc 14's item 1, and still item 1. The serve's `_ReadModelCache`
-(`serve.py:616`) is a **response** cache — it replays the exact stdout payload of
+Archived doc 14's item 1, and still item 1. The serve's `_PollResponseCache`
+(`serve.py:621`; renamed from `_ReadModelCache` in the duplicate-implementation
+retirement, Stage 2 — the old name was the third thing in this repo wearing
+"read model") is a **response** cache — it replays the exact stdout payload of
 `status --json` / `snapshot --json` behind a fingerprint and a 20 s TTL. It does not
 cache parsed store models, so a build that misses the core cache still re-reads and
 re-decodes the JSON store from disk. `parse_cache.py` landed the `(path, mtime_ns,

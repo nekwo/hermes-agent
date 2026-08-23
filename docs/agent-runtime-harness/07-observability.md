@@ -200,8 +200,11 @@ bootstrap before it. `phases` is a SUPERSET, not a replacement (`:41-46`).
 
 ### The launcher's three lines
 
-All three ride `Logger` into `<temp>/eternia_launcher_diag.log` in debug AND
-release, stamped `[<UTC ISO-8601>] <level> <logger> — <message>`
+All three ride `Logger` into `<temp>/eternia_launcher_diag.log` — the EMITTERS
+run unconditionally, but since MCF-83 §2 (launcher `1a012e13d`, 2026-08-20) the
+disk tee installs only in debug or opt-in support builds
+(`kDebugMode || ETERNIA_VOICE_DIAGNOSTICS`); a release binary emits to a logger
+nothing tees. Lines are stamped `[<UTC ISO-8601>] <level> <logger> — <message>`
 (`lib/core/telemetry/diag_log_file.dart:278-283`). Bullet paths below are
 relative to `lib/features/mission_control/`.
 
@@ -212,7 +215,7 @@ relative to `lib/features/mission_control/`.
   because the field set is CLOSED unlike the open-ended boot receipt (`:255-265`).
 * `[MissionChatOutcome] turn_id=… status=… [error_kind=…] message="…"` —
   `agent_chat/mission_agent_chat_runtime_controller.dart:1566-1571`. Landed
-  because the 2026-08-22 01:00:47Z new-chat rejection settled leaving NO
+  because the 2026-08-22 02:00:47Z new-chat rejection settled leaving NO
   envelope anywhere on disk: the timing line printed bare (correct — no phases
   happened) and the refusal lived only in widget state. Harness error prose only,
   truncated at 220 chars, never operator text.

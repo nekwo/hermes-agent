@@ -363,7 +363,7 @@ operator's text.
 
 ## Open rows
 
-- **New-chat first send settled REJECTED — OPEN, unreproduced.** 2026-08-22 01:00:47Z; the mint is
+- **New-chat first send settled REJECTED — OPEN, unreproduced.** 2026-08-22 02:00:47Z; the mint is
   acquitted, the explicit-`session_id` lane implicated, and `[MissionChatOutcome]` (§10) stands
   guard for the next occurrence → [record](planned/new-chat-first-send-rejected.md).
 - **Hermes admission costs ~4–6 s of every warm turn**; convicted contributor is

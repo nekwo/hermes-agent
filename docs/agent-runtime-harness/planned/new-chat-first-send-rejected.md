@@ -8,7 +8,7 @@ same day and has not yet caught one.
 
 ## The incident
 
-2026-08-22 01:00:47Z — the timestamp the launcher's own anchor records
+2026-08-22 02:00:47Z — the timestamp the launcher's own anchor records
 (`mission_agent_chat_runtime_controller.dart:1556`). An operator opened a new chat
 with `alice` and the FIRST send settled `REJECTED`. The refusal envelope was recorded
 NOWHERE: a bare `[MissionChatTiming]` line (correct — no phases happened) and nothing

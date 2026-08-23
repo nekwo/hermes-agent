@@ -79,8 +79,14 @@ rule against.
 - A ruling on which of the three outcomes applies.
 - If (1): the second-authority drift argument answered in writing, and the
   equivalence between the two caches tested, not assumed.
-- If (2): a grep-clean retirement including `runtime_config.ReadModelConfig`,
-  the two CLI verbs, and `tests/agent_runtime/test_read_model*.py`.
+- If (2): a grep-clean retirement including the two CLI verbs and
+  `tests/agent_runtime/test_read_model*.py` — but NOT `ReadModelConfig`
+  wholesale: its `delta_patches` field gates the LIVE S7-A patch-producer lane
+  (`SHIPPED_DELTA_PATCHES`, resolved by `state_patches.delta_patches_enabled`;
+  the launcher's base seed writes `read_model.delta_patches: true`, so the YAML
+  key path is cross-repo wire). Retire only the dead-lane fields `enabled`,
+  `serve_snapshot_from_db`, `db_filename`; the class, the `read_model:` YAML
+  block, and `delta_patches` stay.
 - If (3): the default flipped and `harness status` reporting the lane's actual
   reach.
 

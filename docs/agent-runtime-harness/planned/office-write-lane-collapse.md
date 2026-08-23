@@ -66,16 +66,16 @@ assertions — with a repo-wide grep as the evidence, never a file-scoped one �
 leave the CLI verb while deleting the launcher-side registry row and lowering,
 which no caller can reach.
 
-## Row 4 — the `--expect-revision` argv arms are unreachable
+## Row 4 — DISCHARGED (verified 2026-08-22, launcher delete audit)
 
-**Evidence.** `harness_capability_registry.dart:224` states it outright:
-`expect_revision` is DELIBERATELY absent from all three office write specs, while
-the bridge still lowers it (`mission_control_bridge.dart:4374`, `:4411`). The
-office's revision guard lives on the RPC lane only. (The BOARD lane is the
-exception and does send it — `board/mission_board_write.dart:166,192`.)
-
-**Gate.** These die with Row 1 or with Row 2, whichever lands first; they are not
-worth a stage of their own.
+The office `--expect-revision` argv arms this row scheduled were already
+deleted by the EG-0.3 reap (reap 1). The two lowerings the old evidence cited
+(`mission_control_bridge.dart:4374`, `:4411`) are the two BOARD lowerings the
+reap deliberately kept (`board/mission_board_write.dart:166,192` is the board's
+own guard), and the launcher's
+`mission_control_office_argv_reap_contract_test.dart` pins the surviving
+`--expect-revision` population at exactly those two. Nothing left to do; do
+not re-plan this deletion.
 
 ## Row 5 — coverage for `.restored` and `.conflict_resolved` (D-W2)
 
