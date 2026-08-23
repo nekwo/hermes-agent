@@ -9,11 +9,14 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from hermes_constants import (
+    get_hermes_auth_home,
     get_hermes_head_home,
     get_hermes_home,
     record_hermes_head_home_if_unset,
+    reset_hermes_auth_home_override,
     reset_hermes_head_home,
     reset_hermes_home_override,
+    set_hermes_auth_home_override,
     set_hermes_home_override,
 )
 from hermes_cli.profiles import (
@@ -173,8 +176,21 @@ def resolve_persona_profile(persona) -> PersonaProfileBinding:
 
 
 @contextmanager
-def persona_profile_context(binding: PersonaProfileBinding, *, runtime_root: Path | None = None) -> Iterator[None]:
+def persona_profile_context(
+    binding: PersonaProfileBinding,
+    *,
+    runtime_root: Path | None = None,
+    export_env: bool = True,
+) -> Iterator[None]:
     """Bind this run's environment. Audit Q1: the runtime root is UNCONDITIONAL.
+
+    ``export_env=False`` binds the profile CONTEXT-LOCALLY ONLY and writes no
+    process-global environment at all. It is not a second implementation — the
+    resolution above (runtime root, typed rows, head-home recording, the
+    ContextVar home override) is shared verbatim; the flag decides only whether
+    the ``os.environ`` mirror is written. Do not call it with ``False``
+    directly: :func:`persona_profile_scope` is the named entry point and carries
+    the rules for when that mode is sound.
 
     This block used to conflate two responsibilities and gate both on one field.
     Profile-home redirection (``HERMES_HOME`` / ``HOME`` / ``HERMES_AUTH_HOME``)
@@ -250,15 +266,16 @@ def persona_profile_context(binding: PersonaProfileBinding, *, runtime_root: Pat
         previous_root = os.environ.get(RUNTIME_ROOT_ENV)
         rows_token = _PROFILE_CONTEXT_ROWS.set(tuple(rows))
         try:
-            if resolved_root is not None:
+            if export_env and resolved_root is not None:
                 os.environ[RUNTIME_ROOT_ENV] = str(resolved_root)
             yield
         finally:
             _PROFILE_CONTEXT_ROWS.reset(rows_token)
-            if previous_root is None:
-                os.environ.pop(RUNTIME_ROOT_ENV, None)
-            else:
-                os.environ[RUNTIME_ROOT_ENV] = previous_root
+            if export_env:
+                if previous_root is None:
+                    os.environ.pop(RUNTIME_ROOT_ENV, None)
+                else:
+                    os.environ[RUNTIME_ROOT_ENV] = previous_root
         return
 
     previous_env = {
@@ -275,6 +292,14 @@ def persona_profile_context(binding: PersonaProfileBinding, *, runtime_root: Pat
     # SessionDB-persistence fix).
     head_home_token = record_hermes_head_home_if_unset(get_hermes_head_home())
     token = set_hermes_home_override(binding.profile_home)
+    # The shared-auth home this binding pins: the head's, so a persona keeps its
+    # own profile home for memory/sessions/config while borrowing the head
+    # credential pool. Resolved through ``get_hermes_auth_home()`` (ContextVar
+    # first, env second) so a nested binding reads the outer one's answer
+    # whichever channel the outer one used, and mirrored into BOTH channels
+    # below: the ContextVar for in-process readers, the env var for spawns.
+    head_auth_home = get_hermes_auth_home() or (previous_env.get("HERMES_HOME") or "")
+    auth_token = set_hermes_auth_home_override(head_auth_home or None)
     rows_token = _PROFILE_CONTEXT_ROWS.set(tuple(rows))
     # ── Why the os.environ writes below still exist (audited 2026-08-09) ──
     # The ContextVar override above already wins for every reader that goes
@@ -288,9 +313,14 @@ def persona_profile_context(binding: PersonaProfileBinding, *, runtime_root: Pat
     #     override) would otherwise hand a child the head home. ContextVars
     #     never cross a subprocess boundary.
     #   * HERMES_AUTH_HOME — hermes_cli/auth.py::_global_auth_file_path reads
-    #     the env var directly on the credential-resolution path of every turn.
+    #     this authority on the credential-resolution path of every turn. It is
+    #     no longer env-ONLY: the value is mirrored into a ContextVar above and
+    #     that reader consults ``get_hermes_auth_home()``, so an in-process lane
+    #     can bind it without the env write. The env write survives for spawns.
     #   * HOME — POSIX ``os.path.expanduser``/``Path.home()`` consult it; there
-    #     is no context-scoped hook for those.
+    #     is no context-scoped hook for those. This is the ONE write with no
+    #     context-local equivalent, and it is what bounds
+    #     :func:`persona_profile_scope` (see its docstring).
     #   * HERMES_AGENT_RUNTIME_ROOT — the legacy terminal envelope layer
     #     (agent_runtime/terminal_envelope.py, tools/terminal_tool.py) still
     #     keys on the exported env var.
@@ -300,26 +330,78 @@ def persona_profile_context(binding: PersonaProfileBinding, *, runtime_root: Pat
     # then restores it after A already restored the original) and mid-turn
     # env readers see the wrong scope. Do not shrink that lock until every
     # reader above is context-scoped and these writes are deleted.
+    #
+    # ``export_env=False`` skips this whole block and therefore needs no lock;
+    # everything above it is context-local and per-task by construction.
     try:
-        head_auth_home = previous_env.get("HERMES_AUTH_HOME") or previous_env.get("HERMES_HOME")
-        if head_auth_home:
-            os.environ["HERMES_AUTH_HOME"] = head_auth_home
-        os.environ["HERMES_HOME"] = str(binding.profile_home)
-        profile_home = binding.profile_home / "home"
-        if profile_home.exists():
-            os.environ["HOME"] = str(profile_home)
-        # Resolved BEFORE the HERMES_HOME override above so the exported root is
-        # the head/operator resolution, not one re-derived through the profile
-        # home this context just diverted to.
-        if resolved_root is not None:
-            os.environ[RUNTIME_ROOT_ENV] = str(resolved_root)
+        if export_env:
+            if head_auth_home:
+                os.environ["HERMES_AUTH_HOME"] = head_auth_home
+            os.environ["HERMES_HOME"] = str(binding.profile_home)
+            profile_home = binding.profile_home / "home"
+            if profile_home.exists():
+                os.environ["HOME"] = str(profile_home)
+            # Resolved BEFORE the HERMES_HOME override above so the exported
+            # root is the head/operator resolution, not one re-derived through
+            # the profile home this context just diverted to.
+            if resolved_root is not None:
+                os.environ[RUNTIME_ROOT_ENV] = str(resolved_root)
         yield
     finally:
         _PROFILE_CONTEXT_ROWS.reset(rows_token)
+        reset_hermes_auth_home_override(auth_token)
         reset_hermes_home_override(token)
         reset_hermes_head_home(head_home_token)
-        for key, value in previous_env.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
+        if export_env:
+            for key, value in previous_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+
+@contextmanager
+def persona_profile_scope(
+    binding: PersonaProfileBinding, *, runtime_root: Path | None = None
+) -> Iterator[None]:
+    """Bind a persona's profile CONTEXT-LOCALLY. Writes no process-global env.
+
+    Same binding, same authority — this delegates to
+    :func:`persona_profile_context` rather than re-deriving anything — with the
+    ``os.environ`` mirror switched off.
+
+    **Why this needs no ``_WORKDIR_LOCK``.** Everything it installs is a
+    ContextVar: the home override (``set_hermes_home_override``), the head-home
+    recording, the shared-auth home (``set_hermes_auth_home_override``) and the
+    typed rows. ContextVars are per-task and per-thread, so two concurrent
+    entries cannot lose each other's update and no OTHER thread's
+    ``get_hermes_home()`` / ``get_hermes_auth_home()`` can observe this binding
+    at all. The env-writing mode's invariant — sound only while runs are
+    serialized — is a statement about ``os.environ``, and this mode has no
+    ``os.environ`` to be unsound about.
+
+    **What it is FOR.** Lanes that only call in-process resolvers: the readiness
+    walk behind every snapshot build (``profile_readiness``) enters a profile
+    binding per persona every few seconds, on the snapshot thread, in the same
+    ``harness serve`` process that hosts chat turns. With the env mirror on,
+    every ambient ``get_hermes_home()`` reader on every other thread resolved
+    the WALKED profile for the width of that walk — which is how a chat turn's
+    ``load_agent_runtime_config()`` returned another profile's ``config.yaml``
+    and ``chat_lane_bundle``'s ``(mtime_ns, size)`` key forced visibility
+    rebuilds (live receipts 2026-08-23: turns overlapping walks billed 1,796 /
+    2,343 ms of context build against 453 ms bundle-free).
+
+    **What it is NOT for, and the one named residue.** Any lane that spawns a
+    subprocess, or drives an in-process plugin that reads ``os.environ`` raw,
+    still needs :func:`persona_profile_context` — a ContextVar never crosses a
+    spawn. And this mode does not redirect ``HOME``, because POSIX
+    ``os.path.expanduser`` / ``Path.home()`` have no context-scoped hook. On
+    POSIX that is observable exactly where a ``~`` is expanded under the
+    binding: a ``skills.external_dirs`` entry spelled with ``~``, and the
+    ``~/.codex`` / ``~/.qwen`` credential singletons. On native Windows it is
+    unobservable — ``ntpath.expanduser`` consults ``USERPROFILE``, never
+    ``HOME``. A lane that depends on the persona's ``~`` must not use this mode.
+    """
+
+    with persona_profile_context(binding, runtime_root=runtime_root, export_env=False):
+        yield

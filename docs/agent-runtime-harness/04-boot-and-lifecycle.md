@@ -190,6 +190,14 @@ The readiness section publishes its own split. Same cold boot:
 `snapshot_agents_readiness walk_ms=2133 tool_visibility_ms=2232`; warm, same day,
 `walk_ms=769 tool_visibility_ms=26`.
 
+The walk's per-persona profile binding is `persona_profile_scope` —
+context-local, no `os.environ` writes, and therefore no `_WORKDIR_LOCK`. On this
+lane that is not a nicety: the walk runs on the builder thread every 2–4 s in the
+process that also serves chat turns, so the env-exporting binding rebound
+`HERMES_HOME` for every other thread every few seconds. See
+02-runtime-data-and-shapes' readiness note for the reachability audit, the
+1.3–1.9 s of turn cost it was billing, and the one named residue (`HOME`).
+
 ## Stage 8 — the boot core cache: consult → fingerprint → serve or demote
 
 `agent_runtime/core_cache.py`. The claim it rests on: the first build is not bandwidth

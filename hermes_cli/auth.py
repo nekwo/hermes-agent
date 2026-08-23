@@ -933,11 +933,24 @@ def _global_auth_file_path() -> Optional[Path]:
     pool.  When unset, fall back to the historical global-root auth.json in
     profile mode.
 
+    Read through ``hermes_constants.get_hermes_auth_home()``, NOT raw
+    ``os.environ``: that authority now has two channels — a context-local
+    override for in-process lanes and the env var for anything that crosses a
+    spawn — and both spell the same fact.  ``agent_runtime.profile_context``
+    writes the ContextVar in both of its modes and the env var only in the
+    env-exporting one, so a lane that binds a profile without mutating
+    process-global environment (``persona_profile_scope``, the snapshot
+    readiness walk) still resolves the SAME auth store this function would have
+    returned under the env write.  Reading the env var raw here saw only half
+    the authority and silently fell through to the global root.
+
     Returns ``None`` when the fallback and active profile resolve to the same
     directory (classic mode, or custom HERMES_HOME that is not a profile).
     """
+    from hermes_constants import get_hermes_auth_home
+
     profile_home = get_hermes_home()
-    explicit_auth_home = os.environ.get("HERMES_AUTH_HOME", "").strip()
+    explicit_auth_home = get_hermes_auth_home()
     if explicit_auth_home:
         auth_home = Path(explicit_auth_home)
     else:

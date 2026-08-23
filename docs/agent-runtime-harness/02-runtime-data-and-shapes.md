@@ -211,6 +211,33 @@ log. The live 2026-08-22 splits are `walk_ms=2133 tool_visibility_ms=2232` on
 the cold boot (pid 30588) and `walk_ms=769 tool_visibility_ms=26` warm
 (pid 32164).
 
+**The walk binds each persona's profile CONTEXT-LOCALLY.**
+`profile_readiness_for_persona` enters `profile_context.persona_profile_scope`,
+not the env-exporting `persona_profile_context`: it installs the ContextVars
+(`set_hermes_home_override`, `set_hermes_auth_home_override`, the head-home
+recording) and writes **no** `os.environ`. That matters because this walk runs
+on the snapshot builder thread every 2–4 s in the same `harness serve` process
+that hosts chat turns, and takes no `profile_runner._WORKDIR_LOCK` — so under
+the old env mirror every ambient `get_hermes_home()` reader on every other
+thread resolved the WALKED profile for the width of the walk. Measured cost of
+that (2026-08-23 turns): a bundle-free turn built context in 453 ms, while turns
+overlapping a walk billed 1,796 / 2,343 ms with `visibility_bundle_builds=3/6`,
+because `chat_lane_bundle`'s key carries the ACTIVE `config.yaml`'s
+`(mtime_ns, size)` and the race moved *which file that was*.
+
+It is sound because the walk reaches no env-pinned reader: it spawns no
+subprocess and drives no plugin; its skill, config and machine-root reads
+resolve through `get_hermes_home()` (ContextVar-first) or an explicit path;
+`get_default_hermes_root()` collapses to the same answer either way, because a
+binding's `profile_home` is always `<root>/profiles/<name>`; and the one raw-env
+reader it does reach — `hermes_cli.auth._global_auth_file_path`, on the provider
+probe — now reads `hermes_constants.get_hermes_auth_home()`, which resolves the
+ContextVar first and the `HERMES_AUTH_HOME` env var second. The named residue is
+`HOME`: POSIX `os.path.expanduser` has no context-scoped hook, so a `~` expanded
+under the binding (a `skills.external_dirs` entry, the `~/.codex` / `~/.qwen`
+singletons) resolves to the process home rather than `<profile>/home`. Inert on
+native Windows, where `expanduser` consults `USERPROFILE`.
+
 ---
 
 ## The core cache — `serve_read_model/`

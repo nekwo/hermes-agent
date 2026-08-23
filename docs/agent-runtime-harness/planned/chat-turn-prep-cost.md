@@ -641,15 +641,49 @@ deregisters.
    `test_a_NAMED_actor_config_field_still_rotates_the_key` witnesses that the mechanism is
    live rather than decorative.
 
-   *The hazard is NOT fixed here, and is stated as standing debt.* The reuse key no longer
-   depends on `HERMES_HOME` holding still, but everything else on a turn's thread still
-   resolves through it while a background walk rebinds the process: `chat_lane_bundle`'s
-   key carries the ACTIVE `config.yaml`'s `(mtime_ns, size)`, so the same race also forces
-   bundle rebuilds (the `visibility_bundle_builds` counter above is how that will show).
-   Retiring it means making the readiness walk stop writing process-global env — a change
-   to a documented, load-bearing seam whose own comment says the writes are pinned by live
-   readers (in-process plugins, `HERMES_AUTH_HOME`, `HOME`, the legacy envelope root), so
-   it is its own stage, not a line in this one.
+   *The hazard was NOT fixed here — it was fixed at the source next, and this debt is now
+   CLOSED.* This item fixed the KEY: the reuse key stopped depending on `HERMES_HOME`
+   holding still. What it left open was every other ambient reader on a turn's thread,
+   notably `chat_lane_bundle`'s key carrying the ACTIVE `config.yaml`'s `(mtime_ns, size)`,
+   so the same race still forced visibility-bundle rebuilds — and the live receipts said so
+   in milliseconds: a bundle-free turn built context in 453 ms, while turns overlapping a
+   readiness walk billed 1,796 / 2,343 ms with `visibility_bundle_builds=3/6` and 11 probe
+   rounds. The hazard owned ~1.3–1.9 s of turn variance.
+
+   **What shipped.** `profile_context.persona_profile_context` grew a context-local-only
+   mode (`export_env=False`) reached through a named sibling,
+   `profile_context.persona_profile_scope`; one authority, one body, the flag decides only
+   whether the `os.environ` mirror is written. `profile_readiness_for_persona` binds through
+   that sibling. The env-writing mode is untouched and keeps its `_WORKDIR_LOCK` invariant
+   comment — `profile_runner` still uses it, and must, because a ContextVar never crosses a
+   subprocess boundary.
+
+   **What the audit had to answer first**, since the seam's own comment says the writes are
+   pinned by live readers. Per env write → reader that pins it → reachable from the walk:
+   `HERMES_AGENT_RUNTIME_ROOT` → the legacy terminal envelope → **not reachable** (the walk
+   runs no tools). `HERMES_HOME` → in-process plugins reading it raw → **not reachable** (the
+   walk loads no plugin), and every home resolution it does perform goes through
+   `get_hermes_home()` (ContextVar-first) or an explicit path; the one raw-env reader,
+   `get_default_hermes_root()`, **collapses to the same answer** either way because a
+   binding's `profile_home` is always `<root>/profiles/<name>`. `HERMES_AUTH_HOME` →
+   `hermes_cli.auth._global_auth_file_path` → **REACHABLE, on every walk**, via
+   `_provider_issue` → `load_pool` / `probe_runtime_provider` → `read_credential_pool` →
+   `_load_global_auth_store`; without a remedy the walk's provider probe would have judged a
+   persona against `<root>/auth.json` instead of the head profile's `auth.json` (both files
+   exist on the live install). Closed by giving that authority a second channel:
+   `hermes_constants.get_hermes_auth_home()` (ContextVar first, env second), which
+   `_global_auth_file_path` and the readiness provider memo key now read. `HOME` → POSIX
+   `expanduser` / `Path.home()` → **reachable in principle, and the one named residue**: no
+   context-scoped hook exists, so a `~` expanded under the binding (a
+   `skills.external_dirs` entry, the `~/.codex` / `~/.qwen` credential singletons) resolves
+   to the process home rather than `<profile>/home`. Unobservable on native Windows
+   (`ntpath.expanduser` consults `USERPROFILE`), and `external_dirs` is `[]` in every profile
+   on this install. It is written into `persona_profile_scope`'s docstring rather than left
+   to be rediscovered.
+
+   *Receipt to take on the next restart:* on turns that overlap a `snapshot_agents_readiness`
+   line, `visibility_bundle_builds=0` and a `request_received → context_built` span in the
+   same band as a non-overlapping turn.
 
 *What this does NOT claim.* The live turns were not re-run — the 19:03 serve was on
 `bfde53b4ae` and the 21:38 one on `14271f261f`; neither was restarted onto this tree.

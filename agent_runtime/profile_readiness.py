@@ -12,7 +12,7 @@ from .machine_roots import (
     path_token_issues,
 )
 from .parse_cache import cached_yaml_file
-from .profile_context import persona_profile_context, resolve_persona_profile
+from .profile_context import persona_profile_scope, resolve_persona_profile
 from .skill_install import harness_skill_hash_mismatches
 
 READINESS_READY = "ready"
@@ -104,7 +104,24 @@ def profile_readiness_for_persona(
         issues.append((binding.readiness, binding.summary))
     elif binding.profile_home is not None:
         try:
-            with persona_profile_context(binding):
+            # CONTEXT-LOCAL binding, deliberately — not the env-exporting
+            # ``persona_profile_context``. This walk runs on the snapshot
+            # builder thread every 2-4 s in a live ``harness serve`` and takes
+            # no ``_WORKDIR_LOCK``, so the env mode's save/mutate/restore was a
+            # lost-update race AND made every ambient ``get_hermes_home()``
+            # reader on every other thread resolve THIS persona's profile for
+            # the width of the walk (2026-08-23: chat turns overlapping a walk
+            # billed 1,796 / 2,343 ms of context build with 3 / 6 visibility
+            # bundle rebuilds, against 453 ms for a bundle-free turn).
+            #
+            # Sound because the walk reaches no env-pinned reader: it spawns no
+            # subprocess and drives no plugin, its skill/config/machine-root
+            # reads all resolve through ``get_hermes_home()`` (ContextVar-first)
+            # or an explicit path, and the ONE raw-env reader it does reach —
+            # ``hermes_cli.auth._global_auth_file_path`` on the provider probe
+            # below — now reads ``get_hermes_auth_home()``, which this mode
+            # binds context-locally. See ``persona_profile_scope``.
+            with persona_profile_scope(binding):
                 skill_resolutions = _resolve_skill_names(
                     list(persona.skills), skill_resolver=skill_resolver
                 )
@@ -240,17 +257,16 @@ def _dominant_issue(issues: list[tuple[str, str]]) -> tuple[str, str]:
 # immediately (same pattern as ``_profile_template_memo``/``_installed_skill_catalog``).
 #
 # The key MUST carry the active profile/auth scope, not just (provider, model):
-# ``_provider_issue`` runs inside ``persona_profile_context``, which diverts the
-# Hermes home (ContextVar override + process-global HERMES_HOME/HERMES_AUTH_HOME
-# mirror) so ``resolve_runtime_provider`` reads PER-PROFILE config and secrets.
-# Keyed on (provider, model) alone, the first profile's verdict leaks to every
-# other profile requesting the same pair within the TTL — one build could show
-# agent B "ready" on agent A's credentials (or falsely flag A with B's
-# auth_attention). The home component resolves through ``get_hermes_home()``
-# (ContextVar-first) INSIDE this call, so the key reflects the caller's active
-# profile context even when the process-global env mirror belongs to another
-# concurrently-running scope (env writes are process-wide; the ContextVar is
-# per-task — see agent_runtime/profile_context.py).
+# ``_provider_issue`` runs inside ``persona_profile_scope``, which diverts the
+# Hermes home and the shared-auth home context-locally so
+# ``resolve_runtime_provider`` reads PER-PROFILE config and secrets. Keyed on
+# (provider, model) alone, the first profile's verdict leaks to every other
+# profile requesting the same pair within the TTL — one build could show agent B
+# "ready" on agent A's credentials (or falsely flag A with B's auth_attention).
+# Both components resolve through the ContextVar-first accessors INSIDE this
+# call, so the key reflects the CALLER's active binding rather than whatever
+# scope happens to own the process env right now (env writes are process-wide;
+# the ContextVars are per-task — see agent_runtime/profile_context.py).
 _PROVIDER_ISSUE_TTL_SECONDS = 60.0
 _provider_issue_memo: dict[tuple[str, str, str, str], dict[str, Any]] = {}
 
@@ -265,21 +281,21 @@ def _provider_issue(persona) -> tuple[str, str] | None:
     model = getattr(persona, "model", None)
     if not provider and not model:
         return None
-    import os
     import time
 
-    from hermes_constants import get_hermes_home
+    from hermes_constants import get_hermes_auth_home, get_hermes_home
 
-    # Home component: ContextVar-aware resolver, NOT a raw env read. Under
-    # ``persona_profile_context`` both agree today (the context mirrors the
-    # override into env), but only the resolver stays correct for this task if
-    # another scope's env mutation is in flight. HERMES_AUTH_HOME stays a raw
-    # env read on purpose: that env value is exactly what the auth fallback
-    # (``hermes_cli/auth.py::_global_auth_file_path``) itself consumes, so the
-    # key must mirror the resolver's actual input.
+    # BOTH components are ContextVar-aware resolvers, never raw env reads. Under
+    # ``persona_profile_scope`` there IS no env mirror to read — the binding is
+    # context-local — and under the env-exporting mode the two channels agree,
+    # so the resolvers are correct in both and the raw reads were correct in
+    # only one. The rule the auth component was always written to: the key must
+    # mirror the auth fallback's ACTUAL input, and
+    # ``hermes_cli/auth.py::_global_auth_file_path`` now consumes
+    # ``get_hermes_auth_home()``.
     key = (
         str(get_hermes_home()),
-        os.environ.get("HERMES_AUTH_HOME") or "",
+        get_hermes_auth_home(),
         str(provider or ""),
         str(model or ""),
     )

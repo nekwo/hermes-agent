@@ -70,6 +70,47 @@ def get_hermes_home_override() -> str | None:
     return str(override)
 
 
+# The explicit shared-auth home for THIS context. Same shape, and the same
+# reason, as the home override above: ``persona_profile_context`` binds a
+# persona's profile home and pins the AUTH fallback to the HEAD home, so a
+# persona keeps its own HERMES_HOME for memory/sessions/config while borrowing
+# the head credential pool (``hermes_cli.auth._global_auth_file_path``).
+#
+# The ``HERMES_AUTH_HOME`` env var remains the authority a SUBPROCESS sees — a
+# ContextVar never crosses a spawn — and this override is what lets a purely
+# in-process lane bind the same fact without a process-global write that every
+# other thread in a ``harness serve`` also reads. Resolution is override-first,
+# env-second, so a lane that writes the env keeps behaving exactly as it did.
+_HERMES_AUTH_HOME_OVERRIDE: ContextVar[str | object] = ContextVar(
+    "_HERMES_AUTH_HOME_OVERRIDE", default=_UNSET
+)
+
+
+def set_hermes_auth_home_override(path: str | Path | None) -> Token:
+    """Set a context-local shared-auth home override and return its reset token."""
+    value: str | object = _UNSET if path is None else str(path)
+    return _HERMES_AUTH_HOME_OVERRIDE.set(value)
+
+
+def reset_hermes_auth_home_override(token: Token) -> None:
+    """Restore the previous context-local shared-auth home override."""
+    _HERMES_AUTH_HOME_OVERRIDE.reset(token)
+
+
+def get_hermes_auth_home() -> str:
+    """The explicit shared-auth home: context-local override first, env second.
+
+    Returns ``""`` when neither authority answers, which is the caller's signal
+    to fall back to the historical global root. This is the ONE reader of the
+    ``HERMES_AUTH_HOME`` authority that every in-process consumer should use;
+    reading the env var raw sees only half of it.
+    """
+    override = _HERMES_AUTH_HOME_OVERRIDE.get()
+    if override is not _UNSET and override:
+        return str(override).strip()
+    return os.environ.get("HERMES_AUTH_HOME", "").strip()
+
+
 def record_hermes_head_home_if_unset(path: str | Path | None) -> Token | None:
     """Record the OUTERMOST (operator/head) Hermes home for this context, once.
 

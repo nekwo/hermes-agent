@@ -19,6 +19,7 @@ record-at-injection kwarg).
 
 from __future__ import annotations
 
+import os
 import types
 from dataclasses import dataclass
 
@@ -1115,6 +1116,180 @@ def test_the_config_document_a_turn_resolves_is_AMBIENT(tmp_path, monkeypatch):
 
     assert during_walk.default_model == "sonnet"
     assert load_agent_runtime_config().default_model == "opus"
+
+
+def _two_config_homes(tmp_path):
+    """A ``base`` and a ``qa`` profile home whose ``config.yaml`` files differ.
+
+    Different MODEL so ``load_agent_runtime_config()`` can tell them apart, and
+    different SIZE so ``chat_lane_bundle``'s ``(mtime_ns, size)`` revision can
+    too — a same-size pair would let the revision test pass by coincidence on a
+    filesystem whose mtime granularity happened to collapse the two writes.
+    """
+
+    turn_home = tmp_path / "profiles" / "base"
+    walked_home = tmp_path / "profiles" / "qa"
+    for home, body in (
+        (turn_home, "agent_runtime:\n  default_model: opus\n"),
+        (
+            walked_home,
+            "agent_runtime:\n  default_model: sonnet\n"
+            "  mission_chat:\n    default_max_seconds: 900\n",
+        ),
+    ):
+        home.mkdir(parents=True)
+        (home / "config.yaml").write_text(body, encoding="utf-8")
+    return turn_home, walked_home
+
+
+def _readiness_walk_gate(monkeypatch, walked_home):
+    """Park a REAL ``profile_readiness_for_persona`` walk inside its binding.
+
+    The gate is ``profile_readiness.cached_yaml_file``, which the walk calls
+    from INSIDE the profile binding (``profile_readiness.py`` — the
+    ``config.yaml`` read). Wrapping it holds the walk open at exactly the point
+    the hazard is about, through the readiness ENTRY POINT rather than by
+    entering the context manager by hand: what is under test is what the
+    snapshot builder does, not what ``persona_profile_context`` does.
+
+    Returns ``(entered, release, run, observed)`` where ``observed`` collects the
+    home the walk itself resolves, so a green run cannot be one where the walk
+    silently bound nothing.
+    """
+
+    import threading
+
+    from agent_runtime import profile_context, profile_readiness
+    from agent_runtime.models import AgentPersona
+    from hermes_constants import get_hermes_home
+
+    entered = threading.Event()
+    release = threading.Event()
+    observed: list[str] = []
+    real = profile_readiness.cached_yaml_file
+
+    def _gated(path, default=None):
+        observed.append(str(get_hermes_home()))
+        entered.set()
+        release.wait(10)
+        return real(path, default=default)
+
+    monkeypatch.setattr(profile_readiness, "cached_yaml_file", _gated)
+    monkeypatch.setattr(profile_context, "profile_exists", lambda name: name == "qa")
+    monkeypatch.setattr(profile_context, "get_profile_dir", lambda name: walked_home)
+
+    persona = AgentPersona(
+        id="qa",
+        display_name="QA",
+        role="qa",
+        model=None,
+        provider=None,
+        api_mode=None,
+        toolsets=[],
+        system_prompt_path="personas/qa/system.md",
+        hermes_profile="qa",
+        skills=[],
+    )
+    answer: list[dict] = []
+
+    def _run():
+        answer.append(profile_readiness.profile_readiness_for_persona(persona))
+
+    return entered, release, _run, observed, answer
+
+
+def test_a_READINESS_walk_does_not_change_what_a_concurrent_turn_RESOLVES(
+    tmp_path, monkeypatch
+):
+    """THE fix at the source, driven through the readiness entry point.
+
+    The sibling above witnesses that ``persona_profile_context`` — the
+    env-EXPORTING mode, which keeps its ``_WORKDIR_LOCK`` invariant — really
+    does rebind the process. This asserts that the SNAPSHOT lane no longer uses
+    it: ``profile_readiness_for_persona`` binds context-locally
+    (``persona_profile_scope``), so a walk standing in ``qa`` is invisible to
+    every other thread.
+
+    *Killing mutation:* point ``profile_readiness`` back at
+    ``persona_profile_context``. *Probed field:* what the OTHER thread's
+    ``load_agent_runtime_config()`` returns while the walk is parked.
+    """
+
+    import threading
+
+    from agent_runtime.config import load_agent_runtime_config
+
+    turn_home, walked_home = _two_config_homes(tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(turn_home))
+    assert load_agent_runtime_config().default_model == "opus"
+
+    entered, release, run, observed, answer = _readiness_walk_gate(
+        monkeypatch, walked_home
+    )
+    walker = threading.Thread(target=run, daemon=True)
+    walker.start()
+    try:
+        assert entered.wait(10), "the readiness walk never reached its config read"
+        during_walk = load_agent_runtime_config()
+        env_during_walk = os.environ.get("HERMES_HOME")
+    finally:
+        release.set()
+        walker.join(10)
+
+    # The walk really did bind qa — for ITSELF.
+    assert observed and observed[0] == str(walked_home)
+    assert answer and answer[0]["hermes_profile"] == "qa"
+    # ...and this thread, which asked for nothing, kept its own profile.
+    assert during_walk.default_model == "opus"
+    assert env_during_walk == str(turn_home)
+    assert load_agent_runtime_config().default_model == "opus"
+
+
+def test_a_READINESS_walk_does_not_move_the_chat_lane_BUNDLE_config_revisions(
+    tmp_path, monkeypatch
+):
+    """The ~1.3-1.9 s receipt's mechanism, pinned at the component that owns it.
+
+    ``chat_lane_bundle``'s key carries ``(mtime_ns, size)`` of the ROOT and the
+    ACTIVE ``config.yaml``, and the active one is ``get_hermes_home()/config.yaml``.
+    Under the hazard a concurrent readiness walk moved that identity to another
+    profile's file, so the memo could not hold and the whole visibility
+    composition — the ``check_fn`` probe sweep included — was re-resolved
+    mid-turn (2026-08-23 live turns: ``visibility_bundle_builds=3/6`` and 11
+    probe rounds on turns overlapping a walk, against a 453 ms bundle-free turn).
+
+    Asserting on ``_config_revisions()`` rather than on a built bundle is
+    deliberate: it is the one component the race could touch, and it can be
+    read without a store, a registry or a probe sweep — so a red here names the
+    hazard rather than some other input having moved.
+    """
+
+    import threading
+
+    from agent_runtime.chat_lane_bundle import _config_revisions
+
+    turn_home, walked_home = _two_config_homes(tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(turn_home))
+    before = _config_revisions()
+
+    entered, release, run, observed, _answer = _readiness_walk_gate(
+        monkeypatch, walked_home
+    )
+    walker = threading.Thread(target=run, daemon=True)
+    walker.start()
+    try:
+        assert entered.wait(10), "the readiness walk never reached its config read"
+        during_walk = _config_revisions()
+    finally:
+        release.set()
+        walker.join(10)
+
+    assert observed and observed[0] == str(walked_home)
+    assert during_walk == before, (
+        "a background readiness walk moved this turn's chat-lane bundle key; "
+        "every overlapping turn re-resolves the whole visibility composition"
+    )
+    assert _config_revisions() == before
 
 
 def test_an_AMBIENT_config_document_cannot_rotate_the_reuse_key(tmp_path, monkeypatch):
