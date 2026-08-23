@@ -64,8 +64,12 @@ provider_first_byte → stream_done → native_committed → projected
 `request_assembled` landed 2026-08-22 (`785a35beae`) and splits the old "provider" span:
 `provider_request_started → request_assembled` is hermes assembly, `request_assembled →
 provider_first_byte` is client init + network + provider (`:352-375`). Beside the marks ride one
-flag (`agent_init_cold`, `:92`) and two counters (`registry_probe_rounds`, `builds_overlapped`,
-`:96`); `_BLOCK_ORDER` (`:106-122`) is the closed set a reader may see.
+flag (`agent_init_cold`, `:92`) and three counters (`registry_probe_rounds`,
+`visibility_bundle_builds`, `builds_overlapped`, `:96`); `_BLOCK_ORDER` is the closed set a reader
+may see. `visibility_bundle_builds` landed 2026-08-23 with the chat-lane bundle (§4a) and is a
+delta of a thread-cumulative counter like `registry_probe_rounds`: `0` on a warm steady-state turn,
+`1` when a keyed input moved, and anything above `1` means something is re-resolving what the
+bundle holds.
 
 **Four honesty rules** (`:18-50`), each enforced in code, not by convention:
 
@@ -146,6 +150,40 @@ resolution onto the operator preview, so `persona tool-diff` stops reporting the
 configured set (under unbounded it sets `configured_toolsets = all_registered_toolsets()`,
 `:867-868`), and carries the typed account of what the scoping removed
 (`chat_lane_capability_drops`, `:688`) — survivors alone were never an account of removals.
+
+### 4a. One visibility resolve per turn (`agent_runtime/chat_lane_bundle.py`, 2026-08-23)
+
+Those resolvers were being walked **four times per turn** — `capability_block` and `admission_line`
+from `build_mission_chat_turn_context`, `tool_contract` and `permission_state` from inside its
+`_runtime_signature`, and `_enabled_toolsets_for_chat`/`_blocked_tool_names_for_chat` again in
+`mission_chat_reply` for the request itself. Each walk re-ran `permission_options_for_chat` →
+`effective_toolsets`/`all_registered_toolsets` → the registry `check_fn` sweep, and the caches
+underneath expire on 15/30 s TTLs tuned for one snapshot build rather than for operator cadence.
+Live receipt: `registry_probe_rounds=27` inside a 1,313 ms `context_built` span, six minutes after a
+serve boot, on a chat where nothing had changed (turn `2026-08-23T14:34:57Z`).
+
+`chat_lane_bundle` resolves the lane ONCE and memoizes the **composition** — never the probes. The
+key is the lane's own identity: persona revision, chat root + a fresh permission fingerprint (mode,
+source, expiry, remaining turns, mode blocks), root + active `config.yaml` `(mtime_ns, size)`,
+runtime root, entry-point lane, and `tools.registry.registry_epoch()` — a single integer that moves
+on every registration/MCP refresh (`registry.generation`) *and* on every `invalidate_check_fn_cache`
+(the availability half, added with this stage). The `check_fn` grace machinery is untouched, and a
+down backend still loses its TOOLS at construction because `registry.get_definitions` re-probes on
+its own TTL; what can go stale is the toolset NAME in the lane's accounting until the epoch moves.
+`invalidate_chat_lane_bundles()` is the explicit hatch. A bundle whose best-effort components
+faulted is served to that turn and never stored. Scope is the turn path only — the preview lane,
+snapshot builder and prewarm still resolve live, because those are routinely driven with a
+monkeypatched resolver a config-keyed memo cannot see. Receipt: `visibility_bundle_builds` (§2).
+
+**The reuse key stopped keying on row liveness at the same time.** `_runtime_signature` hashed
+`asdict(instance)` whole, and a chat turn WRITES that row (`state` flips, `updated_at` /
+`last_heartbeat_at` are stamped, the handler writes `skill_manifest_hash` back at the end of every
+turn), so with `persona_chat.hot_sessions` finally on, the second message of one chat 45 s after the
+first recorded `resident_rebuild_runtime_signature_changed` + `resident_actor_reused=0`
+(`2026-08-23T14:45:14Z`). It now folds explicit allowlists — `PERSONA_IDENTITY_FIELDS` /
+`INSTANCE_IDENTITY_FIELDS` (`mission_chat_turn_context.py`) — of the fields that decide what a
+constructed actor IS. Allowlists, not denylists: a new field on either record is presumed
+bookkeeping until someone names it.
 
 ## 5. MCP admission — the profile declares the server
 

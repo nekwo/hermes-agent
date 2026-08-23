@@ -93,7 +93,19 @@ PHASE_FLAGS: tuple[str, ...] = ("agent_init_cold",)
 
 #: Non-negative counts (Stage 4 attribution). Absent when unobservable — see
 #: the field notes in :meth:`TurnPhaseMarks.count`.
-PHASE_COUNTERS: tuple[str, ...] = ("registry_probe_rounds", "builds_overlapped")
+#:
+#: ``visibility_bundle_builds`` is the receipt for "one chat-lane visibility
+#: resolve per turn" (``agent_runtime.chat_lane_bundle``). Like
+#: ``registry_probe_rounds`` it is a DELTA across the turn of a thread-cumulative
+#: counter, and like it, ``0`` is the interesting answer: a warm steady-state
+#: turn of an unchanged chat reuses the bundle and builds none. ``1`` is the
+#: honest cost of the first turn after any keyed input moved; anything above ``1``
+#: means something is re-resolving what the bundle was supposed to hold.
+PHASE_COUNTERS: tuple[str, ...] = (
+    "registry_probe_rounds",
+    "builds_overlapped",
+    "visibility_bundle_builds",
+)
 
 #: Every key the block may carry, in the order a human reads the turn.
 #: ``agent_init_cold`` sits next to ``agent_ready`` because it qualifies it.
@@ -118,6 +130,7 @@ _BLOCK_ORDER: tuple[str, ...] = (
     "native_committed",
     "projected",
     "registry_probe_rounds",
+    "visibility_bundle_builds",
     "builds_overlapped",
 )
 

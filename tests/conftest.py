@@ -604,6 +604,18 @@ def _reset_snapshot_catalog_memos():
         if isinstance(memo, dict):
             memo["rows"] = None
             memo["at"] = 0.0
+    # Same rule, different shape: the chat-lane visibility bundle
+    # (``agent_runtime.chat_lane_bundle``) is keyed on persona/permission/config
+    # identity, and a test's hermetic HERMES_HOME normally makes that key unique
+    # per test anyway. "Normally" is not a guarantee, and a bundle surviving into
+    # the next test would serve it another test's toolset answer. Start cold.
+    #
+    # This does NOT cover a single test that monkeypatches a resolver BETWEEN two
+    # turn-path calls — the memo cannot see a function patch. Such a test calls
+    # ``invalidate_chat_lane_bundles()`` itself, which is real API.
+    bundle_module = sys.modules.get("agent_runtime.chat_lane_bundle")
+    if bundle_module is not None:
+        bundle_module.invalidate_chat_lane_bundles()
     yield
 
 

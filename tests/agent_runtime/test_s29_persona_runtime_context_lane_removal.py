@@ -126,11 +126,22 @@ def test_the_profile_runner_namesake_is_untouched():
 
 def test_the_chat_lane_block_list_survives():
     """``_blocked_tool_names_for_chat`` is one character away from the removed
-    ``_blocked_tool_names_for_run`` and is the LIVE chat lane's block list."""
+    ``_blocked_tool_names_for_run`` and is the LIVE chat lane's block list.
+
+    The floor moved 4 → 3 on 2026-08-23 and the fourth site did not die: the
+    request-assembly call inside ``mission_chat_reply`` now reads the block off
+    ``chat_lane_bundle``, which resolves THIS function once per turn instead of
+    letting the request walk the whole resolution a fourth time. So the same
+    call still happens on the same lane — it is made from the bundle's builder,
+    which is asserted next.
+    """
+
+    from agent_runtime import chat_lane_bundle as bundle_module
 
     source = inspect.getsource(persona_runtime)
     assert callable(persona_runtime._blocked_tool_names_for_chat)
-    assert source.count("_blocked_tool_names_for_chat(") >= 4
+    assert source.count("_blocked_tool_names_for_chat(") >= 3
+    assert "_blocked_tool_names_for_chat(" in inspect.getsource(bundle_module)
 
 
 

@@ -50,6 +50,22 @@ Pinned semantics (do not "tidy" these)
   same object the runner's clamp enforces; the capability account recorded for
   the operator is the same object rendered for the agent. Resolving either twice
   is how the two views drift.
+* **The chat lane's visibility is resolved ONCE per turn**
+  (``chat_lane_bundle``). Four of the resolvers below — the capability account,
+  the admission line, the admitted operating manuals, the tool contract and the
+  permission state — used to walk ``permission_options_for_chat`` →
+  ``effective_toolsets``/``all_registered_toolsets`` → the registry's
+  ``check_fn`` sweep INDEPENDENTLY, and ``mission_chat_reply`` then walked it a
+  fourth time for the request it assembles. Live receipt for the cost:
+  ``registry_probe_rounds=27`` inside one 1,313 ms context build. They now read
+  one bundle, memoized on the lane's own identity; the AUTHORITIES are
+  unchanged and are exactly the functions the bundle calls. See
+  :mod:`agent_runtime.chat_lane_bundle` for the key and its staleness surface.
+* **The reuse key is a function of actor IDENTITY, never of row liveness.**
+  ``_runtime_signature`` folds the persona and the instance through explicit
+  field allowlists (:data:`PERSONA_IDENTITY_FIELDS`,
+  :data:`INSTANCE_IDENTITY_FIELDS`) rather than hashing the whole record. See
+  those constants for the live receipt that forced it.
 
 Impurity is confined to :class:`MissionChatTurnResolvers`
 ---------------------------------------------------------
@@ -154,9 +170,11 @@ def _default_build_preloaded_skills_prompt(
 
 
 def _default_admitted_operating_skills(persona: Any, *, session_id: str | None) -> list[str]:
-    from .persona_runtime import mission_chat_operating_skills
+    # Through the bundle, which resolves ``mission_chat_operating_skills`` — see
+    # this module's "one resolve" note and :mod:`agent_runtime.chat_lane_bundle`.
+    from .chat_lane_bundle import chat_lane_bundle
 
-    return list(mission_chat_operating_skills(persona, session_id=session_id))
+    return list(chat_lane_bundle(persona, session_id=session_id).operating_skills)
 
 
 def _default_load_workspace_agents(agents_file: Any) -> Any:
@@ -166,9 +184,10 @@ def _default_load_workspace_agents(agents_file: Any) -> Any:
 
 
 def _default_capability_block(persona: Any, *, session_id: str | None) -> dict[str, Any]:
-    from .runtime_hud import capability_block_for_persona
+    # Through the bundle, which resolves ``capability_block_for_persona``.
+    from .chat_lane_bundle import chat_lane_bundle
 
-    return capability_block_for_persona(persona, session_id=session_id)
+    return chat_lane_bundle(persona, session_id=session_id).capability()
 
 
 def _default_situational_hud(
@@ -182,21 +201,27 @@ def _default_situational_hud(
 
 
 def _default_admission_line(persona: Any, *, session_id: str | None) -> str:
-    from .persona_runtime import mission_chat_admission_line
+    # Through the bundle, which resolves ``mission_chat_admission_line``.
+    from .chat_lane_bundle import chat_lane_bundle
 
-    return mission_chat_admission_line(persona, session_id=session_id)
+    return chat_lane_bundle(persona, session_id=session_id).admission_line
 
 
 def _default_tool_contract(persona: Any, *, session_id: str | None) -> dict[str, Any]:
-    from .persona_runtime import chat_runtime_tool_contract
+    # Through the bundle, which composes the same two lists
+    # ``chat_runtime_tool_contract`` composes — from the SAME resolve the
+    # request the actor is built from uses, so the reuse key and the request
+    # cannot describe different tool surfaces.
+    from .chat_lane_bundle import chat_lane_bundle
 
-    return chat_runtime_tool_contract(persona, session_id=session_id)
+    return chat_lane_bundle(persona, session_id=session_id).tool_contract()
 
 
 def _default_permission_state(persona: Any, *, session_id: str | None) -> dict[str, Any]:
-    from .tool_permissions import permission_state_for_chat
+    # Through the bundle, which resolves ``permission_state_for_chat``.
+    from .chat_lane_bundle import chat_lane_bundle
 
-    return permission_state_for_chat(persona, session_id=session_id)
+    return chat_lane_bundle(persona, session_id=session_id).permission_state()
 
 
 def _default_store_root() -> str:
@@ -602,6 +627,124 @@ def _as_plain(value: Any) -> Any:
     return asdict(value) if is_dataclass(value) and not isinstance(value, type) else value
 
 
+# ── actor identity vs. row liveness ──────────────────────────────────────────
+#
+# ``_runtime_signature`` is a REUSE key: two turns share a resident actor only
+# when every input that decides what that actor IS is identical. It used to fold
+# ``asdict(persona)`` and ``asdict(instance)`` whole, which quietly made it a key
+# over the ROWS rather than over the actor — and a persona-instance row is
+# written on chat activity.
+#
+# **Live receipt (2026-08-23T14:45:14Z).** The operator turned
+# ``persona_chat.hot_sessions`` on and restarted the serve, so the resident-actor
+# registry finally existed. The SECOND message of one neko chat, ~45 s after the
+# first, with no persona / config / permission change between them, recorded
+# ``resident_rebuild_runtime_signature_changed`` and ``resident_actor_reused=0``.
+# The instance row had moved: ``state`` flips busy→idle across a turn,
+# ``updated_at`` and ``last_heartbeat_at`` are stamped on every write, and the
+# mission-chat handler itself writes ``skill_manifest_hash`` back onto the
+# instance at the end of each turn. So the key could never match twice and hot
+# sessions bought nothing at all.
+#
+# Both lists are ALLOWLISTS, not denylists, and that is the point: a new field on
+# either record is presumed bookkeeping until someone decides it changes the
+# actor and names it here. A denylist inverts the default and re-opens this
+# defect on the next field anyone adds.
+#
+# A name that is not on the record at all is recorded as ABSENT rather than
+# defaulted, so a record shape that LOSES a field cannot hash identical to one
+# that carries it set to ``None``.
+
+#: Persona fields that decide what a constructed actor is: its identity and
+#: prompt material, its provider/model triple, its tool surface, its skills, its
+#: profile binding and its budgets. ``readiness`` is deliberately absent — it is
+#: a stored report ABOUT the persona, refreshed by readiness passes, and nothing
+#: an actor is built from reads it.
+PERSONA_IDENTITY_FIELDS: tuple[str, ...] = (
+    "api_mode",
+    "autonomy",
+    "display_name",
+    "hermes_profile",
+    "id",
+    "include_core_context_files",
+    "include_profile_memory",
+    "iteration_budget",
+    "max_api_calls",
+    "max_total_tokens",
+    "max_wall_seconds",
+    "model",
+    "model_override_issued_at",
+    "provider",
+    "repo_scope",
+    "repo_scope_label",
+    "required_mcp_servers",
+    "role",
+    "schema_version",
+    "skills",
+    "soul_overlay_path",
+    "system_prompt_path",
+    "toolsets",
+)
+
+#: Instance fields that decide what a constructed actor is: which persona and
+#: profile it places, where it is placed, and the per-instance model-override
+#: tier (``set-model`` writes ``model`` / ``provider`` / ``api_mode`` /
+#: ``reasoning_effort`` / ``model_override_issued_at`` together, so all five are
+#: here and a real override change still rotates the key).
+#:
+#: Everything else is liveness or routing and is deliberately absent:
+#: ``state`` / ``updated_at`` / ``last_heartbeat_at`` / ``token_budget_used``
+#: (stamped by activity), ``skill_manifest_hash`` (written back by the turn that
+#: just ran), ``active_run_id`` / ``current_assignment_id`` / ``current_task_id``
+#: (run bookkeeping), the chat pointers ``default_chat_session_id`` /
+#: ``session_id`` / ``chat_head_home`` (the chat root is already in the signature
+#: as ``root``), and the graph edges ``spawned_by`` / ``steered_by`` /
+#: ``returned_to`` / ``goal_id`` (they render into the HUD, which rides the
+#: volatile tail and is therefore not part of the cached actor at all).
+INSTANCE_IDENTITY_FIELDS: tuple[str, ...] = (
+    "api_mode",
+    "current_chat_goal",
+    "display_name",
+    "id",
+    "mode",
+    "model",
+    "model_override_issued_at",
+    "persona_id",
+    "profile_id",
+    "provider",
+    "realm_id",
+    "reasoning_effort",
+    "role",
+    "runtime_root",
+    "schema_version",
+    "skill_overrides",
+    "workspace_id",
+)
+
+
+def _identity_revision(value: Any, fields: tuple[str, ...]) -> str:
+    """Hash a record's ACTOR-IDENTITY projection. See the note above."""
+
+    plain = _as_plain(value)
+    source = plain if isinstance(plain, dict) else None
+    projected: dict[str, Any] = {}
+    absent: list[str] = []
+    missing = object()
+    for name in fields:
+        if source is not None:
+            if name in source:
+                projected[name] = source[name]
+            else:
+                absent.append(name)
+            continue
+        found = getattr(value, name, missing)
+        if found is missing:
+            absent.append(name)
+        else:
+            projected[name] = found
+    return _revision_hash({"fields": projected, "absent": absent})
+
+
 def _runtime_signature(
     *,
     persona: Any,
@@ -618,12 +761,17 @@ def _runtime_signature(
 
     Config objects are HASHED before inclusion rather than embedded, so the
     signature can never become an observability channel for prompt/config text.
+
+    The persona and instance contribute their ACTOR-IDENTITY projection, not
+    their whole row — see :data:`PERSONA_IDENTITY_FIELDS` /
+    :data:`INSTANCE_IDENTITY_FIELDS` and the 2026-08-23T14:45:14Z receipt
+    recorded there.
     """
 
     return _revision_hash(
         {
-            "persona_revision": _revision_hash(_as_plain(persona)),
-            "instance_revision": _revision_hash(_as_plain(instance)),
+            "persona_revision": _identity_revision(persona, PERSONA_IDENTITY_FIELDS),
+            "instance_revision": _identity_revision(instance, INSTANCE_IDENTITY_FIELDS),
             "root": session_id,
             "root_model_config_revision": _revision_hash(session_model_config),
             "provider": model_selection.get("effective_provider"),
@@ -647,6 +795,8 @@ def _runtime_signature(
 
 __all__ = [
     "DEFAULT_RESOLVERS",
+    "INSTANCE_IDENTITY_FIELDS",
+    "PERSONA_IDENTITY_FIELDS",
     "PRELOAD_SURFACE",
     "PROMPT_CONTRACT_REVISION",
     "TAIL_BUDGET_BYTES",

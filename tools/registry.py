@@ -244,6 +244,11 @@ _check_fn_cache: Dict[Callable, tuple[float, bool, float]] = {}
 # Monotonic timestamp of the most recent True result per check_fn.
 _check_fn_last_good: Dict[Callable, float] = {}
 _check_fn_cache_lock = threading.Lock()
+# Bumped by :func:`invalidate_check_fn_cache`, and by nothing else. It is the
+# AVAILABILITY half of :func:`registry_epoch` — see that function for why a
+# caller that memoizes a *composition* of availability answers needs a counter
+# that moves on an explicit invalidation and not only on a registration.
+_check_fn_epoch: int = 0
 
 # ── probe-round accounting ────────────────────────────────────────────────
 #
@@ -372,10 +377,19 @@ def _check_fn_cached(fn: Callable) -> bool:
 
 def invalidate_check_fn_cache() -> None:
     """Drop all cached ``check_fn`` results. Call after config changes that
-    affect tool availability (e.g. ``hermes tools enable``)."""
+    affect tool availability (e.g. ``hermes tools enable``).
+
+    Also advances :func:`registry_epoch`. The probe cache expiring is not the
+    only thing that has to happen when availability changes: anything that
+    memoized a COMPOSITION built out of availability answers (see
+    ``agent_runtime.chat_lane_bundle``) holds a value this call has just
+    invalidated, and it has no other way to learn that. The counter is the
+    announcement."""
+    global _check_fn_epoch
     with _check_fn_cache_lock:
         _check_fn_cache.clear()
         _check_fn_last_good.clear()
+        _check_fn_epoch += 1
 
 
 class ToolRegistry:
@@ -401,6 +415,20 @@ class ToolRegistry:
         # against it: a cache entry keyed on the generation is valid for as
         # long as the generation hasn't changed.
         self._generation: int = 0
+
+    @property
+    def generation(self) -> int:
+        """The registration generation. Compare for EQUALITY, never for order.
+
+        Read under the same lock the mutators bump it under, so a reader can
+        never observe a half-applied registration's counter. Public because
+        memoizing callers outside this module (``agent_init``, and since 2026-08
+        ``agent_runtime.chat_lane_bundle`` through :func:`registry_epoch`) have
+        to key on it; ``_generation`` stays the field.
+        """
+
+        with self._lock:
+            return self._generation
 
     def _snapshot_state(self) -> tuple[List[ToolEntry], Dict[str, Callable]]:
         """Return a coherent snapshot of registry entries and toolset checks."""
@@ -919,6 +947,36 @@ class ToolRegistry:
 
 # Module-level singleton
 registry = ToolRegistry()
+
+
+def registry_epoch() -> int:
+    """The registry's identity for cache keys: registration + availability.
+
+    Two counters, summed into one monotonically-increasing integer:
+
+    * ``registry.generation`` — every ``register`` / ``deregister`` /
+      ``register_toolset_alias``, which is also every MCP dynamic refresh.
+    * :data:`_check_fn_epoch` — every :func:`invalidate_check_fn_cache`, which
+      is what ``hermes tools enable`` and the credential/config paths call when
+      a backend's AVAILABILITY (not its registration) changes.
+
+    Both halves matter and neither implies the other: a toolset can stay
+    registered while its ``check_fn`` starts answering differently, and a
+    ``check_fn`` cache can stay warm while an MCP server registers new tools.
+    A memo that keyed on only one of them would go stale in the other
+    direction.
+
+    **Comparison is equality, not ordering.** The sum is monotone, but a step of
+    2 says "both halves moved", not "two registrations happened" — nothing may
+    read magnitude out of it. It exists so a caller can ask "is the registry
+    still the one I computed against?" in one integer compare.
+
+    The value is a snapshot the instant it is read; a caller memoizing against
+    it must re-read it on every lookup, which is exactly what makes an
+    invalidation that lands mid-turn visible on the next lookup.
+    """
+
+    return registry.generation + _check_fn_epoch
 
 
 # ---------------------------------------------------------------------------

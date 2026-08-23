@@ -9,6 +9,7 @@ if TYPE_CHECKING:
 from hermes_constants import get_hermes_home
 
 from . import paths
+from .chat_lane_bundle import chat_lane_bundle
 from .chat_lane_toolsets import (
     ChatLaneDrop,
     chat_lane_blocked_tools,
@@ -169,12 +170,19 @@ class GPTPersonaRuntime:
         # since the terminal envelope became mode-aware (2026-08-09) the two
         # planes MUST agree, and the cheapest way to guarantee that is to read
         # the answer once.
-        turn_permission = permission_options_for_chat(persona, session_id=perm_session_id)
-        admission = resolve_mcp_admission(
-            persona,
-            lane=LANE_MISSION_CHAT,
-            permission_mode=turn_permission.permission_mode,
-        )
+        #
+        # Since 2026-08-23 that "once" is the WHOLE chat lane's visibility, not
+        # just the permission mode: the same bundle the turn-context builder
+        # already resolved (permission mode, MCP admission, enabled toolsets,
+        # blocked tool names) is read here instead of walking
+        # ``permission_options_for_chat`` → ``all_registered_toolsets`` → the
+        # registry ``check_fn`` sweep a fourth time for the request. The
+        # admission object threaded to the runner below is the SAME object the
+        # toolset scope was resolved against, which is the property the old
+        # inline resolve existed to guarantee. See
+        # :mod:`agent_runtime.chat_lane_bundle`.
+        lane_bundle = chat_lane_bundle(persona, session_id=perm_session_id)
+        admission = lane_bundle.admission
         # Repo grounding for this turn (G6). Resolved ONCE, here, and handed to
         # the EXISTING ``AgentRunRequest.workdir`` seam the worker lane already
         # uses — ``profile_runner`` chdirs and exports ``TERMINAL_CWD`` under its
@@ -210,7 +218,7 @@ class GPTPersonaRuntime:
             lane=LANE_MISSION_CHAT,
             session_id=perm_session_id,
             runtime_root=paths.store_root(),
-            permission_mode=turn_permission.permission_mode,
+            permission_mode=lane_bundle.permission_mode,
         )
         result = self._runner.run(
             AgentRunRequest(
@@ -221,12 +229,8 @@ class GPTPersonaRuntime:
                 reasoning_effort=reasoning_effort,
                 terminal_envelope_scope=envelope_scope,
                 mcp_admission=admission,
-                enabled_toolsets=_enabled_toolsets_for_chat(
-                    persona,
-                    session_id=perm_session_id,
-                    admission=admission,
-                ),
-                blocked_tool_names=_blocked_tool_names_for_chat(persona, session_id=perm_session_id),
+                enabled_toolsets=list(lane_bundle.enabled_toolsets),
+                blocked_tool_names=list(lane_bundle.blocked_tool_names),
                 quiet_mode=True,
                 # Operator chat honors the persona's core-context-file opt-in like
                 # the mission-run (L143) and free-chat (L208) paths. Isolated

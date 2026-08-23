@@ -501,6 +501,127 @@ def test_the_runtime_signature_changes_with_every_reuse_relevant_input():
     )
 
 
+def _live_records():
+    """The REAL persona / instance dataclasses, not this file's fixtures.
+
+    The churn these tests are about lives in fields the fixtures do not
+    declare — ``state``, ``updated_at``, ``last_heartbeat_at``,
+    ``skill_manifest_hash`` — so a fixture-shaped record could not reproduce it.
+    """
+
+    from agent_runtime.models import AgentPersona, PersonaInstance
+    from agent_runtime.states import WorkerSessionState
+
+    persona = AgentPersona(
+        id="dev",
+        display_name="Launcher Dev",
+        role="dev",
+        model=None,
+        provider=None,
+        api_mode="codex_responses",
+        toolsets=["file", "search"],
+        system_prompt_path="personas/dev/system.md",
+        hermes_profile="dev",
+    )
+    instance = PersonaInstance(
+        id="personainst_dev",
+        persona_id="dev",
+        role="dev",
+        display_name="Launcher Dev",
+        profile_id="dev",
+        runtime_root="X:/test/root",
+        state=WorkerSessionState.IDLE,
+    )
+    return persona, instance
+
+
+def test_the_reuse_key_survives_a_turn_of_row_liveness():
+    """The 2026-08-23T14:45:14Z defect, pinned.
+
+    With ``persona_chat.hot_sessions`` finally on, the SECOND message of one
+    neko chat — 45 seconds after the first, no persona / config / permission
+    change between them — recorded ``resident_rebuild_runtime_signature_changed``
+    and ``resident_actor_reused=0``. ``_runtime_signature`` hashed the whole
+    persona-instance ROW, and a chat turn WRITES that row: ``state`` flips across
+    the turn, ``updated_at`` / ``last_heartbeat_at`` are stamped on every save,
+    and the mission-chat handler writes ``skill_manifest_hash`` back at the end
+    of each turn. So the reuse key could never match twice and hot sessions
+    bought exactly nothing.
+
+    Everything mutated below is what one ordinary turn does to the row.
+    """
+
+    from datetime import datetime, timedelta, timezone
+
+    from agent_runtime.states import WorkerSessionState
+
+    persona, instance = _live_records()
+    instance.state = WorkerSessionState.RUNNING
+    instance.updated_at = datetime(2026, 8, 23, 14, 44, tzinfo=timezone.utc)
+    instance.last_heartbeat_at = instance.updated_at
+    instance.skill_manifest_hash = "manifest-turn-1"
+    instance.active_run_id = "run_turn_1"
+    instance.token_budget_used = 17_633
+    before = _build(persona=persona, instance=instance).runtime_signature
+
+    # ...one turn later.
+    instance.state = WorkerSessionState.IDLE
+    instance.updated_at = instance.updated_at + timedelta(seconds=45)
+    instance.last_heartbeat_at = instance.updated_at
+    instance.skill_manifest_hash = "manifest-turn-2"
+    instance.active_run_id = "run_turn_2"
+    instance.token_budget_used = 21_004
+    persona.readiness = {"readiness": "ready", "checked_at": "2026-08-23T14:45:14Z"}
+    after = _build(persona=persona, instance=instance).runtime_signature
+
+    assert after == before, (
+        "row liveness moved the resident-actor reuse key; hot sessions cannot "
+        "reuse an actor across two turns of one chat"
+    )
+
+
+def test_the_reuse_key_still_moves_for_a_real_instance_edit():
+    """The other half, and the reason the fix is an ALLOWLIST: an instance-level
+    ``set-model`` writes model / provider / api_mode / reasoning_effort and their
+    ``issued_at`` together, and every one of them changes what a constructed
+    actor IS. A denylist that only excluded the fields we happened to notice
+    would keep passing this test while quietly re-admitting the next
+    per-turn-stamped field anyone adds."""
+
+    persona, instance = _live_records()
+    baseline = _build(persona=persona, instance=instance).runtime_signature
+
+    for field, value in (
+        ("model", "gpt-5.6-luna"),
+        ("provider", "openai-codex"),
+        ("api_mode", "chat_completions"),
+        ("reasoning_effort", "high"),
+        ("skill_overrides", ["harness-dev-delivery"]),
+        ("display_name", "Launcher Dev (2)"),
+        ("profile_id", "qa"),
+    ):
+        _persona_copy, edited = _live_records()
+        setattr(edited, field, value)
+        assert (
+            _build(persona=persona, instance=edited).runtime_signature != baseline
+        ), f"an instance {field} change no longer rotates the reuse key"
+
+    for field, value in (
+        ("toolsets", ["search"]),
+        ("skills", ["harness-qa-verdict"]),
+        ("hermes_profile", "qa"),
+        ("required_mcp_servers", ["launcher_qa"]),
+        ("model", "gpt-5.6-luna"),
+        ("include_profile_memory", True),
+    ):
+        edited_persona, _instance_copy = _live_records()
+        setattr(edited_persona, field, value)
+        assert (
+            _build(persona=edited_persona, instance=instance).runtime_signature
+            != baseline
+        ), f"a persona {field} change no longer rotates the reuse key"
+
+
 def test_the_signature_never_embeds_prompt_or_config_text():
     """Config objects are HASHED before inclusion so the signature cannot become
     an observability channel for prompt/config text."""
@@ -563,24 +684,60 @@ def _resolver_default_source(name: str) -> str:
     raise AssertionError(f"{name} not found in {mission_chat_turn_context.__file__}")
 
 
+def _called_names(source: str) -> set[str]:
+    """Names this source actually CALLS — not names it merely mentions.
+
+    A comment or a docstring naming an authority is not a call to it, and the
+    substring check this replaced could not tell the two apart. That mattered
+    the moment the defaults grew a doctrine comment naming the authority they
+    reach THROUGH the bundle: the guard would have passed on the prose.
+    """
+
+    import ast
+
+    calls: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        callee = node.func
+        name = callee.id if isinstance(callee, ast.Name) else getattr(callee, "attr", None)
+        if name:
+            calls.add(name)
+    return calls
+
+
 def test_the_default_resolvers_bind_the_canonical_authorities():
     """No parallel implementations: the defaults are the SAME functions the turn
-    itself would have called inline."""
+    itself would have called inline.
 
-    from agent_runtime import mission_chat_turn_context, runtime_hud, tool_permissions
+    Five of them now reach their authority THROUGH
+    ``agent_runtime.chat_lane_bundle``, which resolves the whole chat-lane
+    visibility once per turn instead of letting each caller walk
+    ``permission_options_for_chat`` → ``all_registered_toolsets`` → the registry
+    probe sweep on its own. That is an indirection, not a second
+    implementation — so the guard follows it and asserts the authority is
+    called at the far end of it.
+    """
+
+    import inspect
+
+    from agent_runtime import chat_lane_bundle, mission_chat_turn_context, runtime_hud
     from agent_runtime.prompt_observability import load_workspace_agents_context
     from agent_runtime.queued_skills import consume_skills_for_next_turn
 
-    # Each default is a thin adapter, so assert the authority it reaches for.
+    #: field -> (authority called, whether it is reached through the bundle)
     sources = {
-        "consume_queued_skills": consume_skills_for_next_turn.__name__,
-        "admitted_operating_skills": "mission_chat_operating_skills",
-        "load_workspace_agents": load_workspace_agents_context.__name__,
-        "capability_block": runtime_hud.capability_block_for_persona.__name__,
-        "situational_hud": runtime_hud.situational_hud_for_instance.__name__,
-        "permission_state": tool_permissions.permission_state_for_chat.__name__,
+        "consume_queued_skills": (consume_skills_for_next_turn.__name__, False),
+        "load_workspace_agents": (load_workspace_agents_context.__name__, False),
+        "situational_hud": (runtime_hud.situational_hud_for_instance.__name__, False),
+        "admitted_operating_skills": ("mission_chat_operating_skills", True),
+        "capability_block": ("capability_block_for_persona", True),
+        "admission_line": ("mission_chat_admission_line", True),
+        "permission_state": ("permission_state_for_chat", True),
+        "tool_contract": ("_enabled_toolsets_for_chat", True),
     }
-    for field, authority in sources.items():
+    bundle_calls = _called_names(inspect.getsource(chat_lane_bundle))
+    for field, (authority, via_bundle) in sources.items():
         bound = getattr(DEFAULT_RESOLVERS, field)
         # Assert the BINDING first, which the old source-only check never did: a
         # wrapper or replacement left on the field is caught here, instead of
@@ -588,5 +745,11 @@ def test_the_default_resolvers_bind_the_canonical_authorities():
         assert bound is getattr(mission_chat_turn_context, f"_default_{field}"), (
             f"{field} is no longer bound to the module's own default"
         )
-        body = _resolver_default_source(bound.__name__)
-        assert authority in body, f"{field} no longer reaches {authority}"
+        called = _called_names(_resolver_default_source(bound.__name__))
+        if via_bundle:
+            assert "chat_lane_bundle" in called, (
+                f"{field} no longer resolves through the one per-turn bundle"
+            )
+            assert authority in bundle_calls, f"the bundle no longer calls {authority}"
+        else:
+            assert authority in called, f"{field} no longer calls {authority}"

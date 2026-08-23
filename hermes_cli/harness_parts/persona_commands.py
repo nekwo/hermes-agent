@@ -1946,6 +1946,24 @@ def _registry_probe_rounds():
         return None
 
 
+def _visibility_bundle_builds():
+    """This thread's cumulative chat-lane bundle BUILDS, or ``None``.
+
+    Same contract, and the same reason for it, as
+    :func:`_registry_probe_rounds`: cumulative, thread-local, never reset here,
+    and ``None`` when the module cannot be consulted at all so the caller leaves
+    ``visibility_bundle_builds`` ABSENT rather than reporting a zero it never
+    measured.
+    """
+
+    try:
+        from agent_runtime.chat_lane_bundle import bundle_builds_this_thread
+
+        return int(bundle_builds_this_thread())
+    except Exception:
+        return None
+
+
 def _snapshot_builds_overlapped(marks, *, until_ms):
     """Stage 4: snapshot builds whose span intersects ``anchor → until_ms``.
 
@@ -2006,6 +2024,11 @@ def _cmd_mission_chat_message(args) -> int:
     # so the turn's number is a DELTA and the near end of it has to be sampled
     # here, on the turn's own thread, before any of the turn's work runs.
     turn_phases.set_baseline("registry_probe_rounds", _registry_probe_rounds())
+    # Same reasoning, one layer up: the chat-lane visibility bundle's build
+    # counter is thread-cumulative too, and its turn number is the delta across
+    # the same window. Sampled here so the baseline predates the turn-context
+    # build, which is where the first bundle lookup happens.
+    turn_phases.set_baseline("visibility_bundle_builds", _visibility_bundle_builds())
     # Per-request capability binding, at the very top so every path below —
     # including the refusals — runs with the truthful answer bound.
     _bind_mission_chat_delivery_capability()
@@ -3204,6 +3227,7 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
         # it.
         turn_phases.mark("agent_ready")
         turn_phases.count_delta("registry_probe_rounds", _registry_probe_rounds())
+        turn_phases.count_delta("visibility_bundle_builds", _visibility_bundle_builds())
         try:
             if not getattr(args, "stream", False):
                 return None

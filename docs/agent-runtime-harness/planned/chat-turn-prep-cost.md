@@ -90,6 +90,14 @@ twice over, by two independent mechanisms. The serve was restarted on HEAD (conf
   §2.3's "bimodal 0.1–0.6 s reused" rows must be re-read as that. Stage 2's premise is
   unaffected — a resident actor is not being reused because there is not one — but its
   receipt (`agent_init_cold=false`) also requires the config stanza to be turned on.
+  **Update 2026-08-23: the stanza WAS turned on, the registry appeared — and reuse still
+  did not happen, for a second and independent reason.** `_runtime_signature` hashed the
+  whole persona-instance row, and a chat turn writes that row (`state` flips,
+  `updated_at`/`last_heartbeat_at` are stamped, `skill_manifest_hash` is written back at
+  the end of every turn), so the reuse key could not match twice. Turn `14:45:14Z` — the
+  second message of one neko chat, 45 s after the first, nothing changed — carries
+  `resident_rebuild_runtime_signature_changed` + `resident_actor_reused=0`. Fixed as part
+  of Stage 1 (§5) with an explicit actor-identity allowlist.
 
 Both are fixed at Stage 0 (§5). Until a serve restarted on the fixed tree writes the
 keys, the assembly-vs-TTFB split inside `→first_byte` still rests on the one measured
@@ -240,7 +248,10 @@ resolver family (`_enabled_toolsets_for_chat`, `chat_lane_capability_drops`,
 `permission_options_for_chat` + toolset resolution. It IS cacheable per
 (persona instance, session, permission revision): the turn already computes exactly such
 a composite key — `_runtime_signature` (`mission_chat_turn_context.py:605-645`) — and
-then throws the component results away.
+then throws the component results away. **REMEDIED 2026-08-23 by Stage 1** — see §5. The
+landed key is NOT `_runtime_signature`'s: it drops the instance (no component reads it)
+and adds an explicit registry epoch, because the signature is a key over the ACTOR and
+this is a key over the LANE. Same insight, two different questions.
 
 **H3 — SessionDB opened cold per turn: CONFIRMED in code, magnitude UNMEASURED.**
 Every turn constructs a fresh `SessionDB` (chain in §2.1.1); the writer-path constructor
@@ -292,7 +303,7 @@ dispatch" cost worth chasing.
 
 ---
 
-## 5. Stages (ordered by value; Stage 0's code has landed, Stages 1–5 not started)
+## 5. Stages (ordered by value; Stage 0 and Stage 1 have landed, Stages 2–5 not started)
 
 **Stage 0 — restore the instrument before touching anything (opening gate, §6).**
 **Code half LANDED 2026-08-23** (uncommitted working tree); the live re-take is still
@@ -325,18 +336,67 @@ Test seam closed with it: the handler-level fake now emits its marker through th
 `tests/agent_runtime/test_progress.py`. Restoring the old sink filter reds five rows.
 *Recovers 0 ms; makes every later claim checkable.* Risk: none (additive keys).
 
-**Stage 1 — one visibility resolve per turn, memoized on the signature.**
-Compute the resolver bundle (enabled toolsets, blocks, capability drops, admission line,
-tool contract, permission state) ONCE per turn and reuse it across the ≥4 call sites in
-`build_mission_chat_turn_context`/`apply_chat_lane_tool_scope`; memoize the bundle
-across turns keyed on the already-computed `_runtime_signature` components + an explicit
-registry epoch (bumped by `invalidate_check_fn_cache`, `tools/registry.py:373`), instead
-of the 15/30 s TTLs. *Expected: `registry_probe_rounds` → 0 on steady-state turns;
-ctx span from ~1.4–2.0 s to <0.5 s; obs span from ~0.45 to ~0.2 s. Receipt:
-`registry_probe_rounds=0` + `context_built<500` on three consecutive warm turns of one
-chat.* Risk: **medium** — staleness surface moves from "30 s" to "explicit
-invalidation"; a missed invalidation hides a genuinely-down backend until epoch bump.
-Keep the check_fn grace machinery untouched; cache the *composition*, not the probes.
+**Stage 1 — one visibility resolve per turn, memoized on identity. CODE LANDED
+2026-08-23** (uncommitted working tree); the live re-take is owed.
+
+What landed:
+
+1. **`agent_runtime/chat_lane_bundle.py`** — the lane's whole visibility (permission
+   mode, MCP admission, enabled toolsets, blocked tool names, capability account,
+   admission line, operating manuals, tool contract, permission state) resolved ONCE and
+   memoized. It caches the **composition, not the probes**: the `check_fn` cache, its
+   grace window and its re-probe backoff are untouched, and `registry.get_definitions`
+   still re-probes every `check_fn` at agent construction — so a down backend still loses
+   its TOOLS. What can go stale is the toolset NAME in the lane's accounting.
+2. **The key is identity, not a clock:** persona revision · chat root · a permission
+   fingerprint read FRESH on every lookup (mode / source / expiry / turns_remaining /
+   mode blocks — so a `consume_turn` decrement or an operator restriction rebuilds, and
+   an `unbounded` bundle can never reach a bounded turn) · root **and** active
+   `config.yaml` `(mtime_ns, size)` · runtime root · entry-point lane ·
+   `tools.registry.registry_epoch()`. Deliberately NOT the instance revision — no
+   component reads the instance, and the instance still enters `_runtime_signature`
+   directly.
+3. **`tools/registry.py` grew the epoch**: `ToolRegistry.generation` (public; bumped by
+   `register` / `deregister` / `register_toolset_alias`, hence every MCP refresh) plus a
+   `_check_fn_epoch` bumped by `invalidate_check_fn_cache` — the availability half, which
+   nothing announced before. `registry_epoch()` is their sum, compared for equality only.
+4. **Bounded and non-poisoning:** one entry per (persona, chat root), replaced rather than
+   accumulated, capped at 256; a bundle whose best-effort components faulted is served to
+   that turn and never stored; the accessors deep-copy, so a consumer that decorates the
+   capability account cannot write into the cache. `invalidate_chat_lane_bundles()` is the
+   explicit hatch.
+5. **Scope is the turn path only** — `mission_chat_turn_context`'s resolver defaults and
+   `mission_chat_reply`. `apply_chat_lane_tool_scope`, the snapshot builder and
+   `persona_prewarm` still resolve live, because those are routinely driven with a
+   monkeypatched resolver rather than a changed config, which a config-keyed memo cannot
+   see. (So §2.5's builder-side churn is Stage 5's, not this stage's.)
+6. **The receipt:** `visibility_bundle_builds`, a third `PHASE_COUNTERS` member under the
+   same absent-never-zero contract — a delta of a thread-cumulative counter, baseline at
+   the handler anchor and second read at `agent_ready`, beside `registry_probe_rounds`.
+   `0` on a warm steady-state turn; `>1` means something is re-resolving.
+
+**Carried in from a live discovery mid-stage (14:45:14Z, hot_sessions ON): the resident
+actor could never be reused, for a reason that had nothing to do with the registry.**
+`_runtime_signature` hashed `asdict(instance)` whole, and a chat turn WRITES that row —
+`state` flips, `updated_at`/`last_heartbeat_at` are stamped, and the handler writes
+`skill_manifest_hash` back at the end of every turn. The second message of one neko chat,
+45 s after the first with nothing changed, recorded
+`resident_rebuild_runtime_signature_changed` + `resident_actor_reused=0`. The persona and
+instance now contribute an explicit ACTOR-IDENTITY allowlist
+(`PERSONA_IDENTITY_FIELDS` / `INSTANCE_IDENTITY_FIELDS`); a real `set-model` still rotates
+the key, a turn's bookkeeping no longer does. **This is a precondition for Stage 2** — a
+pre-constructed resident actor would have been discarded on its first reuse attempt.
+
+*Expected: `registry_probe_rounds` → 0 on steady-state turns; ctx span from ~1.4–2.0 s to
+<0.5 s. Receipt: `registry_probe_rounds=0` + `visibility_bundle_builds=0` +
+`context_built<500` on three consecutive warm turns of one chat — plus, now that hot
+sessions are on, `resident_actor_reused=1` on turn 2 of one chat.* The obs-span
+(`prompt_observability`) half of the original estimate is NOT addressed here — that memo
+is the separate `_SKILL_CATALOG_TTL_SECONDS` one and stays a 15 s TTL.
+Risk: **medium**, as stated — staleness surface moves from "30 s" to "explicit
+invalidation". Residue after the epoch: a backend that dies with nobody calling
+`invalidate_check_fn_cache`, and a profile MCP declaration edited on disk before
+registration. Both are named in the module's doctrine.
 
 **Stage 2 — pre-construct the resident actor at chat-open (or first prewarm after
 placement).** The registry + factory already exist (`profile_runner.py:967-986`); an
@@ -348,6 +408,15 @@ turn an operator is watching). Receipt: `agent_init_cold=false` + `agent_ready�
 touches `_WORKDIR_LOCK`/cwd and MCP admission; must run under the same scopes as a real
 run and must not race a genuinely concurrent turn (the registry's signature check
 already guards reuse correctness).
+
+**Two of this stage's preconditions were cleared on 2026-08-23 and both were invisible
+until the other moved.** The operator turned `persona_chat.hot_sessions` on and restarted,
+which finally made the resident-actor registry exist — and the very first pair of turns
+proved the registry alone buys nothing, because `_runtime_signature` was keyed on
+persona-instance row liveness and could not match twice (Stage 1, §5). With the identity
+allowlist in, reuse is possible for the first time; *verify `resident_actor_reused=1` on
+turn 2 of one chat before building anything on top of it*, because a pre-constructed
+actor discarded on first use is worse than none.
 
 **Stage 3 — prologue diet, gated on the Stage-0 split data.** Cache tool-schema
 serialization per toolset tuple and verify the system-prompt restore path actually hits
@@ -381,9 +450,16 @@ without removing the per-turn re-composition that Stage 1 removes properly.
 ## 6. Opening gate
 
 **Do not start Stage 1+ until one turn record from a serve running the Stage-0 tree
-shows `request_assembled`, `agent_init_cold` and `profile_timing` present.** The gate is
-half open: Stage 0's code has landed (§5), but a restart on that tree has not been taken,
-and a fix nobody has seen write a record is still a claim. Note what the first attempt at
+shows `request_assembled`, `agent_init_cold` and `profile_timing` present.**
+
+**Status 2026-08-23: the gate opened, and the first thing through it changed a stage.**
+The operator restarted a serve on the Stage-0 tree with `persona_chat.hot_sessions`
+enabled; live turn records now carry the runner's `profile_timing` (turn `14:45:14Z`
+shows `resident_rebuild_runtime_signature_changed` and `resident_actor_reused=0`), which
+is exactly the class of fact the instrument existed to surface — and it falsified the
+assumption behind Stage 2 within two turns (§1 update). Stage 1 proceeded on that
+evidence. **Still owed on this gate: `request_assembled` observed on a live record.**
+Until then §2.4's assembly-vs-TTFB split rests on the one carry-forward measurement. Note what the first attempt at
 this gate proved — the serve HAD been restarted on HEAD and the keys still did not appear
 (§1), because the causes were a redaction/noise filter and a default-off config, not
 vintage. Acting on Stage 1/2/3 without the restored instrument would repeat the exact
@@ -414,3 +490,11 @@ Secondary gates, inherited:
   yet on any record.
 - `send_to_admit`'s ~110 ms transport share is derived from ONE turn's
   launcher-vs-record reconciliation; other turns may differ under launcher load.
+- **Stage 1's own receipt is OWED.** The code landed and is pinned by tests (memo hit,
+  every keyed input rebuilding, the degraded-bundle rule, the copy-on-read rule, the
+  actor-identity allowlist, the new counter reaching the record), but no live turn record
+  written by a serve running it has been read. Until one shows
+  `registry_probe_rounds=0` + `visibility_bundle_builds=0` on three consecutive warm turns
+  of one chat — and `resident_actor_reused=1` on turn 2 — the ctx-span improvement is a
+  prediction, not a measurement. The same rule this audit exists to enforce applies to its
+  own remedies.

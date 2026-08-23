@@ -200,6 +200,17 @@ def attributed_turn(request, monkeypatch, capsys, isolate_agent_runtime_root, em
         registry_module, "probe_rounds_this_thread", lambda: next(rounds, 11)
     )
 
+    from agent_runtime import chat_lane_bundle as bundle_module
+
+    # Same shape, same window: baseline at the anchor, second read at
+    # ``agent_ready``. Scripted rather than measured for the same reason the
+    # probe rounds are — this row is about the DELTA arithmetic reaching the
+    # record, not about how many bundles this test process happened to build.
+    bundle_builds = iter([3, 4])
+    monkeypatch.setattr(
+        bundle_module, "bundle_builds_this_thread", lambda: next(bundle_builds, 4)
+    )
+
     harness = _seed(
         monkeypatch,
         _streaming_provider(profile_timing={"resident_actor_reused": 0}),
@@ -248,6 +259,37 @@ def test_the_turn_records_the_registry_probe_rounds_it_paid_for(attributed_turn)
     """Baseline at the anchor, second read at ``agent_ready``: 11 - 7."""
 
     assert attributed_turn["registry_probe_rounds"] == 4
+
+
+@pytest.mark.parametrize("attributed_turn", [(_INSIDE_BUILD,)], indirect=True)
+def test_the_turn_records_the_visibility_bundle_builds_it_paid_for(attributed_turn):
+    """The Stage 1 receipt reaches the durable record: 4 - 3.
+
+    ``agent_runtime.chat_lane_bundle`` resolves the chat lane's visibility once
+    per turn and reuses it while the lane's identity holds, so a warm
+    steady-state turn should report ``0`` here and a turn that pays for a
+    genuine change should report ``1``. Anything above ``1`` means something is
+    re-resolving what the bundle was supposed to hold.
+    """
+
+    assert attributed_turn["visibility_bundle_builds"] == 1
+
+
+def test_a_warm_turn_reports_a_HARD_zero_bundle_build_not_an_absence():
+    """``0`` is the interesting answer and must be distinguishable from "could
+    not ask" — the same rule ``registry_probe_rounds`` obeys."""
+
+    marks = TurnPhaseMarks(monotonic=_TickClock(), wall_now=lambda: "stamp")
+    marks.set_baseline("visibility_bundle_builds", 9)
+    marks.count_delta("visibility_bundle_builds", 9)
+    assert marks.snapshot()["visibility_bundle_builds"] == 0
+
+    unknown = TurnPhaseMarks(monotonic=_TickClock(), wall_now=lambda: "stamp")
+    unknown.set_baseline("visibility_bundle_builds", None)
+    unknown.count_delta("visibility_bundle_builds", 4096)
+    assert "visibility_bundle_builds" not in unknown.snapshot(), (
+        "an unaskable counter must stay ABSENT, never report a lifetime total"
+    )
 
 
 @pytest.mark.parametrize("attributed_turn", [(_INSIDE_BUILD,)], indirect=True)
