@@ -299,50 +299,20 @@ default and is **not** cached, so a transient failure self-heals
 ## The read model — `read_model.db` — RETIRED 2026-08-22
 
 **There is no second cache of the snapshot core.** `serve_read_model/` above is
-the only one. This section is history, kept because the lane's name still appears
-on disk, in a live config file, and in six committed wire goldens.
-
-**What it was.** `agent_runtime/read_model.py` + `read_model_schema.sql`: a
-SQLite database in `store_root()`, WAL journal, holding the whole compact frame
-as one `projections_misc` blob plus two row tables (`agent_instances`,
-`operator_channels`), at `READ_MODEL_SCHEMA_VERSION = 3`. A `FrameSource` enum
-named where a served frame came from (`built` / `cache` / `cache_miss_rebuilt`),
-`render_snapshot()` returned `None` rather than a lying `{}`, and
-`agent_runtime/projector.py` warmed it through `Projector.full_rebuild()` behind
-`hermes harness rebuild-read-model`. It was complete, careful work.
-
-**Why it went.** Four findings, in the order that decided it:
-
-1. `write_snapshot()` had exactly **one** non-test caller —
-   `read_model.resolve_snapshot_frame` — reached only from the `harness snapshot`
-   CLI verb. The serve path bypassed it by design and said so.
-2. `Projector.full_rebuild()` and `write_snapshot()`'s gated
-   `ReadModel().apply_full_rebuild(snapshot)` were **two production writers of
-   the same database over the same `build_snapshot()` output**, one gated on
-   `read_model_enabled()` and one not.
-3. `resolve_snapshot_frame` **built the full core first** and only then decided
-   whether to serve the cached frame, so a cache HIT cost one full build plus a
-   database read. The lane could not save work as shaped.
-4. `write_snapshot`'s other output, the `snapshot.json` boot cache, had lost its
-   consumer: the launcher's cold-paint reader was retired at MC-7 / P11
-   (`mission_control_snapshot.dart:187`), and no reader remains in the launcher's
-   `lib/`.
-
-Neither `read_model.db` nor `snapshot.json` existed in the live store root
-(verified 2026-08-22) — on a machine that boots the launcher and never runs
-`harness snapshot`, both stayed absent whatever the config said. Outcome (2),
-**retire**, was the operator ruling; outcome (1), wiring it to the serve path,
-would have added a second validity authority beside the fingerprint, which
-`core_cache.py:20-40` argues against for the core cache itself.
-
-**What was deleted:** `read_model.py`, `projector.py`, `read_model_schema.sql`,
-`snapshot.write_snapshot` (and its temp-file sweeper), and the two CLI verbs
-`harness rebuild-read-model` / `harness read`. `harness snapshot` calls
-`build_snapshot()` directly and still stamps `parity.frame_source` — now always
-`"built"`, because removing a key from the envelope is a contract change and the
+the only one. The `read_model.db` lane (module, schema, projector, both CLI
+verbs, `write_snapshot` and the `snapshot.json` boot cache) was deleted at
+Stage 6 of the duplicate-implementation retirement — the full what/why record
+is that stage's row in
+[planned/duplicate-implementation-retirement.md](planned/duplicate-implementation-retirement.md)
+and the `fac754194e` commit body; the s74 rows in
+`tests/agent_runtime/test_tombstone_registry.py` enforce it. `harness snapshot`
+calls `build_snapshot()` directly and still stamps `parity.frame_source` — now
+always `"built"`, because removing an envelope key is a contract change and the
 additive rule cuts one way only.
 
-**What survives, and why each one is not an oversight:**
+**What survives, and why each one is not an oversight** (this table is the live
+truth a reader needs; the lane's name still appears in a live config file and
+six committed wire goldens):
 
 | Survivor | Why |
 | --- | --- |
@@ -418,32 +388,23 @@ log, 13:45–13:46). The `events` section is not the problem; the two walks are.
   (prewarm, generation 1, pid 30588). Every build re-projects the whole store;
   RD3's incremental lane was retired 2026-08-01 with no successor.
   → [planned/incremental-projection.md](planned/incremental-projection.md)
-- **2026-08-22 — CLOSED BY RETIREMENT: `read_model.db` was enabled and never
-  written.** The live root config set `read_model.enabled: true` while
-  `write_snapshot()` had exactly one non-test caller, reached only from
-  `harness snapshot`, so neither `read_model.db` nor `snapshot.json` existed in
-  the live store root. Ruled outcome (2), **retire**, and executed as Stage 6 of
-  [planned/duplicate-implementation-retirement.md](planned/duplicate-implementation-retirement.md);
-  the ruling file itself is deleted and its findings are folded into "The read
-  model — RETIRED" above. **One residue is still open and is not this row:** the
-  live operator `config.yaml` at `X:\Eternia\.hermes\` still carries
-  `read_model.enabled: true`, which is now an advertised-but-inert control. The
-  parser ignores unknown and retired keys by construction (`.get` per key), so it
-  costs nothing at boot — but this codebase has an explicit rule against inert
-  controls, and the line wants deleting by whoever owns that file.
+- **2026-08-22 — operator-owned residue of the Stage 6 retirement:** the live
+  `config.yaml` at `X:\Eternia\.hermes\` still carries
+  `read_model.enabled: true`, now an advertised-but-inert control. The parser
+  ignores retired keys by construction (`.get` per key), so it costs nothing at
+  boot — but this codebase has an explicit rule against inert controls, and the
+  line wants deleting by whoever owns that file. (The retirement itself, its
+  ruling, and its deferred contract-bump remainder live in "The read model —
+  RETIRED" above — closed rows do not sit in this section.)
 - **2026-08-22 — RD4's push invalidation is still absent.** No change feed in the
   codebase; consumers poll. Unaffected by Stage 6 — the question is about the
-  LIVE core-cache lane, not the retired database.
+  LIVE core-cache lane, not the retired database; any revival names a new
+  producer (the projector is gone).
   → [planned/read-model-change-feed.md](planned/read-model-change-feed.md)
-- **2026-08-22 — MOOT: a schema bump clears the database.** RD6's forward-only
-  migration lane and `ReadModelSchemaTooNew` were never built, and the schema
-  they would have migrated is deleted. The planned file is left in place as the
-  record of a design that had no subject; nothing here is actionable.
-  → [planned/read-model-schema-migrations.md](planned/read-model-schema-migrations.md)
-- **2026-08-22 — MOOT: no certification gates.** RD8's soak test, crash drill and
-  production-envelope entry were specified for the retired lane. Same disposition
-  as the row above.
-  → [planned/read-model-certification-gates.md](planned/read-model-certification-gates.md)
+- **2026-08-22 — the Unverified carry-forward sections have no burn-down
+  owner.** Seven domain docs carry claims from archived sources that no pass
+  has verified against code; nothing schedules that verification.
+  → [planned/unverified-carryforward-burndown.md](planned/unverified-carryforward-burndown.md)
 
 ---
 

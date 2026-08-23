@@ -5,9 +5,10 @@ duplicate-implementation retirement (2026-08-22): the plan's producer was "the
 projector", and `agent_runtime/projector.py` is now DELETED with the whole
 `read_model.db` lane (doc 02 § the retired read model). Any revival must name
 a new producer; the feed-shape and watcher design below survive as reference
-only. Kept pending the same delete ruling as
-[read-model-certification-gates.md](read-model-certification-gates.md) and
-[read-model-schema-migrations.md](read-model-schema-migrations.md).
+only. (Its two moot siblings — the RD6 schema-migration and RD8 certification
+plans — were deleted 2026-08-22 with the lane; the archive keeps their
+originals. This file stays because push invalidation of the LIVE core-cache
+lane is still a real open question — doc 02's RD4 open row.)
 **Domain:** runtime data and shapes. **Opened:** 2026-08-22.
 
 ## Verification
