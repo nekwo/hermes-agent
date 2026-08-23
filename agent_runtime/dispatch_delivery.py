@@ -100,8 +100,10 @@ __all__ = [
 DELIVERY_REQUESTED_BY = "harness-delivery"
 
 #: Bound on the reply carried into the delivery message. Mirrors the relay
-#: tool's own reply bound: past this, the answer belongs in the thread it was
-#: written in, which the block points at.
+#: tool's own reply bound and ``dispatch_store.REPLY_LIMIT``: past this, the
+#: answer belongs in the thread it was written in, which the block points at.
+#: Fenced against a one-sided edit by
+#: ``tests/agent_runtime/test_mirrored_constant_fences.py``.
 REPLY_LIMIT = 8000
 
 #: How often the drain looks for work. Deliberately unhurried — a completion is

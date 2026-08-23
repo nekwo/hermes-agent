@@ -68,6 +68,9 @@ from tools.registry import registry
 
 logger = logging.getLogger(__name__)
 
+#: The relay's own reply bound — the same number as ``dispatch_store.REPLY_LIMIT``
+#: and ``dispatch_delivery.REPLY_LIMIT`` under a private spelling, and fenced
+#: equal to both by ``tests/agent_runtime/test_mirrored_constant_fences.py``.
 _REPLY_LIMIT = 8000
 _MESSAGE_LIMIT = 12000
 

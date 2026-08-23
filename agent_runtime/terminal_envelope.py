@@ -129,7 +129,10 @@ logger = logging.getLogger(__name__)
 # ── the lane this slice governs ─────────────────────────────────────────────
 #
 # Same spelling as ``mcp_admission.LANE_MISSION_CHAT`` — the runtime surface a
-# persona turn runs on, distinct from ``mcp_lane``'s entry-point lane.
+# persona turn runs on, distinct from ``mcp_lane``'s entry-point lane. Mirrored
+# rather than imported, and FENCED like every other deliberate mirror in this
+# repo: ``tests/agent_runtime/test_mirrored_constant_fences.py`` asserts the two
+# spellings are equal, so a one-sided edit to this wire token goes red.
 
 LANE_MISSION_CHAT = "mission_chat"
 

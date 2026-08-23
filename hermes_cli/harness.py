@@ -113,7 +113,6 @@ from agent_runtime.persona_chat_continuity import (
     PersonaChatBusyError,
     PersonaChatClarifyTicketStore,
     PersonaChatMintReceiptStore,
-    PERSONA_CHAT_SESSION_SOURCE,
     native_history_revision,
     persona_chat_root_lease,
     persona_chat_runtime_registry,
@@ -924,7 +923,19 @@ def build_parser(parent_subparsers) -> None:
     # (messaging is `harness mission-chat message`). Removing the flag needs a
     # lockstep launcher change: mission_control_bridge.dart emits it on every
     # persona.instance.create / persona.profile.instantiate call.
-    persona_instance_create.add_argument("--message", required=True, help="DEPRECATED: accepted for launcher wire-compat and ignored; send messages with `harness mission-chat message`")
+    #
+    # DEMOTED (duplicate-implementation retirement, Stage 5): it used to be
+    # `required=True`, so a CLI caller was forced to supply a message that
+    # nothing reads — the one half of the cross-repo compat we could drop
+    # unilaterally, because loosening a requirement cannot break a caller that
+    # still sends the flag. It is now optional-and-ignored: still ACCEPTED for
+    # every launcher build that emits it, still acted on by nobody.
+    # FULL DELETION is gated on the operator's launcher rebuild: once
+    # mission_control_bridge.dart's create/instantiate argv builders (and the
+    # registry `allowedArgs` row) no longer emit `--message`, this line goes.
+    # Deleting it before that turns every stale launcher build's create call
+    # into an argparse error.
+    persona_instance_create.add_argument("--message", required=False, default=None, help="DEPRECATED: accepted for launcher wire-compat and ignored; send messages with `harness mission-chat message`")
     persona_instance_create.add_argument("--requested-by", default="cli")
     _add_coordinator_permission_args(persona_instance_create)
     persona_instance_create.add_argument("--client-message-id", default=None)

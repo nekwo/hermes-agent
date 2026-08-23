@@ -20,6 +20,15 @@ from .persona_assignments import (
     safe_assignment_text,
     safe_assignment_token,
 )
+#: Single-homed in ``agent_runtime.persona_chat_continuity`` — this module used
+#: to carry its own ``= "agent_runtime_persona_chat"`` literal, which was drift
+#: waiting for a one-sided edit to a wire token. The import is also the
+#: re-export: this module's own projections below and four test import sites
+#: (``test_agent_chat_tool.py``, ``test_persona_chat_continuity.py`` ×3) read the
+#: name off ``persona_chat_history``, and they keep resolving. Neither module
+#: imports the other transitively at module scope, so there is no cycle to
+#: dodge here.
+from .persona_chat_continuity import PERSONA_CHAT_SESSION_SOURCE
 from .redaction import TEXT_SECRET_ASSIGNMENT_RE
 from .redaction_mode import redaction_observe_enabled
 from .relay_policy import parse_harness_delivery_marker, parse_relay_sender_marker
@@ -41,7 +50,6 @@ from .turn_visibility import (
     classify_persisted_turn_row,
 )
 
-PERSONA_CHAT_SESSION_SOURCE = "agent_runtime_persona_chat"
 # Structural marker for the canned "I'll … then report back with …" pre-trace
 # acknowledgment the persona-chat turn writes ahead of the real LLM reply. The
 # ack text is tool-specific (several variants) and changes over time, so we stamp

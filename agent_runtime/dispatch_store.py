@@ -127,8 +127,12 @@ MAX_DELIVERY_ATTEMPTS = 8
 DROP_REASON_ATTEMPT_CAP = "attempt_cap"
 
 #: Bound on the stored ask/reply text. The reply bound matches the relay tool's
-#: own ``_REPLY_LIMIT``; nothing downstream ever needs more, and the store is not
-#: a transcript (the thread itself is, and the row points at it).
+#: own ``_REPLY_LIMIT`` (``tools/agent_chat_tool.py``) and the delivery lane's
+#: ``dispatch_delivery.REPLY_LIMIT``; nothing downstream ever needs more, and the
+#: store is not a transcript (the thread itself is, and the row points at it).
+#: The three spellings are FENCED, not merely documented:
+#: ``tests/agent_runtime/test_mirrored_constant_fences.py`` asserts they are
+#: equal, because three bounds that disagree truncate one answer twice.
 ASK_LIMIT = 4000
 REPLY_LIMIT = 8000
 
