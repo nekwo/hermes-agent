@@ -183,6 +183,7 @@ same fact. There is exactly one: the snapshot's own ``parity`` envelope, which
 | ``snapshot_core_cache core_source=cache`` (INFO) | the snapshot payload | ``parity.core_source == "cache"`` — SAME spelling, no split. The line also carries ``caller=`` ``inputs=`` ``fingerprint=`` ``offset=``, none of which reach the payload |
 | ``snapshot_core_cache core_source=cache stale=true`` (INFO) | the snapshot payload | ``parity.core_stale == true`` AND ``parity.freshness.state == "stale"`` — the field the launcher's ``MissionSnapshotEnvelope`` already maps to ``MissionSnapshotHealth.stale``. RESIDUAL SPLIT, named rather than fixed: the log says ``stale=true``, the payload says ``parity.core_stale``/``parity.freshness.state``, and the payload spelling is a consumer contract that predates this lane |
 | ``snapshot_core_cache core_source=rebuilt`` (INFO, ``_log_demote``) | the snapshot payload, PARTIALLY | ``parity.core_source == "rebuilt"`` carries THAT the cache was demoted; the ``reason=`` never leaves this logger, and ``CoreDecision.reason`` is read by no caller today. So a field census of WHY a cache demoted has exactly one source: this line. **AND IT NOW HAS A READER (BO-4, 2026-08-21):** ``agent_runtime.core_cache_census`` executes every census rule in this row — the reason histogram, the runtime-authored/store bucketing, the diff-unavailable arms, and the refusal to read a silent window as a clean one — as code rather than as prose, run by ``scripts/core_cache_demote_census.py``. Amending a rule here means amending that module and its tests; a rule that lives only in this sentence is a rule nothing executes, which is how the self-invalidating cache below ran unnoticed for months. Reasons ``unreadable`` ``core_digest_mismatch`` ``fingerprint_unavailable`` ``fingerprint_mismatch`` ``build_stamp_unknown`` ``build_stamp_mismatch`` ``contract_mismatch`` ``runtime_root_mismatch`` ``home_mismatch``. **CENSUS RULE (MC-2): ``home_mismatch`` is not an ordinary miss.** The other reasons say the STORE moved, the install changed, or the pair is unbound — all facts about the thing being cached. This one says the persisted pair was keyed under a different Hermes home than the reading process resolved, i.e. the two runs asked different QUESTIONS, and it is emitted INSTEAD of ``fingerprint_mismatch`` so the distinction is countable rather than inferred. On a multi-home install (an operator who really does run two roots) it is ordinary. On a SINGLE-PROFILE operator boot it is evidence that a persona scope was live while a build stat'd — the capture in ``core_cache.resolved_fingerprint_home`` was taken too late — which is a defect to go fix, not noise to tune out. A pair carrying no ``sidecar.fingerprint_home`` at all (every one written before MC-2) is skipped rather than demoted, so this reason can never fire for an install that simply predates the field. ``absent`` is deliberately NOT logged (the ordinary cold start would print a line on every build in every process), so its only trace is the ABSENCE of a line and a census must not read "no demote line" as "no demote". **CENSUS RULE (MC-3): ``fingerprint_mismatch`` ALONE grows a tail**, and the tail is ``changed=`` then ``diff=`` LAST (paths may contain spaces, so nothing can be field-parsed after it; the tail is additive, so an existing ``reason=`` grep is unaffected). No other reason carries one, deliberately: a diff on a ``build_stamp_mismatch`` would name every file the operator's upgrade touched and read as store churn. **The scope is ``last_pair`` BY CONSTRUCTION and that caveat is the row's most important sentence:** a demote diff is the delta since the LAST WRITE-BACK, so on a busy store it legitimately names files that are simply moving, and the receipt is TRUE without naming a defect. It is self-perturbation evidence — the A1-b/A2 class worth acting on — ONLY when the named paths are ones the runtime itself writes (``dispatch_delivery_drain.json``, ``serve_socket.owner.json``, ``state.db-wal``, ``serve_socket.lock``); when they are store paths the operator's own writes touched, the miss is legitimate and the cache is working as designed. An arm that could not compute the diff says so in its own words rather than emitting an empty list, which would read as "we looked and nothing moved": ``diff_scope=none changed=0 diff_reason=`` ``no_entries`` (nothing persisted yet, or an install predating MC-3) / ``entries_unbound`` (the entries file in the live generation is not the one that write-back put there — MCF-21 made a torn trio unrepresentable, so this now reads as tampering or corruption rather than as a failed diagnostic write) / ``digest_without_entry_delta`` (the digests disagreed and no triple did), then ``diff=diff_unavailable`` |
+| ``snapshot_core_cache fingerprint_home_lazy_capture`` (WARNING) | none | ``site=`` ``home=`` ``authoritative=``. **CENSUS RULE (HC-1): this is the row above's defect CAUGHT IN THE ACT, one boot earlier.** ``reason=home_mismatch`` is read off the process that JUDGES a pair; this line is emitted by the process that PRODUCES one, at the moment its home is captured lazily — on whichever build or consult happened to be first — inside a process that had already named the boot instant which owed that capture (``site=`` is that instant, e.g. ``serve_loop:booting_frame_emitted``). A process that never declared an instant (an ordinary short-lived tool, a test) emits nothing here, so a nonzero count is never a cold start: it is a serve whose eager capture did not run, and therefore a serve free to write a sidecar keyed under a persona scope's home. ``authoritative=`` restates :func:`hermes_constants.hermes_head_home_is_authoritative` AT CAPTURE TIME — ``authoritative=false`` means the head had already degenerated to the ambient resolution, which is the state in which a live persona override IS the captured home. **NO CENSUS COUNTS THIS LINE TODAY, and that is stated here rather than left to be discovered:** ``agent_runtime.core_cache_census`` reads the demote family and is keyed on ``reason=home_mismatch``, so this receipt is an operator grep on the serve's own log. It is not a rule executed as code, which is the standard the row above is held to, and teaching the census this family is the honest way to retire that gap |
 | ``snapshot_core_cache_write ok=true`` (INFO) | none | ``inputs=`` ``fingerprint=`` ``offset=`` ``restat=`` ``self_perturbed_refreshed=`` ``foreign_moved=``. **CENSUS RULE (IC-2): the last three describe the KEY, not the write.** ``restat=`` is one of refreshed / clean / skipped / unavailable — deliberately NOT worded ``reason=``, because this line is a success and a fourth ``reason=`` vocabulary on this logger is the exact defect this table exists to have retired. ``self_perturbed_refreshed=`` counts the entries the build's OWN writes moved and the persisted key therefore adopted fresh (see :func:`_restat_on_post_build_reality`); a healthy store settles to a small steady number and a zero on every build with ``never_converged`` still firing means the oscillating input is NOT in the audited set and the set is what needs widening. ``foreign_moved=`` counts entries that moved during the build and were NOT in that set, i.e. a concurrent writer — those keep their pre-build triple, so a nonzero count predicts the next process's ``fingerprint_mismatch`` and is the honest measure of how much the store is moving under its own builds. a ``restat=`` reading "unavailable" means the re-stat could not be taken at all and the pre-build key was persisted unchanged: not a failure of the write, but a build whose key is knowingly stale |
 | ``snapshot_core_cache_write ok=false`` (INFO/WARNING) | none | reasons ``serialize`` ``build_stamp_unknown`` ``fingerprint_unavailable`` ``io``. **COLLISION:** ``build_stamp_unknown`` and ``fingerprint_unavailable`` are ALSO demote reasons on the row above. Grep the family token with them, never the reason alone |
 | ``snapshot_core_shadow ok=true`` (INFO) | none | ``caller=`` ``divergence=none`` — the shadow build agreed with the cache. **CENSUS RULE (MCF-Q1): this line ALSO closes the armed window**, exactly as the divergence row below does. It used to be the one full build in the process that changed nothing, and that is what made the memo's boot bound vacuous on a cache-hit boot; counting this line is counting boots whose cache was confirmed, never boots that kept serving it |
@@ -333,6 +334,17 @@ RECEIPT_NEVER_CONVERGED = "never_converged"
 #: whether it is the same directory every time (a permanently held handle) or a
 #: different one each time (transient contention).
 RECEIPT_GENERATION_RESIDUE = "generation_residue"
+
+#: HC-1. The fingerprint home was captured LAZILY — on whichever build or
+#: consult happened to be first — inside a process that had already NAMED the
+#: boot instant which owed that capture (see
+#: :func:`declare_fingerprint_home_boot_site`). In a serve that is the
+#: `home_mismatch` defect recurring rather than an ordinary cold start: the
+#: instant exists precisely so the capture cannot land inside a persona scope,
+#: and a lazy capture means it did not run. Its own receipt because the
+#: alternative — inferring it from the NEXT boot's ``reason=home_mismatch`` — is
+#: a diagnosis that arrives one boot late and only after a write-back.
+RECEIPT_FINGERPRINT_HOME_LAZY_CAPTURE = "fingerprint_home_lazy_capture"
 
 #: The typed reason on a bound refusal, plus which walk refused. ``scope``
 #: matters because the two bounds are different numbers over different trees, and
@@ -1291,8 +1303,152 @@ def _receipt_fingerprint_refused(*, scope: str, root: Any, bound: int) -> None:
 #: ``fingerprint_home`` in the sidecar and a later boot judging against it
 #: demotes ``home_mismatch`` (see the channel table), which is exactly the field
 #: signal that a capture was taken too late.
+#:
+#: HC-1 (2026-08-22) NARROWS THAT RESIDUAL RATHER THAN RE-ARGUING IT. "The first
+#: fingerprint of the process is the boot consult" was an ARGUMENT, and the field
+#: falsified it twice on a SINGLE-PROFILE install (2026-08-21 16:04:32 and
+#: 2026-08-22 13:36, one boot / three callers demoting ``home_mismatch`` each
+#: time — there is no second root for two runs to legitimately disagree about).
+#: A long-lived process now DECLARES the boot instant that owes the capture and
+#: TAKES it there, so "first use" is a defined point in the lifecycle instead of
+#: whichever build or consult won a race. The lazy path below is kept — a plain
+#: tool, a test, a subprocess that never boots a serve still has to work — but it
+#: is no longer SILENT in a process that declared an instant: see
+#: :data:`RECEIPT_FINGERPRINT_HOME_LAZY_CAPTURE`.
 _fingerprint_home_lock = threading.Lock()
 _fingerprint_home: tuple[Path, bool] | None = None
+#: ``True`` when the capture came from :func:`capture_fingerprint_home` — an
+#: explicit, named boot instant — and ``False`` when the lazy path took it.
+_fingerprint_home_eager: bool = False
+#: The boot instant a long-lived process declared it would capture at, or
+#: ``None`` in a process that never declared one. This is what makes the lazy
+#: receipt below distinguish "a defect recurring" from "an ordinary short-lived
+#: process doing the only thing it can".
+_fingerprint_home_boot_site: str | None = None
+
+
+class FingerprintHomeCapture(NamedTuple):
+    """What this process captured, and WHERE it came from.
+
+    ``home`` is ``None`` until something has captured — which is a state worth
+    being able to observe rather than a gap: a process that declared a boot
+    instant and then reached a request with ``home is None`` is a process whose
+    eager capture did not run.
+    """
+
+    home: Path | None
+    authoritative: bool
+    eager: bool
+    boot_site: str | None
+
+
+def _capture_fingerprint_home_locked(*, eager: bool) -> tuple[Path, bool]:
+    """Take the capture. The caller holds :data:`_fingerprint_home_lock`."""
+
+    global _fingerprint_home, _fingerprint_home_eager
+    from hermes_constants import (
+        get_hermes_head_home,
+        hermes_head_home_is_authoritative,
+    )
+
+    _fingerprint_home = (
+        Path(get_hermes_head_home()),
+        bool(hermes_head_home_is_authoritative()),
+    )
+    _fingerprint_home_eager = eager
+    return _fingerprint_home
+
+
+def _receipt_fingerprint_home_lazy_capture(
+    *, home: Path, authoritative: bool, site: str
+) -> None:
+    """The countable artifact for a capture that was NOT taken where it was owed.
+
+    Emitted only in a process that declared a boot instant, so it can never fire
+    for an ordinary short-lived caller. See the channel table row for the census
+    rule; the short version is that this line and ``reason=home_mismatch`` are
+    the same defect seen from the producing and the judging side, and this one
+    arrives a boot earlier.
+    """
+
+    logger.warning(
+        "snapshot_core_cache %s site=%s home=%s authoritative=%s — the "
+        "fingerprint home was captured on first use rather than at the boot "
+        "instant that owes it, so whatever scope was live at that moment is now "
+        "pinned for the life of this process. A sidecar written from here is "
+        "keyed under that home and the next boot will demote it "
+        "reason=home_mismatch.",
+        RECEIPT_FINGERPRINT_HOME_LAZY_CAPTURE,
+        site,
+        home,
+        "true" if authoritative else "false",
+    )
+
+
+def declare_fingerprint_home_boot_site(site: str) -> None:
+    """Name the boot instant at which THIS process owes its capture.
+
+    Deliberately a SEPARATE call from :func:`capture_fingerprint_home`, and the
+    separation is the whole mechanism rather than ceremony: the declaration is
+    the process saying what it IS (a long-lived runtime with a defined boot
+    sequence), the capture is the ACT. Fused into one call, deleting the act
+    would delete the ability to notice that it is missing — which is precisely
+    how a capture taken too late stayed unattributed until a census rule went
+    looking for it. Kept apart, a boot that declares and then does not capture
+    reports itself on the first fingerprint it takes.
+
+    A later declaration wins: the CLI's dispatch names the coarse instant, and a
+    serve that starts underneath it names its own, more specific one.
+    """
+
+    global _fingerprint_home_boot_site
+    with _fingerprint_home_lock:
+        _fingerprint_home_boot_site = site
+
+
+def capture_fingerprint_home() -> tuple[Path, bool]:
+    """Capture the fingerprint home NOW, at the caller's defined boot instant.
+
+    The eager half of HC-1. Call it from a boot sequence at a point that provably
+    precedes any persona scope; everything afterwards — every build, every
+    consult, on every thread — then resolves through what was captured here.
+
+    Idempotent, and capture-once still wins: if something already captured
+    (lazily, before this call), that capture stands and the lazy receipt has
+    already named it. Re-capturing here would silently replace a home some
+    fingerprint has already been taken under, which is a worse fault than the one
+    being fixed.
+    """
+
+    with _fingerprint_home_lock:
+        if _fingerprint_home is None:
+            return _capture_fingerprint_home_locked(eager=True)
+        return _fingerprint_home
+
+
+def fingerprint_home_capture() -> FingerprintHomeCapture:
+    """Observe the capture WITHOUT taking one.
+
+    Its own function rather than exposing the globals, and pointedly not a call
+    to :func:`resolved_fingerprint_home`: an observer that captured would destroy
+    the very thing it is being asked about — "was this captured eagerly?" cannot
+    be answered by a function whose answer is "it is now".
+    """
+
+    with _fingerprint_home_lock:
+        if _fingerprint_home is None:
+            return FingerprintHomeCapture(
+                home=None,
+                authoritative=False,
+                eager=False,
+                boot_site=_fingerprint_home_boot_site,
+            )
+        return FingerprintHomeCapture(
+            home=_fingerprint_home[0],
+            authoritative=_fingerprint_home[1],
+            eager=_fingerprint_home_eager,
+            boot_site=_fingerprint_home_boot_site,
+        )
 
 
 def resolved_fingerprint_home() -> tuple[Path, bool]:
@@ -1303,21 +1459,28 @@ def resolved_fingerprint_home() -> tuple[Path, bool]:
     ambient resolution, so the recorded home is only as good as the moment it was
     taken. That is a fact a demote should be able to name, which is why it is
     persisted beside the home instead of dropped.
+
+    The lazy capture here is the FALLBACK, not the design: a process that
+    declared a boot instant and still lands in this branch is reporting the
+    defect HC-1 exists to retire, and says so on the log rather than quietly
+    pinning whatever home the winning caller happened to be running under.
     """
 
-    global _fingerprint_home
+    lazy_site: str | None = None
     with _fingerprint_home_lock:
         if _fingerprint_home is None:
-            from hermes_constants import (
-                get_hermes_head_home,
-                hermes_head_home_is_authoritative,
-            )
-
-            _fingerprint_home = (
-                Path(get_hermes_head_home()),
-                bool(hermes_head_home_is_authoritative()),
-            )
-        return _fingerprint_home
+            captured = _capture_fingerprint_home_locked(eager=False)
+            lazy_site = _fingerprint_home_boot_site
+        else:
+            captured = _fingerprint_home
+    # OUTSIDE the lock. A logging handler is arbitrary third-party code and this
+    # lock is taken on every fingerprint walk; emitting under it would put a
+    # handler's I/O in front of every stat in the process.
+    if lazy_site is not None:
+        _receipt_fingerprint_home_lazy_capture(
+            home=captured[0], authoritative=captured[1], site=lazy_site
+        )
+    return captured
 
 
 def reset_fingerprint_home() -> None:
@@ -1329,11 +1492,18 @@ def reset_fingerprint_home() -> None:
     case 2 with a directory pytest has already deleted — a fingerprint that is
     stable for the wrong reason. The ``tests/agent_runtime`` conftest drops it
     autouse, the same way it drops the profile-runner resolve memo.
+
+    Drops the boot-site declaration too, and that is load-bearing rather than
+    tidy: a case that drove a serve boot would otherwise leave every LATER case
+    in the session claiming to be a serve, and each one's ordinary lazy capture
+    would emit the receipt that means a defect recurred.
     """
 
-    global _fingerprint_home
+    global _fingerprint_home, _fingerprint_home_eager, _fingerprint_home_boot_site
     with _fingerprint_home_lock:
         _fingerprint_home = None
+        _fingerprint_home_eager = False
+        _fingerprint_home_boot_site = None
 
 
 @contextmanager

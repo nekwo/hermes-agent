@@ -11509,6 +11509,52 @@ def cmd_claw(args):
     claw_command(args)
 
 
+#: The named capture instant for a ONE-SHOT CLI process (HC-1). Carries the
+#: module and the seam so it reads the same way in a receipt as the serve's own
+#: ``serve_loop:booting_frame_emitted`` does.
+_FINGERPRINT_HOME_CLI_BOOT_SITE = "hermes_cli.main:harness_command_dispatch"
+
+
+def _capture_core_cache_fingerprint_home(args) -> None:
+    """Capture the core cache's fingerprint home BEFORE the command runs (HC-1).
+
+    THE RULE, and why it is applied here and only here. ``core_cache`` freezes
+    the Hermes home its input closure is stat'd under on FIRST USE, and a first
+    use that lands inside ``profile_context.persona_profile_context`` pins that
+    persona's home for the life of the process — after which any sidecar this
+    process writes is keyed under it, and the NEXT boot demotes the pair
+    ``reason=home_mismatch``. A one-shot CLI is not exempt from that: ``hermes
+    harness chat send`` runs a persona turn through
+    ``profile_runner._execute_agent_run``, whose whole body is inside that
+    scope, and a tool in that turn reaching the snapshot is a first fingerprint
+    taken under the override. The poisoned pair then outlives the process.
+
+    SCOPE, decided on evidence rather than on caution: only ``hermes harness …``
+    can reach this lane at all — ``core_cache``/``agent_runtime.snapshot`` are
+    imported by ``hermes_cli.harness``, ``harness_support`` and the four
+    ``harness_parts`` modules, and by nothing else under ``hermes_cli``. Every
+    other command would pay a ~90ms import of a subtree it never touches, so the
+    fork is the same one the error-envelope fork below already makes.
+
+    ``hermes harness serve`` passes through here too, and that is deliberate
+    rather than redundant: this is the earliest instant in the process, and
+    ``serve_loop`` re-declares its own, more specific site under it. Capture-once
+    means the second call is an observation, not a second answer.
+
+    Best effort by contract: an instrument must never be why a command fails.
+    """
+
+    if getattr(args, "command", None) != "harness":
+        return
+    try:
+        from agent_runtime import core_cache
+
+        core_cache.declare_fingerprint_home_boot_site(_FINGERPRINT_HOME_CLI_BOOT_SITE)
+        core_cache.capture_fingerprint_home()
+    except Exception:
+        pass
+
+
 def main():
     """Main entry point for hermes CLI."""
     # The THIRD anchor (BW-0). Everything from here to the command's own entry
@@ -12924,6 +12970,7 @@ def main():
     # is misconfigured) actually exit non-zero.  Handlers that return
     # None are treated as success (exit 0).
     if hasattr(args, "func"):
+        _capture_core_cache_fingerprint_home(args)
         try:
             rc = args.func(args)
         except Exception as exc:

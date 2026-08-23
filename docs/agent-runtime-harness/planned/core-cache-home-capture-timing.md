@@ -1,8 +1,12 @@
 # Planned — capture the fingerprint home before a persona scope can be live
 
-**Status:** NOT IMPLEMENTED. Convicted by a shipped census rule; the fix is not written.
+**Status:** HC-1 and HC-2 LANDED 2026-08-22. Still filed here because the gate that
+decides it is **gate 1 (HC-3)** — ten live operator boots with zero
+`reason=home_mismatch`, reported by the census — and no amount of code discharges a
+field gate. Gates 2, 3 and 4 are pinned by tests; see "What landed" below.
 **Owning doc:** [`../04-boot-and-lifecycle.md`](../04-boot-and-lifecycle.md) Stage 8.
-**Module:** `agent_runtime/core_cache.py::resolved_fingerprint_home` (`:1170`).
+**Module:** `agent_runtime/core_cache.py::resolved_fingerprint_home` (relocate by
+symbol — the line numbers quoted below predate the IC-1/IC-2 and HC-1 edits).
 
 **Distinct from [`core-cache-input-closure.md`](core-cache-input-closure.md).** That plan
 widens WHICH inputs are fingerprinted, for `fingerprint_mismatch` / `never_converged`.
@@ -85,6 +89,50 @@ inverse, so the seam is present.
   unchanged (gate 3) and the no-sidecar skip pinned (gate 4).
 - **HC-3**: the live proof is gate 1 — ten operator boots, zero
   `reason=home_mismatch`, reported by the census, after deploy.
+
+## What landed (HC-1 + HC-2, 2026-08-22)
+
+**The capture instant, named.** `serve_loop` declares
+`FINGERPRINT_HOME_BOOT_SITE = "serve_loop:booting_frame_emitted"` and captures
+immediately after the `booting` frame — before the root runtime config load, the
+chat-session registry, the chat-head publish, the root anchor, the store-root
+resolve, the service foundations, the two boot sweeps, the `ready` frame, the
+prewarm thread and every dispatched request. Nothing earlier in the process is
+eligible: `HERMES_HOME` is fixed at `hermes_cli.main` module import
+(`_apply_profile_override`) and `HERMES_HEAD_HOME` is the launcher's spawn env, so
+both authorities `get_hermes_head_home()` reads are already final at that line.
+Importing `core_cache` there costs 93 ms cold, of which ~90 ms is a dependency set
+the boot imports anyway before `ready`; the module itself is 2.5 ms. The import
+moves earlier, it is not added.
+
+**The CLI one-shot, decided on evidence rather than waived.** `hermes harness
+chat send` runs a persona turn inside `profile_runner._execute_agent_run`, whose
+whole body is under `persona_profile_context` — a first fingerprint taken in there
+pins the persona's home and the sidecar it writes outlives the process, so the
+next serve boot demotes a pair no serve produced. The capture is therefore taken
+at `hermes_cli.main` command dispatch, forked to `command == "harness"` because
+`core_cache`/`agent_runtime.snapshot` are reachable from `hermes_cli.harness`,
+`harness_support` and the four `harness_parts` modules and from nothing else under
+`hermes_cli`. `hermes harness serve` passes through both sites; capture-once means
+the serve's own, more specific declaration renames the site without re-answering.
+
+**The lazy path stayed, and got loud.** `declare_fingerprint_home_boot_site` is a
+SEPARATE call from `capture_fingerprint_home` on purpose: the declaration is the
+process saying what it is, the capture is the act, and fusing them would mean
+deleting the act also deletes the ability to notice it is missing. A lazy capture
+in a process that declared an instant emits
+`snapshot_core_cache fingerprint_home_lazy_capture site=… home=… authoritative=…`
+(WARNING), with its own row in the channel table. It is the same defect as
+`reason=home_mismatch` seen from the producing side, a boot earlier.
+
+**Gates 2/3/4.** Gate 2 is
+`tests/agent_runtime/test_core_cache_home_capture_instant.py`, which reads the
+capture state at the `booting` write and at the `ready` write and so pins the
+instant BETWEEN them (a one-sided "captured by end of boot" assertion would be
+satisfied by the boot's own store reads). Gates 3 and 4 are extended in place in
+`tests/agent_runtime/test_core_cache_home_closure.py` — a genuine multi-home
+install still demotes, and a pair with no `sidecar.fingerprint_home` is still
+skipped, both now driven with an eager capture in hand.
 
 ## Gate
 

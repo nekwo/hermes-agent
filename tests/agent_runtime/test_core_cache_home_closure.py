@@ -582,6 +582,71 @@ def test_a_sidecar_written_before_this_stage_is_not_demoted_for_it(
     )
 
 
+def test_a_genuine_multi_home_install_still_demotes_after_an_eager_capture(
+    two_profiles, monkeypatch, caplog
+):
+    """GATE 3 of HC-1, and the reason it is a gate.
+
+    HC-1 makes the capture instant explicit so that a SINGLE-PROFILE install
+    stops demoting for a reason that cannot honestly apply to it. The failure
+    mode of that fix is suppression: an operator who really does run two roots
+    must still be told that the pair on disk answers the other root's question,
+    rather than be served across them silently.
+
+    So this drives the fixed shape end to end — a boot instant declared, the home
+    captured eagerly at it, no lazy receipt anywhere — and then requires the
+    demote to fire exactly as it did before. The absence of the lazy receipt is
+    load-bearing here: it is what makes this a demote produced by a
+    properly-captured home rather than by the very defect HC-1 retires.
+    """
+
+    core_cache.declare_fingerprint_home_boot_site("probe:multi_home_boot")
+    core_cache.capture_fingerprint_home()
+    assert core_cache.fingerprint_home_capture().eager is True
+
+    key = _persist_pair(monkeypatch, fingerprint_home=str(two_profiles.other))
+
+    with caplog.at_level(logging.WARNING, logger="agent_runtime.core_cache"):
+        read = core_cache.read_persisted_core(fingerprint=key)
+
+    assert read.matched is False, (
+        "a pair keyed under another Hermes home was served as authoritative. "
+        "home_mismatch must keep its meaning on a genuine multi-home install — "
+        "capturing the home earlier makes the reason RARE, never absent"
+    )
+    assert read.reason == core_cache.DEMOTE_HOME_MISMATCH, read.reason
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if core_cache.RECEIPT_FINGERPRINT_HOME_LAZY_CAPTURE in record.getMessage()
+    ] == [], "the eager capture did not take, so this case proved nothing"
+
+
+def test_the_no_sidecar_skip_survives_the_eager_capture(two_profiles, monkeypatch):
+    """GATE 4 of HC-1. Absent is still not mismatch, under the new capture.
+
+    Every pair persisted before MC-2 carries no home at all, and an install that
+    predates the field must be unaffected by a change to WHEN the home is taken.
+    Pinned here rather than only above because the eager capture is a new state
+    the skip has to hold in: a boot that now always has a home in hand is exactly
+    the process most likely to start comparing it against a field that is not
+    there.
+    """
+
+    core_cache.declare_fingerprint_home_boot_site("probe:legacy_pair_boot")
+    core_cache.capture_fingerprint_home()
+
+    key = _persist_pair(monkeypatch, fingerprint_home=_DROP)
+
+    read = core_cache.read_persisted_core(fingerprint=key)
+
+    assert read.matched is True, (
+        "a legacy sidecar with no fingerprint_home was demoted "
+        f"({read.reason!r}) once the home was captured eagerly; absent must not "
+        "read as mismatch"
+    )
+
+
 def test_the_rendered_line_carries_the_spelling_the_table_tells_you_to_grep(
     two_profiles, monkeypatch, caplog
 ):

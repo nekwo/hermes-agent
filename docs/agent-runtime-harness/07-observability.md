@@ -127,7 +127,14 @@ The emitters: `snapshot_core_cache core_source=cache …` (`:3155`), the demote
 stale variant (`:3211`), `snapshot_core_cache_write ok=true` (`:1872`) and its
 four `ok=false` reasons (`:1786`, `:1790`, `:1794`, `:1864`),
 `fingerprint_refused` (`:1114`), `generation_residue` (`:2000`),
-`never_converged` (`:2303`), `..._lane_closed` (`:2996`).
+`never_converged` (`:2303`), `..._lane_closed` (`:2996`), and — HC-1, 2026-08-22
+— `fingerprint_home_lazy_capture` (`_receipt_fingerprint_home_lazy_capture`,
+located by symbol because the line numbers in this paragraph predate the IC/HC
+edits). That last one is the ONE receipt here with no census reading it: it fires
+when a process that DECLARED a boot instant for its fingerprint-home capture
+(`serve_loop:booting_frame_emitted`, or the CLI's harness dispatch) reached its
+first fingerprint without having taken it, which is `reason=home_mismatch` seen
+from the producing side, one boot earlier.
 
 Three facts a reader must carry. **A cache hit deliberately does NOT emit
 `snapshot_build_core`** (`:3112-3119`) — there was no build, and a receipt

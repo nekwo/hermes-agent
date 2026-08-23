@@ -57,8 +57,22 @@ through subprocesses after recording that the originally specified assertion was
 The `booting` frame is emitted before ANY heavy boot work, carrying `boot: timeline.stamps()`
 (`serve.py:1149-1156`). A supervising launcher can tell a live cold boot from a wedged child by
 this frame alone — which is what keeps a short watchdog from killing a cold boot mid-flight and
-respawning into another cold boot forever (2026-07-26 kill-loop incident). Then three cheap marked
-phases:
+respawning into another cold boot forever (2026-07-26 kill-loop incident).
+
+**The first statement after that frame is the fingerprint-home capture (HC-1, 2026-08-22)** —
+`core_cache.declare_fingerprint_home_boot_site(FINGERPRINT_HOME_BOOT_SITE)` then
+`capture_fingerprint_home()`. `HERMES_HOME` is already final (resolved at `hermes_cli.main`
+module import by `_apply_profile_override`) and `HERMES_HEAD_HOME` is the launcher's spawn env,
+so there is no earlier point where both authorities are valid — and everything AFTER it is
+either something that could take a fingerprint or something that could install a persona's
+context-local home override. Captured lazily, as it was until HC-1, the instant was whichever
+build or consult won the race, which on a persona turn is a thread with the override live: the
+operator's SINGLE-PROFILE install demoted `reason=home_mismatch` on three callers in one boot,
+twice. The lazy path remains as the fallback for processes with no boot sequence, but in a
+process that declared an instant it now emits `snapshot_core_cache fingerprint_home_lazy_capture`
+(WARNING) rather than pinning a scope's home in silence. Unmarked on the timeline on purpose:
+the capture is two env reads, and its `core_cache` import is ~90% dependencies the boot below
+pays for before `ready` anyway. Then three cheap marked phases:
 
 - `chat_registry_ms` — the persona-chat hot-session registry, sized from
   `load_root_runtime_config().persona_chat` (`serve.py:1167-1175`).

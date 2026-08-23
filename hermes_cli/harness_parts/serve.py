@@ -235,6 +235,15 @@ from typing import Any, Callable, TextIO
 SERVE_SCHEMA_VERSION = 1
 DEFAULT_POOL_SIZE = 4
 
+#: The NAMED boot instant at which this serve captures the core cache's
+#: fingerprint home (HC-1). A constant rather than a literal at the call site
+#: because it is a two-ended contract: it is what
+#: ``core_cache.RECEIPT_FINGERPRINT_HOME_LAZY_CAPTURE`` prints as ``site=`` when
+#: the capture did NOT happen here, and it is what the regression pin asserts the
+#: capture instant to be. The spelling names the frame it follows, so a boot log
+#: and the receipt can be read against each other without consulting this file.
+FINGERPRINT_HOME_BOOT_SITE = "serve_loop:booting_frame_emitted"
+
 # ── The OP lane's advertisement (TC-1/C-1) ───────────────────────────────────
 #
 # The METHOD lane has been discoverable since ``serve_rpc.manifest()`` started
@@ -1175,6 +1184,48 @@ def serve_loop(
             "boot": timeline.stamps(),
         }
     )
+    # ── The fingerprint home, captured HERE and nowhere later (HC-1) ─────────
+    #
+    # WHY THIS INSTANT, named against what is on either side of it.
+    #
+    # BEFORE: process creation, the interpreter + hermes import tax, and
+    # ``hermes_cli.main._apply_profile_override`` — which is where HERMES_HOME
+    # is resolved from --profile / the active-profile marker, at main's MODULE
+    # import, long before this command was dispatched. HERMES_HEAD_HOME is the
+    # launcher's spawn env and is likewise fixed by now. So the two authorities
+    # ``get_hermes_head_home`` reads are already final at this line; there is no
+    # earlier point in this process where they are BOTH valid.
+    #
+    # AFTER: everything that could take a fingerprint, and everything that could
+    # install a context-local home override. Specifically — the root runtime
+    # config load, the chat-session registry, the chat-head publish, the root
+    # anchor, the store-root resolve, the service foundations, the orphaned-turn
+    # and dispatch sweeps, the ready frame, the prewarm thread (whose first act
+    # is a full read-model build), and every dispatched request after it. A
+    # persona scope can only exist inside one of those, so a capture here cannot
+    # be taken under one.
+    #
+    # THE DEFECT THIS RETIRES. ``resolved_fingerprint_home`` is capture-once but
+    # was LAZY, so the capture instant was whichever build or consult won the
+    # race — and on a persona turn that is a thread with
+    # ``persona_profile_context``'s override live. The install this runs on has
+    # ONE profile and still demoted ``reason=home_mismatch`` on three callers in
+    # a single boot, twice (2026-08-21 16:04:32, 2026-08-22 13:36), each time
+    # followed by a cold 7.6s build.
+    #
+    # COST, measured rather than assumed: importing ``core_cache`` here is 93ms
+    # cold, of which ~90ms is its dependency set (paths, dispatch_delivery,
+    # parity, serve_auth, serve_registry, serve_socket) — every one of which the
+    # boot below imports anyway, before ``ready``. The module itself is 2.5ms.
+    # This moves the import earlier; it does not add it.
+    #
+    # The declaration is a SEPARATE call on purpose — see
+    # ``core_cache.declare_fingerprint_home_boot_site``. It is what makes a boot
+    # that stops capturing SAY so, instead of silently going back to lazy.
+    from agent_runtime import core_cache as _core_cache
+
+    _core_cache.declare_fingerprint_home_boot_site(FINGERPRINT_HOME_BOOT_SITE)
+    _core_cache.capture_fingerprint_home()
     # The METHOD lane's registry + its manifest. Imported here rather than at
     # module scope for the same reason as everything else in this function —
     # nothing agent_runtime-shaped is paid for before ``booting`` is out — and
