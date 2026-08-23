@@ -388,14 +388,12 @@ log, 13:45–13:46). The `events` section is not the problem; the two walks are.
   (prewarm, generation 1, pid 30588). Every build re-projects the whole store;
   RD3's incremental lane was retired 2026-08-01 with no successor.
   → [planned/incremental-projection.md](planned/incremental-projection.md)
-- **2026-08-22 — operator-owned residue of the Stage 6 retirement:** the live
-  `config.yaml` at `X:\Eternia\.hermes\` still carries
-  `read_model.enabled: true`, now an advertised-but-inert control. The parser
-  ignores retired keys by construction (`.get` per key), so it costs nothing at
-  boot — but this codebase has an explicit rule against inert controls, and the
-  line wants deleting by whoever owns that file. (The retirement itself, its
-  ruling, and its deferred contract-bump remainder live in "The read model —
-  RETIRED" above — closed rows do not sit in this section.)
+- **2026-08-22 — the retired lane's last traces have a removal plan.** Three
+  dead config fields still ride the snapshot wire (contract-bump lockstep —
+  rides the NEXT bump, never its own), the operator's live `config.yaml` still
+  carries the inert `read_model.enabled: true` (operator-owned one-liner), and
+  this doc's RETIRED section shrinks when the wire fields go.
+  → [planned/read-model-residue-removal.md](planned/read-model-residue-removal.md)
 - **2026-08-22 — RD4's push invalidation is still absent.** No change feed in the
   codebase; consumers poll. Unaffected by Stage 6 — the question is about the
   LIVE core-cache lane, not the retired database; any revival names a new
