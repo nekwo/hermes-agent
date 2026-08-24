@@ -346,6 +346,11 @@ omit it — the office's revision guard lives on the RPC lane only.
 
 ## Open rows
 
+- The placement verb: `harness agent create` gains server-side layout, a
+  skills phase with an install gate, a store-level desk fence, an RPC-first
+  inverse, and a live proof that a second-process create reaches the fold →
+  [planned/agent-placement-verb.md](planned/agent-placement-verb.md)
+  (both repos; its §0 corrects four premises of the 2026-08-24 brief)
 - Gesture prediction's two remaining stages (an unpinned create-refusal
   retraction, and adoption still trusting the client's own content key) →
   [planned/office-gesture-prediction-remainder.md](planned/office-gesture-prediction-remainder.md)
