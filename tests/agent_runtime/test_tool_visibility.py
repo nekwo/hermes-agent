@@ -460,6 +460,27 @@ def test_chat_lane_preview_matches_actual_lane_default_scoped(bounded_chat_sessi
     assert "skill_view" in final
 
 
+def test_chat_lane_agent_chat_send_is_granted_and_never_deferred(bounded_chat_session):
+    """First-class on the chat lane means BOTH halves: the toolset grant puts
+    the def in the lane's tools, and the never-defer promotion keeps it out
+    from behind the tool_search bridge (operator ruling 2026-08-23)."""
+    import tools.agent_chat_tool  # noqa: F401 — registration runs at import
+    from tools.tool_search import ToolSearchConfig, is_deferrable_tool_name
+
+    persona = _persona("neko_supervisor")
+    session_id = bounded_chat_session(persona.id)
+    _enabled, actual_tools = _actual_chat_lane(persona, session_id)
+
+    cfg = ToolSearchConfig.from_raw(None)
+    for name in ("agent_chat_send", "agent_chat_dispatches"):
+        assert name in actual_tools, (
+            f"'{name}' is not granted on the chat lane"
+        )
+        assert not is_deferrable_tool_name(name, config=cfg), (
+            f"Promoted tool '{name}' must NEVER be deferrable"
+        )
+
+
 def test_chat_lane_preview_matches_actual_lane_with_restore_config(
     monkeypatch, bounded_chat_session
 ):

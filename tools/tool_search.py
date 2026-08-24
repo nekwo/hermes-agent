@@ -96,6 +96,10 @@ class ToolSearchConfig:
     # Absolute cap on the embedded listing, regardless of context size.
     # Effective budget = min(listing_max_tokens, threshold_pct% of context).
     listing_max_tokens: int = 20000
+    # Operator-extended never-defer tool names; unions with, never replaces,
+    # ``_NEVER_DEFER_TOOLS``. A tuple (not a list) so the frozen dataclass
+    # stays hashable.
+    never_defer: tuple[str, ...] = ()
 
     @classmethod
     def from_raw(cls, raw: Any) -> "ToolSearchConfig":
@@ -145,6 +149,22 @@ class ToolSearchConfig:
             listing = "auto"
         listing_max_tokens = max(200, min(60000, _safe_int(raw.get("listing_max_tokens"), 20000)))
 
+        # Operator extension to the hardcoded never-defer set. Anything that
+        # isn't a list/tuple of names falls back to "no extension" rather than
+        # raising — same convention as every other field here.
+        never_defer_raw = raw.get("never_defer")
+        never_defer_names: set[str] = set()
+        if isinstance(never_defer_raw, (list, tuple)):
+            for item in never_defer_raw:
+                try:
+                    cleaned = str(item).strip()
+                except Exception:
+                    continue
+                if not cleaned or cleaned in BRIDGE_TOOL_NAMES:
+                    continue
+                never_defer_names.add(cleaned)
+        never_defer = tuple(sorted(never_defer_names))
+
         return cls(
             enabled=enabled,
             threshold_pct=threshold_pct,
@@ -152,6 +172,7 @@ class ToolSearchConfig:
             max_search_limit=max_search_limit,
             listing=listing,
             listing_max_tokens=listing_max_tokens,
+            never_defer=never_defer,
         )
 
 
@@ -201,17 +222,43 @@ def _core_tool_names() -> frozenset[str]:
         return frozenset()
 
 
-def is_deferrable_tool_name(name: str) -> bool:
+# Fork-owned never-defer promotions (operator ruling 2026-08-23: "agent message
+# send should be a first class tool"). These are NOT core tools — putting them
+# in toolsets._HERMES_CORE_TOOLS would GRANT them to every platform bundle
+# (toolsets.py:464+). This set only un-hides: a tool still has to be granted by
+# the lane's toolset resolution before classify_tools ever sees its def.
+# send + dispatches (the wait=false read-back sibling) ride eagerly; the three
+# read-side siblings (threads/open/log_path) stay deferred by design.
+_NEVER_DEFER_TOOLS = frozenset({"agent_chat_send", "agent_chat_dispatches"})
+
+
+def never_defer_tool_names(config: Optional[ToolSearchConfig] = None) -> frozenset[str]:
+    """Hardcoded promotions unioned with the operator's config extension.
+
+    Config EXTENDS the set; nothing in config can remove a hardcoded name.
+    """
+    if config is None:
+        config = load_config()  # never raises
+    if not config.never_defer:
+        return _NEVER_DEFER_TOOLS
+    return _NEVER_DEFER_TOOLS | frozenset(config.never_defer)
+
+
+def is_deferrable_tool_name(name: str, *,
+                            config: Optional[ToolSearchConfig] = None) -> bool:
     """Return True if a tool with this name is *eligible* for deferral.
 
     A tool is deferrable iff it is registered with an MCP toolset prefix
     OR it is not in ``_HERMES_CORE_TOOLS``. Core tools are never deferred
     even when their toolset is technically plugin-provided (this protects
-    against accidental shadowing).
+    against accidental shadowing). Names in ``never_defer_tool_names`` are
+    promoted the same way without being granted anywhere new.
     """
     if name in BRIDGE_TOOL_NAMES:
         return False
     if name in _core_tool_names():
+        return False
+    if name in never_defer_tool_names(config):
         return False
     # Check registry toolset for MCP prefix.
     try:
@@ -227,13 +274,21 @@ def is_deferrable_tool_name(name: str) -> bool:
         return False
 
 
-def classify_tools(tool_defs: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+def classify_tools(tool_defs: List[Dict[str, Any]], *,
+                   config: Optional[ToolSearchConfig] = None
+                   ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Split a tool-defs list into (visible, deferrable).
 
     ``visible`` retains every tool that must stay in the model-facing array:
     every core tool, plus any tool we can't classify. ``deferrable`` is the
     candidate set for catalog entry.
+
+    This only ever *partitions* the defs it is handed — it never introduces a
+    def the caller did not already produce. Never-defer promotion therefore
+    un-hides, and can never grant.
     """
+    if config is None:
+        config = load_config()
     visible: List[Dict[str, Any]] = []
     deferrable: List[Dict[str, Any]] = []
     for td in tool_defs:
@@ -243,7 +298,7 @@ def classify_tools(tool_defs: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]
             # Should never happen — bridge tools are added after classification —
             # but be defensive.
             continue
-        if is_deferrable_tool_name(name):
+        if is_deferrable_tool_name(name, config=config):
             deferrable.append(td)
         else:
             visible.append(td)
@@ -853,7 +908,7 @@ def assemble_tool_defs(
     incoming = [td for td in tool_defs
                 if (td.get("function") or {}).get("name") not in BRIDGE_TOOL_NAMES]
 
-    visible, deferrable = classify_tools(incoming)
+    visible, deferrable = classify_tools(incoming, config=config)
     if not deferrable:
         return AssemblyResult(tool_defs=incoming, activated=False)
 
@@ -937,7 +992,7 @@ def dispatch_tool_search(args: Dict[str, Any],
     else:
         limit = max(1, min(config.max_search_limit, _safe_int(raw_limit, config.search_default_limit)))
 
-    _, deferrable = classify_tools(current_tool_defs)
+    _, deferrable = classify_tools(current_tool_defs, config=config)
     catalog = build_catalog(deferrable)
     hits = search_catalog(catalog, query, limit=limit)
     return json.dumps({
@@ -1026,10 +1081,11 @@ def scoped_deferrable_names(tool_defs: List[Dict[str, Any]]) -> frozenset[str]:
     ``tool_executor`` unwrap so a restricted-toolset session can never invoke
     an out-of-scope tool via the bridge.
     """
+    config = load_config()
     names: set[str] = set()
     for td in tool_defs:
         name = (td.get("function") or {}).get("name", "")
-        if name and is_deferrable_tool_name(name):
+        if name and is_deferrable_tool_name(name, config=config):
             names.add(name)
     return frozenset(names)
 
@@ -1129,6 +1185,7 @@ __all__ = [
     "CatalogEntry",
     "AssemblyResult",
     "load_config",
+    "never_defer_tool_names",
     "is_deferrable_tool_name",
     "classify_tools",
     "estimate_tokens_from_schemas",

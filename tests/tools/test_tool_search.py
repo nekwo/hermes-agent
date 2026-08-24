@@ -61,6 +61,62 @@ class TestConfigParsing:
         assert cfg.max_search_limit == 50
         assert cfg.search_default_limit <= cfg.max_search_limit
 
+    def test_never_defer_config_parses_and_sanitizes(self):
+        """The operator extension parses to a deduped, sorted tuple; junk
+        shapes fall back to the empty extension rather than raising."""
+        from tools.tool_search import ToolSearchConfig
+        cfg = ToolSearchConfig.from_raw({
+            "never_defer": ["my_mcp_tool", " ", "tool_search", "my_mcp_tool"],
+        })
+        assert cfg.never_defer == ("my_mcp_tool",), (
+            f"never_defer must sanitize to ('my_mcp_tool',), got {cfg.never_defer!r}"
+        )
+        assert ToolSearchConfig.from_raw(None).never_defer == ()
+        assert ToolSearchConfig.from_raw(True).never_defer == ()
+        assert ToolSearchConfig.from_raw({}).never_defer == ()
+        # Non-list shapes are ignored, never raised on.
+        assert ToolSearchConfig.from_raw({"never_defer": "nope"}).never_defer == ()
+        assert ToolSearchConfig.from_raw({"never_defer": {"a": 1}}).never_defer == ()
+        assert ToolSearchConfig.from_raw({"never_defer": None}).never_defer == ()
+
+    def test_never_defer_config_extends_never_shrinks(self):
+        """Config EXTENDS the hardcoded promotions — it can never remove one."""
+        from tools.registry import registry
+        from tools.tool_search import (
+            ToolSearchConfig, is_deferrable_tool_name, never_defer_tool_names,
+        )
+
+        hardcoded = {"agent_chat_send", "agent_chat_dispatches"}
+
+        empty = never_defer_tool_names(ToolSearchConfig.from_raw({"never_defer": []}))
+        assert hardcoded <= empty, (
+            f"hardcoded promotions missing with an empty extension: {sorted(empty)}"
+        )
+
+        cfg = ToolSearchConfig.from_raw({"never_defer": ["extra_x"]})
+        extended = never_defer_tool_names(cfg)
+        assert hardcoded <= extended, (
+            f"config extension dropped hardcoded promotions: {sorted(extended)}"
+        )
+        assert "extra_x" in extended
+
+        # And the extension actually un-hides a really-registered MCP tool.
+        def _handler(args, task_id=None, **kw):
+            return json.dumps({"ok": True})
+
+        registry.register(
+            name="nd_extension_probe",
+            handler=_handler,
+            schema=_td("nd_extension_probe", "Probe tool.")["function"],
+            toolset="mcp-nd-test",
+        )
+        assert is_deferrable_tool_name(
+            "nd_extension_probe", config=ToolSearchConfig.from_raw(None))
+        assert not is_deferrable_tool_name(
+            "nd_extension_probe",
+            config=ToolSearchConfig.from_raw({"never_defer": ["nd_extension_probe"]}),
+        )
+
 
 # ---------------------------------------------------------------------------
 # Classification — the hard invariant: core tools NEVER defer.
@@ -105,6 +161,46 @@ class TestClassification:
         names = {(td.get("function") or {}).get("name") for td in visible}
         assert "xx_unknown_tool" in names
         assert deferrable == []
+
+    def test_promoted_agent_chat_tools_never_defer(self):
+        """Operator ruling 2026-08-23: agent-to-agent send is a first-class
+        tool. It is promoted in tool_search's never-defer set — NOT added to
+        toolsets._HERMES_CORE_TOOLS, which would grant it everywhere."""
+        import tools.agent_chat_tool  # noqa: F401 — registration runs at import
+        from tools.tool_search import ToolSearchConfig, is_deferrable_tool_name
+        cfg = ToolSearchConfig.from_raw(None)
+        for name in ("agent_chat_send", "agent_chat_dispatches"):
+            assert not is_deferrable_tool_name(name, config=cfg), (
+                f"Promoted tool '{name}' must NEVER be deferrable"
+            )
+
+    def test_other_agent_chat_tools_stay_deferrable(self):
+        """The promotion's boundary: only send + dispatches ride eagerly."""
+        import tools.agent_chat_tool  # noqa: F401
+        from tools.registry import registry
+        from tools.tool_search import ToolSearchConfig, is_deferrable_tool_name
+        cfg = ToolSearchConfig.from_raw(None)
+        for name in ("agent_chat_threads", "agent_chat_open", "agent_chat_log_path"):
+            assert registry.get_entry(name) is not None, (
+                f"'{name}' is not registered — this test would false-green"
+            )
+            assert is_deferrable_tool_name(name, config=cfg), (
+                f"Read-side sibling '{name}' must stay deferred"
+            )
+
+    def test_never_defer_does_not_grant(self):
+        """Un-hide, never grant. classify_tools only PARTITIONS the defs it is
+        handed — a promoted name can never materialize in a lane that was not
+        granted the toolset producing its def."""
+        import tools.agent_chat_tool  # noqa: F401
+        from tools.tool_search import ToolSearchConfig, classify_tools
+        defs = [_td("terminal", "Run shell")]
+        visible, deferrable = classify_tools(
+            defs, config=ToolSearchConfig.from_raw(None))
+        out_names = {(td.get("function") or {}).get("name") for td in visible + deferrable}
+        assert out_names == {"terminal"}, (
+            f"classify_tools materialized names it was never handed: {sorted(out_names)}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -500,6 +596,55 @@ class TestCatalogListing:
         assert result.activated
         search = next(t for t in result.tool_defs if t["function"]["name"] == "tool_search")
         assert "mcp_x_0" not in search["function"]["description"]
+
+    def test_promoted_tools_ride_eagerly_and_drop_from_listing(self):
+        """The promotion's whole point, end to end: agent_chat_send ships in
+        the model-facing array next to the bridge trio, and vanishes from both
+        the tier-1 listing and the tool_search catalog."""
+        import tools.agent_chat_tool  # noqa: F401
+        from tools.registry import registry
+        from tools.tool_search import (
+            ToolSearchConfig, assemble_tool_defs, dispatch_tool_search,
+        )
+
+        for i in range(30):
+            self._register(f"mcp_x_{i}")
+
+        raw = registry.get_schema("agent_chat_send") or {}
+        fn = raw.get("function") if raw.get("type") == "function" else raw
+        assert (fn or {}).get("name") == "agent_chat_send", (
+            "registry did not yield a real agent_chat_send schema — the test "
+            "would assert against a fabricated def"
+        )
+        send_def = {"type": "function", "function": fn}
+
+        defs = [_td(f"mcp_x_{i}", "Deferred.") for i in range(30)] + [send_def]
+        cfg = ToolSearchConfig.from_raw({"enabled": "on"})
+        result = assemble_tool_defs(defs, context_length=200_000, config=cfg)
+
+        assert result.activated
+        names = {t["function"]["name"] for t in result.tool_defs}
+        assert {"tool_search", "tool_describe", "tool_call"} <= names
+        assert "agent_chat_send" in names, (
+            "promoted tool did not ride eagerly in the assembled tools array"
+        )
+        assert result.deferred_count == 30, (
+            f"expected 30 deferred (the MCP tools only), got {result.deferred_count} "
+            "— the promoted tool is still being deferred"
+        )
+
+        search = next(t for t in result.tool_defs if t["function"]["name"] == "tool_search")
+        assert "agent_chat_send" not in search["function"]["description"], (
+            "promoted tool is still advertised in the tier-1 catalog listing"
+        )
+
+        parsed = json.loads(dispatch_tool_search(
+            {"query": "agent chat send", "limit": 10},
+            current_tool_defs=defs, config=cfg,
+        ))
+        assert "agent_chat_send" not in {m["name"] for m in parsed["matches"]}, (
+            "promoted tool is still searchable through the bridge catalog"
+        )
 
 
 class TestDeferredCallSchemaProbe:
