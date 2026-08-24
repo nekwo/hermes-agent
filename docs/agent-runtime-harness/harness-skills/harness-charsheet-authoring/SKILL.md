@@ -56,7 +56,9 @@ Three ways this goes wrong, all seen live:
   (`hermes_cli/main.py:_apply_profile_override`). Same command, two answers,
   depending on a file you did not set.
 - **Never rebuild a path from a slug or an attempt number.** Every payload names
-  its own `directory` / `path` / `source`. Read those.
+  its own `directory` / `path` / `source`. Read those — and treat an absent path
+  as absent whichever way it arrives (`null` or `""`). Never turn one into a
+  bare `MEDIA:` line.
 
 If the operator's draft is not in your list, say which home you are in and which
 home the draft is in. Do not author a second copy.
@@ -122,9 +124,11 @@ that carried the defect. So:
   without the key just replaces the backdrop), NEAREST-upscales it (no filter
   averages a defect away) onto flat dark, and writes
   `<draft>/thumbs/<row>-attempt-<n+1>-frame-<f+1>-x<scale>.png`. Its payload is
-  `{ok, draft, stage, row, attempt, attempts, frame, frames, scale, source,
-  path, width, height}` — `source` is the attempt file the crop came from, the
-  same string `status --json` reports as that attempt's `path`.
+  a **superset** — `{ok, draft, stage, row, attempt, attempts, frame, frames,
+  scale, source, path, width, height}` today, and it grows additively, so read
+  the response you were handed rather than the list you remember. `source` is
+  the attempt file the crop came from, the same string `status --json` reports
+  as that attempt's `path`.
 - **`--frame 0` is a default, not an answer.** A defect is hunted frame by frame;
   walk `--frame` across `frames`.
 - `--scale` (default 2) is bounded by an **output**-pixel budget and is
