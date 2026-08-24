@@ -58,6 +58,13 @@ from hermes_constants import get_hermes_home
 
 logger = logging.getLogger(__name__)
 
+# One number, three documents: `draft.json`, the `status --json` payload, and
+# the INSTALLED `character.json` manifest the launcher parses. That is why
+# `authored_by` did not bump it — an optional, draft-only provenance field that
+# a schema-1 reader already tolerates (it is absent when unset, and unknown keys
+# were always ignored) is not worth relabelling an installed sheet's manifest
+# for. A field that a consumer must read to be correct is a different case and
+# would bump all three, which is the argument for splitting them first.
 SCHEMA = 1
 
 # turnaround → rows → composed. Order is the tuple order; nothing branches on a
@@ -72,11 +79,18 @@ REVISIONS_DIRNAME = "revisions"
 THUMBS_DIRNAME = "thumbs"
 
 # QA crops: 2x is what made a one-pixel seam legible in a chat card during the
-# 2026-08-24 run, so it is the default. The ceiling is a refusal rather than a
-# clamp — a caller who asks for 40x has made a mistake and should be told, not
-# silently given 8x and left to wonder why the crop is small.
+# 2026-08-24 run, so it is the default. What bounds a crop is not a scale
+# ceiling but the output's pixel count (`pipeline.MAX_THUMB_PIXELS`), and it is
+# a refusal rather than a clamp — a caller who asks for 40x has made a mistake
+# and should be told, not silently given 8x and left to wonder why the crop is
+# small.
 DEFAULT_THUMB_SCALE = 2
-MAX_THUMB_SCALE = 8
+
+# Which frame cell a crop shows when the caller does not say. Frame 0 is the
+# first pose of the strip and the one an operator reaches for first; the point
+# of a default is that `thumb --row walk-n` crops SOMETHING, never the whole
+# strip (which removes no pixels at all — see `pipeline.frame_cell`).
+DEFAULT_THUMB_FRAME = 0
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
@@ -273,6 +287,13 @@ class CharacterDraft:
         the console shares — it is not an owner, and no verb checks it. Nothing
         infers it: a caller that does not say stores nothing, because a guessed
         author is worse than an absent one.
+
+        "Stores nothing" is literal — the KEY is absent, not present-and-empty.
+        An empty string would be a third spelling of "no author" that reads as a
+        value, and it is the spelling that survives ``.get(..., "")`` all the way
+        into the payload, where a consumer can no longer tell a draft with no
+        author recorded from one authored by ``""`` and a backfill can no longer
+        select the drafts that need filling in.
         """
         concept = str(concept or "").strip()
         if not concept:
@@ -300,8 +321,10 @@ class CharacterDraft:
             "updated": now,
             "spec": spec_to_dict(spec),
             "base_image": "",
-            "authored_by": str(authored_by or "").strip(),
         }
+        author = str(authored_by or "").strip()
+        if author:
+            data["authored_by"] = author
         draft = cls(directory, data)
         draft._save()
         if base_image is not None:
@@ -365,9 +388,17 @@ class CharacterDraft:
         return str(self._data.get("stage", STAGES[0]))
 
     @property
-    def authored_by(self) -> str:
-        """The persona this draft was authored by, or ``""`` — provenance only."""
-        return str(self._data.get("authored_by", "") or "")
+    def authored_by(self) -> str | None:
+        """The persona this draft was authored by, or ``None`` — provenance only.
+
+        ``None`` and not ``""``: absence is a fact a consumer must be able to
+        read. It travels to the payload as JSON ``null``, so B2/P1 can render
+        "unattributed" honestly and a later backfill can select exactly the
+        drafts that carry no author — neither of which is possible once absence
+        has been flattened into an empty string.
+        """
+        author = str(self._data.get("authored_by", "") or "").strip()
+        return author or None
 
     @property
     def spec(self) -> SheetSpec:
@@ -651,16 +682,28 @@ class CharacterDraft:
         row_key: str,
         *,
         attempt: int = -1,
+        frame: int = DEFAULT_THUMB_FRAME,
         scale: int = DEFAULT_THUMB_SCALE,
     ) -> dict:
-        """Write a card-size QA crop of ONE row attempt; return where it landed.
+        """Write a card-size QA crop of ONE frame of ONE row attempt.
 
-        The §F.2 looking procedure as a verb. A row strip shown whole in a chat
-        column is a false negative machine: the 2026-08-24 seam was invisible at
-        fit-to-window scale in the very strip that carried it, and "I looked at
-        the strip and it's fine" was reliably wrong. So the crop is upscaled with
+        The §F.2 looking procedure as a verb, and the procedure is *crop, then
+        upscale* — in that order, because the crop is the half that removes
+        pixels. A row strip shown whole in a chat column is a false negative
+        machine: the 2026-08-24 seam was invisible at fit-to-window scale in the
+        very strip that carried it, and "I looked at the strip and it's fine" was
+        reliably wrong. Enlarging that same strip does not fix it — measured
+        live, a whole-strip 2x thumb and the raw attempt are the same picture at
+        card width (≤2/255 per channel), while costing 24 MiB decoded against
+        the 12 MiB installed sheet the crop exists to avoid decoding.
+
+        So the default is ONE frame cell (:data:`DEFAULT_THUMB_FRAME`), sliced
+        from the strip by the row's own frame count, and only then upscaled with
         NEAREST (no filter averages the defect away) onto a flat dark backdrop
-        (a dark line over transparency renders as nothing).
+        with the chroma field keyed out (a seam over magenta reads as nothing,
+        and so does one over transparency). The whole-strip view still exists and
+        needs no verb: it is the attempt file itself, which the payload names as
+        ``source``.
 
         Stage-free on purpose: looking is never out of order. A composed draft is
         exactly when an operator goes back to find what went wrong, and refusing
@@ -672,12 +715,6 @@ class CharacterDraft:
         4 KiB.
         """
         row = self._authored_row(row_key)
-        if isinstance(scale, bool) or not isinstance(scale, int):
-            raise ValueError(f"scale must be an integer, got {scale!r}")
-        if not 1 <= scale <= MAX_THUMB_SCALE:
-            raise ValueError(
-                f"scale {scale} is out of range: a QA crop is scaled 1-{MAX_THUMB_SCALE}x"
-            )
         store = self.store
         key = row_item(row.key)
         if not store.history(key):
@@ -694,15 +731,24 @@ class CharacterDraft:
                 f"attempt {index} of row {row.key!r} has no image on disk"
                 + (f" at {source}" if source is not None else "")
             )
-        image = pipeline.upscale_on_backdrop(source, scale=scale)
-        out = self.directory / THUMBS_DIRNAME / f"{row.key}-a{index}-x{scale}.png"
+        cell = pipeline.frame_cell(source, frame=frame, frames=row.frames)
+        image = pipeline.upscale_on_backdrop(cell, scale=scale)
+        # The filename is a HUMAN surface — an operator correlating a crop back
+        # to the attempt it came from — so it counts the way the store's own
+        # filenames count: `walk-n-attempt-3-frame-1-x2.png` sits beside
+        # `revisions/row@walk-n/attempt-3.png`. The payload below stays 0-based
+        # machine truth. A QA surface relabels; it never renumbers.
+        out = self.directory / THUMBS_DIRNAME / (
+            f"{row.key}-attempt-{index + 1}-frame-{frame + 1}-x{scale}.png"
+        )
         out.parent.mkdir(parents=True, exist_ok=True)
         image.save(out, format="PNG")
         logger.info(
-            "charsheet draft %s: row %s attempt %d cropped at %dx%d → %s",
+            "charsheet draft %s: row %s attempt %d frame %d cropped at %dx%d → %s",
             self.id,
             row.key,
             index,
+            frame,
             image.width,
             image.height,
             out,
@@ -711,6 +757,8 @@ class CharacterDraft:
             "row": row.key,
             "attempt": index,
             "attempts": len(store.history(key)),
+            "frame": frame,
+            "frames": row.frames,
             "scale": scale,
             "source": str(source),
             "path": str(out),

@@ -334,13 +334,23 @@ def test_a_reroll_and_a_row_reroll_are_reachable_through_the_cli(fake, base_imag
     assert row["attempts"] == 2
 
 
+# FIXTURE RULE for every assertion below that judges PIXELS: the crop's input
+# comes from `generate_row_strip` through the fake provider (`rows` /
+# `reroll-row`), never from a hand-built PIL image proposed into the store. A
+# hand-built input is one the author chose to have the property under test, so
+# the assertion holds whether or not the code puts it there — which is how
+# `assert crop.getpixel((0, 0))[3] == 255, "the crop must be opaque"` came to
+# survive deleting the backdrop composite entirely (a row attempt is opaque
+# magenta already). Longer note: tests/agent/test_charsheet_draft.py.
+
+
 def test_thumb_writes_the_crop_its_payload_describes(fake, base_image, capsys, tmp_path):
-    """The byte shape: the payload's path, size and opacity are the file's.
+    """The byte shape: the payload's path, size and ground are the file's.
 
     A card-size crop is the whole point of the verb (plan §F.2), so the numbers
     it reports have to be readable back out of the PNG — and the picture has to
-    be opaque, because the seam this exists to reveal is drawn over transparent
-    pixels.
+    show the flat dark ground, because a chroma field that survives into the
+    crop is the field the seam was invisible against in the first place.
     """
     draft_id = start_draft(capsys, "--base-image", str(base_image))
     run(["harness", "characters", "turnaround", "--draft", draft_id, "--json"], capsys)
@@ -353,20 +363,27 @@ def test_thumb_writes_the_crop_its_payload_describes(fake, base_image, capsys, t
     )
 
     assert (code, payload["ok"]) == (0, True)
-    assert set(payload) >= {"ok", "path", "row", "attempt", "width", "height"}
+    assert set(payload) >= {"ok", "path", "row", "attempt", "frame", "frames", "width", "height"}
     assert (payload["row"], payload["attempt"], payload["draft"]) == ("walk-e", 0, draft_id)
+    assert (payload["frame"], payload["frames"]) == (0, 2)
     out = Path(payload["path"])
-    assert out.name == "walk-e-a0-x2.png"
+    assert out.name == "walk-e-attempt-1-frame-1-x2.png"
     assert out.parent.name == "thumbs"
-    with Image.open(out) as crop, Image.open(payload["source"]) as source:
+    with Image.open(out) as opened, Image.open(payload["source"]) as opened_source:
+        crop = opened.convert("RGBA")
+        source = opened_source.convert("RGBA")
         assert (crop.width, crop.height) == (payload["width"], payload["height"])
-        assert (crop.width, crop.height) == (source.width * 2, source.height * 2)
-        assert crop.convert("RGBA").getpixel((0, 0))[3] == 255, "the crop must be opaque"
+        # ONE frame cell of the strip, then upscaled — not the whole strip.
+        assert (crop.width, crop.height) == (round(source.width / 2) * 2, source.height * 2)
+        assert source.getpixel((0, 0))[:3] == pipeline.MAGENTA, "not a live-shaped strip"
+        assert crop.getpixel((0, 0)) == pipeline.QA_BACKDROP, (
+            "the chroma field reached the crop: the backdrop never showed"
+        )
     # A path, never bytes: nothing in the payload carries an image inline.
     assert "base64" not in json.dumps(payload).lower()
 
 
-def test_thumb_addresses_one_attempt_at_a_time(fake, base_image, capsys):
+def test_thumb_addresses_one_attempt_and_one_frame_at_a_time(fake, base_image, capsys):
     draft_id = start_draft(capsys, "--base-image", str(base_image))
     run(["harness", "characters", "turnaround", "--draft", draft_id, "--json"], capsys)
     run(["harness", "characters", "approve-direction", "--draft", draft_id, "--all", "--json"], capsys)
@@ -386,15 +403,65 @@ def test_thumb_addresses_one_attempt_at_a_time(fake, base_image, capsys):
         ["harness", "characters", "thumb", "--draft", draft_id, "--row", "walk-e", "--json"],
         capsys,
     )
+    _, other_frame = run(
+        ["harness", "characters", "thumb", "--draft", draft_id, "--row", "walk-e",
+         "--frame", "1", "--json"],
+        capsys,
+    )
     status = run(["harness", "characters", "status", "--draft", draft_id, "--json"], capsys)[1]
 
     assert code == 0
-    assert Path(first["path"]).name == "walk-e-a0-x3.png"
-    assert (latest["attempt"], Path(latest["path"]).name) == (1, "walk-e-a1-x2.png")
-    assert first["path"] != latest["path"]
+    assert Path(first["path"]).name == "walk-e-attempt-1-frame-1-x3.png"
+    assert (latest["attempt"], Path(latest["path"]).name) == (
+        1,
+        "walk-e-attempt-2-frame-1-x2.png",
+    )
+    assert (other_frame["frame"], Path(other_frame["path"]).name) == (
+        1,
+        "walk-e-attempt-2-frame-2-x2.png",
+    )
+    assert len({first["path"], latest["path"], other_frame["path"]}) == 3
+    # The thumb filename counts the way the store's own filenames count, so an
+    # operator walks from one to the other with no off-by-one.
+    assert Path(first["source"]).name == "attempt-1.png"
+    assert Path(latest["source"]).name == "attempt-2.png"
     # Each crop is taken from that attempt's own file, as `status` reports it.
     history = status["status"]["rows"]["walk-e"]["history"]
     assert [entry["path"] for entry in history] == [first["source"], latest["source"]]
+
+
+def test_a_human_line_counts_attempts_the_way_the_store_names_its_files(
+    fake, base_image, capsys
+):
+    """One helper renders every attempt an operator reads (`_attempt_label`).
+
+    The payload stays 0-based machine truth; the sentence beside it is 1-based,
+    because the file it is talking about is `attempt-2.png`. "attempt 1, 2
+    total" for the SECOND attempt put two bases in one sentence.
+    """
+    draft_id = start_draft(capsys, "--base-image", str(base_image))
+    run(["harness", "characters", "turnaround", "--draft", draft_id, "--json"], capsys)
+    run(["harness", "characters", "approve-direction", "--draft", draft_id, "--all", "--json"], capsys)
+    run(["harness", "characters", "rows", "--draft", draft_id, "--only", "walk-e", "--json"], capsys)
+
+    rerolled = parser().parse_args(
+        ["harness", "characters", "reroll-row", "--draft", draft_id, "--row", "walk-e"]
+    )
+    assert rerolled.func(rerolled) == 0
+    reroll_line = capsys.readouterr().out.strip()
+
+    thumbed = parser().parse_args(
+        ["harness", "characters", "thumb", "--draft", draft_id, "--row", "walk-e",
+         "--attempt", "1"]
+    )
+    assert thumbed.func(thumbed) == 0
+    thumb_line = capsys.readouterr().out.strip()
+
+    assert "attempt 2 of 2" in reroll_line
+    assert "attempt 1 of 2" not in reroll_line
+    assert "attempt 2 of 2" in thumb_line
+    assert "frame 1 of 2" in thumb_line
+    assert "walk-e-attempt-2-frame-1-x2.png" in thumb_line
 
 
 @pytest.mark.parametrize(
@@ -402,7 +469,9 @@ def test_thumb_addresses_one_attempt_at_a_time(fake, base_image, capsys):
     [
         (["--row", "idle-w"], "is not an authored row"),
         (["--row", "walk-e", "--attempt", "9"], "out of range"),
-        (["--row", "walk-e", "--scale", "0"], "out of range"),
+        (["--row", "walk-e", "--frame", "9"], "frame 9 out of range"),
+        (["--row", "walk-e", "--scale", "0"], "must be an integer >= 1"),
+        (["--row", "walk-e", "--scale", "9999"], "budget"),
     ],
 )
 def test_a_crop_that_cannot_be_taken_reports_the_pets_error_shape(
@@ -446,6 +515,25 @@ def test_start_records_the_authoring_persona_as_provenance(fake, capsys):
     assert started["summary"]["authoredBy"] == "alice"
     assert status["status"]["authoredBy"] == "alice"
     assert listed["drafts"][0]["authoredBy"] == "alice"
+
+
+def test_an_unattributed_draft_reports_a_null_author_in_every_payload(fake, capsys):
+    """Absence has to reach the consumer, in both payload spellings.
+
+    B2/P1 see only the payload. `""` reads as a value and is what a draft
+    written before the field existed also produced, so a consumer could not tell
+    "no author recorded" from "authored by the empty string" and no backfill
+    could select the drafts that need one.
+    """
+    draft_id = start_draft(capsys)
+
+    _, status = run(["harness", "characters", "status", "--draft", draft_id, "--json"], capsys)
+    _, listed = run(["harness", "characters", "list", "--json"], capsys)
+
+    # Both spellings, read back off real stdout: the key is present and null,
+    # not absent and not "".
+    assert status["status"]["authoredBy"] is None
+    assert listed["drafts"][0]["authoredBy"] is None
 
 
 def test_start_shapes_the_sheet_from_the_states_and_directions_flags(fake, capsys):

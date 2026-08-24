@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import re
+import warnings
 from pathlib import Path
 
 import pytest
@@ -471,9 +473,31 @@ def test_a_second_draft_may_not_overwrite_another_characters_slug(installed, fak
 
 
 # ──────────────────────────── row crops (looking) ────────────────────────────
+#
+# FIXTURE RULE for every test below that judges PIXELS: the input must come
+# from the pipeline that produces it in production — `generate_row_strip`
+# through the fake provider, i.e. `run_rows` / `reroll_row` — never from a
+# hand-built PIL image `propose`d straight into the store.
+#
+# This is not style. A hand-built input is one the author chose to have the
+# property under test, so the assertion passes whether or not the code puts it
+# there. The A1 review found both consequences at once: a crop test fed a
+# TRANSPARENT PNG proved a backdrop composite that is a guaranteed no-op on
+# every image the verb can actually receive (row attempts are opaque magenta,
+# alpha extrema (255, 255) on all eight live items), and the CLI's
+# "the crop must be opaque" assertion survived deleting the composite entirely.
+#
+# Hand-built inputs stay legitimate in `test_charsheet_revisions.py`, where the
+# store genuinely does not care what the bytes are.
 
 
-def test_a_row_crop_is_named_for_its_row_attempt_and_scale(fake, base):
+def test_a_row_crop_is_named_the_way_the_store_names_the_attempt(fake, base):
+    """A filename is a human surface, so it counts the way the store's do.
+
+    `revisions/row@walk-e/attempt-1.png` is the file this crop came from; a
+    thumb called `walk-e-a0-x3.png` left an operator correlating the two off by
+    one. The payload keeps the 0-based machine truth.
+    """
     draft = run_to_rows(base)
     draft.run_rows(only=["walk-e"])
 
@@ -481,42 +505,119 @@ def test_a_row_crop_is_named_for_its_row_attempt_and_scale(fake, base):
 
     out = Path(result["path"])
     assert out.parent == draft.directory / "thumbs"
-    assert out.name == "walk-e-a0-x3.png"
+    assert out.name == "walk-e-attempt-1-frame-1-x3.png"
     assert out.is_file()
-    with Image.open(draft.store.attempt_path(row_item("walk-e"), 0)) as source:
-        expected = (source.width * 3, source.height * 3)
-    assert (result["width"], result["height"]) == expected
+    assert draft.store.attempt_path(row_item("walk-e"), 0).name == "attempt-1.png"
+    assert (result["attempt"], result["frame"]) == (0, 0)
+    assert result["scale"] == 3 and result["row"] == "walk-e"
     with Image.open(out) as crop:
-        assert crop.size == expected
-    assert result["attempt"] == 0 and result["scale"] == 3 and result["row"] == "walk-e"
+        assert crop.size == (result["width"], result["height"])
 
 
-def test_a_crop_composites_the_attempt_onto_an_opaque_dark_backdrop(fake, base, tmp_path):
-    """The §F.2 point: a defect over transparency renders as nothing.
+def test_the_default_crop_is_one_frame_and_not_the_whole_strip(fake, base):
+    """The §F.2 procedure is crop-THEN-upscale, and the crop is the half that
+    removes pixels.
 
-    The source here is one white pixel in a transparent field — the shape a
-    one-pixel seam has once the chroma field is gone. The crop must show the
-    pixel as a NEAREST block on flat dark, not a hole in an alpha channel.
+    Upscaling a whole row strip is not a crop — it is an enlargement, and at
+    card width it resolves no better than the raw attempt while decoding twice
+    the installed sheet it exists to avoid. So the default addresses one frame
+    cell, sliced by the row's own frame count.
     """
     draft = run_to_rows(base)
     draft.run_rows(only=["walk-e"])
-    hole = tmp_path / "hole.png"
-    holed = Image.new("RGBA", (8, 4), (0, 0, 0, 0))
-    holed.putpixel((1, 1), (255, 255, 255, 255))
-    holed.save(hole, format="PNG")
-    draft.store.propose(row_item("walk-e"), hole)
+    frames = next(row.frames for row in SPEC.authored_rows() if row.key == "walk-e")
+    source = draft.store.attempt_path(row_item("walk-e"), 0)
+    with Image.open(source) as strip:
+        strip_w, strip_h = strip.size
 
-    result = draft.row_thumb("walk-e", attempt=1, scale=2)
+    result = draft.row_thumb("walk-e", scale=2)
+
+    assert result["frames"] == frames
+    assert result["height"] == strip_h * 2
+    assert result["width"] == round(strip_w / frames) * 2
+    assert result["width"] < strip_w, (
+        "the crop is wider than the strip it came from — nothing was cropped"
+    )
+    with Image.open(result["path"]) as crop:
+        assert crop.size == (result["width"], result["height"])
+
+
+def test_each_frame_of_a_strip_crops_to_a_different_picture(fake, base):
+    """`--frame` addresses a cell, so two cells are two pictures.
+
+    Within-strip identity is the point of generating a row as one image; what
+    differs between cells is the pose, which is exactly what an operator is
+    looking at frame by frame.
+    """
+    draft = run_to_rows(base)
+    draft.run_rows(only=["walk-e"])
+
+    first = draft.row_thumb("walk-e", frame=0, scale=1)
+    second = draft.row_thumb("walk-e", frame=1, scale=1)
+
+    assert first["path"] != second["path"]
+    assert Path(first["path"]).name.endswith("-frame-1-x1.png")
+    assert Path(second["path"]).name.endswith("-frame-2-x1.png")
+    assert Path(first["path"]).read_bytes() != Path(second["path"]).read_bytes()
+
+
+def test_a_crop_keys_the_chroma_field_out_so_the_dark_backdrop_can_show(fake, base):
+    """The §F.2 point, taken on the image the verb actually receives.
+
+    A row strip off the provider is a full-bleed magenta field at alpha 255
+    everywhere — `alpha_composite`-ing it over a backdrop replaces every
+    backdrop pixel, so a backdrop with nothing keyed out is a step that renders
+    and changes nothing. And §F.1's complaint is precisely that a one-pixel seam
+    is invisible AGAINST the magenta. Keying is what gives the flat dark ground
+    something to show through, and what makes "is it opaque?" a real question.
+    """
+    draft = run_to_rows(base)
+    draft.run_rows(only=["walk-e"])
+    source = draft.store.attempt_path(row_item("walk-e"), 0)
+    with Image.open(source) as strip:
+        strip = strip.convert("RGBA")
+        # The premise: this input is opaque magenta, like every live attempt.
+        assert strip.getchannel("A").getextrema() == (255, 255)
+        assert strip.getpixel((0, 0))[:3] == pipeline.MAGENTA
+
+    result = draft.row_thumb("walk-e", attempt=0, scale=1)
 
     with Image.open(result["path"]) as crop:
-        assert crop.mode == "RGBA"
-        assert crop.size == (16, 8)
-        assert crop.getpixel((0, 0)) == pipeline.QA_BACKDROP
-        assert crop.getpixel((0, 0))[3] == 255, "transparent, not composited"
-        # NEAREST: one source pixel becomes a solid 2x2 block, unblended.
-        assert {crop.getpixel(xy) for xy in ((2, 2), (3, 2), (2, 3), (3, 3))} == {
-            (255, 255, 255, 255)
-        }
+        crop = crop.convert("RGBA")
+        assert crop.getpixel((0, 0)) == pipeline.QA_BACKDROP, (
+            "the chroma field reached the crop: the backdrop never showed"
+        )
+        assert crop.getchannel("A").getextrema() == (255, 255)
+        drawn = {crop.getpixel((x, y))[:3] for x in range(crop.width) for y in range(crop.height)}
+        assert drawn - {pipeline.QA_BACKDROP[:3]}, "the art was keyed away with the field"
+        assert pipeline.MAGENTA not in drawn
+
+
+def test_a_crop_is_upscaled_with_nearest_so_a_one_pixel_defect_survives(fake, base):
+    """Any smoothing filter averages a one-pixel seam into its neighbours.
+
+    Pinned at a real edge of a real strip rather than at a synthetic pixel: the
+    2x crop's block over that edge must be one flat colour equal to the 1x
+    crop's pixel. A bilinear/bicubic resize blends there and the set grows.
+    """
+    draft = run_to_rows(base)
+    draft.run_rows(only=["walk-e"])
+
+    one = draft.row_thumb("walk-e", frame=0, scale=1)
+    two = draft.row_thumb("walk-e", frame=0, scale=2)
+
+    with Image.open(one["path"]) as small, Image.open(two["path"]) as big:
+        small = small.convert("RGBA")
+        big = big.convert("RGBA")
+        edge = next(
+            (x, y)
+            for y in range(small.height)
+            for x in range(small.width - 1)
+            if small.getpixel((x, y)) != small.getpixel((x + 1, y))
+        )
+        x, y = edge
+        block = {big.getpixel((2 * x + dx, 2 * y + dy)) for dx in (0, 1) for dy in (0, 1)}
+        assert block == {small.getpixel((x, y))}
 
 
 def test_looking_at_a_row_is_never_out_of_order(fake, base):
@@ -535,8 +636,10 @@ def test_looking_at_a_row_is_never_out_of_order(fake, base):
         ({"row_key": "idle-w"}, ValueError, "is not an authored row"),
         ({"row_key": "sprint-e"}, ValueError, "is not an authored row"),
         ({"row_key": "walk-e", "attempt": 7}, IndexError, "out of range"),
-        ({"row_key": "walk-e", "scale": 0}, ValueError, "out of range"),
-        ({"row_key": "walk-e", "scale": 99}, ValueError, "out of range"),
+        ({"row_key": "walk-e", "frame": 7}, IndexError, "frame 7 out of range"),
+        ({"row_key": "walk-e", "frame": -1}, IndexError, "frame -1 out of range"),
+        ({"row_key": "walk-e", "frame": "0"}, ValueError, "frame must be an integer"),
+        ({"row_key": "walk-e", "scale": 0}, ValueError, "must be an integer >= 1"),
         ({"row_key": "walk-e", "scale": "2"}, ValueError, "must be an integer"),
     ],
 )
@@ -546,6 +649,50 @@ def test_a_crop_that_cannot_be_taken_is_refused_with_a_reason(fake, base, kwargs
 
     with pytest.raises(error, match=message):
         draft.row_thumb(**kwargs)
+
+
+def test_a_crop_budget_is_output_pixels_and_the_refusal_names_the_source(fake, base):
+    """`--scale N` alone can never express what a caller cares about.
+
+    A fixed 1-8 ceiling is a count unrelated to the source, so the same factor
+    is harmless on one image and a decompression bomb on another: `--scale 8` on
+    a live 1536x1024 attempt wrote 12288x8192 = 100_663_296 px, past Pillow's own
+    `MAX_IMAGE_PIXELS` — a file this package writes and Pillow then refuses to
+    reopen without a `DecompressionBombWarning`, which RAISES under `-W error`.
+    The budget is on the output and is checked before the resize, so nothing
+    oversized is ever allocated, let alone written.
+    """
+    draft = run_to_rows(base)
+    draft.run_rows(only=["walk-e"])
+    cell = draft.row_thumb("walk-e", scale=1)
+    over = math.ceil(math.sqrt(pipeline.MAX_THUMB_PIXELS / (cell["width"] * cell["height"]))) + 1
+    before = sorted(p.name for p in (draft.directory / "thumbs").iterdir())
+
+    with pytest.raises(ValueError) as refusal:
+        draft.row_thumb("walk-e", scale=over)
+
+    message = str(refusal.value)
+    assert f"{cell['width']}x{cell['height']} source" in message
+    assert "budget" in message
+    assert sorted(p.name for p in (draft.directory / "thumbs").iterdir()) == before
+
+
+def test_the_crop_budget_stays_under_pillows_decompression_bomb_threshold(fake, base):
+    """The invariant the budget exists for, stated where a raise would break it.
+
+    A crop this package writes must be one a consumer can reopen — including a
+    consumer running under `-W error`, where the bomb warning is an exception.
+    """
+    assert pipeline.MAX_THUMB_PIXELS < Image.MAX_IMAGE_PIXELS
+
+    draft = run_to_rows(base)
+    draft.run_rows(only=["walk-e"])
+    result = draft.row_thumb("walk-e", scale=2)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with Image.open(result["path"]) as crop:
+            crop.load()
 
 
 def test_a_row_with_no_attempt_yet_says_so_instead_of_cropping_nothing(fake, base):
@@ -603,8 +750,32 @@ def test_a_draft_records_who_authored_it_without_that_scoping_where_it_lives(fak
 
 
 def test_an_unattributed_draft_stays_unattributed_rather_than_guessing(draft):
-    assert draft.authored_by == ""
-    assert draft.status_payload()["authoredBy"] == ""
+    """Absence is a fact, and it has to survive to the consumer.
+
+    An empty string is a third spelling of "no author" that reads as a value:
+    it is what `.get(..., "")` produces for a draft written before the field
+    existed AND what a `--authored-by`-less start used to store, so the payload
+    collapsed the two and a backfill could select neither. The key is simply not
+    written, and the payload says `null`.
+    """
+    on_disk = json.loads((draft.directory / "draft.json").read_text(encoding="utf-8"))
+
+    assert "authored_by" not in on_disk
+    assert draft.authored_by is None
+    assert CharacterDraft.load(draft.id).authored_by is None
+    assert draft.status_payload()["authoredBy"] is None
+
+
+def test_the_authored_by_key_is_absent_rather_than_empty_when_it_is_not_given(fake, base):
+    """A blank `--authored-by` is not an author; it must not mint an empty one."""
+    blank = CharacterDraft.create(
+        concept=CONCEPT, slug=SLUG, spec=SPEC, base_image=base, authored_by="   "
+    )
+
+    on_disk = json.loads((blank.directory / "draft.json").read_text(encoding="utf-8"))
+
+    assert "authored_by" not in on_disk
+    assert blank.authored_by is None
 
 
 def test_setting_a_base_image_that_does_not_exist_is_refused(draft, tmp_path):

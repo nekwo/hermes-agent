@@ -1534,14 +1534,16 @@ def build_parser(parent_subparsers) -> None:
     characters_status.add_argument("--draft", required=True, help="Draft id from `harness characters list`")
     characters_status.add_argument("--json", action="store_true")
     characters_status.set_defaults(func=_cmd_characters_status)
-    characters_thumb = characters_subs.add_parser("thumb", help="Write a card-size QA crop of one row attempt (NEAREST upscale on a flat dark backdrop) and return its path")
+    characters_thumb = characters_subs.add_parser("thumb", help="Write a card-size QA crop of ONE FRAME of one row attempt (chroma keyed out, NEAREST upscale on a flat dark backdrop) and return its path")
     characters_thumb.add_argument("--draft", required=True)
     characters_thumb.add_argument("--row", required=True, help="An authored row key, e.g. walk-n")
     characters_thumb.add_argument("--attempt", type=int, default=-1, help="Which attempt to crop, 0-based as in `status --json` history; -1 = latest")
-    # No default spelled here: the number lives in `draft.DEFAULT_THUMB_SCALE`
-    # and is resolved in the handler, which is also where charsheet is imported
-    # — build_parser runs for EVERY harness call and must not pull in Pillow.
-    characters_thumb.add_argument("--scale", type=int, default=None, help="NEAREST upscale factor (default 2, max 8); 2 is what makes a one-pixel seam legible at card size")
+    # No defaults spelled here: the numbers live in `draft.DEFAULT_THUMB_SCALE` /
+    # `draft.DEFAULT_THUMB_FRAME` and are resolved in the handler, which is also
+    # where charsheet is imported — build_parser runs for EVERY harness call and
+    # must not pull in Pillow.
+    characters_thumb.add_argument("--frame", type=int, default=None, help="Which frame cell of the strip to crop, 0-based (default 0); the crop is the half that removes pixels, so there is always one")
+    characters_thumb.add_argument("--scale", type=int, default=None, help="NEAREST upscale factor (default 2); refused, never clamped, when the OUTPUT would exceed the QA-crop pixel budget")
     characters_thumb.add_argument("--json", action="store_true")
     characters_thumb.set_defaults(func=_cmd_characters_thumb)
     characters_base = characters_subs.add_parser("base", help="Set or replace the draft's base identity image")
@@ -3082,6 +3084,22 @@ def _characters_emit(args, data: dict, human: str) -> int:
     return 0
 
 
+def _attempt_label(index: int, total: int | None = None) -> str:
+    """How an attempt is SHOWN to a person: 1-based, and counted the same way.
+
+    **A QA surface relabels, never renumbers.** Attempt indices are 0-based
+    everywhere a machine reads them — the `status --json` history, `--attempt`,
+    the revision store's one resolver — and the payloads emitted beside these
+    lines keep that. But the store's own files are `attempt-1.png`,
+    `attempt-2.png`, and a human line that said "attempt 0 of 3" put two
+    different bases in one sentence and left an operator correlating a crop to
+    a store file off by one. Every human line that shows an attempt renders it
+    here, so the two numbering systems meet in exactly one place.
+    """
+    shown = f"attempt {index + 1}"
+    return f"{shown} of {total}" if total is not None else shown
+
+
 # What the backend raises for a refusal the operator can act on: a wrong stage, an
 # unauthored direction, an unknown row key (ValueError); a missing draft or an
 # uninstalled slug (FileNotFoundError); an --attempt out of range (IndexError).
@@ -3231,18 +3249,22 @@ def _cmd_characters_thumb(args) -> int:
     # names it (plan A-4). `pets thumb` answers with a data URI because a Petdex
     # gallery row may come from a remote sheet; a draft's attempts are always on
     # this disk, and the launcher reads them there.
-    from agent.charsheet.draft import DEFAULT_THUMB_SCALE
+    from agent.charsheet.draft import DEFAULT_THUMB_FRAME, DEFAULT_THUMB_SCALE
 
     row_key = str(getattr(args, "row", "") or "").strip()
     attempt = int(getattr(args, "attempt", -1))
+    requested_frame = getattr(args, "frame", None)
+    frame = DEFAULT_THUMB_FRAME if requested_frame is None else int(requested_frame)
     requested_scale = getattr(args, "scale", None)
     scale = DEFAULT_THUMB_SCALE if requested_scale is None else int(requested_scale)
 
     def call(draft):
-        result = draft.row_thumb(row_key, attempt=attempt, scale=scale)
+        result = draft.row_thumb(row_key, attempt=attempt, frame=frame, scale=scale)
         return result, (
-            f"Draft {draft.id}: row {result['row']} attempt {result['attempt']} "
-            f"of {result['attempts']} cropped at {result['width']}x{result['height']} "
+            f"Draft {draft.id}: row {result['row']} "
+            f"{_attempt_label(result['attempt'], result['attempts'])}, "
+            f"frame {result['frame'] + 1} of {result['frames']}, "
+            f"cropped at {result['width']}x{result['height']} "
             f"({result['scale']}x) → {result['path']}"
         )
 
@@ -3276,7 +3298,7 @@ def _cmd_characters_reroll_direction(args) -> int:
         result = draft.reroll_direction(direction, note=note)
         return result, (
             f"Draft {draft.id}: direction {result['direction']} re-rolled "
-            f"(attempt {result['attempt']}, {result['attempts']} total, unapproved)"
+            f"({_attempt_label(result['attempt'], result['attempts'])}, unapproved)"
         )
 
     return _characters_verb(args, call)
@@ -3297,8 +3319,8 @@ def _cmd_characters_approve_direction(args) -> int:
         else:
             result = draft.approve_direction(direction, attempt=attempt)
             human = (
-                f"Draft {draft.id}: approved {result['direction']} attempt "
-                f"{result['approved']}; stage is now '{draft.stage}'"
+                f"Draft {draft.id}: approved {result['direction']} "
+                f"{_attempt_label(result['approved'])}; stage is now '{draft.stage}'"
             )
         return result, human
 
@@ -3324,7 +3346,7 @@ def _cmd_characters_reroll_row(args) -> int:
         result = draft.reroll_row(row_key, note=note)
         return result, (
             f"Draft {draft.id}: row {result['row']} re-rolled "
-            f"(attempt {result['attempt']}, {result['attempts']} total, approved)"
+            f"({_attempt_label(result['attempt'], result['attempts'])}, approved)"
         )
 
     return _characters_verb(args, call)

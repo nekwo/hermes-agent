@@ -70,6 +70,7 @@ __all__ = [
     "build_sheet_palette",
     "compose_draft_frames",
     "compose_sheet",
+    "frame_cell",
     "generate_direction_view",
     "generate_row_strip",
     "generate_turnaround",
@@ -92,7 +93,30 @@ MAGENTA: tuple[int, int, int] = (255, 0, 255)
 # masquerade as one. Opaque by construction — the whole point of the backdrop is
 # that a defect over TRANSPARENT pixels shows up as something rather than as
 # nothing (the 2026-08-24 seam hunt, plan §F.2).
+#
+# It only shows through something that HAS transparency, which is why
+# `upscale_on_backdrop` keys the chroma field out first: a row attempt off the
+# provider is a full-bleed magenta field at alpha 255 everywhere, and
+# compositing that over the backdrop replaces every backdrop pixel — the step
+# renders, costs a full-image composite, and changes nothing.
 QA_BACKDROP: tuple[int, int, int, int] = (18, 18, 22, 255)
+
+# Ceiling on what a QA crop may DECODE to, evaluated before the resize.
+#
+# The old ceiling was a bare `1 <= scale <= 8`: a count with no relationship to
+# the source. `--scale 8` on a live 1536x1024 row attempt wrote 12288x8192 =
+# 100_663_296 pixels — past Pillow's own `Image.MAX_IMAGE_PIXELS` bomb threshold
+# (89_478_485), so the verb produced a file Pillow refuses to reopen without a
+# `DecompressionBombWarning`, and RAISES for a caller running under `-W error`.
+# The quantity a caller cares about is the output's pixel count; a scale factor
+# alone can never express it, because the same factor is harmless on one source
+# and a bomb on another.
+#
+# 16M pixels is 64 MiB decoded RGBA: under a fifth of Pillow's threshold (so a
+# crop this package writes always reopens cleanly) and ~5x the largest sheet it
+# composes (1536x2080 = 3_194_880). A default 2x single-frame crop is ~0.8M, so
+# the budget only bites on a deliberate deep zoom.
+MAX_THUMB_PIXELS = 16_000_000
 
 # A non-directional state has no facing to hold, but the row prompt is built
 # around explicit view language. Front view is the neutral choice: it is the one
@@ -191,15 +215,70 @@ def recomposite_on_magenta(image_or_path):
     return field
 
 
-def upscale_on_backdrop(image_or_path, *, scale: int, backdrop=QA_BACKDROP):
-    """The §F.2 looking procedure: NEAREST upscale, composited on flat dark.
+def frame_cell(image_or_path, *, frame: int, frames: int):
+    """Crop ONE frame cell out of a row strip, at full strip height.
 
-    Both halves are load-bearing and both were learned the expensive way on
-    2026-08-24. **NEAREST** because any smoothing filter averages a one-pixel
-    seam into its neighbours — the defect is destroyed by the very step meant to
-    make it visible. **A flat opaque backdrop** because the pixels a QA surface
-    must judge are frequently transparent or chroma-keyed, and a dark line drawn
-    over transparency renders as nothing at all in a chat card.
+    The half of the §F.2 procedure that actually REMOVES pixels. A row strip is
+    already one row, so upscaling the whole strip is not a crop at all — it is
+    an enlargement, and at card size it resolves no better than the raw attempt
+    it was made from (measured 2026-08-24: ≤2/255 per channel against the source
+    at 360 px, 0 of 86_400 pixels differing by more than 8). The remaining
+    reduction is per-frame, and a frame is the unit an operator judges: within-
+    strip identity means a defect is looked for frame by frame.
+
+    Slot geometry is the strip's own: *frames* equal columns, boundaries rounded
+    so no column is dropped or double-counted. Full height is kept deliberately
+    — a seam sits wherever the model drew it, and trimming to the subject would
+    be this module guessing which pixels the operator came to look at.
+    """
+    if isinstance(frames, bool) or not isinstance(frames, int) or frames < 1:
+        raise ValueError(f"frames must be an integer >= 1, got {frames!r}")
+    if isinstance(frame, bool) or not isinstance(frame, int):
+        raise ValueError(f"frame must be an integer, got {frame!r}")
+    if not 0 <= frame < frames:
+        raise IndexError(
+            f"frame {frame} out of range: this row has {frames} frame(s), "
+            f"addressed 0-{frames - 1}"
+        )
+    strip = _open_rgba(image_or_path)
+    left = round(frame * strip.width / frames)
+    right = round((frame + 1) * strip.width / frames)
+    if right <= left:
+        raise ValueError(
+            f"a {strip.width}px strip cannot be split into {frames} frame(s): "
+            "frame 0 would be empty"
+        )
+    return strip.crop((left, 0, right, strip.height))
+
+
+def upscale_on_backdrop(
+    image_or_path,
+    *,
+    scale: int,
+    backdrop=QA_BACKDROP,
+    chroma_key: tuple[int, int, int] | None = MAGENTA,
+):
+    """The §F.2 looking procedure: key, composite on flat dark, NEAREST upscale.
+
+    Three steps, all learned the expensive way on 2026-08-24. **Key the chroma
+    field out** because everything this package generates arrives on a full-bleed
+    magenta field at alpha 255 — composite that over a backdrop and the backdrop
+    is replaced pixel for pixel, so a "flat dark ground" that never renders is
+    exactly as useful as no ground at all. And §F.1's actual complaint is that
+    the seam is invisible *against the magenta*. **A flat opaque backdrop**
+    because once the field is gone the pixels a QA surface must judge sit over
+    transparency, and a dark line drawn over transparency renders as nothing at
+    all in a chat card. **NEAREST** because any smoothing filter averages a
+    one-pixel seam into its neighbours — the defect is destroyed by the very
+    step meant to make it visible.
+
+    *chroma_key* is the field to remove; ``None`` composites the source as it
+    stands (for an image that is already a cutout). An image that already
+    carries transparency is left alone by the keyer either way.
+
+    The output pixel count is budgeted BEFORE the resize
+    (:data:`MAX_THUMB_PIXELS`) and the refusal names the source dimensions, so a
+    caller can see which half of ``source x scale**2`` was the problem.
 
     Returns an RGBA image whose alpha is 255 everywhere: the caller writes a
     picture, not a mask, and "is it opaque?" must be answerable from the file.
@@ -209,6 +288,16 @@ def upscale_on_backdrop(image_or_path, *, scale: int, backdrop=QA_BACKDROP):
     if isinstance(scale, bool) or not isinstance(scale, int) or scale < 1:
         raise ValueError(f"scale must be an integer >= 1, got {scale!r}")
     source = _open_rgba(image_or_path)
+    pixels = source.width * source.height * scale * scale
+    if pixels > MAX_THUMB_PIXELS:
+        raise ValueError(
+            f"scale {scale} on a {source.width}x{source.height} source would write "
+            f"{source.width * scale}x{source.height * scale} = {pixels:,} pixels, "
+            f"over the {MAX_THUMB_PIXELS:,}-pixel QA-crop budget; ask for a smaller "
+            "scale, or a single frame instead of a whole strip"
+        )
+    if chroma_key is not None:
+        source = remove_background(source, chroma_key=tuple(chroma_key))
     field = Image.new("RGBA", source.size, tuple(backdrop))
     field.alpha_composite(source)
     if scale == 1:

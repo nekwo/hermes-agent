@@ -214,7 +214,15 @@ class ImageRevisionStore:
             raise ValueError(
                 f"attempt {index} of {key!r} was rejected and cannot be approved"
             )
-        image = self._item_dir(key) / str(record.get("file", ""))
+        # The same derivation `current()`, `latest()` and `attempt_path()` use.
+        # Spelled out inline it was a FOURTH: `dir / str(record.get("file", ""))`
+        # is the item DIRECTORY when the key is absent, and `is_file()` on a
+        # directory is False — so a record with no file was refused by naming a
+        # directory as an image path, while every read path correctly said
+        # `None`. One derivation, one answer.
+        image = self._record_path(self._item_dir(key), record)
+        if image is None:
+            raise ValueError(f"attempt {index} of {key!r} has no file recorded")
         if not image.is_file():
             raise ValueError(f"attempt {index} of {key!r} has no image on disk at {image}")
         state["approved"] = index

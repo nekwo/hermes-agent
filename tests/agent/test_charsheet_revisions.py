@@ -335,6 +335,35 @@ def test_approving_an_attempt_whose_image_vanished_is_refused(store, root, image
         store.approve("k")
 
 
+def test_approving_a_record_with_no_file_says_so_instead_of_naming_a_directory(
+    store, root, images
+):
+    """`approve` derives its path the way every read does, or it says something
+    false.
+
+    `dir / str(record.get("file", ""))` is the item DIRECTORY when the key is
+    absent, and `is_file()` on a directory is False — so the refusal named a
+    DIRECTORY as the image path ("has no image on disk at .../revisions/k")
+    while `attempt_path` and `latest` correctly answered `None` for the same
+    record. Four derivations of one path was three too many.
+    """
+    store.propose("k", images("a.png"))
+    state_path = root / "k" / STATE_FILENAME
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    del state["attempts"][0]["file"]
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    assert store.attempt_path("k", 0) is None
+    assert store.latest("k") is None
+
+    with pytest.raises(ValueError) as refusal:
+        store.approve("k")
+
+    message = str(refusal.value)
+    assert "no file recorded" in message
+    assert str(root / "k") not in message, "a directory was named as an image path"
+
+
 def test_the_root_is_created_on_construction(tmp_path):
     store = ImageRevisionStore(tmp_path / "deep" / "nested" / "revisions")
 
