@@ -125,14 +125,20 @@ that carried the defect. So:
   averages a defect away) onto flat dark, and writes
   `<draft>/thumbs/<row>-attempt-<n+1>-frame-<f+1>-x<scale>.png`. Its payload is
   a **superset** — `{ok, draft, stage, row, attempt, attempts, frame, frames,
-  scale, source, path, width, height}` today, and it grows additively, so read
-  the response you were handed rather than the list you remember. `source` is
-  the attempt file the crop came from, the same string `status --json` reports
-  as that attempt's `path`.
+  scale, source, path, width, height, cardSafe}` today, and it grows additively,
+  so read the response you were handed rather than the list you remember.
+  `source` is the attempt file the crop came from, the same string
+  `status --json` reports as that attempt's `path`.
 - **`--frame 0` is a default, not an answer.** A defect is hunted frame by frame;
   walk `--frame` across `frames`.
-- `--scale` (default 2) is bounded by an **output**-pixel budget and is
-  **refused, never clamped** — the refusal names the source dimensions.
+- `--scale` (default 2) is bounded by **output**-pixel budgets and is
+  **refused, never clamped** — the refusal names the source dimensions. There
+  are two: at or below the default the crop must be lighter than the composed
+  sheet (that is the whole point of cropping), and a deeper zoom is allowed but
+  comes back **`cardSafe: false`**. **Only declare a `cardSafe: true` crop with
+  `MEDIA:`** — a false one is a fullscreen-viewer artifact and hands the console
+  a decode several times the sheet's for a 420px square. Say the path and tell
+  the operator to open it instead.
 - **The single most reliable read is attempt N beside attempt N−1**, same row,
   same frame, declared in one turn and labelled. Two independent agents each
   failed to see this seam at 5–6× magnification on a single frame; side by side,
