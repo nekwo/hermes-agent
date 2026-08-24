@@ -364,6 +364,10 @@ Each links to a `planned/` file carrying its evidence and the gate to open it.
 - Queued — **the global-singleton persona-instance redesign**, cited at
   `persona_assignments.py:2518` →
   [planned/global-singleton-persona-instances.md](planned/global-singleton-persona-instances.md)
+- 2026-08-24 — **a character's state vocabulary is fixed at `start`**: there is
+  no `characters add-state`, so adding a strip to an installed sheet means
+  re-authoring the character →
+  [planned/charsheet-add-state.md](planned/charsheet-add-state.md)
 
 ## Unverified carry-forward
 

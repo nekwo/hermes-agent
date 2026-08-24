@@ -93,6 +93,70 @@ def test_runtime_model_skill_documents_graph_and_level_agent_commands():
     assert "QA is a node only if the selected blueprint binds it" in text
 
 
+def _charsheet_skill_text() -> str:
+    root = Path(__file__).resolve().parents[2] / "docs" / "agent-runtime-harness" / "harness-skills"
+    return (root / "harness-charsheet-authoring" / "SKILL.md").read_text(encoding="utf-8")
+
+
+def _live_characters_verbs() -> set[str]:
+    """The `harness characters` verbs argparse ACTUALLY registers, right now."""
+    import argparse
+
+    from hermes_cli.harness import build_parser
+
+    def choices(parser):
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                return action.choices
+        raise AssertionError(f"no subparsers on {parser.prog!r}")
+
+    root = argparse.ArgumentParser()
+    build_parser(root.add_subparsers(dest="command"))
+    return set(choices(choices(choices(root)["harness"])["characters"]))
+
+
+def test_charsheet_skill_is_a_canonical_skill_the_authoring_persona_preloads():
+    from hermes_constants import CANONICAL_SHARED_SKILL_IDS
+
+    assert "harness-charsheet-authoring" in CANONICAL_SHARED_SKILL_IDS
+
+    text = _charsheet_skill_text()
+    assert "load_policy: required_preload" in text
+    assert "name: harness-charsheet-authoring" in text
+
+
+def test_charsheet_skill_documents_exactly_the_characters_verbs_hermes_has():
+    """The skill's verb table is pinned to the live parser tree.
+
+    A skill that teaches a stale verb surface is worse than no skill — agents
+    trust it. So the table cannot drift in either direction: a verb hermes grows
+    (``add-state``) and a verb the skill invents both fail here.
+    """
+    import re
+
+    documented = {
+        match.group(1)
+        for match in re.finditer(r"^\| `([a-z][a-z-]*)", _charsheet_skill_text(), re.MULTILINE)
+    }
+
+    assert documented == _live_characters_verbs()
+
+
+def test_charsheet_skill_teaches_the_looking_procedure_not_just_the_verbs():
+    text = _charsheet_skill_text()
+
+    # The three field findings the verb list cannot carry: crop one FRAME, read
+    # attempts side by side, and never trust an automated seam scan as a gate.
+    assert "`--frame 0` is a default, not an answer" in text
+    assert "attempt N beside attempt N−1" in text
+    assert "Do not build a pass/fail scanner" in text
+    # The two lines the console parses, and the fence that un-declares them.
+    assert "`MEDIA:<absolute path>`" in text
+    assert "`CHARSHEET-QA:{json}`" in text
+    # A restricted session is not a broken feature.
+    assert "chat_lane_restore_toolsets" in text
+
+
 def test_mission_lead_skill_answers_graph_from_supplied_task_plan():
     root = Path(__file__).resolve().parents[2] / "docs" / "agent-runtime-harness" / "harness-skills"
     text = (root / "harness-mission-lead" / "SKILL.md").read_text(encoding="utf-8")
