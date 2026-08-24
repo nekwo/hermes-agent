@@ -217,6 +217,18 @@ DELEGATED_ERROR_KIND_SOURCES = {
     ),
     "agent_runtime.target_policy": ("ambiguous_target",),
     "agent_runtime.persona_chat_mint": ("PersonaChatMintError.code",),
+    # The dispatch DELIVERY QUEUE's own refusals, spoken only by
+    # ``harness mission-chat dispatch redeliver``. They describe a queue row's
+    # delivery state, not how a chat TURN ended, so owning them here would put
+    # a second lane's vocabulary in this table — the exact duplication this
+    # module exists to prevent. ``dispatch_store.REARM_ERROR_KINDS`` is the
+    # authority; the verb reads it.
+    "agent_runtime.dispatch_store": (
+        "dispatch_not_found",
+        "dispatch_already_delivered",
+        "dispatch_not_dropped",
+        "dispatch_store_unavailable",
+    ),
 }
 
 

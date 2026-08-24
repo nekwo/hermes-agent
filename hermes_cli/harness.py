@@ -1174,6 +1174,29 @@ def build_parser(parent_subparsers) -> None:
     mission_chat_clarify_tickets.add_argument("--session-id", default=None, help="Only list tickets bound to this chat root (counts still cover the whole store)")
     mission_chat_clarify_tickets.add_argument("--state", default=None, choices=["open", "answered", "rebound"], help="Only list tickets in this lifecycle state (counts still cover the whole store)")
     mission_chat_clarify_tickets.set_defaults(func=_cmd_mission_chat_clarify_tickets)
+    # The agent-to-agent delivery QUEUE, as opposed to the chat turns it forges
+    # into. Repair verbs only: the drain owns the normal path, and this group
+    # exists for the rows it gave up on.
+    mission_chat_dispatch = mission_chat_subs.add_parser(
+        "dispatch", help="Operate the agent-to-agent dispatch delivery queue"
+    )
+    mission_chat_dispatch_subs = mission_chat_dispatch.add_subparsers(
+        dest="mission_chat_dispatch_command"
+    )
+    mission_chat_dispatch_redeliver = mission_chat_dispatch_subs.add_parser(
+        "redeliver",
+        help=(
+            "Re-arm a DROPPED dispatch reply for another delivery pass (dropped -> "
+            "pending, attempts 0, previous drop reason cleared)"
+        ),
+    )
+    mission_chat_dispatch_redeliver.add_argument(
+        "dispatch_id", help="The dispatch handle, e.g. dispatch-2540634d5cf3"
+    )
+    mission_chat_dispatch_redeliver.add_argument("--json", action="store_true")
+    mission_chat_dispatch_redeliver.set_defaults(
+        func=_cmd_mission_chat_dispatch_redeliver
+    )
 
     status = subs.add_parser("status", help="Show harness status")
     status.add_argument("--json", action="store_true")

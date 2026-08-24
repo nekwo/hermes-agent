@@ -73,7 +73,12 @@ __all__ = [
     "DELIVERY_DROPPED",
     "DELIVERY_PENDING",
     "DROP_REASON_ATTEMPT_CAP",
+    "DROP_REASON_FORGE_REJECTED",
     "MAX_DELIVERY_ATTEMPTS",
+    "REARM_ALREADY_DELIVERED",
+    "REARM_NOT_DROPPED",
+    "REARM_NOT_FOUND",
+    "REARM_REARMED",
     "STATE_ERROR",
     "STATE_RUNNING",
     "STATE_UNKNOWN",
@@ -84,6 +89,7 @@ __all__ = [
     "mark_delivered",
     "mint_dispatch_id",
     "pending_deliveries",
+    "rearm_delivery",
     "record_completion",
     "record_dispatch",
     "release_delivery_claim",
@@ -125,6 +131,33 @@ MAX_DELIVERY_ATTEMPTS = 8
 #: the row and the operator reads the projection, so a reason that lives only in
 #: the event log renders as the useless "undelivered".
 DROP_REASON_ATTEMPT_CAP = "attempt_cap"
+
+#: Prefix for the OTHER terminal give-up: the forge refused this row for a
+#: DETERMINISTIC reason (a guard verdict — foreign root, unknown persona,
+#: retired instance). Spelled ``forge_rejected:<error_kind>`` on the row, so the
+#: Activity panel renders the actual verdict instead of ``attempt_cap`` — which
+#: is what an operator saw for 40 seconds' worth of eight identical refusals.
+DROP_REASON_FORGE_REJECTED = "forge_rejected"
+
+#: Outcomes of :func:`rearm_delivery`. A verb refusing a row must be able to say
+#: WHICH refusal it was, so these are values rather than a bare ``False``.
+REARM_REARMED = "rearmed"
+REARM_NOT_FOUND = "not_found"
+REARM_ALREADY_DELIVERED = "already_delivered"
+REARM_NOT_DROPPED = "not_dropped"
+
+#: The wire ``error_kind`` for each re-arm refusal, and for a store that could
+#: not be read at all. Declared HERE, beside the outcomes they name, because
+#: this module owns them — the CLI verb reads this table instead of re-spelling
+#: the values, exactly as ``relay_policy`` and ``target_policy`` own theirs.
+#: Registered for the record in
+#: ``mission_chat_outcome.DELEGATED_ERROR_KIND_SOURCES``.
+REARM_ERROR_KINDS = {
+    REARM_NOT_FOUND: "dispatch_not_found",
+    REARM_ALREADY_DELIVERED: "dispatch_already_delivered",
+    REARM_NOT_DROPPED: "dispatch_not_dropped",
+}
+ERROR_KIND_DISPATCH_STORE_UNAVAILABLE = "dispatch_store_unavailable"
 
 #: Bound on the stored ask/reply text. The reply bound matches the relay tool's
 #: own ``_REPLY_LIMIT`` (``tools/agent_chat_tool.py``) and the delivery lane's
@@ -741,6 +774,60 @@ def drop_delivery(dispatch_id: str, *, reason: str) -> bool:
     if dropped:
         _emit("dispatch.dropped", dispatch_id=str(dispatch_id), reason=str(reason)[:120])
     return dropped
+
+
+def rearm_delivery(dispatch_id: str) -> tuple[str, dict[str, Any] | None]:
+    """Put a DROPPED delivery back in the queue. Returns ``(outcome, row)``.
+
+    The operator's way back from a terminal give-up. A dropped row is not a lost
+    answer — the reply is still durable on the row and the sender still has not
+    been told — so once the reason it was refused is FIXED (a deployed guard fix,
+    a re-opened chat root), the delivery deserves another pass rather than a
+    hand-written re-send.
+
+    The re-arm is byte-for-byte the one ``record_completion`` already performs
+    when a second outcome lands on a dropped row (see the ``delivery_attempts`` /
+    ``delivery_error`` CASE arms there): back to ``pending``, counter to zero,
+    previous give-up cleared, claim released. Both spellings must stay identical
+    — a re-arm that kept the exhausted counter is re-dropped by the very next
+    claim, and the operator then reads a stale reason against a delivery that
+    never got an attempt.
+
+    Refuses by NAME rather than silently: ``not_found``, ``already_delivered``
+    (the sender was told; re-arming would deliver a second copy) and
+    ``not_dropped`` (a pending row is already queued and needs nothing).
+
+    Deliberately emits no EventLog row. ``dispatch.delivery_rearmed`` would be a
+    new registered contract, and the registry's hash is stamped on every live
+    persona instance — a migration this repair verb has no business forcing. The
+    mutation is not silent regardless: the operator ran the verb and reads its
+    envelope, and the next drain pass emits the real ``dispatch.delivered`` or
+    ``dispatch.dropped`` for the same row.
+    """
+
+    now_epoch = time.time()
+    with _DB_LOCK, _transaction() as conn:
+        row = conn.execute(
+            f"SELECT delivery_state FROM {_TABLE} WHERE dispatch_id=?",
+            (str(dispatch_id),),
+        ).fetchone()
+        if row is None:
+            return REARM_NOT_FOUND, None
+        state = str(row[0] or DELIVERY_PENDING)
+        if state == DELIVERY_DELIVERED:
+            outcome = REARM_ALREADY_DELIVERED
+        elif state != DELIVERY_DROPPED:
+            outcome = REARM_NOT_DROPPED
+        else:
+            conn.execute(
+                f"""UPDATE {_TABLE} SET delivery_state=?, delivery_attempts=0,
+                       delivery_error=NULL, delivery_claim=NULL,
+                       delivery_claimed_at=NULL, updated_at=?
+                    WHERE dispatch_id=? AND delivery_state=?""",
+                (DELIVERY_PENDING, now_epoch, str(dispatch_id), DELIVERY_DROPPED),
+            )
+            outcome = REARM_REARMED
+    return outcome, get_dispatch(dispatch_id)
 
 
 #: How often the backlog report may repeat while the condition persists.

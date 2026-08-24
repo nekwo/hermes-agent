@@ -106,6 +106,43 @@ DELIVERY_REQUESTED_BY = "harness-delivery"
 #: ``tests/agent_runtime/test_mirrored_constant_fences.py``.
 REPLY_LIMIT = 8000
 
+
+def _terminal_forge_rejections() -> frozenset[str]:
+    """``error_kind`` values a RETRY can never turn into a delivery.
+
+    The attempt cap exists to converge rows that are genuinely undeliverable
+    (their chat root deleted, say) — a budget for TRANSIENT failure. It is the
+    wrong instrument entirely for a GUARD VERDICT: a foreign-root refusal, an
+    unknown persona, a retired instance are pure functions of state that a
+    delivery attempt does not touch, so attempt eight is refused for exactly the
+    reason attempt one was. Burning all eight buys nothing, costs ~40 s of drain
+    passes, and — worst of it — ends with ``attempt_cap`` written to
+    ``delivery_error``, which is what the operator's Activity panel then shows
+    instead of the verdict that actually happened. That is precisely how the
+    2026-08-24 ``foreign_chat_session`` outage (dispatch-2540634d5cf3) presented:
+    the panel said the attempts ran out, never that a guard said no.
+
+    Derived from the OWNED vocabulary rather than re-spelled, so a kind added to
+    ``mission_chat_outcome`` cannot quietly fall out of this class: every
+    admission refusal, plus the chat-root refusals MINUS ``chat_busy`` — the one
+    member of that family which is a live-operator race and the definition of
+    transient (it keeps the refund path below).
+
+    Everything not named here — busy, lease contention, transport, an exception
+    out of the forge — keeps the existing cap/refund semantics.
+    """
+
+    from .mission_chat_outcome import (
+        ADMISSION_ERROR_KINDS,
+        CHAT_ROOT_ERROR_KINDS,
+        ChatErrorKind,
+    )
+
+    kinds = (set(ADMISSION_ERROR_KINDS) | set(CHAT_ROOT_ERROR_KINDS)) - {
+        ChatErrorKind.CHAT_BUSY
+    }
+    return frozenset(str(kind) for kind in kinds)
+
 #: How often the drain looks for work. Deliberately unhurried — a completion is
 #: not latency-critical, and every pass costs a lease probe plus a journal read
 #: on a process that is also running turns.
@@ -1138,6 +1175,22 @@ def drain_once(*, forge: Callable | None = None, limit: int | None = None) -> di
         # the claim burned: without this, eight unlucky races walk a good
         # completion to a terminal `dropped` having never once failed.
         error_kind = str((payload or {}).get("error_kind") or "")
+        # A DETERMINISTIC guard verdict is terminal on the FIRST occurrence: the
+        # reply stays durable on the row, the real reason lands in
+        # ``delivery_error`` where the Activity panel renders it, and the row
+        # leaves the queue instead of replaying an identical refusal eight times.
+        # ``harness mission-chat dispatch redeliver <id>`` re-arms it once the
+        # verdict's cause is fixed. See :func:`_terminal_forge_rejections`.
+        if error_kind in _terminal_forge_rejections():
+            dispatch_store.drop_delivery(
+                dispatch_id,
+                reason=f"{dispatch_store.DROP_REASON_FORGE_REJECTED}:{error_kind}",
+            )
+            tally["dropped"] += 1
+            _telemetry.record_bounce(  # A
+                event_key, f"forge_rejected:{error_kind}", forge_error, root=root
+            )
+            continue
         busy = error_kind == "chat_busy"
         dispatch_store.release_delivery_claim(dispatch_id, refund_attempt=busy)
         if busy:

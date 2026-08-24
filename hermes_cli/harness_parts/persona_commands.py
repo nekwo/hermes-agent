@@ -88,6 +88,7 @@ from agent_runtime.persona_assignments import (
     persona_id_from_instance_id as _persona_id_from_instance_id,
     persona_instance_id_for,
     persona_instance_summary,
+    personas_equal,
     resolve_default_chat_session_id_for_instance,
     safe_assignment_text,
     safe_assignment_token,
@@ -866,9 +867,23 @@ def _cmd_persona_instance_open_chat(args) -> int:
                     )
                 except Exception:
                     owner_instance = None
+                # Same two-normalizer defect as the mission-chat fence, one verb
+                # over: ``safe_assignment_token(owner.persona_id)`` (token form)
+                # against ``persona_id``, which is
+                # ``_normalize_cli_persona_or_template_id`` output (colon form).
+                # ``personas_equal`` folds both sides through one authority; the
+                # pin leg is bounded exactly as it is there (ownership proof, not
+                # persona proof).
+                owner_persona = getattr(owner_instance, "persona_id", None)
+                pin_proves_ownership = bool(target_instance_id) and (
+                    target_instance_id == session_owner
+                )
+                persona_ok = personas_equal(owner_persona, persona_id) or (
+                    pin_proves_ownership and not safe_assignment_token(owner_persona)
+                )
                 if (
                     owner_instance is None
-                    or safe_assignment_token(owner_instance.persona_id) != persona_id
+                    or not persona_ok
                     or (target_instance_id and target_instance_id != session_owner)
                 ):
                     data = {
@@ -1046,7 +1061,10 @@ def _cmd_persona_instance_open_new_chat(args, *, persona_id: str, coordinator_sc
             persona_instance_id=target_instance_id,
             next_expected="refresh the Harness roster and retry against a live persona instance",
         )
-    if current.persona_id != persona_id:
+    # Fourth site of the shape: the STORED persona compared raw against
+    # ``_normalize_cli_persona_or_template_id`` output. One authority, both sides
+    # — a spelling difference is not an instance mismatch.
+    if not personas_equal(current.persona_id, persona_id):
         return _emit_persona_open_chat_error(
             args,
             error_kind=ChatErrorKind.PERSONA_INSTANCE_MISMATCH,
@@ -1275,10 +1293,28 @@ def _cmd_persona_chat_delete(args) -> int:
         }
         print(emit_json(data) if args.json else data["error"])
         return 2
+    # Third site of the same shape: the STORED ``owner_instance.persona_id``
+    # compared raw against ``requested_persona``, which is
+    # ``_normalize_cli_persona_or_template_id`` output — or, on that call's
+    # except branch, ``safe_assignment_token`` output. Two normalizers reachable
+    # from one argument, in one predicate. Folded through ``personas_equal`` so a
+    # spelling can no longer refuse the delete of a root the caller owns.
+    owner_persona = getattr(owner_instance, "persona_id", None)
+    pin_proves_ownership = bool(requested_instance) and (
+        owner_instance is not None and owner_instance.id == requested_instance
+    )
+    # Pin bounded exactly as in the mission-chat fence: proven ownership speaks
+    # only where the persona leg is silent (an owner row with no readable
+    # persona). A pin must not license deleting a root the caller has just
+    # named a DIFFERENT persona for — that is caller confusion, and refusing it
+    # costs nothing.
+    persona_ok = (not requested_persona) or personas_equal(
+        owner_persona, requested_persona
+    ) or (pin_proves_ownership and not safe_assignment_token(owner_persona))
     if (
         owner_instance is None
         or (requested_instance and owner_instance.id != requested_instance)
-        or (requested_persona and owner_instance.persona_id != requested_persona)
+        or not persona_ok
     ):
         data = {
             "ok": False,
@@ -2317,13 +2353,33 @@ def _cmd_mission_chat_message(args) -> int:
             owner_instance = instance_store.get(owner) if owner else None
         except Exception:
             owner_instance = None
-        owner_persona = safe_assignment_token(
-            getattr(owner_instance, "persona_id", None)
+        # ONE spelling authority on BOTH sides (``personas_equal``). This fence
+        # used to compare ``safe_assignment_token(owner.persona_id)`` against
+        # ``normalize_persona_or_template_id(caller_persona)`` — token form vs
+        # colon form, two normalizers, one persona — so ``profile:alice`` could
+        # never equal ``profile_alice`` and EVERY agent-to-agent reply delivery
+        # for a profile persona was refused as foreign
+        # (2026-08-24, dispatch-2540634d5cf3).
+        owner_persona = getattr(owner_instance, "persona_id", None)
+        # The PIN leg is an identity check on the very field ownership is
+        # defined by: the chat root's owner IS an instance id. When the caller
+        # supplies one it is authoritative about OWNERSHIP — but not about
+        # WHOSE BRAIN RUNS. ``normalized_persona`` (not the owner's persona) is
+        # what selected the persona, model and profile for this turn, so a pin
+        # that proved ownership while the caller named a genuinely DIFFERENT
+        # persona would run that persona's turn inside this instance's thread.
+        # The pin therefore overrides the persona leg only where the persona
+        # leg has nothing to say: an owner row whose persona is missing or
+        # unreadable. See the F1 note in the guard tests.
+        pin_proves_ownership = bool(persona_instance_id) and owner == persona_instance_id
+        owner_persona_known = bool(safe_assignment_token(owner_persona))
+        persona_ok = personas_equal(owner_persona, normalized_persona) or (
+            pin_proves_ownership and not owner_persona_known
         )
         if (
             not owner
             or owner_instance is None
-            or owner_persona != normalized_persona
+            or not persona_ok
             or (persona_instance_id and owner != persona_instance_id)
         ):
             data = {
@@ -4113,6 +4169,126 @@ def _clarify_ticket_row(record: dict, *, now: float, ttl_seconds: float) -> dict
             round(max(now - float(answered_at), 0.0), 3) if answered_at else None
         ),
     }
+
+
+#: What the redeliver verb tells the operator to do about each refusal. Beside
+#: the outcomes rather than inside the handler so a new outcome cannot ship
+#: without an answer to "so what do I do".
+_DISPATCH_REDELIVER_NEXT_EXPECTED = {
+    "not_found": "check the dispatch id; only rows still inside the store's retention window exist",
+    "already_delivered": "nothing to do — the sender already received this reply",
+    "not_dropped": "the row is still queued; the drain will deliver it on its next pass",
+}
+
+
+def _cmd_mission_chat_dispatch_redeliver(args) -> int:
+    """Re-arm one DROPPED dispatch reply for another delivery pass.
+
+    The operator's way back from a terminal give-up. A dropped row still holds a
+    real answer that its sender was never told — the 2026-08-24
+    ``foreign_chat_session`` outage produced a queue full of exactly these — and
+    once the reason the delivery was refused is fixed and a serve restart has
+    picked the fix up, the row deserves another pass rather than a hand-written
+    re-send that loses the dispatch's provenance.
+
+    Refusals are TYPED, not silent: re-arming a delivered row would deliver a
+    second copy, and re-arming a pending one would tell an operator something
+    happened when nothing did.
+
+    Never prints message bodies. The ask and the reply live on the row, the row
+    is a queue record and not a transcript, and an operator repairing a delivery
+    queue does not need to read either — the thread this re-arms into is where
+    the text belongs.
+    """
+
+    # Function-local, per the exec'd-part discipline: this file is exec'd into
+    # harness.py's globals, so a module-level import here would need a matching
+    # one there or it is a NameError on a LIVE turn. Neither vocabulary is
+    # re-spelled — the admission kind is the enum member, and the queue's own
+    # refusals are read off ``dispatch_store``, which owns them.
+    from agent_runtime import dispatch_store
+    from agent_runtime.mission_chat_outcome import ChatErrorKind
+
+    dispatch_id = safe_assignment_text(getattr(args, "dispatch_id", None), limit=200)
+    if not dispatch_id:
+        data = attach_root_observability(
+            {
+                "ok": False,
+                "capability_id": "mission.chat.dispatch.redeliver",
+                "error_kind": ChatErrorKind.INVALID_REQUEST,
+                "error": "dispatch_id is required",
+            }
+        )
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+
+    try:
+        outcome, row = dispatch_store.rearm_delivery(dispatch_id)
+    except Exception as exc:
+        data = attach_root_observability(
+            {
+                "ok": False,
+                "capability_id": "mission.chat.dispatch.redeliver",
+                "error_kind": dispatch_store.ERROR_KIND_DISPATCH_STORE_UNAVAILABLE,
+                "error": safe_assignment_text(str(exc), limit=320),
+                "dispatch_id": dispatch_id,
+            }
+        )
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+
+    record = row if isinstance(row, dict) else {}
+    # The queue-record fields ONLY. `ask` / `reply` are deliberately absent.
+    state = {
+        "dispatch_id": dispatch_id,
+        "state": record.get("state") or "",
+        "delivery_state": record.get("delivery_state") or "",
+        "delivery_attempts": int(record.get("delivery_attempts") or 0),
+        "delivery_error": record.get("delivery_error") or None,
+        "target_persona": record.get("target_persona") or "",
+        "target_instance_id": record.get("target_instance_id") or "",
+        "sender_session_id": record.get("sender_session_id") or "",
+    }
+    if outcome != dispatch_store.REARM_REARMED:
+        data = attach_root_observability(
+            {
+                "ok": False,
+                "capability_id": "mission.chat.dispatch.redeliver",
+                "error_kind": dispatch_store.REARM_ERROR_KINDS.get(
+                    outcome, dispatch_store.ERROR_KIND_DISPATCH_STORE_UNAVAILABLE
+                ),
+                "error": f"dispatch delivery cannot be re-armed: {outcome}",
+                "outcome": outcome,
+                **state,
+                "next_expected": _DISPATCH_REDELIVER_NEXT_EXPECTED.get(
+                    outcome, "inspect the dispatch row before re-arming it"
+                ),
+            }
+        )
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+
+    data = attach_root_observability(
+        {
+            "ok": True,
+            "capability_id": "mission.chat.dispatch.redeliver",
+            "outcome": outcome,
+            **state,
+            "next_expected": (
+                "the serve delivery drain picks it up on its next pass; a serve "
+                "process without the fix that dropped it will drop it again"
+            ),
+        }
+    )
+    print(
+        emit_json(data)
+        if args.json
+        else (
+            f"re-armed {dispatch_id}: delivery_state="
+            f"{state['delivery_state']} attempts={state['delivery_attempts']}"
+        )
+    )
+    return 0
 
 
 def _cmd_mission_chat_clarify_tickets(args) -> int:

@@ -2967,6 +2967,60 @@ def normalize_persona_or_template_id(persona_id: str) -> str:
     return normalize_persona_id(raw)
 
 
+def _persona_comparison_key(value: Any) -> str:
+    """The ONE spelling a persona is compared under. Never called for display.
+
+    Two folds, in a fixed order, because either one alone is a half-answer:
+    ``normalize_persona_or_template_id`` resolves the FORM (an instance id in a
+    persona slot, a ``profile:<name>`` channel, a bare persona id) but preserves
+    the colon; ``safe_assignment_token`` flattens the punctuation but cannot
+    resolve an instance id. Folding through both, in that order, is the only
+    order that answers both questions.
+
+    An id this module cannot normalize is tokenized as it arrived rather than
+    dropped: two callers who both spell an unknown persona the same way still
+    mean the same persona, and answering ``False`` there would silently widen a
+    guard's refusal set.
+    """
+
+    try:
+        canonical = normalize_persona_or_template_id(value)
+    except Exception:
+        canonical = value
+    return safe_assignment_token(canonical)
+
+
+def personas_equal(left: Any, right: Any) -> bool:
+    """Do two persona spellings name the SAME persona?
+
+    **Doctrine: one persona, one spelling authority — a guard must never compare
+    the outputs of two different normalizers.**
+
+    This function exists because a guard did exactly that, and the cost was a
+    live outage. ``_cmd_mission_chat_message``'s ``foreign_chat_session`` fence
+    compared ``normalize_persona_or_template_id(caller_persona)`` — which
+    PRESERVES the colon, ``"profile:alice"`` — against
+    ``safe_assignment_token(owner_instance.persona_id)`` — which REPLACES it,
+    ``"profile_alice"``. One persona, two normalizers, one predicate: the two
+    sides could never be equal, so every agent-to-agent reply delivery for a
+    ``profile:`` persona was rejected as foreign and burned all eight delivery
+    attempts against an identical, deterministic refusal
+    (2026-08-24, dispatch-2540634d5cf3).
+
+    Both sides fold through :func:`_persona_comparison_key` here, so there is
+    exactly one authority and no call site can pick a different half of it.
+
+    Empty on the LEFT is ``False``: "no persona was named" is never proof that
+    two personas match, and a guard that read absence as agreement would accept
+    precisely the requests it exists to refuse.
+    """
+
+    left_key = _persona_comparison_key(left)
+    if not left_key:
+        return False
+    return left_key == _persona_comparison_key(right)
+
+
 def _profile_id_for_persona_or_template(persona_or_template_id: str) -> str | None:
     """The profile an instance projection should be stamped with at creation.
 
