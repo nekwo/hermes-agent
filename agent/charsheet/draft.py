@@ -623,6 +623,18 @@ class CharacterDraft:
 
     # -------------------------------------------------- stage 3: composed
 
+    def reopen(self) -> dict:
+        """Reopen a composed draft for fixes; returns to stage ``rows``.
+
+        Nothing is deleted and the installed sheet stays installed: compose
+        always re-runs from the approved strips, so the next ``compose`` after
+        a fix simply overwrites the install. Without this verb the only path
+        back was hand-editing ``draft.json`` (proven live on 2026-08-24).
+        """
+        self._require_stage("reopen", "composed")
+        self._set_stage("rows")
+        return {"stage": self.stage}
+
     def compose(self) -> dict:
         """Compose, validate and install the sheet; advances to ``composed``.
 

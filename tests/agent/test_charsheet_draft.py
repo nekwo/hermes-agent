@@ -428,6 +428,32 @@ def test_compose_installs_a_validated_sheet_and_a_manifest_carrying_the_spec(ins
     assert (manifest["frameW"], manifest["frameH"]) == (SPEC.frame_w, SPEC.frame_h)
 
 
+def test_reopen_returns_a_composed_draft_to_rows_for_a_fix_and_recompose_reinstalls(fake, base):
+    draft = run_to_composed(base)
+    manifest_path = characters_dir() / draft.slug / MANIFEST_FILENAME
+    installed_before = manifest_path.read_bytes()
+
+    assert draft.reopen() == {"stage": "rows"}
+    assert draft.stage == "rows"
+    # Reopening deletes nothing: the install is untouched until the next compose.
+    assert manifest_path.read_bytes() == installed_before
+
+    draft.reroll_row("walk-e")
+    composed = draft.compose()
+    assert composed["slug"] == draft.slug
+    assert draft.stage == "composed"
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["draftId"] == draft.id
+
+
+def test_reopen_refuses_any_draft_that_is_not_composed(fake, base):
+    draft = run_to_rows(base)
+
+    with pytest.raises(ValueError, match="reopen requires draft stage 'composed'"):
+        draft.reopen()
+
+    assert draft.stage == "rows"
+
+
 def test_a_second_draft_may_not_overwrite_another_characters_slug(installed, fake, tmp_path):
     manifest_path = characters_dir() / installed["slug"] / MANIFEST_FILENAME
     before = manifest_path.read_bytes()

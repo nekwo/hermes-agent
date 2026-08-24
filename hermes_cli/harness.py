@@ -1571,6 +1571,10 @@ def build_parser(parent_subparsers) -> None:
     characters_compose.add_argument("--draft", required=True)
     characters_compose.add_argument("--json", action="store_true")
     characters_compose.set_defaults(func=_cmd_characters_compose)
+    characters_reopen = characters_subs.add_parser("reopen", help="Reopen a composed draft for fixes (stage 'composed' → 'rows'); the installed sheet stays until the next compose")
+    characters_reopen.add_argument("--draft", required=True)
+    characters_reopen.add_argument("--json", action="store_true")
+    characters_reopen.set_defaults(func=_cmd_characters_reopen)
     characters_sprite = characters_subs.add_parser("sprite", help="Return an installed character spritesheet payload")
     characters_sprite.add_argument("slug")
     characters_sprite.add_argument("--json", action="store_true")
@@ -3296,6 +3300,17 @@ def _cmd_characters_compose(args) -> int:
         return result, (
             f"Draft {draft.id} composed → {result['slug']} "
             f"({result['validation']['width']}x{result['validation']['height']}) at {result['sheet']}"
+        )
+
+    return _characters_verb(args, call)
+
+
+def _cmd_characters_reopen(args) -> int:
+    def call(draft):
+        result = draft.reopen()
+        return result, (
+            f"Draft {draft.id} reopened at stage {result['stage']} "
+            "(installed sheet unchanged until the next compose)"
         )
 
     return _characters_verb(args, call)

@@ -197,6 +197,7 @@ def start_draft(capsys, *extra):
         (["rows", "--draft", "d"], "rows"),
         (["reroll-row", "--draft", "d", "--row", "walk-e"], "reroll-row"),
         (["compose", "--draft", "d"], "compose"),
+        (["reopen", "--draft", "d"], "reopen"),
         (["sprite", "arrow-knight"], "sprite"),
     ],
 )
@@ -253,6 +254,19 @@ def test_the_full_qa_flow_runs_through_the_cli(fake, base_image, capsys):
     assert (code, composed["ok"], composed["stage"]) == (0, True, "composed")
     assert composed["validation"]["ok"] is True
     assert (composed["validation"]["width"], composed["validation"]["height"]) == SPEC.sheet_size()
+
+    # A composed draft reopens for a row fix and recomposes; nothing else moves.
+    code, reopened = run(["harness", "characters", "reopen", "--draft", draft_id, "--json"], capsys)
+    assert (code, reopened["ok"], reopened["stage"]) == (0, True, "rows")
+
+    code, rerolled = run(
+        ["harness", "characters", "reroll-row", "--draft", draft_id, "--row", "walk-e", "--json"],
+        capsys,
+    )
+    assert (code, rerolled["ok"], rerolled["approved"]) == (0, True, True)
+
+    code, recomposed = run(["harness", "characters", "compose", "--draft", draft_id, "--json"], capsys)
+    assert (code, recomposed["ok"], recomposed["stage"]) == (0, True, "composed")
 
     code, listed = run(["harness", "characters", "list", "--json"], capsys)
     assert (code, listed["ok"]) == (0, True)
@@ -366,6 +380,7 @@ def test_an_out_of_order_verb_reports_the_pets_error_shape(fake, base_image, cap
         ["status", "--draft", "no-such-draft"],
         ["turnaround", "--draft", "no-such-draft"],
         ["compose", "--draft", "no-such-draft"],
+        ["reopen", "--draft", "no-such-draft"],
     ],
 )
 def test_an_unknown_draft_is_an_error_with_the_id_echoed_back(fake, capsys, argv):
