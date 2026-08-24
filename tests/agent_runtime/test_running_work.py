@@ -1737,6 +1737,91 @@ def test_an_ABANDONED_delivery_stays_visible_with_its_reason(dispatch_home):
     assert row["cancellable"] is False
 
 
+def _named_instance():
+    """A real instance row named the way an operator names it."""
+
+    from agent_runtime.models import AgentPersona
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    return PersonaInstanceStore().ensure_for_persona(
+        AgentPersona(
+            id="neko_supervisor_agent",
+            display_name="Neko Mission Lead",
+            role="supervisor",
+            model=None,
+            provider=None,
+            api_mode=None,
+            toolsets=[],
+            system_prompt_path="",
+        )
+    )
+
+
+def test_a_dispatch_row_is_labelled_with_the_agents_NAME_not_its_handle(
+    dispatch_home,
+):
+    """The label is the only part of this row an operator reads.
+
+    It named the target by persona id while the agent that owns the row is
+    called something else entirely (operator ruling, 2026-08-24). ``persona_id``
+    keeps the machine identity — two fields, two audiences, and a display name
+    in ``persona_id`` would be a lie a consumer could route on.
+    """
+
+    instance = _named_instance()
+    _record_dispatch(
+        target_persona=instance.persona_id,
+        target_instance_id=instance.id,
+        title="",
+    )
+
+    rows = [row for row in build_running_work()["rows"] if row["kind"] == "dispatch"]
+
+    assert rows[0]["label"].startswith("Neko Mission Lead: Run the full launcher suite")
+    assert rows[0]["owner"]["persona_id"] == "neko_supervisor_agent"
+    assert rows[0]["owner"]["persona_instance_id"] == instance.id
+
+
+def test_an_undelivered_reply_names_the_agent_it_came_from(dispatch_home):
+    from agent_runtime.dispatch_store import (
+        STATE_COMPLETED,
+        drop_delivery,
+        record_completion,
+    )
+
+    instance = _named_instance()
+    dispatch_id = _record_dispatch(
+        target_persona=instance.persona_id, target_instance_id=instance.id
+    )
+    record_completion(dispatch_id, state=STATE_COMPLETED, reply="the answer nobody got")
+    drop_delivery(dispatch_id, reason="attempt_cap")
+
+    rows = [row for row in build_running_work()["rows"] if row["kind"] == "dispatch"]
+
+    assert rows[0]["label"] == "undelivered reply from Neko Mission Lead"
+
+
+def test_an_unnameable_target_keeps_the_persona_id_label(dispatch_home, monkeypatch):
+    """The projection must never raise over a nicety.
+
+    An exception here does not degrade a label — it blanks the whole Activity
+    lane, and "I could not look" then reads to the operator as "nothing is
+    running".
+    """
+
+    from agent_runtime import persona_assignments
+
+    def _unreadable(self, persona_instance_id):
+        raise RuntimeError("instance store unreadable")
+
+    monkeypatch.setattr(persona_assignments.PersonaInstanceStore, "get", _unreadable)
+    _record_dispatch(target_instance_id="personainst_dev_cccccccccccc", title="")
+
+    rows = [row for row in build_running_work()["rows"] if row["kind"] == "dispatch"]
+
+    assert rows[0]["label"].startswith("dev: Run the full launcher suite")
+
+
 def test_a_DELIVERED_dispatch_does_not_linger_on_the_hud(dispatch_home):
     """Only the abandoned ones stay. A delivered answer is not an incident."""
 

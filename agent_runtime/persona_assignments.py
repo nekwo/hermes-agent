@@ -2776,6 +2776,54 @@ def chat_session_owner_persona(session_id: str | None) -> tuple[str, str] | None
     return persona_id, instance_id
 
 
+def persona_instance_display_name(persona_instance_id: Any) -> str:
+    """The operator-facing NAME of an instance ("Neko Mission Lead"), or ``""``.
+
+    THE answer to "what is this instance called" for anything that knows only an
+    instance handle. It reads the same row and the same field every other naming
+    surface reads — ``PersonaInstanceStore.get(...).display_name``, which is what
+    ``operator_channels`` bulk-builds its ``display_names`` map out of and what
+    ``persona_instance_summary`` publishes — so a delivered reply, a relayed
+    message and the roster can never disagree about an agent's name.
+
+    FAIL-SAFE BY CONSTRUCTION, and that is the whole reason it exists as a
+    function rather than as three inline ``try`` blocks. Its callers are
+    PRESENTATION paths: the forged delivery block (whose exceptions burn a
+    delivery attempt against a cap) and the running-work projection (whose
+    exceptions blank an operator's Activity lane). A name is a nicety; the
+    delivery and the projection are not. So every failure — an absent row, an
+    unreadable store, a home that does not hold this instance, an id that is not
+    an instance handle at all — returns the empty string, and the caller falls
+    back to the id it already had.
+
+    Empty is therefore "I could not name it", never "it has no name": a caller
+    must render the id rather than invent one, exactly as the relay attribution
+    lane does when an instance does not resolve in the roster.
+
+    The name comes back through :func:`safe_assignment_text` at the SAME 120-char
+    bound ``operator_channels`` applies to its bulk ``display_names`` map, so a
+    row carrying a novel-length name cannot widen a wire projection or a forged
+    message body through this door.
+    """
+
+    handle = str(persona_instance_id or "").strip()
+    if not handle:
+        return ""
+    try:
+        instance = PersonaInstanceStore().get(handle)
+    except Exception:
+        # DEBUG, not WARNING: an unresolvable name is an ordinary outcome for a
+        # retired instance or a cross-home read, and a delivery lane that logged
+        # a warning per pass would drown the one that matters.
+        logging.getLogger(__name__).debug(
+            "persona_instance_display_name could not resolve instance=%s",
+            handle,
+            exc_info=True,
+        )
+        return ""
+    return safe_assignment_text(getattr(instance, "display_name", None), limit=120)
+
+
 def sender_scope_workspace_id(
     session_id: str | None,
     *,

@@ -79,7 +79,8 @@ def _completed(**overrides):
     record_dispatch(
         dispatch_id=dispatch_id,
         sender_session_id=overrides.pop("sender_session_id", SENDER_ROOT),
-        target_persona="dev",
+        target_persona=overrides.pop("target_persona", "dev"),
+        target_instance_id=overrides.pop("target_instance_id", ""),
         title="Run the suite",
         ask="Run the full launcher suite and report failures.",
         notify_operator=overrides.pop("notify_operator", False),
@@ -251,6 +252,113 @@ def test_the_delivered_message_stands_on_its_own(store_home):
     assert "3 failures" in text
     assert row["target_session_id"] in text
     assert "agent_chat_open" in text
+
+
+# --------------------------------------------------------------------------
+# WHO REPLIED (operator ruling, 2026-08-24)
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def named_target(store_home):
+    """A REAL instance row for the dispatch target, carrying a real name.
+
+    Deliberately the store and not a stubbed resolver: the defect this pins is
+    "the block names the agent by a handle nobody calls them", and only a row
+    that actually holds ``display_name`` can prove the block reads THAT field
+    rather than re-deriving a name from the id.
+    """
+
+    from agent_runtime.models import AgentPersona
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    return PersonaInstanceStore().ensure_for_persona(
+        AgentPersona(
+            id="neko_supervisor_agent",
+            display_name="Neko Mission Lead",
+            role="supervisor",
+            model=None,
+            provider=None,
+            api_mode=None,
+            toolsets=[],
+            system_prompt_path="",
+        )
+    )
+
+
+def test_the_delivered_block_names_the_agent_that_replied(store_home, named_target):
+    """"Delivered result" and a bare handle told the reader nothing.
+
+    The sender's model and the operator reading over its shoulder both had to
+    map ``personainst_neko_supervisor_agent_…`` back to a teammate themselves.
+    The name leads; the ids stay, because a name is what a human reads and an id
+    is what the next tool call needs.
+    """
+
+    dispatch_id = _completed(
+        target_persona=named_target.persona_id,
+        target_instance_id=named_target.id,
+    )
+
+    text = format_dispatch_delivery(get_dispatch(dispatch_id))
+    header = text.splitlines()[0]
+
+    assert header.startswith("[BACKGROUND DISPATCH COMPLETE — reply from Neko Mission Lead (")
+    assert named_target.id in header
+    # The dispatch id is not traded away for the name — it is the only thing
+    # that identifies WHICH background request this settles.
+    assert dispatch_id in header
+    assert "You dispatched Neko Mission Lead in the background" in text
+    assert (
+        f"Dispatched to: Neko Mission Lead — {named_target.persona_id} "
+        f"({named_target.id})"
+    ) in text
+
+
+def test_an_unnameable_target_degrades_to_the_id_and_still_delivers(
+    store_home, resolvable_sender, idle_sender, monkeypatch
+):
+    """A name is a nicety. The delivery is not.
+
+    ``format_dispatch_delivery`` runs INSIDE the forge, whose exceptions burn one
+    of eight delivery attempts and walk a good answer toward a terminal
+    ``dropped``. So an instance store that will not answer must cost the delivery
+    nothing at all — the header falls back to the handle and the turn is forged.
+    """
+
+    from agent_runtime import persona_assignments
+
+    def _unreadable(self, persona_instance_id):
+        raise RuntimeError("instance store unreadable")
+
+    monkeypatch.setattr(persona_assignments.PersonaInstanceStore, "get", _unreadable)
+    handle = "personainst_neko_supervisor_agent_f6f7a51b"
+    dispatch_id = _completed(
+        target_persona="neko_supervisor_agent", target_instance_id=handle
+    )
+    forge = _Forge()
+
+    tally = drain_once(forge=forge)
+
+    assert tally["delivered"] == 1
+    header = forge.calls[0]["message"].splitlines()[0]
+    assert header == f"[BACKGROUND DISPATCH COMPLETE — reply from {handle} — {dispatch_id}]"
+    assert get_dispatch(dispatch_id)["delivery_state"] == DELIVERY_DELIVERED
+
+
+def test_a_row_with_no_instance_handle_keeps_its_persona_name(store_home):
+    """Pre-instance rows (and persona-addressed dispatches) still say who."""
+
+    dispatch_id = _completed()
+
+    text = format_dispatch_delivery(get_dispatch(dispatch_id))
+
+    assert text.splitlines()[0] == (
+        f"[BACKGROUND DISPATCH COMPLETE — reply from dev — {dispatch_id}]"
+    )
+    # Byte-identical to the pre-naming line: nothing was invented for a row that
+    # carries no instance.
+    assert "Dispatched to: dev\n" in text + "\n"
 
 
 def test_notify_operator_puts_the_instruction_in_the_message(store_home):

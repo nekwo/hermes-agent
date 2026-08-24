@@ -1379,6 +1379,34 @@ def _collect_dispatches(
         )
 
     collected: list[dict[str, Any]] = []
+    # instance handle → operator-facing name, resolved AT MOST ONCE per pass.
+    #
+    # The label is the only part of a dispatch row an operator actually reads,
+    # and it named the target by persona id ("dev: run the suite") while the
+    # agent that owns the row is called something else entirely. The memo is what
+    # keeps that a projection concern rather than a cost one: this lane is polled,
+    # each miss is a small row read, and a burst of dispatches to one teammate
+    # must not pay for the same name N times. A resolution that fails is memoized
+    # as "" too — a name that cannot be read now will not read on the next row
+    # either, and retrying it per row is how a slow store becomes a slow panel.
+    names: dict[str, str] = {}
+
+    def _named(record: dict[str, Any]) -> str:
+        """The target's display name, else its persona id, else ``""``."""
+
+        from .persona_assignments import persona_instance_display_name
+
+        persona = _safe_text(record.get("target_persona"), limit=120)
+        handle = _safe_text(record.get("target_instance_id"), limit=200)
+        if not handle:
+            return persona
+        if handle not in names:
+            # Fail-safe at the source: this returns "" for an absent or
+            # unreadable row rather than raising into a projection whose
+            # exceptions blank the whole lane.
+            names[handle] = persona_instance_display_name(handle)
+        return names[handle] or persona
+
     for record in rows:
         if not isinstance(record, dict):
             continue
@@ -1408,8 +1436,12 @@ def _collect_dispatches(
         orphaned = verdict in {PID_DEAD, PID_RECYCLED}
         started = record.get("dispatched_at")
         target = _safe_text(record.get("target_persona"), limit=120)
+        # The LABEL names the teammate the way the operator does; ``persona_id``
+        # below keeps the machine identity. Two fields, two audiences — putting a
+        # display name in ``persona_id`` would be a lie a consumer could route on.
+        named = _named(record) or target
         label = _safe_text(record.get("title"), limit=160) or (
-            f"{target}: {_safe_text(record.get('ask'), limit=120)}" if target else dispatch_id
+            f"{named}: {_safe_text(record.get('ask'), limit=120)}" if named else dispatch_id
         )
         collected.append(
             _row(
@@ -1474,6 +1506,7 @@ def _collect_dispatches(
         if accountant is not None:
             accountant.consider()
         target = _safe_text(record.get("target_persona"), limit=120)
+        named = _named(record) or target
         reason = _safe_text(record.get("delivery_error"), limit=160) or "undelivered"
         settled = record.get("completed_at") or record.get("updated_at")
         collected.append(
@@ -1481,8 +1514,8 @@ def _collect_dispatches(
                 kind=KIND_DISPATCH,
                 stable_id=dispatch_id,
                 label=(
-                    f"undelivered reply from {target}"
-                    if target
+                    f"undelivered reply from {named}"
+                    if named
                     else f"undelivered reply ({dispatch_id})"
                 ),
                 status=STATUS_ERROR,

@@ -814,25 +814,64 @@ def format_dispatch_delivery(row: dict[str, Any]) -> str:
     the result or re-dispatch because the world moved on.
     """
 
+    from .persona_assignments import persona_instance_display_name
+
     result = row.get("result") or {}
     status = str(row.get("state") or "unknown")
     reply = str(result.get("reply") or "")[:REPLY_LIMIT]
     error = str(result.get("error") or "")
-    target = str(row.get("target_persona") or "the teammate")
+    persona = str(row.get("target_persona") or "")
     instance = str(row.get("target_instance_id") or "")
+    # WHO REPLIED, in the words an operator uses for them.
+    #
+    # The row records a persona id and an instance handle, and neither is what
+    # anyone calls this agent: the block used to open with a bare dispatch id and
+    # then say "You dispatched neko_supervisor_agent", so the sender's model and
+    # the operator reading over its shoulder both had to map a handle back to a
+    # teammate themselves (operator ruling, 2026-08-24).
+    #
+    # The resolution is fail-safe by construction — see
+    # :func:`persona_assignments.persona_instance_display_name` — because THIS
+    # function runs inside the forge, whose exceptions burn one of eight delivery
+    # attempts. A name that will not resolve degrades to the id, never to a lost
+    # delivery, and never to a guessed name.
+    display_name = persona_instance_display_name(instance)
+    # Most-to-least specific, and every tier is something the reader can act on:
+    # the name they know, else the exact instance, else the persona, else the
+    # honest placeholder the block has always used.
+    target = display_name or persona or "the teammate"
+    # The header's attribution segment. Omitted entirely when nothing identifies
+    # the target, so a row that can name nobody keeps the exact header it has
+    # always had rather than gaining an empty "reply from".
+    attribution = ""
+    if display_name:
+        attribution = (
+            f"reply from {display_name} ({instance})" if instance
+            else f"reply from {display_name}"
+        )
+    elif instance or persona:
+        attribution = f"reply from {instance or persona}"
     ask = str(row.get("ask") or "")
     dispatched_at = float(row.get("dispatched_at") or 0.0)
     completed_at = float(row.get("completed_at") or time.time())
 
     lines = [
-        f"[BACKGROUND DISPATCH COMPLETE — {row.get('dispatch_id')}]",
+        "[BACKGROUND DISPATCH COMPLETE — "
+        + (f"{attribution} — " if attribution else "")
+        + f"{row.get('dispatch_id')}]",
         (
             f"You dispatched {target} in the background earlier and kept working. "
             "They have finished; their answer is below. You may have moved on since "
             "then — use this, or re-dispatch if things have changed."
         ),
         "",
-        f"Dispatched to: {target}" + (f" ({instance})" if instance else ""),
+        # The name leads, but the persona id and the instance handle both stay:
+        # a name is what a human reads and an id is what a tool call needs, and
+        # the block is the sender's only copy of either. When no name resolved
+        # this line is byte-identical to what it has always been.
+        f"Dispatched to: {target}"
+        + (f" — {persona}" if display_name and persona else "")
+        + (f" ({instance})" if instance else ""),
     ]
     if dispatched_at:
         lines.append(
