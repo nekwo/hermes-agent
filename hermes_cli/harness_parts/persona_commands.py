@@ -1814,6 +1814,215 @@ def _publish_persona_chat_send_refused_event(
         return False
 
 
+#: The journal states that mean "the root's CURRENT turn is this very
+#: ``client_message_id``". Narrower than ``INFLIGHT_TURN_STATES`` on purpose:
+#: ``outcome_unknown`` is in-flight-ish but already has its own honest refusal
+#: (``chat_turn_outcome_unknown``, which routes to ``turn-resolve``), and
+#: ``running`` is the legacy pre-journal spelling no live transition produces.
+_DUPLICATE_IN_FLIGHT_TURN_STATES = frozenset(
+    {TURN_STATE_PENDING, TURN_STATE_EXECUTING}
+)
+
+
+def _mission_chat_busy_outcome(
+    *,
+    args,
+    session_db,
+    session_id: str,
+    client_message_id: str,
+    normalized_persona: str,
+    persona_instance_id,
+    session_established,
+    exc,
+) -> int:
+    """Answer a send that lost the chat-root lease. Emits, returns the exit code.
+
+    **Reads only.** Every branch here runs OUTSIDE the lease it just failed to
+    acquire, against a root another turn is actively writing, so it may not
+    transition the journal, may not publish the projection event (that helper
+    writes a ``projection_event_emitted`` marker through
+    ``transition_mission_chat_turn``), and may not touch SessionDB. The turn
+    journal is per-session JSON on disk and readable without the lease; that
+    read is the whole mechanism.
+
+    Why this exists (2026-08-24 incident). ``_cmd_mission_chat_message`` splits
+    plan → commit, and ALL of the lane's dedupe/idempotent-replay logic lives
+    inside ``_mission_chat_commit_turn`` — i.e. AFTER the lease. So a duplicate
+    of the turn that is CURRENTLY RUNNING died ``chat_busy`` before any dedupe
+    could see it. ``chat_busy`` means "someone else holds the root", which a
+    caller is entitled to read as "your message never landed": the Launcher's
+    streaming-inactivity fallback re-presented its own still-running
+    ``client_message_id``, got ``chat_busy``, and painted a delivered turn as a
+    rejection while the agent's reply committed 20 seconds later.
+
+    The distinction this restores is: *whose* turn is the busy root running?
+
+    * this message's, still going  → ``chat_turn_duplicate_in_flight`` (BLOCKED,
+      non-terminal: do not resend a new id, do not resolve, re-present THIS id)
+    * this message's, already answered → the idempotent replay, served read-only
+    * this message's, unprovable   → the existing ``chat_turn_outcome_unknown``
+    * somebody else's              → ``chat_busy``, exactly as before
+
+    A torn or missing journal read simply falls through to ``chat_busy`` — the
+    degraded answer, never a wrong one.
+    """
+
+    # Function-local: this file is exec'd into harness.py's globals, so the
+    # turn-outcome vocabulary is imported where it is used (same convention as
+    # every other handler in this file).
+    from agent_runtime.mission_chat_outcome import ChatErrorKind, ExecutionState
+
+    journal = (
+        mission_chat_turn_record(
+            session_id=session_id, client_message_id=client_message_id
+        )
+        or {}
+    )
+    journal_state = safe_assignment_token(journal.get("state"))
+    turn_id = journal.get("turn_id") or client_message_id
+
+    if journal_state in _DUPLICATE_IN_FLIGHT_TURN_STATES:
+        data = {
+            "ok": False,
+            "capability_id": "mission.chat.message",
+            "execution_state": ExecutionState.BLOCKED,
+            "error_kind": ChatErrorKind.CHAT_TURN_DUPLICATE_IN_FLIGHT,
+            "duplicate_in_flight": True,
+            # Explicitly NOT busy. A consumer that switches on this flag must
+            # not see a duplicate-in-flight as a lost message.
+            "chat_busy": False,
+            "turn_resolution_required": False,
+            "journal_state": journal_state,
+            "root_chat_session_id": session_id,
+            "session_id": session_id,
+            "client_message_id": client_message_id,
+            "turn_id": turn_id,
+            "lease_owner": exc.owner,
+            "error": (
+                "this client_message_id is the turn currently running on this root"
+            ),
+            "next_expected": (
+                "do not resend a new id and do not resolve; re-present this same "
+                "client_message_id after the turn settles to replay its committed reply"
+            ),
+        }
+        _publish_persona_chat_send_refused_event(
+            session_id=session_id,
+            client_message_id=client_message_id,
+            persona_id=normalized_persona,
+            persona_instance_id=persona_instance_id,
+            error_kind=ChatErrorKind.CHAT_TURN_DUPLICATE_IN_FLIGHT,
+            lease_owner=exc.owner,
+        )
+        _mission_chat_emit(args, data)
+        return 2
+
+    if journal_state in RESEND_BLOCKING_TURN_STATES:
+        # Only ``outcome_unknown`` can reach here (``executing`` was taken
+        # above). The record already IS the state the leased path would move it
+        # to, so the same refusal is served without the transition.
+        data = {
+            "ok": False,
+            "capability_id": "mission.chat.message",
+            "execution_state": ExecutionState.BLOCKED,
+            "error_kind": ChatErrorKind.CHAT_TURN_OUTCOME_UNKNOWN,
+            "journal_state": journal_state,
+            "root_chat_session_id": session_id,
+            "session_id": session_id,
+            "client_message_id": client_message_id,
+            "turn_id": turn_id,
+            "error": (
+                "the prior provider outcome cannot be proven; resolve this turn "
+                "before resending"
+            ),
+            "next_expected": (
+                "resolve the exact outcome_unknown turn with action=abandon, then "
+                "send a new client_message_id"
+            ),
+        }
+        _mission_chat_emit(args, data)
+        return 2
+
+    if journal_state in (TURN_STATE_PROJECTED, TURN_STATE_NATIVE_COMMITTED):
+        stored_reply = journal.get("stored_reply")
+        if stored_reply is None:
+            replay = _persona_chat_existing_turn(
+                session_db=session_db,
+                session_id=session_id,
+                client_message_id=client_message_id,
+            )
+            assistant = replay.get("assistant")
+            if isinstance(assistant, dict):
+                stored_reply = assistant.get("content")
+        if stored_reply is not None:
+            reply_text = _redact_persona_chat_text(
+                stored_reply, limit=PERSONA_CHAT_REPLY_LIMIT
+            )
+            data = {
+                "ok": True,
+                "capability_id": "mission.chat.message",
+                "persona_id": normalized_persona,
+                "persona_instance_id": persona_instance_id,
+                "root_chat_session_id": session_id,
+                "active_session_id": journal.get("active_session_id") or session_id,
+                "session_id": session_id,
+                "chat_session_id": session_id,
+                # A replay reports the same thread lineage the original turn
+                # did — see the leased replay branch in the commit phase.
+                "session_established": session_established,
+                "client_message_id": client_message_id,
+                "turn_id": turn_id,
+                "execution_state": ExecutionState.COMPLETED,
+                "reply": reply_text,
+                "idempotent_replay": True,
+                "journal_state": journal_state,
+                # ``native_committed`` still owes the settling→projected walk.
+                # It is deliberately NOT done here (it is a journal WRITE); the
+                # next lease-holding presentation of this id finishes it.
+                "next_expected": (
+                    "duplicate client message id replayed from the turn journal "
+                    "while another turn holds this chat root"
+                ),
+            }
+            _stamp_turn_visibility(data, reply_text)
+            _mission_chat_emit(
+                args, data, f"mission chat reply for {normalized_persona}"
+            )
+            return 0
+
+    # No record, an unreadable record, or a settled state with no reply to
+    # serve: the root is busy with something that is not provably this message.
+    data = {
+        "ok": False,
+        "capability_id": "mission.chat.message",
+        "execution_state": ExecutionState.REJECTED,
+        "error_kind": ChatErrorKind.CHAT_BUSY,
+        "chat_busy": True,
+        "root_chat_session_id": session_id,
+        "session_id": session_id,
+        "lease_owner": exc.owner,
+        "client_message_id": client_message_id,
+        "error": str(exc),
+    }
+    # Durable FIRST, then the wire. A refused send is the one turn outcome
+    # that writes nothing by construction — every durable write lives inside
+    # the lease this branch never acquired — so before 2026-08-09 an
+    # operator message lost to a busy root left no trace anywhere: not in
+    # the transcript, not in the turn journal, not in the EventLog. The
+    # refusal envelope on stdout was the only evidence, and it died with the
+    # banner that rendered it.
+    _publish_persona_chat_send_refused_event(
+        session_id=session_id,
+        client_message_id=client_message_id,
+        persona_id=normalized_persona,
+        persona_instance_id=persona_instance_id,
+        error_kind=ChatErrorKind.CHAT_BUSY,
+        lease_owner=exc.owner,
+    )
+    _mission_chat_emit(args, data)
+    return 2
+
+
 def _mission_chat_emit(args, data, plain=None, *, stream=None) -> None:
     """THE one place a mission-chat turn payload leaves this handler.
 
@@ -2644,35 +2853,22 @@ def _cmd_mission_chat_message(args) -> int:
         ):
             exit_code = _mission_chat_commit_turn(plan, deferred)
     except PersonaChatBusyError as exc:
-        data = {
-            "ok": False,
-            "capability_id": "mission.chat.message",
-            "execution_state": ExecutionState.REJECTED,
-            "error_kind": ChatErrorKind.CHAT_BUSY,
-            "chat_busy": True,
-            "root_chat_session_id": session_id,
-            "session_id": session_id,
-            "lease_owner": exc.owner,
-            "client_message_id": client_message_id,
-            "error": str(exc),
-        }
-        # Durable FIRST, then the wire. A refused send is the one turn outcome
-        # that writes nothing by construction — every durable write lives inside
-        # the lease this branch never acquired — so before 2026-08-09 an
-        # operator message lost to a busy root left no trace anywhere: not in
-        # the transcript, not in the turn journal, not in the EventLog. The
-        # refusal envelope on stdout was the only evidence, and it died with the
-        # banner that rendered it.
-        _publish_persona_chat_send_refused_event(
+        # "The root is busy" is not one answer, it is four — and which one it is
+        # depends on whether the turn holding the lease IS this message. The
+        # journal is readable without the lease, so that question is answerable
+        # here; see ``_mission_chat_busy_outcome`` for the incident that made
+        # collapsing all four into ``chat_busy`` a delivered-turn-painted-as-
+        # rejected bug.
+        return _mission_chat_busy_outcome(
+            args=args,
+            session_db=session_db,
             session_id=session_id,
             client_message_id=client_message_id,
-            persona_id=normalized_persona,
+            normalized_persona=normalized_persona,
             persona_instance_id=persona_instance_id,
-            error_kind=ChatErrorKind.CHAT_BUSY,
-            lease_owner=exc.owner,
+            session_established=session_established,
+            exc=exc,
         )
-        _mission_chat_emit(args, data)
-        return 2
     # ── lease RELEASED ─────────────────────────────────────────────────────
     # Everything the turn owed the root is committed and reported. The root is
     # free from here, so a slow or failing deferred step delays nobody's next

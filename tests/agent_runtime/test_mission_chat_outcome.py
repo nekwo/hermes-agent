@@ -72,6 +72,7 @@ CHAT_ERROR_KIND_WIRE = {
     "CHAT_TURN_OUTCOME_UNKNOWN": "chat_turn_outcome_unknown",
     "CHAT_TURN_NOT_SUBMITTED": "chat_turn_not_submitted",
     "CHAT_TURN_RESOLUTION_MISMATCH": "chat_turn_resolution_mismatch",
+    "CHAT_TURN_DUPLICATE_IN_FLIGHT": "chat_turn_duplicate_in_flight",
 }
 
 
@@ -268,6 +269,51 @@ def test_a_state_in_two_buckets_is_rejected(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="in both"):
         module._guard_turn_outcome_vocabulary()
+
+
+def test_duplicate_in_flight_is_a_turn_lifecycle_kind_and_not_a_chat_root_one():
+    """Where the 2026-08-24 kind lives decides how three consumers treat it.
+
+    It is a statement about a TURN ("this id is the one running"), not about
+    root ownership ("someone else holds the lock"), and the family placement is
+    what the dispatch lane's ``_terminal_forge_rejections`` reads to decide
+    whether an attempt is burnable. Filing it under the chat-root family would
+    silently make it terminal there.
+    """
+
+    from agent_runtime.mission_chat_outcome import (
+        CHAT_ROOT_ERROR_KINDS,
+        TURN_LIFECYCLE_ERROR_KINDS,
+        _ERROR_KIND_FAMILIES,
+    )
+
+    kind = ChatErrorKind.CHAT_TURN_DUPLICATE_IN_FLIGHT
+    assert kind in TURN_LIFECYCLE_ERROR_KINDS
+    assert kind not in CHAT_ROOT_ERROR_KINDS
+    holders = [name for name, family in _ERROR_KIND_FAMILIES.items() if kind in family]
+    assert holders == ["TURN_LIFECYCLE_ERROR_KINDS"], holders
+
+
+def test_the_dispatch_lane_refunds_a_duplicate_in_flight_attempt():
+    """R5. ``delivery_client_message_id`` derives the idempotency key from the
+    dispatch id rather than minting one per attempt, so the delivery drain DOES
+    re-present an in-flight id and DOES see the new kind. Losing a race with a
+    live turn is not a delivery failure: it must be refunded like ``chat_busy``,
+    or eight unlucky races walk a deliverable completion to ``dropped``."""
+
+    from agent_runtime import dispatch_delivery
+
+    kind = str(ChatErrorKind.CHAT_TURN_DUPLICATE_IN_FLIGHT)
+    assert kind in dispatch_delivery._transient_forge_refusals()
+    assert str(ChatErrorKind.CHAT_BUSY) in dispatch_delivery._transient_forge_refusals()
+    assert kind not in dispatch_delivery._terminal_forge_rejections(), (
+        "a duplicate-in-flight refusal is transient by definition; dropping the "
+        "row on the first one discards a completion that was about to land"
+    )
+    # The idempotency key really is stable across attempts — the premise above.
+    assert dispatch_delivery.delivery_client_message_id(
+        "dispatch-abc"
+    ) == dispatch_delivery.delivery_client_message_id("dispatch-abc")
 
 
 def test_a_delegated_kind_may_not_also_be_owned_here():

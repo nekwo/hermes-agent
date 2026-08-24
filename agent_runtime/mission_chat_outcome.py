@@ -162,6 +162,15 @@ class ChatErrorKind(StrEnum):
     CHAT_TURN_OUTCOME_UNKNOWN = "chat_turn_outcome_unknown"
     CHAT_TURN_NOT_SUBMITTED = "chat_turn_not_submitted"
     CHAT_TURN_RESOLUTION_MISMATCH = "chat_turn_resolution_mismatch"
+    #: This exact ``client_message_id`` is the turn RUNNING on the root right
+    #: now. Deliberately NOT ``chat_busy``: busy says "someone else holds the
+    #: root, try again", which a caller is entitled to treat as "your message
+    #: never landed". This says the opposite — the message DID land, it is being
+    #: answered, and the only correct move is to re-present the SAME id later to
+    #: collect the reply. The 2026-08-24 incident is the whole reason it exists:
+    #: a launcher inactivity-fallback re-presented its own in-flight id, got
+    #: ``chat_busy``, and painted a delivered turn as a rejection.
+    CHAT_TURN_DUPLICATE_IN_FLIGHT = "chat_turn_duplicate_in_flight"
 
 
 ADMISSION_ERROR_KINDS = frozenset(
@@ -195,6 +204,7 @@ TURN_LIFECYCLE_ERROR_KINDS = frozenset(
         ChatErrorKind.CHAT_TURN_OUTCOME_UNKNOWN,
         ChatErrorKind.CHAT_TURN_NOT_SUBMITTED,
         ChatErrorKind.CHAT_TURN_RESOLUTION_MISMATCH,
+        ChatErrorKind.CHAT_TURN_DUPLICATE_IN_FLIGHT,
     }
 )
 

@@ -297,6 +297,230 @@ def test_the_refusal_record_satisfies_its_registered_contract(
 
 
 # --------------------------------------------------------------------------- #
+# Convergence: "the root is busy" is FOUR answers, not one (2026-08-24)        #
+# --------------------------------------------------------------------------- #
+#
+# Incident shape: the Launcher's 60 s streaming-inactivity fallback re-presented
+# its OWN still-running ``client_message_id`` while Neko's synchronous
+# ``agent_chat_send`` ran for 66 frameless seconds. The root lease was held by
+# that very turn, so the duplicate died ``chat_busy`` — a refusal that says
+# "someone else has the root, your message did not land". The Launcher believed
+# it, painted the delivered turn as rejected, and the agent's reply committed
+# 20 s later into a feed whose stream subscription was already dead.
+#
+# The dedupe/idempotent-replay machinery that would have answered correctly
+# lives INSIDE ``_mission_chat_commit_turn``, i.e. after the lease. These pin
+# that the busy seam now reads the (lease-free) turn journal first and tells
+# apart: this message still running, this message already answered, this message
+# unprovable, and somebody else's turn.
+
+
+def _journal_bytes() -> dict[str, bytes]:
+    """Every turn-journal file, verbatim. The read-only fence's evidence."""
+
+    from agent_runtime.mission_chat_turns import _store_dir
+
+    root = _store_dir()
+    if not root.exists():
+        return {}
+    return {path.name: path.read_bytes() for path in sorted(root.glob("*.json"))}
+
+
+def _seed_journal(client_message_id: str, state: str, *, stored_reply=None) -> None:
+    """Walk a journal record to ``state`` through the real transition table."""
+
+    from agent_runtime.mission_chat_turns import (
+        TURN_STATE_EXECUTING,
+        TURN_STATE_NATIVE_COMMITTED,
+        TURN_STATE_PENDING,
+        TURN_STATE_PROJECTED,
+        MissionChatTurnPersistOutcome,
+        transition_mission_chat_turn,
+    )
+
+    walk = [TURN_STATE_PENDING, TURN_STATE_EXECUTING, TURN_STATE_NATIVE_COMMITTED, TURN_STATE_PROJECTED]
+    for step in walk[: walk.index(state) + 1]:
+        metadata = {"root_chat_session_id": ROOT}
+        if step == TURN_STATE_EXECUTING:
+            metadata["provider_submitted"] = True
+        if stored_reply is not None and step in (
+            TURN_STATE_NATIVE_COMMITTED,
+            TURN_STATE_PROJECTED,
+        ):
+            metadata["stored_reply"] = stored_reply
+        outcome = transition_mission_chat_turn(
+            session_id=ROOT,
+            client_message_id=client_message_id,
+            turn_id=client_message_id,
+            state=step,
+            metadata=metadata,
+        )
+        assert outcome == MissionChatTurnPersistOutcome.PERSISTED, (
+            f"seeding {client_message_id} -> {step} did not persist: {outcome}"
+        )
+
+
+@pytest.mark.parametrize("state", ["pending", "executing"])
+def test_a_duplicate_of_the_running_turn_is_not_chat_busy(
+    monkeypatch, capsys, isolate_agent_runtime_root, state
+):
+    """The whole incident, at the seam that caused it.
+
+    ``chat_busy`` here is a lie about a message that DID land: the root is busy
+    running this exact ``client_message_id``. The honest answer is non-terminal
+    — do not resend a new id, do not resolve, re-present THIS id later.
+    """
+
+    harness = _install_chat_lane(monkeypatch)
+    _seed_journal("cm-inflight", state)
+    before = _journal_bytes()
+
+    with persona_chat_root_lease(ROOT, owner_id="the-running-turn", observer_kind="cli"):
+        assert harness._cmd_mission_chat_message(_args("cm-inflight")) == 2
+
+    frames = [f for f in _envelopes(capsys) if f.get("capability_id") == "mission.chat.message"]
+    assert frames, "no terminal frame was emitted"
+    refusal = frames[-1]
+    assert refusal["error_kind"] == "chat_turn_duplicate_in_flight", (
+        "a duplicate of the CURRENTLY RUNNING turn was answered "
+        f"{refusal['error_kind']!r}. chat_busy tells the caller its message "
+        "never landed, which is how a delivered turn gets painted as rejected"
+    )
+    assert refusal["execution_state"] == "blocked"
+    assert refusal["duplicate_in_flight"] is True
+    assert refusal["chat_busy"] is False
+    assert refusal["turn_resolution_required"] is False
+    assert refusal["client_message_id"] == "cm-inflight"
+    assert refusal["journal_state"] == state
+    assert _journal_bytes() == before, (
+        "the busy seam WROTE to the turn journal. It runs outside the lease it "
+        "just failed to acquire, against a root another turn is actively "
+        "writing — every branch there must be read-only"
+    )
+
+
+def test_the_duplicate_in_flight_refusal_leaves_its_own_forensics_row(
+    monkeypatch, capsys, isolate_agent_runtime_root
+):
+    harness = _install_chat_lane(monkeypatch)
+    _seed_journal("cm-inflight-evidence", "executing")
+
+    with persona_chat_root_lease(ROOT, observer_kind="cli"):
+        harness._cmd_mission_chat_message(_args("cm-inflight-evidence"))
+    capsys.readouterr()
+
+    rows = [e for e in EventLog().tail(20) if e.type == "persona_chat.send_refused"]
+    assert len(rows) == 1, "the new refusal kind lost the durable counter-record"
+    assert rows[0].payload["error_kind"] == "chat_turn_duplicate_in_flight"
+    assert rows[0].payload["client_message_id"] == "cm-inflight-evidence"
+    wire = json.dumps(rows[0].payload)
+    assert OPERATOR_TEXT not in wire, f"operator text leaked into the row: {wire}"
+
+
+def test_a_busy_root_running_a_DIFFERENT_message_is_still_chat_busy(
+    monkeypatch, capsys, isolate_agent_runtime_root
+):
+    """The narrowing must be about identity, not about busyness.
+
+    A root busy with somebody else's turn is exactly today's refusal: the
+    operator's message really did not land, and ``chat_busy`` is the truth.
+    """
+
+    harness = _install_chat_lane(monkeypatch)
+    _seed_journal("cm-somebody-elses-turn", "executing")
+
+    with persona_chat_root_lease(ROOT, observer_kind="cli"):
+        assert harness._cmd_mission_chat_message(_args("cm-mine")) == 2
+
+    frames = [f for f in _envelopes(capsys) if f.get("capability_id") == "mission.chat.message"]
+    assert frames[-1]["error_kind"] == "chat_busy", (
+        "a send that lost the root to ANOTHER message was answered "
+        f"{frames[-1]['error_kind']!r}; only the running message's own duplicate "
+        "may take the convergence branch"
+    )
+    assert frames[-1]["chat_busy"] is True
+
+
+@pytest.mark.parametrize("state", ["native_committed", "projected"])
+def test_a_duplicate_of_an_ANSWERED_turn_replays_read_only(
+    monkeypatch, capsys, isolate_agent_runtime_root, state
+):
+    """The convergence loop's landing: the reply is served while the root is busy.
+
+    The turn committed; a DIFFERENT turn now holds the lease. The stored reply
+    is already durable in the journal, so it is served from there — with no
+    transition, and deliberately without the projection event (that helper
+    writes a ``projection_event_emitted`` marker through the journal).
+    """
+
+    harness = _install_chat_lane(monkeypatch)
+    _seed_journal("cm-answered", state, stored_reply="the recorded reply")
+    before = _journal_bytes()
+
+    with persona_chat_root_lease(ROOT, owner_id="a-later-turn", observer_kind="cli"):
+        assert harness._cmd_mission_chat_message(_args("cm-answered")) == 0
+
+    frames = [f for f in _envelopes(capsys) if f.get("capability_id") == "mission.chat.message"]
+    assert frames[-1]["ok"] is True
+    assert frames[-1]["idempotent_replay"] is True
+    assert frames[-1]["reply"] == "the recorded reply"
+    assert frames[-1]["journal_state"] == state
+    assert _journal_bytes() == before, (
+        "the read-only replay branch wrote to the turn journal while another "
+        "turn held the chat root — an unleased write against a live root"
+    )
+
+
+def test_a_duplicate_of_an_unprovable_turn_still_routes_to_turn_resolve(
+    monkeypatch, capsys, isolate_agent_runtime_root
+):
+    harness = _install_chat_lane(monkeypatch)
+    _seed_journal("cm-unknown", "executing")
+    from agent_runtime.mission_chat_turns import transition_mission_chat_turn
+
+    transition_mission_chat_turn(
+        session_id=ROOT,
+        client_message_id="cm-unknown",
+        turn_id="cm-unknown",
+        state="outcome_unknown",
+        metadata={"provider_submitted": True},
+    )
+    before = _journal_bytes()
+
+    with persona_chat_root_lease(ROOT, observer_kind="cli"):
+        assert harness._cmd_mission_chat_message(_args("cm-unknown")) == 2
+
+    frames = [f for f in _envelopes(capsys) if f.get("capability_id") == "mission.chat.message"]
+    assert frames[-1]["error_kind"] == "chat_turn_outcome_unknown"
+    assert _journal_bytes() == before
+
+
+def test_an_UNLEASED_resend_of_an_executing_turn_keeps_todays_path(
+    monkeypatch, capsys, isolate_agent_runtime_root
+):
+    """The seam only fires when the lease is HELD.
+
+    A process that died mid-turn leaves an ``executing`` record and a free root.
+    That resend must still flip to ``outcome_unknown`` inside the lease and
+    demand a resolve — nothing about this change relaxes it.
+    """
+
+    harness = _install_chat_lane(monkeypatch)
+    _seed_journal("cm-orphan", "executing")
+
+    assert harness._cmd_mission_chat_message(_args("cm-orphan")) == 2
+    frames = [f for f in _envelopes(capsys) if f.get("capability_id") == "mission.chat.message"]
+    assert frames[-1]["error_kind"] == "chat_turn_outcome_unknown"
+
+    from agent_runtime.mission_chat_turns import mission_chat_turn_record
+
+    record = mission_chat_turn_record(session_id=ROOT, client_message_id="cm-orphan")
+    assert record["state"] == "outcome_unknown", (
+        "the leased path no longer settles an orphaned executing turn"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # The carrier itself                                                           #
 # --------------------------------------------------------------------------- #
 

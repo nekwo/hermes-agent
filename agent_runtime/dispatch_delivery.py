@@ -143,6 +143,30 @@ def _terminal_forge_rejections() -> frozenset[str]:
     }
     return frozenset(str(kind) for kind in kinds)
 
+
+def _transient_forge_refusals() -> frozenset[str]:
+    """``error_kind`` values that name a LIVE RACE, so the attempt is refunded.
+
+    ``chat_busy`` was the only member while the busy seam gave one answer.
+    ``chat_turn_duplicate_in_flight`` (2026-08-24) is the second, and it is
+    stronger evidence of the same thing: it says the root is busy running THIS
+    dispatch's own delivery turn. ``delivery_client_message_id`` derives the
+    idempotency key from the dispatch id rather than minting one per attempt
+    (deliberately — it is what makes the chat lane's replay dedupe work), so
+    this lane genuinely re-presents an in-flight id and genuinely sees the new
+    kind. Burning an attempt for it would walk a perfectly deliverable
+    completion toward ``dropped`` for the crime of being answered right now.
+    """
+
+    from .mission_chat_outcome import ChatErrorKind
+
+    return frozenset(
+        {
+            str(ChatErrorKind.CHAT_BUSY),
+            str(ChatErrorKind.CHAT_TURN_DUPLICATE_IN_FLIGHT),
+        }
+    )
+
 #: How often the drain looks for work. Deliberately unhurried — a completion is
 #: not latency-critical, and every pass costs a lease probe plus a journal read
 #: on a process that is also running turns.
@@ -1230,7 +1254,7 @@ def drain_once(*, forge: Callable | None = None, limit: int | None = None) -> di
                 event_key, f"forge_rejected:{error_kind}", forge_error, root=root
             )
             continue
-        busy = error_kind == "chat_busy"
+        busy = error_kind in _transient_forge_refusals()
         dispatch_store.release_delivery_claim(dispatch_id, refund_attempt=busy)
         if busy:
             tally["busy"] += 1
@@ -1582,7 +1606,7 @@ def drain_background_completions(*, forge: Callable | None = None) -> dict[str, 
         # operator is not a failure, so a `chat_busy` refusal does not count
         # against the cap.
         error_kind = str((payload or {}).get("error_kind") or "")
-        if error_kind == "chat_busy":
+        if error_kind in _transient_forge_refusals():
             tally["requeued"] += 1
             _telemetry.record_bounce(key, "forge_busy", "", root=root)  # A
         elif durable:
