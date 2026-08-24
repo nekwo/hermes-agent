@@ -1292,6 +1292,146 @@ def test_a_READINESS_walk_does_not_move_the_chat_lane_BUNDLE_config_revisions(
     assert _config_revisions() == before
 
 
+def _prompt_observability_walk_gate(monkeypatch, walked_home):
+    """Park a REAL ``snapshot_prompt_observability`` build inside its binding.
+
+    The sibling of ``_readiness_walk_gate``, one snapshot section over. The gate
+    is ``prompt_observability._installed_skill_catalog``, the first call the
+    per-persona body makes INSIDE ``skill_profile_context`` on a cache miss (a
+    fresh ``_SkillObservabilityResolver`` guarantees the miss).
+
+    Driven through ``snapshot_prompt_observability`` rather than through
+    ``mission_chat_prompt_observability`` directly: the loop over the roster IS
+    the lane that bills ``prompt_observability:4520`` on a cold build, and it is
+    what puts this binding on the builder thread once per persona instance.
+    """
+
+    import threading
+
+    from agent_runtime import profile_context, prompt_observability
+    from hermes_constants import get_hermes_home
+
+    entered = threading.Event()
+    release = threading.Event()
+    observed: list[str] = []
+    real = prompt_observability._installed_skill_catalog
+
+    def _gated():
+        observed.append(str(get_hermes_home()))
+        entered.set()
+        release.wait(10)
+        return real()
+
+    monkeypatch.setattr(prompt_observability, "_installed_skill_catalog", _gated)
+    monkeypatch.setattr(
+        prompt_observability, "load_latest_prompt_observability_contexts", lambda: []
+    )
+    monkeypatch.setattr(profile_context, "profile_exists", lambda name: name == "qa")
+    monkeypatch.setattr(profile_context, "get_profile_dir", lambda name: walked_home)
+
+    persona = types.SimpleNamespace(
+        id="qa", hermes_profile="qa", display_name="QA", role="qa", skills=[]
+    )
+    instance = types.SimpleNamespace(
+        id="personainst_qa", persona_id="qa", session_id="persona_chat_qa"
+    )
+    section: list[dict] = []
+
+    def _run():
+        section.append(
+            prompt_observability.snapshot_prompt_observability(
+                personas=[persona], persona_instances=[instance]
+            )
+        )
+
+    return entered, release, _run, observed, section
+
+
+def test_a_PROMPT_OBSERVABILITY_build_does_not_change_what_a_turn_RESOLVES(
+    tmp_path, monkeypatch
+):
+    """The readiness walk's sibling, on the section that costs four times as much.
+
+    ``snapshot_prompt_observability`` enters a persona profile binding once per
+    roster instance on the snapshot builder thread, holding no
+    ``_WORKDIR_LOCK`` — the identical hazard, and a wider window
+    (``sections_top=prompt_observability:4520`` against ``agents_readiness:4366``
+    on the 2026-08-22 cold boot).
+
+    *Killing mutation:* point ``prompt_observability`` back at
+    ``persona_profile_context``. *Probed field:* what the OTHER thread's
+    ``load_agent_runtime_config()`` returns while the build is parked.
+    """
+
+    import threading
+
+    from agent_runtime.config import load_agent_runtime_config
+
+    turn_home, walked_home = _two_config_homes(tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(turn_home))
+    assert load_agent_runtime_config().default_model == "opus"
+
+    entered, release, run, observed, section = _prompt_observability_walk_gate(
+        monkeypatch, walked_home
+    )
+    builder = threading.Thread(target=run, daemon=True)
+    builder.start()
+    try:
+        assert entered.wait(10), "the observability build never reached its skill walk"
+        during_build = load_agent_runtime_config()
+        env_during_build = os.environ.get("HERMES_HOME")
+    finally:
+        release.set()
+        builder.join(10)
+
+    # The build really did bind qa — for ITSELF.
+    assert observed and observed[0] == str(walked_home)
+    assert section and section[0]["chat_contexts"]
+    # ...and this thread, which asked for nothing, kept its own profile.
+    assert during_build.default_model == "opus"
+    assert env_during_build == str(turn_home)
+    assert load_agent_runtime_config().default_model == "opus"
+
+
+def test_a_PROMPT_OBSERVABILITY_build_does_not_move_the_BUNDLE_config_revisions(
+    tmp_path, monkeypatch
+):
+    """Same receipt mechanism as the readiness sibling, same component.
+
+    Whichever snapshot section holds the binding, the cost lands in the same
+    place: ``chat_lane_bundle``'s key carries the ACTIVE ``config.yaml``'s
+    ``(mtime_ns, size)``, so a turn overlapping the build re-resolves the whole
+    visibility composition.
+    """
+
+    import threading
+
+    from agent_runtime.chat_lane_bundle import _config_revisions
+
+    turn_home, walked_home = _two_config_homes(tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(turn_home))
+    before = _config_revisions()
+
+    entered, release, run, observed, _section = _prompt_observability_walk_gate(
+        monkeypatch, walked_home
+    )
+    builder = threading.Thread(target=run, daemon=True)
+    builder.start()
+    try:
+        assert entered.wait(10), "the observability build never reached its skill walk"
+        during_build = _config_revisions()
+    finally:
+        release.set()
+        builder.join(10)
+
+    assert observed and observed[0] == str(walked_home)
+    assert during_build == before, (
+        "a background prompt-observability build moved this turn's chat-lane "
+        "bundle key; every overlapping turn re-resolves its visibility"
+    )
+    assert _config_revisions() == before
+
+
 def test_an_AMBIENT_config_document_cannot_rotate_the_reuse_key(tmp_path, monkeypatch):
     """THE fix, stated as a rule: two different config DOCUMENTS, one actor.
 

@@ -238,6 +238,45 @@ under the binding (a `skills.external_dirs` entry, the `~/.codex` / `~/.qwen`
 singletons) resolves to the process home rather than `<profile>/home`. Inert on
 native Windows, where `expanduser` consults `USERPROFILE`.
 
+**So does the prompt-observability section**, and it is the more expensive half:
+`snapshot_prompt_observability` enters a binding once per roster instance
+(`mission_chat_prompt_observability`'s `skill_profile_context`), and that section
+bills `prompt_observability:4520` against `agents_readiness:4366` on the
+2026-08-22 cold boot. Same switch, same reason. This site also has a **second
+lane**: `persona_commands._cmd_mission_chat_message` calls the same function at
+`observability_built`, *before* `profile_runner` installs its own locked
+binding — so under the env mirror a chat turn was rebinding the process for every
+concurrent turn and for the builder, not only the other way round. Both lanes are
+fixed by the one switch.
+
+Its branch audit lands in the same place as readiness, with one axis doing more
+work. Reached from inside the binding: no subprocess, no plugin dispatch, and no
+`hermes_cli.auth` path at all (this block runs no provider probe, so the
+`HERMES_AUTH_HOME` reader is not even reachable here). Skill discovery resolves
+through `get_hermes_home()` — `skills_tool._skills_dir`, `skill_utils.get_skills_dir`,
+`get_config_path` — and the per-persona hash check takes an **explicit**
+`hermes_home=` from `resolve_persona_profile`, never the ambient one. The realm
+rows are a sidecar file read (`read_realm_sync_sidecar`, "zero git calls in the
+snapshot"), and `paths.store_root()` collapses because the env mode exports the
+root it resolved *before* the override, which is what the ambient env resolves to
+anyway. The identity-prompt, operative-rules, SOUL-overlay and profile-context-file
+reads all run **outside** the binding and are unaffected either way.
+
+The one axis that carries weight is `get_default_hermes_root()`, which reads
+`HERMES_HOME` raw and is reached five ways from inside the binding
+(`get_shared_skills_dir`, `hermes_cli.profiles.get_profile_dir`,
+`skill_install.harness_skill_destination`, `skills_inventory.build_shared_catalog`,
+and `skill_utils.skill_source_kind` per resolved candidate). It **collapses**, and
+the reason is structural rather than incidental: a binding's `profile_home` always
+comes from `get_profile_dir` — `get_default_hermes_root()/profiles/<name>` — and
+that function is a fixed point over exactly those paths (a path under the native
+home maps back to the native home; a custom `<root>/profiles/x` maps back to
+`<root>`; with `HERMES_HOME` unset the profiles root *is* the platform default, so
+the written home lands under it). `get_shared_skills_dir`'s docstring states the
+same property for its own case. It is pinned by
+`test_the_profiles_root_survives_dropping_the_HERMES_HOME_write`, parametrized
+over all three ambient layouts, rather than left as an argument in prose.
+
 ---
 
 ## The core cache — `serve_read_model/`

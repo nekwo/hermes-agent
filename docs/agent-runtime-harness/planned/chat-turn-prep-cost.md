@@ -681,9 +681,40 @@ deregisters.
    on this install. It is written into `persona_profile_scope`'s docstring rather than left
    to be rediscovered.
 
+   **The sibling, closed in the same wave.** Retiring the readiness walk's env writes left
+   ONE unserialized binding on the snapshot lane, and it was the bigger one:
+   `snapshot_prompt_observability` enters `mission_chat_prompt_observability`'s
+   `skill_profile_context` once per roster instance, and that section bills
+   `prompt_observability:4520` against `agents_readiness:4366` on the 2026-08-22 cold boot.
+   It now binds through `persona_profile_scope` too. The audit answered the same way: no
+   subprocess, no plugin dispatch, and — unlike readiness — no `hermes_cli.auth` path at all,
+   because this block runs no provider probe, so the `HERMES_AUTH_HOME` reader is not even
+   reachable here. Skill discovery resolves through `get_hermes_home()`
+   (`skills_tool._skills_dir`, `skill_utils.get_skills_dir`, `get_config_path`); the
+   per-persona hash check takes an EXPLICIT `hermes_home=`; the realm rows are a sidecar file
+   read; `paths.store_root()` collapses because the env mode exports the root it resolved
+   BEFORE the override. The one axis carrying weight, `get_default_hermes_root()` (raw
+   `HERMES_HOME`, reached five ways from inside the binding), collapses structurally — a
+   binding's `profile_home` is always `get_profile_dir`'s
+   `get_default_hermes_root()/profiles/<name>`, and that function is a fixed point over
+   exactly those paths — and that is now PINNED by
+   `test_the_profiles_root_survives_dropping_the_HERMES_HOME_write`, parametrized over all
+   three ambient layouts including `HERMES_HOME` unset, rather than argued in prose. Same
+   `HOME` residue, same bound.
+
+   That site turned out to carry a second lane nobody had named:
+   `persona_commands._cmd_mission_chat_message` calls the same function at
+   `observability_built`, BEFORE `profile_runner` installs its own locked binding. So a chat
+   TURN was rebinding the process for every concurrent turn (`harness-serve_1` /
+   `harness-serve_2`) and for the snapshot builder — the hazard ran in both directions, and
+   the one switch closes both.
+
    *Receipt to take on the next restart:* on turns that overlap a `snapshot_agents_readiness`
-   line, `visibility_bundle_builds=0` and a `request_received → context_built` span in the
-   same band as a non-overlapping turn.
+   or `prompt_observability` build, `visibility_bundle_builds=0` and a
+   `request_received → context_built` span in the same band as a non-overlapping turn. With
+   both snapshot bindings context-local and the turn lane's own binding no longer
+   process-global, `resident_rebuild_component_relevant_config_revision` should not appear at
+   all.
 
 *What this does NOT claim.* The live turns were not re-run — the 19:03 serve was on
 `bfde53b4ae` and the 21:38 one on `14271f261f`; neither was restarted onto this tree.

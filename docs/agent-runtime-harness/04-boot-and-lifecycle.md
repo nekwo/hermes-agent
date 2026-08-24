@@ -196,7 +196,11 @@ lane that is not a nicety: the walk runs on the builder thread every 2–4 s in 
 process that also serves chat turns, so the env-exporting binding rebound
 `HERMES_HOME` for every other thread every few seconds. See
 02-runtime-data-and-shapes' readiness note for the reachability audit, the
-1.3–1.9 s of turn cost it was billing, and the one named residue (`HOME`).
+1.3–1.9 s of turn cost it was billing, and the one named residue (`HOME`). The
+`prompt_observability` section binds the same way and for the same reason — it is
+the more expensive of the two, and its binding also sits on the CHAT-TURN path
+(`observability_built`, ahead of the runner's own locked binding), so the switch
+stops turns rebinding the process for each other as well.
 
 ## Stage 8 — the boot core cache: consult → fingerprint → serve or demote
 

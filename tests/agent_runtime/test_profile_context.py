@@ -217,6 +217,65 @@ def test_the_context_local_scope_resolves_the_SAME_shared_auth_store(
     )
 
 
+@pytest.mark.parametrize("ambient", ["profile_home", "custom_root", "unset"])
+def test_the_profiles_root_survives_dropping_the_HERMES_HOME_write(
+    ambient, tmp_path, monkeypatch
+):
+    """The COLLAPSE the context-local mode rests on, as a property not a claim.
+
+    ``get_default_hermes_root()`` reads ``os.environ["HERMES_HOME"]`` RAW, and it
+    is reached from inside a binding by every skill-root resolution that matters
+    (`get_shared_skills_dir`, `hermes_cli.profiles.get_profile_dir`,
+    `skill_install.harness_skill_destination`, `skills_inventory.build_shared_catalog`).
+    So the whole no-env-writes argument turns on ONE question: does re-deriving
+    the root from the profile home the env mode WOULD have written give the same
+    answer as reading the ambient env the context-local mode leaves alone?
+
+    It does, structurally, because a binding's ``profile_home`` always comes from
+    ``get_profile_dir`` — i.e. ``get_default_hermes_root()/profiles/<name>`` — and
+    that function is a fixed point over exactly those paths: a path under the
+    native home maps back to the native home, and a custom ``<root>/profiles/x``
+    maps back to ``<root>``. ``get_shared_skills_dir``'s own docstring states the
+    property for its own case ("alice, neko, base, … all compute the same
+    ``<root>/shared/skills`` from their own ``HERMES_HOME``").
+
+    Parametrized over the three ambient layouts a serve can be launched in,
+    including **unset** — the one an audit flagged as the possible divergence.
+    It is not one: with ``HERMES_HOME`` unset the profiles root IS the platform
+    default, so the written profile home lands under it and maps straight back.
+
+    *Killing mutation:* drop the ``env_path.parent.name == "profiles"`` mapping
+    in ``get_default_hermes_root``. *Probed field:* the re-derived root.
+    """
+
+    from hermes_cli.profiles import get_profile_dir
+    from hermes_constants import get_default_hermes_root
+
+    with monkeypatch.context() as scoped:
+        if ambient == "unset":
+            scoped.delenv("HERMES_HOME", raising=False)
+        elif ambient == "custom_root":
+            scoped.setenv("HERMES_HOME", str(tmp_path / "opt" / "data"))
+        else:
+            scoped.setenv(
+                "HERMES_HOME", str(tmp_path / "opt" / "data" / "profiles" / "base")
+            )
+
+        # What the context-local mode leaves the raw readers looking at.
+        ambient_root = get_default_hermes_root()
+        # The binding a persona resolves, computed from that same ambient env.
+        profile_home = get_profile_dir("qa")
+        assert profile_home.parent.name == "profiles"
+
+        # ...and what the env-WRITING mode would have made those readers see.
+        scoped.setenv("HERMES_HOME", str(profile_home))
+        assert get_default_hermes_root() == ambient_root, (
+            "the profiles root a binding re-derives is not the one it came from; "
+            "dropping the HERMES_HOME write would move every shared-skills and "
+            "profile-dir resolution inside the binding"
+        )
+
+
 def test_the_context_local_scope_is_invisible_to_other_threads(tmp_path, monkeypatch):
     """ContextVars are per-task, which is the whole reason this needs no lock."""
 

@@ -183,10 +183,38 @@ def mission_chat_prompt_observability(
         for item in instance_skill_overrides or ()
         if (token := safe_assignment_token(item))
     }
+    # CONTEXT-LOCAL binding, deliberately — not the env-exporting
+    # ``persona_profile_context``. Both of this function's production lanes want
+    # that, and for the same reason: neither holds ``_WORKDIR_LOCK``, so the env
+    # mirror was an unserialized process-global mutation that every OTHER thread
+    # read as its own scope.
+    #
+    #   * the SNAPSHOT lane — ``snapshot_prompt_observability`` calls this once
+    #     per persona instance on the builder thread, and this is the section
+    #     that bills ``prompt_observability:4520`` of a cold build, so the
+    #     binding window is wide;
+    #   * the TURN lane — ``persona_commands._cmd_mission_chat_message`` calls
+    #     this at ``observability_built``, BEFORE ``profile_runner`` installs its
+    #     own locked binding. So a turn was rebinding the process for every
+    #     concurrent turn (``harness-serve_1`` / ``harness-serve_2``) and for the
+    #     snapshot builder, not only the other way around.
+    #
+    # Sound because this block reaches no env-pinned reader. It spawns no
+    # subprocess and drives no plugin. Its skill discovery resolves through
+    # ``get_hermes_home()`` (ContextVar-first): ``skills_tool._skills_dir``,
+    # ``skill_utils.get_skills_dir``, ``get_config_path``. The raw-``HERMES_HOME``
+    # reader it does reach, ``get_default_hermes_root()`` (via
+    # ``get_shared_skills_dir`` / ``RealmStore``'s runtime root), COLLAPSES — a
+    # binding's ``profile_home`` is always ``<root>/profiles/<name>``, which maps
+    # back to the same ``<root>`` the ambient home does; ``get_shared_skills_dir``
+    # documents exactly that property. The realm rows are a sidecar file read
+    # ("zero git calls in the snapshot", Decision 7). The per-persona hash check
+    # takes an EXPLICIT ``hermes_home=`` and never the ambient one. Residue:
+    # ``HOME`` is not redirected — see ``persona_profile_scope``.
     try:
-        from .profile_context import persona_profile_context, resolve_persona_profile
+        from .profile_context import persona_profile_scope, resolve_persona_profile
 
-        skill_profile_context = persona_profile_context(
+        skill_profile_context = persona_profile_scope(
             resolve_persona_profile(persona)
         )
     except Exception:
