@@ -16,7 +16,7 @@ the create receipt (`agent_create_phases.py:23-24`) then inherited verbatim.
 
 1. **Absent is never zero.** A phase that did not happen has no key — not `0`,
    not `null`, not present-and-empty. `safe_turn_phases`
-   (`agent_runtime/mission_chat_phases.py:450`) drops keys it
+   (`agent_runtime/mission_chat_phases.py:463`) drops keys it
    cannot read rather than defaulting them; `_format_ttfb_token`
    (`agent/conversation_loop.py:382-394`) emits no `ttfb=` token rather than
    `ttfb=0.0s`, "which reads as an instantaneous provider and is a lie no
@@ -206,15 +206,17 @@ definition — the anchor, and the only always-present key), `context_built`,
 `observability_built`, `emitter_created`, `write_ahead`, `agent_ready`,
 `provider_request_started`, `request_assembled`, `provider_first_byte`,
 `stream_done`, `native_committed`, `projected`. Plus the flag `agent_init_cold`
-and the counters `registry_probe_rounds` / `builds_overlapped` (`:92-96`), all
-three absent when the fact could not be established honestly — populated at
-`hermes_cli/harness_parts/persona_commands.py:2008`, `:3203`, `:3392`, `:3398`,
-overlap counted by `agent_runtime/snapshot_build_ledger.py`.
+and the counters `registry_probe_rounds` / `builds_overlapped` /
+`visibility_bundle_builds` (`:104-108`), all four absent when the fact could not
+be established honestly — baselined at
+`hermes_cli/harness_parts/persona_commands.py:2064`, `:2069`, delta-counted at
+`:3267-3268`, flag and overlap set at `:3461`, `:3467`, overlap counted by
+`agent_runtime/snapshot_build_ledger.py`.
 
 Persisted at `<store>/mission_chat_turns/<safe_session_key>.json`
 (`mission_chat_turns.py:28-43`) with `sort_keys=True` (`:1073`), so the on-disk order is
 alphabetical and **nothing may depend on ordering** — the join contract is the
-key names and their meaning (`mission_chat_phases.py:98-105`). A "phase" more
+key names and their meaning (`mission_chat_phases.py:118-134`). A "phase" more
 than 24 h after the anchor is rejected on READ as corrupt; the writer cannot
 produce one (`:128-132`). The emitter's own `ttft_ms` keeps its meaning: it is
 constructed only after replay checks, native history load, turn-context build

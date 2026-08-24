@@ -69,8 +69,9 @@ Measured before→after, each with the commit that carries the proof in its body
 | **TTFB token for every lane** | `74702c193e` | mission-chat turns get provider TTFB from phase marks; before this, every other lane's first byte survived only as prose |
 | **Phase-timing marker through the progress sink + `profile_timing` on the record** | `60c7f46ec1` | `request_assembled`/`agent_init_cold` never reached a live record (the sink's Trace-noise filter ate the marker; the resident registry never existed so the flag had no source); recovers 0 ms, makes Stages 1–2 checkable |
 | **Chat-lane visibility bundle** — one resolve per turn, memoized on identity + registry epoch | `7f2c82f090` | `registry_probe_rounds` 23–27/turn → 0 on warm turns; the resident-actor reuse key stopped hashing row liveness (turn 2 reuse receipt: bootstrap 62 ms) |
-| **Resident-actor prewarm at boot + chat-open** | `bfde53b4ae` | first-turn construction (~3 s, `agent_construct_ms=3000` on the 17:33:01Z first-after-boot turn) moved off the operator's path; receipt owed: first turn of a fresh chat with `agent_init_cold=false` |
-| **Resident-actor rebuild names its cause** — per-component signature digests + two identity fixes | working tree 2026-08-23 | three consecutive turns of one prewarmed neko root (19:03:10/23/40Z) each rebuilt with only `resident_rebuild_runtime_signature_changed` to show for it, so the diagnosis cost a store archaeology session. `acquire` now diffs a per-component digest map and writes `resident_rebuild_component_<name>`; `permissions` stopped folding the operator-shaped `permission_state` (its `blocked_tools` is resolved over every tool registered in the process) and `current_chat_goal` left the instance allowlist. Recovers 0 ms directly; it is what makes the Stage 1/2 reuse claim checkable in one read |
+| **Resident-actor prewarm at boot + chat-open** | `bfde53b4ae` | first-turn construction (~3 s, `agent_construct_ms=3000` on the 17:33:01Z first-after-boot turn) moved off the operator's path; live 2026-08-24: 59 `persona_chat_actor_prewarm` lines, warm turns reuse. Receipt still owed on the one clause that names the remedy: first turn of a fresh chat with `agent_init_cold=false` |
+| **Resident-actor rebuild names its cause** — per-component signature digests + two identity fixes | `14271f261f`, `b0c1a668b9` | three consecutive turns of one prewarmed neko root (19:03:10/23/40Z) each rebuilt with only `resident_rebuild_runtime_signature_changed` to show for it, so the diagnosis cost a store archaeology session. `acquire` now diffs a per-component digest map and writes `resident_rebuild_component_<name>`; `permissions` stopped folding the operator-shaped `permission_state` (its `blocked_tools` is resolved over every tool registered in the process) and `current_chat_goal` left the instance allowlist; `b0c1a668b9` stopped the key reading the ambient config document, so a readiness walk's `HERMES_HOME` rebind could no longer rotate a chat's actor. Recovers 0 ms directly; it is what makes the Stage 1/2 reuse claim checkable in one read — and did, on the 2026-08-24 records, where the warm turns carry no `resident_rebuild_component_*` key and the cold ones name `workspace_agents` |
+| **Profile binding goes context-local** — the readiness walk, then prompt observability (and with it the chat turn's own `observability_built` call) | `e567a9ff00`, `846848cfc4` | `profile_context`'s save/mutate/restore of process-global `HERMES_HOME` is sound only under `profile_runner._WORKDIR_LOCK`, and both callers entered it WITHOUT the lock — the readiness walk on the snapshot builder thread every 2–4 s, and `_cmd_mission_chat_message` on every turn before `profile_runner` installs its locked binding. So a background walk moved live turns' `chat_lane_bundle` key, whose `(mtime_ns, size)` is read off the ACTIVE `config.yaml`. Measured: a bundle-free turn built context in **453 ms** against **1,796 / 2,343 ms** on turns overlapping a walk with `visibility_bundle_builds=3/6`. `persona_profile_scope` binds ContextVars and writes no `os.environ`; `persona_profile_context(export_env=True)` keeps the mirror for subprocess-facing callers. Mechanism and the reader-by-reader audit: `02-runtime-data-and-shapes.md` §The build receipt |
 | **Catalog TTL memos** (`_installed_skill_catalog`, `_profile_templates_cached`) | archived doc 14 §Slice 1 | `build_ms` 3,700 → 2,943 warm (~20%) |
 | **Coalesced concurrent builds** | archived doc 14 §Slice 2 | three concurrent builds were 8.8 s EACH; boot-storm first response 8.2 → 3.6 s |
 | **Build-scoped batch skill resolver** | archived doc 14 §first-message hardening | full core **36.622 s → 5.949 s** on the same live store (~84%); 502 exhaustive `resolve_skill` calls collapsed to one walk |
@@ -138,7 +139,7 @@ size)` key doc 14 asked for, but applied it to YAML/frontmatter leaves only.
 `raw_decode`, 13,748 `nt.stat`, 5,652 `io.open` per build) is from 2026-07-09 and
 predates the batch resolver, rotation and `parse_cache` — **do not cite it as current.**
 
-### 4. hermes admission, 4–6 s per warm turn — REMEDIATED 2026-08-23, re-take owed
+### 4. hermes admission, 4–6 s per warm turn — REMEDIATED 2026-08-23, warm re-take READ 2026-08-24, two clauses open
 
 **Evidence:** anchor→`agent_ready` 4,046 ms (alice) / 5,891 ms (qa) on a warm serve,
 2026-08-22 turn records. Registry `check_fn` availability re-probes run per turn
@@ -150,9 +151,25 @@ predates the batch resolver, rotation and `parse_cache` — **do not cite it as 
 probe storms, hot sessions + the identity-allowlist reuse key ended per-turn agent
 construction, and the actor prewarm moved first-turn construction off the operator's
 path. First live receipt: bootstrap 3,782 ms → **62 ms** on the 17:33:01Z/17:33:17Z
-pair. The numbers to beat were 4.0 s and 5.9 s; the row CLOSES when three consecutive
-warm turns show `registry_probe_rounds=0` + `visibility_bundle_builds=0` +
-`context_built<500`.
+pair. The numbers to beat were 4.0 s and 5.9 s.
+
+**Re-take READ 2026-08-24** (ten records, 00:42–00:48Z, `mission_chat_turns/`). The gate
+asked for three consecutive warm turns; **five** consecutive turns of one neko root
+(00:43:08 / :17 / :20 / :28 / :56) delivered `registry_probe_rounds=0` +
+`visibility_bundle_builds=0` + `resident_actor_reused=1` + `agent_init_cold=false` + no
+`resident_rebuild_component_*` key, and `request_assembled` is present on **all ten**
+records — the Stage-0 instrument's own gate, closed. Two clauses of this row stay OPEN:
+
+- **`context_built<500` held on two of five** — 343 and 468 ms against 562 / 796 / 968.
+  The bundle is no longer being rebuilt, so the residue is elsewhere in the context
+  builder; it is the tail, not the storm.
+- **The fresh-chat first turn is still cold.** All three first turns in the window read
+  `agent_init_cold=true`; the two neko ones name
+  `resident_rebuild_component_workspace_agents` — the documented `--agents-file` blind
+  spot (04's Stage 9a residue), not a prewarm failure. The third (qa, 00:48:49Z) names no
+  component at all, which is a genuine first construct for that root rather than a
+  rebuild. Wall cost of the residue is small: `agent_ready − write_ahead` = 125 / 94 /
+  750 ms, against the ~3 s construction this stage removed.
 
 ### 5. The turn prologue — CONVICTED at n=2, diet GATED
 

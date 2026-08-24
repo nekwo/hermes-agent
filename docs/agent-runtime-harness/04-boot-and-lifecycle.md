@@ -160,15 +160,20 @@ orphaned_turn_sweep_ms=31 dispatch_restore_ms=0 elapsed_ms=204 total_ms=1630
 ```
 
 (Live serve, 2026-08-22 15:46:27.) `elapsed_ms` excludes the interpreter; `total_ms` counts
-from process creation. **The full 2026-08-21/22 population is 28 boots, `total_ms` 1,042 to
-4,335** — typical ~1.5-3 s, with five boots over 3,000 and a tail at 4,335 (08-21 21:59:47).
+from process creation. **The 2026-08-21/22 population through this boot is 27 boots, `total_ms`
+1,042 to 4,335** — typical ~1.5-3 s, with five boots over 3,000 and a tail at 4,335
+(08-21 21:59:47). (Corrected 2026-08-24: this line read 28 against doc 08's 27 for the same
+window and the same range; a re-census of `harness serve boot timeline` lines in
+`profiles/base/logs/agent.log` through 2026-08-22 15:46:27 counts 27, and the two docs now
+agree. The same census run to the end of 08-22 counts 33 boots, 1,042 to 4,713 — the log is
+append-only, so a later re-take is a superset, not a contradiction.)
 Even the tail is an order of magnitude under the cold core build below, which is the
 comparison that matters; a six-boot sample reading 1,488-2,990 was the narrower window.
 
 ## Stage 7 — the first read-model core, and why it is cold
 
 `_prewarm_read_model_snapshot` calls `build_snapshot(build_info={"caller": "prewarm"})`
-(`serve.py:957-996`). Naming the caller is what makes this build appear in the log at all:
+(`serve.py:985-1027`). Naming the caller is what makes this build appear in the log at all:
 until the builder emitted its own receipt, every `snapshot_build` line in the boot window
 belonged to a caller that RODE this build — which is how one build came to look like three.
 The receipt (`agent_runtime.snapshot`), live 2026-08-22 15:46:38:
@@ -361,8 +366,15 @@ its first turn and rebuilds: wasted background work, never a wrong answer.
 
 Receipts: `persona_chat_actor_prewarm root=… outcome=… elapsed_ms=…` per item and
 `persona_chat_actor_prewarm pass candidates=… queued=… skipped=… elapsed_ms=…` per boot pass
-(07-observability's census). **No live receipt has been read yet** — the code landed
-2026-08-23 and the first-turn re-take is owed (`planned/chat-turn-prep-cost.md` §7).
+(07-observability's census). **Read live 2026-08-24: 59 such lines in
+`profiles/base/logs/agent.log`** — the passes fire and the items warm, e.g. `2026-08-23
+20:59:32 … outcome=warmed elapsed_ms=250`, alongside the same pass's 2,109 / 1,328 / 78 ms
+items; no `skipped_turn_active` storm, so the yield rule is not firing too eagerly. What the
+lines do NOT yet close is the first-turn half: **every sampled fresh-chat first turn still
+reads `agent_init_cold=true`**, and the two neko ones name
+`resident_rebuild_component_workspace_agents` as the moving component — the `--agents-file`
+residue above, exactly as predicted. That re-take stays owed
+(`planned/chat-turn-prep-cost.md` §7).
 
 ## Stage 10 — demote builds and same-offset core reuse
 

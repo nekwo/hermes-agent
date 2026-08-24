@@ -1,6 +1,6 @@
 # Planned — chat-turn prep cost (the ~4 s of hermes between admission and the provider)
 
-**Status:** Stages 0–2 LANDED 2026-08-23 (`60c7f46ec1` / `7f2c82f090` / `bfde53b4ae`), Stage 2a landed in two parts (`14271f261f` = the instrument + convictions 4–6; conviction 7, the ambient config document, in the working tree — the instrument's first field validation); live steady-state re-take receipts owed for 1, 2 and 2a; Stages 3–5 not started. **Owner doc:**
+**Status:** Stages 0–2 LANDED 2026-08-23 (`60c7f46ec1` / `7f2c82f090` / `bfde53b4ae`), Stage 2a landed in two parts (`14271f261f` = the instrument + convictions 4–6; `b0c1a668b9` = conviction 7, the ambient config document — the instrument's first field validation); live steady-state re-take READ 2026-08-24 for 1, 2a and the warm half of 2 (§6), leaving the `context_built` tail and the fresh-chat first turn open; Stages 3–5 not started. **Owner doc:**
 [`../05-chat-turn-lane.md`](../05-chat-turn-lane.md).
 **Question this answers** (operator, 2026-08-22): *"maybe something we are doing with the
 chat isn't initializing fully or fast enough?"* — the answer is **yes, twice over**: the
@@ -313,7 +313,7 @@ owed. A serve restart was NOT the fix — see the resolved caveat in §1. Three 
 1. **The sink forwards a phase-timing marker past its own noise filter.**
    `ChatProgressSink._forward_phase_timing_marker` (`agent_runtime/progress.py:178-224`,
    called at `:137` BEFORE `_chat_progress_has_signal`) recognizes the marker through
-   `mission_chat_phases.phase_timing_marker_step` (`:378-409` — one authority, read by
+   `mission_chat_phases.phase_timing_marker_step` (`:391-422` — one authority, read by
    both the sink and the converter) and hands it to `on_trace` only. It is an
    instrument, not an event: **no EventLog row, no `before_first_trace` latch, no chat-log
    mirror**, so the Trace-lane rule at `progress.py:83-86` stays literally true. Nothing
@@ -503,7 +503,8 @@ pool may refresh an expired agent key, and its result is cached for the turn beh
 (2) MCP admission spawns this persona's declared servers and tears them down on the way out.
 
 **Stage 2a — a refused reuse NAMES the input that moved. CODE LANDED 2026-08-23**
-(working tree); the live re-take is owed. Not a latency stage: it is the instrument
+(`14271f261f` = the instrument + convictions 4–6; `b0c1a668b9` = conviction 7, the ambient
+config document); the live re-take READ 2026-08-24 (§6). Not a latency stage: it is the instrument
 Stage 2's claim could not be checked without, plus the two identity fixes it convicted.
 
 *The receipt that forced it (2026-08-23T19:03Z, serve on `bfde53b4ae`+docs).* The boot
@@ -770,8 +771,10 @@ enabled; live turn records now carry the runner's `profile_timing` (turn `14:45:
 shows `resident_rebuild_runtime_signature_changed` and `resident_actor_reused=0`), which
 is exactly the class of fact the instrument existed to surface — and it falsified the
 assumption behind Stage 2 within two turns (§1 update). Stage 1 proceeded on that
-evidence. **Still owed on this gate: `request_assembled` observed on a live record.**
-Until then §2.4's assembly-vs-TTFB split rests on the one carry-forward measurement. Note what the first attempt at
+evidence. **The gate is now fully CLOSED, 2026-08-24:** `request_assembled` is present on
+**all ten** records in the 00:42–00:48Z window (1,187–2,921 ms), alongside `agent_init_cold`
+and `profile_timing` on every one — so §2.4's assembly-vs-TTFB split no longer rests on the
+one carry-forward measurement. Note what the first attempt at
 this gate proved — the serve HAD been restarted on HEAD and the keys still did not appear
 (§1), because the causes were a redaction/noise filter and a default-off config, not
 vintage. Acting on Stage 1/2/3 without the restored instrument would repeat the exact
@@ -851,22 +854,29 @@ already writes `runtime_resolve_cached=0/1` to tell them apart.
   yet on any record.
 - `send_to_admit`'s ~110 ms transport share is derived from ONE turn's
   launcher-vs-record reconciliation; other turns may differ under launcher load.
-- **Stage 2's own receipt is OWED, on the same terms as Stage 1's.** The lane is pinned by
-  tests — the prewarmed actor being REUSED by the next real turn rather than rebuilt, the
-  end-to-end signature parity against real stores, the stand-down under a genuinely
-  concurrent run, the call-site census that keeps the hook off the per-turn seam, the boot
-  cap and ordering — but no live turn record written by a serve running it has been read.
-  Until one first-turn record of a freshly opened chat shows `agent_init_cold=false` and
-  `agent_ready − write_ahead < 700 ms`, the −2.5–3.5 s is a prediction. The second thing to
-  read on that serve is the `persona_chat_actor_prewarm` lines themselves: a pass whose
-  items all read `skipped_turn_active` means the yield rule is firing too eagerly, and a
-  first turn that still reads `agent_init_cold=true` next to a `warmed` line for its root
-  means a signature input the prewarm cannot reproduce (check for `--agents-file` first).
-- **Stage 1's own receipt is OWED.** The code landed and is pinned by tests (memo hit,
-  every keyed input rebuilding, the degraded-bundle rule, the copy-on-read rule, the
-  actor-identity allowlist, the new counter reaching the record), but no live turn record
-  written by a serve running it has been read. Until one shows
-  `registry_probe_rounds=0` + `visibility_bundle_builds=0` on three consecutive warm turns
-  of one chat — and `resident_actor_reused=1` on turn 2 — the ctx-span improvement is a
-  prediction, not a measurement. The same rule this audit exists to enforce applies to its
-  own remedies.
+- **Stage 2's receipt is HALF READ (2026-08-24), and the open half is exactly the residue
+  this stage named in advance.** The `persona_chat_actor_prewarm` lines were the second
+  thing to read, and they read clean: 59 lines in `profiles/base/logs/agent.log`, items
+  `outcome=warmed` at 78–2,531 ms, no `skipped_turn_active` pass — the yield rule is not
+  firing too eagerly. The first thing to read did NOT close: all three fresh-chat first
+  turns in the window read `agent_init_cold=true`, and the two neko ones name
+  `resident_rebuild_component_workspace_agents`. That is the `--agents-file` check this
+  bullet told the reader to run first, and it comes back positive: the operator's workspace
+  `AGENTS.md` is attached per turn from a launcher-side selection and the prewarm cannot
+  know it, so a workspace-bound root mismatches on its first turn however well it was
+  warmed. The wall half held anyway (`agent_ready − write_ahead` = 125 / 94 / 750 ms), so
+  what remains is a rebuild, not the −2.5–3.5 s construction. **Remaining open: a first
+  turn of a freshly opened chat with `agent_init_cold=false`** — reachable either from a
+  root with no workspace-agents binding, or by teaching the prewarm that input.
+- **Stage 1's receipt is READ (2026-08-24), and the gate was met verbatim.** The gate asked
+  for `registry_probe_rounds=0` + `visibility_bundle_builds=0` on three consecutive warm
+  turns of one chat plus `resident_actor_reused=1` on turn 2; **five** consecutive turns of
+  one neko root delivered it — `00:43:08` / `:17` / `:20` / `:28` / `:56`, every one with
+  `resident_actor_reused=1`, `agent_init_cold=false`, no `resident_rebuild_component_*` key,
+  `registry_probe_rounds=0` and `visibility_bundle_builds=0`. The probe storms (23–27 rounds
+  per turn in §1's table) are gone from the live record, and so is the mid-turn bundle
+  rebuild. **Remaining open: the `context_built` tail.** The ctx spans on those five turns
+  were 562 / 796 / 343 / 968 / 468 ms — two under the 500 ms the row wanted, three not. The
+  bundle is provably not the cause any more (`visibility_bundle_builds=0` on all five), so
+  the residue is elsewhere in the context builder and needs its own conviction before it
+  gets a remedy. The same rule this audit exists to enforce applies to its own remedies.

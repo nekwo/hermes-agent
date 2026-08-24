@@ -73,8 +73,8 @@ bundle holds.
 
 **Four honesty rules** (`:18-50`), each enforced in code, not by convention:
 
-1. **Absent, never a fake zero.** `snapshot()` emits only what was marked (`:321-342`);
-   `safe_turn_phases` drops what it cannot read and never defaults (`:387-422`); `flag()`/`count()`
+1. **Absent, never a fake zero.** `snapshot()` emits only what was marked (`:334-355`);
+   `safe_turn_phases` drops what it cannot read and never defaults (`:463-499`); `flag()`/`count()`
    treat `None` as "could not establish" and record nothing (`:242-279`) — which matters most for
    the counters, where `0` is a real and interesting answer.
 2. **Monotonic only.** Anchor and marks come from one injected callable (`:170-179`); `anchored_at`
@@ -223,7 +223,17 @@ under a re-derived key would be worse than no warm at all. Second, it cannot go 
 it would steal the operator's queued skills from the turn being warmed for.
 
 Receipt on the turn record: `agent_init_cold=false` with `agent_ready − write_ahead < 700 ms` on a
-chat's first message. **Owed, not yet observed** (`planned/chat-turn-prep-cost.md` §7).
+chat's first message. **Half read, half still owed** (2026-08-24 turn store, ten records in the
+00:42–00:48Z window). The prewarm itself is proven live — 59 `persona_chat_actor_prewarm` lines in
+`profiles/base/logs/agent.log`, items warming in 78–2,531 ms (04's Stage 9a) — and the reuse it
+exists to feed is proven on every warm turn: five consecutive turns of one root (00:43:08/17/20/28/56)
+each read `resident_actor_reused=1`, `agent_init_cold=false` and no `resident_rebuild_component_*`
+key at all. What is NOT yet observed is the fresh-chat FIRST turn reading `agent_init_cold=false`:
+all three first turns in the window read `true`, and the two neko ones name
+`resident_rebuild_component_workspace_agents` — the `--agents-file` residue 04 names, a workspace-bound
+chat mismatching on the one input the prewarm cannot reproduce. The wall half of the receipt does
+hold there (`agent_ready − write_ahead` = 125 / 94 / 750 ms), so the residue costs a rebuild, not the
+old ~3 s construction (`planned/chat-turn-prep-cost.md` §7).
 
 ## 5. MCP admission — the profile declares the server
 
@@ -399,7 +409,7 @@ the hermes side of the split) and right before the provider call; it carries no
 `duration_ms`/`timing_key` because it names an INSTANT, which also keeps it out of the
 profile-timing dict. Step constant: `CONVERSATION_REQUEST_ASSEMBLED_STEP =
 "conversation_request_assembled"` (`hermes_constants.py:1400`); `mark_from_trace_payload`
-(`mission_chat_phases.py:411-447`) is the only converter, and it takes nothing from a malformed one.
+(`mission_chat_phases.py:424-460`) is the only converter, and it takes nothing from a malformed one.
 
 **The payload has to survive the sink to reach that converter.** Its real route is
 `agent.status_callback → profile_runner._profile_status_callback (:1489) → ChatProgressSink.emit →
@@ -410,7 +420,7 @@ an instant rather than work. That silently unmeasured `request_assembled` on eve
 ahead of the filter) now forwards the marker to `on_trace` ONLY: no EventLog row, no
 `before_first_trace` latch, no chat-log mirror, and only a `step` matched against the closed set of
 marker steps plus a bare `status` token — so the noise rule and the redaction boundary both stay
-intact. `phase_timing_marker_step` (`mission_chat_phases.py:378-409`) is the single authority both
+intact. `phase_timing_marker_step` (`mission_chat_phases.py:391-422`) is the single authority both
 sides read, so producer and consumer cannot drift apart again.
 
 The live measurement that motivated the split (turn `c59ab99e`, 2026-08-22): **1,762 ms of a 13,532
@@ -456,12 +466,18 @@ operator's text.
 - **New-chat first send settled REJECTED — OPEN, unreproduced.** 2026-08-22 02:00:47Z; the mint is
   acquitted, the explicit-`session_id` lane implicated, and `[MissionChatOutcome]` (§10) stands
   guard for the next occurrence → [record](planned/new-chat-first-send-rejected.md).
-- **Hermes admission cost — REMEDIATED 2026-08-23, steady-state re-take owed.** The
-  ~4–6 s warm-turn share was remediated by `planned/chat-turn-prep-cost.md` Stages 0–2
+- **Hermes admission cost — REMEDIATED 2026-08-23, warm half RE-TAKEN 2026-08-24; two
+  narrow opens left.** The ~4–6 s warm-turn share was remediated by
+  `planned/chat-turn-prep-cost.md` Stages 0–2
   (`60c7f46ec1`/`7f2c82f090`/`bfde53b4ae`: visibility bundle, actor prewarm); first live
-  reuse receipt: bootstrap 3,782 ms → 62 ms (turns 17:33:01Z/17:33:17Z). The row closes
-  when three consecutive warm turns show `registry_probe_rounds=0` +
-  `visibility_bundle_builds=0` + `context_built<500` →
+  reuse receipt: bootstrap 3,782 ms → 62 ms (turns 17:33:01Z/17:33:17Z). The steady-state
+  re-take arrived on the 2026-08-24 00:42–00:48Z records: five consecutive warm turns of one
+  root read `registry_probe_rounds=0` + `visibility_bundle_builds=0` + `resident_actor_reused=1`
+  + `agent_init_cold=false`, and `request_assembled` is present on all ten records in the
+  window. Two clauses did NOT close and stay open: **`context_built<500`** held on two of the
+  five (343 / 468 ms) against 562 / 796 / 968 on the other three, and the **fresh-chat first
+  turn** still reads `agent_init_cold=true` through
+  `resident_rebuild_component_workspace_agents` (§4b) →
   [plan](planned/mission-chat-admission-latency.md).
 - **Chat-lane context, memory and affordance gaps** — core-context/profile-memory knobs with no
   operator surface, no shell hooks, no slash commands, no attachment *input*, no per-turn worktree
@@ -481,7 +497,7 @@ Mechanism exists in code; the NUMBER or live condition was not re-measured here.
   states no test asserts a millisecond and none can reproduce the magnitude; the enforced gate is
   the probe-round count. **Annotated 2026-08-23 (prep-cost §3 H2): the 2,421 ms is the UNWARMED
   CREATE subphase (warm create: 859/15 ms) — never re-quote it as a per-turn cost.**
-- **The 1,762 ms hermes share of turn `c59ab99e`** (`mission_chat_phases.py:420-421`) and the live
+- **The 1,762 ms hermes share of turn `c59ab99e`** (`mission_chat_phases.py:433-434`) and the live
   phase-joined TTFT splits (alice 17.8 s, qa 9.2 s) — 2026-08-22 session receipts, read through the
   launcher's audit tooling; not reproducible from this repo.
 - **Tool-schema census** (62 core tools / 93,075 bytes vs 34 deferrable / 32,182; 74% core) —
