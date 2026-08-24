@@ -1543,7 +1543,7 @@ def build_parser(parent_subparsers) -> None:
     # where charsheet is imported — build_parser runs for EVERY harness call and
     # must not pull in Pillow.
     characters_thumb.add_argument("--frame", type=int, default=None, help="Which frame cell of the strip to crop, 0-based (default 0); the crop is the half that removes pixels, so there is always one")
-    characters_thumb.add_argument("--scale", type=int, default=None, help="NEAREST upscale factor (default 2); refused, never clamped, when the OUTPUT would exceed the QA-crop pixel budget")
+    characters_thumb.add_argument("--scale", type=int, default=None, help="NEAREST upscale factor (default 2); refused, never clamped. At or below the default the OUTPUT must fit the card budget (lighter than the sheet the crop replaces); above it the crop is a fullscreen-viewer artifact, bounded by the write ceiling and reported as cardSafe=false")
     characters_thumb.add_argument("--json", action="store_true")
     characters_thumb.set_defaults(func=_cmd_characters_thumb)
     characters_base = characters_subs.add_parser("base", help="Set or replace the draft's base identity image")
@@ -3260,12 +3260,16 @@ def _cmd_characters_thumb(args) -> int:
 
     def call(draft):
         result = draft.row_thumb(row_key, attempt=attempt, frame=frame, scale=scale)
+        # An agent reads the human line as often as the payload, and the one
+        # thing it must not do with a deep zoom is declare it with `MEDIA:`. So
+        # the line says which artifact this is, not just how big it came out.
+        weight = "" if result["cardSafe"] else " — too heavy for a card; open it in the viewer"
         return result, (
             f"Draft {draft.id}: row {result['row']} "
             f"{_attempt_label(result['attempt'], result['attempts'])}, "
             f"frame {result['frame'] + 1} of {result['frames']}, "
             f"cropped at {result['width']}x{result['height']} "
-            f"({result['scale']}x) → {result['path']}"
+            f"({result['scale']}x) → {result['path']}{weight}"
         )
 
     return _characters_verb(args, call)

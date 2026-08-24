@@ -80,10 +80,16 @@ THUMBS_DIRNAME = "thumbs"
 
 # QA crops: 2x is what made a one-pixel seam legible in a chat card during the
 # 2026-08-24 run, so it is the default. What bounds a crop is not a scale
-# ceiling but the output's pixel count (`pipeline.MAX_THUMB_PIXELS`), and it is
-# a refusal rather than a clamp — a caller who asks for 40x has made a mistake
-# and should be told, not silently given 8x and left to wonder why the crop is
-# small.
+# ceiling but the output's pixel count, and it is a refusal rather than a clamp
+# — a caller who asks for 40x has made a mistake and should be told, not
+# silently given 8x and left to wonder why the crop is small.
+#
+# This constant is also the line between the two pixel bounds (see
+# `pipeline.MAX_CARD_PIXELS` / `pipeline.MAX_THUMB_PIXELS`): at or below the
+# default a crop must be card-weight, because it is the crop a caller who just
+# asked for a picture gets and the one an agent declares to a card. Above it,
+# the caller has asked for a deep zoom on purpose and gets one — bounded by the
+# write ceiling, and labelled as viewer-only in the payload.
 DEFAULT_THUMB_SCALE = 2
 
 # Which frame cell a crop shows when the caller does not say. Frame 0 is the
@@ -246,6 +252,17 @@ def row_item(key: str) -> str:
 
 def _strip_filename(key: str, attempt: int) -> str:
     return f"{key}-{attempt}.png"
+
+
+def _path_or_none(path: Path | None) -> str | None:
+    """One spelling of "there is no file here" for the whole payload.
+
+    A path field is a ``str`` or ``None``; ``""`` is neither, and it is what a
+    consumer gets when a ``Path | None`` is coerced through ``str(x or "")``.
+    Every path in ``status --json`` goes through here so absence cannot acquire
+    a second spelling one field at a time.
+    """
+    return str(path) if path is not None else None
 
 
 # ─────────────────────────────── the draft ───────────────────────────────
@@ -710,6 +727,18 @@ class CharacterDraft:
         to render a picture at that point is the wall ``reopen`` was built to
         remove.
 
+        **Card-weight is enforced at the default and reported everywhere else.**
+        The point of the verb (launcher risk D.3) is that a card decodes less
+        than the sheet, so a crop taken at :data:`DEFAULT_THUMB_SCALE` or below —
+        the crop a caller gets by asking for a picture, and the one an agent
+        declares with a ``MEDIA:`` line — is REFUSED when it would outweigh the
+        sheet (``pipeline.MAX_CARD_PIXELS``). A deliberate deeper zoom is a
+        different artifact with a different reader: it is allowed up to the write
+        ceiling and carries ``cardSafe: False``, which is how a consumer knows to
+        open it in the fullscreen viewer instead of drawing it in a 420px square.
+        A boolean rather than a silent clamp, because a caller who asked for 8x
+        wants 8x — they just must not be told it is a card.
+
         Returns a PATH and never bytes (plan A-4): the launcher runs on this
         machine, and the trace lane that would carry an inline image is capped at
         4 KiB.
@@ -732,6 +761,23 @@ class CharacterDraft:
                 + (f" at {source}" if source is not None else "")
             )
         cell = pipeline.frame_cell(source, frame=frame, frames=row.frames)
+        # Both bounds are read off the OUTPUT size before anything is allocated:
+        # the write ceiling inside `upscale_on_backdrop`, the card budget here,
+        # where the default is known. Refusing after the resize would already
+        # have paid for the picture nobody may use. The scale is gated first
+        # through the same helper `upscale_on_backdrop` uses — weighing an
+        # output means multiplying by it, and `512 * "2"` is a string.
+        scale = pipeline.require_scale(scale)
+        card_safe = pipeline.fits_card_budget(cell.width * scale, cell.height * scale)
+        if not card_safe and scale <= DEFAULT_THUMB_SCALE:
+            raise ValueError(
+                f"scale {scale} on this {cell.width}x{cell.height} frame of row "
+                f"{row.key!r} would write {cell.width * scale}x{cell.height * scale} "
+                f"= {cell.width * cell.height * scale * scale:,} pixels, over the "
+                f"{pipeline.MAX_CARD_PIXELS:,}-pixel card budget — heavier than the "
+                "sheet this crop exists to avoid decoding, which is no mitigation "
+                "at all; ask for --scale 1, or a row with more frames to slice"
+            )
         image = pipeline.upscale_on_backdrop(cell, scale=scale)
         # The filename is a HUMAN surface — an operator correlating a crop back
         # to the attempt it came from — so it counts the way the store's own
@@ -764,6 +810,7 @@ class CharacterDraft:
             "path": str(out),
             "width": image.width,
             "height": image.height,
+            "cardSafe": card_safe,
         }
 
     # -------------------------------------------------- stage 3: composed
@@ -946,7 +993,16 @@ class CharacterDraft:
         filename re-derived from the attempt number — a QA surface that wants to
         show attempt 2 beside attempt 3 has to address them individually, and
         re-spelling the store's layout here is how the two would drift apart.
-        Empty only for a record with no file recorded at all.
+
+        **Every path here is a ``str`` or JSON ``null``, never ``""``.** Same
+        reasoning as ``authored_by`` above, and the same payload: absence is a
+        fact a consumer must be able to READ. An empty string is not a path, and
+        a consumer that receives one cannot tell "no image was recorded for this
+        attempt" from any other empty value — while an agent following the
+        ``MEDIA:<path>`` protocol interpolates it and emits a bare ``MEDIA:``
+        line. ``attempt_path``/``current``/``latest`` all return a typed
+        ``Path | None``; flattening that at the payload boundary destroyed the
+        only distinction the store took care to make.
         """
         history = store.history(key)
         approved = store.approved_index(key)
@@ -957,13 +1013,13 @@ class CharacterDraft:
             "key": key,
             "attempts": len(history),
             "approved": approved,
-            "approvedPath": str(approved_path) if approved_path else "",
-            "current": str(current) if current else "",
+            "approvedPath": _path_or_none(approved_path),
+            "current": _path_or_none(current),
             "rejected": [i for i, record in enumerate(history) if record.get("rejected")],
             "history": [
                 {
                     "attempt": index,
-                    "path": str(store.attempt_path(key, index) or ""),
+                    "path": _path_or_none(store.attempt_path(key, index)),
                     "note": str(record.get("note", "")),
                     "created": str(record.get("created", "")),
                     "rejected": bool(record.get("rejected")),

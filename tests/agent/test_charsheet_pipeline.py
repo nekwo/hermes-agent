@@ -574,3 +574,43 @@ def test_a_cell_of_the_wrong_size_is_refitted_only_at_the_upstream_geometry():
     odd = SheetSpec(states=(StateSpec("cheer", 2, False),), scheme=FOUR_WAY, frame_w=64, frame_h=64)
     with pytest.raises(ValueError, match="only the upstream"):
         pipeline.compose_sheet(odd, {"cheer": [small]})
+
+
+# ────────────────────────── frame-cell geometry ──────────────────────────
+
+
+@pytest.mark.parametrize("width, frames", [(768, 3), (770, 3), (2172, 8), (100, 7), (13, 13)])
+def test_a_frame_cell_is_the_frames_own_slot_and_the_slots_tile_the_strip(width, frames):
+    """WHERE the crop is taken, not just how wide it comes out.
+
+    A 2026-08-24 mutation audit shifted this window by +3px on BOTH bounds and
+    the whole suite stayed green: every assertion in it read the cell's SIZE,
+    which a shift does not change, so the verb could have been showing an
+    operator the wrong slice of the strip while reporting the right dimensions.
+    A defect is hunted frame by frame — a cell that is three pixels off cuts
+    through the neighbour it was supposed to exclude.
+
+    Each column carries its own x in its pixels, so a cell's contents name the
+    columns it came from. The boundaries are the strip's own rounding: the slots
+    must tile it with no gap, no overlap and no dropped column, which is what
+    makes `round()` on both bounds the contract rather than an implementation
+    detail (widths 770/100/13 are the cases where the division does not divide).
+    """
+    height = 24
+    row = b"".join(bytes((x % 256, x // 256, 40, 255)) for x in range(width))
+    strip = Image.frombytes("RGBA", (width, height), row * height)
+
+    cells = [pipeline.frame_cell(strip, frame=k, frames=frames) for k in range(frames)]
+
+    for k, cell in enumerate(cells):
+        box = (round(k * width / frames), 0, round((k + 1) * width / frames), height)
+        assert cell.size == (box[2] - box[0], height)
+        assert cell.tobytes() == strip.crop(box).tobytes(), f"frame {k} is not its own slot"
+    # The slots tile the strip: joined end to end they ARE the strip.
+    joined = Image.new("RGBA", (width, height))
+    at = 0
+    for cell in cells:
+        joined.paste(cell, (at, 0))
+        at += cell.width
+    assert at == width
+    assert joined.tobytes() == strip.tobytes()

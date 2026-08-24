@@ -20,6 +20,8 @@ from pathlib import Path
 import pytest
 
 from agent.charsheet import pipeline
+from agent.charsheet.draft import drafts_dir
+from agent.charsheet.revisions import STATE_FILENAME
 from agent.charsheet.spec import FOUR_WAY, SheetSpec, StateSpec
 from hermes_cli.harness import build_parser
 
@@ -363,7 +365,10 @@ def test_thumb_writes_the_crop_its_payload_describes(fake, base_image, capsys, t
     )
 
     assert (code, payload["ok"]) == (0, True)
-    assert set(payload) >= {"ok", "path", "row", "attempt", "frame", "frames", "width", "height"}
+    assert set(payload) >= {
+        "ok", "path", "row", "attempt", "frame", "frames", "width", "height", "cardSafe",
+    }
+    assert payload["cardSafe"] is True, "the default crop is the one a card may draw"
     assert (payload["row"], payload["attempt"], payload["draft"]) == ("walk-e", 0, draft_id)
     assert (payload["frame"], payload["frames"]) == (0, 2)
     out = Path(payload["path"])
@@ -428,6 +433,72 @@ def test_thumb_addresses_one_attempt_and_one_frame_at_a_time(fake, base_image, c
     # Each crop is taken from that attempt's own file, as `status` reports it.
     history = status["status"]["rows"]["walk-e"]["history"]
     assert [entry["path"] for entry in history] == [first["source"], latest["source"]]
+
+
+def test_a_missing_attempt_file_travels_as_json_null_and_never_as_an_empty_string(
+    fake, base_image, capsys
+):
+    """`null` is what B2 and the `MEDIA:` protocol can actually read.
+
+    Same payload, two spellings of absence: `authoredBy` was fixed to `null`
+    while `history[].path`, `current` and `approvedPath` — the field A1 itself
+    introduced among them — still flattened `Path | None` to `""`. A consumer
+    handed `""` cannot tell "no image recorded" from any other empty value, and
+    an agent interpolating it emits a bare `MEDIA:` line. Asserted on the raw
+    JSON text, because the coercion this pins happens on the way out.
+    """
+    draft_id = start_draft(capsys, "--base-image", str(base_image))
+    run(["harness", "characters", "turnaround", "--draft", draft_id, "--json"], capsys)
+    item_dir = drafts_dir() / draft_id / "revisions" / "turnaround@e"
+    state = json.loads((item_dir / STATE_FILENAME).read_text(encoding="utf-8"))
+    state["attempts"][0].pop("file")
+    (item_dir / STATE_FILENAME).write_text(json.dumps(state), encoding="utf-8")
+
+    args = parser().parse_args(
+        ["harness", "characters", "status", "--draft", draft_id, "--json"]
+    )
+    assert args.func(args) == 0
+    text = capsys.readouterr().out
+    item = one_json_object(text)["status"]["turnaround"]["e"]
+
+    assert item["history"][0]["path"] is None
+    assert item["current"] is None
+    assert item["approvedPath"] is None
+    assert '"path": null' in text
+    assert '"authoredBy": null' in text, "the field whose rule these three now follow"
+
+
+def test_a_deep_zoom_says_it_is_not_a_card_in_the_payload_and_in_the_line(
+    fake, base_image, capsys
+):
+    """An agent reads the sentence as often as the JSON, so both carry it.
+
+    The one thing it must not do with a `--scale 10` crop is declare it with a
+    `MEDIA:` line — that hands the console a decode several times the sheet's
+    for a 420px square (risk D.3). The file is fine; the claim "this is a card"
+    is not, and silence is what let the claim through.
+    """
+    draft_id = start_draft(capsys, "--base-image", str(base_image))
+    run(["harness", "characters", "turnaround", "--draft", draft_id, "--json"], capsys)
+    run(["harness", "characters", "approve-direction", "--draft", draft_id, "--all", "--json"], capsys)
+    run(["harness", "characters", "rows", "--draft", draft_id, "--only", "walk-e", "--json"], capsys)
+
+    code, zoomed = run(
+        ["harness", "characters", "thumb", "--draft", draft_id, "--row", "walk-e",
+         "--scale", "10", "--json"],
+        capsys,
+    )
+    spoken = parser().parse_args(
+        ["harness", "characters", "thumb", "--draft", draft_id, "--row", "walk-e",
+         "--scale", "10"]
+    )
+    assert spoken.func(spoken) == 0
+    line = capsys.readouterr().out.strip()
+
+    assert code == 0, "a viewer artifact is written, not refused"
+    assert zoomed["cardSafe"] is False
+    assert zoomed["width"] * zoomed["height"] > pipeline.MAX_CARD_PIXELS
+    assert "open it in the viewer" in line
 
 
 def test_a_human_line_counts_attempts_the_way_the_store_names_its_files(

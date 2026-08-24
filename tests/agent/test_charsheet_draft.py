@@ -22,6 +22,7 @@ import pytest
 
 from agent.charsheet import pipeline
 from agent.charsheet.draft import (
+    DEFAULT_THUMB_SCALE,
     MANIFEST_FILENAME,
     SHEET_FILENAME,
     STAGES,
@@ -695,6 +696,83 @@ def test_the_crop_budget_stays_under_pillows_decompression_bomb_threshold(fake, 
             crop.load()
 
 
+def test_the_card_budget_is_the_sheet_and_not_the_bomb_threshold(fake, base):
+    """Two bounds, two values. One number could not be right for both.
+
+    `MAX_THUMB_PIXELS` answers "may this file exist?" and is set against
+    Pillow's bomb threshold. Risk D.3 asks a different question — "may a chat
+    card decode this?" — and states the check: *a crop that is not smaller than
+    the sheet is not a mitigation.* The sheet is therefore the budget, derived
+    from the spec so it cannot drift from the thing it is measured against.
+
+    The killing mutation is the state this replaced: one constant serving both,
+    at which point a crop 3.94x heavier than the sheet passes the only bound
+    there is.
+    """
+    width, height = CHAR8.sheet_size()
+
+    assert pipeline.MAX_CARD_PIXELS == width * height
+    assert pipeline.MAX_CARD_PIXELS < pipeline.MAX_THUMB_PIXELS
+    assert pipeline.fits_card_budget(width, height)
+    assert not pipeline.fits_card_budget(width, height + 1)
+
+
+def test_a_default_crop_heavier_than_the_sheet_is_refused_rather_than_declared(
+    fake, base, tmp_path
+):
+    """The default crop is the one an agent hands to a card, so it is bounded.
+
+    A hand-sized strip is the stimulus here, not the property: what is under
+    test is arithmetic on the source's dimensions, and the only way to reach the
+    real budget is a real-sized source. The fake draftsman draws small on
+    purpose, which is exactly why this case never appeared on its own.
+
+    A refusal, not a clamp, and it names the escape: `--scale 1` is the same
+    pixels without the enlargement, and is what a one-frame row wanted anyway.
+    """
+    draft = run_to_rows(base)
+    draft.run_rows(only=["walk-e"])
+    frames = next(row.frames for row in SPEC.authored_rows() if row.key == "walk-e")
+    # Sized so ONE cell at the default 2x lands just over the sheet's own count.
+    big = tmp_path / "oversized-strip.png"
+    Image.new("RGBA", (512 * frames, 1600), MAGENTA).save(big)
+    draft.store.propose(row_item("walk-e"), big)
+    cell_pixels = 512 * 1600
+    assert cell_pixels * DEFAULT_THUMB_SCALE**2 > pipeline.MAX_CARD_PIXELS
+
+    with pytest.raises(ValueError) as refusal:
+        draft.row_thumb("walk-e")
+
+    message = str(refusal.value)
+    assert "card budget" in message
+    assert f"{pipeline.MAX_CARD_PIXELS:,}" in message
+    assert "--scale 1" in message
+    assert not (draft.directory / "thumbs").exists(), "the refusal wrote a file anyway"
+    # ...and the escape the refusal names actually works.
+    assert draft.row_thumb("walk-e", scale=1)["cardSafe"] is True
+
+
+def test_a_deliberate_deep_zoom_is_written_and_labelled_viewer_only(fake, base):
+    """Above the default the caller has asked for a zoom, and gets one.
+
+    What they must not get is silence: `--scale 8` on the live draft wrote
+    2176x5792 = 12_603_392 px — 3.94x the sheet — at exit 0 with nothing in the
+    payload to stop an agent declaring it with a `MEDIA:` line. The file is
+    legitimate (the viewer opens it); the claim "this is a card" is not.
+    """
+    draft = run_to_rows(base)
+    draft.run_rows(only=["walk-e"])
+
+    default = draft.row_thumb("walk-e")
+    zoomed = draft.row_thumb("walk-e", scale=10)
+
+    assert default["cardSafe"] is True
+    assert default["width"] * default["height"] <= pipeline.MAX_CARD_PIXELS
+    assert zoomed["cardSafe"] is False
+    assert zoomed["width"] * zoomed["height"] > pipeline.MAX_CARD_PIXELS
+    assert Path(zoomed["path"]).is_file(), "a viewer artifact is still written"
+
+
 def test_a_row_with_no_attempt_yet_says_so_instead_of_cropping_nothing(fake, base):
     draft = run_to_rows(base)
 
@@ -795,7 +873,7 @@ def test_status_shows_a_pending_item_by_its_latest_attempt(draft):
 
     assert item["attempts"] == 2
     assert item["approved"] is None
-    assert item["approvedPath"] == ""
+    assert item["approvedPath"] is None
     assert item["current"] == str(draft.store.latest(turnaround_item("e")))
     assert item["history"][-1]["note"] == "again"
     assert "e" in status["pending"]["turnaround"]
@@ -827,6 +905,16 @@ def test_every_attempt_in_the_status_history_carries_the_file_the_store_persiste
 
 
 def test_an_attempt_with_no_file_recorded_reports_no_path_rather_than_a_guess(draft):
+    """Absence is `None`, and it has exactly one spelling in this payload.
+
+    `""` is not a path. A consumer handed one cannot tell "no image was
+    recorded" from any other empty value, and an agent following the
+    `MEDIA:<path>` protocol interpolates it into a bare `MEDIA:` line. The store
+    already answers `Path | None`; the killing mutation is the `str(x or "")`
+    that flattened it at the payload boundary — which is what `authored_by` was
+    fixed for while these three fields, in the same response, kept the old
+    spelling.
+    """
     draft.run_turnaround()
     item_dir = draft.store.root / turnaround_item("e")
     state = json.loads((item_dir / STATE_FILENAME).read_text(encoding="utf-8"))
@@ -835,8 +923,12 @@ def test_an_attempt_with_no_file_recorded_reports_no_path_rather_than_a_guess(dr
 
     item = draft.status_payload()["turnaround"]["e"]
 
-    assert item["history"][0]["path"] == ""
-    assert item["current"] == ""
+    assert item["history"][0]["path"] is None
+    assert item["current"] is None
+    assert item["approvedPath"] is None
+    # Every path field in the item agrees: one spelling of "nothing here".
+    paths = [item["approvedPath"], item["current"], *(e["path"] for e in item["history"])]
+    assert "" not in paths
 
 
 def test_status_reports_what_has_not_been_generated_yet(draft):

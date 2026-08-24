@@ -37,7 +37,7 @@ from pathlib import Path
 
 from agent.charsheet import prompts
 from agent.charsheet.palette import DEFAULT_MAX_COLORS, build_palette, lock_to_palette
-from agent.charsheet.spec import RowSpec, SheetSpec
+from agent.charsheet.spec import CHAR8, RowSpec, SheetSpec
 
 # --- Upstream reuse (the ONE intentional drift surface) ----------------------
 # House policy: import upstream pixel machinery, never edit or copy it. The two
@@ -101,22 +101,62 @@ MAGENTA: tuple[int, int, int] = (255, 0, 255)
 # renders, costs a full-image composite, and changes nothing.
 QA_BACKDROP: tuple[int, int, int, int] = (18, 18, 22, 255)
 
-# Ceiling on what a QA crop may DECODE to, evaluated before the resize.
+# Two bounds with two different correct values. They were ONE number until a
+# 2026-08-24 re-review, and one number could not be right for both.
 #
-# The old ceiling was a bare `1 <= scale <= 8`: a count with no relationship to
-# the source. `--scale 8` on a live 1536x1024 row attempt wrote 12288x8192 =
-# 100_663_296 pixels — past Pillow's own `Image.MAX_IMAGE_PIXELS` bomb threshold
-# (89_478_485), so the verb produced a file Pillow refuses to reopen without a
-# `DecompressionBombWarning`, and RAISES for a caller running under `-W error`.
-# The quantity a caller cares about is the output's pixel count; a scale factor
-# alone can never express it, because the same factor is harmless on one source
-# and a bomb on another.
+# `MAX_THUMB_PIXELS` is the WRITE-SAFETY ceiling — what this package may put on
+# disk at all, evaluated before the resize. The old ceiling was a bare
+# `1 <= scale <= 8`: a count with no relationship to the source. `--scale 8` on a
+# live 1536x1024 row attempt wrote 12288x8192 = 100_663_296 pixels — past
+# Pillow's own `Image.MAX_IMAGE_PIXELS` bomb threshold (89_478_485), so the verb
+# produced a file Pillow refuses to reopen without a `DecompressionBombWarning`,
+# and RAISES for a caller running under `-W error`. The quantity a caller cares
+# about is the output's pixel count; a scale factor alone can never express it,
+# because the same factor is harmless on one source and a bomb on another.
 #
-# 16M pixels is 64 MiB decoded RGBA: under a fifth of Pillow's threshold (so a
-# crop this package writes always reopens cleanly) and ~5x the largest sheet it
-# composes (1536x2080 = 3_194_880). A default 2x single-frame crop is ~0.8M, so
-# the budget only bites on a deliberate deep zoom.
+# 16M pixels is 64 MiB decoded RGBA: under a fifth of Pillow's threshold, so a
+# crop this package writes always reopens cleanly.
 MAX_THUMB_PIXELS = 16_000_000
+
+# `MAX_CARD_PIXELS` is the CARD-WEIGHT budget, and it is the bound the crop verb
+# exists to serve. Launcher risk D.3 asks `thumb` to retire the cost of decoding
+# a full sheet into a chat card, and states the check plainly: *a crop that is
+# not smaller than the sheet is not a mitigation.* A bomb threshold cannot
+# express that — it sits 28x above the sheet, so `--scale 8` on a live attempt
+# passed the write ceiling at 2176x5792 = 12_603_392 px, 3.94x the sheet it is
+# supposed to be lighter than, and nothing in the payload said so.
+#
+# So the card budget IS the sheet, derived rather than restated: the largest
+# sheet this package composes (`CHAR8`, 1536x2080 = 3_194_880 px / 12.2 MiB
+# decoded RGBA). A sheet that grows moves the budget with it, and the number can
+# never drift from the thing it is measured against.
+MAX_CARD_PIXELS = CHAR8.sheet_size()[0] * CHAR8.sheet_size()[1]
+
+
+def require_scale(scale) -> int:
+    """The ONE gate on an upscale factor; returns it, or refuses with a reason.
+
+    Public because two callers must agree: :func:`upscale_on_backdrop` reads it
+    before allocating, and a caller weighing the OUTPUT against a budget has to
+    know the number is an int before multiplying by it — ``512 * "2"`` is a
+    perfectly good string, and arithmetic on one is how a type error reaches a
+    consumer wearing a budget refusal's clothes. A second spelling of this
+    check is a second answer to "is 0 a scale?".
+    """
+    if isinstance(scale, bool) or not isinstance(scale, int) or scale < 1:
+        raise ValueError(f"scale must be an integer >= 1, got {scale!r}")
+    return scale
+
+
+def fits_card_budget(width: int, height: int) -> bool:
+    """Is a ``width`` x ``height`` image light enough to draw as a chat card?
+
+    Pure, and public because the answer is a FACT a payload has to carry: the
+    verb that writes a crop cannot know whether its caller will declare the path
+    to a card or open it in a fullscreen viewer, so it reports which the file is
+    fit for instead of guessing. See :data:`MAX_CARD_PIXELS`.
+    """
+    return width * height <= MAX_CARD_PIXELS
 
 # A non-directional state has no facing to hold, but the row prompt is built
 # around explicit view language. Front view is the neutral choice: it is the one
@@ -276,24 +316,26 @@ def upscale_on_backdrop(
     stands (for an image that is already a cutout). An image that already
     carries transparency is left alone by the keyer either way.
 
-    The output pixel count is budgeted BEFORE the resize
-    (:data:`MAX_THUMB_PIXELS`) and the refusal names the source dimensions, so a
-    caller can see which half of ``source x scale**2`` was the problem.
+    The output pixel count is checked against the WRITE-SAFETY ceiling BEFORE
+    the resize (:data:`MAX_THUMB_PIXELS`) and the refusal names the source
+    dimensions, so a caller can see which half of ``source x scale**2`` was the
+    problem. That ceiling is about what may exist on disk, not about what a chat
+    card may decode — the card-weight bound is :data:`MAX_CARD_PIXELS`, and it
+    is applied by the verb that knows which crop is the default one.
 
     Returns an RGBA image whose alpha is 255 everywhere: the caller writes a
     picture, not a mask, and "is it opaque?" must be answerable from the file.
     """
     from PIL import Image
 
-    if isinstance(scale, bool) or not isinstance(scale, int) or scale < 1:
-        raise ValueError(f"scale must be an integer >= 1, got {scale!r}")
+    scale = require_scale(scale)
     source = _open_rgba(image_or_path)
     pixels = source.width * source.height * scale * scale
     if pixels > MAX_THUMB_PIXELS:
         raise ValueError(
             f"scale {scale} on a {source.width}x{source.height} source would write "
             f"{source.width * scale}x{source.height * scale} = {pixels:,} pixels, "
-            f"over the {MAX_THUMB_PIXELS:,}-pixel QA-crop budget; ask for a smaller "
+            f"over the {MAX_THUMB_PIXELS:,}-pixel write budget; ask for a smaller "
             "scale, or a single frame instead of a whole strip"
         )
     if chroma_key is not None:
