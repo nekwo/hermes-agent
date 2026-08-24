@@ -543,6 +543,90 @@ class TestRegression_ToolsetScoping:
         # core tools are never deferrable
         assert "terminal" not in names
 
+    # ---- inline schemas on top search hits (kills the describe round-trip) ----
+
+    def test_search_hits_include_parameters_for_top_hits(self):
+        from tools.tool_search import (
+            ToolSearchConfig, dispatch_tool_search, _SEARCH_HIT_SCHEMA_TOP_N,
+        )
+
+        props: Dict[str, Any] = {}
+        defs: List[Dict[str, Any]] = []
+        for i in range(6):
+            name = f"mcp_inline_sch_{i}"
+            self._register(name, "mcp-inline-sch")
+            props[name] = {f"arg_{i}": {"type": "string", "description": f"argument {i}"}}
+            defs.append(_td(name, "Inline schema probe tool.", props[name]))
+
+        parsed = json.loads(dispatch_tool_search(
+            {"query": "inline schema probe", "limit": 6},
+            current_tool_defs=defs,
+            config=ToolSearchConfig.from_raw({"enabled": "on"}),
+        ))
+        matches = parsed["matches"]
+        assert len(matches) == 6, f"expected all 6 probes to match, got {len(matches)}"
+
+        assert "parameters" in matches[0], (
+            "top search hit carries no inline parameters schema — the model is "
+            "forced back into a tool_describe round-trip"
+        )
+        assert matches[0]["parameters"]["properties"] == props[matches[0]["name"]], (
+            "inline schema does not match the tool's registered parameters"
+        )
+        for m in matches[:_SEARCH_HIT_SCHEMA_TOP_N]:
+            assert "parameters" in m, f"top hit '{m['name']}' is missing parameters"
+        for m in matches[_SEARCH_HIT_SCHEMA_TOP_N:]:
+            assert "parameters" not in m, (
+                f"hit '{m['name']}' is past the top-{_SEARCH_HIT_SCHEMA_TOP_N} "
+                "cutoff and must stay schema-less"
+            )
+
+    def test_search_hit_schema_cap_omits_oversized(self):
+        from tools.tool_search import (
+            ToolSearchConfig, dispatch_tool_search, _SEARCH_HIT_SCHEMA_MAX_CHARS,
+        )
+
+        name = "mcp_oversized_sch_tool"
+        self._register(name, "mcp-oversized-sch")
+        big = {"blob": {"type": "string",
+                        "description": "x" * (_SEARCH_HIT_SCHEMA_MAX_CHARS + 1000)}}
+        defs = [_td(name, "Oversized schema probe.", big)]
+
+        parsed = json.loads(dispatch_tool_search(
+            {"query": "oversized schema probe"},
+            current_tool_defs=defs,
+            config=ToolSearchConfig.from_raw({"enabled": "on"}),
+        ))
+        match = parsed["matches"][0]
+        assert match["name"] == name
+        assert "parameters" not in match, (
+            "an over-cap schema was inlined anyway — one pathological MCP tool "
+            "can now blow up every search result"
+        )
+        # Name + description still survive, so tool_describe remains reachable.
+        assert match["description"] == "Oversized schema probe."
+
+    def test_bridge_description_licenses_skipping_describe(self):
+        from tools.tool_search import assemble_tool_defs, ToolSearchConfig
+
+        for i in range(5):
+            self._register(f"mcp_desc_lic_{i}", "mcp-desc-lic")
+        defs = [_td(f"mcp_desc_lic_{i}", "Deferred.") for i in range(5)]
+        result = assemble_tool_defs(
+            defs, context_length=200_000,
+            config=ToolSearchConfig.from_raw({"enabled": "on"}),
+        )
+        assert result.activated
+        search = next(t for t in result.tool_defs
+                      if t["function"]["name"] == "tool_search")
+        desc = search["function"]["description"]
+        assert "full `parameters` schema" in desc, (
+            "bridge description does not advertise inline schemas"
+        )
+        assert "invoke it directly with `tool_call`" in desc, (
+            "bridge description does not license skipping tool_describe"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Catalog listing (skills-style progressive disclosure)

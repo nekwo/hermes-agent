@@ -702,9 +702,11 @@ def bridge_tool_schemas(
     """
     desc_search = (
         f"Search {deferred_count} additional tools that are loaded on demand. "
-        "Returns up to ``limit`` matches with name and description. Follow "
-        f"with `{TOOL_DESCRIBE_NAME}` to load a tool's full parameter schema, "
-        f"then `{TOOL_CALL_NAME}` to invoke it. Tools listed at the top of this "
+        "Returns up to ``limit`` matches with name, description, and — for the "
+        "top matches — the full `parameters` schema. When a match includes "
+        f"`parameters`, invoke it directly with `{TOOL_CALL_NAME}`; "
+        f"`{TOOL_DESCRIBE_NAME}` is only needed for matches without one. "
+        "Tools listed at the top of this "
         "system prompt are already available and do not need to be searched."
     )
     if listing and listing_form == "groups":
@@ -965,14 +967,36 @@ def is_bridge_tool(name: str) -> bool:
     return name in BRIDGE_TOOL_NAMES
 
 
-def _format_search_hit(entry: CatalogEntry) -> Dict[str, Any]:
-    return {
+# How many search hits carry their full ``parameters`` schema inline. The
+# describe round-trip after a search is the single most common wasted model
+# iteration in the bridge lane (~3-6 s), and the model almost always invokes
+# one of the first few hits — so pay a few hundred tokens on the top matches
+# and let it skip describe entirely.
+_SEARCH_HIT_SCHEMA_TOP_N = 3
+# Per-hit cap on ``json.dumps(parameters)``. A healthy tool's schema is a few
+# thousand chars (agent_chat_send is ~3.5 K); this keeps one pathological MCP
+# schema from blowing up the whole search result. Over the cap, the hit is
+# served schema-less and the model falls back to ``tool_describe``.
+_SEARCH_HIT_SCHEMA_MAX_CHARS = 6_000
+
+
+def _format_search_hit(entry: CatalogEntry, *,
+                       include_parameters: bool = False) -> Dict[str, Any]:
+    hit: Dict[str, Any] = {
         "name": entry.name,
         "source": entry.source,
         "source_name": entry.source_name,
         # Cap description so a chatty MCP server doesn't blow up the result.
         "description": (entry.description or "")[:400],
     }
+    if include_parameters:
+        params = ((entry.schema.get("function") or {}).get("parameters")) or {}
+        try:
+            if len(json.dumps(params, ensure_ascii=False)) <= _SEARCH_HIT_SCHEMA_MAX_CHARS:
+                hit["parameters"] = params
+        except (TypeError, ValueError):
+            pass  # unserializable schema → the describe path still serves it
+    return hit
 
 
 def dispatch_tool_search(args: Dict[str, Any],
@@ -998,7 +1022,10 @@ def dispatch_tool_search(args: Dict[str, Any],
     return json.dumps({
         "query": query,
         "total_available": len(catalog),
-        "matches": [_format_search_hit(h) for h in hits],
+        "matches": [
+            _format_search_hit(h, include_parameters=(i < _SEARCH_HIT_SCHEMA_TOP_N))
+            for i, h in enumerate(hits)
+        ],
     }, ensure_ascii=False)
 
 
