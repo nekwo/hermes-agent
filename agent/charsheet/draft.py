@@ -254,13 +254,19 @@ def _strip_filename(key: str, attempt: int) -> str:
     return f"{key}-{attempt}.png"
 
 
-def _path_or_none(path: Path | None) -> str | None:
+def path_or_none(path: Path | None) -> str | None:
     """One spelling of "there is no file here" for the whole payload.
 
     A path field is a ``str`` or ``None``; ``""`` is neither, and it is what a
     consumer gets when a ``Path | None`` is coerced through ``str(x or "")``.
     Every path in ``status --json`` goes through here so absence cannot acquire
     a second spelling one field at a time.
+
+    **Public because the rule is not this module's alone.** It shipped private
+    and ``hermes_cli.harness._characters_draft_summary`` — the ``list`` row,
+    carrying the same ``baseImage`` field — kept its own ``str(x) if x else ""``
+    for exactly as long. A one-module helper enforcing a payload-wide rule is
+    how the fourth field got missed; the CLI imports this one now.
     """
     return str(path) if path is not None else None
 
@@ -933,9 +939,17 @@ class CharacterDraft:
     def status_payload(self) -> dict:
         """Everything a QA UI needs: stage, spec summary, per-item history.
 
-        JSON-safe by construction (paths are strings). ``current`` is the approved
-        image when there is one and the latest attempt otherwise, so a pending item
-        is still displayable.
+        JSON-safe by construction. ``current`` is the approved image when there is
+        one and the latest attempt otherwise, so a pending item is still
+        displayable.
+
+        **Every path in this payload is a ``str`` or JSON ``null``** — including
+        ``baseImage``, which is the one ``path_or_none`` did NOT reach when the
+        rule was first written. It answered ``""`` for a draft with no base image
+        beside ``authoredBy: null`` and ``history[].path: null`` in the same
+        response, which is exactly the two-spellings defect the helper exists to
+        retire, one field later. ``list`` carries the same field
+        (``_characters_draft_summary``) and answers the same way.
         """
         spec = self.spec
         store = self.store
@@ -962,7 +976,7 @@ class CharacterDraft:
             "stages": list(STAGES),
             "created": str(self._data.get("created", "")),
             "updated": str(self._data.get("updated", "")),
-            "baseImage": str(base) if base else "",
+            "baseImage": path_or_none(base),
             "spec": {
                 **spec_to_dict(spec),
                 "rows": [_row_json(row) for row in spec.rows()],
@@ -1013,13 +1027,13 @@ class CharacterDraft:
             "key": key,
             "attempts": len(history),
             "approved": approved,
-            "approvedPath": _path_or_none(approved_path),
-            "current": _path_or_none(current),
+            "approvedPath": path_or_none(approved_path),
+            "current": path_or_none(current),
             "rejected": [i for i, record in enumerate(history) if record.get("rejected")],
             "history": [
                 {
                     "attempt": index,
-                    "path": _path_or_none(store.attempt_path(key, index)),
+                    "path": path_or_none(store.attempt_path(key, index)),
                     "note": str(record.get("note", "")),
                     "created": str(record.get("created", "")),
                     "rejected": bool(record.get("rejected")),

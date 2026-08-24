@@ -8,3 +8,8 @@ web/package-lock.json linguist-generated=true
 Dockerfile  text eol=lf
 *.dockerfile text eol=lf
 docker/entrypoint.sh text eol=lf
+
+# Same reason, different shell: git runs hooks through sh, and a CRLF shebang
+# line fails as "bad interpreter". The hooks carry no extension, so the *.sh
+# rule above does not reach them.
+.githooks/* text eol=lf

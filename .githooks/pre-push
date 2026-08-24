@@ -1,0 +1,72 @@
+#!/bin/sh
+# Pre-push gate: the runtime's copy of every canonical shared skill must be this
+# repo's copy.
+#
+# Install this once per clone:
+#
+#     git config core.hooksPath .githooks
+#
+# (git config is per-clone and shared by every worktree of it, so one command
+# covers the primary checkout and every `git worktree add` under it.)
+#
+# WHY A HOOK AND NOT A TEST. A chat turn loads
+# `<hermes root>/shared/skills/<id>/SKILL.md`, never the repo's
+# `docs/agent-runtime-harness/harness-skills/<id>/SKILL.md` — the resolver
+# refuses a non-`shared_core` candidate for any canonical id. The two copies are
+# joined by an explicit `harness install-harness-skills` and by nothing else, so
+# a commit that edits the repo copy changes what the docs say and changes
+# nothing an agent reads. A unit test cannot see that: it reads the tree, which
+# is correct by construction. The join lives on the machine, and a push is the
+# moment a repo-side edit and a machine are both in front of us.
+#
+# It repairs before it verifies, on purpose. Divergence here is stale MACHINE
+# STATE, not a defect in the tree, and the right answer to it is to fix it —
+# the verify afterwards is what turns that into a gate: an install that did not
+# take fails the push instead of passing silently.
+#
+# Cost when nothing drifted: one Python start plus seven small file hashes.
+# `install_harness_skill` writes nothing when the hashes already match.
+#
+# A push that only deletes a remote ref is skipped; anything else runs. There is
+# deliberately no "did this push touch a skill file" trigger set — the check is
+# cheap, and the drift it catches was introduced by commits that are already
+# pushed.
+
+set -e
+
+z40='0000000000000000000000000000000000000000'
+deletes_only=1
+saw_ref=0
+
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+    saw_ref=1
+    if [ "$local_sha" != "$z40" ]; then
+        deletes_only=0
+    fi
+done
+
+if [ "$saw_ref" = "1" ] && [ "$deletes_only" = "1" ]; then
+    exit 0
+fi
+
+repo_root=$(git rev-parse --show-toplevel)
+script="$repo_root/scripts/verify_harness_skill_install.py"
+
+if [ ! -f "$script" ]; then
+    echo "pre-push: $script is missing — cannot verify the installed skill packages." >&2
+    exit 1
+fi
+
+# Fail loud on a missing interpreter rather than skipping the gate: a gate that
+# quietly does not run is worse than no gate (the launcher's Stage C tier sat
+# red for twelve days behind exactly that shape).
+if command -v python >/dev/null 2>&1; then
+    py=python
+elif command -v python3 >/dev/null 2>&1; then
+    py=python3
+else
+    echo "pre-push: no python on PATH — cannot verify the installed skill packages." >&2
+    exit 1
+fi
+
+"$py" "$script"

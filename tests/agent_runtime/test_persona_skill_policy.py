@@ -125,6 +125,26 @@ def test_charsheet_skill_is_a_canonical_skill_the_authoring_persona_preloads():
     assert "name: harness-charsheet-authoring" in text
 
 
+_CHARSHEET_VERB_TABLE_HEADER = "| Verb | What it does | Stage it needs |"
+
+
+def _charsheet_verb_table() -> str:
+    """Just the verb table — the rest of the skill is not a verb list.
+
+    Scoped deliberately. This used to sweep the WHOLE file for ``^| `token``,
+    which meant any second markdown table whose first cell opened with a
+    backticked lowercase word would join the documented verb set and fail this
+    test against a file that is perfectly correct. The table is addressed by its
+    header, and the header's absence is its own failure rather than a silently
+    empty set.
+    """
+    text = _charsheet_skill_text()
+    assert _CHARSHEET_VERB_TABLE_HEADER in text, (
+        "the charsheet skill's verb table header moved; this test addresses it by name"
+    )
+    return text.split(_CHARSHEET_VERB_TABLE_HEADER, 1)[1].split("\n\n", 1)[0]
+
+
 def test_charsheet_skill_documents_exactly_the_characters_verbs_hermes_has():
     """The skill's verb table is pinned to the live parser tree.
 
@@ -136,7 +156,7 @@ def test_charsheet_skill_documents_exactly_the_characters_verbs_hermes_has():
 
     documented = {
         match.group(1)
-        for match in re.finditer(r"^\| `([a-z][a-z-]*)", _charsheet_skill_text(), re.MULTILINE)
+        for match in re.finditer(r"^\| `([a-z][a-z-]*)", _charsheet_verb_table(), re.MULTILINE)
     }
 
     assert documented == _live_characters_verbs()
@@ -155,6 +175,140 @@ def test_charsheet_skill_teaches_the_looking_procedure_not_just_the_verbs():
     assert "`CHARSHEET-QA:{json}`" in text
     # A restricted session is not a broken feature.
     assert "chat_lane_restore_toolsets" in text
+
+
+def test_charsheet_skill_teaches_all_three_environment_traps():
+    """Plan §F.7's three traps, not two of them.
+
+    Trap 2 shipped missing. It is the one that fires immediately AFTER the
+    operator does the right thing about trap 1: the plan upgrade invalidates the
+    stored token, the ``image_gen`` probe comes back ``401 token_expired`` with a
+    local expiry still hours out, and the skill's only scripted answer was
+    "report the image provider is unavailable in this home" — which sends the
+    operator to check ``auth.json`` placement, correct for trap 1 and wrong here.
+    """
+    text = _charsheet_skill_text()
+
+    # 1 — the plan-gated account that fails politely at HTTP 200.
+    assert "`image_generation` tool silently stripped" in text
+    # 2 — the stale token a plan change leaves behind.
+    assert "`401 token_expired`" in text
+    assert "STALE STORED TOKEN, not" in text
+    assert "Force a refresh and" in text
+    # 3 — HERMES_HOME is not one value.
+    assert "A relative `HERMES_HOME` resolves against the shell's cwd" in text
+
+
+def _charsheet_qa_line_contract() -> dict:
+    """The fixture risk D.5 names, hermes-side."""
+    import json
+
+    path = Path(__file__).resolve().parents[1] / "fixtures" / "charsheet_qa_line.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_charsheet_qa_line_fixture_pins_the_key_set_the_skill_promises():
+    """The producer half of risk D.5's cross-repo pin.
+
+    The ``CHARSHEET-QA:`` line has no code producer — an agent emits it, guided
+    by the skill body — and no code consumer in this repo either; the launcher's
+    B2 card and P1 project creation read it. Which meant the only thing pinning
+    its key set was prose inside a skill package the runtime loads from a copy
+    this repo does not control (see the pre-push gate). So the fixture is the
+    pin, and this test is the producer half of it: change what the skill
+    promises and the fixture must move with it, in the same commit, or the
+    launcher's twin fixture is parsing a shape nobody emits any more.
+    """
+    import json
+    import re
+
+    contract = _charsheet_qa_line_contract()
+    text = _charsheet_skill_text()
+
+    # What the skill promises, read out of the skill rather than restated here.
+    body = text.split("**`CHARSHEET-QA:{json}`**", 1)[1].split("- **Clarify chips**", 1)[0]
+    spans = [span for span in re.findall(r"`([^`]+)`", body) if '":' in span]
+    assert len(spans) == 2, f"expected a required object and an optional tail, got {spans!r}"
+    promised_required = re.findall(r'"([A-Za-z]+)"\s*:', spans[0])
+    promised_optional = re.findall(r'"([A-Za-z]+)"\s*:', spans[1])
+
+    assert promised_required == contract["requiredKeys"]
+    assert promised_optional == contract["optionalKeys"]
+
+    # And every pinned line is that shape, literally — prefix, then one JSON
+    # object, on one line. This is the byte sequence the launcher's twin parses.
+    for name, line in contract["lines"].items():
+        assert "\n" not in line, f"{name}: the line is one line"
+        assert line.startswith(contract["prefix"]), f"{name}: wrong prefix"
+        payload = json.loads(line[len(contract["prefix"]) :])
+        assert set(contract["requiredKeys"]) <= set(payload), f"{name}: missing a required key"
+        assert set(payload) <= set(contract["requiredKeys"]) | set(
+            contract["optionalKeys"]
+        ), f"{name}: carries a key the skill never promised"
+        assert all(str(value).strip() for value in payload.values()), f"{name}: empty value"
+
+
+def _write_skill_package(root: Path, skill: str, body: str) -> Path:
+    package = root / skill
+    package.mkdir(parents=True, exist_ok=True)
+    path = package / "SKILL.md"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_installed_canonical_skill_drift_fails_the_pre_push_gate(tmp_path, monkeypatch, capsys):
+    """The join A0 shipped without a gate: the repo copy vs the copy turns READ.
+
+    ``docs/agent-runtime-harness/harness-skills/<id>/SKILL.md`` is the source;
+    a chat turn loads ``<hermes root>/shared/skills/<id>/SKILL.md`` and nothing
+    else, because ``agent.skill_utils`` refuses any candidate for a canonical id
+    whose ``source_kind`` is not ``shared_core``. Nothing joins the two on
+    commit. On 2026-08-24 two edits to the charsheet skill landed on ``main``
+    and reached no turn at all — and every test stayed green throughout, because
+    every test reads the repo copy.
+
+    So this exercises the verifier the pre-push hook runs, at the level the
+    guarantee lives at: against an INSTALLED package. ``--check`` reports and
+    never repairs; the default mode repairs first, then still verifies, so an
+    install that did not take fails rather than passing quietly.
+    """
+    from scripts.verify_harness_skill_install import main
+
+    source_root = tmp_path / "repo-skills"
+    shared_root = tmp_path / "shared" / "skills"
+    skill = "harness-continuity"  # a real canonical id — the installer refuses any other
+
+    monkeypatch.setattr(
+        "agent_runtime.skill_install.harness_skill_source_root", lambda: source_root
+    )
+    monkeypatch.setattr("agent_runtime.skill_install.get_shared_skills_dir", lambda: shared_root)
+    monkeypatch.setattr("agent_runtime.skill_install.HARNESS_SKILLS", frozenset({skill}))
+    monkeypatch.setattr("hermes_constants.CANONICAL_SHARED_SKILL_IDS", frozenset({skill}))
+
+    _write_skill_package(source_root, skill, "# v1\n")
+
+    # Never installed is not clean: the resolver would answer nothing at all.
+    assert main(["--check"]) == 1
+    assert "NOT INSTALLED" in capsys.readouterr().out
+
+    assert main([]) == 0
+    installed = shared_root / skill / "SKILL.md"
+    assert installed.read_text(encoding="utf-8") == "# v1\n"
+
+    # The exact 2026-08-24 shape: the repo copy moves on, the installed one does not.
+    _write_skill_package(source_root, skill, "# v2 — the sentence no turn ever read\n")
+    assert main(["--check"]) == 1
+    assert "DIVERGED" in capsys.readouterr().out
+
+    # Repair mode closes it, and the runtime's copy is the repo's again.
+    assert main([]) == 0
+    assert installed.read_text(encoding="utf-8") == "# v2 — the sentence no turn ever read\n"
+
+    # And drift introduced on the INSTALLED side is caught from that direction too.
+    installed.write_text(installed.read_text(encoding="utf-8") + "edited in place\n", encoding="utf-8")
+    assert main(["--check"]) == 1
+    assert "DIVERGED" in capsys.readouterr().out
+    assert main([]) == 0
 
 
 def test_mission_lead_skill_answers_graph_from_supplied_task_plan():

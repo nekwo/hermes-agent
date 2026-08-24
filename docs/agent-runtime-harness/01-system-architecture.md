@@ -229,10 +229,32 @@ package to the single shared canonical root, `get_shared_skills_dir()` —
 root-relative, not per-profile, so every persona references one copy and realm
 sync publishes it (`skill_install.py:38-43`). Never edit the installed copy.
 
-The six directories present match `hermes_constants.CANONICAL_SHARED_SKILL_IDS`
-(`hermes_constants.py:19-28`) exactly: `harness-mission-lead`,
-`harness-dev-delivery`, `harness-continuity`, `harness-qa-verdict`,
-`harness-runtime-model` and `launcher-analyze-proof`.
+The directories present match `hermes_constants.CANONICAL_SHARED_SKILL_IDS`
+(`hermes_constants.py:19-28`) exactly — seven since 2026-08-24:
+`harness-mission-lead`, `harness-dev-delivery`, `harness-continuity`,
+`harness-qa-verdict`, `harness-runtime-model`, `harness-charsheet-authoring`
+and `launcher-analyze-proof`. Read the constant for the count; this list is a
+gloss and went stale within a day of `harness-charsheet-authoring` joining it.
+
+**The two copies are joined by `install-harness-skills` and by nothing else,
+and the pre-push hook is what makes that reliable.** A turn loads the INSTALLED
+package — for a canonical id the resolver rejects every other candidate
+(`skill_utils._skill_resolution_status` → `invalid_source` for any
+`source_kind` but `shared_core`) — so a commit that edits the repo copy changes
+the documentation and changes nothing an agent reads. It happened: the
+`harness-charsheet-authoring` package was installed at `5504706978` and edited
+twice more the same hour; the installed copy stayed 449 B behind for two days,
+and the live gate turn's `used_skills` row carried the stale package's hash.
+Tests do not see this — they read the tree, which is correct by construction.
+So the check runs where the guarantee lives, on the machine:
+`scripts/verify_harness_skill_install.py` installs every canonical package and
+then fails if `harness_skill_hash_mismatches` is non-empty (`--check` verifies
+without writing), and `.githooks/pre-push` runs it on every push. **One command
+per clone arms it** — `git config core.hooksPath .githooks`, which git shares
+across every worktree of that clone. The runtime reports the same divergence
+passively as the `skill_hash_mismatch` readiness code
+(`agent_runtime/profile_readiness.py`), which is where to look when a persona
+is behaving like an older version of its own skill.
 
 Two adjacent lanes are live. `skill_promotion.py` is the one guarded door
 through which downloaded or authored packages become canonical: downloads land

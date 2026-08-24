@@ -3131,7 +3131,16 @@ def _characters_verb(args, call) -> int:
 
 
 def _characters_draft_summary(draft) -> dict:
-    """A list row: identity and shape, without walking the revision store."""
+    """A list row: identity and shape, without walking the revision store.
+
+    ``baseImage`` answers with the SAME spelling of absence ``status --json``
+    uses — a ``str`` or JSON ``null``, never ``""`` — through the one helper
+    (``draft.path_or_none``). ``list`` and ``status`` name the same field, and a
+    consumer that has to remember which of the two flattens absence is a
+    consumer that will get it wrong.
+    """
+    from agent.charsheet.draft import path_or_none
+
     spec = draft.spec
     return {
         "id": draft.id,
@@ -3144,7 +3153,7 @@ def _characters_draft_summary(draft) -> dict:
         "rows": len(spec.rows()),
         "authoredRows": len(spec.authored_rows()),
         "directions": len(spec.scheme.order),
-        "baseImage": str(draft.base_image) if draft.base_image else "",
+        "baseImage": path_or_none(draft.base_image),
         "directory": str(draft.directory),
     }
 

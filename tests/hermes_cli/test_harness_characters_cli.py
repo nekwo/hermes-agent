@@ -605,6 +605,29 @@ def test_an_unattributed_draft_reports_a_null_author_in_every_payload(fake, caps
     # not absent and not "".
     assert status["status"]["authoredBy"] is None
     assert listed["drafts"][0]["authoredBy"] is None
+    # `baseImage` is a PATH field and answers the same way, in both payloads.
+    # It was the one `path_or_none` did not reach — absence kept a second
+    # spelling in the very response that had just been cleaned of it, and the
+    # `MEDIA:<path>` protocol turns `""` into a bare `MEDIA:` line that renders
+    # no card at all.
+    assert status["status"]["baseImage"] is None
+    assert listed["drafts"][0]["baseImage"] is None
+
+
+def test_a_base_image_still_travels_as_a_string_in_every_payload(fake, base_image, capsys):
+    """The other half of the rule: present means a `str`, not a truthy object.
+
+    Fixing absence by returning `None` everywhere would be a payload that never
+    names the file, so the presence case is pinned beside it.
+    """
+    draft_id = start_draft(capsys, "--base-image", str(base_image))
+
+    _, status = run(["harness", "characters", "status", "--draft", draft_id, "--json"], capsys)
+    _, listed = run(["harness", "characters", "list", "--json"], capsys)
+
+    for payload in (status["status"], listed["drafts"][0]):
+        assert isinstance(payload["baseImage"], str)
+        assert Path(payload["baseImage"]).is_file()
 
 
 def test_start_shapes_the_sheet_from_the_states_and_directions_flags(fake, capsys):
@@ -629,7 +652,14 @@ def test_start_shapes_the_sheet_from_the_states_and_directions_flags(fake, capsy
     assert summary["authoredRows"] == len(expected.authored_rows())
     assert summary["slug"] == "a-tall-knight"
     assert summary["stage"] == "turnaround"
-    assert summary["baseImage"] == ""
+    # A draft started without --base-image has no base image, and absence is
+    # spelled the ONE way this payload spells it. This line read `== ""` until
+    # 2026-08-24: `list`'s `baseImage` was the fourth path field still
+    # flattening the store's `Path | None`, in a response whose other three had
+    # already been fixed and whose helper docstring already claimed there was a
+    # single spelling. The test PINNED the defect, which is why a review found
+    # it and the suite did not.
+    assert summary["baseImage"] is None
 
 
 # ────────────────────────────── the error shape ──────────────────────────────

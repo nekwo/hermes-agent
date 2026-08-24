@@ -85,5 +85,18 @@ Focused suites green — `tests/agent/test_charsheet_draft.py`,
 3. asserts the recomposed `character.json` lists three states.
 
 Then live on the `anime-girl` draft: `reopen`, `add-state --state jumping:6`,
-`rows --only jumping-*`, `compose`, and read three states out of the installed
-manifest.
+`rows --only jumping-s,jumping-se,jumping-e,jumping-ne,jumping-n`, `compose`,
+and read three states out of the installed manifest.
+
+**The keys are spelled out because `--only` has no glob.**
+`_cmd_characters_rows` splits the value on commas and hands the parts to
+`run_rows`, which matches row keys EXACTLY — `unknown = [key for key in wanted
+if key not in known]` raises `ValueError` naming the authored rows. An earlier
+wording of this step said `--only jumping-*`; that is not a wildcard, it is one
+unknown row key, and the gate would have died on the first draft it was run
+against. The five keys are `row_key("jumping", d)` over `EIGHT_WAY.authored`
+(`"s", "se", "e", "ne", "n"` — verified in `agent/charsheet/spec.py`), which is
+the scheme the live `anime-girl` draft carries. A `--directions 4` draft
+authors three (`FOUR_WAY.authored` = `"s", "e", "n"`) and its list is shorter by
+two — so read the draft's own `spec.scheme.authored` rather than copying this
+line.

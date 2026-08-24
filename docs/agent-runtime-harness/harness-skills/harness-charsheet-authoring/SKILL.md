@@ -71,6 +71,16 @@ it has no such tool. It reads exactly like a broken plugin. Spend one cheap
 report "the image provider is unavailable in this home" and name the home —
 never start the pipeline and discover it on generation twelve.
 
+- **A `401 token_expired` right after a plan change is a STALE STORED TOKEN, not
+  a missing credential.** An account upgrade invalidates the token already on
+  disk, and it keeps a local expiry hours out — so the probe fails while
+  `auth.json` looks perfectly healthy. This fires immediately after the operator
+  did the right thing about the trap above, which makes it the most confusing
+  one: sending them back to check `auth.json` placement is the correct answer
+  for a home with no credentials and the wrong answer here. Force a refresh and
+  re-probe **before** reporting the provider unavailable; the refreshed token
+  reads the new plan.
+
 ## The verbs
 
 Thirteen, flat, all with `--json`. Every draft verb takes `--draft <id>` as a
@@ -85,7 +95,7 @@ not the slug** (`20260824-140756-cd645a` vs `anime-girl`).
 | `base --draft <id> --image <path>` | Sets/replaces the identity anchor. | any |
 | `turnaround --draft <id>` | One generation per **authored** direction (`s se e ne n` for the 8-way scheme). | `turnaround` |
 | `reroll-direction --draft <id> --direction <d> [--note …]` | Re-draws one direction reference. | `turnaround` |
-| `approve-direction --draft <id> (--direction <d> [--attempt n] \| --all)` | Approving all five advances to `rows`. | `turnaround` |
+| `approve-direction --draft <id> (--direction <d> [--attempt n] \| --all)` | Approving every authored direction advances to `rows`. | `turnaround` |
 | `rows --draft <id> [--only a,b]` | One generation per **row strip** — never per frame. | `rows` |
 | `reroll-row --draft <id> --row <key> [--note …]` | Re-draws one strip. **Auto-approved.** | `rows` |
 | `thumb --draft <id> --row <key> [--attempt n] [--frame n] [--scale n]` | Writes a card-size QA crop of ONE frame. | **any** |
