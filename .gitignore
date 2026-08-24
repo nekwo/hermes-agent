@@ -202,3 +202,9 @@ native/fts5_cjk/*.so
 # interrupted; consumed by launch-time recovery. Never commit it (was tracked
 # by accident via 3a69e34702, removed in the #72002 salvage).
 .lazy-refresh-incomplete
+
+# Runtime profile homes (HERMES_HOME=profiles/<name>). Decision 6 of the
+# console-character-authoring plan puts the character draft root here, so this
+# tree fills with generated sheets, attempt PNGs and revision state. Nothing
+# under it is source; a stray `git add -A` would commit a character corpus.
+/profiles/
