@@ -497,6 +497,43 @@ def test_safe_elements_preserves_todo_state_only_on_todo_tools():
     assert "todo_state" not in elements[1]  # non-todo tool gains no key
 
 
+def test_safe_elements_rebounds_patch_fields_only_where_present():
+    """Defence in depth over the producer cap, and absent-when-absent so a
+    reloaded non-patch element cannot grow a viewer affordance."""
+
+    elements = mission_chat_turns._safe_elements(
+        [
+            {
+                "kind": "tool",
+                "id": "t1_tool_1",
+                "turn_id": "t1",
+                "seq": 1,
+                "state": "settled",
+                "name": "patch",
+                "patch_artifact": "/store/patch_diffs/" + ("d" * 900) + ".diff",
+                "patch_adds": 12,
+                "patch_dels": 3,
+                "patch_mode": "replace",
+            },
+            {
+                "kind": "tool",
+                "id": "t1_tool_2",
+                "turn_id": "t1",
+                "seq": 2,
+                "state": "settled",
+                "name": "terminal",
+            },
+        ]
+    )
+
+    assert len(elements[0]["patch_artifact"]) <= 500
+    assert elements[0]["patch_adds"] == 12
+    assert elements[0]["patch_dels"] == 3
+    assert elements[0]["patch_mode"] == "replace"
+    for key in ("patch_artifact", "patch_adds", "patch_dels", "patch_mode"):
+        assert key not in elements[1]
+
+
 def test_chat_emitter_carries_explicit_empty_todo_state_on_both_lanes():
     # T9d end-to-end on the emit path: a cleared todo checklist arrives as an
     # explicit empty list, and it must ride BOTH the turn-store element and the

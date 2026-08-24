@@ -711,3 +711,80 @@ def test_the_sanitizer_DROPS_what_it_cannot_read_rather_than_defaulting(block):
 def test_the_sanitizer_never_invents_the_anchor():
     assert safe_turn_phases({}) is None
     assert "request_received" not in (safe_turn_phases({"anchored_at": "s"}) or {})
+
+
+# --------------------------------------------------------------------------- #
+# 9. The v2 tool frame carries the patch's diff artifact                       #
+# --------------------------------------------------------------------------- #
+# Lives here because this is the file that already constructs a real
+# `_ChatProtocolV2Emitter`; the claim is about the LIVE-turn carrier, which is
+# the same emitter these phase rows drive. A streaming patch tile and a
+# reloaded one must agree, so the four patch fields have to ride the frame as
+# well as the snapshot, and they must ride it ABSENT-when-absent — a null
+# sentinel would make the launcher's "no affordance" branch unreachable.
+def test_the_tool_finished_frame_carries_the_patch_artifact_and_counts(capsys):
+    import json as _json
+
+    from hermes_cli import harness
+
+    emitter = harness._ChatProtocolV2Emitter(
+        turn_id="turn_patch",
+        client_message_id="client_patch",
+    )
+    emitter.progress(
+        {
+            "type": "run.tool.finished",
+            "tool_name": "patch",
+            "status": "passed",
+            "duration_ms": 42,
+            "changed_files": ["main.dart"],
+            "patch_artifact": r"X:\Unreal Engine\store\patch_diffs\a.diff",
+            "patch_adds": 12,
+            "patch_dels": 3,
+            "patch_mode": "replace",
+        }
+    )
+
+    frames = [
+        _json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.strip()
+    ]
+    finished = next(f for f in frames if f["type"] == "tool.finished")
+    # A path with a space in it survives whole.
+    assert finished["patch_artifact"] == r"X:\Unreal Engine\store\patch_diffs\a.diff"
+    assert finished["patch_adds"] == 12
+    assert finished["patch_dels"] == 3
+    assert finished["patch_mode"] == "replace"
+    # ...and the element the turn store persists agrees with the frame.
+    element = next(e for e in emitter.elements if e.get("kind") == "tool")
+    assert element["patch_artifact"] == finished["patch_artifact"]
+    assert element["patch_adds"] == 12
+
+
+def test_a_non_patch_tool_frame_grows_no_patch_keys(capsys):
+    from hermes_cli import harness
+
+    emitter = harness._ChatProtocolV2Emitter(
+        turn_id="turn_terminal",
+        client_message_id="client_terminal",
+    )
+    emitter.progress(
+        {
+            "type": "run.tool.finished",
+            "tool_name": "terminal",
+            "status": "passed",
+            "command_full": "pytest -q",
+        }
+    )
+
+    import json as _json
+
+    frames = [
+        _json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.strip()
+    ]
+    finished = next(f for f in frames if f["type"] == "tool.finished")
+    for key in ("patch_artifact", "patch_adds", "patch_dels", "patch_mode"):
+        assert key not in finished

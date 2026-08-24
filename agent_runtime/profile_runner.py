@@ -2176,6 +2176,7 @@ def _dev_work_payload(tool_name: str | None, *, status: str, result: Any, invoca
         payload: dict[str, Any] = {"phase": "dev_work", "step": "patch"}
         if operator_paths:
             payload["changed_paths"] = operator_paths
+        payload["patch_mode"] = _patch_mode_token(normalized_tool, invocation)
         if labels:
             joined = ", ".join(labels[:4]) + ("…" if len(labels) > 4 else "")
             payload["changed_files"] = labels
@@ -2189,6 +2190,16 @@ def _dev_work_payload(tool_name: str | None, *, status: str, result: Any, invoca
         else:
             payload["summary"] = "Patch failed"
             payload["patch_summary"] = "Patch failed"
+        if status == "passed":
+            # The diff BODY stays on this machine (see patch_diff_artifacts) —
+            # what joins the payload is the artifact's path and its +/− counts.
+            # `diff` itself is never added to any payload here, and the tripwire
+            # for that is test_profile_runner.py's
+            # `test_progress_adapter_summarizes_patch_tool_result_without_raw_diff`
+            # (it pins THIS payload's exact shape). The observability-lane test
+            # guards the other half — the task lane's allowlist — but it builds
+            # its own payload, so it cannot see a producer regression.
+            payload.update(_patch_diff_fields(result))
         return payload
     if normalized_tool in {"write_file", "edit_file", "file.write", "file.edit"}:
         candidates = _candidate_file_values(result, invocation)
@@ -2216,6 +2227,48 @@ def _dev_work_payload(tool_name: str | None, *, status: str, result: Any, invoca
             payload["file_summary"] = "Code file write failed"
         return payload
     return None
+
+
+#: The two patch grammars, and the only two tokens ``patch_mode`` may carry.
+#: A value from an invocation is admitted only if it is one of these — an
+#: unrecognized mode falls back to the tool's own default rather than putting
+#: caller-supplied prose on the wire.
+_PATCH_MODES = ("replace", "patch")
+
+
+def _patch_mode_token(normalized_tool: str, invocation: Any) -> str:
+    """Which patch grammar this call used: ``replace`` (old/new string) or
+    ``patch`` (V4A).
+
+    The invocation is the authority when it names a valid mode. Absent that, the
+    default is the tool's: ``patch`` defaults to replace mode exactly like
+    ``patch_tool(mode="replace")`` does, and ``apply_patch`` is V4A-only.
+    """
+
+    if isinstance(invocation, dict):
+        mode = str(invocation.get("mode") or "").strip().lower()
+        if mode in _PATCH_MODES:
+            return mode
+    return "patch" if normalized_tool == "apply_patch" else "replace"
+
+
+def _patch_diff_fields(result: Any) -> dict[str, Any]:
+    """Write the call's diff to the local artifact store and name it.
+
+    Lazy import: the artifact module touches the store root, and this module is
+    imported in contexts (tests, tooling) that resolve one only when they must.
+    Best-effort by construction — ``record_patch_diff`` swallows its own
+    failures, and an empty dict here means the tile renders without the viewer
+    affordance, never that the turn breaks.
+    """
+
+    try:
+        from .patch_diff_artifacts import record_patch_diff
+
+        fields = record_patch_diff(result)
+    except Exception:
+        return {}
+    return fields if isinstance(fields, dict) else {}
 
 
 def _candidate_file_values(result: Any, invocation: Any) -> list[Any]:

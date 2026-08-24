@@ -30,6 +30,45 @@ def test_observability_preserves_dev_work_payload_for_mission_control():
     }
 
 
+def test_observability_carries_patch_shape_but_never_the_artifact_path():
+    """Lane separation, pinned.
+
+    This is the Telegram-grade lane: it is path-free by design. The SHAPE of a
+    patch (how many lines moved, which grammar) is safe to carry there; WHERE
+    the diff was written is not, and the artifact path must not appear even
+    though the mission-chat lane carries it happily."""
+
+    payload = _safe_event_payload(
+        {
+            "phase": "dev_work",
+            "step": "patch",
+            "tool_name": "patch",
+            "status": "passed",
+            "patch_summary": "Patched 1 file",
+            "patch_adds": 12,
+            "patch_dels": 3,
+            "patch_mode": "replace",
+            "patch_artifact": (
+                "C:/Users/beast/.hermes/agent-runtime/patch_diffs/x.diff"
+            ),
+        }
+    )
+
+    assert payload == {
+        "phase": "dev_work",
+        "step": "patch",
+        "tool_name": "patch",
+        "status": "passed",
+        "patch_summary": "Patched 1 file",
+        "patch_adds": 12,
+        "patch_dels": 3,
+        "patch_mode": "replace",
+    }
+    encoded = repr(payload)
+    assert "patch_artifact" not in encoded
+    assert "patch_diffs" not in encoded
+
+
 def test_observability_preserves_safe_agent_thinking_summary_only():
     payload = _safe_event_payload(
         {

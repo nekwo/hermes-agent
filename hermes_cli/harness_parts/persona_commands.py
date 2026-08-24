@@ -5615,9 +5615,21 @@ class _ChatProtocolV2Emitter:
         tool_input = _safe_stream_block(payload.get("tool_input"), limit=1200) or tool.get("tool_input")
         if tool_input:
             tool["tool_input"] = tool_input
-        tool_result = _safe_stream_block(payload.get("tool_result"), limit=1800)
-        if tool_result:
-            tool["tool_result"] = tool_result
+        # Patch observability: the local diff artifact's path (same
+        # `_safe_stream_text` grade `command` rides — paths survive it) plus the
+        # +/− counts and the grammar. Scrubbed and bounded at the progress sink;
+        # this is the live-turn carrier of the same four fields the snapshot
+        # lane carries, so a streaming tile and a reloaded one agree.
+        patch_artifact = _safe_stream_text(payload.get("patch_artifact"), limit=500)
+        if patch_artifact:
+            tool["patch_artifact"] = patch_artifact
+        for count_key in ("patch_adds", "patch_dels"):
+            count = payload.get(count_key)
+            if isinstance(count, int) and not isinstance(count, bool):
+                tool[count_key] = count
+        patch_mode = _safe_stream_text(payload.get("patch_mode"), limit=20)
+        if patch_mode:
+            tool["patch_mode"] = patch_mode
         self._emit_chat_frame(
             {
                 "type": "tool.finished",
@@ -5636,6 +5648,14 @@ class _ChatProtocolV2Emitter:
                 "tool_input": tool.get("tool_input"),
                 "tool_result": tool.get("tool_result"),
                 **({"todo_state": tool["todo_state"]} if "todo_state" in tool else {}),
+                # Absent-when-absent, like todo_state: a non-patch tool never
+                # carries these keys at all, so the launcher's "no affordance"
+                # branch is reached by absence rather than by a null sentinel.
+                **{
+                    key: tool[key]
+                    for key in ("patch_artifact", "patch_adds", "patch_dels", "patch_mode")
+                    if key in tool
+                },
             }
         )
 

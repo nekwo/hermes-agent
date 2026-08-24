@@ -356,6 +356,25 @@ def prompt_observability_index_path() -> Path:
     return store_root() / "prompt_observability_index.json"
 
 
+def patch_diffs_dir() -> Path:
+    """The unified diff a patch tool call produced, one ``.diff`` file per call.
+
+    Written at the agent_runtime trace boundary (never by the tools layer, which
+    is upstream-shared and runs in contexts with no store). The TRACE carries
+    only this file's PATH — the diff body never rides a frame, so the operator's
+    viewer reads it locally at view time and nothing is shipped anywhere."""
+    return store_root() / "patch_diffs"
+
+
+def patch_diffs_archive_dir() -> Path:
+    """Retention target for :func:`patch_diffs_dir`: diffs evicted from the live
+    dir MOVE here, same archive-never-delete discipline as
+    :func:`prompt_observability_archive_dir` and with the same unbounded archive
+    side. A trace row whose diff was archived renders its viewer affordance
+    disabled (the path no longer resolves) — honest by construction."""
+    return store_root() / "patch_diffs_archive"
+
+
 # S44 removed the eight role_envelope* / role_checklist* path helpers that lived
 # here. They addressed the two store directories archived aside as writer-less on
 # 2026-07-30; their last readers were the deleted stores and the two checkpoint

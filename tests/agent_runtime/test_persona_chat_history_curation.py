@@ -1437,6 +1437,60 @@ def test_trace_entry_carries_the_dispatch_reply_and_its_author():
     assert finished["dispatch_reply_from"] == "Backend Dev (instance)"
 
 
+def test_trace_entry_carries_the_patch_artifact_path_and_counts():
+    """The artifact PATH needs the operator-line scrub (paths allowed), while
+    the mode token takes the pathish-dropping text scrub — two different grades
+    on one row, and getting them backwards silently drops the path."""
+
+    events = EventLog()
+    ts = now()
+    events.append(
+        Event(
+            ts=ts,
+            type="run.tool.finished",
+            task_id="task_patch",
+            run_id="run_patch",
+            persona_id="neko_supervisor",
+            payload={
+                "phase": "dev_work",
+                "step": "patch",
+                "tool_name": "patch",
+                "status": "passed",
+                "summary": "Patched 1 files: main.dart",
+                "patch_artifact": (
+                    r"X:\Unreal Engine\store\patch_diffs"
+                    r"\20260824T120000Z_deadbeef1234.diff"
+                ),
+                "patch_adds": 12,
+                "patch_dels": 3,
+                "patch_mode": "replace",
+            },
+        )
+    )
+
+    rows = persona_chat_trace_summary(
+        persona_instances=[
+            _persona_instance("personainst_neko", "neko_supervisor", "task_patch")
+        ],
+        event_log=events,
+    )
+
+    finished = next(
+        entry
+        for entry in rows[0]["entries"]
+        if entry["event"] == "tool_finished"
+    )
+    assert finished["patch_artifact"].endswith("20260824T120000Z_deadbeef1234.diff")
+    # The space in "Unreal Engine" survives: the one-line scrub collapses runs
+    # of whitespace, it does not strip separators out of a path.
+    assert "Unreal Engine" in finished["patch_artifact"]
+    assert finished["patch_adds"] == 12
+    assert finished["patch_dels"] == 3
+    assert finished["patch_mode"] == "replace"
+    # And the diff BODY is nowhere on the entry, under any key.
+    assert "diff" not in {key for key in finished if key != "patch_artifact"}
+
+
 def test_trace_entry_carries_generic_tool_io():
     events = EventLog()
     ts = now()

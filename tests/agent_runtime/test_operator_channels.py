@@ -1184,6 +1184,63 @@ def test_tool_call_message_carries_the_dispatch_reply_and_its_author():
     assert dispatch["tool"]["dispatch_reply_from"] == "Backend Dev (instance)"
 
 
+def test_tool_call_message_carries_the_patch_artifact_and_counts():
+    """Newest-wins through the merge for the patch row: only the FINISHED entry
+    has a diff to name, so the collapsed tool_call the launcher reads must pick
+    it up from there."""
+
+    ts = now()
+    channels = operator_channel_summary(
+        persona_instances=[_dev_task_instance(ts)],
+        persona_chat_history=[],
+        persona_chat_trace=[
+            {
+                "session_id": "20260705_dev_session",
+                "persona_id": "dev",
+                "persona_instance_id": "personainst_dev",
+                "task_id": "task_goal",
+                "entries": [
+                    {
+                        "event": "tool_started",
+                        "tool_name": "patch",
+                        "summary": "Started tool patch",
+                        "status": "started",
+                        "run_id": "run_a",
+                        "ts": "2026-07-05T05:48:03Z",
+                    },
+                    {
+                        "event": "tool_finished",
+                        "tool_name": "patch",
+                        "summary": "Patched 1 files: main.dart",
+                        "status": "passed",
+                        "run_id": "run_a",
+                        "patch_artifact": "/store/patch_diffs/20260705T054809Z_ab12cd34ef56.diff",
+                        "patch_adds": 12,
+                        "patch_dels": 3,
+                        "patch_mode": "replace",
+                        "ts": "2026-07-05T05:48:09Z",
+                    },
+                ],
+            }
+        ],
+    )
+
+    tool_calls = [
+        message
+        for message in channels[0]["conversation"]["messages"]
+        if message["kind"] == "tool_call"
+    ]
+    patch = next(m for m in tool_calls if m["tool"]["tool_name"] == "patch")
+    assert patch["tool"]["patch_artifact"] == (
+        "/store/patch_diffs/20260705T054809Z_ab12cd34ef56.diff"
+    )
+    # Counts ride the INT arm, not the string one — a count rendered as "12"
+    # would fail the launcher's int parse and silently drop the chip.
+    assert patch["tool"]["patch_adds"] == 12
+    assert patch["tool"]["patch_dels"] == 3
+    assert patch["tool"]["patch_mode"] == "replace"
+
+
 def test_native_reasoning_mints_thinking_row_and_reply_echo_is_deduped():
     session_id = "persona_chat_personainst_neko_fanout"
     reply_text = "Dispatched to backend_dev, dev, and qa; each got a one-line bounded check."

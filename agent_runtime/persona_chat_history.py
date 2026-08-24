@@ -1992,6 +1992,15 @@ def _trace_entry(event: Any) -> dict[str, Any] | None:
         "dispatch_reply_from": _safe_trace_operator_line(
             payload.get("dispatch_reply_from"), limit=120
         ),
+        # Patch observability: the local diff artifact's PATH (operator-line
+        # scrub — paths ALLOWED, secret-bearing values still dropped; the
+        # pathish-dropping `_safe_trace_text` would be wrong here and is right
+        # for the mode token below), plus the +/− counts and the grammar used.
+        # The diff BODY is not here and is not anywhere on this wire.
+        "patch_artifact": _safe_trace_operator_line(payload.get("patch_artifact"), limit=500),
+        "patch_adds": _safe_trace_int(payload.get("patch_adds")),
+        "patch_dels": _safe_trace_int(payload.get("patch_dels")),
+        "patch_mode": _safe_trace_text(payload.get("patch_mode"), limit=20),
         "detail": _safe_trace_operator_line(payload.get("detail"), limit=500),
         "output": _safe_trace_operator_block(payload.get("output"), limit=1600),
         # Generic tool input/result record (tools with no dedicated field):

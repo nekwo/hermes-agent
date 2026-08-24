@@ -6,6 +6,8 @@ import pytest
 
 import json
 
+from agent_runtime import paths
+from agent_runtime.progress import _safe_progress_payload
 from agent_runtime.profile_runner import (
     AgentRunRequest,
     ProfileAgentRunner,
@@ -864,29 +866,125 @@ def test_progress_adapter_summarizes_patch_tool_result_without_raw_diff():
         },
     )
 
-    assert events == [
-        {
-            "type": "run.tool.finished",
-            "phase": "dev_work",
-            "step": "patch",
-            "tool_name": "patch",
-            "status": "passed",
-            "summary": "Patched 2 files: mission_control_page.dart, mission_control_page_test.dart",
-            "detail": "Changed files: mission_control_page.dart, mission_control_page_test.dart",
-            "patch_summary": "Patched 2 files",
-            "changed_files": ["mission_control_page.dart", "mission_control_page_test.dart"],
-            # Operator lane keeps the repo-RELATIVE paths (absolute paths and
-            # secret-looking names never make it in — see the write_file test).
-            "changed_paths": [
-                "lib/features/mission_control/mission_control_page.dart",
-                "test/features/mission_control/mission_control_page_test.dart",
-            ],
-            "files_touched": 2,
-        }
-    ]
-    encoded = repr(events)
+    payload = dict(events[0])
+    # The diff produced an artifact, so the payload names WHERE it was written
+    # and how big the change was. The path is a tmp_path under the isolated
+    # store root, so it is checked separately from the pinned shape below.
+    artifact = payload.pop("patch_artifact")
+    assert Path(artifact).exists()
+    assert Path(artifact).parent == paths.patch_diffs_dir()
+    assert events == [payload | {"patch_artifact": artifact}]
+    assert payload == {
+        "type": "run.tool.finished",
+        "phase": "dev_work",
+        "step": "patch",
+        "tool_name": "patch",
+        "status": "passed",
+        "summary": "Patched 2 files: mission_control_page.dart, mission_control_page_test.dart",
+        "detail": "Changed files: mission_control_page.dart, mission_control_page_test.dart",
+        "patch_summary": "Patched 2 files",
+        "changed_files": ["mission_control_page.dart", "mission_control_page_test.dart"],
+        # Operator lane keeps the repo-RELATIVE paths (absolute paths and
+        # secret-looking names never make it in — see the write_file test).
+        "changed_paths": [
+            "lib/features/mission_control/mission_control_page.dart",
+            "test/features/mission_control/mission_control_page_test.dart",
+        ],
+        "files_touched": 2,
+        "patch_mode": "replace",
+        # The diff BODY is not here and never will be — only its size.
+        "patch_adds": 0,
+        "patch_dels": 0,
+    }
+    # THE withholding claim: the secret diff text reached the artifact file on
+    # this machine and nothing else. It is not in the payload under any key.
+    encoded = repr(payload)
     assert "SECRET raw diff" not in encoded
     assert "private/absolute/path.dart" not in encoded
+    assert Path(artifact).read_text(encoding="utf-8") == (
+        "SECRET raw diff should never be persisted"
+    )
+
+
+def test_patch_payload_carries_the_artifact_when_the_result_is_a_json_string():
+    """The shape the real agent loop delivers (``agent/tool_executor.py`` hands
+    the callback the tool's ``json.dumps`` string, not the parsed dict)."""
+
+    events = []
+    cb = _progress_adapter(events.append, "run.tool.finished")
+    diff = "--- a/x.py\n+++ b/x.py\n@@ -1 +1,2 @@\n-old\n+new\n+extra\n"
+
+    cb(
+        "call_1",
+        "patch",
+        {"mode": "replace", "path": "lib/x.py"},
+        json.dumps({"success": True, "diff": diff, "files_modified": ["lib/x.py"]}),
+    )
+
+    payload = events[0]
+    assert payload["patch_adds"] == 2
+    assert payload["patch_dels"] == 1
+    assert payload["patch_mode"] == "replace"
+    assert Path(payload["patch_artifact"]).read_text(encoding="utf-8") == diff
+
+
+def test_failed_patch_carries_no_artifact_fields():
+    events = []
+    cb = _progress_adapter(events.append, "run.tool.finished")
+
+    cb(
+        "call_1",
+        "patch",
+        {"mode": "patch", "patch": "*** Begin Patch"},
+        {"success": False, "error": "Failed to parse patch", "diff": "unused"},
+    )
+
+    payload = events[0]
+    assert payload["status"] == "failed"
+    # The mode is a fact about the CALL, so it survives a failure; the artifact
+    # is a fact about a change that never happened, so it does not exist.
+    assert payload["patch_mode"] == "patch"
+    assert "patch_artifact" not in payload
+    assert "patch_adds" not in payload
+    assert "patch_dels" not in payload
+
+
+def test_patch_mode_defaults_per_tool_and_rejects_an_unknown_token():
+    started = []
+    cb = _progress_adapter(started.append, "run.tool.finished")
+
+    # apply_patch is V4A-only upstream, so its default is the V4A grammar.
+    cb("c1", "apply_patch", {"diff": "*** Begin Patch"}, {"success": True})
+    # An unrecognized mode falls back to the tool default rather than putting
+    # caller-supplied prose on the wire.
+    cb("c2", "patch", {"mode": "../../etc/passwd"}, {"success": True})
+    cb("c3", "patch", {"mode": "patch"}, {"success": True})
+
+    assert [event["patch_mode"] for event in started] == ["patch", "replace", "patch"]
+
+
+def test_a_twelve_file_patch_payload_stays_under_the_event_cap():
+    """The 4KB event payload cap, with the artifact path and counts riding a
+    payload that already carries twelve changed paths. Dev-work events carry no
+    tool_input/tool_result, which is where the headroom comes from."""
+
+    events = []
+    cb = _progress_adapter(events.append, "run.tool.finished")
+    files = [f"lib/features/mission_control/agent_chat/module_number_{i}.dart" for i in range(12)]
+    diff = "".join(
+        f"--- a/{name}\n+++ b/{name}\n@@ -1 +1 @@\n-a\n+b\n" for name in files
+    )
+
+    cb(
+        "call_1",
+        "patch",
+        {"mode": "patch"},
+        {"success": True, "files_modified": files, "diff": diff},
+    )
+
+    safe = _safe_progress_payload("run.tool.finished", events[0])
+    assert "patch_artifact" in safe
+    assert len(json.dumps(safe).encode("utf-8")) < 4096
 
 
 def test_progress_adapter_summarizes_write_file_as_dev_work_without_absolute_path():

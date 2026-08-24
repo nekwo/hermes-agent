@@ -8,7 +8,7 @@ import shutil
 import stat
 import tempfile
 from pathlib import Path
-from typing import Any, Union
+from typing import Any, Optional, Union
 from urllib.parse import urlparse
 
 import yaml
@@ -196,6 +196,7 @@ def atomic_write_text(
     *,
     encoding: str = "utf-8",
     tmp_prefix: str = ".tmp_",
+    newline: Optional[str] = None,
 ) -> None:
     """Write *content* to *path* via temp file + fsync + atomic rename.
 
@@ -205,6 +206,12 @@ def atomic_write_text(
 
     Used by the memory store, skill manager, and agent importer so that
     every destructive file rewrite in the codebase shares one implementation.
+
+    ``newline`` is passed straight to :func:`open`; the default (``None``)
+    keeps the historical behavior, where ``\\n`` becomes the platform line
+    ending.  Pass ``""`` for a format whose line ending is part of its
+    grammar rather than the host's convention — a unified diff is ``\\n`` on
+    every platform, so the patch-diff artifact writer uses it.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -212,7 +219,7 @@ def atomic_write_text(
         dir=str(path.parent), prefix=tmp_prefix, suffix=".tmp"
     )
     try:
-        with os.fdopen(fd, "w", encoding=encoding) as handle:
+        with os.fdopen(fd, "w", encoding=encoding, newline=newline) as handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())

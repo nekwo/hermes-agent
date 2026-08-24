@@ -1407,6 +1407,20 @@ def _safe_elements(value: Any) -> list[dict[str, Any]]:
             todo_state = _safe_todo_state(raw.get("todo_state"))
             if todo_state is not None:
                 base["todo_state"] = todo_state
+            # Patch observability: the diff artifact's path and its +/− counts,
+            # re-bounded here (defence in depth over the producer cap) so a
+            # reloaded turn offers the same viewer affordance the live one did.
+            # Keyed absent-when-absent — a non-patch element gains nothing.
+            patch_artifact = safe_assignment_text(raw.get("patch_artifact"), limit=500)
+            if patch_artifact:
+                base["patch_artifact"] = patch_artifact
+            patch_mode = safe_assignment_token(raw.get("patch_mode"))
+            if patch_mode:
+                base["patch_mode"] = patch_mode
+            for count_key in ("patch_adds", "patch_dels"):
+                count = _safe_int(raw.get(count_key))
+                if count is not None:
+                    base[count_key] = count
         elements.append(base)
     return sorted(elements, key=lambda item: (int(item.get("seq") or 0), str(item.get("id") or "")))
 

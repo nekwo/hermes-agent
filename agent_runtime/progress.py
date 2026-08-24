@@ -52,6 +52,11 @@ _SAFE_PROGRESS_KEYS = {
     # name of the agent who sent it, so the console renders the exchange instead
     # of only the order. A detached (wait=false) dispatch carries neither.
     "dispatch_reply", "dispatch_reply_from",
+    # Patch observability: the local artifact's PATH plus the +/− line counts
+    # and which patch grammar was used. Never the diff CONTENT — the body stays
+    # on the machine that produced it and is read locally at view time, which is
+    # the whole reason the path is what travels.
+    "patch_artifact", "patch_adds", "patch_dels", "patch_mode",
     # Generic tool-call input/result record for tools with no dedicated field
     # (non-terminal, non-dev-work): a bounded key-per-line rendering of the raw
     # invocation and result, produced by profile_runner._attach_tool_io. This is
@@ -72,6 +77,12 @@ _OPERATOR_DISPATCH_ORDER_MAX = 1500
 # the one-line target scrub is the right shape for it).
 _OPERATOR_DISPATCH_REPLY_MAX = 1500
 _OPERATOR_DISPATCH_REPLY_FROM_MAX = 120
+# The patch diff artifact's path. It IS a path, so it needs the operator-line
+# grade (paths allowed, secret-bearing values still dropped) — the default
+# scalar arm's `_looks_sensitive_or_pathish` would eat it, which is correct for
+# an undeclared string and wrong for this one. Same bound and same shape as
+# `command_full`, the other declared path-bearing operator field.
+_OPERATOR_PATCH_ARTIFACT_MAX = 500
 # Relay thread pointers: opaque runtime ids, never prose. Re-asserted at the
 # sink (the producer already checked) because this is the redaction boundary —
 # a caller that hand-built the payload gets the same contract. Truncation would
@@ -361,6 +372,14 @@ def _safe_progress_payload(event_type: str, payload: dict[str, Any]) -> dict[str
             elif observe:
                 safe[key] = _observe_text(value, limit=_OPERATOR_COMMAND_FULL_MAX)
                 _mark_would_redact(safe, key, "operator_command")
+            continue
+        if isinstance(value, str) and key == "patch_artifact":
+            text = _safe_operator_line(value, limit=_OPERATOR_PATCH_ARTIFACT_MAX)
+            if text:
+                safe[key] = text
+            elif observe:
+                safe[key] = _observe_text(value, limit=_OPERATOR_PATCH_ARTIFACT_MAX)
+                _mark_would_redact(safe, key, "patch_artifact")
             continue
         if isinstance(value, str) and key == "target_label":
             text = _safe_operator_line(value, limit=_OPERATOR_TARGET_MAX)

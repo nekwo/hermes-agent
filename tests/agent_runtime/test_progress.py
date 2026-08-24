@@ -835,3 +835,78 @@ def test_the_WHOLE_live_chain_carries_the_marker_from_the_loop_to_the_mark(
         "the loop's dispatch marker did not survive the progress chain; the "
         "turn record loses the hermes-assembly / provider-TTFB split"
     )
+
+
+def test_safe_progress_payload_passes_the_patch_artifact_path_and_counts():
+    # The allowlist is the whole gate: a key missing from _SAFE_PROGRESS_KEYS
+    # vanishes SILENTLY here, and a path-bearing key that reaches the default
+    # scalar arm is dropped by _looks_sensitive_or_pathish — so this field needs
+    # BOTH the allowlist entry and its own operator-line arm.
+    safe = _safe_progress_payload(
+        "run.tool.finished",
+        {
+            "type": "run.tool.finished",
+            "phase": "dev_work",
+            "step": "patch",
+            "tool_name": "patch",
+            "status": "passed",
+            "patch_artifact": (
+                r"X:\Eternia\.hermes\agent-runtime\patch_diffs"
+                r"\20260824T120000Z_abc123def456.diff"
+            ),
+            "patch_adds": 42,
+            "patch_dels": 7,
+            "patch_mode": "replace",
+        },
+    )
+
+    assert "patch_artifact" in safe
+    # A path with a SPACE in it must survive whole — the operator-line scrub
+    # collapses runs of whitespace but keeps single spaces and separators.
+    assert safe["patch_artifact"].endswith("20260824T120000Z_abc123def456.diff")
+    assert safe["patch_adds"] == 42
+    assert safe["patch_dels"] == 7
+    assert safe["patch_mode"] == "replace"
+
+
+def test_safe_progress_payload_keeps_a_patch_artifact_path_containing_spaces():
+    safe = _safe_progress_payload(
+        "run.tool.finished",
+        {
+            "type": "run.tool.finished",
+            "tool_name": "patch",
+            "patch_artifact": r"X:\Unreal Engine\store\patch_diffs\a.diff",
+        },
+    )
+
+    assert safe["patch_artifact"] == r"X:\Unreal Engine\store\patch_diffs\a.diff"
+
+
+def test_safe_progress_payload_drops_a_secret_bearing_patch_artifact():
+    # Paths are allowed on this field; secrets are not. The operator-line scrub
+    # is what draws that line, and it is the reason this field cannot simply be
+    # declared "pathish and therefore fine".
+    safe = _safe_progress_payload(
+        "run.tool.finished",
+        {
+            "type": "run.tool.finished",
+            "tool_name": "patch",
+            "patch_artifact": "/store/patch_diffs/api_key=SECRET-VALUE.diff",
+        },
+    )
+
+    assert "patch_artifact" not in safe
+
+
+def test_safe_progress_payload_bounds_the_patch_artifact_at_500():
+    safe = _safe_progress_payload(
+        "run.tool.finished",
+        {
+            "type": "run.tool.finished",
+            "tool_name": "patch",
+            "patch_artifact": "/store/" + ("d" * 900) + ".diff",
+        },
+    )
+
+    assert len(safe["patch_artifact"]) == 500
+    assert safe["patch_artifact"].endswith("…")

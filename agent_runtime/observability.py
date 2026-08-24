@@ -379,6 +379,11 @@ def _safe_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "compact_count", "exit_code", "total_tokens", "proof_id", "evidence_id", "packet_id", "proof_count",
         "incident_count", "decision_type", "validation_status", "error_class", "next_expected", "stage_id",
         "patch_summary", "code_summary", "file_summary", "changed_files", "files_touched",
+        # Patch shape only: how many lines moved and which patch grammar. The
+        # artifact PATH is deliberately absent — this lane is path-free by
+        # design (the drop below would eat it anyway), so a Telegram-grade
+        # reader learns the size of a change and never where it lives.
+        "patch_adds", "patch_dels", "patch_mode",
         "reasoning_summary", "envelope_id", "decision_count", "continuation_count",
         "model_invocation_count", "close_reason", "next_action_before", "next_action_after",
         "proof_ids_added_count", "incident_ids_opened_count", "session_id_present",

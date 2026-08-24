@@ -1238,11 +1238,15 @@ _TOOL_DETAIL_STR_FIELDS = (
     # renders the exchange. Newest-wins for the same reason: only the finished
     # entry can carry an answer.
     "dispatch_reply", "dispatch_reply_from",
+    # ...plus the patch call's local diff artifact and the grammar it used, so
+    # the console's patch tile can offer to open the diff. Newest-wins like its
+    # siblings: only the finished entry has an artifact to name.
+    "patch_artifact", "patch_mode",
     # Generic tool input/result record (tools with no dedicated detail field) —
     # feeds the console's collapsed Input/Result dropdowns.
     "tool_input", "tool_result",
 )
-_TOOL_DETAIL_INT_FIELDS = ("duration_ms", "exit_code")
+_TOOL_DETAIL_INT_FIELDS = ("duration_ms", "exit_code", "patch_adds", "patch_dels")
 
 
 def _merge_tool_detail(tool: dict[str, Any], entry: dict[str, Any]) -> None:
