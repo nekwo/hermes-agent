@@ -1234,6 +1234,10 @@ _TOOL_DETAIL_STR_FIELDS = (
     # open the other half of the exchange. Newest-wins like its siblings: the
     # started entry has no thread yet, the finished entry supplies it.
     "dispatch_target_session_id",
+    # ...plus the reply that came back and who sent it, so the console's tile
+    # renders the exchange. Newest-wins for the same reason: only the finished
+    # entry can carry an answer.
+    "dispatch_reply", "dispatch_reply_from",
     # Generic tool input/result record (tools with no dedicated detail field) —
     # feeds the console's collapsed Input/Result dropdowns.
     "tool_input", "tool_result",

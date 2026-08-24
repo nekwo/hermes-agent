@@ -1380,6 +1380,63 @@ def test_trace_entry_carries_the_dispatch_target_thread():
     )
 
 
+def test_trace_entry_carries_the_dispatch_reply_and_its_author():
+    """PA-2: the teammate's ANSWER survives to the launcher-facing trace entry.
+    Without this the operator sees the order and a collapsed result blob; with
+    it the exchange reads in the feed, attributed by display name."""
+
+    events = EventLog()
+    ts = now()
+    events.append(
+        Event(
+            ts=ts,
+            type="run.tool.started",
+            task_id="task_reply",
+            run_id="run_neko",
+            persona_id="neko_supervisor",
+            payload={
+                "tool_name": "agent_chat_send",
+                "status": "started",
+                "summary": "Started tool agent_chat_send: → backend_dev: run the check",
+                "dispatch_target": "backend_dev",
+                "dispatch_order": "Run a bounded backend health check.",
+            },
+        )
+    )
+    events.append(
+        Event(
+            ts=ts,
+            type="run.tool.finished",
+            task_id="task_reply",
+            run_id="run_neko",
+            persona_id="neko_supervisor",
+            payload={
+                "tool_name": "agent_chat_send",
+                "status": "passed",
+                "summary": "Finished tool agent_chat_send: passed",
+                "dispatch_reply": "On it — patch landed.\nSuite is green.",
+                "dispatch_reply_from": "Backend Dev (instance)",
+            },
+        )
+    )
+
+    rows = persona_chat_trace_summary(
+        persona_instances=[
+            _persona_instance("personainst_neko", "neko_supervisor", "task_reply")
+        ],
+        event_log=events,
+    )
+
+    entries = rows[0]["entries"]
+    started = next(entry for entry in entries if entry["event"] == "tool_started")
+    finished = next(entry for entry in entries if entry["event"] == "tool_finished")
+    # An order has no answer yet — the started row cannot carry one.
+    assert started["dispatch_reply"] is None
+    # Block scrub: the reply's newline structure survives the projection.
+    assert finished["dispatch_reply"] == "On it — patch landed.\nSuite is green."
+    assert finished["dispatch_reply_from"] == "Backend Dev (instance)"
+
+
 def test_trace_entry_carries_generic_tool_io():
     events = EventLog()
     ts = now()

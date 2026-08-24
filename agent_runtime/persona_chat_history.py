@@ -1981,6 +1981,17 @@ def _trace_entry(event: Any) -> dict[str, Any] | None:
         "dispatch_target_session_id": _safe_trace_operator_line(
             payload.get("dispatch_target_session_id"), limit=240
         ),
+        # ...and the ANSWER (finished event, WAITING lane only): the teammate's
+        # reply plus the display name of the agent who sent it, so the console
+        # renders the exchange rather than only the order. 1600 sits ABOVE the
+        # producer's 1500 for the same reason the tool_input/tool_result limits
+        # below sit above theirs — the sink's truncation marker can inflate the
+        # producer bound, and a re-truncation here would cut the head, which is
+        # this record's operator signal.
+        "dispatch_reply": _safe_trace_operator_block(payload.get("dispatch_reply"), limit=1600),
+        "dispatch_reply_from": _safe_trace_operator_line(
+            payload.get("dispatch_reply_from"), limit=120
+        ),
         "detail": _safe_trace_operator_line(payload.get("detail"), limit=500),
         "output": _safe_trace_operator_block(payload.get("output"), limit=1600),
         # Generic tool input/result record (tools with no dedicated field):

@@ -1558,6 +1558,163 @@ def test_target_thread_fields_are_dispatch_only_and_id_shaped():
     assert "dispatch_target_session_id" not in over_long
 
 
+# PA-2: the relay's ANSWER. The waiting lane's reply used to exist only inside
+# the collapsed result blob ("i don't see nekos reply"); dispatch_reply makes it
+# a first-class trace fact and dispatch_reply_from names who said it.
+
+
+def test_waiting_agent_chat_send_carries_the_reply_and_its_author(monkeypatch):
+    monkeypatch.setattr(
+        "agent_runtime.persona_assignments.persona_instance_display_name",
+        lambda handle: "Neko Mission Lead" if handle == "personainst_neko_3ebfce41" else "",
+    )
+    result = {
+        "ok": True,
+        "target_persona": "neko",
+        "reply": "On it — patch landed.\nSuite is green.",
+        "chat_session_id": "persona_chat_personainst_neko_bbbbbbbbbbbb",
+        "persona_instance_id": "personainst_neko_3ebfce41",
+    }
+
+    payload = _tool_finished_payload(
+        "run.tool.finished",
+        "agent_chat_send",
+        duration=None,
+        is_error=False,
+        result=result,
+        invocation={"persona_id": "neko", "message": "land the patch"},
+    )
+    assert payload["dispatch_reply"] == "On it — patch landed.\nSuite is green."
+    assert payload["dispatch_reply_from"] == "Neko Mission Lead"
+
+    # The SAME envelope through the other door: a live relay reaches the adapter
+    # as json.dumps(...), so both shapes must answer identically.
+    serialized = _tool_finished_payload(
+        "run.tool.finished",
+        "agent_chat_send",
+        duration=None,
+        is_error=False,
+        result=json.dumps(result),
+        invocation={"persona_id": "neko", "message": "land the patch"},
+    )
+    assert serialized["dispatch_reply"] == payload["dispatch_reply"]
+    assert serialized["dispatch_reply_from"] == "Neko Mission Lead"
+
+
+def test_detached_agent_chat_send_carries_no_reply():
+    # wait=false returns {ok, dispatched, dispatch_id, ...} with NO reply key at
+    # all — the child turn answers long after the sender's turn ended. That
+    # structural absence IS the double-render guard: the background delivery
+    # block stays the sole carrier of a detached reply.
+    payload = _tool_finished_payload(
+        "run.tool.finished",
+        "agent_chat_send",
+        duration=None,
+        is_error=False,
+        result=json.dumps(
+            {
+                "ok": True,
+                "dispatched": True,
+                "dispatch_id": "dsp_abc123",
+                "target_persona": "neko",
+                "session_id": None,
+            }
+        ),
+        invocation={"persona_id": "neko", "message": "run the long suite"},
+    )
+
+    assert "dispatch_reply" not in payload
+    assert "dispatch_reply_from" not in payload
+
+
+def test_refused_agent_chat_send_carries_no_reply():
+    # A refusal's prose is an error, not a teammate's answer. Rendering it in the
+    # reply bubble would attribute the harness's "no" to the agent.
+    payload = _tool_finished_payload(
+        "run.tool.finished",
+        "agent_chat_send",
+        duration=None,
+        is_error=True,
+        result={
+            "ok": False,
+            "error": "no such persona",
+            "reply": "this is not an answer",
+            "persona_instance_id": "personainst_neko_3ebfce41",
+        },
+        invocation={"persona_id": "nope", "message": "hi"},
+    )
+
+    assert "dispatch_reply" not in payload
+    assert "dispatch_reply_from" not in payload
+
+
+def test_dispatch_reply_drops_secret_lines_and_bounds_at_1500():
+    secret = _tool_finished_payload(
+        "run.tool.finished",
+        "agent_chat_send",
+        duration=None,
+        is_error=False,
+        result={
+            "ok": True,
+            "reply": "Suite is green.\napi_key=SECRET-VALUE\nShipping now.",
+        },
+        invocation={"persona_id": "neko", "message": "status?"},
+    )
+    # Per-LINE drop, newline structure kept — the same block grade as the order.
+    assert secret["dispatch_reply"] == "Suite is green.\nShipping now."
+    assert "SECRET-VALUE" not in secret["dispatch_reply"]
+
+    long_reply = _tool_finished_payload(
+        "run.tool.finished",
+        "agent_chat_send",
+        duration=None,
+        is_error=False,
+        result={"ok": True, "reply": "y" * 4000},
+        invocation={"persona_id": "neko", "message": "status?"},
+    )
+    assert len(long_reply["dispatch_reply"]) == 1500
+    assert long_reply["dispatch_reply"].endswith("…")
+
+
+def test_dispatch_reply_survives_a_naming_failure(monkeypatch):
+    # A name is a nicety; the trace fact is not. An unresolvable (retired,
+    # cross-home) instance must cost the attribution line, never the reply.
+    def _boom(handle):
+        raise RuntimeError("store unreadable")
+
+    monkeypatch.setattr(
+        "agent_runtime.persona_assignments.persona_instance_display_name", _boom
+    )
+    payload = _tool_finished_payload(
+        "run.tool.finished",
+        "agent_chat_send",
+        duration=None,
+        is_error=False,
+        result={
+            "ok": True,
+            "reply": "Suite is green.",
+            "persona_instance_id": "personainst_neko_3ebfce41",
+        },
+        invocation={"persona_id": "neko", "message": "status?"},
+    )
+
+    assert payload["dispatch_reply"] == "Suite is green."
+    # Absent, never invented: the console falls back to the id tier.
+    assert "dispatch_reply_from" not in payload
+
+
+def test_dispatch_reply_is_agent_chat_send_only():
+    other = _tool_finished_payload(
+        "run.tool.finished",
+        "agent_chat_open",
+        duration=None,
+        is_error=False,
+        result={"ok": True, "reply": "not a relay answer"},
+        invocation={"persona_id": "dev"},
+    )
+    assert "dispatch_reply" not in other
+
+
 def test_dev_work_finished_payload_never_records_raw_tool_io():
     # Dev-work policy: changed_paths/changed_files ARE the record; the raw
     # invocation (diff body, machine-absolute paths) never rides the payload.

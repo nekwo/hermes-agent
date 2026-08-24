@@ -379,6 +379,111 @@ def test_append_bounded_event_sheds_dispatch_order_when_output_not_enough(isolat
     assert rows[0].payload["dispatch_target"] == "backend_dev"
 
 
+def test_safe_progress_payload_passes_the_dispatch_reply_and_its_author():
+    # The allowlist is the whole gate: a key missing from _SAFE_PROGRESS_KEYS
+    # vanishes SILENTLY at this boundary, which is exactly the bug class that
+    # keeps a producer-side field from ever reaching the operator.
+    payload = _safe_progress_payload(
+        "run.tool.finished",
+        {
+            "type": "run.tool.finished",
+            "tool_name": "agent_chat_send",
+            "status": "passed",
+            "dispatch_reply": (
+                "On it — patch landed.\n"
+                "api_key=SECRET-VALUE must be dropped\n"
+                "Suite is green."
+            ),
+            "dispatch_reply_from": "Neko Mission Lead",
+        },
+    )
+
+    # Block grade: the secret LINE is dropped, the newline structure survives.
+    assert payload["dispatch_reply"] == "On it — patch landed.\nSuite is green."
+    assert "SECRET-VALUE" not in payload["dispatch_reply"]
+    assert payload["dispatch_reply_from"] == "Neko Mission Lead"
+
+
+def test_safe_progress_payload_bounds_dispatch_reply_at_1500():
+    payload = _safe_progress_payload(
+        "run.tool.finished",
+        {"type": "run.tool.finished", "tool_name": "agent_chat_send", "dispatch_reply": "y" * 4000},
+    )
+
+    assert len(payload["dispatch_reply"]) == 1500
+    assert payload["dispatch_reply"].endswith("…")
+
+
+def test_append_bounded_event_sheds_tool_result_before_dispatch_reply(isolate_agent_runtime_root):
+    # On a finished relay the co-resident heavy field is tool_result — the raw
+    # JSON that CONTAINS the same reply. It sheds first, so the operator-facing
+    # signal survives with the row.
+    log = EventLog()
+    payload = {
+        "type": "run.tool.finished",
+        "tool_name": "agent_chat_send",
+        "status": "passed",
+        "dispatch_target": "neko",
+        "dispatch_reply": "On it — patch landed.",
+        "dispatch_reply_from": "Neko Mission Lead",
+        "tool_result": "r" * 5000,
+    }
+    _append_bounded_event(
+        log,
+        Event(
+            ts=now(),
+            type="run.tool.finished",
+            task_id="task_shed_before_reply",
+            run_id="run_a",
+            persona_id="neko",
+            payload=payload,
+        ),
+    )
+
+    rows = log.for_task("task_shed_before_reply")
+    assert len(rows) == 1
+    assert "tool_result" not in rows[0].payload
+    assert rows[0].payload["tool_result_truncated"] is True
+    assert rows[0].payload["dispatch_reply"] == "On it — patch landed."
+    assert rows[0].payload["dispatch_reply_from"] == "Neko Mission Lead"
+    assert "dispatch_reply_truncated" not in rows[0].payload
+
+
+def test_append_bounded_event_sheds_dispatch_reply_when_the_rest_is_not_enough(
+    isolate_agent_runtime_root,
+):
+    log = EventLog()
+    payload = {
+        "type": "run.tool.finished",
+        "tool_name": "agent_chat_send",
+        "status": "passed",
+        "dispatch_target": "neko",
+        "dispatch_reply": "y" * 4200,
+        "tool_result": "r" * 4200,
+        "output": "x" * 4200,
+        "tool_input": "i" * 4200,
+    }
+    _append_bounded_event(
+        log,
+        Event(
+            ts=now(),
+            type="run.tool.finished",
+            task_id="task_shed_reply",
+            run_id="run_a",
+            persona_id="neko",
+            payload=payload,
+        ),
+    )
+
+    rows = log.for_task("task_shed_reply")
+    assert len(rows) == 1
+    # A truthful marker instead of a vanished event; the tool row survives.
+    assert "dispatch_reply" not in rows[0].payload
+    assert rows[0].payload["dispatch_reply_truncated"] is True
+    assert rows[0].payload["tool_result_truncated"] is True
+    assert rows[0].payload["dispatch_target"] == "neko"
+
+
 def test_safe_progress_payload_carries_tool_io_blocks():
     payload = _safe_progress_payload(
         "run.tool.finished",

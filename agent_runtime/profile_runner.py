@@ -1902,21 +1902,30 @@ def _agent_chat_target_label(tool_name: str | None, invocation: Any) -> str | No
 
 _DISPATCH_TARGET_MAX = 120
 _DISPATCH_ORDER_MAX = 1500
+#: The teammate's REPLY on a waiting relay. Same block grade and same bound as
+#: the order — the two halves of one exchange are priced identically so neither
+#: side of the operator's bubble reads as the authoritative one.
+_DISPATCH_REPLY_MAX = 1500
 
 
-def _scrub_dispatch_order(message: Any) -> str | None:
+def _scrub_dispatch_order(message: Any, *, limit: int = _DISPATCH_ORDER_MAX) -> str | None:
     """The FULL relay order for the operator console's dispatch tile: per-line
     secret drop (any line matching :func:`_line_has_secret` is removed, the rest
     kept), newlines PRESERVED (never whitespace-collapsed like ``target_label``),
-    capped at :data:`_DISPATCH_ORDER_MAX` chars with a trailing ellipsis."""
+    capped at ``limit`` chars with a trailing ellipsis.
+
+    ``limit`` exists so the relay's REPLY half can reuse this exact scrub grade
+    (block, newline-preserving, per-line secret drop) under its own bound; both
+    dispatch-order call sites keep the default.
+    """
 
     text = str(message or "").replace("\r\n", "\n").replace("\r", "\n")
     kept = [line for line in text.split("\n") if not _line_has_secret(line)]
     order = "\n".join(kept).strip()
     if not order:
         return None
-    if len(order) > _DISPATCH_ORDER_MAX:
-        order = f"{order[: _DISPATCH_ORDER_MAX - 1]}…"
+    if len(order) > limit:
+        order = f"{order[: limit - 1]}…"
     return order
 
 
@@ -2012,6 +2021,49 @@ def _agent_chat_dispatch_thread_fields(tool_name: str | None, result: Any) -> di
     return {"dispatch_target_session_id": session_id} if session_id else {}
 
 
+def _agent_chat_dispatch_reply_fields(tool_name: str | None, result: Any) -> dict[str, str]:
+    """The relay's ANSWER: what the teammate actually said back, and who said it.
+
+    ``dispatch_target``/``dispatch_order`` name WHO was told WHAT and
+    ``dispatch_target_session_id`` names WHERE — this names the reply itself, so
+    the operator reads a teammate's answer in the feed instead of hunting it
+    inside a collapsed result blob.
+
+    WAITING LANE ONLY, by construction rather than by flag: a ``wait=false``
+    dispatch's result payload has no ``reply`` key at all (it returns
+    ``{ok, dispatched, dispatch_id, ...}``), so the detached lane exits at the
+    empty-reply guard and the background delivery block stays the sole carrier
+    of that reply. A refused relay (``ok: false``) has no reply either.
+
+    ``dispatch_reply_from`` is the replying agent's operator-facing display name
+    and is a NICETY: the name resolution is wrapped whole because a trace fact
+    must never be lost to a naming failure. When the name cannot be resolved the
+    field is absent and the console falls back to the id tier — the same ladder
+    :mod:`agent_runtime.dispatch_delivery` uses for the background delivery
+    block. Empty means "I could not name it", never "it has no name": a missing
+    name must render an id, never an invented one.
+    """
+
+    if tool_name != "agent_chat_send":
+        return {}
+    payload = _dispatch_result_envelope(result)
+    if not payload or payload.get("ok") is False:
+        return {}
+    reply = _scrub_dispatch_order(payload.get("reply"), limit=_DISPATCH_REPLY_MAX)
+    if not reply:
+        return {}
+    fields: dict[str, str] = {"dispatch_reply": reply}
+    try:
+        from .persona_assignments import persona_instance_display_name
+
+        name = persona_instance_display_name(payload.get("persona_instance_id"))
+        if name:
+            fields["dispatch_reply_from"] = name[:_DISPATCH_TARGET_MAX]
+    except Exception:
+        pass
+    return fields
+
+
 def _tool_started_payload(event_type: str, tool_name: str | None, *, invocation: Any = None) -> dict[str, Any]:
     payload = {"type": event_type, "phase": "tool", "step": "tool_started", "status": "started"}
     if tool_name:
@@ -2099,6 +2151,9 @@ def _tool_finished_payload(event_type: str, tool_name: str | None, *, duration: 
     # dispatch_target/dispatch_order are untouched, and a lane that cannot name
     # a thread (detached dispatch, refusal) emits nothing at all.
     payload.update(_agent_chat_dispatch_thread_fields(tool_name, result))
+    # ...and what came back. Finished-only, like the thread id: a reply is a
+    # result fact, so the started event stays byte-identical.
+    payload.update(_agent_chat_dispatch_reply_fields(tool_name, result))
     # agent_chat_send input is already first-class (dispatch_target/dispatch_order
     # on the started event) — re-attaching the order as tool_input would spend
     # the same bytes twice against the event cap. Its RESULT still attaches.

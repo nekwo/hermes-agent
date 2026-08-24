@@ -48,6 +48,10 @@ _SAFE_PROGRESS_KEYS = {
     # relay, so the console can open the other half of the exchange instead of
     # only naming it. A detached (wait=false) dispatch cannot answer this.
     "dispatch_target_session_id",
+    # ...and the ANSWER: the teammate's reply on a WAITING relay plus the display
+    # name of the agent who sent it, so the console renders the exchange instead
+    # of only the order. A detached (wait=false) dispatch carries neither.
+    "dispatch_reply", "dispatch_reply_from",
     # Generic tool-call input/result record for tools with no dedicated field
     # (non-terminal, non-dev-work): a bounded key-per-line rendering of the raw
     # invocation and result, produced by profile_runner._attach_tool_io. This is
@@ -63,6 +67,11 @@ _OPERATOR_OUTPUT_TAIL_MAX = 1200
 _OPERATOR_PATHS_MAX = 12
 _OPERATOR_DISPATCH_TARGET_MAX = 120
 _OPERATOR_DISPATCH_ORDER_MAX = 1500
+# The reply half of the exchange: same block grade and same bound as the order,
+# and the replying agent's display name at the target bound (it IS a name, so
+# the one-line target scrub is the right shape for it).
+_OPERATOR_DISPATCH_REPLY_MAX = 1500
+_OPERATOR_DISPATCH_REPLY_FROM_MAX = 120
 # Relay thread pointers: opaque runtime ids, never prose. Re-asserted at the
 # sink (the producer already checked) because this is the redaction boundary —
 # a caller that hand-built the payload gets the same contract. Truncation would
@@ -273,12 +282,20 @@ def _append_bounded_event(event_log: EventLog, event: Event) -> None:
     """Append, degrading oversized payloads instead of silently dropping them.
 
     The operator detail fields (``tool_result`` / ``output`` / ``tool_input`` /
-    ``dispatch_order``) are the variable-size fields that can push a payload
-    past the 4KB event cap; a too-large event previously vanished into the
-    sink's bare except. Shed them largest-and-least-critical first so the tool
-    row itself (command, target, status, files, the ``→ target`` chip) always
-    survives. If the row is still too large after all four, the final append
-    re-raises to the sink's best-effort boundary (unchanged terminal behavior).
+    ``dispatch_reply`` / ``dispatch_order``) are the variable-size fields that
+    can push a payload past the 4KB event cap; a too-large event previously
+    vanished into the sink's bare except. Shed them largest-and-least-critical
+    first so the tool row itself (command, target, status, files, the
+    ``→ target`` chip) always survives. If the row is still too large after all
+    five, the final append re-raises to the sink's best-effort boundary
+    (unchanged terminal behavior).
+
+    ``dispatch_reply`` sheds second-to-last on purpose. On a finished
+    ``agent_chat_send`` event its co-resident heavy field is ``tool_result``
+    (≤1700 — the raw JSON that CONTAINS the same reply), so shedding that first
+    usually frees the room and costs the operator nothing they can't read in the
+    bubble. The reply is the operator-facing signal; ``dispatch_order`` stays
+    last so the started event's shed ladder keeps its shape.
     """
 
     try:
@@ -290,6 +307,7 @@ def _append_bounded_event(event_log: EventLog, event: Event) -> None:
         ("tool_result", "tool_result_truncated"),
         ("output", "output_truncated"),
         ("tool_input", "tool_input_truncated"),
+        ("dispatch_reply", "dispatch_reply_truncated"),
         ("dispatch_order", "dispatch_order_truncated"),
     ):
         if drop_key not in payload:
@@ -367,6 +385,22 @@ def _safe_progress_payload(event_type: str, payload: dict[str, Any]) -> dict[str
             elif observe:
                 safe[key] = _observe_text(value, limit=_OPERATOR_DISPATCH_ORDER_MAX)
                 _mark_would_redact(safe, key, "dispatch_order")
+            continue
+        if isinstance(value, str) and key == "dispatch_reply":
+            text = _safe_dispatch_order(value, limit=_OPERATOR_DISPATCH_REPLY_MAX)
+            if text:
+                safe[key] = text
+            elif observe:
+                safe[key] = _observe_text(value, limit=_OPERATOR_DISPATCH_REPLY_MAX)
+                _mark_would_redact(safe, key, "dispatch_reply")
+            continue
+        if isinstance(value, str) and key == "dispatch_reply_from":
+            text = " ".join(value.strip().split())
+            if text and not _looks_sensitive(text):
+                safe[key] = text[:_OPERATOR_DISPATCH_REPLY_FROM_MAX]
+            elif observe and text:
+                safe[key] = _observe_text(value, limit=_OPERATOR_DISPATCH_REPLY_FROM_MAX)
+                _mark_would_redact(safe, key, "dispatch_reply_from")
             continue
         if isinstance(value, str) and key == "output":
             text = _safe_operator_output_tail(value)
@@ -469,11 +503,15 @@ def _safe_operator_line(value: str, *, limit: int) -> str | None:
     return f"{text[: limit - 1]}…" if len(text) > limit else text
 
 
-def _safe_dispatch_order(value: str) -> str | None:
+def _safe_dispatch_order(value: str, *, limit: int = _OPERATOR_DISPATCH_ORDER_MAX) -> str | None:
     """Redaction boundary for the full agent-to-agent order: drop any secret-
     bearing line, keep the rest with newline structure intact (never whitespace-
-    collapsed), bounded at :data:`_OPERATOR_DISPATCH_ORDER_MAX`. Consistent with
-    the profile-runner scrub that produces the field; idempotent when re-applied.
+    collapsed), bounded at ``limit``. Consistent with the profile-runner scrub
+    that produces the field; idempotent when re-applied.
+
+    ``limit`` lets the exchange's REPLY half reuse this exact grade under its own
+    bound — one scrub for both directions of the relay, never two that could
+    drift apart.
     """
 
     text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
@@ -481,8 +519,8 @@ def _safe_dispatch_order(value: str) -> str | None:
     order = "\n".join(kept).strip()
     if not order:
         return None
-    if len(order) > _OPERATOR_DISPATCH_ORDER_MAX:
-        order = f"{order[: _OPERATOR_DISPATCH_ORDER_MAX - 1]}…"
+    if len(order) > limit:
+        order = f"{order[: limit - 1]}…"
     return order
 
 
