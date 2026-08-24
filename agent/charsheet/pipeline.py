@@ -76,6 +76,7 @@ __all__ = [
     "recomposite_on_magenta",
     "row_prefix",
     "turnaround_order",
+    "upscale_on_backdrop",
     "validate_sheet",
     "view_prefix",
 ]
@@ -85,6 +86,13 @@ __all__ = [
 # prompt language asks for and what `remove_background`'s saturated fast path is
 # tuned against.
 MAGENTA: tuple[int, int, int] = (255, 0, 255)
+
+# What a QA crop is composited onto. Near-black but not black: an image with a
+# black outline still reads against it, while a hole in the art does not
+# masquerade as one. Opaque by construction — the whole point of the backdrop is
+# that a defect over TRANSPARENT pixels shows up as something rather than as
+# nothing (the 2026-08-24 seam hunt, plan §F.2).
+QA_BACKDROP: tuple[int, int, int, int] = (18, 18, 22, 255)
 
 # A non-directional state has no facing to hold, but the row prompt is built
 # around explicit view language. Front view is the neutral choice: it is the one
@@ -181,6 +189,31 @@ def recomposite_on_magenta(image_or_path):
     field = Image.new("RGBA", cutout.size, (*MAGENTA, 255))
     field.alpha_composite(cutout)
     return field
+
+
+def upscale_on_backdrop(image_or_path, *, scale: int, backdrop=QA_BACKDROP):
+    """The §F.2 looking procedure: NEAREST upscale, composited on flat dark.
+
+    Both halves are load-bearing and both were learned the expensive way on
+    2026-08-24. **NEAREST** because any smoothing filter averages a one-pixel
+    seam into its neighbours — the defect is destroyed by the very step meant to
+    make it visible. **A flat opaque backdrop** because the pixels a QA surface
+    must judge are frequently transparent or chroma-keyed, and a dark line drawn
+    over transparency renders as nothing at all in a chat card.
+
+    Returns an RGBA image whose alpha is 255 everywhere: the caller writes a
+    picture, not a mask, and "is it opaque?" must be answerable from the file.
+    """
+    from PIL import Image
+
+    if isinstance(scale, bool) or not isinstance(scale, int) or scale < 1:
+        raise ValueError(f"scale must be an integer >= 1, got {scale!r}")
+    source = _open_rgba(image_or_path)
+    field = Image.new("RGBA", source.size, tuple(backdrop))
+    field.alpha_composite(source)
+    if scale == 1:
+        return field
+    return field.resize((field.width * scale, field.height * scale), Image.NEAREST)
 
 
 def turnaround_order(authored: Iterable[str]) -> tuple[str, ...]:

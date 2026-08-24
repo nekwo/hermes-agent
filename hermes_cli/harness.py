@@ -1524,6 +1524,7 @@ def build_parser(parent_subparsers) -> None:
     characters_start.add_argument("--states", default="", help="Animation states as 'idle:6,walk:8[,cheer:5:fixed]'; default = the CHAR8 states")
     characters_start.add_argument("--directions", default="8", help="Direction scheme: 8 (five authored, three mirrored) or 4")
     characters_start.add_argument("--base-image", dest="base_image", default="", help="Identity-anchor image; copied into the draft")
+    characters_start.add_argument("--authored-by", dest="authored_by", default="", help="Persona driving this authoring run, recorded as provenance; drafts live under the one HERMES_HOME either way")
     characters_start.add_argument("--json", action="store_true")
     characters_start.set_defaults(func=_cmd_characters_start)
     characters_list = characters_subs.add_parser("list", help="List character drafts and installed characters")
@@ -1533,6 +1534,16 @@ def build_parser(parent_subparsers) -> None:
     characters_status.add_argument("--draft", required=True, help="Draft id from `harness characters list`")
     characters_status.add_argument("--json", action="store_true")
     characters_status.set_defaults(func=_cmd_characters_status)
+    characters_thumb = characters_subs.add_parser("thumb", help="Write a card-size QA crop of one row attempt (NEAREST upscale on a flat dark backdrop) and return its path")
+    characters_thumb.add_argument("--draft", required=True)
+    characters_thumb.add_argument("--row", required=True, help="An authored row key, e.g. walk-n")
+    characters_thumb.add_argument("--attempt", type=int, default=-1, help="Which attempt to crop, 0-based as in `status --json` history; -1 = latest")
+    # No default spelled here: the number lives in `draft.DEFAULT_THUMB_SCALE`
+    # and is resolved in the handler, which is also where charsheet is imported
+    # — build_parser runs for EVERY harness call and must not pull in Pillow.
+    characters_thumb.add_argument("--scale", type=int, default=None, help="NEAREST upscale factor (default 2, max 8); 2 is what makes a one-pixel seam legible at card size")
+    characters_thumb.add_argument("--json", action="store_true")
+    characters_thumb.set_defaults(func=_cmd_characters_thumb)
     characters_base = characters_subs.add_parser("base", help="Set or replace the draft's base identity image")
     characters_base.add_argument("--draft", required=True)
     characters_base.add_argument("--image", required=True, help="Path to the identity-anchor image; copied into the draft")
@@ -3110,6 +3121,7 @@ def _characters_draft_summary(draft) -> dict:
         "displayName": draft.display_name,
         "concept": draft.concept,
         "style": draft.style,
+        "authoredBy": draft.authored_by,
         "stage": draft.stage,
         "rows": len(spec.rows()),
         "authoredRows": len(spec.authored_rows()),
@@ -3175,6 +3187,7 @@ def _cmd_characters_start(args) -> int:
             # Passed to create() rather than set after it, so a draft is never
             # observable without the anchor the operator asked it to have.
             base_image=Path(base_text).expanduser() if base_text else None,
+            authored_by=str(getattr(args, "authored_by", "") or ""),
         )
     except _CHARACTERS_EXPECTED as exc:
         return _characters_error(args, exc)
@@ -3208,6 +3221,29 @@ def _cmd_characters_status(args) -> int:
         return {"status": status}, (
             f"Draft {draft.id} ({draft.slug}) at stage '{draft.stage}'; pending "
             f"turnaround={status['pending']['turnaround']} rows={status['pending']['rows']}"
+        )
+
+    return _characters_verb(args, call)
+
+
+def _cmd_characters_thumb(args) -> int:
+    # A path, never bytes: the crop is written into the draft and the payload
+    # names it (plan A-4). `pets thumb` answers with a data URI because a Petdex
+    # gallery row may come from a remote sheet; a draft's attempts are always on
+    # this disk, and the launcher reads them there.
+    from agent.charsheet.draft import DEFAULT_THUMB_SCALE
+
+    row_key = str(getattr(args, "row", "") or "").strip()
+    attempt = int(getattr(args, "attempt", -1))
+    requested_scale = getattr(args, "scale", None)
+    scale = DEFAULT_THUMB_SCALE if requested_scale is None else int(requested_scale)
+
+    def call(draft):
+        result = draft.row_thumb(row_key, attempt=attempt, scale=scale)
+        return result, (
+            f"Draft {draft.id}: row {result['row']} attempt {result['attempt']} "
+            f"of {result['attempts']} cropped at {result['width']}x{result['height']} "
+            f"({result['scale']}x) → {result['path']}"
         )
 
     return _characters_verb(args, call)

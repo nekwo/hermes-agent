@@ -69,6 +69,14 @@ DRAFT_FILENAME = "draft.json"
 MANIFEST_FILENAME = "character.json"
 SHEET_FILENAME = "sheet.webp"
 REVISIONS_DIRNAME = "revisions"
+THUMBS_DIRNAME = "thumbs"
+
+# QA crops: 2x is what made a one-pixel seam legible in a chat card during the
+# 2026-08-24 run, so it is the default. The ceiling is a refusal rather than a
+# clamp — a caller who asks for 40x has made a mistake and should be told, not
+# silently given 8x and left to wonder why the crop is small.
+DEFAULT_THUMB_SCALE = 2
+MAX_THUMB_SCALE = 8
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
@@ -248,6 +256,7 @@ class CharacterDraft:
         style: str = "auto",
         spec: SheetSpec = CHAR8,
         base_image=None,
+        authored_by: str = "",
     ) -> CharacterDraft:
         """Start a draft at stage ``turnaround``.
 
@@ -256,6 +265,14 @@ class CharacterDraft:
         caller moving or deleting the original. It may be supplied later
         (:meth:`set_base_image`) — the base-draft pick flow has not chosen one
         yet at ``characters start`` time — but no generation verb runs without it.
+
+        *authored_by* is PROVENANCE and nothing else (launcher companion doc §13
+        decision 6): it records which persona drove the authoring run so a later
+        reader can ask "whose draft is this". It does not scope where the draft
+        lives — every draft is in ``$HERMES_HOME/characters/`` under the one home
+        the console shares — it is not an owner, and no verb checks it. Nothing
+        infers it: a caller that does not say stores nothing, because a guessed
+        author is worse than an absent one.
         """
         concept = str(concept or "").strip()
         if not concept:
@@ -283,6 +300,7 @@ class CharacterDraft:
             "updated": now,
             "spec": spec_to_dict(spec),
             "base_image": "",
+            "authored_by": str(authored_by or "").strip(),
         }
         draft = cls(directory, data)
         draft._save()
@@ -345,6 +363,11 @@ class CharacterDraft:
     @property
     def stage(self) -> str:
         return str(self._data.get("stage", STAGES[0]))
+
+    @property
+    def authored_by(self) -> str:
+        """The persona this draft was authored by, or ``""`` — provenance only."""
+        return str(self._data.get("authored_by", "") or "")
 
     @property
     def spec(self) -> SheetSpec:
@@ -621,6 +644,80 @@ class CharacterDraft:
             "approved": True,
         }
 
+    # ------------------------------------------------------- looking at rows
+
+    def row_thumb(
+        self,
+        row_key: str,
+        *,
+        attempt: int = -1,
+        scale: int = DEFAULT_THUMB_SCALE,
+    ) -> dict:
+        """Write a card-size QA crop of ONE row attempt; return where it landed.
+
+        The §F.2 looking procedure as a verb. A row strip shown whole in a chat
+        column is a false negative machine: the 2026-08-24 seam was invisible at
+        fit-to-window scale in the very strip that carried it, and "I looked at
+        the strip and it's fine" was reliably wrong. So the crop is upscaled with
+        NEAREST (no filter averages the defect away) onto a flat dark backdrop
+        (a dark line over transparency renders as nothing).
+
+        Stage-free on purpose: looking is never out of order. A composed draft is
+        exactly when an operator goes back to find what went wrong, and refusing
+        to render a picture at that point is the wall ``reopen`` was built to
+        remove.
+
+        Returns a PATH and never bytes (plan A-4): the launcher runs on this
+        machine, and the trace lane that would carry an inline image is capped at
+        4 KiB.
+        """
+        row = self._authored_row(row_key)
+        if isinstance(scale, bool) or not isinstance(scale, int):
+            raise ValueError(f"scale must be an integer, got {scale!r}")
+        if not 1 <= scale <= MAX_THUMB_SCALE:
+            raise ValueError(
+                f"scale {scale} is out of range: a QA crop is scaled 1-{MAX_THUMB_SCALE}x"
+            )
+        store = self.store
+        key = row_item(row.key)
+        if not store.history(key):
+            raise ValueError(
+                f"row {row.key!r} has no attempt to crop yet; generate it first "
+                f"(`characters rows --only {row.key}`)"
+            )
+        # The store resolves -1 → the newest index and refuses out-of-range, so
+        # the number in the filename is the number the payload reports.
+        index = store.attempt_index(key, attempt)
+        source = store.attempt_path(key, index)
+        if source is None or not source.is_file():
+            raise ValueError(
+                f"attempt {index} of row {row.key!r} has no image on disk"
+                + (f" at {source}" if source is not None else "")
+            )
+        image = pipeline.upscale_on_backdrop(source, scale=scale)
+        out = self.directory / THUMBS_DIRNAME / f"{row.key}-a{index}-x{scale}.png"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        image.save(out, format="PNG")
+        logger.info(
+            "charsheet draft %s: row %s attempt %d cropped at %dx%d → %s",
+            self.id,
+            row.key,
+            index,
+            image.width,
+            image.height,
+            out,
+        )
+        return {
+            "row": row.key,
+            "attempt": index,
+            "attempts": len(store.history(key)),
+            "scale": scale,
+            "source": str(source),
+            "path": str(out),
+            "width": image.width,
+            "height": image.height,
+        }
+
     # -------------------------------------------------- stage 3: composed
 
     def reopen(self) -> dict:
@@ -765,6 +862,7 @@ class CharacterDraft:
             "displayName": self.display_name,
             "concept": self.concept,
             "style": self.style,
+            "authoredBy": self.authored_by,
             "stage": self.stage,
             "stages": list(STAGES),
             "created": str(self._data.get("created", "")),
@@ -794,6 +892,14 @@ class CharacterDraft:
 
     @staticmethod
     def _item_status(store: ImageRevisionStore, key: str) -> dict:
+        """One QA item: its counts, its current image, and every attempt's file.
+
+        ``history[].path`` is the store's own answer for that index, not a
+        filename re-derived from the attempt number — a QA surface that wants to
+        show attempt 2 beside attempt 3 has to address them individually, and
+        re-spelling the store's layout here is how the two would drift apart.
+        Empty only for a record with no file recorded at all.
+        """
         history = store.history(key)
         approved = store.approved_index(key)
         approved_path = store.current(key)
@@ -809,6 +915,7 @@ class CharacterDraft:
             "history": [
                 {
                     "attempt": index,
+                    "path": str(store.attempt_path(key, index) or ""),
                     "note": str(record.get("note", "")),
                     "created": str(record.get("created", "")),
                     "rejected": bool(record.get("rejected")),

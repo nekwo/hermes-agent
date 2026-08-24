@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+from pathlib import Path
 
 import pytest
 
@@ -32,7 +33,7 @@ from agent.charsheet.draft import (
     sprite_payload,
     turnaround_item,
 )
-from agent.charsheet.revisions import ImageRevisionStore
+from agent.charsheet.revisions import STATE_FILENAME, ImageRevisionStore
 from agent.charsheet.spec import CHAR8, EIGHT_WAY, FOUR_WAY, SheetSpec, StateSpec
 
 pytest.importorskip("PIL")
@@ -469,6 +470,91 @@ def test_a_second_draft_may_not_overwrite_another_characters_slug(installed, fak
     assert second.stage == "rows"
 
 
+# ──────────────────────────── row crops (looking) ────────────────────────────
+
+
+def test_a_row_crop_is_named_for_its_row_attempt_and_scale(fake, base):
+    draft = run_to_rows(base)
+    draft.run_rows(only=["walk-e"])
+
+    result = draft.row_thumb("walk-e", attempt=0, scale=3)
+
+    out = Path(result["path"])
+    assert out.parent == draft.directory / "thumbs"
+    assert out.name == "walk-e-a0-x3.png"
+    assert out.is_file()
+    with Image.open(draft.store.attempt_path(row_item("walk-e"), 0)) as source:
+        expected = (source.width * 3, source.height * 3)
+    assert (result["width"], result["height"]) == expected
+    with Image.open(out) as crop:
+        assert crop.size == expected
+    assert result["attempt"] == 0 and result["scale"] == 3 and result["row"] == "walk-e"
+
+
+def test_a_crop_composites_the_attempt_onto_an_opaque_dark_backdrop(fake, base, tmp_path):
+    """The §F.2 point: a defect over transparency renders as nothing.
+
+    The source here is one white pixel in a transparent field — the shape a
+    one-pixel seam has once the chroma field is gone. The crop must show the
+    pixel as a NEAREST block on flat dark, not a hole in an alpha channel.
+    """
+    draft = run_to_rows(base)
+    draft.run_rows(only=["walk-e"])
+    hole = tmp_path / "hole.png"
+    holed = Image.new("RGBA", (8, 4), (0, 0, 0, 0))
+    holed.putpixel((1, 1), (255, 255, 255, 255))
+    holed.save(hole, format="PNG")
+    draft.store.propose(row_item("walk-e"), hole)
+
+    result = draft.row_thumb("walk-e", attempt=1, scale=2)
+
+    with Image.open(result["path"]) as crop:
+        assert crop.mode == "RGBA"
+        assert crop.size == (16, 8)
+        assert crop.getpixel((0, 0)) == pipeline.QA_BACKDROP
+        assert crop.getpixel((0, 0))[3] == 255, "transparent, not composited"
+        # NEAREST: one source pixel becomes a solid 2x2 block, unblended.
+        assert {crop.getpixel(xy) for xy in ((2, 2), (3, 2), (2, 3), (3, 3))} == {
+            (255, 255, 255, 255)
+        }
+
+
+def test_looking_at_a_row_is_never_out_of_order(fake, base):
+    """A composed draft is exactly when the operator goes hunting for a defect."""
+    draft = run_to_composed(base)
+
+    result = draft.row_thumb("walk-e")
+
+    assert draft.stage == "composed"
+    assert Path(result["path"]).is_file()
+
+
+@pytest.mark.parametrize(
+    "kwargs, error, message",
+    [
+        ({"row_key": "idle-w"}, ValueError, "is not an authored row"),
+        ({"row_key": "sprint-e"}, ValueError, "is not an authored row"),
+        ({"row_key": "walk-e", "attempt": 7}, IndexError, "out of range"),
+        ({"row_key": "walk-e", "scale": 0}, ValueError, "out of range"),
+        ({"row_key": "walk-e", "scale": 99}, ValueError, "out of range"),
+        ({"row_key": "walk-e", "scale": "2"}, ValueError, "must be an integer"),
+    ],
+)
+def test_a_crop_that_cannot_be_taken_is_refused_with_a_reason(fake, base, kwargs, error, message):
+    draft = run_to_rows(base)
+    draft.run_rows(only=["walk-e"])
+
+    with pytest.raises(error, match=message):
+        draft.row_thumb(**kwargs)
+
+
+def test_a_row_with_no_attempt_yet_says_so_instead_of_cropping_nothing(fake, base):
+    draft = run_to_rows(base)
+
+    with pytest.raises(ValueError, match="has no attempt to crop yet"):
+        draft.row_thumb("walk-e")
+
+
 # ───────────────────────────── the base image ─────────────────────────────
 
 
@@ -502,6 +588,25 @@ def test_a_draft_needs_a_concept(fake):
         CharacterDraft.create(concept="   ", spec=SPEC)
 
 
+def test_a_draft_records_who_authored_it_without_that_scoping_where_it_lives(fake, base):
+    """`authored_by` is provenance (companion doc §13.6), never a home or a gate."""
+    authored = CharacterDraft.create(
+        concept=CONCEPT, slug=SLUG, spec=SPEC, base_image=base, authored_by="alice"
+    )
+
+    assert authored.authored_by == "alice"
+    assert CharacterDraft.load(authored.id).authored_by == "alice"
+    assert authored.status_payload()["authoredBy"] == "alice"
+    # Same drafts directory as any other draft: the persona names the author, it
+    # does not scope the store.
+    assert authored.directory.parent == drafts_dir()
+
+
+def test_an_unattributed_draft_stays_unattributed_rather_than_guessing(draft):
+    assert draft.authored_by == ""
+    assert draft.status_payload()["authoredBy"] == ""
+
+
 def test_setting_a_base_image_that_does_not_exist_is_refused(draft, tmp_path):
     with pytest.raises(ValueError, match="is not an existing file"):
         draft.set_base_image(tmp_path / "gone.png")
@@ -523,6 +628,44 @@ def test_status_shows_a_pending_item_by_its_latest_attempt(draft):
     assert item["current"] == str(draft.store.latest(turnaround_item("e")))
     assert item["history"][-1]["note"] == "again"
     assert "e" in status["pending"]["turnaround"]
+
+
+def test_every_attempt_in_the_status_history_carries_the_file_the_store_persisted(draft):
+    """Attempt 2 must be addressable beside attempt 3 — one path per attempt.
+
+    The killing mutation is reporting the item's ``current`` image for every
+    entry: the payload still looks populated, and a QA surface silently shows
+    the same picture three times.
+    """
+    draft.run_turnaround()
+    draft.reroll_direction("e", note="again")
+    draft.reroll_direction("e", note="once more")
+
+    item = draft.status_payload()["turnaround"]["e"]
+    paths = [entry["path"] for entry in item["history"]]
+    item_dir = draft.store.root / turnaround_item("e")
+    recorded = json.loads((item_dir / STATE_FILENAME).read_text(encoding="utf-8"))
+
+    assert len(paths) == 3
+    assert len(set(paths)) == 3, "every attempt needs its own path, not the item's"
+    # The store's own filenames, not a filename this payload re-derived.
+    assert [Path(path).name for path in paths] == [r["file"] for r in recorded["attempts"]]
+    assert all(Path(path).parent == item_dir and Path(path).is_file() for path in paths)
+    # `current` is one of the attempts (the newest here) — not all of them.
+    assert paths.count(item["current"]) == 1
+
+
+def test_an_attempt_with_no_file_recorded_reports_no_path_rather_than_a_guess(draft):
+    draft.run_turnaround()
+    item_dir = draft.store.root / turnaround_item("e")
+    state = json.loads((item_dir / STATE_FILENAME).read_text(encoding="utf-8"))
+    state["attempts"][0].pop("file")
+    (item_dir / STATE_FILENAME).write_text(json.dumps(state), encoding="utf-8")
+
+    item = draft.status_payload()["turnaround"]["e"]
+
+    assert item["history"][0]["path"] == ""
+    assert item["current"] == ""
 
 
 def test_status_reports_what_has_not_been_generated_yet(draft):

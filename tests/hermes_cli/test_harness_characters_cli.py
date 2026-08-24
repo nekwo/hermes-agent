@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+from pathlib import Path
 
 import pytest
 
@@ -195,6 +196,7 @@ def start_draft(capsys, *extra):
         (["approve-direction", "--draft", "d", "--all"], "approve-direction"),
         (["approve-direction", "--draft", "d", "--direction", "ne"], "approve-direction"),
         (["rows", "--draft", "d"], "rows"),
+        (["thumb", "--draft", "d", "--row", "walk-e"], "thumb"),
         (["reroll-row", "--draft", "d", "--row", "walk-e"], "reroll-row"),
         (["compose", "--draft", "d"], "compose"),
         (["reopen", "--draft", "d"], "reopen"),
@@ -332,6 +334,120 @@ def test_a_reroll_and_a_row_reroll_are_reachable_through_the_cli(fake, base_imag
     assert row["attempts"] == 2
 
 
+def test_thumb_writes_the_crop_its_payload_describes(fake, base_image, capsys, tmp_path):
+    """The byte shape: the payload's path, size and opacity are the file's.
+
+    A card-size crop is the whole point of the verb (plan §F.2), so the numbers
+    it reports have to be readable back out of the PNG — and the picture has to
+    be opaque, because the seam this exists to reveal is drawn over transparent
+    pixels.
+    """
+    draft_id = start_draft(capsys, "--base-image", str(base_image))
+    run(["harness", "characters", "turnaround", "--draft", draft_id, "--json"], capsys)
+    run(["harness", "characters", "approve-direction", "--draft", draft_id, "--all", "--json"], capsys)
+    run(["harness", "characters", "rows", "--draft", draft_id, "--only", "walk-e", "--json"], capsys)
+
+    code, payload = run(
+        ["harness", "characters", "thumb", "--draft", draft_id, "--row", "walk-e", "--json"],
+        capsys,
+    )
+
+    assert (code, payload["ok"]) == (0, True)
+    assert set(payload) >= {"ok", "path", "row", "attempt", "width", "height"}
+    assert (payload["row"], payload["attempt"], payload["draft"]) == ("walk-e", 0, draft_id)
+    out = Path(payload["path"])
+    assert out.name == "walk-e-a0-x2.png"
+    assert out.parent.name == "thumbs"
+    with Image.open(out) as crop, Image.open(payload["source"]) as source:
+        assert (crop.width, crop.height) == (payload["width"], payload["height"])
+        assert (crop.width, crop.height) == (source.width * 2, source.height * 2)
+        assert crop.convert("RGBA").getpixel((0, 0))[3] == 255, "the crop must be opaque"
+    # A path, never bytes: nothing in the payload carries an image inline.
+    assert "base64" not in json.dumps(payload).lower()
+
+
+def test_thumb_addresses_one_attempt_at_a_time(fake, base_image, capsys):
+    draft_id = start_draft(capsys, "--base-image", str(base_image))
+    run(["harness", "characters", "turnaround", "--draft", draft_id, "--json"], capsys)
+    run(["harness", "characters", "approve-direction", "--draft", draft_id, "--all", "--json"], capsys)
+    run(["harness", "characters", "rows", "--draft", draft_id, "--only", "walk-e", "--json"], capsys)
+    run(
+        ["harness", "characters", "reroll-row", "--draft", draft_id, "--row", "walk-e",
+         "--note", "tighter step", "--json"],
+        capsys,
+    )
+
+    code, first = run(
+        ["harness", "characters", "thumb", "--draft", draft_id, "--row", "walk-e",
+         "--attempt", "0", "--scale", "3", "--json"],
+        capsys,
+    )
+    _, latest = run(
+        ["harness", "characters", "thumb", "--draft", draft_id, "--row", "walk-e", "--json"],
+        capsys,
+    )
+    status = run(["harness", "characters", "status", "--draft", draft_id, "--json"], capsys)[1]
+
+    assert code == 0
+    assert Path(first["path"]).name == "walk-e-a0-x3.png"
+    assert (latest["attempt"], Path(latest["path"]).name) == (1, "walk-e-a1-x2.png")
+    assert first["path"] != latest["path"]
+    # Each crop is taken from that attempt's own file, as `status` reports it.
+    history = status["status"]["rows"]["walk-e"]["history"]
+    assert [entry["path"] for entry in history] == [first["source"], latest["source"]]
+
+
+@pytest.mark.parametrize(
+    "argv, message",
+    [
+        (["--row", "idle-w"], "is not an authored row"),
+        (["--row", "walk-e", "--attempt", "9"], "out of range"),
+        (["--row", "walk-e", "--scale", "0"], "out of range"),
+    ],
+)
+def test_a_crop_that_cannot_be_taken_reports_the_pets_error_shape(
+    fake, base_image, capsys, argv, message
+):
+    draft_id = start_draft(capsys, "--base-image", str(base_image))
+    run(["harness", "characters", "turnaround", "--draft", draft_id, "--json"], capsys)
+    run(["harness", "characters", "approve-direction", "--draft", draft_id, "--all", "--json"], capsys)
+    run(["harness", "characters", "rows", "--draft", draft_id, "--only", "walk-e", "--json"], capsys)
+
+    code, payload = run(
+        ["harness", "characters", "thumb", "--draft", draft_id, *argv, "--json"], capsys
+    )
+
+    assert code == 2
+    assert payload["ok"] is False
+    assert message in payload["error"]
+    assert not isinstance(payload["error"], dict)  # flat, not the Stage-42 envelope
+    assert payload["draft"] == draft_id
+
+
+def test_start_records_the_authoring_persona_as_provenance(fake, capsys):
+    code, started = run(
+        [
+            "harness", "characters", "start",
+            "--concept", "an arrow knight",
+            "--slug", "arrow-knight",
+            "--states", STATES_FLAG,
+            "--directions", DIRECTIONS_FLAG,
+            "--authored-by", "alice",
+            "--json",
+        ],
+        capsys,
+    )
+    draft_id = started["draft"]
+
+    _, status = run(["harness", "characters", "status", "--draft", draft_id, "--json"], capsys)
+    _, listed = run(["harness", "characters", "list", "--json"], capsys)
+
+    assert (code, started["ok"]) == (0, True)
+    assert started["summary"]["authoredBy"] == "alice"
+    assert status["status"]["authoredBy"] == "alice"
+    assert listed["drafts"][0]["authoredBy"] == "alice"
+
+
 def test_start_shapes_the_sheet_from_the_states_and_directions_flags(fake, capsys):
     code, payload = run(
         [
@@ -381,6 +497,7 @@ def test_an_out_of_order_verb_reports_the_pets_error_shape(fake, base_image, cap
         ["turnaround", "--draft", "no-such-draft"],
         ["compose", "--draft", "no-such-draft"],
         ["reopen", "--draft", "no-such-draft"],
+        ["thumb", "--draft", "no-such-draft", "--row", "walk-e"],
     ],
 )
 def test_an_unknown_draft_is_an_error_with_the_id_echoed_back(fake, capsys, argv):

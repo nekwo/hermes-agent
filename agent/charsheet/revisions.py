@@ -140,7 +140,7 @@ class ImageRevisionStore:
         index = state["approved"]
         if index is None:
             return None
-        return self._item_dir(key) / str(state["attempts"][index]["file"])
+        return self._record_path(self._item_dir(key), state["attempts"][index])
 
     def approved_index(self, key: str) -> int | None:
         """Index of the approved attempt, or ``None``."""
@@ -156,7 +156,30 @@ class ImageRevisionStore:
         state = self._read_state(key)
         if not state["attempts"]:
             return None
-        return self._item_dir(key) / str(state["attempts"][-1]["file"])
+        return self._record_path(self._item_dir(key), state["attempts"][-1])
+
+    def attempt_index(self, key: str, attempt: int) -> int:
+        """Resolve *attempt* (``-1`` = latest) to a real 0-based index.
+
+        The ONE index resolver a caller may reach: a QA surface that wants both
+        the number and the file must not re-derive "negative counts from the end"
+        for itself, or the two answers drift the moment history grows.  Raises
+        :class:`ValueError` for an item with no attempts and :class:`IndexError`
+        when the index is out of range — the refusals the CLI already reports.
+        """
+        return self._resolve(key, self._read_state(key), attempt)
+
+    def attempt_path(self, key: str, attempt: int) -> Path | None:
+        """Path of ONE attempt's image (``-1`` = latest), as recorded on disk.
+
+        ``current()`` and ``latest()`` are this same derivation over the approved
+        and newest index; every one of the three reads the ``file`` the store
+        wrote, so no caller can re-derive an attempt filename and be wrong about
+        it.  ``None`` only when the record carries no ``file`` at all.
+        """
+        state = self._read_state(key)
+        index = self._resolve(key, state, attempt)
+        return self._record_path(self._item_dir(key), state["attempts"][index])
 
     # ------------------------------------------------------------- writing
 
@@ -216,6 +239,11 @@ class ImageRevisionStore:
 
     def _item_dir(self, key: str) -> Path:
         return self.root / self.validate_key(key)
+
+    @staticmethod
+    def _record_path(directory: Path, record: dict) -> Path | None:
+        filename = str(record.get("file", "") or "")
+        return (directory / filename) if filename else None
 
     def _resolve(self, key: str, state: dict, attempt: int) -> int:
         attempts = state["attempts"]
