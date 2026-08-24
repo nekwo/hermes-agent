@@ -108,6 +108,11 @@ For product edits:
 3. Run the repo's deploy-check yourself when it is cheap and relevant — EterniaBackend
    `manage.py check`; EterniaLauncher focused `flutter analyze <changed paths>`; hermes-agent
    focused `pytest` for the changed modules.
+4. Bound the verification tail. After a small change, one post-commit `git show --stat HEAD`
+   (or `git show HEAD` when the diff itself is the proof) is the commit receipt — report it and
+   stop. Do not re-run `git diff --check`, `git status`, link checks, or a second focused test
+   over state a command in this same reply already proved clean. Each redundant re-check is a
+   full model iteration (~12-15s) that proves nothing new.
 
 No-edit investigation work is exempt: do not invent commits for work that changed nothing.
 
