@@ -687,7 +687,13 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   a different shift on symmetric art and breaks that equality.
   *Consequence:* the window BOUNDS the blindness, it does not remove it. A pure
   translation past the window still crosses (−24 px reads +10.91% even
-  registered). And it is not free — see the two entries below.
+  registered — **that figure is the untouched NEIGHBOUR `idle-ne`; the displaced
+  row `idle-e` itself reads +9.38%**, corrected 2026-08-25 by review). The
+  crossing band is also bounded on BOTH sides, which "past the window still
+  crosses" hides: sliding `idle-e` reads −15.38% at −8 and −16 px (registered
+  away), +9.38% at −24, +17.92% at −32, +18.75% at −40 and +7.76% at −56 —
+  installing again. It is a BAND of roughly −20 to −48 px on this art, not a
+  threshold. And it is not free — see the two entries below.
 
 - **[READ] `normalize_cells` is load-bearing for the handedness gate, and it is
   upstream pet code this package does not own.** `agent/charsheet/pipeline.py`
@@ -735,8 +741,21 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   operator obeying a three-row refusal spends two correct approved attempts and
   cannot get them back. The gate now reports only the LOCAL MAXIMUM of each
   contiguous run of flagged rows; the rest ride in the same finding as
-  `corroborating`, and the message says "Do NOT re-roll them". In every case
-  measured the culprit was the run's maximum.
+  `corroborating`, and the message says "Do NOT re-roll them". ~~In every case
+  measured the culprit was the run's maximum.~~ **STRUCK 2026-08-25 (review):
+  the culprit is the run's maximum only when exactly ONE row of the run is at
+  fault, and both other reachable shapes INVERT it.** (i) A CORRECT `idle-e`
+  slid −24 px — pure placement, art untouched — reads +9.38% while its untouched
+  neighbour `idle-ne` reads +10.91%, so the run maximum, and therefore the row
+  the refusal tells the operator to re-roll, is the innocent neighbour; the
+  disturbed row rides under "Do NOT re-roll them". A 48 px one-sided prop
+  inverts the same way (propped `idle-e` +0.79%, neighbour `idle-ne` +4.89%).
+  (ii) With TWO mirrored rows FLANKING a correct one — `idle-se` and `idle-ne`
+  mirrored, `idle-e` correct — the correct middle row wins the rotation run at
+  +13.33% and is reported as a standalone `rotation` culprit; the evidence that
+  it is correct (its cross-state reading of −75.71%) sits unused in the same
+  payload. That shape is reachable: it is what a SECOND badly-worded diagonal in
+  `VIEW_LANGUAGE` produces, the way `ne` alone produced round one's.
   *Consequence:* when a refusal names one row and mentions others, re-roll the
   named one and compose again. The synthetic glyph fixture never reproduced this
   — it flags exactly one row every time — which is why round one's tests were
@@ -762,6 +781,17 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   it wakes up at the third state. And it is a consensus, so a character whose
   every state is mirrored is a fixed point of it too, and a 2-of-3 split convicts
   the minority. Say so rather than reporting it as certainty.
+  **An EVEN split convicts EVERYBODY — added 2026-08-25 by review.**
+  `majority = len(pairs) // 2 + 1` is 2 of 3 pairs on a FOUR-state sheet, so a
+  2-2 split leaves every row with two disagreeing pairs. Measured on a 4-state
+  sheet built from the live art with two of the four `e` rows mirrored: ALL FOUR
+  are flagged as errors, the two CORRECT ones with basis `states` at +14.31%,
+  none marked `corroborating`, none carrying "Do NOT re-roll them" — while their
+  rotation readings sit at −15.97%. The states pass never goes through
+  `_run_findings`, so it has no attribution step at all, and `SKILL.md` tells the
+  agent that a multi-row `states` refusal is "the one case where re-rolling
+  several rows IS right". One `add-state` takes the live character from three
+  states to four.
 
 - **[READ] One blank row used to make its whole state unjudged, silently, on a
   sheet that still installs.** `validate_sheet` records an empty row as a
@@ -829,7 +859,10 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
 
 - **[READ] Three round-one figures do not reproduce; here are the measured
   ones.** (a) "~1 s on a 15-row sheet" was **0.08 s** for the unregistered gate
-  and is **~4.0 s** for the registered one on the live 15-row sheet — the shift
+  and is ~~**~4.0 s**~~ **5.7–10.7 s** (three clean runs, 2026-08-25 review:
+  10.70 / 5.74 / 6.31 s for `detect_mirrored_art`; `validate_sheet` end to end
+  6.46 s, which is what an operator actually waits for on `compose`)
+  for the registered one on the live 15-row sheet — the shift
   search is 33 distance evaluations per frame pair per orientation. It errs
   safe either way, but say the real number. (b) The call-site comment said the
   check runs "only on a sheet whose geometry already holds"; it runs
@@ -838,6 +871,80 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   from `flagged` AND from `unjudged`, the one place the module broke its own
   accounting rule; such a row is now unjudged with the reason, because a row that
   simply vanishes from the payload reads exactly like a clean one.
+
+- **[READ] A single mirrored row can now ship CLEAN on real three-state art —
+  measured, not inferred.** Mirroring each of the live sheet's nine interior rows
+  one at a time, 2026-08-25: `jumping-se` reads **+6.78% in the rotation and
+  +7.64% across the states** and is flagged by NEITHER pass, so that sheet
+  composes, installs and bundles with no refusal and no warning. `idle-se` is the
+  near-miss the round-two entries already name (+4.33% rotation, recovered at
+  +11.76% across states); `jumping-se` is the one the cross-state pass does not
+  recover, because 8% sits inside its band too. The other seven are caught
+  (+9.12% … +15.86%). And the row the gate was BUILT for is only just inside it:
+  on the preserved pre-fix sheet the three genuinely mirrored `ne` rows read
+  +12.28 / +8.52 / **+7.37%** — the third is UNDER the threshold, and the
+  install is refused only because the first two are over. The cross-state pass
+  says nothing there at all (−80.67%), because all three states were mirrored
+  the same way and a unanimous consensus convicts nobody.
+  *Consequence:* "compose passed" now means "no single row cleared 8% on the two
+  neighbourhoods it can see". Say the sentence, not the word "clean". Look at
+  `se` rows in particular — every miss measured so far is a `se`.
+
+- **[READ] On the DEFAULT two-state sheet the gate sees ONE isolated mirrored
+  row and nothing else.** `characters start` creates `idle:6, walk:8`, and the
+  cross-state pass needs three states, so on the default sheet only the rotation
+  answers. Measured on a two-state cut of the live art: a WHOLE state mirrored
+  scores **bit-identical** to the correct sheet (−4.53 / −15.38 / −13.63% …,
+  nothing flagged) — it is a fixed point per state; and two ADJACENT mirrored
+  rows (`idle-e` + `idle-ne`) also pass clean, their rotation gains going
+  NEGATIVE (−4.75%, −13.47%) because a contiguous block is only visible at its
+  edges. Both are caught the moment a third state exists (+17.00% / +10.25%
+  across states).
+  *Consequence:* a two-state character gets the weakest form of this check.
+  If the operator cares, the cheapest sensitivity available is a third state —
+  say that rather than quoting the gate's separation figures at them.
+
+- **[READ] Two things the code promises are not pinned by any test, and both
+  survived a round trip.** Re-run of the sixteen-sabotage exercise on
+  `1b95ce0b62`, 2026-08-25, over `tests/agent/test_charsheet_pipeline.py`:
+  (a) `REGISTRATION_WINDOW_DIVISOR = 12` → `6` (window 32 px) and → `3`
+  (window 64 px) both leave **all 62 tests green**, while moving the
+  false-refusal boundary on correct art from −24 px to −40 px to past −56 px.
+  Nothing asserts the window's size, and nothing asserts the thing it is FOR —
+  that a slide LARGER than the window is still caught.
+  `test_sliding_a_correct_row_sideways_is_not_handedness` slides 8 px, inside
+  every one of those windows.
+  (b) `_finding_from_run`'s `culprit = max(run, key=…gain)` → `run[0][1]` also
+  leaves all 62 green: in the fixture the mirrored row is the FIRST of its run,
+  so "the run's maximum" and "the first of the run" are the same row and the
+  fixture cannot tell the repair from the bug — the same too-weak-pair defect
+  `1b95ce0b62` fixed twice, recurring a third time one function over.
+  Also measured: the threshold pin
+  (`test_the_threshold_sits_between_the_two_measured_populations`) tolerates any
+  value in **0.0503 … 0.1205** on its fixture. Raising 0.08 → 0.11 does go red,
+  but through `test_an_end_row_is_not_blamed_…` (cobalt's 10.48% single seam)
+  and `test_sliding_a_correct_row_…`, not through the test written for it: the
+  fixture's only true positive is a single loud row at +12.05%, and the real true
+  floor on live art is +4.33%. The fixture does not contain the band where the
+  two populations actually meet.
+  *Consequence:* if you re-tune the window or the attribution, the suite will not
+  tell you. Measure on the live sheet and write the number down here.
+
+- **[READ] `normalize_cells`'s residual eats 10 of the 16 px window on art that
+  PASSES — confirmed, with the right instrument.** The "up to 10 px" figure in
+  the entry above is right, and an alpha-weighted column centroid does NOT
+  reproduce it (that reads 3.7 px). The number that matters is the shift
+  `_registered_distance` itself chooses: measured over every adjacent seam of the
+  live sheet, direct shifts run −5 … **+10** px, the largest on `jumping s|se` —
+  the pair the entry names. So ordinary correct art already consumes 62% of the
+  window, leaving ~6 px of headroom before a real displacement starts eating
+  judgement. Nothing in this package pins that: the charsheet fixtures are
+  PRE-COMPOSED sheets, so an upstream retune of the centring rule cannot redden
+  them — only live composes would drift.
+  *Consequence:* the cheap pin is a charsheet-side test that composes a
+  multi-row set through `compose_draft_frames` and asserts the per-row registered
+  shift stays inside `registration_window(frame_w)`. Without it "if
+  `normalize_cells` ever stops registering" has no detector at all.
 
 ---
 
