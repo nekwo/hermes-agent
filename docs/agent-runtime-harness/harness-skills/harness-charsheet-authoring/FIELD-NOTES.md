@@ -92,6 +92,58 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   *Consequence:* on a 401 right after a plan change, force a refresh and re-probe before
   reporting the provider unavailable.
 
+- **[READ] The image-generation TOOL is `image_generate`; `image_gen` is the toolset that
+  carries it.** `toolsets.py` registers `image_gen: {tools: ["image_generate"]}`,
+  `tools/image_generation_tool.py` declares `name="image_generate"`, and `image_gen` is
+  separately the `config.yaml` section that selects the provider
+  (`agent/image_gen_registry`). Nothing is called `image_gen` at the tool level.
+  *Consequence:* the provider preflight is one `image_generate` call. Say the schema name,
+  not the config section — they differ by one word and only one of them is callable.
+
+- **[READ] `--authored-by` is unvalidated free text, and an agent will not put a persona id
+  in it on its own.** The lane does state the id: `persona_runtime`'s identity clause renders
+  "You are <display name> (Mission Control persona id: `<id>`)". On the A2 run the id was
+  `base` and the agent wrote `authored_by: "chara_a2"` — a slugified copy of its INSTANCE
+  display name ("Chara A2 - Tier1 authoring"). `list --json` reports it verbatim as
+  `authoredBy`, and it resolves to nothing: not a persona id, not a `hermes_profile`.
+  *Consequence:* pass the id from the parenthesis in your own identity line, verbatim, never a
+  display name. A consumer that reads `authoredBy` to pick the profile a draft is visible
+  under must treat an unmatched value as "unattributed", not as a profile name.
+
+## Verbs and stage gates
+
+- **[READ] A state below 2 frames passes `start` and can never reach `rows`.** Two modules
+  hold different floors: `spec.StateSpec` / `spec.parse_states` accept
+  `1 <= frames <= MAX_FRAMES_PER_ROW`, while `prompts.row_prompt` raises
+  `frame_count must be at least 2 for an animation row`. Live: `start --states idle:1` built a
+  draft, spent the base anchor and three direction generations, and only then refused at
+  `rows` with `{"ok": false, "error": "frame_count must be at least 2 for an animation row,
+  got 1", "stage": "rows"}`, exit 2. The refusal names neither the row nor the state, nothing
+  says the draft is unrecoverable, and no verb can change `--states` afterwards (`add-state`
+  does not exist).
+  *Consequence:* never start a state below 2 frames. The floor that binds is the prompt
+  builder's, not the spec's, and it is enforced four generations late.
+
+- **[READ] `thumb` is row-only — at the `turnaround` stage there is no crop verb at all.**
+  `Draft.row_thumb` opens with `self._authored_row(row_key)`, so a direction reference is
+  outside its vocabulary. Passing the store's own key answers
+  `{"ok": false, "error": "'turnaround@s' is not an authored row of this sheet (authored
+  rows: idle-s, idle-e, idle-n)", "stage": "turnaround"}`, exit 2. Live, the agent tried
+  exactly that, then hand-rolled a Pillow crop: first into the draft's own `thumbs/`
+  directory — which does not exist until `thumb` creates it, so the write failed — then into
+  `$HERMES_HOME/cache/`.
+  *Consequence:* a direction reference is QA'd by declaring the reference itself, or by
+  cropping to a path OUTSIDE the draft. `thumbs/` is `thumb`'s namespace; nothing else writes
+  there, and nothing writes into a draft with file tools.
+
+- **[READ] `--directions 4` authors THREE directions.** `spec.FOUR_WAY.authored =
+  ("s", "e", "n")` against `EIGHT_WAY.authored = ("s", "se", "e", "ne", "n")`. Live, an agent
+  reading only the 8-way set quoted the operator "4 direction references + 4 idle row strips"
+  for a `--directions 4`, one-state sheet whose real cost is 3 + 3.
+  *Consequence:* read `spec.scheme.authored` out of `status --json` before quoting a cost, and
+  take row keys from the payload — this sheet's were `idle-s`, `idle-e`, `idle-n`, and nothing
+  was named `walk`.
+
 ## Looking at a sheet
 
 - **[READ] The console's MEDIA hero card is a fixed 1:1 centre-cover square.**
@@ -136,6 +188,25 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   ~50 rows. It is a hard lower boundary, not a dark band between two bright regions.
   *Consequence:* "look for a dark band" is the wrong search; look for a hard edge.
 
+- **[READ] The default crop is a reduction only when the row has more than 4 frames.** `thumb`
+  slices one cell (`strip_px / frames`) and then multiplies by `scale**2`, so the output is
+  `strip_px * scale**2 / frames` and it shrinks only while `scale**2 < frames`. At the default
+  `--scale 2` that means `frames > 4`. Measured on an `idle:2` row: the strip is 1774x887 =
+  1,573,538 px and the default crop is 1774x1774 = 3,147,076 px — **twice the strip it was
+  supposed to make lighter.** CHAR8's own rows are the happy case (walk:8 gives 0.5x, idle:6
+  gives 0.67x), which is why the whole-strip defect this verb replaced was only ever measured
+  there.
+  *Consequence:* on a short row `--scale 1` is the crop and `--scale 2` is an enlargement.
+  Divide before you zoom.
+
+- **[READ] A raw row strip and a turnaround reference are both heavier than the sheet, and
+  nothing checks either.** The card-weight budget lives inside `thumb` alone. Live, an agent
+  declared three raw strips at 1,573,538 px each against a composed sheet of 384x624 =
+  239,616 px — 6.6x the sheet per card — plus turnaround references up to 413,404 px.
+  *Consequence:* "declare a crop, not a sheet" is a rule the tooling does not enforce on any
+  path it does not own. The only self-reporting artifact is `thumb`'s, and the `cardSafe`
+  entry below says what that report does not promise.
+
 ## Payload
 
 - **[READ] Attempts are 0-based in payloads and flags, 1-based in human lines.**
@@ -147,8 +218,21 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   `thumb` carries `cardSafe`, derived from `MAX_CARD_PIXELS` (itself derived from
   `CHAR8.sheet_size()`, so it cannot drift). Above the default scale a crop is written but
   flagged; at or below it an over-budget crop is refused, naming `--scale 1`.
-  *Consequence:* only declare a `cardSafe: true` crop with `MEDIA:`. Never carry a copy of
-  the threshold.
+  ~~*Consequence:* only declare a `cardSafe: true` crop with `MEDIA:`.~~ **Struck by A2 —
+  `cardSafe: true` does not mean "lighter than this sheet".** The derivation above is right
+  and the guarantee it gets read for is wrong: `pipeline.MAX_CARD_PIXELS` is
+  `CHAR8.sheet_size()`, the LARGEST sheet the package composes, not the sheet the draft in
+  hand will compose. Measured live on a `--directions 4`, `idle:2` draft whose composed sheet
+  is 384x624 = 239,616 px: the DEFAULT crop (`thumb --row idle-s --frame 0 --scale 2`) came
+  back 1774x1774 = 3,147,076 px carrying `cardSafe: true` — **13.1x the sheet it exists to
+  avoid decoding**, clearing the fixed budget by 1.5%. One reroll turn declared four of them:
+  12,588,304 px, roughly 48 MiB decoded, every one `cardSafe: true`. `--scale 3` on the same
+  row is the first `false`.
+  *Consequence (restated):* `cardSafe` is a CEILING, and it is CHAR8's. It answers "will this
+  file sink the console", never "is this lighter than my sheet". On any spec smaller than
+  CHAR8, weigh the crop against that draft's own `spec.sheet_size()` — and see the frames rule
+  above, which is what actually decides whether a crop reduces anything. Still never carry a
+  copy of the threshold.
 
 - **[READ] Absence travels as JSON `null`, not `""`** for `history[].path`, `current`,
   `approvedPath` — and, since `91e23bf0c5`, `baseImage` in BOTH `status --json` and
@@ -158,6 +242,41 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   those payloads goes through one public helper (`draft.path_or_none`).
   *Consequence:* tolerate both on read (older drafts and other payloads may still carry
   `""`); emit neither as a bare `MEDIA:` line.
+
+- **[READ] `characters sprite <slug> --json` inlines the whole sheet as base64 and has no
+  path-only mode.** `draft.sprite_payload` always emits `spritesheetBase64` from the sheet
+  bytes and returns no path or directory for it. Measured on the installed CHAR8 `anime-girl`:
+  438,972 base64 chars = **428.7 KiB**, in a 441,694-byte payload — 107x the 4,096-byte
+  event-payload cap (`agent_runtime/events.EVENT_PAYLOAD_LIMIT_BYTES`) that the "images travel
+  as paths" rule is written against. It is also 8.8x the terminal tool's own output cap
+  (`tools/tool_output_limits.DEFAULT_MAX_BYTES = 50_000`, unset in `profiles/base`), and
+  `tools/terminal_tool.py` truncates by splicing a notice between a 40% head and a 60% tail —
+  which for this payload happens to keep the structural fields (they sit in the first 2,202
+  and last 498 chars) while making the JSON unparseable and spending roughly 12k tokens of
+  context on base64. A small 4-way `idle:2` sheet came to 43,477 bytes and survived intact;
+  the size scales with the sheet, so the small case proves nothing about the real one.
+  *Consequence:* on the chat lane read `character.json` (or `status --json`) for the shape.
+  `sprite --json` is a launcher-side read; do not pipe it into a turn.
+
+- **[READ] `CHARSHEET-QA:`'s required `generator` key has no source in any payload, and its
+  meaning flips at compose.** `tests/fixtures/charsheet_qa_line.json` puts `generator` in
+  `requiredKeys` and illustrates it with `"openai-codex"`, an image provider. The only
+  `generator` the pipeline writes is the literal `"charsheet"` in `character.json`'s manifest
+  (`draft.compose`), which names the pipeline. No `start` / `status` / `list` / `rows` payload
+  carries a provider name at all. Live, one draft emitted `"generator":"openai-codex"` at
+  `turnaround` and `rows` and `"generator":"charsheet"` at `composed`, and dropped the key
+  from every item-level line — which the fixture makes required.
+  *Consequence:* decide once what `generator` means and say the same thing on every line of one
+  draft. A consumer cannot key on it today.
+
+- **[READ] `status --json` answers under `.status`, and `rows` / `turnaround` are MAPS keyed by
+  item key.** `.status.rows` is `{"idle-s": {...}, ...}` — not a list — each value carrying
+  `attempts`, `approved`, `current`, `approvedPath` and a `history` array whose entries are
+  `{attempt, created, note, path, rejected}`. `.status.stages` is the ordered stage list and
+  `.status.pending` / `.status.missing` are `{rows: [], turnaround: []}`.
+  *Consequence:* A1's per-attempt `path` is live and is how attempt N is shown beside N-1
+  without a second lookup. The reroll note travels in the same entry, which is what makes an
+  attempt reproducible.
 
 ## Process
 
@@ -176,6 +295,30 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
 - **[READ] The default hypothesis is "the model drew it", not "the code broke it".**
   The one real defect found in anger was generated art, and the pipeline-residue
   hypothesis (slicing, keying, palette lock) cost the most time while being wrong.
+
+- **[READ] A clarify chip is emitted only when the turn deliberately reaches for one, and a
+  decision phrased as prose bullets looks the same to the agent.** Live: two decision turns
+  went out as markdown bullet lists with `clarify_request: null`; after the operator said
+  "give me pickable options rather than a prose question" the next turn called `clarify` with
+  four choices and the payload carried a `clarify_token`; the turn after that reverted to
+  bullets. Nothing refuses a prose question — `MissionChatClarifyCapture` simply has nothing to
+  capture, so the console renders text where a one-click answer was the point.
+  *Consequence:* the chip is not a formatting preference, it is the operator's only
+  one-interaction answer. Reach for `clarify` at every point you stop — including the turn
+  where you are reporting a blocker and offering ways out of it.
+
+- **[READ] A stage change with no `CHARSHEET-QA:` line is invisible downstream.** Live,
+  `reopen` moved a draft `composed` to `rows` and the reply carried no line, so anything
+  keying off the last one still believes the draft is composed.
+  *Consequence:* `reopen` IS a stage change. Emit the line for every stage that actually
+  moved, and say in prose when a verb failed and left the stage where it was.
+
+- **[READ] The operator trace truncates a command at 500 characters.**
+  `agent_runtime/progress._OPERATOR_COMMAND_FULL_MAX` is 500, and a `characters start` carrying
+  a concept, a style and an absolute `--base-image` is longer — live, it was cut mid-path in
+  the console's own trace row.
+  *Consequence:* the trace is not a record of what you ran. Put the draft id, the slug and the
+  spec you chose in the REPLY, where the operator can actually read them.
 
 ---
 
