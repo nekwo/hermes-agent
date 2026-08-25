@@ -4,6 +4,13 @@
 console-character-authoring program appends what it LEARNED here as it lands; the skill
 is rewritten from this file at the end of the program, not before.
 
+**This is one of two halves.** The launcher lane keeps its own running record at
+`EterniaLauncher/docs/spatial/CHARA_CONSOLE_AUTHORING_FIELD_NOTES.md`, because a launcher
+slice landing in a launcher worktree cannot commit here without a cross-repo write into a
+shared checkout. AF reads BOTH. The split is by which repo the agent is standing in, not
+by subject: a finding about a hermes payload, verb or home belongs in THIS file even when
+a launcher slice discovers it — the other file cross-references, it does not copy.
+
 **Why it works this way (owner ruling, 2026-08-24).** The skill was written second
 (slice A0) and was stale within one commit: A1's polish changed the `thumb` payload and
 the crop budget the same day, and the copy the runtime actually serves diverged from the
@@ -154,6 +161,11 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
 
 ## Appended by slice
 
-<!-- A2, A3, B0, B1, B2, D1.1, P1, R1: append your entries above this line, under the
-     matching heading, or add a heading if none fits. Then say in your slice report that
-     you did. -->
+<!-- A2, A3, R1 and any slice standing in the HERMES repo: append your entries above this
+     line, under the matching heading, or add a heading if none fits. Then say in your
+     slice report that you did.
+
+     Standing in the LAUNCHER repo? Write to
+     EterniaLauncher/docs/spatial/CHARA_CONSOLE_AUTHORING_FIELD_NOTES.md instead — unless
+     what you learned is about a hermes payload, verb or home, which belongs here even
+     then. Do not write to both. -->
