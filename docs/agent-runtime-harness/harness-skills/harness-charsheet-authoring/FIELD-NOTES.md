@@ -726,10 +726,18 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   about 7x to about 2.5x. The threshold stayed at 8% — set for specificity, since
   a false refusal used to be permanent — which means it now misses part of the
   true band by design: three of those twelve single-row mirrors fall under it.
+  **"About 2.5x apart" is STRUCK 2026-08-25 (round three): it is measured
+  against the wrong false population.** The false row in that table is a
+  deliberately asymmetric CORRECT character, which registration handles by
+  design. The false population that matters is correct art DISPLACED, and it
+  reaches **+18.75%** — above every true reading in the same table. On one basis
+  the two populations overlap, so there is no separation figure to quote and no
+  value of the threshold that produces one.
   *Consequence:* a clean handedness pass is weaker evidence than it was, in
   exchange for a refusal that is much better evidence. Two things buy the
   sensitivity back — the cross-state pass, and the operator's eye. Neither is
-  optional.
+  optional. **And a single-basis refusal is no longer "much better evidence"; it
+  is a warning now. See the round-three entries at the end of this section.**
 
 - **[READ] A mirrored row makes its NEIGHBOURS read high, and obeying a
   multi-row refusal spends correct approved art.** Measured on the repaired live
@@ -739,9 +747,15 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   said `characters reroll-row --row <that row>` — and `reroll_row` proposes then
   approves unconditionally with no `approve-row` verb anywhere in the repo, so an
   operator obeying a three-row refusal spends two correct approved attempts and
-  cannot get them back. The gate now reports only the LOCAL MAXIMUM of each
+  cannot get them back. ~~The gate now reports only the LOCAL MAXIMUM of each
   contiguous run of flagged rows; the rest ride in the same finding as
-  `corroborating`, and the message says "Do NOT re-roll them". ~~In every case
+  `corroborating`, and the message says "Do NOT re-roll them".~~ **The
+  local-maximum rule is STRUCK in turn, 2026-08-25 (round three): the rotation's
+  ranking now names NOBODY.** A run of two or more adjacent flagged rows is
+  reported as "one of these N" unless a second, independent basis convicts one
+  of them; only a LONE flagged row is named off the rotation alone. The
+  `corroborating` list and its "Do NOT re-roll them" survive, but only on a
+  finding that actually named a culprit. ~~In every case
   measured the culprit was the run's maximum.~~ **STRUCK 2026-08-25 (review):
   the culprit is the run's maximum only when exactly ONE row of the run is at
   fault, and both other reachable shapes INVERT it.** (i) A CORRECT `idle-e`
@@ -941,10 +955,164 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   judgement. Nothing in this package pins that: the charsheet fixtures are
   PRE-COMPOSED sheets, so an upstream retune of the centring rule cannot redden
   them — only live composes would drift.
-  *Consequence:* the cheap pin is a charsheet-side test that composes a
+  *Consequence:* ~~the cheap pin is a charsheet-side test that composes a
   multi-row set through `compose_draft_frames` and asserts the per-row registered
-  shift stays inside `registration_window(frame_w)`. Without it "if
-  `normalize_cells` ever stops registering" has no detector at all.
+  shift stays inside `registration_window(frame_w)`.~~ **STRUCK 2026-08-25
+  (round three): that test was written, and it does NOT detect a
+  `normalize_cells` regression.** Replacing `normalize_cells` with a fit that
+  centres nothing leaves every composed shift at **0**, because
+  `extract_strip_frames` content-crops each frame per slot BEFORE the centring
+  runs — on this path EXTRACTION, not centring, is what puts neighbouring rows
+  in comparable positions. The test is worth having for what it does measure —
+  the composed shift budget on real art, 9 px of 16 with a 32 px prop
+  saturating the window — and its detection floor was measured by injecting a
+  per-row drift: red at 6 px, green at 4 px. Read it as a pin on the composition
+  path's shift budget, not on the upstream centring rule. "If `normalize_cells`
+  ever stops registering" still has no detector, and now we know why one is hard
+  to write.
+
+- **[READ] THE RULING: the threshold is not the lever, so it did not move. What
+  moved is what ONE reading is allowed to DO.** Measured in both directions, the
+  two populations do not separate at 8% and no other value separates them
+  either. The true floor is BELOW the line on real art — mirroring each interior
+  row of the repaired sheet one at a time, `jumping-se` reads **+6.78% rotation
+  / +7.64% states** and is flagged by NEITHER pass, so that sheet composes,
+  installs and bundles clean. The founding defect sits AT the line: the pre-fix
+  sheet's third mirrored row, `jumping-ne`, reads **+7.37%**, and the install was
+  refused only because two of three cleared it. And the false ceiling is far
+  ABOVE that floor once art is stressed — a CORRECT `idle-e` slid sideways reads
+  +9.38% at −24 px, +17.92% at −32, **+18.75%** at −40 and +7.76% at −56, a BAND
+  of roughly −20 to −48 px rather than a threshold. `max(false) ≈ +18.75%` and
+  `min(true) = +7.64%`: the line sits inside both populations. So a
+  **rotation-only or states-only** finding is now a **WARNING** that does not
+  block `compose`, and **ERROR** is reserved for **two independent bases
+  agreeing about the same row** (`basis: "rotation and states"`).
+  *Consequence:* say the sentence, not the word "clean" — and say the cost out
+  loud. `characters start` creates `idle:6, walk:8`; two states have no
+  cross-state pass; so **on the default character this gate can only ever
+  warn**. That is the right admission rather than a regression: measured on a
+  two-state cut of the live art, a whole mirrored state scores bit-identical to
+  the correct sheet and two adjacent mirrored rows pass with their gains going
+  NEGATIVE. It was already nearly blind there, and blocking on one weak reading
+  bought confidence it did not have. **Read the warnings out to the operator** —
+  `compose` prints every one on the human line now, and nothing else stands
+  between a single-basis reading and a shipped mirrored row.
+
+- **[READ] The rotation's RANKING never names a row, because in two reachable
+  shapes the loudest row of a run is the innocent one.** Both reproduce on the
+  checked-in fixture and both are now tests. (i) PLACEMENT: `walk-e` slid −24 px
+  — correct art, a displacement half again the 16 px window — reads +10.48% and
+  drags its UNTOUCHED neighbour `walk-ne` to +10.68%, so "the run's maximum"
+  named the innocent neighbour and filed the disturbed row under "Do NOT re-roll
+  them". (ii) FLANKED: mirror `idle-se` and `idle-ne` and leave `idle-e`
+  correct — what a SECOND badly-worded diagonal in `VIEW_LANGUAGE` produces —
+  and the correct middle row wins the run at **+14.28%** while the evidence
+  exonerating it, a cross-state reading of **−97.62%**, sat unused in the same
+  payload. The rule now: a run of two or more adjacent flagged rows is named
+  only when a second, independent basis convicts exactly one of them; otherwise
+  it is reported as *"one of N rows … and this pass cannot say which"* with the
+  rows ranked and NO `reroll-row` command. A lone flagged row is still named,
+  which is what keeps the founding defect attributable.
+  *Consequence:* three message shapes now, and they mean different things. A
+  REFUSAL names a culprit and hands you the `reroll-row` line. A WARNING names
+  one row and asks you to crop it. An UNATTRIBUTED finding names none. Never
+  re-roll off the third, and never off a row under "Do NOT re-roll them".
+
+- **[READ] A negative cross-state reading is NOT a character reference, and the
+  obvious version of this repair would have retired the defect the gate was
+  built for.** "A row the other states vouch for cannot be the rotation culprit"
+  reads well and is wrong: a direction mirrored in EVERY state is a fixed point
+  of the cross-state pass and reads strongly negative there PRECISELY BECAUSE it
+  is consistently wrong. Measured on the fixture, the two cases are numerically
+  identical in shape — flanked leaves the correct `idle-e` at −97.62%, and the
+  founding defect (`ne` mirrored in all three states) leaves each mirrored row
+  at −111.32%. What separates them is not the sign: it is that `ne` is over the
+  line in the rotation of THREE states out of three there, and `e` is over it in
+  ONE of three in both inversion shapes. So a contradicted row is demoted UNLESS
+  its direction is suspected in a strict majority of the rotations.
+  *Consequence:* when you are tempted to exonerate a row with the other pass's
+  silence, check whether that pass CAN speak about it. A unanimous consensus and
+  a clean bill of health produce the same number.
+
+- **[READ] The cross-state "majority" was not a majority on an EVEN number of
+  states, and one `add-state` reaches four.** `majority = len(pairs) // 2 + 1`
+  counts the OTHER states, so on a four-state sheet it is 2 of 3 and a 2-2 split
+  leaves every row inside a "majority". Measured on a four-state sheet built
+  from the live art with two of four `e` rows mirrored: **all four flagged as
+  errors**, the two CORRECT ones at **+14.31%** basis `states` with no
+  corroborating marker and no "Do NOT re-roll them", while their rotation
+  readings sat at −15.97% — and `SKILL.md` told the agent that a multi-row
+  `states` refusal is "the one case where re-rolling several rows IS right". It
+  is now `len(drawn) // 2 + 1`: a strict majority of ALL the states, i.e. a row
+  is convicted only when its camp is a strict MINORITY. An even split convicts
+  nobody and the direction is reported unjudged with *"the states split
+  evenly"*. The states pass also runs through the same attribution step as the
+  rotation now, and its `len(ranked) < needed` case is an `unjudged` entry
+  rather than a bare `continue` — the last silent drop in the module.
+  *Consequence:* a four-state character gets a WEAKER cross-state read than a
+  three-state one, not a stronger one, whenever the mirror is even. Five states
+  is the next number that cannot tie.
+
+- **[READ] Two knobs were pinned by nothing and a third was over-specified.**
+  Re-run of the sabotage exercise, 2026-08-25. `REGISTRATION_WINDOW_DIVISOR`
+  12 → 6 and 12 → 3 both left all 62 tests green while moving the false-refusal
+  boundary from −24 px to past −56 px; the one test that slides a row moved it
+  8 px, inside every candidate window. It is now asserted directly
+  (`registration_window(192) == 16`) plus the complement the window exists FOR:
+  a slide of exactly the window registers away to within two points of the
+  unslid reading, and a slide half again the window crosses the line. (A slide
+  is not a pure translation, incidentally — sliding a row inside its own cell
+  clips the art at the cell edge, so "registers away exactly" is not available
+  and the test says so.) The culprit rule was the second, and it is gone rather
+  than re-pinned. The third: `max(convicted, ...)` ranked two cross-state
+  convictions inside one run — a branch NO fixture can reach, because two
+  ADJACENT mirrored rows never form a rotation run at all (`idle-e` + `idle-ne`
+  mirrored read −5.30% / −15.36%, a block being visible only at its edges). It
+  is now `len(convicted) == 1`, so the unreachable ranking is deleted instead of
+  left untested.
+  *Consequence:* when a fixture cannot reach a branch, DELETE the branch. The
+  too-weak-fixture defect has now recurred four times in this module; three of
+  those four were a knob that no reachable input could distinguish, and the
+  repair each time was to make the code say the thing the fixture can see.
+
+- **[READ] The override records what it let through, and the record now
+  reaches somebody.** Three things were wrong with round two's half. The human
+  path never showed the refusal text — `_characters_emit` prints one line and
+  `validation["warnings"]` needs `--json`, so a successful `--accept-handedness`
+  printed a row count and nothing else; `compose` now prints every warning on
+  the human line, which matters twice as much since single-basis findings live
+  there too. `handednessAccepted` had ZERO readers anywhere in either repo; it
+  is now republished by `characters list` and by `sprite_payload`, which is what
+  lets the launcher's `bundle_character.dart` read it without decoding a pixel.
+  And it recorded row keys only, so accepting a +40% finding and an +8.1% one
+  were indistinguishable afterwards; it is `{row, gain, basis}` now (old bare-key
+  manifests still parse, as `basis: "unrecorded"`).
+  **The grammar changed with it:** a row refused on two bases is refused by two
+  independent bodies of evidence, and one row name waived both — so an operator
+  overriding a PLACEMENT reading also silenced the cross-state one, which
+  placement cannot explain. The token is `<row>:rotation+states`; a bare row is
+  refused with the spelling it needs, and a WARNING cannot be accepted at all
+  because it never blocked.
+  *Consequence:* `--accept-handedness idle-e` from a shell history no longer
+  works even on a row that is genuinely refused. Read the refusal, name the
+  bases, and say in the turn what you saw on the strip.
+
+- **[READ] The timing figures, re-measured, and what was done about them.**
+  Round two said "~4.0 s registered"; the review measured 5.74 / 6.31 / 10.70 s
+  for `detect_mirrored_art` and 6.46 s for `validate_sheet` end to end. On the
+  3-frame checked-in fixture here: `detect_mirrored_art` **2.28 s**,
+  `validate_sheet` **3.0 s**, of which the RGB-residue scan was **0.39 s** — a
+  pixel-by-pixel Python loop over 1.8M pixels running on every compose. It is
+  now three Pillow band operations, **0.031 s**, 12x, with identical counts on a
+  clean sheet and on one with residue injected. The suites also cache each
+  distinct MUTATED fixture sheet instead of re-deriving it per test. Net on the
+  five charsheet suites: round two 357 passed in 311.96 s, round three **377
+  passed in 228.20 s**, worst single test **8.73 s** against the 30 s cap (29%,
+  from 58%).
+  *Consequence:* the headroom question is answered by making the work cheaper,
+  not by raising the cap. If you add a test that composes or validates a real
+  sheet, put its mutation through the `variant_*` cache — two tests wanting the
+  same broken sheet should pay for it once.
 
 ---
 

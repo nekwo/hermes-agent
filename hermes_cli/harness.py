@@ -1582,7 +1582,7 @@ def build_parser(parent_subparsers) -> None:
     characters_reroll_row.set_defaults(func=_cmd_characters_reroll_row)
     characters_compose = characters_subs.add_parser("compose", help="Compose, validate and install the sheet (stage 'rows' → 'composed')")
     characters_compose.add_argument("--draft", required=True)
-    characters_compose.add_argument("--accept-handedness", default="", help="Row keys whose mirrored-art refusal you have LOOKED at and are overriding, e.g. 'idle-e'. Per row, never blanket; naming a row that was not flagged is itself refused, and the honoured list is written into the installed manifest")
+    characters_compose.add_argument("--accept-handedness", default="", help="Mirrored-art REFUSALS you have looked at and are overriding, spelled '<row>:rotation+states' (e.g. 'idle-e:rotation+states'). Per row, never blanket. Only a row BOTH passes agree about is refused, so only that shape can be accepted — a single-basis finding is a warning and there is nothing to accept. The basis is named on purpose: a bare row key waived two independent bodies of evidence at once. Naming a row that was not flagged is itself refused, and the honoured list rides on the installed manifest, 'characters list' and the sprite payload as {row, gain, basis}")
     characters_compose.add_argument("--json", action="store_true")
     characters_compose.set_defaults(func=_cmd_characters_compose)
     characters_reopen = characters_subs.add_parser("reopen", help="Reopen a composed draft for fixes (stage 'composed' → 'rows'); the installed sheet stays until the next compose")
@@ -3165,10 +3165,18 @@ def _characters_draft_summary(draft) -> dict:
 
 
 def _characters_installed_rows() -> list[dict]:
-    """Installed characters: one row per directory carrying a manifest."""
+    """Installed characters: one row per directory carrying a manifest.
+
+    ``handednessAccepted`` rides on every row because the alternative is that a
+    character carrying a mirrored row its operator overrode looks IDENTICAL here
+    to one that passed clean — which is the shape this whole lane exists to
+    retire. It is a list of ``{row, gain, basis}``, empty for nearly every
+    character.
+    """
     from agent.charsheet.draft import (
         MANIFEST_FILENAME,
         SHEET_FILENAME,
+        _handedness_accepted,
         characters_dir,
     )
 
@@ -3194,6 +3202,7 @@ def _characters_installed_rows() -> list[dict]:
                 "directory": str(child),
                 "sheet": str(sheet) if sheet.is_file() else "",
                 "installed": sheet.is_file(),
+                "handednessAccepted": _handedness_accepted(manifest),
             }
         )
     return rows
@@ -3244,7 +3253,19 @@ def _cmd_characters_list(args) -> int:
     data = {"ok": True, "drafts": drafts, "characters": installed}
     lines = [f"{len(drafts)} draft(s), {len(installed)} installed character(s)"]
     lines += [f"  draft {row['id']}  {row['slug']}  stage={row['stage']}" for row in drafts]
-    lines += [f"  installed {row['slug']}  {row['displayName']}" for row in installed]
+    lines += [
+        f"  installed {row['slug']}  {row['displayName']}"
+        + (
+            "  handedness accepted: "
+            + ", ".join(
+                f"{entry['row']} {entry['gain'] * 100:.0f}% ({entry['basis']})"
+                for entry in row["handednessAccepted"]
+            )
+            if row["handednessAccepted"]
+            else ""
+        )
+        for row in installed
+    ]
     return _characters_emit(args, data, "\n".join(lines))
 
 
@@ -3384,11 +3405,21 @@ def _cmd_characters_compose(args) -> int:
         # `composed → 1536x3120` told an operator nothing about the six of
         # fifteen rows the check could not answer for, and a clean pass has never
         # been a certificate.
-        return result, (
+        #
+        # The WARNINGS ride on it as well, and that is not cosmetic. A
+        # single-basis handedness finding no longer blocks, and an accepted one
+        # never did: both are warnings, `validation["warnings"]` needs `--json`,
+        # and a successful `--accept-handedness` therefore used to print a row
+        # count and nothing else — no gain, no basis, no reason. A warning
+        # nobody prints is the shape of the failure this whole lane exists to
+        # retire.
+        lines = [
             f"Draft {draft.id} composed → {result['slug']} "
             f"({validation['width']}x{validation['height']}) at {result['sheet']}; "
             + pipeline.handedness_summary(validation["handedness"])
-        )
+        ]
+        lines += [f"  warning: {text}" for text in validation["warnings"]]
+        return result, "\n".join(lines)
 
     return _characters_verb(args, call)
 
@@ -3434,11 +3465,21 @@ def _cmd_characters_sprite(args) -> int:
     except _CHARACTERS_EXPECTED as exc:
         return _characters_error(args, exc, slug=slug)
     data = {"ok": True, "character": payload}
+    accepted = payload.get("handednessAccepted") or []
     return _characters_emit(
         args,
         data,
         f"{payload['slug']} ({payload['displayName']}): {len(payload['framesByRow'])} rows, "
-        f"{payload['frameW']}x{payload['frameH']} cells, revision {payload['spritesheetRevision']}",
+        f"{payload['frameW']}x{payload['frameH']} cells, revision {payload['spritesheetRevision']}"
+        + (
+            "; handedness accepted: "
+            + ", ".join(
+                f"{entry['row']} {entry['gain'] * 100:.0f}% ({entry['basis']})"
+                for entry in accepted
+            )
+            if accepted
+            else ""
+        ),
     )
 
 

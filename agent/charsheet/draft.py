@@ -966,12 +966,15 @@ class CharacterDraft:
         partially approved draft would install a sheet with blank rows that the
         consumer's spec claims are filled.
 
-        *accept_handedness* names rows whose mirrored-art finding the operator
-        has looked at and is overriding — see
-        :func:`pipeline.validate_sheet`. It is per ROW and never blanket, an
-        accepted row that was not flagged is itself a refusal, and the honoured
-        list is written into the installed manifest so the override survives as a
-        fact about the character rather than as a refusal nobody can see any more.
+        *accept_handedness* names ``<row>:rotation+states`` tokens whose
+        mirrored-art REFUSAL the operator has looked at and is overriding — see
+        :func:`pipeline.validate_sheet`. It is per ROW and never blanket, it
+        applies only to a finding both passes agree about (a single-basis
+        finding is a warning and does not block, so there is nothing to accept),
+        an accepted row that was not flagged is itself a refusal, and the
+        honoured list is written into the installed manifest as
+        ``{row, gain, basis}`` so the override survives as a fact about the
+        character rather than as a refusal nobody can see any more.
         """
         self._require_stage("compose", "rows")
         spec = self.spec
@@ -1057,9 +1060,15 @@ class CharacterDraft:
             "created": _utc_now(),
         }
         if validation["handedness"].get("accepted"):
-            manifest["handednessAccepted"] = list(
-                validation["handedness"]["accepted"]
-            )
+            # ``{row, gain, basis}``, not bare row keys: accepting a +40% finding
+            # and an +8.1% one used to be indistinguishable the moment the
+            # compose was over, and this manifest is the only place the fact
+            # survives. ``sprite_payload`` and ``characters list`` both republish
+            # it, so no consumer has to open this file to learn that a character
+            # carries a mirrored row its operator looked at and accepted.
+            manifest["handednessAccepted"] = [
+                dict(entry) for entry in validation["handedness"]["accepted"]
+            ]
         _write_json_atomic(directory / MANIFEST_FILENAME, manifest)
         self._set_stage("composed")
         logger.info(
@@ -1272,4 +1281,38 @@ def sprite_payload(slug: str) -> dict:
         ],
         "rows": rows,
         "stateRows": [row["key"] for row in rows],
+        # The one fact about this sheet the pixels cannot carry: an operator
+        # looked at a two-basis mirrored-art refusal and overrode it, per row,
+        # with its gain and its bases. Empty for every character composed
+        # without an override, which is nearly all of them. It rides here so a
+        # consumer that byte-copies the sheet (the launcher's
+        # `bundle_character.dart` decodes nothing) can still read it; whether
+        # that consumer refuses, warns or records is its own ruling, but it
+        # could not make one at all while this lived only inside the manifest.
+        "handednessAccepted": _handedness_accepted(manifest),
     }
+
+
+def _handedness_accepted(manifest: dict) -> list[dict]:
+    """The manifest's accepted mirrored-art findings, JSON-safe and total.
+
+    Tolerates the ROUND-TWO spelling — a bare list of row keys — because a
+    character installed by that build is still installed, and a payload that
+    raised on it would take the whole sprite down over a provenance field.
+    """
+    raw = manifest.get("handednessAccepted") or []
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    for entry in raw:
+        if isinstance(entry, dict):
+            out.append(
+                {
+                    "row": str(entry.get("row", "")),
+                    "gain": float(entry.get("gain", 0.0) or 0.0),
+                    "basis": str(entry.get("basis", "") or "unrecorded"),
+                }
+            )
+        else:
+            out.append({"row": str(entry), "gain": 0.0, "basis": "unrecorded"})
+    return out

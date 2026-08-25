@@ -64,9 +64,11 @@ from agent.pet.generate.atlas import (
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "ACCEPT_BASIS_TOKEN",
     "MAGENTA",
     "MIRROR_GAIN_THRESHOLD",
     "PREFIX_TURNAROUND",
+    "REGISTRATION_WINDOW_DIVISOR",
     "atlas_to_webp_bytes",
     "build_sheet_palette",
     "compose_draft_frames",
@@ -77,6 +79,7 @@ __all__ = [
     "generate_turnaround",
     "handedness_summary",
     "recomposite_on_magenta",
+    "registration_window",
     "row_prefix",
     "turnaround_order",
     "upscale_on_backdrop",
@@ -656,14 +659,30 @@ def compose_sheet(spec: SheetSpec, cells_by_key: dict[str, list]):
 #         satchel over one shoulder, deliberately asymmetric — reads +1.72%.
 #         Ceiling +1.72%.
 #
-# 8% therefore sits 4.7x above the loudest false signal and 1.7x below the
-# quietest true one it still catches. It deliberately does NOT catch the whole
-# true band: three of those twelve fall under it. That asymmetry is on purpose
-# and it is the reverse of the shipped design's — a false refusal used to be
-# permanent, so the threshold is set for specificity, and the two things that
-# buy the sensitivity back are the cross-state pass below (which scores the same
-# defect at +7.64% ... +43.09%) and the operator's named acceptance in
-# :func:`validate_sheet`.
+# **The threshold is not the lever, and moving it cannot become one.** Both
+# bands were re-measured on 2026-08-25 in the direction the note above does not
+# reach, and they OVERLAP:
+#
+#   The true floor is BELOW the line, on real art. Mirroring each interior row
+#   of the repaired live sheet one at a time, `jumping-se` reads +6.78% in the
+#   rotation and +7.64% across the states — flagged by NEITHER pass. That sheet
+#   composes, installs and bundles with no refusal and no warning. The founding
+#   defect sits AT the line: the pre-fix sheet's third genuinely mirrored row,
+#   `jumping-ne`, reads +7.37%, and the install was refused only because the
+#   other two cleared it.
+#
+#   The false ceiling is far ABOVE that floor once art is stressed. Sliding a
+#   CORRECT `idle-e` sideways: -24 px reads +9.38%, -32 px +17.92%, -40 px
+#   +18.75%, -56 px +7.76% and installs again. It is a BAND of roughly -20 to
+#   -48 px, not a threshold.
+#
+# max(false) is about +18.75% and min(true) is +7.64%. An 8% line does not
+# separate two populations there; it sits inside both of them. So the number
+# stays where it is and what changed is what ONE reading is allowed to do: a
+# single basis WARNS, and only two independent bases agreeing about the same row
+# REFUSE (see :func:`detect_mirrored_art` and :func:`validate_sheet`). Sensitivity
+# is bought back by the cross-state pass below and by the operator's eye, and the
+# named acceptance in :func:`validate_sheet` is the door past a two-basis refusal.
 #
 # It is a RATIO on purpose: an absolute pixel distance is a property of the
 # character's palette and silhouette and would need retuning per art style. A
@@ -835,42 +854,144 @@ def _gain(seams: list[dict]) -> float | None:
     return (as_drawn - sum(seam["mirroredDistance"] for seam in seams)) / as_drawn
 
 
-def _finding_from_run(run: list[tuple[int, dict]]) -> dict:
-    culprit = max(run, key=lambda item: item[1]["gain"])[1]
-    finding = dict(culprit)
-    finding["corroborating"] = [
-        {"row": entry["row"], "gain": entry["gain"]}
-        for _position, entry in run
-        if entry["row"] != culprit["row"]
+def _contradicted(entry: dict, cross: dict[str, float], suspected: set[str]) -> bool:
+    """Do the OTHER states vouch for this row, or merely agree with it?
+
+    A negative cross-state reading means "every state draws this direction the
+    same way". That is exculpatory exactly when the other states' copies of the
+    direction are not themselves under suspicion, and it is worth nothing when
+    they are: a direction mirrored in EVERY state is a fixed point of the
+    cross-state pass and reads strongly negative there PRECISELY BECAUSE it is
+    consistently wrong. Measured on the fixture, both halves. Two mirrored rows
+    flanking a correct one leave the correct middle row at -97.62% across the
+    states, and `e` is over threshold in one state's rotation out of three. The
+    founding defect — `ne` mirrored in all three states — leaves each mirrored
+    row at -111.32% across the states, and `ne` is over threshold in three
+    rotations out of three. Reading the SIGN alone would exonerate the second,
+    which is the defect this whole gate was built for; *suspected* is what
+    separates them.
+    """
+    gain = cross.get(entry["row"])
+    if gain is None or gain >= 0:
+        return False
+    return entry["direction"] not in suspected
+
+
+def _attribute_run(
+    run: list[tuple[int, dict]], cross: dict[str, float], suspected: set[str]
+) -> tuple[dict | None, str]:
+    """``(culprit, how)`` — which row of a run the evidence can actually NAME.
+
+    ``how`` is ``"both"`` (a second, independent basis convicts this row),
+    ``"rotation"`` (ONE flagged row, alone, with nothing contradicting it), or
+    the reason no row could be named at all: ``"run"`` (two or more flagged
+    together, which the rotation cannot take apart) or ``"contradicted"`` (the
+    single flagged row is vouched for by the other states).
+
+    **"The culprit is the run's maximum" is retired, not re-tuned.** It was true
+    of every case round two measured and false in two it did not, both of which
+    put an INNOCENT row at the top of the run. A CORRECT row displaced sideways
+    past the registration window reads high and drags its untouched neighbour
+    higher still — measured on the fixture, `walk-e` slid -24 px reads +10.48%
+    while the untouched `walk-ne` reads +10.68% and wins. And a correct row
+    FLANKED by two mirrored ones wins its run outright: `idle-e`, correct,
+    +14.28% between a mirrored `idle-se` and a mirrored `idle-ne`. Both are
+    reachable — the first is a prop or a framing drift, the second is what a
+    SECOND badly-worded diagonal in ``VIEW_LANGUAGE`` produces, the way `ne`
+    alone produced the first defect this package ever saw.
+
+    So the ranking never names anybody. Adjacent flagged rows are taken apart by
+    a second BASIS or not at all, which is the same argument that leaves the
+    rotation's end rows unjudged: one seam cannot say which of the two rows
+    beside it is mirrored, and neither can two rows that raised each other. A
+    lone flagged row has nothing to be confused with, so it is still named —
+    which is what keeps the founding defect attributable, since `ne` mirrored in
+    every state flags one isolated row per state.
+    """
+    entries = [entry for _position, entry in run]
+    convicted = [
+        entry
+        for entry in entries
+        if (cross.get(entry["row"]) or 0.0) >= MIRROR_GAIN_THRESHOLD
     ]
+    # EXACTLY one, and the count is the rule rather than a tie-break. Ranking
+    # two convictions would be a knob no fixture can reach — measured: two
+    # ADJACENT mirrored rows never form a rotation run at all, because a
+    # contiguous block is visible only at its edges and both rows' rotation
+    # gains go NEGATIVE (`idle-e` + `idle-ne` mirrored reads -5.30% / -15.36%).
+    # A run holding two cross-state convictions is a shape nothing here
+    # understands, and the safe answer to a shape you do not understand is to
+    # name nobody rather than to sort it.
+    if len(convicted) == 1:
+        return convicted[0], "both"
+    if len(entries) >= 2:
+        return None, "run"
+    if _contradicted(entries[0], cross, suspected):
+        return None, "contradicted"
+    return entries[0], "rotation"
+
+
+def _finding_from_run(
+    run: list[tuple[int, dict]], cross: dict[str, float], suspected: set[str]
+) -> dict:
+    culprit, how = _attribute_run(run, cross, suspected)
+    ranked = sorted(
+        (entry for _position, entry in run),
+        key=lambda entry: entry["gain"],
+        reverse=True,
+    )
+    anchor = culprit if culprit is not None else ranked[0]
+    finding = dict(anchor)
+    finding["attributed"] = culprit is not None
+    finding["attribution"] = how
+    # ``corroborating`` carries "do NOT re-roll these", so it is only honest
+    # once a row has actually been named as the fault. An unattributed run lists
+    # its rows as ``alternatives`` instead: any of them may be the one.
+    finding["corroborating"] = (
+        [
+            {"row": entry["row"], "gain": entry["gain"]}
+            for entry in ranked
+            if entry["row"] != anchor["row"]
+        ]
+        if culprit is not None
+        else []
+    )
+    finding["alternatives"] = (
+        []
+        if culprit is not None
+        else [{"row": entry["row"], "gain": entry["gain"]} for entry in ranked]
+    )
     return finding
 
 
-def _run_findings(scored: list[tuple[int, dict]]) -> list[dict]:
-    """One finding per contiguous RUN of over-threshold rows: the run's maximum.
+def _run_findings(
+    scored: list[tuple[int, dict]], cross: dict[str, float], suspected: set[str]
+) -> list[dict]:
+    """One finding per contiguous RUN of over-threshold rows.
 
     A mirrored row raises BOTH its neighbours toward the line, because their
     seams against it prefer the flip from their side too. Reporting each of them
-    as its own error is not a harmless excess of caution: every message says
+    as its own error is not a harmless excess of caution: every message names
     ``characters reroll-row``, ``reroll_row`` proposes and approves
     unconditionally, and there is no ``approve-row`` verb to undo it — so an
     operator who obeys a three-row refusal literally spends two correct approved
     attempts. Measured on the live repaired sheet: mirroring `idle-e` alone puts
-    `idle-e` at +13.33% and `idle-ne` at +11.87%; mirroring `walk-e` puts
-    `walk-e` at +15.86% and `walk-ne` at +14.09%. In every case the culprit is
-    the run's maximum, which is what this reports; the rest ride along as
-    ``corroborating`` and the refusal says not to touch them.
+    `idle-e` at +13.33% and `idle-ne` at +11.87%.
+
+    WHICH row of the run is named is :func:`_attribute_run`'s job, and it is not
+    simply the maximum — see that function for the two measured shapes where the
+    maximum is an innocent row.
     """
     over = [item for item in scored if item[1]["gain"] >= MIRROR_GAIN_THRESHOLD]
     findings: list[dict] = []
     run: list[tuple[int, dict]] = []
     for item in over:
         if run and item[0] != run[-1][0] + 1:
-            findings.append(_finding_from_run(run))
+            findings.append(_finding_from_run(run, cross, suspected))
             run = []
         run.append(item)
     if run:
-        findings.append(_finding_from_run(run))
+        findings.append(_finding_from_run(run, cross, suspected))
     return findings
 
 
@@ -909,10 +1030,26 @@ def detect_mirrored_art(spec: SheetSpec, image) -> dict:
     Why the state pass needs THREE states: across one pair a disagreement cannot
     say which of the two rows is the mirrored one — the same reason the
     rotation's end rows are never judged. With three or more, a row is convicted
-    only when it still reads over the threshold against a MAJORITY of the other
-    states, and that majority reading is what ``gain`` reports for this basis.
-    The default sheet has two states, so this pass says nothing until a third
-    arrives.
+    only when a strict majority of ALL the states that draw the direction
+    disagree with it — that is, only when its camp is a strict MINORITY — and
+    the quietest of those disagreeing readings is what ``gain`` reports for this
+    basis. The default sheet has two states, so this pass says nothing until a
+    third arrives, and an EVEN number of states that splits evenly convicts
+    nobody: two camps of equal size, and nothing inside the sheet says which one
+    is mirrored.
+
+    **Neither basis, alone, refuses an install.** A single-basis finding carries
+    ``severity: "warning"``; only ``basis: "rotation and states"`` — two
+    independent neighbourhoods agreeing about the SAME row — carries
+    ``severity: "error"``. The two populations do not separate at the threshold
+    on one basis: the quietest true reading measured on real art is +6.78%
+    rotation / +7.64% states, and the loudest false one, a CORRECT row displaced
+    sideways, is +18.75%. The line sits inside both populations, so no value of
+    :data:`MIRROR_GAIN_THRESHOLD` separates them and what changed instead is
+    what one reading is permitted to do. The consequence is stated rather than
+    hidden: ``characters start`` creates ``idle:6, walk:8``, two states have no
+    cross-state pass, and on that DEFAULT sheet this check can therefore only
+    ever warn.
 
     **What this cannot see, written down so nobody has to rediscover it.** The
     measure is invariant under flipping every row at once, because
@@ -949,10 +1086,15 @@ def detect_mirrored_art(spec: SheetSpec, image) -> dict:
     basis. ``judged`` carries the gain of every row a pass could answer for, over
     the threshold or under it, so the margin is a readable fact rather than
     something a caller re-derives.
-    ``flagged`` is the subset worth acting on after attribution, each entry
-    quoting the seams that voted plus any ``corroborating`` rows that read high
-    because of it. ``unjudged`` is the accounting: a row this cannot answer for is
-    named with the reason rather than silently dropped.
+    ``flagged`` is the subset worth acting on after attribution. Each entry
+    quotes the seams that voted and carries ``severity`` (above), ``attributed``
+    and ``attribution``. ``attributed`` is the honest half: ``True`` means the
+    evidence NAMES this row, and the entry then lists any ``corroborating`` rows
+    that read high because of it ("do not re-roll them"); ``False`` means a
+    neighbourhood is wrong but nothing here can say which row, and the entry
+    lists the whole run under ``alternatives`` instead. ``unjudged`` is the
+    accounting: a row this cannot answer for is named with the reason rather
+    than silently dropped.
     """
     rgba = _open_rgba(image)
     window = registration_window(spec.frame_w)
@@ -969,8 +1111,137 @@ def detect_mirrored_art(spec: SheetSpec, image) -> dict:
 
     judged: list[dict] = []
     unjudged: list[dict] = []
-    rotation_flagged: list[dict] = []
 
+    # The states pass runs FIRST, because the rotation's attribution reads it.
+    # Naming a row as the culprit of a rotation run is a claim the rotation
+    # cannot make on its own (see _attribute_run), so the second basis has to
+    # exist before the first one is allowed to point at anybody.
+    state_flagged: list[dict] = []
+    directional = [state for state in spec.states if state.directional]
+    for direction in turnaround_order(spec.scheme.authored)[1:-1]:
+        drawn = [
+            rows_by_key[row_key(state.name, direction)]
+            for state in directional
+            if not blank(rows_by_key[row_key(state.name, direction)])
+        ]
+        if len(drawn) < 3:
+            unjudged.append(
+                {
+                    "rows": [row.key for row in drawn],
+                    "basis": "states",
+                    "reason": (
+                        f"only {len(drawn)} state(s) draw {direction!r} — across one "
+                        "pair a disagreement cannot say WHICH of the two states is "
+                        "mirrored, so this read needs three"
+                    ),
+                }
+            )
+            continue
+        across: dict[tuple[str, str], dict] = {}
+        for index, left in enumerate(drawn):
+            for right in drawn[index + 1 :]:
+                direct, flipped = _seam_distance(
+                    cells(left), cells(right), window=window
+                )
+                across[(left.key, right.key)] = _seam_record(
+                    left.key, right.key, direct, flipped
+                )
+        # A strict majority of ALL the states that draw this direction, never a
+        # majority of the OTHER ones. `len(pairs) // 2 + 1` was 2 of 3 on a
+        # four-state sheet, so a 2-2 split left every row inside a "majority"
+        # and convicted all four — the two CORRECT ones at +14.31% basis
+        # `states`, with no corroborating marker at all, while their rotation
+        # readings sat at -15.97%. `len(drawn) // 2 + 1` is the same number for
+        # three states and for five, and one more for four, which is what makes
+        # an even split convict nobody: a row is convicted only when its camp is
+        # a strict MINORITY of the states — the same argument that forces the
+        # three-state minimum above.
+        needed = len(drawn) // 2 + 1
+        entries: list[dict] = []
+        against: dict[str, int] = {}
+        for row in drawn:
+            pairs = [seam for pair, seam in across.items() if row.key in pair]
+            ranked = sorted(
+                (seam for seam in pairs if _gain([seam]) is not None),
+                key=lambda seam: _gain([seam]),
+                reverse=True,
+            )
+            if len(ranked) < needed:
+                # Never a bare `continue`: a row that vanishes from the payload
+                # reads exactly like a clean one. Same accounting rule as the
+                # rotation's `as_drawn <= 0` case.
+                unjudged.append(
+                    {
+                        "rows": [row.key],
+                        "basis": "states",
+                        "reason": (
+                            f"only {len(ranked)} of its {len(pairs)} cross-state "
+                            "pairs measure anything, and a conviction here needs "
+                            f"{needed} of {len(drawn)} states to disagree with it"
+                        ),
+                    }
+                )
+                continue
+            against[row.key] = sum(
+                1 for seam in ranked if _gain([seam]) >= MIRROR_GAIN_THRESHOLD
+            )
+            entries.append(
+                {
+                    "row": row.key,
+                    "state": row.state,
+                    "direction": row.direction,
+                    "gain": _gain([ranked[needed - 1]]),
+                    "basis": "states",
+                    "seams": _seam_evidence(row.key, ranked[:needed]),
+                }
+            )
+        # An even split is every row landing exactly ONE short of the conviction
+        # line — which is why it is spelled `needed - 1` and not `len(drawn) //
+        # 2`. The two are equal, and writing the second one made this branch
+        # able to mask a wrong `needed`: with the old `len(pairs) // 2 + 1` the
+        # conviction line drops to 2 of 4 and every row of a 2-2 split is
+        # convicted, but a branch keyed to its own arithmetic still fired first
+        # and hid it. One knob, one place.
+        if (
+            len(drawn) % 2 == 0
+            and len(against) == len(drawn)
+            and all(count == needed - 1 for count in against.values())
+        ):
+            # Every state disagrees with exactly half the others: two camps of
+            # equal size, and nothing inside the sheet says which camp holds the
+            # mirrored art. Reporting a gain here would read as a clean pass.
+            unjudged.append(
+                {
+                    "rows": [row.key for row in drawn],
+                    "basis": "states",
+                    "reason": (
+                        f"the {len(drawn)} states that draw {direction!r} split "
+                        f"evenly, {needed - 1} against {needed - 1} — neither "
+                        "camp is a "
+                        "minority, so this pass cannot say which half is mirrored"
+                    ),
+                }
+            )
+            continue
+        judged.extend(entries)
+        state_flagged.extend(
+            dict(entry, corroborating=[], alternatives=[])
+            for entry in entries
+            if entry["gain"] >= MIRROR_GAIN_THRESHOLD
+        )
+
+    cross_gain = {
+        entry["row"]: entry["gain"] for entry in judged if entry["basis"] == "states"
+    }
+    convicted_per_state: dict[str, int] = {}
+    for finding in state_flagged:
+        convicted_per_state[finding["state"]] = (
+            convicted_per_state.get(finding["state"], 0) + 1
+        )
+
+    # The rotation pass.
+    rotation_scored: list[tuple[int, dict]] = []
+    per_state_scored: list[list[tuple[int, dict]]] = []
     for state in spec.states:
         if not state.directional:
             unjudged.append(
@@ -1062,63 +1333,56 @@ def detect_mirrored_art(spec: SheetSpec, image) -> dict:
             )
 
         judged.extend(entry for _position, entry in scored)
-        rotation_flagged.extend(_run_findings(scored))
+        per_state_scored.append(scored)
+        rotation_scored.extend(scored)
 
-    state_flagged: list[dict] = []
-    directional = [state for state in spec.states if state.directional]
-    for direction in turnaround_order(spec.scheme.authored)[1:-1]:
-        drawn = [
-            rows_by_key[row_key(state.name, direction)]
-            for state in directional
-            if not blank(rows_by_key[row_key(state.name, direction)])
-        ]
-        if len(drawn) < 3:
-            unjudged.append(
-                {
-                    "rows": [row.key for row in drawn],
-                    "basis": "states",
-                    "reason": (
-                        f"only {len(drawn)} state(s) draw {direction!r} — across one "
-                        "pair a disagreement cannot say WHICH of the two states is "
-                        "mirrored, so this read needs three"
-                    ),
-                }
+    # A direction the rotation suspects in a strict MAJORITY of the states that
+    # judged it is the signature of a direction drawn the same wrong way every
+    # time — which is exactly the case the cross-state pass is blind to, so its
+    # silence there must not be read as a character reference.
+    judged_per_direction: dict[str, int] = {}
+    over_per_direction: dict[str, int] = {}
+    for _position, entry in rotation_scored:
+        judged_per_direction[entry["direction"]] = (
+            judged_per_direction.get(entry["direction"], 0) + 1
+        )
+        if entry["gain"] >= MIRROR_GAIN_THRESHOLD:
+            over_per_direction[entry["direction"]] = (
+                over_per_direction.get(entry["direction"], 0) + 1
             )
-            continue
-        across: dict[tuple[str, str], dict] = {}
-        for index, left in enumerate(drawn):
-            for right in drawn[index + 1 :]:
-                direct, flipped = _seam_distance(
-                    cells(left), cells(right), window=window
-                )
-                across[(left.key, right.key)] = _seam_record(
-                    left.key, right.key, direct, flipped
-                )
-        for row in drawn:
-            pairs = [seam for pair, seam in across.items() if row.key in pair]
-            ranked = sorted(
-                (seam for seam in pairs if _gain([seam]) is not None),
-                key=lambda seam: _gain([seam]),
-                reverse=True,
-            )
-            majority = len(pairs) // 2 + 1
-            if len(ranked) < majority:
-                continue
-            entry = {
-                "row": row.key,
-                "state": row.state,
-                "direction": row.direction,
-                "gain": _gain([ranked[majority - 1]]),
-                "basis": "states",
-                "seams": _seam_evidence(row.key, ranked[:majority]),
-            }
-            judged.append(entry)
-            if entry["gain"] >= MIRROR_GAIN_THRESHOLD:
-                state_flagged.append(dict(entry, corroborating=[]))
+    suspected = {
+        direction
+        for direction, seen in judged_per_direction.items()
+        if seen >= 2 and over_per_direction.get(direction, 0) * 2 > seen
+    }
+
+    rotation_flagged: list[dict] = []
+    for scored in per_state_scored:
+        rotation_flagged.extend(_run_findings(scored, cross_gain, suspected))
 
     flagged: list[dict] = list(rotation_flagged)
     by_row = {finding["row"]: finding for finding in flagged}
     for finding in state_flagged:
+        # The cross-state pass names one row, never a neighbourhood, so it has
+        # no run to attribute. It still has to answer the same question the
+        # rotation does: is this row named on evidence, or only ranked? A row
+        # whose rotation reading CONTRADICTS the states one is named only when
+        # its state is convicted as a whole — the `add-state` shape, where the
+        # rotation is a fixed point and its silence means nothing.
+        rotation_gain = next(
+            (
+                entry["gain"]
+                for entry in judged
+                if entry["row"] == finding["row"] and entry["basis"] == "rotation"
+            ),
+            None,
+        )
+        finding["attributed"] = not (
+            rotation_gain is not None
+            and rotation_gain < 0
+            and convicted_per_state.get(finding["state"], 0) < 2
+        )
+        finding["attribution"] = "states" if finding["attributed"] else "contradicted"
         existing = by_row.get(finding["row"])
         if existing is None:
             # A row that only rode along as corroborating now has evidence of its
@@ -1135,9 +1399,33 @@ def detect_mirrored_art(spec: SheetSpec, image) -> dict:
             existing["basis"] = "rotation and states"
             existing["seams"] = existing["seams"] + finding["seams"]
             existing["gain"] = max(existing["gain"], finding["gain"])
+            existing["attributed"] = True
+            existing["attribution"] = "both"
+            existing["alternatives"] = []
+
+    for finding in flagged:
+        # THE SEVERITY RULE, and it is the whole ruling in one line: a single
+        # basis WARNS, two independent bases agreeing REFUSE. The two
+        # populations do not separate on one basis — measured in both
+        # directions, the true floor on real art is +6.78% rotation / +7.64%
+        # states (`jumping-se` mirrored, caught by neither pass) and the false
+        # ceiling on CORRECT art displaced sideways is +18.75%. An 8% line does
+        # not sit BETWEEN two populations there; it sits inside both of them.
+        # Moving the number cannot fix that, so what moved instead is what a
+        # single reading is allowed to DO.
+        finding["severity"] = (
+            "error" if finding["basis"] == "rotation and states" else "warning"
+        )
 
     flagged.sort(key=lambda finding: rows_by_key[finding["row"]].index)
     return {"flagged": flagged, "judged": judged, "unjudged": unjudged}
+
+
+# How an operator spells "I am waiving BOTH bases" on the command line. Only a
+# two-basis finding blocks, so this is the only acceptance that can exist, and
+# spelling it out is what stops one row name from silently waiving a second,
+# independent body of evidence.
+ACCEPT_BASIS_TOKEN = "rotation+states"
 
 
 _MIRROR_BASIS = {
@@ -1150,27 +1438,89 @@ _MIRROR_BASIS = {
 }
 
 
+# The one spelling of "this row was named, and here is what it costs to obey a
+# name that is wrong". Both branches of :func:`mirrored_art_error` quote it.
+_REROLL_IS_ONE_WAY = (
+    "a re-roll auto-approves and there is no approve-row verb to undo it, so "
+    "obeying a name that is wrong spends correct approved art"
+)
+
+
 def mirrored_art_error(finding: dict) -> str:
-    """The refusal text for ONE :func:`detect_mirrored_art` finding.
+    """The operator-facing text for ONE :func:`detect_mirrored_art` finding.
 
     Public so the message has a single spelling: the validator raises it and a
     test asserts it, and a second copy is how a refusal starts naming a verb
     that no longer exists.
+
+    It renders three different things, and the difference is the point.
+    ``severity: "error"`` — two independent bases agreeing — is the only one
+    that blocks a compose, and the only one that hands the operator a
+    ``reroll-row`` command. A single-basis finding WARNS and says so, because
+    one basis does not separate the two populations. An UNATTRIBUTED finding
+    names no row at all: it lists the run and says the rotation alone cannot
+    tell which of them is the fault, which is true in the two shapes where the
+    run's maximum is an innocent row (see :func:`_attribute_run`).
     """
     evidence = "; ".join(
         f"vs '{seam['with']}' {seam['distance']:.2f} -> "
         f"{seam['mirroredDistance']:.2f} flipped"
         for seam in finding["seams"]
     )
-    text = (
-        f"row '{finding['row']}' looks drawn as the MIRROR of "
-        f"{finding['direction']!r}: {_MIRROR_BASIS[finding['basis']]} "
-        f"{finding['gain'] * 100:.0f}% better ({evidence}). A mirrored authored "
-        "row corrupts the derived direction with it, because the consumer builds "
-        "that one by flipping this row. Re-roll it "
-        f"(characters reroll-row --row {finding['row']} --note ...) with the "
-        "facing spelled in frame terms, and look at the strip before composing."
+    corrupts = (
+        "A mirrored authored row corrupts the derived direction with it, "
+        "because the consumer builds that one by flipping this row."
     )
+    if not finding.get("attributed", True):
+        ranked = ", ".join(
+            f"'{entry['row']}' {entry['gain'] * 100:.0f}%"
+            for entry in finding.get("alternatives") or [finding]
+        )
+        why = (
+            "flagged rows next to each other raise each other, and the rotation "
+            "cannot say which of them started it — a correct row slid sideways, "
+            "and a correct row flanked by two mirrored ones, both put an "
+            "innocent row at the top. Only a second, independent read takes a "
+            "run apart, and a third state is what provides one"
+            if finding.get("attribution") == "run"
+            else "the same direction in the other states vouches for it, so "
+            "this reads as PLACEMENT — a prop or a framing drift — rather than "
+            "handedness"
+        )
+        return (
+            f"one of {len(finding.get('alternatives') or [finding])} rows in "
+            f"{finding['state']!r} reads as a MIRROR and this pass cannot say "
+            f"which: {ranked} ({evidence}). {corrupts} It is NOT attributed to "
+            f"{finding['row']!r} or to any other single row — {why}. Do not "
+            f"re-roll on this alone: {_REROLL_IS_ONE_WAY}. Crop these rows and "
+            "look at them, and reach for --accept-handedness only on a finding "
+            "that actually blocks."
+        )
+    if finding.get("severity") == "error":
+        text = (
+            f"row '{finding['row']}' looks drawn as the MIRROR of "
+            f"{finding['direction']!r}: {_MIRROR_BASIS[finding['basis']]} "
+            f"{finding['gain'] * 100:.0f}% better ({evidence}). Two independent "
+            f"reads agree about this one row, which is what refuses an install. "
+            f"{corrupts} Re-roll it "
+            f"(characters reroll-row --row {finding['row']} --note ...) with the "
+            "facing spelled in frame terms, and look at the strip before "
+            "composing."
+        )
+    else:
+        text = (
+            f"row '{finding['row']}' reads as the MIRROR of "
+            f"{finding['direction']!r} on ONE basis: "
+            f"{_MIRROR_BASIS[finding['basis']]} "
+            f"{finding['gain'] * 100:.0f}% better ({evidence}). One basis is a "
+            "WARNING and does not block the install — the true and false "
+            "populations overlap on a single read (the quietest true reading "
+            "measured on real art is +6.8%, the loudest false one +18.8%), so "
+            f"this cannot be told apart from placement on its own. {corrupts} "
+            f"Crop this row and look before you re-roll: {_REROLL_IS_ONE_WAY}. "
+            "A third state is what gives the cross-state pass something to say, "
+            "and two bases agreeing is what refuses an install."
+        )
     if finding.get("corroborating"):
         names = ", ".join(
             f"'{entry['row']}' {entry['gain'] * 100:.0f}%"
@@ -1179,10 +1529,8 @@ def mirrored_art_error(finding: dict) -> str:
         text += (
             f" {names} read high too and are NOT separate faults: a mirrored row "
             "pulls the seams of the rows either side of it toward the line as "
-            "well. Do NOT re-roll them — a re-roll auto-approves and there is no "
-            "approve-row verb to undo it, so obeying a run of these spends "
-            "correct art. Fix this row, compose again, and judge what is left "
-            "then."
+            f"well. Do NOT re-roll them — {_REROLL_IS_ONE_WAY}. Fix this row, "
+            "compose again, and judge what is left then."
         )
     return text
 
@@ -1205,16 +1553,53 @@ def handedness_summary(handedness: dict) -> str:
         {row for entry in handedness["unjudged"] for row in entry["rows"]} - judged
     )
     parts = [f"{len(judged)} row(s) judged"]
-    if handedness["flagged"]:
-        parts.append(f"{len(handedness['flagged'])} flagged")
     accepted = handedness.get("accepted") or []
+    accepted_rows = {entry["row"] for entry in accepted}
+    blocking = [
+        finding
+        for finding in handedness["flagged"]
+        if finding.get("severity") == "error" and finding["row"] not in accepted_rows
+    ]
+    warned = [
+        finding
+        for finding in handedness["flagged"]
+        if finding.get("severity") != "error" and finding["row"] not in accepted_rows
+    ]
+    if blocking:
+        parts.append(f"{len(blocking)} refused")
+    if warned:
+        # Named, not just counted: a warning no longer blocks, so the only thing
+        # standing between it and a shipped mirrored row is somebody reading it.
+        parts.append(
+            f"{len(warned)} warned ({', '.join(sorted(f['row'] for f in warned))})"
+        )
     if accepted:
         parts.append(
-            f"{len(accepted)} accepted by the operator ({', '.join(accepted)})"
+            f"{len(accepted)} accepted by the operator "
+            f"({', '.join(entry['row'] for entry in accepted)})"
         )
     if unjudged:
         parts.append(f"{len(unjudged)} unjudged ({', '.join(unjudged)})")
     return "handedness: " + ", ".join(parts)
+
+
+def _rgb_residue_count(rgba) -> int:
+    """Transparent pixels that still carry colour, counted in Pillow's C loops.
+
+    The same predicate the pixel-by-pixel version used — ``alpha == 0 and any of
+    R, G, B``— expressed as band operations, because this walks every pixel of
+    the sheet on EVERY compose and the Python loop was 0.39 s of a 3.0 s
+    ``validate_sheet`` on a 576x3120 fixture (12x, measured 2026-08-25). Pillow
+    only: ``numpy`` is absent from the venv this pipeline runs in.
+    """
+    from PIL import ImageChops
+
+    red, green, blue, alpha = rgba.split()
+    coloured = ImageChops.lighter(ImageChops.lighter(red, green), blue).point(
+        lambda value: 255 if value else 0
+    )
+    clear = alpha.point(lambda value: 255 if value == 0 else 0)
+    return sum(ImageChops.multiply(coloured, clear).histogram()[1:])
 
 
 def validate_sheet(
@@ -1236,26 +1621,36 @@ def validate_sheet(
 
     ``handedness`` is :func:`detect_mirrored_art`'s whole answer, carried in the
     payload whether or not it found anything — including its ``unjudged`` list,
-    so a caller can always see which rows this could not answer for. A flagged
-    row is an ERROR and not a warning on purpose: the one time this defect
-    happened it shipped, was installed, was bundled into the launcher and was
-    finally caught by a human looking at a 3D scene. A warning is the shape that
-    failure already had.
+    so a caller can always see which rows this could not answer for.
 
-    **``accept_handedness`` is the one way past that refusal, and it is a named
-    one.** The gate separates its two populations by about 2.5x on the only two
-    characters anyone has measured (see :data:`MIRROR_GAIN_THRESHOLD`), and
-    registration bounds the placement blindness rather than removing it — a
-    one-sided prop past a quarter of the frame width still crosses on correct
-    art. A measurement that good is a strong SIGNAL, not a proof, and a refusal
-    with no way past it made the wrong one permanent for that draft: `compose`
-    has no other door and `reroll_row` auto-approves. So the operator may accept
-    specific ROWS, having looked at them — never the check as a whole. An
-    accepted row becomes a warning that still carries the whole refusal text, and
-    is named in ``handedness["accepted"]`` so the acceptance is a durable fact
-    rather than a refusal that vanished. Naming a row that was NOT flagged is
-    itself an error: an acceptance with nothing to accept is a bypass lying in
-    wait for the next refusal.
+    **Only a finding carrying ``severity: "error"`` blocks**, and that is
+    exactly ``basis: "rotation and states"`` — two independent neighbourhoods
+    agreeing about one row. A single-basis finding is a WARNING with the whole
+    text intact. That is not a softening for convenience, it is what the
+    measurements force: the true floor on real art is +6.78% rotation / +7.64%
+    states and the false ceiling on correct art displaced sideways is +18.75%,
+    so on ONE basis the two populations overlap and no threshold separates them.
+    Round one made every flagged row a refusal, which bought certainty it did
+    not have and pointed ``reroll-row`` at correct art in two reachable shapes.
+    Say the consequence out loud: ``characters start`` creates ``idle:6,
+    walk:8``, the cross-state pass needs three states, so on the DEFAULT
+    character this check can only ever warn — and on a two-state cut of the live
+    art a whole mirrored state already scored bit-identical to the correct
+    sheet, so it was nearly blind there before this rule existed.
+
+    **``accept_handedness`` is the one way past a refusal, it names rows, and it
+    now names the basis with them.** It applies to the ERROR case only: there is
+    nothing to accept about a warning, which does not block. A row refused on
+    two bases is refused by two independent bodies of evidence, and a bare row
+    name waived both at once — an operator accepting a PLACEMENT reading also
+    silenced the cross-state one, which placement cannot explain. So the token
+    is ``<row>:rotation+states``; a bare ``<row>`` is refused with the spelling
+    it needs. An accepted row becomes a warning that still carries the whole
+    refusal text, and rides in ``handedness["accepted"]`` as ``{row, gain,
+    basis}`` — accepting a +40% finding and an +8.1% one used to be
+    indistinguishable afterwards. Naming a row that was NOT flagged is itself an
+    error: an acceptance with nothing to accept is a bypass lying in wait for
+    the next refusal.
     """
     rgba = _open_rgba(image)
     errors: list[str] = []
@@ -1346,12 +1741,7 @@ def validate_sheet(
                     f"sheet median {global_med_w}x{global_med_h}px)"
                 )
 
-    data = rgba.tobytes()
-    residue = sum(
-        1
-        for i in range(0, len(data), 4)
-        if data[i + 3] == 0 and (data[i] or data[i + 1] or data[i + 2])
-    )
+    residue = _rgb_residue_count(rgba)
     if residue:
         errors.append(f"{residue} transparent pixels retain RGB residue")
 
@@ -1361,32 +1751,61 @@ def validate_sheet(
     # are errors unless the operator accepted that row by name — see the
     # docstring for why this one is not allowed to be a plain warning.
     handedness = detect_mirrored_art(spec, rgba)
-    flagged_rows = {finding["row"] for finding in handedness["flagged"]}
+    flagged_by_row = {finding["row"]: finding for finding in handedness["flagged"]}
     known_rows = {row.key for row in spec.rows()}
-    accepted: list[str] = []
-    for key in dict.fromkeys(str(row).strip() for row in accept_handedness):
-        if not key:
+    accepted: list[dict] = []
+    for token in dict.fromkeys(str(row).strip() for row in accept_handedness):
+        if not token:
             continue
+        key, _colon, basis = token.partition(":")
+        key = key.strip()
+        basis = basis.strip()
+        finding = flagged_by_row.get(key)
         if key not in known_rows:
             errors.append(
                 f"handedness acceptance names {key!r}, which is not a row of this "
                 f"sheet ({', '.join(sorted(known_rows))})"
             )
-        elif key not in flagged_rows:
+        elif finding is None:
             errors.append(
                 f"handedness acceptance names {key!r}, which was not flagged — an "
                 "acceptance with nothing to accept is a bypass waiting for the "
                 "next refusal; drop it"
             )
+        elif finding.get("severity") != "error":
+            errors.append(
+                f"handedness acceptance names {key!r}, which is a WARNING and "
+                "does not block this install — there is nothing to accept. Only "
+                "a row both passes agree about is refused; drop it"
+            )
+        elif not basis:
+            errors.append(
+                f"handedness acceptance names {key!r} with no basis. That row is "
+                "refused because TWO independent reads agree about it, and a bare "
+                "row name waives both — including the cross-state evidence, which "
+                "a placement or framing argument cannot explain. Name what you "
+                f"are waiving: --accept-handedness {key}:{ACCEPT_BASIS_TOKEN}"
+            )
+        elif basis != ACCEPT_BASIS_TOKEN:
+            errors.append(
+                f"handedness acceptance names {key!r} with basis {basis!r}; this "
+                f"finding's bases are {finding['basis']!r}, so the acceptance is "
+                f"spelled {key}:{ACCEPT_BASIS_TOKEN}"
+            )
         else:
-            accepted.append(key)
+            accepted.append(
+                {"row": key, "gain": finding["gain"], "basis": finding["basis"]}
+            )
     handedness["accepted"] = accepted
+    accepted_rows = {entry["row"] for entry in accepted}
     for finding in handedness["flagged"]:
         message = mirrored_art_error(finding)
-        if finding["row"] in accepted:
+        if finding["row"] in accepted_rows:
             warnings.append(f"handedness accepted by the operator — {message}")
-        else:
+        elif finding.get("severity") == "error":
             errors.append(message)
+        else:
+            warnings.append(f"handedness warning, does not block — {message}")
 
     return {
         "ok": not errors,

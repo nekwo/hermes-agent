@@ -99,7 +99,7 @@ not the slug** (`20260824-140756-cd645a` vs `anime-girl`).
 | `rows --draft <id> [--only a,b]` | One generation per **row strip** — never per frame. | `rows` |
 | `reroll-row --draft <id> --row <key> [--note …]` | Re-draws one strip. **Auto-approved.** | `rows` |
 | `thumb --draft <id> --row <key> [--attempt n] [--frame n] [--scale n]` | Writes a card-size QA crop of ONE frame. | **any** |
-| `compose --draft <id> [--accept-handedness a,b]` | Composes, validates, installs; advances to `composed`. `--accept-handedness` overrides the mirrored-art refusal for the rows you NAME, after looking at them — never blanket, and a row nothing flagged is itself refused. | `rows` |
+| `compose --draft <id> [--accept-handedness <row>:rotation+states,…]` | Composes, validates, installs; advances to `composed`. `--accept-handedness` overrides a mirrored-art REFUSAL for the rows you NAME, after looking at them — never blanket, the basis is spelled out beside the row, and a row nothing refused is itself refused. | `rows` |
 | `reopen --draft <id>` | Back to `rows` for fixes. Installed sheet untouched. | `composed` |
 | `add-state --draft <id> --state <name>:<frames>[:fixed]` | Adds ONE state; seeds its rows un-generated, touches no approved row. | `rows` |
 | `sprite <slug>` | The installed payload the launcher reads. | — |
@@ -263,23 +263,20 @@ Three line shapes leave your reply, and two of them are parsed.
   `reroll-row` that row alone with a note, then resume with
   `rows --only <the rest>`. **Never re-run a bare `rows`** — it regenerates rows
   that already passed.
-- **A reroll is auto-approved, and it is a ONE-WAY door.** `reroll_row` ends with
-  `propose` then `approve` unconditionally, and there is **no `approve-row`
-  method and no `approve-row` verb** — `approve-direction` is for turnaround
-  references only. So a reroll that comes back WORSE than the attempt it replaced
-  cannot be un-approved; the only way back is another reroll that happens to be
-  good. Crop and look BEFORE you spend the next one, and tell the operator the
-  pointer moves whether or not the new attempt is better. (Nothing is lost:
-  earlier attempts and their notes stay in `state.json` and `--attempt n` still
-  renders them. It is the *approved* pointer that only moves forward.) This is
-  why a refusal naming several rows is dangerous to obey literally — see the
-  compose bullet below.
+- **A reroll is auto-approved, and it is a ONE-WAY door.** There is no
+  `approve-row` verb, so a reroll that comes back worse than what it replaced
+  cannot be un-approved — only another reroll that happens to be good. Crop and
+  look BEFORE you spend the next one, and say the pointer moves either way.
+  (Earlier attempts and their notes stay in `state.json`; it is the *approved*
+  pointer that only moves forward.) This is why a finding naming several rows is
+  dangerous to obey literally — see the compose bullets below.
 - **Rerolls are stochastic and row-grained.** There is no per-frame
   regeneration: the frames of a strip share an identity because they were drawn
   together, so one bad frame costs its whole row. Budget two or three attempts on
   a bad row and tell the operator that up front.
-- **`compose` refuses a row drawn as the MIRROR of the direction it claims**, by
-  name, with its numbers. Only the AUTHORED directions are drawn, and the
+- **`compose` reports a row drawn as the MIRROR of the direction it claims**, by
+  name, with its numbers — and refuses when two independent reads agree about
+  that row (see the next paragraph). Only the AUTHORED directions are drawn, and the
   consumer builds the other three by flipping them, so a mirrored row corrupts
   two directions at once — this happened: `anime-girl`'s `ne` was drawn facing
   north-WEST in `idle`, `walk` and later `jumping`, which broke `ne` AND `nw`
@@ -288,12 +285,26 @@ Three line shapes leave your reply, and two of them are parsed.
   in FRAME terms ("the body angled up and to the RIGHT of frame; the sliver of
   face on the viewer's RIGHT; never the mirror of this") — not a nudge, and never
   a hand-flip of the sheet, which the next compose overwrites.
-  **Re-roll ONLY the rows the refusal names as faults.** A mirrored row pulls the
-  seams of the rows on BOTH sides of it toward the line, so more rows read high
-  than are wrong. The refusal reports the culprit and lists the others as
-  corroborating, in the same message, with the words "Do NOT re-roll them" —
-  obey that literally, because a reroll auto-approves and cannot be undone, so
-  re-rolling a corroborating row spends correct approved art for nothing.
+  **ONE reading WARNS; only TWO agreeing REFUSE.** The check has two independent
+  neighbourhoods — the rotation (a row against its neighbours in the same state)
+  and the states (the same direction across the other states). A finding from one
+  of them is a warning: `compose` prints it, by name, with its numbers, and the
+  character installs. A row BOTH of them flag is an error and `compose` refuses.
+  That is not a softening, it is what the measurements force — the quietest true
+  reading on real art is +6.8% and the loudest FALSE one, correct art displaced
+  sideways, is +18.8%, so on one basis the two populations overlap and no
+  threshold separates them. **Read the warnings out to the operator.** Nothing
+  else stands between a single-basis reading and a shipped mirrored row.
+  **Re-roll only a row the message NAMES as a fault, and only from a refusal.** A
+  mirrored row pulls the seams of the rows on both sides of it toward the line, so
+  more rows read high than are wrong — and the loudest of them is not reliably
+  the culprit: a correct row slid sideways, and a correct row flanked by two
+  mirrored ones, both put an INNOCENT row at the top. So the message says which
+  of three things it is. It names a culprit and gives you the `reroll-row`
+  command (a refusal, two bases agreeing); it names one row and asks you to crop
+  and look (a warning, one basis); or it says *"one of N rows … and this pass
+  cannot say which"* and names none of them. Never re-roll off the third shape,
+  and never re-roll a row listed under "Do NOT re-roll them".
   **What it does NOT see, so you still look.** It judges a row only when it has a
   neighbour on each side (`se`, `e`, `ne` on an 8-way sheet — the front and back
   views are excluded, and every row it could not answer for is named in
@@ -301,24 +312,37 @@ Three line shapes leave your reply, and two of them are parsed.
   sheet gives it almost nothing. A character mirrored on EVERY row passes
   perfectly, because a sheet cannot tell from inside itself which way is east —
   and so does a character whose every STATE is mirrored. It answers WHICH SIDE,
-  never HOW FAR: a rotation turned too far is still turned the right way.
-- **The same check reads a whole STATE across the others**, which is the pass
-  that catches `add-state` generating five rows against a reference that turns
-  the wrong way. It needs THREE states before it can say anything (across one
-  pair, a disagreement cannot say which of the two is wrong), so the default
-  `idle`+`walk` sheet gets nothing from it and the third state is where it wakes
-  up. When it fires, the refusal names each row of that state with basis
-  `states` — that is the one case where re-rolling several rows IS right, and the
-  reference is worth suspecting before the rows are.
-- **A refusal you believe is wrong has exactly one door, and it names rows.**
-  `compose --accept-handedness idle-e,walk-ne` installs despite those rows'
-  findings, records them on the character's manifest as `handednessAccepted`, and
-  keeps every other flagged row refusing. Naming a row that was NOT flagged is
-  itself an error, so the flag cannot be carried along in a command line as
-  boilerplate. Use it only after looking at the strip with the operator and
-  saying what you saw — the check separates its two populations by about 2.5x on
-  the two characters ever measured, which makes it a strong signal and not a
-  proof.
+  never HOW FAR: a rotation turned too far is still turned the right way. And a
+  single mirrored row can pass clean outright: on real art `jumping-se` mirrored
+  reads +6.78% and +7.64% and is caught by neither pass.
+- **On the DEFAULT character this check can only ever warn**, and you should say
+  so. `characters start` creates `idle:6, walk:8`; the cross-state pass needs
+  three states; so two states leave the rotation as the only reading there will
+  ever be, and one reading does not refuse. A two-state sheet is weak in its own
+  right, measured: a whole mirrored state scores bit-identical to the correct
+  sheet, and two adjacent mirrored rows pass with their gains going negative.
+  **The cheapest sensitivity available is a third state** — say that rather than
+  quoting separation figures at the operator.
+- **The cross-state pass is what catches `add-state`** generating a whole state's
+  rows against a reference that turns the wrong way — the rotation is blind to it
+  by construction, because a wholly mirrored state still fits itself. It needs
+  THREE states before it can say anything, and it convicts a row only when a
+  strict MINORITY of the states draw it that way: an even split (two states
+  against two, one `add-state` away) convicts nobody and says "the states split
+  evenly". When it fires on every row of one state, suspect the state's
+  reference before its rows — but it is one basis, so it warns, and the decision
+  is the operator's.
+- **A refusal you believe is wrong has exactly one door, it names rows, and it
+  names what it waives.** `compose --accept-handedness idle-ne:rotation+states`
+  installs despite that row's finding, records it on the character's manifest as
+  `handednessAccepted` (row, gain and basis — `characters list` and
+  `sprite` republish it), and keeps every other refused row refusing. The basis
+  is spelled out because a bare row name waived two independent bodies of
+  evidence at once: an operator overriding a PLACEMENT reading also silenced the
+  cross-state one, which placement cannot explain. Naming a row that was not
+  flagged is an error, and so is naming a WARNING — a warning did not block, so
+  there is nothing to accept. Use it only after looking at the strip with the
+  operator and saying what you saw.
 - **`composed` is not terminal.** The post-install fix loop is
   `reopen → reroll-row → compose`, and the post-install GROWTH loop is
   `reopen → add-state → rows --only … → compose`. Both are non-destructive — the

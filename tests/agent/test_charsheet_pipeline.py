@@ -741,22 +741,57 @@ def test_a_sheet_whose_rows_all_face_where_they_claim_is_clean(sheet):
     assert pipeline.validate_sheet(SPEC, sheet)["handedness"]["flagged"] == []
 
 
-def test_a_row_drawn_as_the_mirror_of_its_direction_blocks_the_install():
-    """The whole point: this refuses, it does not warn.
+def test_one_basis_warns_by_name_and_does_not_block_the_install():
+    """The ruling, at the boundary it moved: ONE reading does not refuse.
 
-    A warning is the shape the failure already had — the defective sheet passed
-    every check there was, composed, installed and shipped.
+    Round one made every flagged row an error, and round two kept that. What it
+    bought was certainty the measurement does not have. Measured in both
+    directions on real art: the true floor is +6.78% rotation / +7.64% states
+    (`jumping-se` mirrored, flagged by NEITHER pass, composes and ships), and
+    the false ceiling on CORRECT art slid sideways is +18.75%. The 8% line does
+    not sit between two populations on one basis; it sits inside both, so no
+    value of the threshold separates them and what changed instead is what a
+    single reading is allowed to DO.
+
+    This sheet has TWO states — which is exactly what `characters start`
+    creates — so the cross-state pass has nothing to say and the rotation is the
+    only reading there will ever be. It warns, by name, with its numbers, and it
+    installs. Say that plainly rather than pretending otherwise: on the default
+    character this check can only ever warn.
     """
     result = pipeline.validate_sheet(EIGHT, eight_way_sheet(mirror=("walk-ne",)))
 
+    assert result["ok"], result["errors"]
+    flagged = result["handedness"]["flagged"]
+    assert [finding["row"] for finding in flagged] == ["walk-ne"]
+    assert [finding["severity"] for finding in flagged] == ["warning"]
+    assert result["errors"] == []
+    assert len(result["warnings"]) == 1
+    message = result["warnings"][0]
+    assert "walk-ne" in message and "does not block" in message
+    # A warning must NOT hand over a reroll command: a reroll auto-approves,
+    # there is no approve-row verb, and one basis cannot justify spending art.
+    assert "characters reroll-row" not in message
+
+
+def test_two_bases_agreeing_is_what_refuses_an_install():
+    """And the other half of the same ruling, on the art that shipped broken.
+
+    `idle-ne` in the fixture is the row drawn facing north-WEST. The rotation
+    reads it at +12.05% and the cross-state pass at +15.40% — two independent
+    neighbourhoods, the same row — which is the only shape that blocks.
+    """
+    result = fixture_validation(EIGHT_WAY_FIXTURE)
+
     assert not result["ok"]
-    assert [finding["row"] for finding in result["handedness"]["flagged"]] == ["walk-ne"]
+    (finding,) = result["handedness"]["flagged"]
+    assert (finding["row"], finding["basis"], finding["severity"]) == (
+        "idle-ne",
+        "rotation and states",
+        "error",
+    )
     assert len(result["errors"]) == 1
-    message = result["errors"][0]
-    assert "walk-ne" in message
-    # The refusal has to be actionable at the verb an operator actually has.
-    assert "characters reroll-row --row walk-ne" in message
-    assert result["warnings"] == []
+    assert "characters reroll-row --row idle-ne" in result["errors"][0]
 
 
 def test_the_flip_is_scored_against_both_neighbours_and_the_evidence_travels():
@@ -965,18 +1000,59 @@ def load_fixture_sheet(name: str):
         return spec, opened.convert("RGBA")
 
 
+EIGHT_WAY_FIXTURE = "handedness_8way.webp"
+# The checked-in sheet carries the genuinely mirrored `idle-ne`. Flipping that
+# one row back is the character as it SHIPS today, and it is the base most of
+# the mutation tests below build on.
+REPAIRED = (("flip", "idle-ne"),)
+
+
 @functools.lru_cache(maxsize=None)
-def fixture_findings(name: str):
-    """:func:`detect_mirrored_art` on an UNMODIFIED fixture, computed once."""
-    spec, sheet = load_fixture_sheet(name)
+def variant(name: str, ops: tuple = ()):
+    """``(spec, image)`` for a fixture with a deterministic mutation applied.
+
+    Cached across the whole module, and that is a timing decision, not a tidiness
+    one: ``detect_mirrored_art`` on this fixture is ~2.3 s and ``validate_sheet``
+    ~2.6 s, several tests want the same mutated sheet, and the worst test in the
+    charsheet suites was measured at 17.53 s against a 30 s cap. Every mutation
+    here is pure — :func:`edit_row` copies — so the same ops always produce the
+    same bytes and computing them twice buys nothing.
+    """
+    spec, image = load_fixture_sheet(name)
+    for kind, *rest in ops:
+        if kind == "flip":
+            image = flip_rows(spec, image, *rest)
+        elif kind == "slide":
+            image = slide_row(spec, image, rest[0], rest[1])
+        elif kind == "blank":
+            image = blank_row(spec, image, rest[0])
+        else:  # pragma: no cover - a typo in a test, not a code path
+            raise AssertionError(f"unknown fixture mutation {kind!r}")
+    return spec, image
+
+
+@functools.lru_cache(maxsize=None)
+def variant_findings(name: str, ops: tuple = ()):
+    """:func:`detect_mirrored_art` on a fixture variant, computed once."""
+    spec, sheet = variant(name, ops)
     return pipeline.detect_mirrored_art(spec, sheet)
 
 
 @functools.lru_cache(maxsize=None)
+def variant_validation(name: str, ops: tuple = (), accepted: tuple[str, ...] = ()):
+    """:func:`validate_sheet` on a fixture variant, computed once."""
+    spec, sheet = variant(name, ops)
+    return pipeline.validate_sheet(spec, sheet, accept_handedness=accepted)
+
+
+def fixture_findings(name: str):
+    """:func:`detect_mirrored_art` on an UNMODIFIED fixture, computed once."""
+    return variant_findings(name, ())
+
+
 def fixture_validation(name: str, accepted: tuple[str, ...] = ()):
     """:func:`validate_sheet` on an UNMODIFIED fixture, computed once."""
-    spec, sheet = load_fixture_sheet(name)
-    return pipeline.validate_sheet(spec, sheet, accept_handedness=accepted)
+    return variant_validation(name, (), accepted)
 
 
 def edit_row(spec, image, key, change):
@@ -1046,13 +1122,11 @@ def test_the_real_defect_is_caught_and_flipping_that_one_row_clears_the_sheet():
     the claim "this measures handedness" stated as an experiment rather than as
     an adjective.
     """
-    spec, sheet = load_fixture_sheet("handedness_8way.webp")
-
-    refused = fixture_validation("handedness_8way.webp")
+    refused = fixture_validation(EIGHT_WAY_FIXTURE)
     assert not refused["ok"]
     assert [finding["row"] for finding in refused["handedness"]["flagged"]] == ["idle-ne"]
 
-    repaired = pipeline.validate_sheet(spec, flip_rows(spec, sheet, "idle-ne"))
+    repaired = variant_validation(EIGHT_WAY_FIXTURE, REPAIRED)
     assert repaired["ok"], repaired["errors"]
     assert repaired["handedness"]["flagged"] == []
     # And not by a whisker: the row that read +12.05% reads -13.70% flipped.
@@ -1077,22 +1151,30 @@ def test_the_same_fixed_point_holds_on_real_art_with_a_real_defect_present():
     )
 
 
-def test_the_threshold_sits_between_the_two_measured_populations():
-    """What the number 0.08 is FOR, asserted as the ordering it encodes.
+def test_the_threshold_separates_the_populations_ON_THIS_FIXTURE():
+    """What the number 0.08 is FOR — and the honest limit of what this proves.
 
     The threshold had no test at all: the suite was green from ~0.03 to at least
     0.25, because the glyph fixture's true positives scored an order above the
     live discrimination band, so nothing noticed a threshold raised past the very
     defect the check shipped for. This pins the property instead of the value —
-    every correct row of a real sheet must fall BELOW the line and the real
-    mirrored row must fall above it — so moving the number in either direction
-    reddens exactly when it stops separating the populations.
+    every correct row of THIS sheet must fall below the line and its real
+    mirrored row above it.
+
+    **It is not a proof that the two populations separate**, and the name says
+    which fixture it is about because that claim was made once and is false.
+    Measured across more of the space than one sheet holds: the true floor on
+    real art is +6.78% rotation / +7.64% states (`jumping-se` mirrored, under
+    the line on both) and the false ceiling on correct art slid sideways is
+    +18.75%. The line sits inside both populations. That is why a single basis
+    now warns instead of refusing — the threshold is not the lever, so this test
+    pins an ordering on known art rather than a separation in general.
 
     Measured on this fixture: the loudest false is `idle-e` at +5.03% (a correct
     row, pulled up because the row beside it is mirrored) and the only true
     positive is `idle-ne` at +12.05% in the rotation and +15.40% across states.
     """
-    found = fixture_findings("handedness_8way.webp")
+    found = fixture_findings(EIGHT_WAY_FIXTURE)
 
     true_rows = {"idle-ne"}
     gains = [(entry["row"], entry["gain"]) for entry in found["judged"]]
@@ -1143,9 +1225,59 @@ def test_sliding_a_correct_row_sideways_is_not_handedness():
     assert registered < 0, registered
     assert registered == pytest.approx(walk_e_gain(sheet, window), abs=1e-9)
     assert (
-        pipeline.detect_mirrored_art(spec, slid)["flagged"]
-        == fixture_findings("handedness_8way.webp")["flagged"]
+        variant_findings(EIGHT_WAY_FIXTURE, (("slide", "walk-e", -8),))["flagged"]
+        == fixture_findings(EIGHT_WAY_FIXTURE)["flagged"]
     )
+
+
+def test_the_registration_window_is_the_size_it_says_and_bounds_what_it_says():
+    """Two sabotages that survived a whole round trip, in one test.
+
+    `REGISTRATION_WINDOW_DIVISOR = 12` mutated to `6` (window 32 px) and to `3`
+    (window 64 px) both left all 62 tests green, while moving the false-refusal
+    boundary on correct art from -24 px to -40 px to past -56 px. Nothing
+    asserted the window's SIZE, and nothing asserted the thing it exists FOR —
+    that a slide LARGER than the window is still seen. The one test that slides
+    a row moves it 8 px, inside every candidate window, so it could not see the
+    knob it was written to justify.
+
+    So: the size, and the boundary either side of it. A slide of exactly the
+    window is registered away and changes nothing; a slide half again the window
+    is not, and shows up. Both readings are on real art of the same row.
+    """
+    assert pipeline.registration_window(192) == 16
+    assert pipeline.registration_window(96) == 8
+    # A frame narrower than the divisor still gets a one-pixel window rather
+    # than a window of zero, which would be no registration at all.
+    assert pipeline.registration_window(4) == 1
+
+    window = pipeline.registration_window(192)
+    inside = gains_by_row(
+        variant_findings(EIGHT_WAY_FIXTURE, REPAIRED + (("slide", "walk-e", -window),)),
+        "rotation",
+    )
+    past = gains_by_row(
+        variant_findings(
+            EIGHT_WAY_FIXTURE, REPAIRED + (("slide", "walk-e", -window - 8),)
+        ),
+        "rotation",
+    )
+    clean = gains_by_row(variant_findings(EIGHT_WAY_FIXTURE, REPAIRED), "rotation")
+
+    # Inside the window the displacement is registered away: the reading stays
+    # within two points of the unslid row's and nowhere near the line. It is not
+    # EXACTLY equal, and the reason is worth knowing — sliding a row inside its
+    # own cell clips the art against the cell edge, so a window-sized slide is
+    # not a pure translation. Registration cancels the displacement; nothing can
+    # give back the pixels that fell off.
+    assert inside["walk-e"] == pytest.approx(clean["walk-e"], abs=0.02)
+    assert inside["walk-e"] < 0
+    # Past it: the same correct art now reads over the line. That is the residue
+    # the window BOUNDS rather than removes, and the reason a single basis warns
+    # instead of refusing. A window twice as wide would register this away too,
+    # which is what makes these two assertions a pin on the SIZE and not just on
+    # the existence of a window.
+    assert past["walk-e"] >= pipeline.MIRROR_GAIN_THRESHOLD
 
 
 def test_the_shift_grid_is_symmetric_so_a_global_flip_still_scores_identically():
@@ -1197,11 +1329,11 @@ def test_only_the_culprit_of_a_run_is_reported_and_the_neighbour_is_named():
     mirrored and `walk-ne` reads +14.40% because of it — one culprit, one
     message, and the message says not to touch the other one.
     """
-    spec, sheet = load_fixture_sheet("handedness_8way.webp")
-    found = pipeline.detect_mirrored_art(spec, flip_rows(spec, sheet, "walk-e"))
+    found = variant_findings(EIGHT_WAY_FIXTURE, (("flip", "walk-e"),))
 
     walk = [finding for finding in found["flagged"] if finding["state"] == "walk"]
     assert [finding["row"] for finding in walk] == ["walk-e"]
+    assert walk[0]["attributed"] and walk[0]["attribution"] == "both"
     assert [entry["row"] for entry in walk[0]["corroborating"]] == ["walk-ne"]
     # `walk-ne` really is over the line — it is suppressed by attribution, not by
     # a threshold that happens to sit above it.
@@ -1215,6 +1347,233 @@ def test_only_the_culprit_of_a_run_is_reported_and_the_neighbour_is_named():
     assert "walk-ne" in message and "Do NOT re-roll them" in message
 
 
+def test_the_culprit_is_not_simply_the_first_row_of_the_run():
+    """The sabotage that survived a whole round trip, pinned.
+
+    `_finding_from_run`'s `culprit = max(run, key=gain)` mutated to `run[0][1]`
+    left all 62 tests green, because in this fixture the mirrored row is the
+    FIRST of its run and the two rules name the same row. Mirroring `walk-ne`
+    instead raises its PREDECESSOR `walk-e`, so the run reads `walk-e` then
+    `walk-ne` and the first of the run is the innocent one.
+    """
+    spec, _sheet = load_fixture_sheet(EIGHT_WAY_FIXTURE)
+    found = variant_findings(EIGHT_WAY_FIXTURE, REPAIRED + (("flip", "walk-ne"),))
+
+    walk = [finding for finding in found["flagged"] if finding["state"] == "walk"]
+    assert [finding["row"] for finding in walk] == ["walk-ne"]
+    rotation = gains_by_row(found, "rotation")
+    # The predecessor really was raised, and it really is the EARLIER row of the
+    # chain — without both, this fixture cannot tell the repair from the bug
+    # either, which is how the sabotage survived in the first place.
+    assert rotation["walk-e"] > 0
+    assert spec.row_by_key("walk-e").index < spec.row_by_key("walk-ne").index
+
+
+@functools.lru_cache(maxsize=None)
+def two_state_cut(ops: tuple = ()):
+    """The fixture's `idle` and `walk` states only — the DEFAULT sheet's shape.
+
+    `characters start` creates `idle:6, walk:8`, so this is what the check
+    actually meets on most characters: no cross-state pass at all, and the
+    rotation as the only reading there will ever be.
+    """
+    spec, source = variant(EIGHT_WAY_FIXTURE, REPAIRED)
+    cut = SheetSpec(
+        states=tuple(state for state in spec.states if state.name != "jump"),
+        scheme=spec.scheme,
+        frame_w=spec.frame_w,
+        frame_h=spec.frame_h,
+    )
+    out = Image.new("RGBA", cut.sheet_size(), (0, 0, 0, 0))
+    for row in cut.rows():
+        cells = pipeline._row_cells(source, spec, spec.row_by_key(row.key))
+        for column, cell in enumerate(cells[: row.frames]):
+            out.paste(cell, (column * cut.frame_w, row.index * cut.frame_h))
+    for kind, *rest in ops:
+        if kind == "flip":
+            out = flip_rows(cut, out, *rest)
+        elif kind == "slide":
+            out = slide_row(cut, out, rest[0], rest[1])
+        else:  # pragma: no cover - a typo in a test
+            raise AssertionError(f"unknown mutation {kind!r}")
+    return cut, out
+
+
+def test_on_the_DEFAULT_two_state_sheet_a_run_is_never_attributed():
+    """The rotation ranks. It does not convict, and here it is all there is.
+
+    Two states means no cross-state pass, so a run of adjacent flagged rows has
+    no second basis that could take it apart — and the run's maximum is not the
+    culprit: `walk-e` here is CORRECT art slid -24 px, and the UNTOUCHED
+    `walk-ne` is the louder of the two. `culprit = max(run, key=gain)` and
+    `culprit = run[0][1]` both name an innocent row on this shape; naming none
+    is the only honest answer, and the message says which rows to crop.
+    """
+    cut, sheet = two_state_cut((("slide", "walk-e", -24),))
+    found = pipeline.detect_mirrored_art(cut, sheet)
+
+    assert gains_by_row(found, "states") == {}
+    rotation = gains_by_row(found, "rotation")
+    # The run really has two rows and its maximum really is the innocent one.
+    assert rotation["walk-e"] >= pipeline.MIRROR_GAIN_THRESHOLD
+    assert rotation["walk-ne"] > rotation["walk-e"]
+
+    (finding,) = [f for f in found["flagged"] if f["state"] == "walk"]
+    assert finding["attributed"] is False
+    assert finding["attribution"] == "run"
+    assert [entry["row"] for entry in finding["alternatives"]] == ["walk-ne", "walk-e"]
+    assert "characters reroll-row" not in pipeline.mirrored_art_error(finding)
+
+
+def test_a_lone_flagged_row_on_a_two_state_sheet_is_still_named():
+    """The control: "never attribute a RUN" must not become "never attribute".
+
+    One mirrored row whose neighbours stay under the line is a run of one. There
+    is nothing for it to be confused with, so it is named — which is what keeps
+    the founding defect (`ne` mirrored in every state, one isolated row per
+    state) attributable on a sheet with no cross-state pass at all.
+    """
+    cut, sheet = two_state_cut((("flip", "walk-ne"),))
+    found = pipeline.detect_mirrored_art(cut, sheet)
+
+    rotation = gains_by_row(found, "rotation")
+    assert rotation["walk-e"] < pipeline.MIRROR_GAIN_THRESHOLD  # a run of ONE
+
+    (finding,) = [f for f in found["flagged"] if f["state"] == "walk"]
+    assert finding["row"] == "walk-ne"
+    assert (finding["attributed"], finding["attribution"]) == (True, "rotation")
+    assert finding["severity"] == "warning"
+
+
+def test_a_correct_row_slid_sideways_does_not_get_its_NEIGHBOUR_re_rolled():
+    """Inversion shape one: placement. The run's maximum is an innocent row.
+
+    `walk-e` here is CORRECT art slid -24 px in a 192 px frame — art untouched,
+    a displacement half again the registration window, which a prop or a framing
+    drift reaches. It reads +10.48% and drags its UNTOUCHED neighbour `walk-ne`
+    to +10.68%, so "the culprit is the run's maximum" names `walk-ne` and files
+    the disturbed row under "Do NOT re-roll them" — exactly backwards, and
+    pointed at approved art a reroll cannot give back.
+
+    Nothing internal to the sheet can attribute this, so the honest answer is to
+    attribute nothing: the finding names the run, says so, and warns.
+    """
+    found = variant_findings(EIGHT_WAY_FIXTURE, REPAIRED + (("slide", "walk-e", -24),))
+
+    walk = [finding for finding in found["flagged"] if finding["state"] == "walk"]
+    assert len(walk) == 1
+    finding = walk[0]
+    rotation = gains_by_row(found, "rotation")
+    # The run really does invert: both rows are over the line and the innocent
+    # NEIGHBOUR is the louder of the two. Without this the test cannot tell the
+    # repair from the bug.
+    assert rotation["walk-e"] >= pipeline.MIRROR_GAIN_THRESHOLD
+    assert rotation["walk-ne"] > rotation["walk-e"]
+
+    assert finding["attributed"] is False
+    assert [entry["row"] for entry in finding["alternatives"]] == ["walk-ne", "walk-e"]
+    assert finding["corroborating"] == []
+    assert finding["severity"] == "warning"
+
+    message = pipeline.mirrored_art_error(finding)
+    assert "cannot say which" in message
+    assert "NOT attributed" in message
+    assert "characters reroll-row" not in message
+
+
+def test_a_lone_flagged_row_the_other_states_vouch_for_is_not_named():
+    """The other half of finding 1: a run of ONE can still be an innocent row.
+
+    `idle-e` slid -48 px is correct art displaced far past the window; it is the
+    only row of its state over the line (+8.08%, its neighbours at +5.49% and
+    +7.84%), so "the run's maximum" and "the only flagged row" are the same row
+    and a run rule cannot help. What clears it is the SECOND basis reading the
+    other way: the same direction in `walk` and `jump` prefers the art as drawn
+    (-3.23%), and `e` is over the line in one rotation of three rather than
+    three of three — so this is placement, not a direction drawn backwards, and
+    nothing is named.
+    """
+    found = variant_findings(EIGHT_WAY_FIXTURE, REPAIRED + (("slide", "idle-e", -48),))
+
+    rotation = gains_by_row(found, "rotation")
+    assert rotation["idle-e"] >= pipeline.MIRROR_GAIN_THRESHOLD
+    assert rotation["idle-se"] < pipeline.MIRROR_GAIN_THRESHOLD
+    assert rotation["idle-ne"] < pipeline.MIRROR_GAIN_THRESHOLD  # a run of ONE
+    assert gains_by_row(found, "states")["idle-e"] < 0
+
+    (finding,) = [f for f in found["flagged"] if f["state"] == "idle"]
+    assert (finding["attributed"], finding["attribution"]) == (False, "contradicted")
+    assert finding["severity"] == "warning"
+    message = pipeline.mirrored_art_error(finding)
+    assert "vouches for it" in message and "PLACEMENT" in message
+    assert "characters reroll-row" not in message
+
+
+def test_a_correct_row_flanked_by_two_mirrored_ones_is_not_the_culprit():
+    """Inversion shape two: flanked. Reachable from ONE more bad row prompt.
+
+    Mirror `idle-se` and `idle-ne` and leave `idle-e` correct — which is what a
+    SECOND badly-worded diagonal in `VIEW_LANGUAGE` produces, the way `ne` alone
+    produced the first one. The correct middle row wins the rotation run at
+    +14.28% and used to be reported as a standalone `rotation` culprit, while
+    the evidence exonerating it — its cross-state reading of -97.62% — sat
+    unused in the same payload.
+
+    Now the cross-state pass is consulted BEFORE the rotation is allowed to
+    point at anybody, so it names `idle-ne`, which both passes agree about, and
+    lists the correct `idle-e` as corroborating with "do not re-roll".
+    """
+    found = variant_findings(
+        EIGHT_WAY_FIXTURE, REPAIRED + (("flip", "idle-se", "idle-ne"),)
+    )
+
+    rotation = gains_by_row(found, "rotation")
+    states = gains_by_row(found, "states")
+    # The trap is real on this art: the CORRECT row is the loudest of its run.
+    assert rotation["idle-e"] > rotation["idle-ne"] >= pipeline.MIRROR_GAIN_THRESHOLD
+    assert states["idle-e"] < 0
+
+    by_row = {finding["row"]: finding for finding in found["flagged"]}
+    assert "idle-e" not in by_row
+    assert by_row["idle-ne"]["basis"] == "rotation and states"
+    assert by_row["idle-ne"]["severity"] == "error"
+    assert [entry["row"] for entry in by_row["idle-ne"]["corroborating"]] == ["idle-e"]
+    assert by_row["idle-se"]["basis"] == "states"
+
+    message = pipeline.mirrored_art_error(by_row["idle-ne"])
+    assert "characters reroll-row --row idle-ne" in message
+    assert "'idle-e'" in message and "Do NOT re-roll them" in message
+
+
+def test_a_direction_mirrored_in_EVERY_state_is_still_attributed():
+    """And the reason a negative cross-state reading is not a character witness.
+
+    The founding defect: `ne` drawn north-WEST in all three states. The
+    cross-state pass says nothing there — a unanimous consensus convicts nobody,
+    and each mirrored row reads -111.32% — so a rule that demoted any row its
+    other states "vouch for" would silently stop naming the very defect this
+    gate was built for. What separates the two cases is that `ne` is over the
+    line in the rotation of THREE states out of three here, and in ONE of three
+    in the flanked and placement shapes above.
+    """
+    found = variant_findings(
+        EIGHT_WAY_FIXTURE, REPAIRED + (("flip", "idle-ne", "walk-ne", "jump-ne"),)
+    )
+
+    states = gains_by_row(found, "states")
+    assert states["idle-ne"] < -1.0  # the pass is not merely quiet, it is inverted
+
+    named = {
+        finding["row"]: finding
+        for finding in found["flagged"]
+        if finding["attributed"]
+    }
+    assert sorted(named) == ["idle-ne", "jump-ne", "walk-ne"]
+    # One basis only, so it warns rather than refusing — and says which.
+    assert {finding["severity"] for finding in named.values()} == {"warning"}
+    assert {finding["basis"] for finding in named.values()} == {"rotation"}
+
+
 def test_a_whole_state_drawn_mirrored_is_caught_across_the_states():
     """The blind spot `add_state` makes reachable, and the pass that closes it.
 
@@ -1225,14 +1584,22 @@ def test_a_whole_state_drawn_mirrored_is_caught_across_the_states():
     times. Comparing the same direction ACROSS states is what sees it, and both
     halves are asserted here: the rotation finds nothing in `jump`, the states
     pass convicts all three of its judged rows.
-    """
-    spec, sheet = load_fixture_sheet("handedness_8way.webp")
-    correct = flip_rows(spec, sheet, "idle-ne")
-    mirrored_state = flip_rows(
-        spec, correct, *(f"jump-{direction}" for direction in ("s", "se", "e", "ne", "n"))
-    )
 
-    found = pipeline.detect_mirrored_art(spec, mirrored_state)
+    **And it WARNS rather than refusing, which is the ruling's real cost.** One
+    basis is all there is here by construction — the rotation is a fixed point
+    of a wholly mirrored state — so nothing blocks. That is not an oversight: on
+    a two-state cut of this same art a whole mirrored state scores bit-identical
+    to the correct sheet, so this pass was already the only thing that could see
+    it at all, and a single reading does not separate the populations. Three
+    named warnings and an operator who reads them is what this buys; if the
+    owner wants a whole mirrored STATE to block, the rule to add is "a `states`
+    finding covering EVERY judged row of one state is an error", which is a
+    second-order consensus and not a second basis.
+    """
+    mirrored_state = REPAIRED + (
+        ("flip", "jump-s", "jump-se", "jump-e", "jump-ne", "jump-n"),
+    )
+    found = variant_findings(EIGHT_WAY_FIXTURE, mirrored_state)
 
     rotation = gains_by_row(found, "rotation")
     assert all(
@@ -1242,6 +1609,100 @@ def test_a_whole_state_drawn_mirrored_is_caught_across_the_states():
     assert sorted(
         (finding["row"], finding["basis"]) for finding in found["flagged"]
     ) == [("jump-e", "states"), ("jump-ne", "states"), ("jump-se", "states")]
+    assert {finding["severity"] for finding in found["flagged"]} == {"warning"}
+    assert all(finding["attributed"] for finding in found["flagged"])
+    installed = variant_validation(EIGHT_WAY_FIXTURE, mirrored_state)
+    assert installed["ok"], installed["errors"]
+    assert len(installed["warnings"]) == 3
+
+
+@functools.lru_cache(maxsize=None)
+def four_state_sheet(mirror: tuple[str, ...] = ()):
+    """The three real states plus a fourth, then *mirror* applied.
+
+    The fourth state is `idle`'s art with the frame order rotated by one: real
+    art, a different animation phase, correct handedness. A byte COPY would be
+    useless — identical cells measure zero, `_gain` returns ``None`` and the
+    pair drops out of the ranking entirely — so the fourth state has to be a
+    genuine independent witness. One `add-state` is all it takes to reach four.
+    """
+    spec, source = variant(EIGHT_WAY_FIXTURE, REPAIRED)
+    wide = SheetSpec(
+        states=tuple(list(spec.states) + [StateSpec("extra", 3, True)]),
+        scheme=spec.scheme,
+        frame_w=spec.frame_w,
+        frame_h=spec.frame_h,
+    )
+    out = Image.new("RGBA", wide.sheet_size(), (0, 0, 0, 0))
+    out.alpha_composite(source, (0, 0))
+    for direction in spec.scheme.authored:
+        cells = pipeline._row_cells(source, spec, spec.row_by_key(f"idle-{direction}"))
+        row = wide.row_by_key(f"extra-{direction}")
+        for column in range(row.frames):
+            out.paste(
+                cells[(column + 1) % len(cells)],
+                (column * wide.frame_w, row.index * wide.frame_h),
+            )
+    return wide, flip_rows(wide, out, *mirror) if mirror else out
+
+
+def test_an_EVEN_number_of_states_that_splits_evenly_convicts_nobody():
+    """`len(pairs) // 2 + 1` is not a majority when the states are even.
+
+    On a FOUR-state sheet that is 2 of 3, so a 2-2 split left every row inside a
+    "majority" and convicted all four — the two CORRECT ones at basis `states`
+    with no corroborating marker and no "Do NOT re-roll them", while their
+    rotation readings sat well under the line. `SKILL.md` told the agent a
+    multi-row `states` refusal is the one case where re-rolling several rows IS
+    right, so following it spends two correct approved attempts. One `add-state`
+    takes the live character from three states to four.
+
+    The rule is now a strict majority of ALL the states that draw the direction:
+    a row is convicted only when its camp is a strict MINORITY. Two camps of two
+    are neither, so the direction goes unjudged and says why.
+    """
+    wide, sheet = four_state_sheet(("idle-e", "walk-e"))
+    found = pipeline.detect_mirrored_art(wide, sheet)
+
+    # `e` is the direction that split; `se` and `ne` are untouched and still
+    # judged, which is the point — the refusal to convict is scoped to the
+    # direction that has no minority, not to the whole pass.
+    states = gains_by_row(found, "states")
+    assert not [row for row in states if row.endswith("-e")]
+    assert {row for row in states if row.endswith("-se")} == {
+        f"{state}-se" for state in ("idle", "walk", "jump", "extra")
+    }
+    split = [
+        entry
+        for entry in found["unjudged"]
+        if entry["basis"] == "states" and "split evenly" in entry["reason"]
+    ]
+    assert len(split) == 1
+    assert sorted(split[0]["rows"]) == ["extra-e", "idle-e", "jump-e", "walk-e"]
+
+    # The two CORRECT rows are not flagged at all now, and the two genuinely
+    # mirrored ones are still seen — by the rotation, on one basis, so they warn.
+    flagged = {finding["row"]: finding for finding in found["flagged"]}
+    assert sorted(flagged) == ["idle-e", "walk-e"]
+    assert {finding["severity"] for finding in flagged.values()} == {"warning"}
+    assert {finding["basis"] for finding in flagged.values()} == {"rotation"}
+
+
+def test_a_fourth_state_does_not_cost_the_cross_state_pass_its_sensitivity():
+    """The control for the test above: the fix must not simply switch it off.
+
+    One mirrored row out of four states is a camp of one against three, which is
+    a strict minority under both the old rule and the new one — so it is still
+    convicted, on both bases, and it still refuses.
+    """
+    wide, sheet = four_state_sheet(("idle-e",))
+    found = pipeline.detect_mirrored_art(wide, sheet)
+
+    (finding,) = found["flagged"]
+    assert finding["row"] == "idle-e"
+    assert finding["basis"] == "rotation and states"
+    assert finding["severity"] == "error"
+    assert gains_by_row(found, "states")["idle-e"] >= pipeline.MIRROR_GAIN_THRESHOLD
 
 
 def test_across_two_states_the_cross_state_read_refuses_to_guess():
@@ -1352,30 +1813,71 @@ def test_an_operator_can_accept_one_named_row_and_the_rest_still_refuse():
     may accept that row; the acceptance is recorded, the refusal text survives as
     a warning, and every other flagged row still refuses.
     """
-    spec, sheet = load_fixture_sheet("handedness_8way.webp")
-    mirrored = flip_rows(spec, sheet, "walk-e")
+    mirrored = (("flip", "walk-e"),)
 
-    partial = pipeline.validate_sheet(spec, mirrored, accept_handedness=["idle-ne"])
+    partial = variant_validation(
+        EIGHT_WAY_FIXTURE, mirrored, ("idle-ne:rotation+states",)
+    )
     assert not partial["ok"]
     assert [error for error in partial["errors"] if "walk-e" in error]
-    assert partial["handedness"]["accepted"] == ["idle-ne"]
+    assert [entry["row"] for entry in partial["handedness"]["accepted"]] == ["idle-ne"]
     assert any("accepted by the operator" in text for text in partial["warnings"])
 
-    both = pipeline.validate_sheet(
-        spec, mirrored, accept_handedness=["idle-ne", "walk-e"]
+    both = variant_validation(
+        EIGHT_WAY_FIXTURE,
+        mirrored,
+        ("idle-ne:rotation+states", "walk-e:rotation+states"),
     )
     assert both["ok"], both["errors"]
-    assert both["handedness"]["accepted"] == ["idle-ne", "walk-e"]
+    # Recorded as {row, gain, basis}: accepting a +22% finding and an +8.1% one
+    # used to be indistinguishable the moment the compose was over.
+    assert [entry["row"] for entry in both["handedness"]["accepted"]] == [
+        "idle-ne",
+        "walk-e",
+    ]
+    assert all(
+        entry["basis"] == "rotation and states"
+        and entry["gain"] >= pipeline.MIRROR_GAIN_THRESHOLD
+        for entry in both["handedness"]["accepted"]
+    )
     # Accepted, not erased: the refusal text is still in the payload, verbatim.
     assert len(both["warnings"]) == 2
     assert all("looks drawn as the MIRROR of" in text for text in both["warnings"])
 
 
+def test_an_acceptance_must_name_the_bases_it_is_waiving():
+    """One row key used to waive TWO independent bodies of evidence.
+
+    A row both passes agree about merges into ONE finding with
+    `basis: "rotation and states"`, and `--accept-handedness idle-ne` waived the
+    whole thing — so an operator accepting it for a PLACEMENT reason (a prop, a
+    framing drift, the thing registration bounds rather than removes) also
+    silenced the cross-state reading, which placement cannot explain. The bare
+    row name is now refused, and the refusal spells the token it wants.
+    """
+    bare = fixture_validation(EIGHT_WAY_FIXTURE, ("idle-ne",))
+
+    assert not bare["ok"]
+    assert bare["handedness"]["accepted"] == []
+    assert any("with no basis" in error for error in bare["errors"])
+    assert any(
+        f"--accept-handedness idle-ne:{pipeline.ACCEPT_BASIS_TOKEN}" in error
+        for error in bare["errors"]
+    )
+
+    named = fixture_validation(
+        EIGHT_WAY_FIXTURE, (f"idle-ne:{pipeline.ACCEPT_BASIS_TOKEN}",)
+    )
+    assert named["ok"], named["errors"]
+
+
 @pytest.mark.parametrize(
     ("accepted", "fragment"),
     [
-        ("walk-e", "was not flagged"),
-        ("idle-nw", "not a row of this sheet"),
+        ("walk-e:rotation+states", "was not flagged"),
+        ("idle-nw:rotation+states", "not a row of this sheet"),
+        ("idle-ne:rotation", "is spelled idle-ne:rotation+states"),
+        ("idle-ne:states", "is spelled idle-ne:rotation+states"),
     ],
 )
 def test_accepting_a_row_with_nothing_to_accept_is_itself_a_refusal(accepted, fragment):
@@ -1383,12 +1885,189 @@ def test_accepting_a_row_with_nothing_to_accept_is_itself_a_refusal(accepted, fr
 
     `--accept-handedness idle-e` carried along in a shell history because it once
     worked would silently disarm the check the day that row is genuinely wrong.
+    A basis that does not match the finding is the same defect wearing the new
+    grammar, so it is refused with the spelling rather than honoured loosely.
     """
-    result = fixture_validation("handedness_8way.webp", (accepted,))
+    result = fixture_validation(EIGHT_WAY_FIXTURE, (accepted,))
 
     assert not result["ok"]
     assert any(fragment in error for error in result["errors"])
     assert result["handedness"]["accepted"] == []
+
+
+def test_a_warning_cannot_be_accepted_because_it_never_blocked():
+    """The override is for refusals. There is nothing to accept about a warning.
+
+    Left acceptable, `--accept-handedness` would quietly become the way an agent
+    makes a warning it did not read go away — and the warning is now the only
+    thing standing between a single-basis reading and a shipped mirrored row.
+    """
+    warned = pipeline.validate_sheet(
+        EIGHT,
+        eight_way_sheet(mirror=("walk-ne",)),
+        accept_handedness=[f"walk-ne:{pipeline.ACCEPT_BASIS_TOKEN}"],
+    )
+
+    assert not warned["ok"]
+    assert warned["handedness"]["accepted"] == []
+    assert any("is a WARNING" in error for error in warned["errors"])
+
+
+def strips_of_real_art(tmp_path, state_name, *, prop_row=None, prop=0):
+    """One state's real cells, laid back out as row STRIPS on the chroma field.
+
+    The charsheet fixtures are pre-composed SHEETS, so nothing in this package
+    exercises the composition path on real art — which is the path
+    `normalize_cells` lives on. This puts the art back into the shape `compose`
+    starts from: a magenta strip per row, gutters between the frames, ready for
+    `extract_strip_frames`.
+
+    *prop* paints a bar that many pixels wide off ONE side of *prop_row*'s art —
+    a bag, a cape, a sheathed sword. It is the reachable driver of a
+    displacement, because `normalize_cells` centres each row's union BOX and a
+    one-sided prop moves the body by half its width.
+    """
+    spec, source = variant(EIGHT_WAY_FIXTURE, REPAIRED)
+    one = SheetSpec(
+        states=(StateSpec(state_name, 3, True),),
+        scheme=spec.scheme,
+        frame_w=spec.frame_w,
+        frame_h=spec.frame_h,
+    )
+    gutter = 40
+    strips = {}
+    for row in one.authored_rows():
+        cells = pipeline._row_cells(source, spec, spec.row_by_key(row.key))
+        strip = Image.new(
+            "RGBA",
+            (
+                sum(cell.width for cell in cells) + gutter * (len(cells) + 1),
+                cells[0].height + 2 * gutter,
+            ),
+            MAGENTA,
+        )
+        left = gutter
+        for cell in cells:
+            art = cell.copy()
+            if prop and row.key == prop_row:
+                box = art.getbbox()
+                edge = max(0, box[0] - prop)
+                ImageDraw.Draw(art).rectangle(
+                    [edge, box[1] + 40, edge + prop, box[1] + 80],
+                    fill=(90, 60, 30, 255),
+                )
+            strip.alpha_composite(art, (left, gutter))
+            left += cell.width + gutter
+        path = tmp_path / f"{row.key}.png"
+        strip.save(path, format="PNG")
+        strips[row.key] = path
+    references = []
+    for direction in spec.scheme.authored:
+        cell = pipeline._row_cells(source, spec, spec.row_by_key(f"idle-{direction}"))[0]
+        framed = Image.new("RGBA", (cell.width + 40, cell.height + 40), MAGENTA)
+        framed.alpha_composite(cell, (20, 20))
+        path = tmp_path / f"reference-{direction}.png"
+        framed.save(path, format="PNG")
+        references.append(path)
+    return one, strips, references
+
+
+def worst_registered_shift(spec, sheet):
+    """The largest shift ``_registered_distance`` chooses over adjacent seams."""
+    window = pipeline.registration_window(spec.frame_w)
+    rows = {row.key: row for row in spec.rows()}
+    worst = 0
+    for state in spec.states:
+        chain = [
+            rows[pipeline.row_key(state.name, direction)]
+            for direction in pipeline.turnaround_order(spec.scheme.authored)
+        ]
+        for left, right in zip(chain, chain[1:]):
+            left_cells = pipeline._row_cells(sheet, spec, left)
+            right_cells = pipeline._row_cells(sheet, spec, right)
+            for index in range(min(len(left_cells), len(right_cells))):
+                _distance, shift = pipeline._registered_distance(
+                    left_cells[index], right_cells[index], window
+                )
+                worst = max(worst, abs(shift))
+    return worst
+
+
+def test_composing_real_art_registers_every_row_inside_the_shift_window(tmp_path):
+    """The composition path's shift budget, on real art, with its headroom.
+
+    The charsheet fixtures are pre-composed SHEETS, so nothing here exercises
+    the path a live `compose` takes — and the handedness gate's registration
+    window is sized against how far that path leaves neighbouring rows apart. If
+    the composition ever starts placing them further apart, the gate does not
+    fail; it starts REFUSING correct characters, silently.
+
+    Measured through the real path: the worst shift the gate picks on correct
+    art is **9 px of a 16 px window**, so ordinary art already eats 56% of it.
+    The propped control is what keeps the assertion from passing vacuously — a
+    32 px one-sided bag on ONE row pushes the registration flat against the
+    window edge, which is the boundary the first number has to stay inside.
+
+    **What this does NOT detect, measured rather than assumed.** The field-note
+    proposal this came from called it a pin on `normalize_cells`, the upstream
+    pet code that centres each row on its union bbox. It is not. Replacing
+    `normalize_cells` with a fit that centres nothing leaves every shift at 0,
+    because `extract_strip_frames` content-crops each frame per slot BEFORE the
+    centring runs — on this path extraction, not centring, is what puts rows in
+    comparable positions. What this test does see is a per-row DRIFT in wherever
+    the composition lands rows: measured red at 6 px and green at 4 px, i.e. a
+    detection floor of ~5 px on top of the 9 px already spent. That is the same
+    ~6 px of headroom the window has, stated as a test rather than as a note.
+    """
+    spec, strips, references = strips_of_real_art(tmp_path, "jump")
+    composed = pipeline.compose_sheet(
+        spec, pipeline.compose_draft_frames(spec, strips, references)
+    )
+    window = pipeline.registration_window(spec.frame_w)
+
+    worst = worst_registered_shift(spec, composed)
+    assert 0 < worst < window, worst
+
+    propped_dir = tmp_path / "propped"
+    propped_dir.mkdir()
+    spec, strips, references = strips_of_real_art(
+        propped_dir, "jump", prop_row="jump-e", prop=32
+    )
+    propped = pipeline.compose_sheet(
+        spec, pipeline.compose_draft_frames(spec, strips, references)
+    )
+
+    assert worst_registered_shift(spec, propped) == window
+
+
+def test_a_cross_state_pair_that_measures_nothing_is_named_not_dropped():
+    """The states pass kept a silent `continue`, one loop over from the fix.
+
+    `if len(ranked) < majority: continue` dropped a row from `flagged` AND from
+    `unjudged` — the exact class the `as_drawn <= 0` repair retired in the
+    rotation pass, surviving in the other one. Here `idle-e` is made
+    byte-identical to `walk-e`, so that pair measures zero and drops out of the
+    ranking, leaving each of them one usable pair where a conviction needs two.
+    """
+    spec, sheet = variant(EIGHT_WAY_FIXTURE, REPAIRED)
+    same = pipeline._row_cells(sheet, spec, spec.row_by_key("walk-e"))
+    twinned = sheet.copy()
+    row = spec.row_by_key("idle-e")
+    for column, cell in enumerate(same[: row.frames]):
+        twinned.paste(cell, (column * spec.frame_w, row.index * spec.frame_h))
+
+    found = pipeline.detect_mirrored_art(spec, twinned)
+
+    states = gains_by_row(found, "states")
+    assert "idle-e" not in states and "walk-e" not in states
+    named = [
+        entry
+        for entry in found["unjudged"]
+        if entry["basis"] == "states" and "measure anything" in entry["reason"]
+    ]
+    assert {row for entry in named for row in entry["rows"]} == {"idle-e", "walk-e"}
+    # Still accounted for, which is the whole rule: no row vanishes from both.
+    assert "idle-e" in unjudged_rows(found, "states")
 
 
 def test_the_handedness_accounting_is_a_line_an_operator_can_read():
@@ -1398,11 +2077,11 @@ def test_the_handedness_accounting_is_a_line_an_operator_can_read():
     that six of fifteen rows were never judged; on a refusal the payload carrying
     that list was discarded exactly when it mattered.
     """
-    handedness = fixture_validation("handedness_8way.webp")["handedness"]
+    handedness = fixture_validation(EIGHT_WAY_FIXTURE)["handedness"]
 
     line = pipeline.handedness_summary(handedness)
 
-    assert line.startswith("handedness: 9 row(s) judged, 1 flagged, 6 unjudged (")
+    assert line.startswith("handedness: 9 row(s) judged, 1 refused, 6 unjudged (")
     for end in ("idle-n", "idle-s", "jump-n", "jump-s", "walk-n", "walk-s"):
         assert end in line
     # A row the rotation answered for is not reported unjudged just because the
@@ -1411,3 +2090,22 @@ def test_the_handedness_accounting_is_a_line_an_operator_can_read():
         fixture_validation("handedness_4way.webp")["handedness"]
     )
     assert four == "handedness: 1 row(s) judged, 2 unjudged (idle-n, idle-s)"
+
+    # A refused row and a WARNED one are different facts and are counted apart —
+    # a warning does not block, so the line has to name the rows it is about or
+    # nobody will look at them.
+    warned = pipeline.handedness_summary(
+        pipeline.validate_sheet(EIGHT, eight_way_sheet(mirror=("walk-ne",)))[
+            "handedness"
+        ]
+    )
+    assert "1 warned (walk-ne)" in warned
+    assert "refused" not in warned
+
+    accepted = pipeline.handedness_summary(
+        fixture_validation(
+            EIGHT_WAY_FIXTURE, (f"idle-ne:{pipeline.ACCEPT_BASIS_TOKEN}",)
+        )["handedness"]
+    )
+    assert "1 accepted by the operator (idle-ne)" in accepted
+    assert "refused" not in accepted

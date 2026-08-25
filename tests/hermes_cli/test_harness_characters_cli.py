@@ -1104,3 +1104,90 @@ def test_accepting_a_handedness_row_that_was_not_flagged_is_refused_at_the_cli(
     assert (code, refused["ok"]) == (2, False)
     assert "was not flagged" in refused["error"]
     assert refused["stage"] == "rows"
+
+
+@pytest.fixture
+def defective_sheet(monkeypatch):
+    """Make this draft's compose validate the real defective 8-way fixture.
+
+    The CLI suite's draft is 4-way, and a 4-way rotation is nearly blind to
+    handedness — its one interior row sits between the two near-symmetric views
+    — so there is no way to make THIS draft produce a genuine refusal. The seam
+    replaced is which IMAGE gets validated; the real validator, the real
+    findings and the real acceptance logic all run, on the sheet whose `idle-ne`
+    genuinely shipped facing north-west.
+    """
+    from tests.agent.test_charsheet_pipeline import load_fixture_sheet
+
+    fixture_spec, sheet = load_fixture_sheet("handedness_8way.webp")
+    real = pipeline.validate_sheet
+
+    def validate_the_fixture(_spec, _image, *, accept_handedness=()):
+        return real(fixture_spec, sheet, accept_handedness=accept_handedness)
+
+    monkeypatch.setattr(pipeline, "validate_sheet", validate_the_fixture)
+
+
+def test_a_successful_handedness_override_says_what_it_let_through(
+    fake, base_image, capsys, defective_sheet
+):
+    """The HUMAN path never showed the refusal text, and that is the whole point.
+
+    `_characters_emit` prints one line and `validation["warnings"]` needs
+    `--json`, so a successful `--accept-handedness` printed a row count and
+    nothing else: no gain, no basis, no reason. An override whose record is
+    invisible on the path an operator actually uses is a refusal that vanished,
+    which is exactly the shape the handedness lane exists to retire — and there
+    was no test of a successful override through the CLI at all.
+    """
+    draft_id = _compose_ready(capsys, base_image)
+
+    spoken = parser().parse_args(
+        [
+            "harness", "characters", "compose", "--draft", draft_id,
+            "--accept-handedness", "idle-ne:rotation+states",
+        ]
+    )
+    assert spoken.func(spoken) == 0
+    printed = capsys.readouterr().out
+
+    assert "composed →" in printed
+    assert "1 accepted by the operator (idle-ne)" in printed
+    # The refusal text itself, on the human line, verbatim — not a count.
+    assert "handedness accepted by the operator" in printed
+    assert "looks drawn as the MIRROR of 'ne'" in printed
+    assert "15% better" in printed
+
+    # And the fact survives the compose: `characters list` and the sprite
+    # payload both republish it, so nobody has to open the manifest to learn
+    # that this character carries a row a human waved through.
+    _code, listed = run(["harness", "characters", "list", "--json"], capsys)
+    accepted = listed["characters"][0]["handednessAccepted"]
+    assert [entry["row"] for entry in accepted] == ["idle-ne"]
+    assert accepted[0]["basis"] == "rotation and states"
+    assert accepted[0]["gain"] == pytest.approx(0.1540, abs=5e-4)
+
+    _code, sprite = run(
+        ["harness", "characters", "sprite", listed["characters"][0]["slug"], "--json"],
+        capsys,
+    )
+    assert [entry["row"] for entry in sprite["character"]["handednessAccepted"]] == [
+        "idle-ne"
+    ]
+
+
+def test_a_clean_character_lists_an_empty_acceptance_rather_than_no_key(
+    fake, base_image, capsys
+):
+    """A consumer must be able to READ "nothing was overridden here".
+
+    The manifest omits the key when there is nothing to record, deliberately —
+    but a payload that omits it too makes "clean" and "old build" the same
+    answer at the reader's end.
+    """
+    draft_id = _compose_ready(capsys, base_image)
+    run(["harness", "characters", "compose", "--draft", draft_id, "--json"], capsys)
+
+    _code, listed = run(["harness", "characters", "list", "--json"], capsys)
+
+    assert listed["characters"][0]["handednessAccepted"] == []

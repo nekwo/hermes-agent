@@ -1585,7 +1585,7 @@ def test_a_refused_compose_carries_the_accounting_it_used_to_discard(
 
     message = str(excinfo.value)
     assert "looks drawn as the MIRROR of" in message
-    assert "handedness: 9 row(s) judged, 1 flagged, 6 unjudged" in message
+    assert "handedness: 9 row(s) judged, 1 refused, 6 unjudged" in message
     assert "a refusal is not a full audit" in message
     assert draft.stage == "rows", "a refused compose does not advance the stage"
 
@@ -1597,7 +1597,9 @@ def test_an_accepted_handedness_row_installs_and_is_recorded_on_the_character(
 
     An operator who looked at the row and overrode it leaves a durable record on
     the installed manifest; the next person to open that character can see which
-    rows a human waved through and which the check cleared.
+    rows a human waved through and which the check cleared. The record carries
+    the GAIN and the BASIS with the row, because accepting a +40% finding and an
+    +8.1% one were indistinguishable the moment the compose was over.
     """
     draft = run_to_rows(base)
     draft.run_rows()
@@ -1605,16 +1607,55 @@ def test_an_accepted_handedness_row_installs_and_is_recorded_on_the_character(
     with pytest.raises(ValueError):
         draft.compose()
 
-    composed = draft.compose(accept_handedness=["idle-ne"])
+    composed = draft.compose(accept_handedness=["idle-ne:rotation+states"])
 
     assert draft.stage == "composed"
-    assert composed["validation"]["handedness"]["accepted"] == ["idle-ne"]
+    assert composed["validation"]["handedness"]["accepted"] == [
+        {
+            "row": "idle-ne",
+            "gain": pytest.approx(0.1540, abs=5e-4),
+            "basis": "rotation and states",
+        }
+    ]
     manifest = json.loads(
         (characters_dir() / composed["slug"] / MANIFEST_FILENAME).read_text(
             encoding="utf-8"
         )
     )
-    assert manifest["handednessAccepted"] == ["idle-ne"]
+    assert manifest["handednessAccepted"] == [
+        {
+            "row": "idle-ne",
+            "gain": pytest.approx(0.1540, abs=5e-4),
+            "basis": "rotation and states",
+        }
+    ]
+    # And it reaches the launcher payload, which byte-copies the sheet and
+    # decodes nothing: without this the only copy of the fact lived inside a
+    # manifest no consumer opens.
+    payload = sprite_payload(composed["slug"])
+    assert [entry["row"] for entry in payload["handednessAccepted"]] == ["idle-ne"]
+
+
+def test_a_bare_row_name_is_no_longer_enough_to_accept_a_two_basis_refusal(
+    fake, base, defective_sheet
+):
+    """A row refused by BOTH passes is refused by two bodies of evidence.
+
+    Accepting it by row name alone waived them together — so an operator
+    overriding a PLACEMENT reading (a prop, a framing drift, the class
+    registration bounds rather than removes) also silenced the cross-state
+    evidence, which placement cannot explain. The refusal now spells the token
+    it wants, and `compose` does not advance.
+    """
+    draft = run_to_rows(base)
+    draft.run_rows()
+
+    with pytest.raises(ValueError) as excinfo:
+        draft.compose(accept_handedness=["idle-ne"])
+
+    assert "with no basis" in str(excinfo.value)
+    assert "idle-ne:rotation+states" in str(excinfo.value)
+    assert draft.stage == "rows"
 
 
 def test_a_clean_compose_records_no_acceptance_at_all(installed):
