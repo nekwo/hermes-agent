@@ -469,6 +469,106 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   *Consequence for AF:* it is a completeness bullet, not a claim needing re-verification.
   Keep it, or fold it into the add-state paragraph.
 
+## Handedness — which way a direction actually faces
+
+- **[READ] "Turned toward the viewer's right" is unambiguous for a FRONT view and
+  ambiguous for a BACK one, and that one phrase shipped a broken character.**
+  `prompts.VIEW_LANGUAGE["ne"]` read *"seen in three-quarter BACK view turned
+  toward the viewer's right: … at most a sliver of the far cheek or jaw"*. Two
+  things were wrong with it and only together do they explain the failure. The
+  sentence named no side of the FRAME — no leading shoulder, unlike its front
+  twin `se` ("the near shoulder leads") — so its only handedness anchor was a
+  phrase that flips meaning depending on whether you resolve "turned toward" in
+  the frame or in the subject's own body. And "the FAR cheek" is backwards for a
+  back three-quarter: the cheek that clears the back of the head is the NEAR one,
+  the one on the side rotated toward the camera, so obeying it literally turns
+  the head the other way. Measured on the live `anime-girl` draft: `ne` came back
+  facing north-WEST in **all three** states it was ever drawn for — `idle` and
+  `walk` (2026-08-24) and `jumping` (2026-08-25), three independent generations —
+  while `se`, carrying the same "toward the viewer's right" in a FRONT view, was
+  right in all three. Face-offset from the body centroid, in the sheet's own
+  `s se e ne n` order: `+0.0 +5.2 +10.9 −6.5 −0.3` (idle), `+1.7 +6.2 +9.9 −8.8
+  −2.2` (walk), `+0.2 +6.4 +10.5 −9.7 −0.1` (jumping) — a rotation that reverses
+  at exactly one step, the same step, every time. Rewritten 2026-08-25 to say the
+  same thing three ways (which way the body points IN FRAME, which shoulder is
+  nearer, which side the sliver of face may appear on) plus an explicit refusal
+  of the mirror; `nw` got the mirrored rewrite in the same pass.
+  *Consequence:* when you write a note about facing, write it in FRAME terms —
+  "the body angled up and to the RIGHT of frame, the sliver of face on the
+  viewer's RIGHT, never the mirror of this". "Turn her the other way" and "face
+  north-east" both leave the model the same coin flip that produced this.
+
+- **[READ] One mirrored authored row breaks TWO directions, and the six others
+  look perfect — which is why it survives QA.** The sheet composes authored rows
+  only and the consumer derives `nw` by flipping `ne` (launcher ADR 0024 ruling
+  3-B; `pipeline.compose_draft_frames` has no flip in it, and `agent/charsheet/
+  __init__.py` said "derived at compose time" until 2026-08-25, which had been
+  false since that ruling). So `ne` drawn as NW makes `nw` render as NE: both
+  rear diagonals wrong, `s`/`n` symmetric enough to look fine, `e`/`w`/`se`/`sw`
+  genuinely fine. The operator's report was "forward-left and forward-right are
+  inverted, standard forward is fine" — a description that fits a launcher
+  sector-mapping bug far better than it fits one bad row, and the launcher's
+  sector/mirror code was checked end to end and is correct.
+  *Consequence:* when an operator reports two opposite directions wrong and the
+  rest right, suspect ONE authored row and its mirror before suspecting the
+  consumer. Ask which of the eight are wrong: a consumer bug rarely spares six.
+
+- **[READ] The approved turnaround reference does NOT determine the row's
+  facing — the row prompt does.** Measured on the same draft, where nothing was
+  ever rerolled at `turnaround` (every direction is `attempt-1`, `approved: 0`,
+  and the files in `turnaround/` are byte-identical to the store's attempts): the
+  approved `e` reference is a LEFT-facing profile (face offset −44.8 px; the
+  shoes point left), and every `e` row generated FROM it — idle, walk and jumping
+  — is right-facing (+10.9, +9.9, +10.5). `ne`'s reference is likewise
+  left-facing (−23.5) and there the rows followed it. So the reference carries
+  identity, and `build_directional_row_prompt`'s FACING clause carries the
+  facing; when they disagree the text usually wins.
+  *Consequence:* approving a turnaround does not certify any row's handedness,
+  and a wrong-facing reference does not doom the rows. QA the ROWS. It also
+  means the reverse repair works: reroll the row with the facing spelled out
+  rather than chasing the reference first.
+
+- **[READ] There is now a compose-time gate, it REFUSES rather than warns, and
+  its blind spot is exact.** `pipeline.detect_mirrored_art`, called from
+  `validate_sheet` (so it blocks `compose` → install), walks each directional
+  state's authored rows in turnaround order and asks per row: *would flipping
+  this one row horizontally make the seams it touches fit better?* Flag at
+  `MIRROR_GAIN_THRESHOLD` = 8%. Measured: the defective sheet scores 19% / 13% /
+  13% on `idle-ne` / `walk-ne` / `jumping-ne`; the corrected sheet and every
+  other row of both, plus a second character (4-way robot, satchel over one
+  shoulder — deliberately asymmetric), score at most 3.9%. Pillow only, no
+  numpy — numpy is not a dependency of this package and is absent from the venv
+  the runtime actually executes in. ~1 s on a 15-row sheet.
+  It judges only rows with a neighbour on EACH side (`se`, `e`, `ne` on an 8-way
+  sheet); the ends are reported in `handedness.unjudged` with the reason, because
+  one seam cannot say which of its two rows is the mirrored one — an earlier
+  draft that judged them refused the correct robot character over an 11%
+  single-seam reading. **Two things pass it by construction, and both are
+  pinned by tests so they stay known:** a sheet mirrored on EVERY row (the
+  measure is invariant under a global flip — only the world outside a sheet says
+  which way is east), and the interior of a contiguous block of mirrored rows.
+  A 4-way sheet is nearly blind too: its one interior row's neighbours are both
+  near-symmetric views, and mirroring it moved the live 4-way character's score
+  from +1.9% to −1.9%.
+  *Consequence:* if `compose` refuses with "looks drawn as the MIRROR of", do not
+  argue with it and do not hand-flip the sheet — the next compose overwrites any
+  hand edit. Reroll the row. And a clean pass is not a certificate: it never saw
+  the front and back views, and it cannot see a consistently mirrored character.
+
+- **[READ] The two-neighbour rule proposed from the launcher side does not hold
+  on the whole sheet, and the state it was measured on is why.** The proposal was
+  to flag a row only when it is closer to BOTH authored neighbours mirrored than
+  unmirrored. On the defective sheet's `walk` state it fires, which is where it
+  was measured. On `idle` it does NOT: `idle-ne` vs `idle-n` reads d=11.84
+  against dmir=12.10 — the unmirrored art is 2.1% closer, pure noise off a
+  near-symmetric back view — so one neighbour votes "ok" and vetoes the other's
+  29% "mirror". The row was mirrored. Requiring both neighbours is what keeps the
+  rule off legitimately asymmetric art, and it is also what lets a symmetric
+  neighbour veto real evidence; summing the seams instead lets that neighbour
+  dilute the ratio without voting, which is what the shipped gate does.
+  *Consequence:* a rule measured on ONE state of one character is measured on one
+  sample. Re-run it over every state before believing it.
+
 ---
 
 ## Appended by slice

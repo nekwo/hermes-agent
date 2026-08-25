@@ -12,10 +12,13 @@ the same code paths carry any scheme, so the cheap one is the honest one to run.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from agent.charsheet import palette as palette_mod
 from agent.charsheet import pipeline
+from agent.charsheet import prompts
 from agent.charsheet.spec import CHAR8, EIGHT_WAY, FOUR_WAY, SheetSpec, StateSpec
 
 pytest.importorskip("PIL")
@@ -491,6 +494,36 @@ def test_a_back_facing_row_prompt_keeps_the_no_face_clause(fake, refs, tmp_path)
     assert "N facing" in prompt
 
 
+def test_the_diagonal_view_language_pairs_are_exact_left_right_mirrors():
+    """The property whose absence shipped a defect, pinned at the vocabulary.
+
+    ``nw`` is produced by flipping ``ne`` and ``sw`` by flipping ``se``, so the
+    two halves of each pair have to describe the same view with the sides
+    exchanged and nothing else. The BACK pair failed that for months in a way no
+    reader noticed, because both halves said "turned toward the viewer's X" and
+    neither said which side of the FRAME the body or the visible cheek lands on
+    — a phrase that is unambiguous while the character faces you and ambiguous
+    the moment it faces away. Live, `ne` came back drawn as `nw` in all three
+    states it was ever generated for.
+
+    This does not check the wording is RIGHT — only that the pair stays
+    symmetric, so an edit to one half that is not made to the other cannot land
+    quietly. The wording being right is what `detect_mirrored_art` measures.
+    """
+    sides = {"right": "left", "left": "right", "RIGHT": "LEFT", "LEFT": "RIGHT"}
+
+    def swap(text):
+        return re.sub("|".join(sides), lambda hit: sides[hit.group(0)], text)
+
+    for derived, source in (("nw", "ne"), ("sw", "se")):
+        assert swap(prompts.VIEW_LANGUAGE[source]) == prompts.VIEW_LANGUAGE[derived], (
+            f"{source!r} and {derived!r} are no longer mirror images of each other"
+        )
+        # And the two halves must not be identical, which a swap of a text
+        # naming neither side would also satisfy.
+        assert prompts.VIEW_LANGUAGE[source] != prompts.VIEW_LANGUAGE[derived]
+
+
 # ──────────────────────── the mechanical row gate ────────────────────────
 
 
@@ -614,3 +647,240 @@ def test_a_frame_cell_is_the_frames_own_slot_and_the_slots_tile_the_strip(width,
         at += cell.width
     assert at == width
     assert joined.tobytes() == strip.tobytes()
+
+
+# ────────────────── handedness: art that contradicts its label ──────────────────
+#
+# The defect this section pins SHIPPED. `anime-girl`'s `ne` row was drawn facing
+# north-WEST — in `idle` and `walk` on 2026-08-24 and again in `jumping` on
+# 2026-08-25, three independent generations of the same wrong side — composed,
+# installed, bundled into the launcher, and found by a human looking at a 3D
+# scene. Because the consumer derives `nw` by flipping `ne`, one mirrored row
+# corrupted BOTH rear diagonals while the other six directions stayed right.
+#
+# The 4-way SPEC above cannot exercise any of this and it is worth saying why
+# rather than quietly using a second one: it authors `s, e, n`, so the only row
+# with two seams has the front and back views as its neighbours, and each of
+# those is close to its own mirror image. The glyph fixture reproduces that
+# exactly — a south arrow IS symmetric — which is the same blindness the real
+# 4-way character measures. Handedness lives in the diagonals, so these tests
+# build an 8-way sheet.
+
+EIGHT = SheetSpec(
+    states=(StateSpec("idle", 2, True), StateSpec("walk", 3, True)),
+    scheme=EIGHT_WAY,
+)
+
+
+BADGE = 14
+
+
+def glyph_cells(spec, *, mirror=(), badge=None):
+    """A composed-shaped cell map: every row drawn pointing where it claims.
+
+    ``mirror`` names rows to flip horizontally — the defect itself, applied to
+    art that is otherwise correct, which is the only way to hold everything else
+    equal. Flipping each CELL in place (rather than the row band) keeps the
+    frame order, so the row still animates forward while facing the wrong way.
+
+    ``badge`` maps a row key to ``"left"`` or ``"right"`` and paints a bar down
+    that edge of every cell in it. The arrows alone make a very tidy character —
+    each end of the rotation is nearly its own mirror image, so no seam against
+    one carries much handedness signal, which is true of the real anime-girl too
+    and is exactly why the end rows are excluded from judging. A badge is how a
+    test puts real signal on ONE seam, the way a satchel over one shoulder does
+    on a real character.
+    """
+    cells = {}
+    for row in spec.authored_rows():
+        direction = row.direction or pipeline.NON_DIRECTIONAL_VIEW
+        side = (badge or {}).get(row.key)
+        frames = []
+        for tick in range(row.frames):
+            cell = Image.new("RGBA", (spec.frame_w, spec.frame_h), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(cell)
+            _draw_glyph(
+                draw,
+                spec.frame_w // 2,
+                spec.frame_h // 2,
+                140,
+                direction,
+                tick,
+                row.frames,
+            )
+            if side:
+                near = 4 if side == "left" else spec.frame_w - 4 - BADGE
+                draw.rectangle([near, 8, near + BADGE, 48], fill=(20, 200, 220, 255))
+            if row.key in mirror:
+                cell = cell.transpose(Image.FLIP_LEFT_RIGHT)
+            frames.append(cell)
+        cells[row.key] = frames
+    return cells
+
+
+def eight_way_sheet(*, mirror=(), badge=None):
+    return pipeline.compose_sheet(EIGHT, glyph_cells(EIGHT, mirror=mirror, badge=badge))
+
+
+def test_a_sheet_whose_rows_all_face_where_they_claim_is_clean(sheet):
+    result = pipeline.validate_sheet(EIGHT, eight_way_sheet())
+
+    assert result["ok"], result["errors"]
+    assert result["handedness"]["flagged"] == []
+    # And the 4-way sheet the rest of this module composes, for the same reason.
+    assert pipeline.validate_sheet(SPEC, sheet)["handedness"]["flagged"] == []
+
+
+def test_a_row_drawn_as_the_mirror_of_its_direction_blocks_the_install():
+    """The whole point: this refuses, it does not warn.
+
+    A warning is the shape the failure already had — the defective sheet passed
+    every check there was, composed, installed and shipped.
+    """
+    result = pipeline.validate_sheet(EIGHT, eight_way_sheet(mirror=("walk-ne",)))
+
+    assert not result["ok"]
+    assert [finding["row"] for finding in result["handedness"]["flagged"]] == ["walk-ne"]
+    assert len(result["errors"]) == 1
+    message = result["errors"][0]
+    assert "walk-ne" in message
+    # The refusal has to be actionable at the verb an operator actually has.
+    assert "characters reroll-row --row walk-ne" in message
+    assert result["warnings"] == []
+
+
+def test_the_flip_is_scored_against_both_neighbours_and_the_evidence_travels():
+    finding = pipeline.validate_sheet(EIGHT, eight_way_sheet(mirror=("idle-ne",)))[
+        "handedness"
+    ]["flagged"][0]
+
+    assert finding["direction"] == "ne"
+    assert {seam["with"] for seam in finding["seams"]} == {"idle-e", "idle-n"}
+    assert finding["gain"] >= pipeline.MIRROR_GAIN_THRESHOLD
+    # The numbers a reader would have to trust the summary about are in the
+    # payload, and the summary is derived from them rather than asserted.
+    assert f"{finding['gain'] * 100:.0f}% better" in pipeline.mirrored_art_error(finding)
+    for seam in finding["seams"]:
+        assert f"{seam['distance']:.2f}" in pipeline.mirrored_art_error(finding)
+
+
+def test_every_directional_state_is_judged_on_its_own_rows():
+    """Two states, one mirrored row each: neither hides behind the other."""
+    result = pipeline.validate_sheet(
+        EIGHT, eight_way_sheet(mirror=("idle-ne", "walk-se"))
+    )
+
+    assert sorted(f["row"] for f in result["handedness"]["flagged"]) == [
+        "idle-ne",
+        "walk-se",
+    ]
+
+
+def test_the_ends_of_the_rotation_are_named_unjudged_never_silently_skipped():
+    unjudged = pipeline.validate_sheet(EIGHT, eight_way_sheet())["handedness"][
+        "unjudged"
+    ]
+
+    named = {row for entry in unjudged for row in entry["rows"]}
+    assert named == {"idle-s", "idle-n", "walk-s", "walk-n"}
+    assert all(entry["reason"] for entry in unjudged)
+
+
+def test_an_end_row_is_not_blamed_for_a_seam_that_does_prefer_its_mirror():
+    """The end-row exclusion, with the evidence present that would convict it.
+
+    This is the situation that made the exclusion necessary, reproduced: the
+    seam between the back view and the rear diagonal genuinely prefers the
+    mirrored art — here by 25%, well past the threshold — and the back view is
+    the only row touching it that has nothing to corroborate against. An earlier
+    draft of the check DID judge it, and the consequence was not theoretical: it
+    refused the install of `cobalt-robot-courier`, a correct character whose back
+    view's single seam preferred the mirror by 11%.
+
+    The rear diagonal, touching two seams, is absolved by the other one — which
+    is the whole argument for scoring a row rather than a seam. Nothing here is
+    mirrored; the badge is just an asymmetric mark, the way a satchel is.
+    """
+    sheet = eight_way_sheet(badge={"idle-ne": "left", "idle-n": "right"})
+
+    chain = [EIGHT.row_by_key(f"idle-{d}") for d in ("s", "se", "e", "ne", "n")]
+    cells_by_key = {row.key: pipeline._row_cells(sheet, EIGHT, row) for row in chain}
+    direct, flipped = pipeline._seam_distance(
+        cells_by_key["idle-ne"], cells_by_key["idle-n"]
+    )
+    # The evidence a single-seam rule would have convicted `idle-n` on.
+    assert (direct - flipped) / direct > pipeline.MIRROR_GAIN_THRESHOLD
+
+    found = pipeline.detect_mirrored_art(EIGHT, sheet)
+
+    assert [finding["row"] for finding in found["flagged"]] == []
+    assert "idle-n" in {row for entry in found["unjudged"] for row in entry["rows"]}
+
+
+def test_a_non_directional_state_is_reported_unjudged_with_its_reason():
+    spec = SheetSpec(
+        states=(StateSpec("idle", 2, True), StateSpec("cheer", 2, False)),
+        scheme=EIGHT_WAY,
+    )
+
+    result = pipeline.validate_sheet(spec, pipeline.compose_sheet(spec, glyph_cells(spec)))
+
+    assert result["ok"], result["errors"]
+    reasons = {
+        row: entry["reason"]
+        for entry in result["handedness"]["unjudged"]
+        for row in entry["rows"]
+    }
+    assert "not directional" in reasons["cheer"]
+
+
+def test_a_sheet_mirrored_on_EVERY_row_passes_and_that_is_the_blind_spot():
+    """Pinned deliberately, because it is the hole and it must stay a known one.
+
+    ``distance(flip(a), flip(b)) == distance(a, b)``: a consistently mirrored
+    character is a perfect fixed point of this measure. Nothing internal to a
+    sheet can catch it — the sheet is self-consistent, and only the world
+    outside it says which way is east. If this test ever turns red, the check
+    grew an outside reference and this section's claims need rewriting.
+    """
+    every_row = tuple(row.key for row in EIGHT.authored_rows())
+    upright = eight_way_sheet(badge={"idle-ne": "left", "idle-n": "right"})
+    flipped = eight_way_sheet(
+        mirror=every_row, badge={"idle-ne": "left", "idle-n": "right"}
+    )
+
+    # A genuinely different picture — the badge makes sure of it, so this is not
+    # two names for the same bytes.
+    assert flipped.tobytes() != upright.tobytes()
+    assert pipeline.validate_sheet(EIGHT, flipped)["ok"]
+    assert pipeline.detect_mirrored_art(EIGHT, flipped)["flagged"] == []
+
+    # And the reason, asserted rather than described: every seam measures
+    # EXACTLY the same on both — BOTH of its distances, not swapped but
+    # unchanged, because distance(flip a, flip b) == distance(a, b) and
+    # distance(flip(flip a), flip b) == distance(flip a, b).
+    chain = [EIGHT.row_by_key(f"idle-{d}") for d in ("s", "se", "e", "ne", "n")]
+    for left, right in zip(chain, chain[1:]):
+        before = pipeline._seam_distance(
+            pipeline._row_cells(upright, EIGHT, left),
+            pipeline._row_cells(upright, EIGHT, right),
+        )
+        after = pipeline._seam_distance(
+            pipeline._row_cells(flipped, EIGHT, left),
+            pipeline._row_cells(flipped, EIGHT, right),
+        )
+        assert after == pytest.approx(before), f"{left.key}|{right.key}"
+
+
+def test_a_wrong_size_sheet_still_answers_the_handedness_question_honestly():
+    """The early geometry return carries the key, and says nothing was judged.
+
+    A caller reading ``handedness`` must never get a missing key that reads like
+    "clean" — the whole reason it is reported on a passing sheet too.
+    """
+    result = pipeline.validate_sheet(EIGHT, eight_way_sheet().crop((0, 0, 10, 10)))
+
+    assert not result["ok"]
+    assert result["handedness"]["flagged"] == []
+    named = {row for entry in result["handedness"]["unjudged"] for row in entry["rows"]}
+    assert named == {row.key for row in EIGHT.rows()}

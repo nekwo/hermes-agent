@@ -181,12 +181,17 @@ that carried the defect. So:
   same frame, declared in one turn and labelled. Two independent agents each
   failed to see this seam at 5–6× magnification on a single frame; side by side,
   both saw it immediately.
-- **Do not build a pass/fail scanner.** A refined "opaque dark pixels with light
-  pixels above" predicate flagged all ten rows including the two known-good
-  rerolled ones (18–85 hits each), and a "sharpest dark row" rank put the sock
-  band and the skirt hem — real art, present in the clean strip too — above the
-  actual seam. A scan is *relative triage* at best: rank rows, then look. The
-  operator's eye is the gate.
+- **Do not build a pass/fail scanner** *for defects in the art* — seams, stray
+  pixels, anatomy. A refined "opaque dark pixels with light pixels above"
+  predicate flagged all ten rows including the two known-good rerolled ones
+  (18–85 hits each), and a "sharpest dark row" rank put the sock band and the
+  skirt hem — real art, present in the clean strip too — above the actual seam.
+  A scan is *relative triage* at best: rank rows, then look. The operator's eye
+  is the gate.
+  **One measurement is not that, and it is already built: handedness.** It asks
+  a structural question with an exact null hypothesis — *would flipping this row
+  make it fit the rotation better?* — instead of guessing what a defect looks
+  like, and `compose` refuses on it (see below). Do not write a second one.
 - **Default hypothesis: the model drew it.** Pipeline residue (slicing, keying,
   the palette lock) was the first guess and cost the most; the defect was in the
   generated art and a reroll fixed it with zero pipeline change.
@@ -264,6 +269,22 @@ Three line shapes leave your reply, and two of them are parsed.
   regeneration: the frames of a strip share an identity because they were drawn
   together, so one bad frame costs its whole row. Budget two or three attempts on
   a bad row and tell the operator that up front.
+- **`compose` refuses a row drawn as the MIRROR of the direction it claims**, by
+  name, with its numbers. Only the AUTHORED directions are drawn, and the
+  consumer builds the other three by flipping them, so a mirrored row corrupts
+  two directions at once — this happened: `anime-girl`'s `ne` was drawn facing
+  north-WEST in `idle`, `walk` and later `jumping`, which broke `ne` AND `nw`
+  while the other six stayed right, and nothing caught it until a human saw the
+  character in a 3D scene. The repair is a `reroll-row` with the facing spelled
+  in FRAME terms ("the body angled up and to the RIGHT of frame; the sliver of
+  face on the viewer's RIGHT; never the mirror of this") — not a nudge, and never
+  a hand-flip of the sheet, which the next compose overwrites.
+  What it does NOT see, so you still look: it judges only the rows with a
+  neighbour on each side (`se`, `e`, `ne` on an 8-way sheet — the front and back
+  views are excluded and named in the payload's `handedness.unjudged`), a 4-way
+  sheet gives it almost nothing to work with, and a character mirrored on EVERY
+  row passes it perfectly, because a sheet cannot tell from inside itself which
+  way is east.
 - **`composed` is not terminal.** The post-install fix loop is
   `reopen → reroll-row → compose`, and the post-install GROWTH loop is
   `reopen → add-state → rows --only … → compose`. Both are non-destructive — the

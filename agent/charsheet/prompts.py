@@ -52,15 +52,44 @@ from agent.charsheet.spec import MIN_FRAMES_PER_ROW
 # are three-quarter views. "the viewer's right/left" (never the character's) is
 # used throughout so the mirror map ("w" <- "e", "nw" <- "ne", "sw" <- "se")
 # stays a literal horizontal flip.
+#
+# The BACK diagonals need more than that phrase, and the reason is the one
+# defect this vocabulary has actually shipped. "Turned toward the viewer's
+# right" is unambiguous while the character faces you: the side that leads is
+# the side of the FRAME it leads toward. Once the character faces away, the two
+# readings come apart — a body turned toward the viewer's right and a body that
+# has turned to its OWN right end up on opposite sides of the frame — and the
+# entry for "ne" resolved it the wrong way for the model. It said the visible
+# sliver was of the "far cheek", which is backwards for a back three-quarter
+# view (the cheek that clears the back of the head is the NEAR one), and unlike
+# the front diagonals it named no leading shoulder, so nothing in the sentence
+# anchored the handedness in the frame. Measured on the live `anime-girl` draft:
+# `ne` came back facing north-WEST in all three states it was ever drawn for —
+# idle and walk on 2026-08-24, jumping on 2026-08-25 — while `se`, carrying the
+# same "toward the viewer's right" phrase in a FRONT view, was right in all
+# three. Because the consumer derives `nw` by flipping `ne`, that one row
+# corrupted BOTH rear diagonals, and it was found in a 3D scene rather than by
+# anything here (`pipeline.detect_mirrored_art` is the gate added with this fix).
+#
+# So the back diagonals now say the same thing three ways: which way the body
+# points in FRAME, which shoulder is nearer, and which side the sliver of face
+# may appear on — plus an explicit refusal of the mirror. Keep that shape if you
+# retune them. The front diagonals are deliberately left alone: they were not
+# ambiguous and they were not wrong.
 VIEW_LANGUAGE: dict[str, str] = {
     "n": (
         "seen directly from behind, the back of the head and body, no face "
         "visible — no eyes, no nose, no mouth, not one facial feature anywhere"
     ),
     "ne": (
-        "seen in three-quarter BACK view turned toward the viewer's right: mostly "
-        "the back of the head and shoulders, at most a sliver of the far cheek or "
-        "jaw, never a front-facing face"
+        "seen in three-quarter BACK view, facing AWAY from the viewer and off "
+        "toward the viewer's right — the body is angled up-and-to-the-RIGHT in "
+        "frame, exactly halfway between the away view and the right-facing "
+        "profile, so the shoulder nearer the camera is the one on the viewer's "
+        "RIGHT: mostly the back of the head and shoulders, at most a sliver of "
+        "the near cheek or jaw showing past the head ON THE VIEWER'S RIGHT SIDE, "
+        "never a front-facing face. Do NOT draw the mirror of this: no part of "
+        "the face may appear on the viewer's left"
     ),
     "e": (
         "seen in full RIGHT-facing profile, the body turned a clean 90 degrees "
@@ -84,9 +113,14 @@ VIEW_LANGUAGE: dict[str, str] = {
         "visible (the mirror of the right-facing profile)"
     ),
     "nw": (
-        "seen in three-quarter BACK view turned toward the viewer's left: mostly "
-        "the back of the head and shoulders, at most a sliver of the far cheek or "
-        "jaw, never a front-facing face"
+        "seen in three-quarter BACK view, facing AWAY from the viewer and off "
+        "toward the viewer's left — the body is angled up-and-to-the-LEFT in "
+        "frame, exactly halfway between the away view and the left-facing "
+        "profile, so the shoulder nearer the camera is the one on the viewer's "
+        "LEFT: mostly the back of the head and shoulders, at most a sliver of "
+        "the near cheek or jaw showing past the head ON THE VIEWER'S LEFT SIDE, "
+        "never a front-facing face. Do NOT draw the mirror of this: no part of "
+        "the face may appear on the viewer's right"
     ),
 }
 
