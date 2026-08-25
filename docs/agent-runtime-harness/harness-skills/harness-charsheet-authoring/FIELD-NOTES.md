@@ -550,10 +550,34 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   A 4-way sheet is nearly blind too: its one interior row's neighbours are both
   near-symmetric views, and mirroring it moved the live 4-way character's score
   from +1.9% to −1.9%.
+  **Two more found by review on 2026-08-25, neither pinned by a test.** (a) A
+  whole directional STATE mirrored passes clean — the fixed point is per state,
+  because the chain never leaves one, so `add_state` generating all five rows of
+  a new state against a bad reference is invisible here. Measured: mirroring all
+  five rows of `idle`, `walk` or `jumping` on the repaired sheet gives `ok=True`,
+  nothing flagged, while the evidence sits unused one row away — `idle-e` against
+  a mirrored `jumping-e` prefers the flip by +22.4%, and on correct art the same
+  comparison reads −15.7% to −68.9%. Comparing the SAME direction across states
+  would close it. (b) The gate names extra rows as readily as the right one: a
+  mirrored row pushes BOTH its neighbours toward the line, and on the live
+  character mirroring `idle-e` alone flags `idle-se` (13.1%) and `idle-ne` (20.8%)
+  beside it. Every flagged row is an error, the message tells the operator to
+  `reroll-row` each of them, and a reroll auto-approves (see the one-way-door
+  entry) — so following the refusal literally spends correct art. Reroll the
+  LARGEST gain first and re-compose before touching another row.
+  And the measure has no registration step, so it reads PLACEMENT as handedness:
+  on the repaired sheet an 8 px horizontal shift of `idle-e` in a 192 px frame —
+  art untouched — moves it from −38.2% to +9.4% and refuses the install. What
+  holds that at bay is `normalize_cells` centring each row on its union bbox
+  (measured residual ±3 px), which is upstream pet code this package imports and
+  does not own. A prop hanging ~10% of the frame width off one side of ONE row
+  displaces the body by half its width and crosses the line: a 16 px prop scores
+  +5.2% (installs, two thirds of the margin gone), a 20 px prop +8.0% (refused).
   *Consequence:* if `compose` refuses with "looks drawn as the MIRROR of", do not
   argue with it and do not hand-flip the sheet — the next compose overwrites any
   hand edit. Reroll the row. And a clean pass is not a certificate: it never saw
-  the front and back views, and it cannot see a consistently mirrored character.
+  the front and back views, and it cannot see a consistently mirrored character
+  or a consistently mirrored STATE.
 
 - **[READ] A wrong turnaround reference is PERMANENT once the draft leaves
   `turnaround`, and every row for that direction then has to fight it.**
@@ -621,8 +645,11 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   unmirrored. On the defective sheet's `walk` state it fires, which is where it
   was measured. On `idle` it does NOT: `idle-ne` vs `idle-n` reads d=11.84
   against dmir=12.10 — the unmirrored art is 2.1% closer, pure noise off a
-  near-symmetric back view — so one neighbour votes "ok" and vetoes the other's
-  29% "mirror". The row was mirrored. Requiring both neighbours is what keeps the
+  near-symmetric back view — so one neighbour votes "ok" and vetoes the other
+  neighbour, whose seam prefers the mirror by **31.8%** (`idle-ne` vs `idle-e`,
+  d=18.46 against dmir=12.59; re-measured on the preserved pre-fix sheet
+  2026-08-25 — this entry and `1175d3db90`'s body both said 29%, which does
+  not reproduce). The row was mirrored. Requiring both neighbours is what keeps the
   rule off legitimately asymmetric art, and it is also what lets a symmetric
   neighbour veto real evidence; summing the seams instead lets that neighbour
   dilute the ratio without voting, which is what the shipped gate does.
