@@ -127,16 +127,51 @@ def resolve_gate_hermes_home(env: dict[str, str] | None = None) -> tuple[str, st
 
     from hermes_constants import _get_platform_default_hermes_home
 
+    _target = (
+        f"{_get_platform_default_hermes_home()}{os.sep}shared{os.sep}skills"
+    )
     raise HermesHomeUnresolved(
         "REFUSING to guess the hermes home. Neither ETERNIA_HERMES_HOME nor "
         "HERMES_HOME is set, and this machine's runtime config declares no "
         "agent_runtime.head_home. The installed skill root is derived from that "
-        f"home, so with none of them set this would target {_get_platform_default_hermes_home()}"
-        f"{os.sep}shared{os.sep}skills — the platform default, which on Windows is a "
-        "populated SHADOW runtime, not the root your personas read. Repairing "
-        "there would overwrite packages that are not this repo's and then verify "
-        "the copy it had just written. Export the home the launcher spawns serve "
-        "with (HERMES_HOME=<hermes root>/profiles/base) and push again."
+        f"home, so with none of them set this would target {_target}"
+        f" — the platform default, {_describe_target(_target)}, not the root "
+        "your personas read. Repairing there would overwrite packages that "
+        "are not this repo's and then verify the copy it had just written. "
+        "Export the home the launcher spawns serve with "
+        "(HERMES_HOME=<hermes root>/profiles/base) and push again."
+    )
+
+
+def _describe_target(path: str) -> str:
+    """Say what is actually AT the refused path, rather than asserting it.
+
+    The first wording of this refusal claimed the platform default "is a
+    populated SHADOW runtime" unconditionally. True on a machine that has run
+    other hermes builds — it held six foreign canonical packages here — and
+    false on the fresh clone that is this message's most likely audience, where
+    it is empty or absent. A refusal that tells a new dev to go find a shadow
+    runtime they do not have sends them hunting; stat it and report which case
+    they are in.
+    """
+    if not os.path.isdir(path):
+        return "which does not exist on this machine"
+    try:
+        packages = [
+            name
+            for name in os.listdir(path)
+            if os.path.isfile(os.path.join(path, name, "SKILL.md"))
+        ]
+    except OSError:
+        return "which could not be read"
+    if not packages:
+        return (
+            "empty here, but a populated SHADOW runtime on any machine that "
+            "has run another hermes build"
+        )
+    return (
+        f"a populated SHADOW runtime here holding {len(packages)} package(s) "
+        "whose bytes are not this repo's"
     )
 
 
