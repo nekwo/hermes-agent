@@ -129,9 +129,18 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   the two cannot drift apart again. `StateSpec` / `SheetSpec` deliberately still accept 1:
   they are also the deserializers (`draft.spec_from_dict`) for every `draft.json` and
   `character.json` on disk, including the drafts the old gap produced, and refusing those at
-  load would make such a draft unreadable rather than repaired — `CharacterDraft.list_drafts`
-  drops an unreadable draft with a log warning, so it would vanish from `characters list`
-  instead of being explained.
+  load would break `characters list` outright.
+  **Corrected on review, 2026-08-25 — the mechanism this entry gave was read off an `except`
+  clause instead of measured, and it understated the damage.** `CharacterDraft.list_drafts`
+  does swallow an unreadable draft with a log warning, but that swallow never fires for a
+  bad spec: `CharacterDraft.load` reads JSON only and `CharacterDraft.spec` is a LAZY
+  property, so `list_drafts` returns the bad draft happily. The raise lands one level up in
+  `_characters_draft_summary` (`spec = draft.spec`), inside `_cmd_characters_list`'s own
+  `except _CHARACTERS_EXPECTED`, which answers `{"ok": false, "error": …}`, exit 2.
+  Measured with the floor raised on `SheetSpec` over a home holding one good draft and one
+  `idle:1` draft: `characters list` returned `ok=false` and **zero** drafts — the good draft
+  vanishes with the bad one and the whole verb fails. The conclusion is unchanged, and
+  stronger than the entry claimed.
   *Consequence:* a one-frame state is now refused before a single generation is spent, on
   both doors, with `frame count 1 for state 'x' out of range; expected 2..8`. The two floors
   answer two different questions and both answers are correct: the SPEC says what a sheet can
@@ -336,11 +345,16 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
 - **[READ] Adding a state never renumbers a row, and `compose` will not let you install a
   blank one.** The state is APPENDED and `SheetSpec.rows()` is state-major, so every row the
   installed manifest already published keeps its index and the sheet grows DOWNWARD (live:
-  the anime-girl sheet went 1536x2080 → 1536x3120 with `idle-*`/`walk-*` untouched at
-  attempts 1/1/1/1/1 and 1/3/2/1/1). The new rows are "seeded" by appearing in the spec —
-  nothing is written to the revision store — so they read `attempts: 0`, `approved: null`,
-  and land in `missing.rows`; `compose` then refuses while any of them lacks an approved
-  strip, naming every one.
+  the anime-girl sheet went 1536x2080 → 1536x3120 with `idle-*`/`walk-*` untouched — all
+  five `idle-*` at one attempt, `walk-n` still at 3 attempts / approved index 2 and
+  `walk-ne` at 2 / 1, both still carrying their 2026-08-24 operator notes. **Corrected on
+  review, 2026-08-25:** this read "attempts 1/1/1/1/1 and 1/3/2/1/1", which is right only
+  in alphabetical row-key order (`e n ne s se`) and wrong in the sheet's own `s se e ne n`
+  order, where `walk-*` reads 1/1/1/2/3. Two orders in one figure is how a row gets
+  mis-attributed; the keys are named instead). The new rows are "seeded" by
+  appearing in the spec — nothing is written to the revision store — so they read
+  `attempts: 0`, `approved: null`, and land in `missing.rows`; `compose` then refuses
+  while any of them lacks an approved strip, naming every one.
   *Consequence:* a consumer holding the previous `character.json` still addresses the same
   pictures by row index, but the sheet's HEIGHT changes — anything keyed on the sheet's size
   or bytes (`spritesheetRevision`) is stale after the recompose, which is the point. And an
