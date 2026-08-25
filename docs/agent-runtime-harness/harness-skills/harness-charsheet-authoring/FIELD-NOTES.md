@@ -53,11 +53,23 @@ slice reports and the plan. This file holds only what an authoring agent needs t
   On 2026-08-24 the installed copy was 14457 B against the repo's 14906 B and a live
   agent read the stale one — omitting a rule added that same day.
   *Consequence:* editing the repo skill changes nothing until it is installed.
+  **Gated 2026-08-24 (`91e23bf0c5`):** `.githooks/pre-push` runs
+  `scripts/verify_harness_skill_install.py`, which installs every canonical package and
+  then fails the push if `harness_skill_hash_mismatches` is non-empty. Arm it once per
+  clone with `git config core.hooksPath .githooks`. It earned its keep on the commit that
+  installed it: this very file, added to the package directory by a parallel session,
+  changed the package hash and was refreshed automatically at push time. The consequence
+  above still holds for anyone whose clone is not armed.
 
-- **[INFERENCE, needs a note when confirmed] Trap not yet written into the skill:** after
-  a provider plan upgrade the stored token can return `401 token_expired` despite a local
-  expiry hours out; a forced refresh fixes it. Fires immediately *after* the operator does
-  the right thing, so it reads as "the fix didn't work".
+- ~~**[INFERENCE, needs a note when confirmed] Trap not yet written into the skill:**~~
+  **[READ] Written into the skill 2026-08-24 (`91e23bf0c5`), Preflight probe 2.** After a
+  provider plan upgrade the stored token returns `401 token_expired` despite a local
+  expiry ~15 h out; a forced refresh fixes it. It fires immediately *after* the operator
+  does the right thing about the plan-gating trap, so the skill's old answer — "report the
+  image provider is unavailable in this home" — sent them to re-check `auth.json`
+  placement they had just fixed.
+  *Consequence:* on a 401 right after a plan change, force a refresh and re-probe before
+  reporting the provider unavailable.
 
 ## Looking at a sheet
 
@@ -97,9 +109,14 @@ slice reports and the plan. This file holds only what an authoring agent needs t
   *Consequence:* only declare a `cardSafe: true` crop with `MEDIA:`. Never carry a copy of
   the threshold.
 
-- **[READ] Absence travels as JSON `null`, not `""`** for `history[].path`, `current` and
-  `approvedPath`. (`baseImage` was still `""` as of the A0 review — check before relying.)
-  *Consequence:* tolerate both on read; emit neither as a bare `MEDIA:` line.
+- **[READ] Absence travels as JSON `null`, not `""`** for `history[].path`, `current`,
+  `approvedPath` — and, since `91e23bf0c5`, `baseImage` in BOTH `status --json` and
+  `list --json`. The parenthetical here ("`baseImage` was still `""` as of the A0
+  review") is now spent: it was the fourth path field, in the same response as the three
+  that had already been fixed, and the CLI test pinned the old spelling. Every path in
+  those payloads goes through one public helper (`draft.path_or_none`).
+  *Consequence:* tolerate both on read (older drafts and other payloads may still carry
+  `""`); emit neither as a bare `MEDIA:` line.
 
 ## Process
 
