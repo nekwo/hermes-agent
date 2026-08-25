@@ -1159,13 +1159,30 @@ def test_the_shift_grid_is_symmetric_so_a_global_flip_still_scores_identically()
     """
     spec, sheet = load_fixture_sheet("handedness_8way.webp")
     window = pipeline.registration_window(spec.frame_w)
-    left = pipeline._row_cells(sheet, spec, spec.row_by_key("walk-e"))[0]
-    right = pipeline._row_cells(sheet, spec, spec.row_by_key("walk-ne"))[0]
     flip = Image.FLIP_LEFT_RIGHT
+    left = pipeline._row_cells(sheet, spec, spec.row_by_key("walk-e"))[0]
+    # A pair whose registration lands on the LAST shift of the grid, because a
+    # grid missing one endpoint is indistinguishable from a symmetric one on any
+    # pair that lines up somewhere in the middle. Slid by exactly the window, the
+    # two are the same picture, so the true minimum is 0 and it is reachable from
+    # only one end — from the other end once both are flipped.
+    right = pipeline._row_cells(
+        slide_row(spec, sheet, "walk-e", window), spec, spec.row_by_key("walk-e")
+    )[0]
 
-    assert pipeline._registered_distance(left, right, window)[0] == pytest.approx(
+    direct, forward = pipeline._registered_distance(left, right, window)
+    mirrored, backward = pipeline._registered_distance(
+        left.transpose(flip), right.transpose(flip), window
+    )
+
+    assert (forward, backward) == (window, -window)
+    assert direct == pytest.approx(0.0, abs=1e-9)
+    assert mirrored == pytest.approx(direct, abs=1e-9)
+    # And on ordinary neighbours, where the minimum sits somewhere in the middle.
+    neighbour = pipeline._row_cells(sheet, spec, spec.row_by_key("walk-ne"))[0]
+    assert pipeline._registered_distance(left, neighbour, window)[0] == pytest.approx(
         pipeline._registered_distance(
-            left.transpose(flip), right.transpose(flip), window
+            left.transpose(flip), neighbour.transpose(flip), window
         )[0]
     )
 
@@ -1254,23 +1271,22 @@ def test_a_blank_row_costs_only_the_seams_it_touches():
     are untouched.
     """
     spec, sheet = load_fixture_sheet("handedness_8way.webp")
-    found = pipeline.detect_mirrored_art(spec, blank_row(spec, sheet, "walk-e"))
+    # `walk-s` blank AND `walk-e` mirrored: under the old rule the empty row made
+    # the whole `walk` chain unjudged, so the mirrored row in it shipped.
+    broken = flip_rows(spec, blank_row(spec, sheet, "walk-s"), "walk-e")
 
-    rotation_unjudged = unjudged_rows(found, "rotation")
-    assert {"walk-se", "walk-e", "walk-ne"} <= rotation_unjudged
-    assert set(gains_by_row(found, "rotation")) == {
-        "idle-se",
-        "idle-e",
-        "idle-ne",
-        "jump-se",
-        "jump-e",
-        "jump-ne",
-    }
-    # The defect in another state is still caught, and the blank row is named for
-    # what it is rather than folded into its neighbours' reason.
-    assert "idle-ne" in {finding["row"] for finding in found["flagged"]}
+    found = pipeline.detect_mirrored_art(spec, broken)
+
+    assert "walk-e" in {finding["row"] for finding in found["flagged"]}
+    # Only the neighbour of the blank row lost its judgement; the rest of the
+    # chain kept both seams.
+    rotation = gains_by_row(found, "rotation")
+    assert {"walk-e", "walk-ne"} <= set(rotation)
+    assert "walk-se" not in rotation
+    assert {"walk-s", "walk-se"} <= unjudged_rows(found, "rotation")
+    # The blank row is named for what it is, not folded into a neighbour's reason.
     assert any(
-        entry["rows"] == ["walk-e"] and "empty row has no facing" in entry["reason"]
+        entry["rows"] == ["walk-s"] and "empty row has no facing" in entry["reason"]
         for entry in found["unjudged"]
     )
 
