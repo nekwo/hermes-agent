@@ -126,10 +126,30 @@ MAX_THUMB_PIXELS = 16_000_000
 # passed the write ceiling at 2176x5792 = 12_603_392 px, 3.94x the sheet it is
 # supposed to be lighter than, and nothing in the payload said so.
 #
-# So the card budget IS the sheet, derived rather than restated: the largest
-# sheet this package composes (`CHAR8`, 1536x2080 = 3_194_880 px / 12.2 MiB
-# decoded RGBA). A sheet that grows moves the budget with it, and the number can
-# never drift from the thing it is measured against.
+# So the budget is SIZED from a sheet — `CHAR8`, 1536x2080 = 3_194_880 px /
+# 12.2 MiB decoded RGBA, the largest sheet this package's default spec composes
+# — but what it MEANS is a fixed console decode ceiling: *will this file sink a
+# chat card*, never *is this lighter than the sheet in your hand*. It is a
+# module constant. It does not move with a draft, and `fits_card_budget` has
+# never compared anything to the caller's own sheet.
+#
+# An earlier wording of this comment claimed the opposite — "a sheet that grows
+# moves the budget with it, and the number can never drift from the thing it is
+# measured against" — and both halves are false, now measured at both ends:
+#
+#   * GROWN: `characters add-state --state jumping:6` recomposed the live
+#     `anime-girl` sheet at 1536x3120 = 4_792_320 px, **1.50x this number**,
+#     which did not move. On such a draft the default-scale refusal in
+#     `draft.row_thumb` can reject a crop that is genuinely lighter than the
+#     sheet that draft will compose.
+#   * SMALL: a `--directions 4`, `idle:2` draft composes 384x624 = 239,616 px,
+#     **13.3x lighter than this number**, so a `cardSafe: True` crop there can
+#     be many times that draft's whole sheet (A2 measured 13.1x live).
+#
+# Whether the budget SHOULD become the draft's own `spec.sheet_size()` is an
+# open question for launcher slice B2, not a comment's to settle: it would
+# change what `cardSafe` MEANS to the consumer that reads it. Recorded with
+# these measurements in the authoring skill's FIELD-NOTES.
 MAX_CARD_PIXELS = CHAR8.sheet_size()[0] * CHAR8.sheet_size()[1]
 
 

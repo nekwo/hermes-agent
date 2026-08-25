@@ -953,6 +953,11 @@ def test_add_state_runs_the_reopen_add_rows_compose_loop_through_the_cli(
         ("walk:5", "is already on this sheet"),
         ("jump:3,cheer:4:fixed", "takes ONE state"),
         ("spin-kick:4", "may not contain '-'"),
+        # An empty value is the one refusal that can only name the FLAG, and
+        # this verb's flag is singular — see the test below for what it used
+        # to answer.
+        ("", "--state is empty"),
+        ("   ", "--state is empty"),
     ],
 )
 def test_add_state_refuses_in_the_flat_pets_error_shape(
@@ -982,6 +987,36 @@ def test_add_state_refuses_in_the_flat_pets_error_shape(
         "idle",
         "walk",
     ]
+
+
+def test_an_empty_state_is_refused_in_this_verbs_own_vocabulary(
+    fake_grown, base_image, capsys
+):
+    """The refusal used to name a flag `add-state` does not have.
+
+    Measured 2026-08-25: `--state ''` and `--state '   '` both answered
+    `--states is empty; expected e.g. 'idle:6,walk:8'` — the PLURAL flag, which
+    belongs to `characters start`, illustrated with a two-state list this verb
+    refuses one check later. `parse_states` is still the one grammar; only the
+    spelling of the flag being refused travels to it.
+    """
+    draft_id = rows_stage_draft(capsys, base_image)
+
+    code, payload = run(
+        [
+            "harness", "characters", "add-state",
+            "--draft", draft_id,
+            "--state", "   ",
+            "--json",
+        ],
+        capsys,
+    )
+
+    assert (code, payload["ok"]) == (2, False)
+    error = payload["error"]
+    assert error.startswith("--state is empty")
+    assert "--states" not in error, "the plural flag is `start`'s, not this verb's"
+    assert "idle:6,walk:8" not in error, "a two-state example this verb refuses"
 
 
 def test_the_add_state_human_line_hands_over_the_exact_only_list(

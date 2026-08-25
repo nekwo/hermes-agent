@@ -154,12 +154,29 @@ that carried the defect. So:
   walk `--frame` across `frames`.
 - `--scale` (default 2) is bounded by **output**-pixel budgets and is
   **refused, never clamped** — the refusal names the source dimensions. There
-  are two: at or below the default the crop must be lighter than the composed
-  sheet (that is the whole point of cropping), and a deeper zoom is allowed but
-  comes back **`cardSafe: false`**. **Only declare a `cardSafe: true` crop with
-  `MEDIA:`** — a false one is a fullscreen-viewer artifact and hands the console
-  a decode several times the sheet's for a 420px square. Say the path and tell
-  the operator to open it instead.
+  are two bounds: at or below the default the crop must clear the card budget
+  (`pipeline.MAX_CARD_PIXELS`), and a deeper zoom is allowed but comes back
+  **`cardSafe: false`**.
+- **That budget is a FIXED console ceiling. It is not a comparison against YOUR
+  sheet, and it never was.** `MAX_CARD_PIXELS` is a module constant sized from
+  `CHAR8` — 1536×2080 = 3,194,880 px — and it does not move with a draft.
+  Measured at both ends:
+  - **A grown sheet.** `add-state --state jumping:6` recomposed the live
+    `anime-girl` sheet at 1536×3120 = 4,792,320 px, **1.50× the budget**. On
+    such a draft the default scale can be REFUSED for a crop that is genuinely
+    lighter than the sheet it will compose — so read the refusal as "over the
+    console ceiling", not as "heavier than your sheet".
+  - **A small sheet.** A `--directions 4`, `idle:2` draft composes 384×624 =
+    239,616 px, and its DEFAULT crop came back `cardSafe: true` at **13.1× that
+    whole sheet**.
+  So take your own size from `status --json` →
+  `.status.spec.sheetWidth` × `.status.spec.sheetHeight` and weigh the crop
+  against it yourself. Never carry a copy of the threshold.
+- **Only declare a `cardSafe: true` crop with `MEDIA:`** — a false one is a
+  fullscreen-viewer artifact and hands the console a decode far past the
+  ceiling for a 420px square. Say the path and tell the operator to open it
+  instead. `cardSafe: true` is necessary, not sufficient: it says the file will
+  not sink the console, not that cropping bought you anything.
 - **The single most reliable read is attempt N beside attempt N−1**, same row,
   same frame, declared in one turn and labelled. Two independent agents each
   failed to see this seam at 5–6× magnification on a single frame; side by side,

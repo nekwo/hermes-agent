@@ -729,10 +729,20 @@ class CharacterDraft:
         appearing in the spec: its store key has no history, so the status
         payload reports ``attempts: 0`` and lists it under ``missing.rows``,
         which is exactly what an un-generated row looks like everywhere else.
-        Writing a placeholder attempt would invent an image nobody drew. The new
-        rows are grounded on the turnaround references the operator already
-        approved — the stage machine guarantees they are approved, because that
-        approval is the only thing that advances a draft to ``rows``.
+        Writing a placeholder attempt would invent an image nobody drew.
+
+        **What a new row is grounded on depends on the state, and
+        :meth:`_row_reference` decides it — not this verb.** A DIRECTIONAL
+        state's rows ground on the turnaround reference the operator already
+        APPROVED for that direction (``store.current``, never ``store.latest``:
+        an operator who rerolls a direction and then keeps the older attempt has
+        to get the older attempt). The stage machine guarantees each of those is
+        approved, because that approval is the only thing that advances a draft
+        to ``rows``. A ``:fixed`` state has ONE row with no direction at all, so
+        it grounds on the BASE image, exactly as a fixed row declared at
+        ``start`` does. This paragraph said "the turnaround references" for every
+        row until 2026-08-25 — ``:fixed`` is advertised in the CLI help and in
+        the skill's verb table, and it has never used one.
 
         **Add only** (owner decision 8). Removing a state would delete approved
         attempts and the operator notes stored with them — the durable QA record
@@ -746,7 +756,12 @@ class CharacterDraft:
         rather than four generations later at ``rows``.
         """
         self._require_stage("add_state", "rows")
-        added = parse_states(state_text)
+        # The grammar stays in ONE place; only the SPELLING of the flag being
+        # refused travels, because `--states` (plural, with a two-state example)
+        # is not a flag this verb has and `add-state` refuses a list one check
+        # later. A refusal that names a flag the caller cannot pass is worse
+        # than no refusal message at all.
+        added = parse_states(state_text, flag="--state", example="jumping:6")
         if len(added) != 1:
             # `--state` is singular and the launcher registry renders one value
             # for it. A comma-separated list would make this a second, quieter
@@ -830,16 +845,26 @@ class CharacterDraft:
         remove.
 
         **Card-weight is enforced at the default and reported everywhere else.**
-        The point of the verb (launcher risk D.3) is that a card decodes less
-        than the sheet, so a crop taken at :data:`DEFAULT_THUMB_SCALE` or below —
-        the crop a caller gets by asking for a picture, and the one an agent
-        declares with a ``MEDIA:`` line — is REFUSED when it would outweigh the
-        sheet (``pipeline.MAX_CARD_PIXELS``). A deliberate deeper zoom is a
-        different artifact with a different reader: it is allowed up to the write
-        ceiling and carries ``cardSafe: False``, which is how a consumer knows to
-        open it in the fullscreen viewer instead of drawing it in a 420px square.
-        A boolean rather than a silent clamp, because a caller who asked for 8x
+        A crop taken at :data:`DEFAULT_THUMB_SCALE` or below — the crop a caller
+        gets by asking for a picture, and the one an agent declares with a
+        ``MEDIA:`` line — is REFUSED when it exceeds
+        ``pipeline.MAX_CARD_PIXELS``. A deliberate deeper zoom is a different
+        artifact with a different reader: it is allowed up to the write ceiling
+        and carries ``cardSafe: False``, which is how a consumer knows to open it
+        in the fullscreen viewer instead of drawing it in a 420px square. A
+        boolean rather than a silent clamp, because a caller who asked for 8x
         wants 8x — they just must not be told it is a card.
+
+        **That budget is a FIXED console ceiling, not a comparison against this
+        draft's sheet, and this docstring used to say otherwise.** It is sized
+        from ``CHAR8`` and is a module constant; it does not move with a spec.
+        Measured both ways: an ``add-state``-grown sheet is 1.50x it (so a crop
+        can be refused here while being lighter than the sheet the draft will
+        compose), and a ``--directions 4``, ``idle:2`` sheet is 13.3x lighter
+        than it (so a ``cardSafe: True`` crop can be many times that sheet).
+        A caller who needs "lighter than MY sheet" computes it from
+        ``spec.sheetWidth`` x ``spec.sheetHeight`` in the status payload.
+        See :data:`agent.charsheet.pipeline.MAX_CARD_PIXELS`.
 
         Returns a PATH and never bytes (plan A-4): the launcher runs on this
         machine, and the trace lane that would carry an inline image is capped at
@@ -876,9 +901,13 @@ class CharacterDraft:
                 f"scale {scale} on this {cell.width}x{cell.height} frame of row "
                 f"{row.key!r} would write {cell.width * scale}x{cell.height * scale} "
                 f"= {cell.width * cell.height * scale * scale:,} pixels, over the "
-                f"{pipeline.MAX_CARD_PIXELS:,}-pixel card budget — heavier than the "
-                "sheet this crop exists to avoid decoding, which is no mitigation "
-                "at all; ask for --scale 1, or a row with more frames to slice"
+                f"{pipeline.MAX_CARD_PIXELS:,}-pixel card budget — the fixed "
+                "ceiling on what a chat card may decode, which is NOT a "
+                "comparison against this draft's own sheet (weigh that yourself "
+                "against spec.sheetWidth x sheetHeight from `status --json`); "
+                "ask for --scale 1, or a row with more frames to slice, or "
+                "--scale 3 or more to take it as a viewer artifact carrying "
+                "cardSafe: false"
             )
         image = pipeline.upscale_on_backdrop(cell, scale=scale)
         # The filename is a HUMAN surface — an operator correlating a crop back

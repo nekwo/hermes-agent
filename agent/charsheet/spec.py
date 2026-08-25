@@ -73,11 +73,24 @@ MAX_FRAMES_PER_ROW = 8
 # also the DESERIALIZERS (``draft.spec_from_dict``) for every ``draft.json`` and
 # ``character.json`` already on disk — including the ``idle:1`` draft the trap
 # produced. Refusing such a spec at load would not repair that draft; it would
-# make it unreadable, and ``CharacterDraft.list_drafts`` swallows an unreadable
-# draft with a log warning, so the draft would vanish from ``characters list``
-# instead of being explained. A draft that can never generate must still be
-# visible. What the two floors mean, stated once: the SPEC says what a sheet can
-# hold, ``parse_states`` says what an operator may ask us to draw.
+# take `characters list` down with it.
+#
+# The mechanism, MEASURED 2026-08-25 at the chokepoint that applies it — an
+# earlier wording of this comment named a different one, read off an ``except``
+# clause, and it understated the damage. ``CharacterDraft.list_drafts`` does
+# swallow an unreadable draft with a log warning, but that swallow never fires
+# for a bad spec: ``CharacterDraft.load`` reads JSON only, and
+# ``CharacterDraft.spec`` is a property computed on ACCESS, so ``list_drafts``
+# returns the bad draft happily. The raise lands one level up, in
+# ``hermes_cli.harness._characters_draft_summary`` (``spec = draft.spec``),
+# inside ``_cmd_characters_list``'s own ``except _CHARACTERS_EXPECTED`` — which
+# answers ``{"ok": false, "error": …}`` and exit 2 for the WHOLE verb. Over a
+# home holding one good draft and one ``idle:1`` draft, raising here returned
+# ``ok=false`` and ZERO drafts: the good draft vanishes with the bad one. The
+# conclusion is unchanged and stronger than it was written.
+#
+# What the two floors mean, stated once: the SPEC says what a sheet can hold,
+# ``parse_states`` says what an operator may ask us to draw.
 MIN_FRAMES_PER_ROW = 2
 
 # The launcher's ``CharacterFacingSector`` vocabulary, in that enum's theta
@@ -364,16 +377,26 @@ CHAR8 = SheetSpec(
 )
 
 
-def parse_states(text: str) -> tuple[StateSpec, ...]:
+def parse_states(
+    text: str, *, flag: str = "--states", example: str = "idle:6,walk:8"
+) -> tuple[StateSpec, ...]:
     """Parse ``--states``: ``"idle:6,walk:8,cheer:5:fixed"`` (``fixed`` = one row).
 
     The ONE door for operator-declared states — ``characters start --states`` and
     ``characters add-state --state`` both come through here, which is why the
     generation floor (:data:`MIN_FRAMES_PER_ROW`) is enforced at this point and
     not at each caller.
+
+    *flag* and *example* exist because the two doors are spelled differently and
+    an empty value is the one refusal that can only name the flag. Answering
+    ``characters add-state --state ''`` with *"--states is empty; expected e.g.
+    'idle:6,walk:8'"* named a flag that verb does not have and illustrated it
+    with a two-state list that same verb refuses one check later — measured
+    2026-08-25. Every other refusal here quotes the offending TEXT, which is the
+    caller's own, so this is the only message that needs to know.
     """
     if not text or not text.strip():
-        raise ValueError("--states is empty; expected e.g. 'idle:6,walk:8'")
+        raise ValueError(f"{flag} is empty; expected e.g. {example!r}")
 
     states: list[StateSpec] = []
     seen: set[str] = set()

@@ -373,19 +373,68 @@ def test_the_declaration_floor_is_two_while_the_spec_still_represents_one():
 
     ``SheetSpec`` keeps the floor at 1 because it is also the DESERIALIZER for
     every ``draft.json`` and ``character.json`` on disk, including the drafts the
-    old gap produced. Refusing those at load would not repair them — it would
-    make them unreadable, and ``CharacterDraft.list_drafts`` drops an unreadable
-    draft with a log line, so the draft would vanish from ``characters list``
-    instead of being explained.
+    old gap produced — so the one-frame half below goes through
+    ``draft.spec_from_dict`` over a real serialized spec. Until 2026-08-25 it
+    constructed ``SheetSpec`` directly and never touched the deserializer, which
+    is to say it asserted "drafts already on disk still load" about the wrong
+    constructor.
+
+    **And what raising the floor here would cost is worse than this docstring
+    used to say.** The old wording — read off ``list_drafts``' ``except`` clause
+    rather than measured — was that an unreadable draft is dropped with a log
+    line and vanishes from ``characters list``. Measured 2026-08-25 at the
+    chokepoint: that swallow never fires for a bad spec. ``CharacterDraft.load``
+    reads JSON only and ``CharacterDraft.spec`` is computed on ACCESS, so
+    ``list_drafts`` returns the bad draft. The raise lands one level up in
+    ``hermes_cli.harness._characters_draft_summary`` (``spec = draft.spec``),
+    inside ``_cmd_characters_list``'s own ``except _CHARACTERS_EXPECTED`` —
+    ``{"ok": false, …}``, exit 2, and EVERY draft vanishes, not one.
     """
+    # `spec_from_dict` ships in `draft`, which pulls the image pipeline in; the
+    # rest of this module is pure model and must not start needing Pillow.
+    pytest.importorskip("PIL")
+    from agent.charsheet.draft import spec_from_dict, spec_to_dict
+
     assert MIN_FRAMES_PER_ROW == 2
 
     with pytest.raises(ValueError, match="out of range"):
         parse_states(f"idle:{MIN_FRAMES_PER_ROW - 1}")
     assert parse_states(f"idle:{MIN_FRAMES_PER_ROW}")[0].frames == MIN_FRAMES_PER_ROW
 
-    one_frame = SheetSpec(states=(StateSpec("idle", 1, True),), scheme=FOUR_WAY)
-    assert [row.frames for row in one_frame.rows()] == [1] * len(FOUR_WAY.authored)
+    # The exact JSON a draft carries, with the one field the old gap wrote.
+    on_disk = spec_to_dict(
+        SheetSpec(states=(StateSpec("idle", MIN_FRAMES_PER_ROW, True),), scheme=FOUR_WAY)
+    )
+    on_disk["states"][0]["frames"] = MIN_FRAMES_PER_ROW - 1
+
+    one_frame = spec_from_dict(on_disk)
+
+    assert [state.frames for state in one_frame.states] == [MIN_FRAMES_PER_ROW - 1]
+    assert [row.frames for row in one_frame.rows()] == [MIN_FRAMES_PER_ROW - 1] * len(
+        FOUR_WAY.authored
+    )
+    # ...and it survives the save/load cycle a draft runs on every write.
+    assert spec_from_dict(spec_to_dict(one_frame)) == one_frame
+
+
+def test_the_empty_refusal_names_the_flag_the_caller_actually_passed():
+    """One grammar, two flags — and an empty value can only name the flag.
+
+    `characters add-state --state ''` answered *"--states is empty; expected
+    e.g. 'idle:6,walk:8'"* until 2026-08-25: the PLURAL flag, which `add-state`
+    does not have, illustrated with a two-state list that verb refuses one check
+    later. Every other refusal in this parser quotes the caller's own TEXT, so
+    this is the only message that has to be told which door it came through.
+    """
+    with pytest.raises(
+        ValueError, match=r"^--states is empty; expected e\.g\. 'idle:6,walk:8'$"
+    ):
+        parse_states("   ")
+
+    with pytest.raises(
+        ValueError, match=r"^--state is empty; expected e\.g\. 'jumping:6'$"
+    ):
+        parse_states("", flag="--state", example="jumping:6")
 
 
 def test_parsed_states_build_a_valid_sheet_in_either_scheme():

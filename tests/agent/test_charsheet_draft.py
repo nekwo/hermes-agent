@@ -11,6 +11,7 @@ and the payload are direction-count agnostic, so the cheap scheme proves them.
 
 from __future__ import annotations
 
+import ast
 import base64
 import json
 import math
@@ -482,6 +483,13 @@ def test_a_second_draft_may_not_overwrite_another_characters_slug(installed, fak
 
 ADDED = StateSpec("jump", 3, True)
 GROWN = SheetSpec(states=SPEC.states + (ADDED,), scheme=FOUR_WAY)
+ADDED_FIXED = StateSpec("cheer", 4, False)
+GROWN_FIXED = SheetSpec(states=SPEC.states + (ADDED_FIXED,), scheme=FOUR_WAY)
+
+# The direction the operator rerolls and then declines, and the attempt they
+# keep. Named because two tests below turn on the pair being DIFFERENT files.
+REROLLED_DIRECTION = "e"
+PREFERRED_ATTEMPT = 0
 
 
 @pytest.fixture
@@ -495,6 +503,40 @@ def fake_grown(tmp_path, monkeypatch):
     provider = FakeProvider(GROWN, tmp_path / "generated")
     monkeypatch.setattr(pipeline, "_generate_image", provider)
     return provider
+
+
+@pytest.fixture
+def fake_grown_fixed(tmp_path, monkeypatch):
+    """``fake_grown``, but the added state is ``:fixed`` — ONE row, no direction."""
+    provider = FakeProvider(GROWN_FIXED, tmp_path / "generated")
+    monkeypatch.setattr(pipeline, "_generate_image", provider)
+    return provider
+
+
+def run_to_rows_keeping_the_older_attempt(base, *, direction=REROLLED_DIRECTION):
+    """Stage ``rows``, with ONE direction whose approved attempt is not its newest.
+
+    The live operator move: reroll a direction, look at both, prefer the
+    ORIGINAL, and pin it with ``approve-direction --attempt 0``. That leaves the
+    item at ``approved=0, latest=1`` — the ONLY shape in which "the approved
+    reference" and "the newest reference" are different files.
+
+    Every other fixture in this module approves the latest attempt, so
+    ``store.current`` and ``store.latest`` answer identically there and a test
+    written against either one passes. That is exactly how the anchoring
+    assertion below was vacuous until 2026-08-25.
+    """
+    draft = CharacterDraft.create(concept=CONCEPT, slug=SLUG, spec=SPEC, base_image=base)
+    draft.run_turnaround()
+    draft.reroll_direction(direction, note="the shoulder line is broken")
+    draft.approve_direction(direction, attempt=PREFERRED_ATTEMPT)
+    # `approve_all_directions` approves the LATEST of every direction, which
+    # would silently undo the divergence this fixture exists to create.
+    for other in FOUR_WAY.authored:
+        if other != direction:
+            draft.approve_direction(other)
+    assert draft.stage == "rows"
+    return draft
 
 
 def test_adding_a_state_leaves_every_approved_row_exactly_as_it_was(fake_grown, base):
@@ -553,21 +595,80 @@ def test_a_new_state_is_appended_so_no_installed_row_changes_index(fake_grown, b
 
 
 def test_the_new_rows_are_anchored_to_the_turnaround_already_approved(fake_grown, base):
-    draft = run_to_rows(base)
+    """Anchored to the APPROVED attempt — which is not always the newest one.
+
+    The failure this exists to catch: at ``turnaround`` the operator rerolls one
+    direction, prefers the ORIGINAL, and pins it with
+    ``approve-direction --attempt 0``. That direction now sits at
+    ``approved=0, latest=1``, and a state added later must ground its strip on
+    the attempt the operator KEPT — not on the one they rejected, silently.
+
+    So the expectation here is written as an attempt INDEX this test chose
+    (``PREFERRED_ATTEMPT``), never as ``store.current(...)``. Asserting against
+    ``store.current`` is asserting the expression ``_row_reference`` computes:
+    on a fixture where nothing was ever rerolled, ``current`` and ``latest``
+    are the same file, so swapping the production call to ``store.latest``
+    left the whole suite green (mutation run 2026-08-25, 65 passed).
+    """
+    draft = run_to_rows_keeping_the_older_attempt(base)
     draft.run_rows()
+    store = draft.store
+    rerolled = turnaround_item(REROLLED_DIRECTION)
+    kept = store.attempt_path(rerolled, PREFERRED_ATTEMPT)
+    declined = store.latest(rerolled)
+    # The fixture's whole point, asserted rather than assumed: two real files,
+    # and the one the operator kept is the older.
+    assert kept != declined
+    assert (kept.name, declined.name) == ("attempt-1.png", "attempt-2.png")
 
     added = draft.add_state("jump:3")
 
-    # Generating a new row needs no new approval: it grounds on the same
-    # reference the operator signed off before the first row was ever drawn.
+    # Generating a new row needs no new approval: it grounds on the reference
+    # the operator signed off before the first row was ever drawn.
     result = draft.run_rows(only=added["rows"])
-    store = draft.store
     for key in added["rows"]:
         direction = key.split("-")[-1]
         assert result["rows"][key]["reference"] == str(
-            store.current(turnaround_item(direction))
+            store.attempt_path(turnaround_item(direction), PREFERRED_ATTEMPT)
         )
         assert result["rows"][key]["approved"] is True
+    # Spelled out for the one direction where the two answers differ.
+    assert result["rows"][f"jump-{REROLLED_DIRECTION}"]["reference"] == str(kept)
+    assert result["rows"][f"jump-{REROLLED_DIRECTION}"]["reference"] != str(declined)
+
+
+def test_a_fixed_state_adds_one_row_and_it_grounds_on_the_base_image(
+    fake_grown_fixed, base
+):
+    """``:fixed`` is advertised, it works, and it never sees a turnaround.
+
+    ``_row_reference`` branches on ``row.direction is None`` and answers
+    ``_require_base()`` — the identity anchor, not a direction view.
+    ``add_state``'s docstring said "grounded on the turnaround references the
+    operator already approved" for every row until 2026-08-25, and no test
+    covered a fixed state at all.
+    """
+    draft = run_to_rows(base)
+    draft.run_rows()
+
+    added = draft.add_state("cheer:4:fixed")
+
+    assert added["state"] == {"name": "cheer", "frames": 4, "directional": False}
+    # One row, keyed by the bare state name: `row_key(state, None)` is the state.
+    assert added["rows"] == ["cheer"]
+    assert added["states"] == ["idle", "walk", "cheer"]
+
+    result = draft.run_rows(only=added["rows"])
+
+    reloaded = CharacterDraft.load(draft.id)
+    assert result["rows"]["cheer"]["reference"] == str(reloaded.base_image)
+    assert result["rows"]["cheer"]["approved"] is True
+    # ...and it is emphatically not any turnaround reference.
+    store = draft.store
+    turnaround_paths = {
+        str(store.current(turnaround_item(d))) for d in FOUR_WAY.authored
+    }
+    assert result["rows"]["cheer"]["reference"] not in turnaround_paths
 
 
 def test_compose_refuses_until_the_new_states_rows_are_generated(fake_grown, base):
@@ -685,6 +786,41 @@ def test_the_declaration_floor_is_the_number_the_prompt_builder_enforces(
     """Two modules, ONE number -- the half of the trap that was a duplicated floor."""
     from agent.charsheet import prompts
     from agent.charsheet.spec import MIN_FRAMES_PER_ROW
+
+    # ONE NUMBER, ONE SOURCE -- pinned at the SOURCE, because it cannot be
+    # pinned at runtime. `prompts` binds the constant with `from ... import` at
+    # import time, so `prompts.MIN_FRAMES_PER_ROW` is a plain int:
+    # `prompts.MIN_FRAMES_PER_ROW is spec.MIN_FRAMES_PER_ROW` is True even when
+    # `prompts` re-hardcodes its own `MIN_FRAMES_PER_ROW = 2`, because CPython
+    # interns every int in -5..256 and identity cannot tell a shared constant
+    # from a re-typed literal (verified 2026-08-25). Monkeypatching `spec`
+    # cannot tell them apart either: a `from X import Y` binding does not follow
+    # X. So the guarantee this test is NAMED for lives in the source text, and
+    # the mutation it must catch -- re-spell the number in `prompts`, drop the
+    # import -- is caught here and nowhere else.
+    tree = ast.parse(Path(prompts.__file__).read_text(encoding="utf-8"))
+    read_from = {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        and any(alias.name == "MIN_FRAMES_PER_ROW" for alias in node.names)
+    }
+    written = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign))
+        and any(
+            isinstance(target, ast.Name) and target.id == "MIN_FRAMES_PER_ROW"
+            for target in (
+                node.targets if isinstance(node, ast.Assign) else [node.target]
+            )
+        )
+    ]
+    assert read_from == {"agent.charsheet.spec"}, (
+        "prompts must READ the frame floor from spec; it imports it from "
+        f"{read_from or 'nowhere'}"
+    )
+    assert not written, "prompts assigns MIN_FRAMES_PER_ROW -- that is a second number"
 
     with pytest.raises(ValueError, match=f"at least {MIN_FRAMES_PER_ROW}"):
         prompts.build_directional_row_prompt(
@@ -927,9 +1063,15 @@ def test_the_card_budget_is_the_sheet_and_not_the_bomb_threshold(fake, base):
 
     `MAX_THUMB_PIXELS` answers "may this file exist?" and is set against
     Pillow's bomb threshold. Risk D.3 asks a different question — "may a chat
-    card decode this?" — and states the check: *a crop that is not smaller than
-    the sheet is not a mitigation.* The sheet is therefore the budget, derived
-    from the spec so it cannot drift from the thing it is measured against.
+    card decode this?" — so the card budget is SIZED from `CHAR8`'s sheet, the
+    largest this package's default spec composes.
+
+    **What it is not, corrected 2026-08-25:** a comparison against the caller's
+    own sheet. This docstring used to say the budget was "derived from the spec
+    so it cannot drift from the thing it is measured against", and it does drift
+    — it is a module constant. An `add-state`-grown sheet measured 1.50x it and
+    a `--directions 4`, `idle:2` sheet 13.3x lighter. It is a fixed console
+    decode ceiling; see `pipeline.MAX_CARD_PIXELS`.
 
     The killing mutation is the state this replaced: one constant serving both,
     at which point a crop 3.94x heavier than the sheet passes the only bound
@@ -973,6 +1115,13 @@ def test_a_default_crop_heavier_than_the_sheet_is_refused_rather_than_declared(
     assert "card budget" in message
     assert f"{pipeline.MAX_CARD_PIXELS:,}" in message
     assert "--scale 1" in message
+    # And it names a FIXED ceiling rather than a comparison it does not make.
+    # It read "heavier than the sheet this crop exists to avoid decoding" until
+    # 2026-08-25, which is false on exactly the drafts an operator reaches for
+    # this verb on: an `add-state`-grown sheet is 1.50x the budget, so the
+    # refusal fires for crops lighter than that draft's own sheet.
+    assert "heavier than the sheet" not in message
+    assert "NOT a comparison" in message
     assert not (draft.directory / "thumbs").exists(), "the refusal wrote a file anyway"
     # ...and the escape the refusal names actually works.
     assert draft.row_thumb("walk-e", scale=1)["cardSafe"] is True

@@ -168,6 +168,33 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   take row keys from the payload — this sheet's were `idle-s`, `idle-e`, `idle-n`, and nothing
   was named `walk`.
 
+- **[READ] A row is grounded on the APPROVED turnaround attempt, never merely the newest —
+  and a `:fixed` row is grounded on the BASE image.** `CharacterDraft._row_reference` branches
+  on `row.direction is None`: a directional row answers `store.current(turnaround_item(d))`,
+  which is the APPROVED attempt (`store.latest` is a different, public, non-approved answer);
+  a fixed row answers `_require_base()`. `run_rows`, `reroll_row` and every row `add-state`
+  seeds all come through it.
+  *Consequence:* the operator move "reroll `ne`, look at both, keep the ORIGINAL"
+  (`approve-direction --direction ne --attempt 0`) is durable — every strip drawn afterwards,
+  including a state added later, anchors on the attempt they kept and never on the one they
+  rejected. If a later state should be drawn against a different reference, re-approve the
+  direction at `turnaround`; do not reroll rows and hope. And never tell an operator that a
+  `:fixed` state (`cheer:4:fixed`) is anchored on a turnaround view — it is the base image,
+  the same anchor the character started from, prompted in the front view
+  (`pipeline.NON_DIRECTIONAL_VIEW`). `add_state`'s own docstring claimed the turnaround for
+  every row until 2026-08-25.
+
+- **[READ] `add-state` refuses an empty value in its OWN flag now (fixed 2026-08-25).**
+  `--state ''` and `--state '   '` answered `--states is empty; expected e.g.
+  'idle:6,walk:8'` — the plural flag, which belongs to `characters start` and which
+  `add-state` does not have, illustrated with a two-state list `add-state` refuses one check
+  later. `spec.parse_states` now takes the caller's `flag`/`example` spelling; the grammar
+  stays one authority. (`characters start --states ''` is not an error at all: an empty value
+  there means "the CHAR8 states", taken from `CHAR8` itself.)
+  *Consequence:* refusals on this verb are actionable text you can hand the operator
+  verbatim. If one ever names a flag the verb does not accept, report it as-is and file it —
+  do not silently translate it into the flag you think was meant.
+
 ## Looking at a sheet
 
 - **[READ] The console's MEDIA hero card is a fixed 1:1 centre-cover square.**
@@ -239,9 +266,14 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   *Consequence:* a QA card RELABELS, never renumbers.
 
 - **[READ] `cardSafe` answers the question; the thresholds are not the consumer's.**
-  `thumb` carries `cardSafe`, derived from `MAX_CARD_PIXELS` (itself derived from
-  `CHAR8.sheet_size()`, so it cannot drift). Above the default scale a crop is written but
-  flagged; at or below it an over-budget crop is refused, naming `--scale 1`.
+  `thumb` carries `cardSafe`, derived from `MAX_CARD_PIXELS`, ~~itself derived from
+  `CHAR8.sheet_size()`, so it cannot drift~~ — **struck 2026-08-25: `MAX_CARD_PIXELS` is a
+  module CONSTANT sized once from `CHAR8.sheet_size()`. It is fixed; what drifts is the
+  draft.** The comment above the constant asserted the opposite in so many words ("a sheet
+  that grows moves the budget with it, and the number can never drift from the thing it is
+  measured against") and was corrected in the same pass, along with `row_thumb`'s refusal
+  message. Above the default scale a crop is written but flagged; at or below it an
+  over-budget crop is refused, naming `--scale 1`.
   ~~*Consequence:* only declare a `cardSafe: true` crop with `MEDIA:`.~~ **Struck by A2 —
   `cardSafe: true` does not mean "lighter than this sheet".** The derivation above is right
   and the guarantee it gets read for is wrong: `pipeline.MAX_CARD_PIXELS` is
@@ -276,12 +308,33 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   8-way `anime-girl` sheet recomposed it at 1536x3120 = 4,792,320 px — **1.50x the fixed
   budget**, and every further state adds another `authored x frame_h` band.
   *Consequence:* on a grown sheet `cardSafe: false` no longer implies "heavier than your
-  sheet" — a crop can be refused at the default scale (`--scale 2`), with a message saying it
-  is "heavier than the sheet this crop exists to avoid decoding", while being genuinely
-  lighter than the sheet that draft will compose. Both directions have one answer, the one
+  sheet" — a crop can be refused at the default scale (`--scale 2`) while being genuinely
+  lighter than the sheet that draft will compose. **The refusal used to SAY the wrong thing
+  as well** — it read "heavier than the sheet this crop exists to avoid decoding" — and as of
+  2026-08-25 `CharacterDraft.row_thumb` names the fixed card budget and states outright that
+  it is not a comparison against your sheet. Both directions have one answer, the one
   A2 already wrote: weigh a crop against **that draft's own `spec.sheetWidth x
   sheetHeight`** from `status --json`, and read `cardSafe` as the console's ceiling, never as
   a statement about your sheet. Do not carry a copy of the threshold.
+
+- **[OPEN QUESTION for launcher slice B2, recorded 2026-08-25 — a decision nobody has
+  taken, not a finding.]** Two options were on the table when `MAX_CARD_PIXELS`'s comment was
+  corrected, and only one was taken. **(a) TAKEN:** the budget is a fixed CONSOLE DECODE
+  ceiling — what a chat card may render — and the comment plus `row_thumb`'s refusal now say
+  exactly that. No semantics changed; `cardSafe` means what it always meant. **(b) NOT taken,
+  and it is the owner's call:** make the budget the draft's own `spec.sheet_size()`, so
+  `cardSafe` would mean "lighter than MY sheet". That changes what the boolean MEANS to the
+  consumer reading it (launcher B2), which is why a fix round declined it. The two
+  measurements that make it live, both on drafts that exist: a `--directions 4`, `idle:2`
+  sheet is 384x624 = 239,616 px and its DEFAULT crop came back `cardSafe: true` at
+  1774x1774 = 3,147,076 px — 13.1x that sheet, and 1.5% under the fixed budget; the
+  `add-state`-grown `anime-girl` sheet is 1536x3120 = 4,792,320 px, 1.50x the fixed budget,
+  where the default scale can be REFUSED for a crop lighter than the sheet that draft will
+  compose. Under (b) both of those answers flip.
+  *Consequence:* until an owner rules, `cardSafe` is the console's ceiling and nothing else.
+  A consumer that needs "lighter than my sheet" computes it from `status --json` →
+  `.status.spec.sheetWidth` x `.status.spec.sheetHeight`. Do not carry a copy of the
+  threshold, and do not read the boolean as a comparison.
 
 - **[READ] `characters sprite <slug> --json` inlines the whole sheet as base64 and has no
   path-only mode.** `draft.sprite_payload` always emits `spritesheetBase64` from the sheet
@@ -391,6 +444,30 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   the console's own trace row.
   *Consequence:* the trace is not a record of what you ran. Put the draft id, the slug and the
   spec you chose in the REPLY, where the operator can actually read them.
+
+## For AF — the skill rewrite
+
+- **[READ] A served file's falsehood is worse than this file's, and the two are not
+  symmetric.** A turn receives `SKILL.md` and receives NOTHING from this file
+  (`agent/skill_commands.py::_build_skill_message`, and the placement note at the top of this
+  file). So an agent reading a false line in `SKILL.md` never meets the correction struck
+  here. Live case: `SKILL.md`'s `--scale` bullet said "at or below the default the crop must
+  be lighter than the composed sheet (that is the whole point of cropping)" — a guarantee
+  `pipeline.MAX_CARD_PIXELS` has never made, on a sheet 1.50x that budget. Corrected in place
+  2026-08-25 rather than left for the rewrite.
+  *Consequence for AF:* whenever an entry here is struck, check whether `SKILL.md` repeats
+  the struck claim, and fix the served copy in the same commit. The strike reaches nobody;
+  the served copy reaches every turn.
+
+- **[READ] `SKILL.md` carries one bullet that repairs nothing false — "A state is added,
+  never removed" (added by A3). KEPT deliberately, and recorded here so AF knows it arrived
+  outside a repair mandate.** It is true at the code (`CharacterDraft.add_state` has no
+  removal path, there is no `--confirm` sibling verb, and the docstring records why) and it
+  stops an agent promising an operator a verb that does not exist — the same rule as "no fake
+  affordances". Dropping a true, useful line to honour a scope boundary would have been churn
+  on a file AF rewrites wholesale.
+  *Consequence for AF:* it is a completeness bullet, not a claim needing re-verification.
+  Keep it, or fold it into the add-state paragraph.
 
 ---
 

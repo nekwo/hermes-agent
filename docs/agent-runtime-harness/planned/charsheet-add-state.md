@@ -81,11 +81,23 @@ The operator sequence on an installed character is then
   builder instead of re-spelled. It is deliberately NOT raised on `StateSpec` /
   `SheetSpec`: those are also the deserializers for every `draft.json` and
   `character.json` on disk, including the drafts the old gap produced, and
-  refusing them at load would make such a draft unreadable rather than repaired
-  — `CharacterDraft.list_drafts` drops an unreadable draft with a log line, so it
-  would vanish from `characters list` instead of being explained. The two floors
-  answer two questions: the spec says what a sheet can HOLD, `parse_states` says
-  what an operator may ask us to DRAW.
+  refusing them at load would take `characters list` down with them. The two
+  floors answer two questions: the spec says what a sheet can HOLD,
+  `parse_states` says what an operator may ask us to DRAW.
+  **Corrected on review, 2026-08-25 — this bullet named a mechanism the code
+  does not have, and it understated the damage.** It read
+  "`CharacterDraft.list_drafts` drops an unreadable draft with a log line, so it
+  would vanish from `characters list` instead of being explained", which was
+  taken off `list_drafts`' `except` clause rather than measured at the
+  chokepoint that applies it. That swallow never fires for a bad spec:
+  `CharacterDraft.load` reads JSON only and `CharacterDraft.spec` is computed on
+  ACCESS, so `list_drafts` returns the bad draft. The raise lands one level up
+  in `_characters_draft_summary` (`spec = draft.spec`), inside
+  `_cmd_characters_list`'s own `except _CHARACTERS_EXPECTED` → `{"ok": false,
+  "error": …}`, exit 2. Measured over a home holding one good draft and one
+  `idle:1` draft: `ok=false` and ZERO drafts — **the whole verb fails and every
+  draft vanishes, not one.** The ruling is unchanged and stronger than the
+  bullet claimed.
 - **The human line hands over the `--only` list.** Because `--only` has no glob
   (below), the verb that knows the new row keys is the verb that spells them:
   `Draft <id>: state jumping added (6 frames, directional); 5 new row(s) to
@@ -132,6 +144,18 @@ sprite byte-baseline, because `harness.py` was touched) — plus new tests that:
 2. asserts a duplicate state name and a wrong stage are both refused in the flat
    pets error shape (`{"ok": false, "error": …}`, exit 2), never clamped;
 3. asserts the recomposed `character.json` lists three states.
+
+**Review round, 2026-08-25 — what the first pass' tests did not hold.** The
+anchoring test asserted `result["rows"][key]["reference"] ==
+str(store.current(turnaround_item(direction)))` — the expression
+`_row_reference` itself computes — over a fixture where no direction was ever
+rerolled, so `current()` and `latest()` named the same file and the mutation
+`store.current` → `store.latest` left all 65 tests green. It now builds the
+divergence it exists to catch: reroll one direction, approve the OLDER attempt
+(`approve-direction --attempt 0`), and assert the new row's reference is the
+attempt the operator KEPT and is not `store.latest(...)`. A `:fixed` state
+gained a test at the same time — its row has no direction, so `_row_reference`
+grounds it on the BASE image, which is what `add_state`'s docstring denied.
 
 Then live on the `anime-girl` draft: `reopen`, `add-state --state jumping:6`,
 `rows --only jumping-s,jumping-se,jumping-e,jumping-ne,jumping-n`, `compose`,
