@@ -529,7 +529,13 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   rather than chasing the reference first.
 
 - **[READ] There is now a compose-time gate, it REFUSES rather than warns, and
-  its blind spot is exact.** `pipeline.detect_mirrored_art`, called from
+  its blind spot is exact.**
+  **~~"its blind spot is exact"~~ — STRUCK 2026-08-25 (round two). This entry
+  describes the UNREGISTERED gate. Its numbers were measured by a ratio that read
+  placement as handedness, its "~1 s" is 0.08 s, and its blind-spot list was
+  three items short. Everything below the line still happened and the diagnosis
+  still stands; the figures and the boundary have moved. Read the round-two
+  entries at the end of this section for the measure that ships.** `pipeline.detect_mirrored_art`, called from
   `validate_sheet` (so it blocks `compose` → install), walks each directional
   state's authored rows in turnaround order and asks per row: *would flipping
   this one row horizontally make the seams it touches fit better?* Flag at
@@ -538,7 +544,8 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   other row of both, plus a second character (4-way robot, satchel over one
   shoulder — deliberately asymmetric), score at most 3.9%. Pillow only, no
   numpy — numpy is not a dependency of this package and is absent from the venv
-  the runtime actually executes in. ~1 s on a 15-row sheet.
+  the runtime actually executes in. ~~~1 s on a 15-row sheet~~ — measured 0.08 s
+  unregistered, ~4.0 s registered (round two).
   It judges only rows with a neighbour on EACH side (`se`, `e`, `ne` on an 8-way
   sheet); the ends are reported in `handedness.unjudged` with the reason, because
   one seam cannot say which of its two rows is the mirrored one — an earlier
@@ -655,6 +662,182 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   dilute the ratio without voting, which is what the shipped gate does.
   *Consequence:* a rule measured on ONE state of one character is measured on one
   sample. Re-run it over every state before believing it.
+
+- **[READ] The gate now REGISTERS before it measures, and that is the difference
+  between measuring handedness and measuring placement.** Round one paired cells
+  by column index with no alignment step, so any horizontal displacement between
+  two neighbouring rows entered the distance and therefore the ratio. Measured on
+  the REPAIRED (correct) live sheet by sliding `idle-e` sideways and touching
+  nothing else: −7 px in a 192 px frame scored +9.81% and REFUSED the install,
+  −24 px scored +18.75% — past every genuine reading on the defective sheet. The
+  reachable driver is not a stray offset, it is a PROP: `normalize_cells` centres
+  each row on its union bbox, so a bag, a cape or a sheathed sword hanging off
+  one side of ONE row widens that row's box and moves the BODY by half the prop's
+  width. A 24 px prop (12.5% of the frame) refused; a 48 px one refused harder.
+  `_registered_distance` now takes the MINIMUM over a symmetric integer shift
+  grid of ±`frame_w/12` (16 px on the 192 px cell), for the direct and the
+  flipped comparison alike, so a translation cancels out of the ratio. After it:
+  the same slides read −18.05% and install, and a one-sided prop up to a quarter
+  of the frame (48 px, body −24 px) still installs at +5.19%.
+  *It is a minimum over a SYMMETRIC grid and not a cross-correlation peak on
+  purpose.* `distance(shift(flip a, d), flip b) == distance(shift(a, −d), b)`, so
+  a symmetric grid's score SET is unchanged by a global flip and its minimum is
+  exactly equal — which is what keeps "a sheet mirrored on every row is a fixed
+  point" true of the registered measure. A peak with a first-wins tie-break picks
+  a different shift on symmetric art and breaks that equality.
+  *Consequence:* the window BOUNDS the blindness, it does not remove it. A pure
+  translation past the window still crosses (−24 px reads +10.91% even
+  registered). And it is not free — see the two entries below.
+
+- **[READ] `normalize_cells` is load-bearing for the handedness gate, and it is
+  upstream pet code this package does not own.** `agent/charsheet/pipeline.py`
+  imports it from `agent.pet.generate.atlas`; it is what puts neighbouring rows
+  in comparable positions at all, and round one's gate only survived contact with
+  real characters because of it. It is weaker than it looks: it pins each row's
+  union BOX to the frame centre (measured residual ±0.5 px — pure rounding), not
+  the row's BODY, and the body still lands **up to 10 px apart between adjacent
+  rows** on art that passes (measured with a column-profile cross-correlation
+  across all three states of the live sheet; the largest was `jumping` `s|se`).
+  Round one charged all of that to handedness. Nothing in this package would
+  notice if an upstream retune changed the centring rule.
+  *Consequence:* if `normalize_cells` ever stops registering, the handedness gate
+  degrades silently — it does not fail, it starts refusing correct characters.
+  The registration window is now the local defence, sized against that 10 px, not
+  against the ±0.5 px the bbox suggests.
+
+- **[READ] Registration costs about half the true signal, and the honest reading
+  is that half of round one's "handedness" was placement.** Re-measured on real
+  art on 2026-08-25, both bands moved:
+  `| population | round one (no registration) | round two (window 16) |`
+  `| true, pre-fix ne rows | +18.53 / +13.05 / +13.01% | +12.28 / +8.52 / +7.37% |`
+  `| true, each interior row of the REPAIRED sheet mirrored one at a time | floor +8.51% | floor +4.33% |`
+  `| false, the repaired sheet's nine interior rows | ≤ −9.30% | ≤ −4.53% |`
+  `| false, cobalt-robot-courier (asymmetric, correct) | +1.85% | +1.72% |`
+  `| false, correct art displaced 8 px | +11.01% REFUSED | −4.53% installs |`
+  Note which number barely moved: the deliberately asymmetric correct character.
+  Registration takes the placement out of the TRUE readings and leaves the
+  genuinely-asymmetric false one where it was, so the separation narrows from
+  about 7x to about 2.5x. The threshold stayed at 8% — set for specificity, since
+  a false refusal used to be permanent — which means it now misses part of the
+  true band by design: three of those twelve single-row mirrors fall under it.
+  *Consequence:* a clean handedness pass is weaker evidence than it was, in
+  exchange for a refusal that is much better evidence. Two things buy the
+  sensitivity back — the cross-state pass, and the operator's eye. Neither is
+  optional.
+
+- **[READ] A mirrored row makes its NEIGHBOURS read high, and obeying a
+  multi-row refusal spends correct approved art.** Measured on the repaired live
+  sheet, mirroring one row at a time: `idle-e` alone puts `idle-e` at +13.33% and
+  `idle-ne` at +11.87%; `walk-e` alone puts `walk-e` at +15.86% and `walk-ne` at
+  +14.09%. Round one made every one of those a separate ERROR and every error
+  said `characters reroll-row --row <that row>` — and `reroll_row` proposes then
+  approves unconditionally with no `approve-row` verb anywhere in the repo, so an
+  operator obeying a three-row refusal spends two correct approved attempts and
+  cannot get them back. The gate now reports only the LOCAL MAXIMUM of each
+  contiguous run of flagged rows; the rest ride in the same finding as
+  `corroborating`, and the message says "Do NOT re-roll them". In every case
+  measured the culprit was the run's maximum.
+  *Consequence:* when a refusal names one row and mentions others, re-roll the
+  named one and compose again. The synthetic glyph fixture never reproduced this
+  — it flags exactly one row every time — which is why round one's tests were
+  systematically more benign than reality here.
+
+- **[READ] The same direction across STATES is a second, stronger read, and it
+  is what sees a whole state drawn backwards.** The rotation pass is a fixed
+  point per state — mirror all five rows of `idle`, `walk` or `jumping` and the
+  chain still fits itself, `ok=True`, nothing flagged — which matters because
+  `add-state` generates one state's five rows in a single batch against one
+  reference and one prompt, exactly the shape of the generation that drew `ne`
+  backwards three times. Comparing the same direction across states sees it
+  loudly: on correct art the pairs read −8.27% to −75.71%, and with one state
+  mirrored the pairs touching it read +7.64% to +43.09%. A row is convicted only
+  when it still reads over the threshold against a MAJORITY of the other states,
+  so it needs THREE — across one pair a disagreement cannot say which side is
+  wrong, the end-row rule on the other axis. Restricted to the directions the
+  rotation already judges (`se`, `e`, `ne`): `s` and `n` read ±0.2% either way
+  and would only add noise.
+  It also recovers what registration cost: mirroring `idle-se` alone reads only
+  +4.33% in the rotation (missed) and +11.76% across states (caught).
+  *Consequence:* the default `idle:6, walk:8` sheet gets NOTHING from this pass —
+  it wakes up at the third state. And it is a consensus, so a character whose
+  every state is mirrored is a fixed point of it too, and a 2-of-3 split convicts
+  the minority. Say so rather than reporting it as certainty.
+
+- **[READ] One blank row used to make its whole state unjudged, silently, on a
+  sheet that still installs.** `validate_sheet` records an empty row as a
+  WARNING as long as one row is filled, and round one's blank guard then marked
+  the entire chain unjudged and moved on — so a sheet with one empty row
+  installed with no handedness answer for the other four, and said so only in a
+  payload nothing read. The guard was also untested: mutating `if blank:` to
+  `if False:` left all 47 tests green. A row is now judged whenever it has a
+  measurable seam on EACH side, so a blank row costs its two neighbours and
+  nothing else. The same rule now covers the rotation's end rows and the
+  short-chain case, which retired `if len(chain) < 3:` — the other mutation round
+  one left green — by making it unreachable rather than by testing it.
+  *Consequence:* three special cases became one rule. If you are adding a fourth
+  reason a row cannot be judged, add it as a seam that does not exist, not as a
+  new branch.
+
+- **[READ] The threshold is now pinned as an ORDERING, and the RED evidence is
+  checked into the repo.** `MIRROR_GAIN_THRESHOLD` had no test at all: round
+  one's suite was green from ~0.03 to at least 0.25, because the synthetic glyph
+  fixture's true positives scored 29–36% — an order above the live band — so
+  raising the number past `walk-ne` at 13.05%, the exact defect it shipped for,
+  changed nothing anybody could see. Worse, the only real defective art in
+  existence lived in one operator's hermes home under a hand-made
+  `…backup-2026-08-25-nefix` folder that nothing protected. Both are now
+  `tests/fixtures/charsheet/handedness_8way.webp` (the repaired sheet's three
+  states at 3 frames, with the genuinely mirrored `idle-ne` in place — one true
+  positive at +12.05% rotation / +15.40% states, eight correct rows, loudest
+  false +5.03%) and `handedness_4way.webp` (cobalt-robot-courier, byte-copied —
+  the only independent false signal anyone has measured). The test asserts
+  `loudest false < MIRROR_GAIN_THRESHOLD < quietest true`, so the number reddens
+  the moment it stops separating the populations, in either direction.
+  *Consequence:* when you re-tune the threshold, you are re-tuning it against
+  that fixture and the test will tell you. When you have a THIRD character, add
+  its sheet — the false ceiling is still one asymmetric character measured once.
+
+- **[READ] `handedness.unjudged` reached nobody, and a refusal threw the whole
+  payload away.** The docstrings promised rows were "named with the reason rather
+  than silently dropped" and that "a caller can always see which rows this could
+  not answer for", and grep found nothing outside `pipeline.py` and its tests
+  reading the key. `_cmd_characters_compose` printed `WxH`; the payload needed
+  `--json`; and on the REFUSAL path `compose()` raises, so the payload was
+  discarded exactly when an operator was deciding how much to trust the check.
+  `pipeline.handedness_summary` is now one line on both paths — the compose
+  sentence carries it on success, and the raised `ValueError` carries it plus "a
+  refusal is not a full audit". On the live sheet it reads *handedness: 9 row(s)
+  judged, 6 unjudged (idle-n, idle-s, jumping-n, jumping-s, walk-n, walk-s)*.
+  *Consequence:* read that line back to the operator. Six of fifteen unjudged is
+  the normal state of an 8-way sheet, not a fault — but it is the difference
+  between "the check passed" and "the check passed on the nine rows it can see".
+
+- **[READ] There IS a way past a refusal now, it names rows, and it is recorded.**
+  Round one shipped no override on the reasoning that the only correct answers
+  are "reroll" or "fix the gate". The premise changed: the false-positive driver
+  is FRAMING, not asymmetry, registration bounds that class rather than removing
+  it, and the two populations are 2.5x apart on the two characters anyone has
+  ever measured. `compose --accept-handedness idle-e,walk-ne` installs despite
+  those rows' findings, writes them to the installed manifest as
+  `handednessAccepted`, keeps every other flagged row refusing, and turns the
+  accepted findings into warnings that still carry the whole refusal text.
+  Naming a row that was NOT flagged is itself an error, so the flag cannot be
+  carried in a command line as boilerplate and quietly disarm the check the day
+  a row is genuinely wrong.
+  *Consequence:* it is per ROW and it is a record, not a bypass. Use it only
+  after looking at the strip with the operator, and say in the turn what you saw.
+
+- **[READ] Three round-one figures do not reproduce; here are the measured
+  ones.** (a) "~1 s on a 15-row sheet" was **0.08 s** for the unregistered gate
+  and is **~4.0 s** for the registered one on the live 15-row sheet — the shift
+  search is 33 distance evaluations per frame pair per orientation. It errs
+  safe either way, but say the real number. (b) The call-site comment said the
+  check runs "only on a sheet whose geometry already holds"; it runs
+  UNCONDITIONALLY after the collapse/outlier/residue checks — only the wrong-SIZE
+  early return short-circuits it. (c) `if as_drawn <= 0: continue` dropped a row
+  from `flagged` AND from `unjudged`, the one place the module broke its own
+  accounting rule; such a row is now unjudged with the reason, because a row that
+  simply vanishes from the payload reads exactly like a clean one.
 
 ---
 

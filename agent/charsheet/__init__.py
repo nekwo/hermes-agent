@@ -14,7 +14,8 @@ earlier wording of this paragraph said "derived at compose time", which was true
 before that ruling and has not been true since; ``pipeline.compose_draft_frames``
 is the chokepoint and it has no flip in it. That asymmetry is why a row drawn as
 the mirror of the direction it claims corrupts TWO directions, and why
-``pipeline.detect_mirrored_art`` refuses such a sheet at validation.
+``pipeline.detect_mirrored_art`` refuses such a sheet at validation -- unless the
+operator accepts that ROW by name, which is recorded on the installed character.
 
 This subpackage is fork-owned but lives inside the upstream ``agent`` namespace
 so it ships with the plain hermes wheel (the packaging boundary rules out

@@ -39,6 +39,7 @@ from agent.charsheet.draft import (
 )
 from agent.charsheet.revisions import STATE_FILENAME, ImageRevisionStore
 from agent.charsheet.spec import CHAR8, EIGHT_WAY, FOUR_WAY, SheetSpec, StateSpec
+from tests.agent.test_charsheet_pipeline import load_fixture_sheet
 
 pytest.importorskip("PIL")
 
@@ -1534,3 +1535,99 @@ def test_directions_mirrored_still_names_the_three_runtime_flips(installed):
         for state in ("idle", "walk")
         for direction in ("nw", "w", "sw")
     } == set()
+
+
+# ───────────── handedness: what compose does with a refusal it can be told about ─────────────
+#
+# The DETECTOR is measured on real art in `test_charsheet_pipeline.py` against
+# the checked-in fixtures; the guarantees pinned here are compose's, and they are
+# the ones that failed: the accounting rode only on the payload nobody read, and
+# there was no way past a refusal at all. The seam replaced is which IMAGE gets
+# validated — the real validator, the real findings and the real acceptance logic
+# all run, on the sheet whose `idle-ne` genuinely shipped facing north-west.
+
+
+@pytest.fixture
+def defective_sheet(monkeypatch):
+    """Make this draft's compose validate the real defective 8-way fixture.
+
+    The draft suite's spec is 4-way on purpose (the stage machine is
+    direction-count agnostic), and a 4-way rotation is nearly blind to handedness
+    — its one interior row sits between the two near-symmetric views. So there is
+    no way to make THIS draft produce a genuine refusal, and pretending otherwise
+    with a hand-built finding would pin the shape of a dict rather than the
+    behaviour of a gate.
+    """
+    fixture_spec, sheet = load_fixture_sheet("handedness_8way.webp")
+    real = pipeline.validate_sheet
+
+    def validate_the_fixture(_spec, _image, *, accept_handedness=()):
+        return real(fixture_spec, sheet, accept_handedness=accept_handedness)
+
+    monkeypatch.setattr(pipeline, "validate_sheet", validate_the_fixture)
+    return fixture_spec
+
+
+def test_a_refused_compose_carries_the_accounting_it_used_to_discard(
+    fake, base, defective_sheet
+):
+    """On a refusal the whole handedness payload was thrown away.
+
+    `compose` raises, so the dict carrying "and here are the six rows nobody
+    judged" never reached the caller — at exactly the moment an operator is
+    deciding how much to trust the refusal.
+    """
+    draft = run_to_rows(base)
+    draft.run_rows()
+
+    with pytest.raises(ValueError) as excinfo:
+        draft.compose()
+
+    message = str(excinfo.value)
+    assert "looks drawn as the MIRROR of" in message
+    assert "handedness: 9 row(s) judged, 1 flagged, 6 unjudged" in message
+    assert "a refusal is not a full audit" in message
+    assert draft.stage == "rows", "a refused compose does not advance the stage"
+
+
+def test_an_accepted_handedness_row_installs_and_is_recorded_on_the_character(
+    fake, base, defective_sheet
+):
+    """The override is a fact about the character, not a refusal that vanished.
+
+    An operator who looked at the row and overrode it leaves a durable record on
+    the installed manifest; the next person to open that character can see which
+    rows a human waved through and which the check cleared.
+    """
+    draft = run_to_rows(base)
+    draft.run_rows()
+
+    with pytest.raises(ValueError):
+        draft.compose()
+
+    composed = draft.compose(accept_handedness=["idle-ne"])
+
+    assert draft.stage == "composed"
+    assert composed["validation"]["handedness"]["accepted"] == ["idle-ne"]
+    manifest = json.loads(
+        (characters_dir() / composed["slug"] / MANIFEST_FILENAME).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert manifest["handednessAccepted"] == ["idle-ne"]
+
+
+def test_a_clean_compose_records_no_acceptance_at_all(installed):
+    """The field is absent, not an empty list, when nothing was overridden.
+
+    An `[]` on every character is a field a reader learns to ignore; a key that
+    appears only when a human overrode something is a key that means something
+    when it appears.
+    """
+    manifest = json.loads(
+        (characters_dir() / installed["slug"] / MANIFEST_FILENAME).read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert "handednessAccepted" not in manifest

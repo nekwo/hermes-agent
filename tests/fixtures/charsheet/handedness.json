@@ -1,0 +1,87 @@
+{
+  "why": "Real art, checked in because the only RED evidence for the handedness gate used to live in one operator's hermes home (a hand-made '.backup-2026-08-25-nefix' folder) that nothing protected. A gate whose only true positive is unreachable from the repo is a gate no test can keep honest.",
+  "sheets": {
+    "handedness_8way.webp": {
+      "source": "the anime-girl draft 20260824-140756-cd645a, alice profile",
+      "built": "2026-08-25",
+      "content": "The first 3 frames of every authored row of the REPAIRED sheet (idle/walk/jumping -> idle/walk/jump), except that 'idle-ne' is the PRE-FIX row — the one genuinely drawn facing north-WEST, composed, installed, bundled and found by a human in a 3D scene. So this one image holds one real mirrored row and eight real correct ones, all from the same character and the same generations.",
+      "spec": {
+        "states": [
+          {
+            "name": "idle",
+            "frames": 3,
+            "directional": true
+          },
+          {
+            "name": "walk",
+            "frames": 3,
+            "directional": true
+          },
+          {
+            "name": "jump",
+            "frames": 3,
+            "directional": true
+          }
+        ],
+        "scheme": {
+          "order": [
+            "s",
+            "se",
+            "e",
+            "ne",
+            "n",
+            "nw",
+            "w",
+            "sw"
+          ],
+          "authored": [
+            "s",
+            "se",
+            "e",
+            "ne",
+            "n"
+          ],
+          "mirrored": {
+            "nw": "ne",
+            "w": "e",
+            "sw": "se"
+          }
+        },
+        "frameW": 192,
+        "frameH": 208
+      }
+    },
+    "handedness_4way.webp": {
+      "source": "the installed cobalt-robot-courier, base profile (byte copy)",
+      "built": "2026-08-25",
+      "content": "A CORRECT 4-way character with a satchel over one shoulder — deliberately asymmetric, and the loudest independent false signal anyone has measured (+1.72%). It is also the character an earlier draft of this check refused, over its back view's single seam.",
+      "spec": {
+        "states": [
+          {
+            "name": "idle",
+            "frames": 2,
+            "directional": true
+          }
+        ],
+        "scheme": {
+          "order": [
+            "s",
+            "e",
+            "n",
+            "w"
+          ],
+          "authored": [
+            "s",
+            "e",
+            "n"
+          ],
+          "mirrored": {
+            "w": "e"
+          }
+        },
+        "frameW": 192,
+        "frameH": 208
+      }
+    }
+  }
+}

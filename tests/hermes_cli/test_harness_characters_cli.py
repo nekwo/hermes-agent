@@ -1043,3 +1043,64 @@ def test_the_add_state_human_line_hands_over_the_exact_only_list(
     expected = ",".join(f"jump-{d}" for d in FOUR_WAY.authored)
     assert f"--only {expected}" in line
     assert line.startswith(f"Draft {draft_id}: state jump added")
+
+
+# ───────────── the handedness accounting, and the one door past a refusal ─────────────
+
+
+def _compose_ready(capsys, base_image):
+    draft_id = start_draft(capsys, "--base-image", str(base_image))
+    run(["harness", "characters", "turnaround", "--draft", draft_id, "--json"], capsys)
+    run(
+        ["harness", "characters", "approve-direction", "--draft", draft_id, "--all", "--json"],
+        capsys,
+    )
+    run(["harness", "characters", "rows", "--draft", draft_id, "--json"], capsys)
+    return draft_id
+
+
+def test_the_compose_line_says_what_the_handedness_check_could_not_answer_for(
+    fake, base_image, capsys
+):
+    """`composed → 1536x3120` is not a certificate and used to read like one.
+
+    The gate judges only rows with a neighbour on each side, so on the default
+    8-way sheet six of fifteen rows are never judged and on this 4-way one four
+    of six are — a fact that lived solely in a payload nothing outside the module
+    read. The sentence an operator actually sees now carries it.
+    """
+    draft_id = _compose_ready(capsys, base_image)
+
+    spoken = parser().parse_args(["harness", "characters", "compose", "--draft", draft_id])
+    assert spoken.func(spoken) == 0
+    line = capsys.readouterr().out.strip()
+
+    assert "composed →" in line
+    assert "handedness: 2 row(s) judged, 4 unjudged (" in line
+    for end in ("idle-n", "idle-s", "walk-n", "walk-s"):
+        assert end in line
+
+
+def test_accepting_a_handedness_row_that_was_not_flagged_is_refused_at_the_cli(
+    fake, base_image, capsys
+):
+    """The override is threaded, and it cannot be carried along as boilerplate.
+
+    `--accept-handedness` exists because a false refusal used to be permanent for
+    a draft — `compose` has no other door. The danger of any such flag is that it
+    ends up in a shell history and silently disarms the check the day the row is
+    genuinely wrong, so naming a row nothing flagged is itself a refusal.
+    """
+    draft_id = _compose_ready(capsys, base_image)
+
+    code, refused = run(
+        [
+            "harness", "characters", "compose", "--draft", draft_id,
+            "--accept-handedness", "walk-e", "--json",
+        ],
+        capsys,
+    )
+
+    assert (code, refused["ok"]) == (2, False)
+    assert "was not flagged" in refused["error"]
+    assert refused["stage"] == "rows"

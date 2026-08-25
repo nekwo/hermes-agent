@@ -65,6 +65,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "MAGENTA",
+    "MIRROR_GAIN_THRESHOLD",
     "PREFIX_TURNAROUND",
     "atlas_to_webp_bytes",
     "build_sheet_palette",
@@ -74,6 +75,7 @@ __all__ = [
     "generate_direction_view",
     "generate_row_strip",
     "generate_turnaround",
+    "handedness_summary",
     "recomposite_on_magenta",
     "row_prefix",
     "turnaround_order",
@@ -640,22 +642,67 @@ def compose_sheet(spec: SheetSpec, cells_by_key: dict[str, list]):
 # How much better a chain of authored directions must fit together once ONE row
 # is flipped horizontally before we call that row's art mirrored.
 #
-# The number is measured, not chosen. On the live ``anime-girl`` draft — whose
-# ``ne`` row was drawn facing north-WEST in all three of its states, shipped,
-# and was found in a 3D scene rather than by any check here — flipping the
-# offending row improved the fit of the seams it touches by 18.5% (idle), 13.1%
-# (walk) and 13.0% (jumping). On the same character's corrected sheet, and on
-# every other row of both sheets, the best any single flip could do was 3.9%; on
-# a second, deliberately asymmetric character (a robot with a satchel over one
-# shoulder, 4-way) it was 1.9%. The two populations are separated by a factor of
-# three and this sits near their geometric mean — roughly 2x above the loudest
-# false signal and 1.6x below the quietest true one.
+# The number is measured, not chosen, and the population it separates was
+# re-measured on 2026-08-25 once registration (below) entered the measure.
+# Registration costs sensitivity — it takes back the part of the old signal that
+# was really PLACEMENT — so both bands moved and the separation narrowed:
+#
+#   TRUE  (real art known to be mirrored): the live `anime-girl` pre-fix sheet's
+#         three `ne` rows score +12.28% / +8.52% / +7.37%, and mirroring each of
+#         the nine interior rows of the REPAIRED sheet one at a time scores
+#         +4.33% ... +15.86%. Twelve samples, floor +4.33%.
+#   FALSE (real art known to be correct): every interior row of the repaired
+#         sheet reads -4.53% ... -18.85%, and `cobalt-robot-courier` — 4-way, a
+#         satchel over one shoulder, deliberately asymmetric — reads +1.72%.
+#         Ceiling +1.72%.
+#
+# 8% therefore sits 4.7x above the loudest false signal and 1.7x below the
+# quietest true one it still catches. It deliberately does NOT catch the whole
+# true band: three of those twelve fall under it. That asymmetry is on purpose
+# and it is the reverse of the shipped design's — a false refusal used to be
+# permanent, so the threshold is set for specificity, and the two things that
+# buy the sensitivity back are the cross-state pass below (which scores the same
+# defect at +7.64% ... +43.09%) and the operator's named acceptance in
+# :func:`validate_sheet`.
 #
 # It is a RATIO on purpose: an absolute pixel distance is a property of the
 # character's palette and silhouette and would need retuning per art style. A
 # ratio is scale-free, and assumes nothing about skin tone, hue or style — only
 # that a rotation sequence is a rotation sequence.
 MIRROR_GAIN_THRESHOLD = 0.08
+
+
+# How far one row may be slid sideways, before either distance is taken, so that
+# PLACEMENT cannot be read as handedness. One twelfth of the frame each way —
+# 16 px on the 192 px cell.
+#
+# Without this the measure has no registration step at all, and any horizontal
+# displacement between neighbouring rows enters the distance and therefore the
+# ratio. Measured on the REPAIRED (correct) live sheet by sliding `idle-e`
+# sideways and changing nothing else: -7 px scored +9.81% and refused the
+# install; -24 px scored +18.75%, past every genuine reading on the defective
+# sheet. What kept that off real characters was ``normalize_cells`` centring each
+# row on its union bbox — upstream pet code this package imports and does not
+# own — and that centring is not as tight as it looks: it pins the union BOX,
+# not the body, so the body still lands up to 10 px apart between neighbouring
+# rows on art that passes (measured across all three states of the live sheet).
+# The shipped measure charged all of that to handedness.
+#
+# The reachable driver is a PROP, not a stray offset: a bag, a cape or a sheathed
+# sword hanging off one side of ONE row widens that row's union bbox, so centring
+# it moves the BODY by half the prop's width. With this window a one-sided prop
+# up to a quarter of the frame (48 px, body -24 px) still installs (+5.19%);
+# without it a 24 px prop already refused (+9.05%).
+#
+# The window BOUNDS the blindness, it does not remove it: a pure translation
+# larger than the window still crosses (-24 px reads +10.91% even registered).
+# That residue is why the acceptance path in :func:`validate_sheet` exists.
+REGISTRATION_WINDOW_DIVISOR = 12
+
+
+def registration_window(frame_w: int) -> int:
+    """Half-width, in pixels, of the shift search for a *frame_w*-wide cell."""
+    return max(1, round(frame_w / REGISTRATION_WINDOW_DIVISOR))
 
 
 def _cell_distance(left, right) -> float:
@@ -688,16 +735,64 @@ def _row_cells(rgba, spec: SheetSpec, row: RowSpec) -> list:
     ]
 
 
-def _seam_distance(left_cells, right_cells) -> tuple[float, float]:
+def _padded(cell, pad: int):
+    """*cell* on a transparent canvas *pad* px wider on each side."""
+    from PIL import Image
+
+    canvas = Image.new("RGBA", (cell.width + 2 * pad, cell.height), (0, 0, 0, 0))
+    canvas.alpha_composite(cell, (pad, 0))
+    return canvas
+
+
+def _registered_distance(left, right, window: int) -> tuple[float, int]:
+    """``(distance, shift)`` — the smallest distance over a symmetric shift grid.
+
+    Both cells are compared on ONE canvas ``window`` px wider on each side, so no
+    content falls off an edge and both distances are divided by the same pixel
+    count: the padding scales the two terms of the ratio identically and cancels.
+
+    The grid is symmetric about zero on purpose. ``distance(shift(flip a, d),
+    flip b) == distance(shift(a, -d), b)``, so under a global flip the SET of
+    scores over a symmetric grid is unchanged and its minimum is EXACTLY equal —
+    which is what keeps the "a sheet mirrored on every row is a fixed point"
+    property true of the registered measure and not merely of the raw one. An
+    asymmetric grid, or a cross-correlation peak with a first-wins tie-break,
+    would break that equality on symmetric art.
+    """
+    if window <= 0:
+        return _cell_distance(left, right), 0
+    width, height = left.size
+    fixed = _padded(right, window)
+    sliding = _padded(left, 2 * window)
+    best: float | None = None
+    best_shift = 0
+    for shift in range(-window, window + 1):
+        start = window - shift
+        score = _cell_distance(
+            sliding.crop((start, 0, start + width + 2 * window, height)), fixed
+        )
+        if best is None or score < best:
+            best, best_shift = score, shift
+    return best, best_shift
+
+
+def _seam_distance(left_cells, right_cells, *, window: int) -> tuple[float, float]:
     """``(as drawn, with one side flipped)`` — mean over column-paired frames.
 
     Paired by column index rather than by pose: neighbouring rows are separate
     generations and their animation phases do not line up anyway, so averaging
     across the whole row is what takes the phase noise out of the number.
 
+    Each pairing is REGISTERED first (:func:`_registered_distance`) and both
+    orientations get the same freedom, so a sideways displacement between the two
+    rows cancels out of the ratio instead of reading as handedness. *window* is
+    the only knob; ``window=0`` is the unregistered measure and exists so a test
+    can show what registration bought.
+
     ``distance(flip(a), b) == distance(a, flip(b))`` — flipping both operands is
-    a re-indexing that changes no per-pixel difference — so a seam has exactly
-    ONE mirrored distance and which side we flip to compute it does not matter.
+    a re-indexing that changes no per-pixel difference, and the symmetric shift
+    grid preserves it — so a seam has exactly ONE mirrored distance and which
+    side we flip to compute it does not matter.
     """
     from PIL import Image
 
@@ -709,52 +804,135 @@ def _seam_distance(left_cells, right_cells) -> tuple[float, float]:
     for index in range(paired):
         left = left_cells[index]
         right = right_cells[index]
-        direct += _cell_distance(left, right)
-        flipped += _cell_distance(left.transpose(Image.FLIP_LEFT_RIGHT), right)
+        direct += _registered_distance(left, right, window)[0]
+        flipped += _registered_distance(
+            left.transpose(Image.FLIP_LEFT_RIGHT), right, window
+        )[0]
     return (direct / paired, flipped / paired)
+
+
+def _seam_record(left: str, right: str, direct: float, flipped: float) -> dict:
+    return {"rows": (left, right), "distance": direct, "mirroredDistance": flipped}
+
+
+def _seam_evidence(row: str, seams: list[dict]) -> list[dict]:
+    """The seams a finding quotes, named from the flagged row's point of view."""
+    return [
+        {
+            "with": next(key for key in seam["rows"] if key != row),
+            "distance": seam["distance"],
+            "mirroredDistance": seam["mirroredDistance"],
+        }
+        for seam in seams
+    ]
+
+
+def _gain(seams: list[dict]) -> float | None:
+    """``(as drawn - flipped) / as drawn`` over *seams*; ``None`` when 0 apart."""
+    as_drawn = sum(seam["distance"] for seam in seams)
+    if as_drawn <= 0:
+        return None
+    return (as_drawn - sum(seam["mirroredDistance"] for seam in seams)) / as_drawn
+
+
+def _finding_from_run(run: list[tuple[int, dict]]) -> dict:
+    culprit = max(run, key=lambda item: item[1]["gain"])[1]
+    finding = dict(culprit)
+    finding["corroborating"] = [
+        {"row": entry["row"], "gain": entry["gain"]}
+        for _position, entry in run
+        if entry["row"] != culprit["row"]
+    ]
+    return finding
+
+
+def _run_findings(scored: list[tuple[int, dict]]) -> list[dict]:
+    """One finding per contiguous RUN of over-threshold rows: the run's maximum.
+
+    A mirrored row raises BOTH its neighbours toward the line, because their
+    seams against it prefer the flip from their side too. Reporting each of them
+    as its own error is not a harmless excess of caution: every message says
+    ``characters reroll-row``, ``reroll_row`` proposes and approves
+    unconditionally, and there is no ``approve-row`` verb to undo it — so an
+    operator who obeys a three-row refusal literally spends two correct approved
+    attempts. Measured on the live repaired sheet: mirroring `idle-e` alone puts
+    `idle-e` at +13.33% and `idle-ne` at +11.87%; mirroring `walk-e` puts
+    `walk-e` at +15.86% and `walk-ne` at +14.09%. In every case the culprit is
+    the run's maximum, which is what this reports; the rest ride along as
+    ``corroborating`` and the refusal says not to touch them.
+    """
+    over = [item for item in scored if item[1]["gain"] >= MIRROR_GAIN_THRESHOLD]
+    findings: list[dict] = []
+    run: list[tuple[int, dict]] = []
+    for item in over:
+        if run and item[0] != run[-1][0] + 1:
+            findings.append(_finding_from_run(run))
+            run = []
+        run.append(item)
+    if run:
+        findings.append(_finding_from_run(run))
+    return findings
 
 
 def detect_mirrored_art(spec: SheetSpec, image) -> dict:
     """Which authored rows are drawn as the MIRROR of the direction they claim.
 
-    The question, stated once: *walking the authored directions in turnaround
-    order, would flipping this one row horizontally make it fit its neighbours
-    in the rotation noticeably better than it does as drawn?* Pure per-pixel
-    distance — no skin tone, hue, silhouette or art-style assumption — and no
-    reference art, because a rotation sequence is its own reference.
+    Two independent passes, both asking the same question — *would flipping this
+    one row horizontally make it fit the art it has to agree with noticeably
+    better than it does as drawn?* — of two different neighbourhoods:
 
-    Why it scores a ROW and not a seam: a seam only says the two rows either
-    side of it disagree, never which of them is wrong. Summing the seams a row
-    touches, before and after flipping IT, is what attributes the fault — and it
-    is also what makes a nearly symmetric neighbour harmless rather than
-    dangerous. The front and back views are close to their own mirror images, so
-    a seam against one carries almost no handedness information; here it lands as
-    a near-zero term that dilutes the ratio, not as a vote that can veto it.
-    That distinction is not academic. On the live defective sheet ``idle-ne``'s
-    seam against ``idle-n`` preferred the UNFLIPPED art by 2.1% — noise off a
-    symmetric view — and the two-neighbour rule that this replaced, which
-    required both neighbours to agree, cleared the row on that vote. It was
-    mirrored, in all three states, and had shipped.
+    * **the rotation** (``basis: "rotation"``): the authored directions of ONE
+      state, walked in turnaround order. Answers a single mis-drawn row.
+    * **the states** (``basis: "states"``): the SAME direction across every
+      state, all of which must face the same way. Answers a whole state drawn
+      mirrored — the case ``add_state`` makes reachable in one batch, since it
+      generates all of a new state's rows against one reference and one prompt,
+      which is exactly how the `ne` defect arose along the other axis.
+
+    Pure per-pixel distance — no skin tone, hue, silhouette or art-style
+    assumption — and no reference art, because a rotation sequence and a set of
+    states are each their own reference.
+
+    Why the rotation pass scores a ROW and not a seam: a seam only says the two
+    rows either side of it disagree, never which of them is wrong. Summing the
+    seams a row touches, before and after flipping IT, is what attributes the
+    fault — and it is also what makes a nearly symmetric neighbour harmless
+    rather than dangerous. The front and back views are close to their own mirror
+    images, so a seam against one carries almost no handedness information; here
+    it lands as a near-zero term that dilutes the ratio, not as a vote that can
+    veto it. On the live defective sheet ``idle-ne``'s seam against ``idle-n``
+    preferred the UNFLIPPED art by 2.1% — noise off a symmetric view — and the
+    two-neighbour rule that this replaced, which required both neighbours to
+    agree, cleared the row on that vote. It was mirrored, in all three states,
+    and had shipped.
+
+    Why the state pass needs THREE states: across one pair a disagreement cannot
+    say which of the two rows is the mirrored one — the same reason the
+    rotation's end rows are never judged. With three or more, a row is convicted
+    only when it still reads over the threshold against a MAJORITY of the other
+    states, and that majority reading is what ``gain`` reports for this basis.
+    The default sheet has two states, so this pass says nothing until a third
+    arrives.
 
     **What this cannot see, written down so nobody has to rediscover it.** The
     measure is invariant under flipping every row at once, because
     ``distance(flip(a), flip(b)) == distance(a, b)``. A character drawn
     consistently mirrored on ALL rows is therefore a perfect fixed point and
-    passes cleanly. Nothing internal to a sheet can catch that: the sheet is
-    self-consistent, and only the world outside it — the launcher's screen axes —
-    says which way is east. The same algebra bounds the second blind spot: a
-    contiguous BLOCK of mirrored rows is visible only at the block's edges, so
-    its interior rows score near zero.
+    passes cleanly — and so is one whose every STATE is mirrored, since the state
+    pass is a consensus and a unanimous one convicts nobody. Nothing internal to
+    a sheet can catch either: the sheet is self-consistent, and only the world
+    outside it — the launcher's screen axes — says which way is east. The same
+    algebra bounds the third blind spot: a contiguous BLOCK of mirrored rows in
+    one rotation is visible only at the block's edges.
 
-    **The rotation's two END rows are never judged**, and are listed as such.
-    They touch one seam each, and one seam cannot say which of the two rows
-    either side of it is the mirrored one — flipping either scores identically.
-    They are also the front and back views, the two closest to their own mirror
-    image. Both halves of that were measured: on the correct 4-way
-    ``cobalt-robot-courier`` sheet the back view's single seam preferred the
-    mirror by 11%, and an earlier draft of this check refused that character's
-    install over it, while the same seam diluted to 1.9% inside its interior
-    neighbour's two-seam score.
+    **The rotation's two END rows are never judged**, and neither is any row
+    whose neighbour is blank: a row is judged only when it has a measurable seam
+    on EACH side. One seam cannot say which of the two rows either side of it is
+    the mirrored one — flipping either scores identically. Both halves of that
+    were measured: on the correct 4-way ``cobalt-robot-courier`` sheet the back
+    view's single seam preferred the mirror by 11%, and an earlier draft of this
+    check refused that character's install over it, while the same seam diluted
+    to 1.9% inside its interior neighbour's two-seam score.
 
     **A 4-way scheme is nearly blind here and that is worth knowing**: it authors
     ``s, e, n``, so its ONE interior row's two neighbours are both near-symmetric
@@ -763,22 +941,47 @@ def detect_mirrored_art(spec: SheetSpec, image) -> dict:
     passes it either way. The 8-way scheme judges ``se, e, ne``, each against at
     least one profile or diagonal, which is where the signal lives.
 
-    Returns ``{"flagged": [...], "unjudged": [...]}``. A ``flagged`` entry carries
-    the row, the gain and every seam that voted, so a refusal can quote its own
-    evidence. ``unjudged`` is the accounting: a row this cannot answer for is
+    Returns ``{"flagged": [...], "judged": [...], "unjudged": [...]}``. Both
+    lists carry a ``basis``, and every row of the sheet is named at least once
+    across the two: a row may be judged by one pass and unjudged by the other
+    (a 4-way sheet's ``e`` row is judged in the rotation and unjudged across
+    states, because there is only one state), but never both under the SAME
+    basis. ``judged`` carries the gain of every row a pass could answer for, over
+    the threshold or under it, so the margin is a readable fact rather than
+    something a caller re-derives.
+    ``flagged`` is the subset worth acting on after attribution, each entry
+    quoting the seams that voted plus any ``corroborating`` rows that read high
+    because of it. ``unjudged`` is the accounting: a row this cannot answer for is
     named with the reason rather than silently dropped.
     """
     rgba = _open_rgba(image)
-    flagged: list[dict] = []
-    unjudged: list[dict] = []
+    window = registration_window(spec.frame_w)
     rows_by_key = {row.key: row for row in spec.rows()}
+    cells_by_key: dict[str, list] = {}
+
+    def cells(row: RowSpec) -> list:
+        if row.key not in cells_by_key:
+            cells_by_key[row.key] = _row_cells(rgba, spec, row)
+        return cells_by_key[row.key]
+
+    def blank(row: RowSpec) -> bool:
+        return not any(cell.getbbox() for cell in cells(row))
+
+    judged: list[dict] = []
+    unjudged: list[dict] = []
+    rotation_flagged: list[dict] = []
 
     for state in spec.states:
         if not state.directional:
             unjudged.append(
                 {
                     "rows": [row_key(state.name, None)],
-                    "reason": "state is not directional — it has no rotation to walk",
+                    "basis": "rotation and states",
+                    "reason": (
+                        "state is not directional — it has no rotation to walk, "
+                        "and no other state holds a copy of a direction to "
+                        "compare it against"
+                    ),
                 }
             )
             continue
@@ -787,97 +990,164 @@ def detect_mirrored_art(spec: SheetSpec, image) -> dict:
             rows_by_key[row_key(state.name, direction)]
             for direction in turnaround_order(spec.scheme.authored)
         ]
-        if len(chain) < 3:
-            unjudged.append(
-                {
-                    "rows": [row.key for row in chain],
-                    "reason": (
-                        f"only {len(chain)} authored direction(s) — across one seam "
-                        "a flip of either side scores identically, so no row can be "
-                        "blamed"
-                    ),
-                }
-            )
-            continue
-
-        cells_by_key = {row.key: _row_cells(rgba, spec, row) for row in chain}
-        blank = [
-            row.key
-            for row in chain
-            if not any(cell.getbbox() for cell in cells_by_key[row.key])
-        ]
-        if blank:
-            unjudged.append(
-                {
-                    "rows": [row.key for row in chain],
-                    "reason": (
-                        f"the chain has empty row(s) ({', '.join(blank)}) — an "
-                        "empty row has no facing"
-                    ),
-                }
-            )
-            continue
-
-        seams: list[dict] = []
+        seams: dict[tuple[str, str], dict] = {}
         for left, right in zip(chain, chain[1:]):
-            direct, flipped = _seam_distance(
-                cells_by_key[left.key], cells_by_key[right.key]
-            )
-            seams.append(
-                {
-                    "rows": (left.key, right.key),
-                    "distance": direct,
-                    "mirroredDistance": flipped,
-                }
+            if blank(left) or blank(right):
+                continue
+            direct, flipped = _seam_distance(cells(left), cells(right), window=window)
+            seams[(left.key, right.key)] = _seam_record(
+                left.key, right.key, direct, flipped
             )
 
-        unjudged.append(
-            {
-                "rows": [chain[0].key, chain[-1].key],
-                "reason": (
-                    "the ends of the rotation touch one seam each, and one seam "
-                    "cannot say WHICH of the two rows either side of it is "
-                    "mirrored — flipping either scores identically. They are also "
-                    "the two views closest to their own mirror image, so there is "
-                    "little to see"
-                ),
+        scored: list[tuple[int, dict]] = []
+        for position, row in enumerate(chain):
+            if blank(row):
+                unjudged.append(
+                    {
+                        "rows": [row.key],
+                        "basis": "rotation",
+                        "reason": "the row is empty — an empty row has no facing",
+                    }
+                )
+                continue
+            before = seams.get((chain[position - 1].key, row.key)) if position else None
+            after = (
+                seams.get((row.key, chain[position + 1].key))
+                if position + 1 < len(chain)
+                else None
+            )
+            touching = [seam for seam in (before, after) if seam is not None]
+            if len(touching) < 2:
+                unjudged.append(
+                    {
+                        "rows": [row.key],
+                        "basis": "rotation",
+                        "reason": (
+                            f"{len(touching)} of the two seams it needs — a row is "
+                            "judged only with a measurable neighbour on EACH side, "
+                            "because one seam cannot say WHICH of the two rows "
+                            "either side of it is mirrored (flipping either scores "
+                            "identically). The ends of the rotation always land "
+                            "here, and they are also the two views closest to their "
+                            "own mirror image, so there is little to see"
+                        ),
+                    }
+                )
+                continue
+            gain = _gain(touching)
+            if gain is None:
+                unjudged.append(
+                    {
+                        "rows": [row.key],
+                        "basis": "rotation",
+                        "reason": (
+                            "both of its seams measure zero — a row identical to "
+                            "its neighbours carries no handedness signal"
+                        ),
+                    }
+                )
+                continue
+            scored.append(
+                (
+                    position,
+                    {
+                        "row": row.key,
+                        "state": row.state,
+                        "direction": row.direction,
+                        "gain": gain,
+                        "basis": "rotation",
+                        "seams": _seam_evidence(row.key, touching),
+                    },
+                )
+            )
+
+        judged.extend(entry for _position, entry in scored)
+        rotation_flagged.extend(_run_findings(scored))
+
+    state_flagged: list[dict] = []
+    directional = [state for state in spec.states if state.directional]
+    for direction in turnaround_order(spec.scheme.authored)[1:-1]:
+        drawn = [
+            rows_by_key[row_key(state.name, direction)]
+            for state in directional
+            if not blank(rows_by_key[row_key(state.name, direction)])
+        ]
+        if len(drawn) < 3:
+            unjudged.append(
+                {
+                    "rows": [row.key for row in drawn],
+                    "basis": "states",
+                    "reason": (
+                        f"only {len(drawn)} state(s) draw {direction!r} — across one "
+                        "pair a disagreement cannot say WHICH of the two states is "
+                        "mirrored, so this read needs three"
+                    ),
+                }
+            )
+            continue
+        across: dict[tuple[str, str], dict] = {}
+        for index, left in enumerate(drawn):
+            for right in drawn[index + 1 :]:
+                direct, flipped = _seam_distance(
+                    cells(left), cells(right), window=window
+                )
+                across[(left.key, right.key)] = _seam_record(
+                    left.key, right.key, direct, flipped
+                )
+        for row in drawn:
+            pairs = [seam for pair, seam in across.items() if row.key in pair]
+            ranked = sorted(
+                (seam for seam in pairs if _gain([seam]) is not None),
+                key=lambda seam: _gain([seam]),
+                reverse=True,
+            )
+            majority = len(pairs) // 2 + 1
+            if len(ranked) < majority:
+                continue
+            entry = {
+                "row": row.key,
+                "state": row.state,
+                "direction": row.direction,
+                "gain": _gain([ranked[majority - 1]]),
+                "basis": "states",
+                "seams": _seam_evidence(row.key, ranked[:majority]),
             }
-        )
+            judged.append(entry)
+            if entry["gain"] >= MIRROR_GAIN_THRESHOLD:
+                state_flagged.append(dict(entry, corroborating=[]))
 
-        # Interior rows only. A row with two seams is corroborated from both
-        # sides; an end row with one is not, and judging it anyway is not a
-        # theoretical worry: on the 4-way `cobalt-robot-courier` sheet — correct
-        # art, verified by eye — the back view's single seam preferred the mirror
-        # by 11% and an earlier draft of this check REFUSED that character's
-        # install. The same seam contributes to its interior neighbour's score as
-        # one of two terms, where it is diluted to 1.9% and correctly ignored.
-        for row in chain[1:-1]:
-            touching = [seam for seam in seams if row.key in seam["rows"]]
-            as_drawn = sum(seam["distance"] for seam in touching)
-            if as_drawn <= 0:
-                continue
-            as_flipped = sum(seam["mirroredDistance"] for seam in touching)
-            gain = (as_drawn - as_flipped) / as_drawn
-            if gain < MIRROR_GAIN_THRESHOLD:
-                continue
-            flagged.append(
-                {
-                    "row": row.key,
-                    "state": row.state,
-                    "direction": row.direction,
-                    "gain": gain,
-                    "seams": [
-                        {
-                            "with": next(key for key in seam["rows"] if key != row.key),
-                            "distance": seam["distance"],
-                            "mirroredDistance": seam["mirroredDistance"],
-                        }
-                        for seam in touching
-                    ],
-                }
-            )
+    flagged: list[dict] = list(rotation_flagged)
+    by_row = {finding["row"]: finding for finding in flagged}
+    for finding in state_flagged:
+        existing = by_row.get(finding["row"])
+        if existing is None:
+            # A row that only rode along as corroborating now has evidence of its
+            # own: stop telling the operator not to touch it.
+            for other in flagged:
+                other["corroborating"] = [
+                    entry
+                    for entry in other["corroborating"]
+                    if entry["row"] != finding["row"]
+                ]
+            flagged.append(finding)
+            by_row[finding["row"]] = finding
+        else:
+            existing["basis"] = "rotation and states"
+            existing["seams"] = existing["seams"] + finding["seams"]
+            existing["gain"] = max(existing["gain"], finding["gain"])
 
-    return {"flagged": flagged, "unjudged": unjudged}
+    flagged.sort(key=lambda finding: rows_by_key[finding["row"]].index)
+    return {"flagged": flagged, "judged": judged, "unjudged": unjudged}
+
+
+_MIRROR_BASIS = {
+    "rotation": "flipping it fits its neighbours in the rotation",
+    "states": "flipping it fits the same direction in the other states",
+    "rotation and states": (
+        "flipping it fits both its neighbours in the rotation and the same "
+        "direction in the other states"
+    ),
+}
 
 
 def mirrored_art_error(finding: dict) -> str:
@@ -892,18 +1162,64 @@ def mirrored_art_error(finding: dict) -> str:
         f"{seam['mirroredDistance']:.2f} flipped"
         for seam in finding["seams"]
     )
-    return (
+    text = (
         f"row '{finding['row']}' looks drawn as the MIRROR of "
-        f"{finding['direction']!r}: flipping it fits its neighbours in the "
-        f"rotation {finding['gain'] * 100:.0f}% better ({evidence}). A mirrored "
-        "authored row corrupts the derived direction with it, because the "
-        "consumer builds that one by flipping this row. Re-roll it "
+        f"{finding['direction']!r}: {_MIRROR_BASIS[finding['basis']]} "
+        f"{finding['gain'] * 100:.0f}% better ({evidence}). A mirrored authored "
+        "row corrupts the derived direction with it, because the consumer builds "
+        "that one by flipping this row. Re-roll it "
         f"(characters reroll-row --row {finding['row']} --note ...) with the "
         "facing spelled in frame terms, and look at the strip before composing."
     )
+    if finding.get("corroborating"):
+        names = ", ".join(
+            f"'{entry['row']}' {entry['gain'] * 100:.0f}%"
+            for entry in finding["corroborating"]
+        )
+        text += (
+            f" {names} read high too and are NOT separate faults: a mirrored row "
+            "pulls the seams of the rows either side of it toward the line as "
+            "well. Do NOT re-roll them — a re-roll auto-approves and there is no "
+            "approve-row verb to undo it, so obeying a run of these spends "
+            "correct art. Fix this row, compose again, and judge what is left "
+            "then."
+        )
+    return text
 
 
-def validate_sheet(spec: SheetSpec, image) -> dict:
+def handedness_summary(handedness: dict) -> str:
+    """One line saying what the handedness check could and could not answer for.
+
+    Counts ROWS, not findings, and "unjudged" here means *no pass answered for
+    it* — a row the rotation judged is not reported as unjudged just because the
+    cross-state pass had only one state to work with.
+
+    Exists because the payload it summarises was, until 2026-08-25, read by
+    nothing outside this module and its tests: ``compose`` printed ``WxH`` and
+    raised on a refusal, so on a clean sheet an operator never learned that six
+    of fifteen rows were never judged, and on a refusal the whole payload — the
+    unjudged list included — was discarded exactly when it mattered.
+    """
+    judged = {entry["row"] for entry in handedness["judged"]}
+    unjudged = sorted(
+        {row for entry in handedness["unjudged"] for row in entry["rows"]} - judged
+    )
+    parts = [f"{len(judged)} row(s) judged"]
+    if handedness["flagged"]:
+        parts.append(f"{len(handedness['flagged'])} flagged")
+    accepted = handedness.get("accepted") or []
+    if accepted:
+        parts.append(
+            f"{len(accepted)} accepted by the operator ({', '.join(accepted)})"
+        )
+    if unjudged:
+        parts.append(f"{len(unjudged)} unjudged ({', '.join(unjudged)})")
+    return "handedness: " + ", ".join(parts)
+
+
+def validate_sheet(
+    spec: SheetSpec, image, *, accept_handedness: Sequence[str] = ()
+) -> dict:
     """Geometry, occupancy, collapse and residue checks, driven by *spec*.
 
     Returns ``{ok, width, height, errors, warnings, filled_rows, handedness}``.
@@ -925,6 +1241,21 @@ def validate_sheet(spec: SheetSpec, image) -> dict:
     happened it shipped, was installed, was bundled into the launcher and was
     finally caught by a human looking at a 3D scene. A warning is the shape that
     failure already had.
+
+    **``accept_handedness`` is the one way past that refusal, and it is a named
+    one.** The gate separates its two populations by about 2.5x on the only two
+    characters anyone has measured (see :data:`MIRROR_GAIN_THRESHOLD`), and
+    registration bounds the placement blindness rather than removing it — a
+    one-sided prop past a quarter of the frame width still crosses on correct
+    art. A measurement that good is a strong SIGNAL, not a proof, and a refusal
+    with no way past it made the wrong one permanent for that draft: `compose`
+    has no other door and `reroll_row` auto-approves. So the operator may accept
+    specific ROWS, having looked at them — never the check as a whole. An
+    accepted row becomes a warning that still carries the whole refusal text, and
+    is named in ``handedness["accepted"]`` so the acceptance is a durable fact
+    rather than a refusal that vanished. Naming a row that was NOT flagged is
+    itself an error: an acceptance with nothing to accept is a bypass lying in
+    wait for the next refusal.
     """
     rgba = _open_rgba(image)
     errors: list[str] = []
@@ -943,6 +1274,8 @@ def validate_sheet(spec: SheetSpec, image) -> dict:
             "filled_rows": [],
             "handedness": {
                 "flagged": [],
+                "accepted": [],
+                "judged": [],
                 "unjudged": [
                     {
                         "rows": [row.key for row in spec.rows()],
@@ -1022,12 +1355,38 @@ def validate_sheet(spec: SheetSpec, image) -> dict:
     if residue:
         errors.append(f"{residue} transparent pixels retain RGB residue")
 
-    # Last, and only on a sheet whose geometry already holds: the handedness
-    # check reads real cells, and there is nothing to say about the facing of a
-    # row that is the wrong size or collapsed. Its findings are errors — see the
-    # docstring for why this one is not allowed to be a warning.
+    # Last, after the collapse/outlier/residue checks above — but NOT conditional
+    # on them: only the wrong-SIZE early return short-circuits this, and every
+    # other error still leaves the handedness answer in the payload. Its findings
+    # are errors unless the operator accepted that row by name — see the
+    # docstring for why this one is not allowed to be a plain warning.
     handedness = detect_mirrored_art(spec, rgba)
-    errors.extend(mirrored_art_error(finding) for finding in handedness["flagged"])
+    flagged_rows = {finding["row"] for finding in handedness["flagged"]}
+    known_rows = {row.key for row in spec.rows()}
+    accepted: list[str] = []
+    for key in dict.fromkeys(str(row).strip() for row in accept_handedness):
+        if not key:
+            continue
+        if key not in known_rows:
+            errors.append(
+                f"handedness acceptance names {key!r}, which is not a row of this "
+                f"sheet ({', '.join(sorted(known_rows))})"
+            )
+        elif key not in flagged_rows:
+            errors.append(
+                f"handedness acceptance names {key!r}, which was not flagged — an "
+                "acceptance with nothing to accept is a bypass waiting for the "
+                "next refusal; drop it"
+            )
+        else:
+            accepted.append(key)
+    handedness["accepted"] = accepted
+    for finding in handedness["flagged"]:
+        message = mirrored_art_error(finding)
+        if finding["row"] in accepted:
+            warnings.append(f"handedness accepted by the operator — {message}")
+        else:
+            errors.append(message)
 
     return {
         "ok": not errors,

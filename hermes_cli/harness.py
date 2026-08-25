@@ -1582,6 +1582,7 @@ def build_parser(parent_subparsers) -> None:
     characters_reroll_row.set_defaults(func=_cmd_characters_reroll_row)
     characters_compose = characters_subs.add_parser("compose", help="Compose, validate and install the sheet (stage 'rows' → 'composed')")
     characters_compose.add_argument("--draft", required=True)
+    characters_compose.add_argument("--accept-handedness", default="", help="Row keys whose mirrored-art refusal you have LOOKED at and are overriding, e.g. 'idle-e'. Per row, never blanket; naming a row that was not flagged is itself refused, and the honoured list is written into the installed manifest")
     characters_compose.add_argument("--json", action="store_true")
     characters_compose.set_defaults(func=_cmd_characters_compose)
     characters_reopen = characters_subs.add_parser("reopen", help="Reopen a composed draft for fixes (stage 'composed' → 'rows'); the installed sheet stays until the next compose")
@@ -3371,11 +3372,22 @@ def _cmd_characters_reroll_row(args) -> int:
 
 
 def _cmd_characters_compose(args) -> int:
+    from agent.charsheet import pipeline
+
+    accept_text = str(getattr(args, "accept_handedness", "") or "").strip()
+    accept = [part.strip() for part in accept_text.split(",") if part.strip()]
+
     def call(draft):
-        result = draft.compose()
+        result = draft.compose(accept_handedness=accept)
+        validation = result["validation"]
+        # The handedness accounting rides on the SUCCESS line too. A clean
+        # `composed → 1536x3120` told an operator nothing about the six of
+        # fifteen rows the check could not answer for, and a clean pass has never
+        # been a certificate.
         return result, (
             f"Draft {draft.id} composed → {result['slug']} "
-            f"({result['validation']['width']}x{result['validation']['height']}) at {result['sheet']}"
+            f"({validation['width']}x{validation['height']}) at {result['sheet']}; "
+            + pipeline.handedness_summary(validation["handedness"])
         )
 
     return _characters_verb(args, call)

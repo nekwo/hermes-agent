@@ -99,7 +99,7 @@ not the slug** (`20260824-140756-cd645a` vs `anime-girl`).
 | `rows --draft <id> [--only a,b]` | One generation per **row strip** — never per frame. | `rows` |
 | `reroll-row --draft <id> --row <key> [--note …]` | Re-draws one strip. **Auto-approved.** | `rows` |
 | `thumb --draft <id> --row <key> [--attempt n] [--frame n] [--scale n]` | Writes a card-size QA crop of ONE frame. | **any** |
-| `compose --draft <id>` | Composes, validates, installs; advances to `composed`. | `rows` |
+| `compose --draft <id> [--accept-handedness a,b]` | Composes, validates, installs; advances to `composed`. `--accept-handedness` overrides the mirrored-art refusal for the rows you NAME, after looking at them — never blanket, and a row nothing flagged is itself refused. | `rows` |
 | `reopen --draft <id>` | Back to `rows` for fixes. Installed sheet untouched. | `composed` |
 | `add-state --draft <id> --state <name>:<frames>[:fixed]` | Adds ONE state; seeds its rows un-generated, touches no approved row. | `rows` |
 | `sprite <slug>` | The installed payload the launcher reads. | — |
@@ -263,8 +263,17 @@ Three line shapes leave your reply, and two of them are parsed.
   `reroll-row` that row alone with a note, then resume with
   `rows --only <the rest>`. **Never re-run a bare `rows`** — it regenerates rows
   that already passed.
-- **A reroll is auto-approved.** An unexamined reroll silently becomes the sheet.
-  Crop and look after every one.
+- **A reroll is auto-approved, and it is a ONE-WAY door.** `reroll_row` ends with
+  `propose` then `approve` unconditionally, and there is **no `approve-row`
+  method and no `approve-row` verb** — `approve-direction` is for turnaround
+  references only. So a reroll that comes back WORSE than the attempt it replaced
+  cannot be un-approved; the only way back is another reroll that happens to be
+  good. Crop and look BEFORE you spend the next one, and tell the operator the
+  pointer moves whether or not the new attempt is better. (Nothing is lost:
+  earlier attempts and their notes stay in `state.json` and `--attempt n` still
+  renders them. It is the *approved* pointer that only moves forward.) This is
+  why a refusal naming several rows is dangerous to obey literally — see the
+  compose bullet below.
 - **Rerolls are stochastic and row-grained.** There is no per-frame
   regeneration: the frames of a strip share an identity because they were drawn
   together, so one bad frame costs its whole row. Budget two or three attempts on
@@ -279,12 +288,37 @@ Three line shapes leave your reply, and two of them are parsed.
   in FRAME terms ("the body angled up and to the RIGHT of frame; the sliver of
   face on the viewer's RIGHT; never the mirror of this") — not a nudge, and never
   a hand-flip of the sheet, which the next compose overwrites.
-  What it does NOT see, so you still look: it judges only the rows with a
+  **Re-roll ONLY the rows the refusal names as faults.** A mirrored row pulls the
+  seams of the rows on BOTH sides of it toward the line, so more rows read high
+  than are wrong. The refusal reports the culprit and lists the others as
+  corroborating, in the same message, with the words "Do NOT re-roll them" —
+  obey that literally, because a reroll auto-approves and cannot be undone, so
+  re-rolling a corroborating row spends correct approved art for nothing.
+  **What it does NOT see, so you still look.** It judges a row only when it has a
   neighbour on each side (`se`, `e`, `ne` on an 8-way sheet — the front and back
-  views are excluded and named in the payload's `handedness.unjudged`), a 4-way
-  sheet gives it almost nothing to work with, and a character mirrored on EVERY
-  row passes it perfectly, because a sheet cannot tell from inside itself which
-  way is east.
+  views are excluded, and every row it could not answer for is named in
+  `handedness.unjudged` and counted in the sentence `compose` prints). A 4-way
+  sheet gives it almost nothing. A character mirrored on EVERY row passes
+  perfectly, because a sheet cannot tell from inside itself which way is east —
+  and so does a character whose every STATE is mirrored. It answers WHICH SIDE,
+  never HOW FAR: a rotation turned too far is still turned the right way.
+- **The same check reads a whole STATE across the others**, which is the pass
+  that catches `add-state` generating five rows against a reference that turns
+  the wrong way. It needs THREE states before it can say anything (across one
+  pair, a disagreement cannot say which of the two is wrong), so the default
+  `idle`+`walk` sheet gets nothing from it and the third state is where it wakes
+  up. When it fires, the refusal names each row of that state with basis
+  `states` — that is the one case where re-rolling several rows IS right, and the
+  reference is worth suspecting before the rows are.
+- **A refusal you believe is wrong has exactly one door, and it names rows.**
+  `compose --accept-handedness idle-e,walk-ne` installs despite those rows'
+  findings, records them on the character's manifest as `handednessAccepted`, and
+  keeps every other flagged row refusing. Naming a row that was NOT flagged is
+  itself an error, so the flag cannot be carried along in a command line as
+  boilerplate. Use it only after looking at the strip with the operator and
+  saying what you saw — the check separates its two populations by about 2.5x on
+  the two characters ever measured, which makes it a strong signal and not a
+  proof.
 - **`composed` is not terminal.** The post-install fix loop is
   `reopen → reroll-row → compose`, and the post-install GROWTH loop is
   `reopen → add-state → rows --only … → compose`. Both are non-destructive — the

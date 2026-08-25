@@ -40,6 +40,7 @@ import os
 import re
 import tempfile
 import uuid
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -958,12 +959,19 @@ class CharacterDraft:
         self._set_stage("rows")
         return {"stage": self.stage}
 
-    def compose(self) -> dict:
+    def compose(self, accept_handedness: Sequence[str] = ()) -> dict:
         """Compose, validate and install the sheet; advances to ``composed``.
 
         Refuses unless every authored row has an approved strip: composing from a
         partially approved draft would install a sheet with blank rows that the
         consumer's spec claims are filled.
+
+        *accept_handedness* names rows whose mirrored-art finding the operator
+        has looked at and is overriding — see
+        :func:`pipeline.validate_sheet`. It is per ROW and never blanket, an
+        accepted row that was not flagged is itself a refusal, and the honoured
+        list is written into the installed manifest so the override survives as a
+        fact about the character rather than as a refusal nobody can see any more.
         """
         self._require_stage("compose", "rows")
         spec = self.spec
@@ -995,11 +1003,20 @@ class CharacterDraft:
 
         cells = pipeline.compose_draft_frames(spec, strips, palette_sources)
         sheet = pipeline.compose_sheet(spec, cells)
-        validation = pipeline.validate_sheet(spec, sheet)
+        validation = pipeline.validate_sheet(
+            spec, sheet, accept_handedness=accept_handedness
+        )
         if not validation["ok"]:
+            # The handedness accounting rides on the REFUSAL too. Without it the
+            # payload carrying "and here are the six rows nobody judged" is
+            # discarded at exactly the moment an operator is deciding whether to
+            # trust the check.
             raise ValueError(
                 f"composed sheet for draft {self.id} failed validation: "
                 + "; ".join(validation["errors"])
+                + " — "
+                + pipeline.handedness_summary(validation["handedness"])
+                + "; a refusal is not a full audit"
             )
 
         directory = characters_dir() / _safe_segment(slugify(self.slug))
@@ -1039,6 +1056,10 @@ class CharacterDraft:
             "draftId": self.id,
             "created": _utc_now(),
         }
+        if validation["handedness"].get("accepted"):
+            manifest["handednessAccepted"] = list(
+                validation["handedness"]["accepted"]
+            )
         _write_json_atomic(directory / MANIFEST_FILENAME, manifest)
         self._set_stage("composed")
         logger.info(
