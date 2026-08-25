@@ -52,6 +52,7 @@ from agent.charsheet.spec import (
     DirectionScheme,
     SheetSpec,
     StateSpec,
+    parse_states,
 )
 from agent.pet.constants import DEFAULT_SCALE, LOOP_MS
 from hermes_constants import get_hermes_home
@@ -702,6 +703,95 @@ class CharacterDraft:
             "path": str(path),
             "note": note,
             "approved": True,
+        }
+
+    def add_state(self, state_text: str) -> dict:
+        """Grow the sheet by ONE state. No approved row is touched.
+
+        The owner ask this exists for: add ``jumping:6`` to a character that is
+        already composed and installed, without re-authoring it. The operator
+        sequence is ``reopen`` -> ``add-state`` -> ``rows --only <the new rows>``
+        -> QA -> ``compose``, and the recomposed manifest carries the new state.
+
+        **Stage ``rows`` only, which is why this verb has no stage logic of its
+        own.** :meth:`reopen` is the one door back from ``composed``; refusing
+        every other stage here means the two verbs cannot disagree about when a
+        spec may change. At ``turnaround`` the answer is ``--states`` on
+        ``start``, which has not been spent yet.
+
+        **The spec is REPLACED, never mutated.** :class:`SheetSpec` and
+        :class:`StateSpec` are frozen on purpose, and the new state is APPENDED,
+        so :meth:`SheetSpec.rows` — which is state-major — keeps every existing
+        row at the index the installed manifest already published. The sheet
+        grows downward; nothing above the new rows moves.
+
+        **Nothing is written into the revision store.** A row is "seeded" by
+        appearing in the spec: its store key has no history, so the status
+        payload reports ``attempts: 0`` and lists it under ``missing.rows``,
+        which is exactly what an un-generated row looks like everywhere else.
+        Writing a placeholder attempt would invent an image nobody drew. The new
+        rows are grounded on the turnaround references the operator already
+        approved — the stage machine guarantees they are approved, because that
+        approval is the only thing that advances a draft to ``rows``.
+
+        **Add only** (owner decision 8). Removing a state would delete approved
+        attempts and the operator notes stored with them — the durable QA record
+        — for the benefit of a coverage number. If it is ever wanted it is its
+        own ``--confirm`` verb, never a flag here.
+
+        *state_text* is parsed by :func:`~agent.charsheet.spec.parse_states`, so
+        the grammar, the reserved ``-``, the name shape and the frame range are
+        one authority shared with ``start --states``; a state below
+        :data:`~agent.charsheet.spec.MIN_FRAMES_PER_ROW` frames is refused HERE,
+        rather than four generations later at ``rows``.
+        """
+        self._require_stage("add_state", "rows")
+        added = parse_states(state_text)
+        if len(added) != 1:
+            # `--state` is singular and the launcher registry renders one value
+            # for it. A comma-separated list would make this a second, quieter
+            # spelling of `start --states`, and it would apply half an operator's
+            # request under one review. Two states are two calls.
+            raise ValueError(
+                f"--state takes ONE state, got {len(added)} "
+                f"({', '.join(state.name for state in added)}); add them one "
+                "call at a time so each new state's rows are reviewed on their own"
+            )
+        state = added[0]
+        spec = self.spec
+        existing = [current.name for current in spec.states]
+        if state.name in existing:
+            raise ValueError(
+                f"state {state.name!r} is already on this sheet "
+                f"(states: {', '.join(existing)}); add-state only ADDS — to "
+                f"redraw its strips use `reroll-row`, and to change its frame "
+                "count start a new draft"
+            )
+        grown = SheetSpec(
+            states=spec.states + (state,),
+            scheme=spec.scheme,
+            frame_w=spec.frame_w,
+            frame_h=spec.frame_h,
+        )
+        self._data["spec"] = spec_to_dict(grown)
+        self._save()
+        new_rows = [row.key for row in grown.authored_rows() if row.state == state.name]
+        logger.info(
+            "charsheet draft %s: state %r added (%d frames) → %d new row(s): %s",
+            self.id,
+            state.name,
+            state.frames,
+            len(new_rows),
+            ", ".join(new_rows),
+        )
+        return {
+            "state": {
+                "name": state.name,
+                "frames": state.frames,
+                "directional": bool(state.directional),
+            },
+            "states": [current.name for current in grown.states],
+            "rows": new_rows,
         }
 
     # ------------------------------------------------------- looking at rows

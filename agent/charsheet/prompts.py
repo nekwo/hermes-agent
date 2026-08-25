@@ -34,6 +34,13 @@ from agent.pet.generate.prompts import (
     style_hint,
 )
 
+# The frame floor this module ENFORCES, taken from the module that DECLARES it.
+# It used to be the literal 2 spelled here while `spec.parse_states` accepted 1,
+# so the same rule had two numbers in two modules and a state could clear the
+# declaration and die at generation. `spec` is pure stdlib and imports nothing
+# from this package, so reading it here cannot cycle.
+from agent.charsheet.spec import MIN_FRAMES_PER_ROW
+
 # Camera-view phrasing per compass direction, walking the compass RING. The ring
 # order is load-bearing: `pipeline.turnaround_order` ranks each direction by its
 # ring distance from the front view, so shuffling this dict silently reorders
@@ -319,9 +326,10 @@ def build_directional_row_prompt(
     action = state_action_for(state)
     direction_key, view = _view_of(direction)
     frames = int(frame_count)
-    if frames < 2:
+    if frames < MIN_FRAMES_PER_ROW:
         raise ValueError(
-            f"frame_count must be at least 2 for an animation row, got {frame_count!r}"
+            f"frame_count must be at least {MIN_FRAMES_PER_ROW} for an animation "
+            f"row, got {frame_count!r}"
         )
     concept = (concept or "the character").strip()
     return (

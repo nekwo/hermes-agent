@@ -112,17 +112,32 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
 
 ## Verbs and stage gates
 
-- **[READ] A state below 2 frames passes `start` and can never reach `rows`.** Two modules
-  hold different floors: `spec.StateSpec` / `spec.parse_states` accept
-  `1 <= frames <= MAX_FRAMES_PER_ROW`, while `prompts.row_prompt` raises
-  `frame_count must be at least 2 for an animation row`. Live: `start --states idle:1` built a
-  draft, spent the base anchor and three direction generations, and only then refused at
-  `rows` with `{"ok": false, "error": "frame_count must be at least 2 for an animation row,
-  got 1", "stage": "rows"}`, exit 2. The refusal names neither the row nor the state, nothing
-  says the draft is unrecoverable, and no verb can change `--states` afterwards (`add-state`
-  does not exist).
-  *Consequence:* never start a state below 2 frames. The floor that binds is the prompt
-  builder's, not the spec's, and it is enforced four generations late.
+- ~~**[READ] A state below 2 frames passes `start` and can never reach `rows`.**~~
+  **Struck by A3 (2026-08-25) — the FACT was right and is now false; the reasoning is kept
+  because it is why the fix landed where it did.** Two modules held different floors:
+  `spec.StateSpec` / `spec.parse_states` accepted `1 <= frames <= MAX_FRAMES_PER_ROW`, while
+  the prompt builder raised `frame_count must be at least 2 for an animation row`. Live:
+  `start --states idle:1` built a draft, spent the base anchor and three direction
+  generations, and only then refused at `rows` with `{"ok": false, "error": "frame_count must
+  be at least 2 for an animation row, got 1", "stage": "rows"}`, exit 2 — naming neither the
+  row nor the state, and no verb could change `--states` afterwards.
+
+- **[READ] The frame floor is 2, it is one number, and it now refuses at the moment you
+  declare the state.** `spec.MIN_FRAMES_PER_ROW` is enforced in `spec.parse_states` — the ONE
+  door both `characters start --states` and `characters add-state --state` come through — and
+  `prompts.build_directional_row_prompt` READS that constant instead of spelling its own, so
+  the two cannot drift apart again. `StateSpec` / `SheetSpec` deliberately still accept 1:
+  they are also the deserializers (`draft.spec_from_dict`) for every `draft.json` and
+  `character.json` on disk, including the drafts the old gap produced, and refusing those at
+  load would make such a draft unreadable rather than repaired — `CharacterDraft.list_drafts`
+  drops an unreadable draft with a log warning, so it would vanish from `characters list`
+  instead of being explained.
+  *Consequence:* a one-frame state is now refused before a single generation is spent, on
+  both doors, with `frame count 1 for state 'x' out of range; expected 2..8`. The two floors
+  answer two different questions and both answers are correct: the SPEC says what a sheet can
+  hold, `parse_states` says what you may ask us to draw. A draft already carrying a one-frame
+  state still loads and still lists — it simply can never reach `rows`, and that is the
+  honest report to give about it.
 
 - **[READ] `thumb` is row-only — at the `turnaround` stage there is no crop verb at all.**
   `Draft.row_thumb` opens with `self._authored_row(row_key)`, so a direction reference is
@@ -243,6 +258,22 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   *Consequence:* tolerate both on read (older drafts and other payloads may still carry
   `""`); emit neither as a bare `MEDIA:` line.
 
+- **[READ] `add-state` can push a draft's own sheet PAST `MAX_CARD_PIXELS`, and that turns
+  A2's `cardSafe` finding around.** The budget is `CHAR8.sheet_size()` = 1536x2080 =
+  3,194,880 px, a FIXED number derived from the largest sheet the package's default spec
+  composes — not from the draft in hand. A2 measured the small end of that: a `--directions 4`,
+  `idle:2` draft whose 239,616-px sheet was 13.1x lighter than a `cardSafe: true` crop.
+  Growing a sheet reaches the other end. Measured live 2026-08-25: adding `jumping:6` to the
+  8-way `anime-girl` sheet recomposed it at 1536x3120 = 4,792,320 px — **1.50x the fixed
+  budget**, and every further state adds another `authored x frame_h` band.
+  *Consequence:* on a grown sheet `cardSafe: false` no longer implies "heavier than your
+  sheet" — a crop can be refused at the default scale (`--scale 2`), with a message saying it
+  is "heavier than the sheet this crop exists to avoid decoding", while being genuinely
+  lighter than the sheet that draft will compose. Both directions have one answer, the one
+  A2 already wrote: weigh a crop against **that draft's own `spec.sheetWidth x
+  sheetHeight`** from `status --json`, and read `cardSafe` as the console's ceiling, never as
+  a statement about your sheet. Do not carry a copy of the threshold.
+
 - **[READ] `characters sprite <slug> --json` inlines the whole sheet as base64 and has no
   path-only mode.** `draft.sprite_payload` always emits `spritesheetBase64` from the sheet
   bytes and returns no path or directory for it. Measured on the installed CHAR8 `anime-girl`:
@@ -287,6 +318,33 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
 
 - **[READ] `--only` takes exact comma-separated keys. There is no glob.**
   `run_rows` raises on any key not in the authored set.
+
+- **[READ] `characters add-state --draft <id> --state <name>:<frames>[:fixed]` exists as of
+  2026-08-25, and `reopen` is its only door.** It refuses at any stage but `rows`
+  (`CharacterDraft.add_state` → `_require_stage`), so on an installed character the sequence
+  is `reopen → add-state → rows --only <new keys> → QA → compose`. It takes exactly ONE
+  state — a comma-separated list is refused with *"--state takes ONE state"*, because
+  `--state` is singular and a list here would be a second spelling of `start --states`. A
+  duplicate state name is refused too; there is no remove verb and none is planned as a flag
+  (removing a state would delete approved attempts and the notes stored with them).
+  *Consequence:* **take the new row keys from the verb's own answer**, never by composing
+  `<state>-<direction>` yourself. The payload's `rows` is the list and the human line spells
+  the whole `--only` string ready to paste — which matters precisely because `--only` has no
+  glob, and because the count is `len(spec.scheme.authored)`: five on an 8-way sheet, three
+  on a `--directions 4` sheet.
+
+- **[READ] Adding a state never renumbers a row, and `compose` will not let you install a
+  blank one.** The state is APPENDED and `SheetSpec.rows()` is state-major, so every row the
+  installed manifest already published keeps its index and the sheet grows DOWNWARD (live:
+  the anime-girl sheet went 1536x2080 → 1536x3120 with `idle-*`/`walk-*` untouched at
+  attempts 1/1/1/1/1 and 1/3/2/1/1). The new rows are "seeded" by appearing in the spec —
+  nothing is written to the revision store — so they read `attempts: 0`, `approved: null`,
+  and land in `missing.rows`; `compose` then refuses while any of them lacks an approved
+  strip, naming every one.
+  *Consequence:* a consumer holding the previous `character.json` still addresses the same
+  pictures by row index, but the sheet's HEIGHT changes — anything keyed on the sheet's size
+  or bytes (`spritesheetRevision`) is stale after the recompose, which is the point. And an
+  un-generated new state cannot silently ship: the refusal is the gate.
 
 - **[READ] Row rerolls are stochastic, row-grained and auto-approved.** One row took three
   strips. An unexamined reroll silently becomes the sheet.

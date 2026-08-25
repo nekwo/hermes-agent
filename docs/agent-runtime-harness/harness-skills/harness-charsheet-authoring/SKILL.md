@@ -83,7 +83,7 @@ never start the pipeline and discover it on generation twelve.
 
 ## The verbs
 
-Thirteen, flat, all with `--json`. Every draft verb takes `--draft <id>` as a
+Fourteen, flat, all with `--json`. Every draft verb takes `--draft <id>` as a
 **required flag**; only `sprite` takes a positional `<slug>`. **The draft id is
 not the slug** (`20260824-140756-cd645a` vs `anime-girl`).
 
@@ -101,11 +101,22 @@ not the slug** (`20260824-140756-cd645a` vs `anime-girl`).
 | `thumb --draft <id> --row <key> [--attempt n] [--frame n] [--scale n]` | Writes a card-size QA crop of ONE frame. | **any** |
 | `compose --draft <id>` | Composes, validates, installs; advances to `composed`. | `rows` |
 | `reopen --draft <id>` | Back to `rows` for fixes. Installed sheet untouched. | `composed` |
+| `add-state --draft <id> --state <name>:<frames>[:fixed]` | Adds ONE state; seeds its rows un-generated, touches no approved row. | `rows` |
 | `sprite <slug>` | The installed payload the launcher reads. | — |
 
-`add-state` does not exist yet. If the operator asks to add a state to an
-installed character, say so plainly and offer the honest alternatives (re-author,
-or wait for the verb) — do not fake it by editing the spec.
+**Adding a state to a character that is already installed** is
+`reopen → add-state → rows --only <the new keys> → QA → compose`. `reopen` is the
+only door: `add-state` refuses at any stage but `rows`, so an installed character
+is reopened first. It touches no approved row and it never renumbers one — the
+new state is appended, so the sheet grows downward and every row the old manifest
+published keeps its index. **Take the new row keys from the verb's own answer**
+(`rows` in the payload; the human line spells the whole `--only` list) rather
+than composing them yourself: the count depends on the draft's own
+`spec.scheme.authored`, and `--only` has no glob.
+
+Frames are **2..8**. A one-frame state is refused by `add-state` and by
+`start --states` at the moment you declare it — it used to be accepted and then
+die at `rows`, several generations later, with no verb able to change it.
 
 Stages run `turnaround → rows → composed`. An out-of-order verb refuses with a
 flat `{"ok": false, "error": …, "stage": …}` and exit 2, and the error names the
@@ -219,7 +230,10 @@ Three line shapes leave your reply, and two of them are parsed.
 - **Say the cost before a sweep.** The default sheet (`idle:6, walk:8`, 8-way) is
   1 seed + 5 direction references + 10 row strips = **16 generations minimum**,
   each a real generation at roughly one to two minutes, plus rerolls (the live
-  run took three extra). Each added state is 5 more strips.
+  run took three extra). Each added state costs ONE strip per authored
+  direction — 5 on that 8-way sheet, **3 on a `--directions 4` sheet**. Read
+  `spec.scheme.authored` out of `status --json` before quoting it; the 8-way
+  five is not a constant.
 - **A failed row aborts the batch, and the survivors look untouched.** A strip
   the slicer rejects is retried three times internally, then `rows` stops. The
   rows that never ran read `attempts: 0` — indistinguishable in a status dump
@@ -234,10 +248,15 @@ Three line shapes leave your reply, and two of them are parsed.
   together, so one bad frame costs its whole row. Budget two or three attempts on
   a bad row and tell the operator that up front.
 - **`composed` is not terminal.** The post-install fix loop is
-  `reopen → reroll-row → compose`. It is non-destructive — the installed sheet
-  stands until the next compose overwrites it — and you will need it more than
-  once per character. An agent that treats `composed` as final tells the operator
-  a fixable sheet is finished.
+  `reopen → reroll-row → compose`, and the post-install GROWTH loop is
+  `reopen → add-state → rows --only … → compose`. Both are non-destructive — the
+  installed sheet stands until the next compose overwrites it — and you will need
+  them more than once per character. An agent that treats `composed` as final
+  tells the operator a fixable sheet is finished.
+- **A state is added, never removed.** There is no remove verb and none is
+  planned as a flag: dropping a state would delete approved attempts and the
+  operator notes stored with them, which is the durable QA record. If the
+  operator wants a state gone, say that plainly.
 - **An authored state is not automatically a reachable one.** A row the runtime
   never requests is installed and silent. Say so when the operator names a state
   outside the runtime's motion vocabulary.

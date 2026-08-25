@@ -54,6 +54,32 @@ DEFAULT_FRAME_H = 208
 # strip; the pet atlas caps at eight columns for the same reason.
 MAX_FRAMES_PER_ROW = 8
 
+# The floor a DECLARED state must clear, and the floor that actually binds.
+# A one-frame row is representable — nothing in :meth:`SheetSpec.rows`, the
+# compose step or the sheet geometry objects to it — but nothing can DRAW one:
+# :func:`agent.charsheet.prompts.build_directional_row_prompt` refuses
+# ``frame_count < 2`` for every row, directional or fixed.
+#
+# Those two floors sat in two modules holding two different numbers until
+# 2026-08-25, and the gap was a live trap rather than a tidiness complaint:
+# ``start --states idle:1`` built a draft, spent the base anchor and three
+# direction generations, and only refused at ``rows`` — four generations late,
+# by which point no verb could change ``--states``. So the number lives here
+# and is enforced where a state is DECLARED (:func:`parse_states`, the one door
+# for both ``start --states`` and ``add-state --state``), and the prompt builder
+# reads this constant instead of spelling its own.
+#
+# Deliberately NOT raised on :class:`StateSpec` / :class:`SheetSpec`. Those are
+# also the DESERIALIZERS (``draft.spec_from_dict``) for every ``draft.json`` and
+# ``character.json`` already on disk — including the ``idle:1`` draft the trap
+# produced. Refusing such a spec at load would not repair that draft; it would
+# make it unreadable, and ``CharacterDraft.list_drafts`` swallows an unreadable
+# draft with a log warning, so the draft would vanish from ``characters list``
+# instead of being explained. A draft that can never generate must still be
+# visible. What the two floors mean, stated once: the SPEC says what a sheet can
+# hold, ``parse_states`` says what an operator may ask us to draw.
+MIN_FRAMES_PER_ROW = 2
+
 # The launcher's ``CharacterFacingSector`` vocabulary, in that enum's theta
 # order. ``AvatarSpriteSheet._deriveDirectionSectors`` (launcher
 # ``packages/eternia_spatial/lib/src/cosmetics/avatar_sprite_resolver.dart``)
@@ -339,7 +365,13 @@ CHAR8 = SheetSpec(
 
 
 def parse_states(text: str) -> tuple[StateSpec, ...]:
-    """Parse ``--states``: ``"idle:6,walk:8,cheer:5:fixed"`` (``fixed`` = one row)."""
+    """Parse ``--states``: ``"idle:6,walk:8,cheer:5:fixed"`` (``fixed`` = one row).
+
+    The ONE door for operator-declared states — ``characters start --states`` and
+    ``characters add-state --state`` both come through here, which is why the
+    generation floor (:data:`MIN_FRAMES_PER_ROW`) is enforced at this point and
+    not at each caller.
+    """
     if not text or not text.strip():
         raise ValueError("--states is empty; expected e.g. 'idle:6,walk:8'")
 
@@ -386,10 +418,12 @@ def parse_states(text: str) -> tuple[StateSpec, ...]:
             raise ValueError(
                 f"frame count {frames_text!r} for state {name!r} is not an integer"
             ) from None
-        if not 1 <= frames <= MAX_FRAMES_PER_ROW:
+        if not MIN_FRAMES_PER_ROW <= frames <= MAX_FRAMES_PER_ROW:
             raise ValueError(
                 f"frame count {frames} for state {name!r} out of range; "
-                f"expected 1..{MAX_FRAMES_PER_ROW}"
+                f"expected {MIN_FRAMES_PER_ROW}..{MAX_FRAMES_PER_ROW} — a row "
+                f"below {MIN_FRAMES_PER_ROW} frames is not an animation and no "
+                "prompt can draw one"
             )
 
         seen.add(name)

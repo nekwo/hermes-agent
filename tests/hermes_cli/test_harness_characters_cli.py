@@ -166,6 +166,20 @@ def base_image(tmp_path):
     return path
 
 
+ADDED_STATE_FLAG = "jump:3"
+SPEC_WITH_ADDED = SheetSpec(
+    states=SPEC.states + (StateSpec("jump", 3, True),), scheme=FOUR_WAY
+)
+
+
+@pytest.fixture
+def fake_grown(tmp_path, monkeypatch):
+    """A draftsman that also knows the rows `add-state` is about to author."""
+    provider = FakeProvider(SPEC_WITH_ADDED, tmp_path / "generated")
+    monkeypatch.setattr(pipeline, "_generate_image", provider)
+    return provider
+
+
 def start_draft(capsys, *extra):
     code, payload = run(
         [
@@ -202,6 +216,7 @@ def start_draft(capsys, *extra):
         (["reroll-row", "--draft", "d", "--row", "walk-e"], "reroll-row"),
         (["compose", "--draft", "d"], "compose"),
         (["reopen", "--draft", "d"], "reopen"),
+        (["add-state", "--draft", "d", "--state", "jump:3"], "add-state"),
         (["sprite", "arrow-knight"], "sprite"),
     ],
 )
@@ -845,3 +860,151 @@ def test_start_refuses_a_hyphenated_state_name(fake, capsys):
 
     code, listed = run(["harness", "characters", "list", "--json"], capsys)
     assert listed["drafts"] == []
+
+
+# ------------------------- add-state (more strips later) -------------------------
+
+
+def drive(capsys, draft_id, *argvs):
+    """Run a sequence of `characters` verbs, asserting each one answered ok."""
+    for argv in argvs:
+        code, payload = run(["harness", "characters", *argv, "--json"], capsys)
+        assert (code, payload["ok"]) == (0, True), (argv, payload)
+    return draft_id
+
+
+def rows_stage_draft(capsys, base_image):
+    draft_id = start_draft(capsys)
+    return drive(
+        capsys,
+        draft_id,
+        ["base", "--draft", draft_id, "--image", str(base_image)],
+        ["turnaround", "--draft", draft_id],
+        ["approve-direction", "--draft", draft_id, "--all"],
+    )
+
+
+def test_add_state_runs_the_reopen_add_rows_compose_loop_through_the_cli(
+    fake_grown, base_image, capsys
+):
+    draft_id = rows_stage_draft(capsys, base_image)
+    drive(
+        capsys,
+        draft_id,
+        ["rows", "--draft", draft_id],
+        ["compose", "--draft", draft_id],
+        # `reopen` is the only door: an installed character is at `composed`.
+        ["reopen", "--draft", draft_id],
+    )
+
+    code, added = run(
+        [
+            "harness", "characters", "add-state",
+            "--draft", draft_id,
+            "--state", ADDED_STATE_FLAG,
+            "--json",
+        ],
+        capsys,
+    )
+    assert (code, added["ok"], added["stage"]) == (0, True, "rows")
+    assert added["state"] == {"name": "jump", "frames": 3, "directional": True}
+    assert added["states"] == ["idle", "walk", "jump"]
+    assert added["rows"] == [f"jump-{d}" for d in FOUR_WAY.authored]
+
+    # `--only` has NO glob: the CLI comma-splits and `run_rows` matches exactly,
+    # so the keys the verb handed back are the keys that go back in.
+    code, rows = run(
+        [
+            "harness", "characters", "rows",
+            "--draft", draft_id,
+            "--only", ",".join(added["rows"]),
+            "--json",
+        ],
+        capsys,
+    )
+    assert (code, rows["ok"]) == (0, True)
+    assert sorted(rows["rows"]) == sorted(added["rows"])
+
+    code, recomposed = run(
+        ["harness", "characters", "compose", "--draft", draft_id, "--json"], capsys
+    )
+    assert (code, recomposed["ok"], recomposed["stage"]) == (0, True, "composed")
+    assert (
+        recomposed["validation"]["width"],
+        recomposed["validation"]["height"],
+    ) == SPEC_WITH_ADDED.sheet_size()
+
+    code, sprite = run(
+        ["harness", "characters", "sprite", recomposed["slug"], "--json"], capsys
+    )
+    assert (code, sprite["ok"]) == (0, True)
+    character = sprite["character"]
+    assert [state["name"] for state in character["states"]] == ["idle", "walk", "jump"]
+    assert character["stateRows"] == [row.key for row in SPEC_WITH_ADDED.rows()]
+    assert character["framesByRow"]["jump-s"] == 3
+
+
+@pytest.mark.parametrize(
+    "state_flag, message",
+    [
+        # The trap: a one-frame state used to pass `start` and die at `rows`,
+        # several generations later. `add-state` refuses it at the door.
+        ("jump:1", "out of range"),
+        ("walk:5", "is already on this sheet"),
+        ("jump:3,cheer:4:fixed", "takes ONE state"),
+        ("spin-kick:4", "may not contain '-'"),
+    ],
+)
+def test_add_state_refuses_in_the_flat_pets_error_shape(
+    fake_grown, base_image, capsys, state_flag, message
+):
+    draft_id = rows_stage_draft(capsys, base_image)
+
+    code, payload = run(
+        [
+            "harness", "characters", "add-state",
+            "--draft", draft_id,
+            "--state", state_flag,
+            "--json",
+        ],
+        capsys,
+    )
+
+    assert code == 2
+    assert payload["ok"] is False
+    assert message in payload["error"]
+    assert (payload["draft"], payload["stage"]) == (draft_id, "rows")
+
+    code, status = run(
+        ["harness", "characters", "status", "--draft", draft_id, "--json"], capsys
+    )
+    assert [state["name"] for state in status["status"]["spec"]["states"]] == [
+        "idle",
+        "walk",
+    ]
+
+
+def test_the_add_state_human_line_hands_over_the_exact_only_list(
+    fake_grown, base_image, capsys
+):
+    """The no-glob trap, answered by the verb that knows the keys.
+
+    `--only jump-*` is one unknown row key, not a wildcard, so the operator
+    needs the list spelled out — and the only surface that has it at that
+    moment is this line.
+    """
+    draft_id = rows_stage_draft(capsys, base_image)
+
+    args = parser().parse_args(
+        [
+            "harness", "characters", "add-state",
+            "--draft", draft_id,
+            "--state", ADDED_STATE_FLAG,
+        ]
+    )
+    assert args.func(args) == 0
+
+    line = capsys.readouterr().out.strip()
+    expected = ",".join(f"jump-{d}" for d in FOUR_WAY.authored)
+    assert f"--only {expected}" in line
+    assert line.startswith(f"Draft {draft_id}: state jump added")

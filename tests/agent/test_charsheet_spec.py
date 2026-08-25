@@ -19,6 +19,7 @@ from agent.charsheet.spec import (
     EIGHT_WAY,
     FOUR_WAY,
     MAX_FRAMES_PER_ROW,
+    MIN_FRAMES_PER_ROW,
     DirectionScheme,
     SheetSpec,
     StateSpec,
@@ -352,12 +353,39 @@ def test_parse_states_accepts_the_default_sheet_rendered_back():
         ("idle:6,idle:8", "duplicate state"),
         ("idle:six", "not an integer"),
         ("idle:0", "out of range"),
+        ("idle:1", "out of range"),
         (f"idle:{MAX_FRAMES_PER_ROW + 1}", "out of range"),
     ],
 )
 def test_parse_states_rejects_unusable_text(text, message):
     with pytest.raises(ValueError, match=message):
         parse_states(text)
+
+
+def test_the_declaration_floor_is_two_while_the_spec_still_represents_one():
+    """Two floors, on purpose, and the difference is what each one answers.
+
+    ``parse_states`` says what an operator may ask us to DRAW, and the answer is
+    two frames — below that ``prompts.build_directional_row_prompt`` refuses and
+    no row can ever be generated. That refusal used to arrive four generations
+    after ``start --states idle:1``, because this parser accepted 1 and the
+    prompt builder demanded 2 (measured live, 2026-08-24).
+
+    ``SheetSpec`` keeps the floor at 1 because it is also the DESERIALIZER for
+    every ``draft.json`` and ``character.json`` on disk, including the drafts the
+    old gap produced. Refusing those at load would not repair them — it would
+    make them unreadable, and ``CharacterDraft.list_drafts`` drops an unreadable
+    draft with a log line, so the draft would vanish from ``characters list``
+    instead of being explained.
+    """
+    assert MIN_FRAMES_PER_ROW == 2
+
+    with pytest.raises(ValueError, match="out of range"):
+        parse_states(f"idle:{MIN_FRAMES_PER_ROW - 1}")
+    assert parse_states(f"idle:{MIN_FRAMES_PER_ROW}")[0].frames == MIN_FRAMES_PER_ROW
+
+    one_frame = SheetSpec(states=(StateSpec("idle", 1, True),), scheme=FOUR_WAY)
+    assert [row.frames for row in one_frame.rows()] == [1] * len(FOUR_WAY.authored)
 
 
 def test_parsed_states_build_a_valid_sheet_in_either_scheme():

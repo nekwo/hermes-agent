@@ -1588,6 +1588,11 @@ def build_parser(parent_subparsers) -> None:
     characters_reopen.add_argument("--draft", required=True)
     characters_reopen.add_argument("--json", action="store_true")
     characters_reopen.set_defaults(func=_cmd_characters_reopen)
+    characters_add_state = characters_subs.add_parser("add-state", help="Add ONE animation state to a draft at stage 'rows' (reopen a composed draft first); the new rows start un-generated and no approved row is touched")
+    characters_add_state.add_argument("--draft", required=True)
+    characters_add_state.add_argument("--state", required=True, help="One state in the --states grammar: 'jumping:6' or 'cheer:4:fixed'. Frames 2..8 — a one-frame row is refused HERE rather than several generations later at 'rows'")
+    characters_add_state.add_argument("--json", action="store_true")
+    characters_add_state.set_defaults(func=_cmd_characters_add_state)
     characters_sprite = characters_subs.add_parser("sprite", help="Return an installed character spritesheet payload")
     characters_sprite.add_argument("slug")
     characters_sprite.add_argument("--json", action="store_true")
@@ -3382,6 +3387,27 @@ def _cmd_characters_reopen(args) -> int:
         return result, (
             f"Draft {draft.id} reopened at stage {result['stage']} "
             "(installed sheet unchanged until the next compose)"
+        )
+
+    return _characters_verb(args, call)
+
+
+def _cmd_characters_add_state(args) -> int:
+    state_text = str(getattr(args, "state", "") or "").strip()
+
+    def call(draft):
+        result = draft.add_state(state_text)
+        state = result["state"]
+        # The `--only` list is spelled out for the operator because `--only` has
+        # NO glob: `run_rows` matches keys exactly and raises on any key it does
+        # not author, so `jumping-*` is one unknown row key, not a wildcard. The
+        # verb that knows the new keys is the verb that should hand them over.
+        return result, (
+            f"Draft {draft.id}: state {state['name']} added "
+            f"({state['frames']} frames, "
+            f"{'directional' if state['directional'] else 'fixed'}); "
+            f"{len(result['rows'])} new row(s) to generate — "
+            f"`characters rows --draft {draft.id} --only {','.join(result['rows'])}`"
         )
 
     return _characters_verb(args, call)

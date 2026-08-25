@@ -473,6 +473,232 @@ def test_a_second_draft_may_not_overwrite_another_characters_slug(installed, fak
     assert second.stage == "rows"
 
 
+# ───────────────────────── adding a state later ─────────────────────────
+#
+# The owner ask (plan slice A3): put a state on a character that is already
+# composed and installed, without re-authoring it and without touching a single
+# approved row. `reopen` is the only door back, so every case here runs at stage
+# `rows`.
+
+ADDED = StateSpec("jump", 3, True)
+GROWN = SheetSpec(states=SPEC.states + (ADDED,), scheme=FOUR_WAY)
+
+
+@pytest.fixture
+def fake_grown(tmp_path, monkeypatch):
+    """A draftsman that also knows the rows ``add_state`` is about to author.
+
+    Same seam as ``fake``; a superset spec, because the provider builds its row
+    lookup once and a row keyed by a state that did not exist at fixture time
+    would be an unexpected prefix rather than a picture.
+    """
+    provider = FakeProvider(GROWN, tmp_path / "generated")
+    monkeypatch.setattr(pipeline, "_generate_image", provider)
+    return provider
+
+
+def test_adding_a_state_leaves_every_approved_row_exactly_as_it_was(fake_grown, base):
+    draft = run_to_composed(base)
+    draft.reopen()
+    # A reroll first, so the rows carry an attempt count, an approved index and
+    # an operator note -- the three things "touches no approved row" is about.
+    draft.reroll_row("walk-e", note="the hem reads as one straight line")
+    before = draft.status_payload()["rows"]
+
+    result = draft.add_state("jump:3")
+
+    assert result["state"] == {"name": "jump", "frames": 3, "directional": True}
+    assert result["states"] == ["idle", "walk", "jump"]
+    assert result["rows"] == [f"jump-{d}" for d in FOUR_WAY.authored]
+
+    status = CharacterDraft.load(draft.id).status_payload()
+    for key, item in before.items():
+        assert status["rows"][key] == item, key
+    for key in result["rows"]:
+        assert status["rows"][key]["attempts"] == 0
+        assert status["rows"][key]["approved"] is None
+        assert status["rows"][key]["current"] is None
+    # "Seeded at attempts: 0" is not a placeholder attempt written into the
+    # store -- it is what an un-generated row already looks like everywhere else.
+    assert status["missing"]["rows"] == result["rows"]
+    assert status["pending"]["rows"] == result["rows"]
+
+
+def test_a_new_state_is_appended_so_no_installed_row_changes_index(fake_grown, base):
+    draft = run_to_composed(base)
+    installed = json.loads(
+        (characters_dir() / draft.slug / MANIFEST_FILENAME).read_text(encoding="utf-8")
+    )["rows"]
+    draft.reopen()
+
+    draft.add_state("jump:3")
+
+    grown = [
+        {
+            "row": row.index,
+            "state": row.state,
+            "direction": row.direction,
+            "frames": row.frames,
+            "key": row.key,
+        }
+        for row in CharacterDraft.load(draft.id).spec.rows()
+    ]
+    # The sheet grows DOWNWARD: every row the installed manifest published keeps
+    # its index, so a consumer holding the old manifest still addresses the same
+    # pictures.
+    assert grown[: len(installed)] == installed
+    assert [row["state"] for row in grown[len(installed) :]] == ["jump"] * len(
+        FOUR_WAY.authored
+    )
+
+
+def test_the_new_rows_are_anchored_to_the_turnaround_already_approved(fake_grown, base):
+    draft = run_to_rows(base)
+    draft.run_rows()
+
+    added = draft.add_state("jump:3")
+
+    # Generating a new row needs no new approval: it grounds on the same
+    # reference the operator signed off before the first row was ever drawn.
+    result = draft.run_rows(only=added["rows"])
+    store = draft.store
+    for key in added["rows"]:
+        direction = key.split("-")[-1]
+        assert result["rows"][key]["reference"] == str(
+            store.current(turnaround_item(direction))
+        )
+        assert result["rows"][key]["approved"] is True
+
+
+def test_compose_refuses_until_the_new_states_rows_are_generated(fake_grown, base):
+    draft = run_to_composed(base)
+    manifest_path = characters_dir() / draft.slug / MANIFEST_FILENAME
+    installed_before = manifest_path.read_bytes()
+    draft.reopen()
+    added = draft.add_state("jump:3")
+
+    with pytest.raises(ValueError) as excinfo:
+        draft.compose()
+
+    # Adding a state cannot install a sheet whose new rows are blank; the
+    # refusal names every one of them.
+    message = str(excinfo.value)
+    assert "have no approved strip" in message
+    for key in added["rows"]:
+        assert key in message
+    assert manifest_path.read_bytes() == installed_before
+    assert draft.stage == "rows"
+
+
+def test_the_recomposed_sheet_carries_the_new_state(fake_grown, base):
+    draft = run_to_composed(base)
+    manifest_path = characters_dir() / draft.slug / MANIFEST_FILENAME
+    draft.reopen()
+    added = draft.add_state("jump:3")
+
+    draft.run_rows(only=added["rows"])
+    composed = draft.compose()
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert [state["name"] for state in manifest["spec"]["states"]] == [
+        "idle",
+        "walk",
+        "jump",
+    ]
+    assert [row["key"] for row in manifest["rows"]] == [row.key for row in GROWN.rows()]
+    assert (
+        composed["validation"]["width"],
+        composed["validation"]["height"],
+    ) == GROWN.sheet_size()
+    payload = sprite_payload(draft.slug)
+    assert [state["name"] for state in payload["states"]] == ["idle", "walk", "jump"]
+    assert payload["framesByRow"]["jump-s"] == 3
+    assert draft.stage == "composed"
+
+
+def test_add_state_refuses_a_state_the_sheet_already_has(fake_grown, base):
+    draft = run_to_rows(base)
+
+    with pytest.raises(ValueError, match="is already on this sheet"):
+        draft.add_state("walk:5")
+
+    assert CharacterDraft.load(draft.id).spec.states == SPEC.states
+
+
+def test_add_state_takes_one_state_and_not_a_list(fake_grown, base):
+    draft = run_to_rows(base)
+
+    with pytest.raises(ValueError, match="takes ONE state"):
+        draft.add_state("jump:3,cheer:4:fixed")
+
+    assert CharacterDraft.load(draft.id).spec.states == SPEC.states
+
+
+@pytest.mark.parametrize(
+    "build, stage",
+    [
+        (
+            lambda base: CharacterDraft.create(
+                concept=CONCEPT, slug=SLUG, spec=SPEC, base_image=base
+            ),
+            "turnaround",
+        ),
+        (run_to_composed, "composed"),
+    ],
+)
+def test_add_state_is_refused_at_every_stage_but_rows(fake_grown, base, build, stage):
+    draft = build(base)
+    assert draft.stage == stage
+
+    with pytest.raises(ValueError, match="add_state requires draft stage 'rows'"):
+        draft.add_state("jump:3")
+
+    assert CharacterDraft.load(draft.id).spec.states == SPEC.states
+
+
+def test_a_state_below_the_frame_floor_is_refused_before_a_generation_is_spent(
+    fake_grown, base
+):
+    """The trap A2 measured live, closed at the door A3 opens.
+
+    ``start --states idle:1`` built a draft, spent the base anchor and three
+    direction generations, and only refused at ``rows`` -- because
+    ``spec.parse_states`` accepted 1 while ``prompts`` demanded 2, and no verb
+    could change ``--states`` afterwards. ``add-state`` is a second door into
+    exactly that trap, so the floor moved to the declaration and the refusal
+    lands before anything is generated.
+    """
+    draft = run_to_rows(base)
+    draft.run_rows()
+    spent = len(fake_grown.calls)
+
+    with pytest.raises(ValueError, match="out of range"):
+        draft.add_state("jump:1")
+
+    assert CharacterDraft.load(draft.id).spec.states == SPEC.states
+    assert len(fake_grown.calls) == spent
+
+
+def test_the_declaration_floor_is_the_number_the_prompt_builder_enforces(
+    fake_grown, base
+):
+    """Two modules, ONE number -- the half of the trap that was a duplicated floor."""
+    from agent.charsheet import prompts
+    from agent.charsheet.spec import MIN_FRAMES_PER_ROW
+
+    with pytest.raises(ValueError, match=f"at least {MIN_FRAMES_PER_ROW}"):
+        prompts.build_directional_row_prompt(
+            "jump", "s", MIN_FRAMES_PER_ROW - 1, CONCEPT
+        )
+    assert prompts.build_directional_row_prompt("jump", "s", MIN_FRAMES_PER_ROW, CONCEPT)
+
+    draft = run_to_rows(base)
+    with pytest.raises(ValueError, match="out of range"):
+        draft.add_state(f"jump:{MIN_FRAMES_PER_ROW - 1}")
+    added = draft.add_state(f"jump:{MIN_FRAMES_PER_ROW}")
+    assert added["state"]["frames"] == MIN_FRAMES_PER_ROW
+
+
 # ──────────────────────────── row crops (looking) ────────────────────────────
 #
 # FIXTURE RULE for every test below that judges PIXELS: the input must come

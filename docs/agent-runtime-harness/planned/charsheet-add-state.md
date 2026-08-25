@@ -2,8 +2,12 @@
 
 **Owner domain:** system architecture ([01-system-architecture.md](../01-system-architecture.md)) —
 the charsheet lane is named there as a live sub-lane of visual identity.
-**Status:** not built. No verb exists.
-**Raised / verified:** 2026-08-24 against `2a21cd26b6`.
+**Status:** BUILT 2026-08-25. `characters add-state --draft <id> --state <name>:<frames>[:fixed]`
+ships; the parser tree is now fourteen verbs. What follows is kept as the design
+record with the as-built corrections marked; where this doc and the code
+disagreed, the code won and the correction is filed below in the same commit.
+**Raised / verified:** 2026-08-24 against `2a21cd26b6`; built and re-verified
+2026-08-25.
 **Origin:** owner ask on the 2026-08-24 authoring run; slice **A3** of the
 launcher-side plan `EterniaLauncher/docs/spatial/CHARA_CONSOLE_AUTHORING_QA_PLAN_2026-08-24.md`,
 shaped by `docs/mission_control/planned/console-character-authoring-architecture.md` §12 step 7.
@@ -17,10 +21,13 @@ approved row.
 
 ## What is true today
 
-The `characters` parser tree is `start list status base turnaround
+*(This section describes the state before 2026-08-25 and is kept for the
+reasoning; `add-state` now sits between `reopen` and `sprite`.)*
+
+The `characters` parser tree was `start list status base turnaround
 reroll-direction approve-direction rows reroll-row thumb compose reopen sprite`
-(`hermes_cli/harness.py`, the `characters_subs` block). There is no `add-state`,
-and the state vocabulary is fixed at `start`: `--states` is parsed once into
+(`hermes_cli/harness.py`, the `characters_subs` block). There was no `add-state`,
+and the state vocabulary was fixed at `start`: `--states` is parsed once into
 `SheetSpec.states` (`agent/charsheet/spec.py:parse_states` → frozen
 `StateSpec(name, frames, directional)` tuples) and written into `draft.json`.
 `reopen` returns a composed draft to stage `rows` for the *existing* spec only
@@ -34,7 +41,11 @@ So the loop an operator can run today ends at "re-author the character".
 positionals, matching every other draft verb. It:
 
 - parses the state with the existing `parse_states` grammar (one authority for
-  `name:frames[:fixed]`, including its rejection of `-` in a state name);
+  `name:frames[:fixed]`, including its rejection of `-` in a state name) — and
+  **refuses more than one entry**: `--state` is singular, the launcher registry
+  renders one value for it, and a comma-separated list here would be a second,
+  quieter spelling of `start --states` that applied half an operator's request
+  under one review;
 - **replaces** `spec.states` with a new frozen tuple that appends it — the
   dataclasses are frozen on purpose, so this is a new value, never a mutation;
 - seeds the new rows at `attempts: 0`, anchored to the already-approved
@@ -45,6 +56,40 @@ positionals, matching every other draft verb. It:
 The operator sequence on an installed character is then
 `reopen → add-state → rows --only <new rows> → QA → compose`, and the recomposed
 `character.json` carries the new state with its frame count and row indices.
+
+**As built — four facts this doc did not have, taken at the code:**
+
+- **The new state is APPENDED, and that is load-bearing.** `SheetSpec.rows()` is
+  state-major, so appending leaves every row the installed manifest already
+  published at the index it published — the sheet grows downward. Prepending or
+  inserting would silently renumber rows a consumer is already addressing.
+- **"Seeds the new rows at `attempts: 0`" writes nothing.** A row is seeded by
+  appearing in the spec: its revision-store key has no history, so
+  `status --json` reports `attempts: 0`, `approved: null` and lists it under
+  `missing.rows` — which is what an un-generated row already looks like
+  everywhere else. Writing a placeholder attempt would invent an image nobody
+  drew. The payload is `{state: {name, frames, directional}, states: [...],
+  rows: [...]}` on top of the house `{ok, draft, stage}` envelope.
+- **A state below two frames is refused HERE, not four generations later.**
+  `spec.parse_states` accepted `1` while `prompts.build_directional_row_prompt`
+  demanded `2`, so `start --states idle:1` built a draft, spent the base anchor
+  and three direction generations, and only died at `rows` (measured live
+  2026-08-24, recorded in the skill's FIELD-NOTES). `add-state` would have been a
+  second door into that trap. The number is now
+  `spec.MIN_FRAMES_PER_ROW`, enforced in `parse_states` — the ONE door both
+  `start --states` and `add-state --state` come through — and READ by the prompt
+  builder instead of re-spelled. It is deliberately NOT raised on `StateSpec` /
+  `SheetSpec`: those are also the deserializers for every `draft.json` and
+  `character.json` on disk, including the drafts the old gap produced, and
+  refusing them at load would make such a draft unreadable rather than repaired
+  — `CharacterDraft.list_drafts` drops an unreadable draft with a log line, so it
+  would vanish from `characters list` instead of being explained. The two floors
+  answer two questions: the spec says what a sheet can HOLD, `parse_states` says
+  what an operator may ask us to DRAW.
+- **The human line hands over the `--only` list.** Because `--only` has no glob
+  (below), the verb that knows the new row keys is the verb that spells them:
+  `Draft <id>: state jumping added (6 frames, directional); 5 new row(s) to
+  generate — `characters rows --draft <id> --only jumping-s,jumping-se,...``
 
 **Add only** (owner decision 8, default). Removal would delete approved attempts
 and the notes stored with them — the durable QA record — and its only consumer is
@@ -73,10 +118,14 @@ flag on `add-state`.
   names a state outside that vocabulary; wiring custom-state triggers is a
   spatial follow-up, not this verb's.
 
-## Gate to open this
+## Gate — as run (2026-08-25)
 
 Focused suites green — `tests/agent/test_charsheet_draft.py`,
-`tests/hermes_cli/test_harness_characters_cli.py` — plus a new test that:
+`tests/hermes_cli/test_harness_characters_cli.py`, plus
+`tests/agent/test_charsheet_spec.py` and `tests/agent/test_charsheet_pipeline.py`
+(the frame floor moved through `spec` and `prompts`, so their own suites are part
+of the gate) and `tests/hermes_cli/test_harness_pets_cli.py` (the standing pets
+sprite byte-baseline, because `harness.py` was touched) — plus new tests that:
 
 1. adds a state to a draft at stage `rows` and asserts the approved rows keep
    their attempt counts, their approved index and their notes;
@@ -87,6 +136,21 @@ Focused suites green — `tests/agent/test_charsheet_draft.py`,
 Then live on the `anime-girl` draft: `reopen`, `add-state --state jumping:6`,
 `rows --only jumping-s,jumping-se,jumping-e,jumping-ne,jumping-n`, `compose`,
 and read three states out of the installed manifest.
+
+**Live, as run (2026-08-25, home read back from `harness status --json` →
+`.runtime_health.hermes_home` = `X:\Eternia\.hermes\profiles\alice`, never
+asserted).** `reopen` → `rows`; `add-state --state jumping:6` returned the five
+keys `jumping-s,jumping-se,jumping-e,jumping-ne,jumping-n` — read off the
+draft's own `spec.scheme.authored` (`s se e ne n`), not copied from this file —
+and `status --json` then showed `idle-*` at 1 attempt each and `walk-n` still at
+3 attempts / approved index 2, `walk-ne` at 2 / 1: the reroll history from the
+2026-08-24 run, untouched. The five new rows sat at `attempts: 0`,
+`approved: null`, in `missing.rows`. `rows --only <the five>` generated all five
+on their FIRST attempt, each grounded on `revisions/turnaround@<d>/attempt-1.png`
+— the reference approved before any row was ever drawn, which is the anchoring
+claim proven live. `compose` then validated 15 filled rows at 1536x3120 and
+installed a `character.json` listing three states, with `idle-*`/`walk-*` still
+at row indices 0..9 and `jumping-*` appended at 10..14.
 
 **The keys are spelled out because `--only` has no glob.**
 `_cmd_characters_rows` splits the value on commas and hands the parts to
