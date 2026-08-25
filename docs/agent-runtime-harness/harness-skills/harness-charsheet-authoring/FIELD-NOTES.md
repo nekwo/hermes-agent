@@ -555,6 +555,66 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   hand edit. Reroll the row. And a clean pass is not a certificate: it never saw
   the front and back views, and it cannot see a consistently mirrored character.
 
+- **[READ] A wrong turnaround reference is PERMANENT once the draft leaves
+  `turnaround`, and every row for that direction then has to fight it.**
+  `CharacterDraft.reroll_direction` and `approve_direction` both
+  `_require_stage(..., "turnaround")`, and the only backward verb in the package
+  is `reopen`, which goes `composed` → `rows`. There is no path back to
+  `turnaround` and no verb that replaces an approved reference afterwards. Live:
+  `anime-girl`'s `ne` reference is a north-WEST view and has been since the
+  single turnaround generation on 2026-08-24 (one attempt, approved index 0, no
+  reroll) — so the fix had to be made entirely in the row prompts, against a
+  reference pulling the other way, for the whole life of the draft.
+  *Consequence:* QA the turnaround strip HARD, before `approve-direction --all`.
+  Approving it is the last moment a reference can be changed. If a reference is
+  wrong and the draft has moved on, say so plainly — the repair is row-side and
+  costs more attempts, or the character starts again.
+
+- **[READ] For a handedness reroll, spelling the target facing is not enough;
+  naming the CONFLICT with the reference is what works.** Measured on the three
+  `ne` rows, 2026-08-25, with the corrected `VIEW_LANGUAGE` already in the
+  prompt. A note that spelled the target in frame terms ("body angled
+  up-and-to-the-RIGHT in frame, the sliver of face on the viewer's RIGHT, never
+  the mirror of this") landed **one of three** — `idle-ne` came back correct,
+  `walk-ne` and `jumping-ne` came back north-WEST again, and a second, more
+  emphatic version of the same note ("HANDEDNESS OVERRIDE… ignore which way the
+  reference is turned") also failed on `walk-ne`. What landed both remaining rows
+  on the first try was a note that told the model what to DO with the reference
+  rather than what to ignore: *"MIRROR THE REFERENCE'S TURN. The attached
+  reference is turned the WRONG way for this row — copy its design, colours, hair
+  and proportions, then draw it turned the OTHER way,"* plus one anatomical
+  anchor that cannot be read two ways — *"her right ear is the only ear visible
+  and it sits on the RIGHT-HAND SIDE of her head as you look at the picture."*
+  Six generations for three rows.
+  *Consequence:* when the grounding reference disagrees with the facing you want,
+  say so in the note, in those words. "Ignore the reference" leaves the image
+  there doing its work; "mirror it" gives the model an operation. And anchor the
+  side on a body part with a name (the visible ear, the near shoulder), not on
+  the direction token.
+
+- **[READ] A row reroll is a ONE-WAY door for the approved attempt.**
+  `CharacterDraft.reroll_row` ends with `store.propose` then `store.approve`
+  unconditionally, and there is no `approve_row` method and no `approve-row`
+  CLI verb — `approve-direction` is for references only. So a reroll that comes
+  back worse than what it replaced cannot be un-approved; the only way back is
+  another reroll that happens to be good. (The history is not lost: earlier
+  attempts and their operator notes stay in `state.json`, and `walk-ne` came out
+  of this repair at 5 attempts / approved 4 with its 2026-08-24 note intact.)
+  *Consequence:* look at the strip BEFORE you spend the next reroll, and tell the
+  operator the pointer moves whether or not the new attempt is better. On a row
+  you are unsure about, that is the difference between one generation and four.
+
+- **[READ] The handedness gate answers WHICH SIDE, never HOW FAR.** After the
+  repair the sheet passes clean, and the face-offset progression `s se e ne n`
+  reads `+0.2 +6.4 +10.5 +15.1 -0.1` for `jumping` — `ne` further from centre
+  than the profile `e` it should sit inside, i.e. a rear diagonal drawn closer to
+  side-on than the rotation wants. `detect_mirrored_art` has nothing to say about
+  that and should not: it compares a row against its neighbours' MIRRORS, and a
+  view that is turned too far is still turned the right way.
+  *Consequence:* a clean compose does not mean the turnaround is even. Look at
+  the five views together — the offsets should rise to the profile and fall
+  again — and reroll on evenness separately if the operator cares.
+
 - **[READ] The two-neighbour rule proposed from the launcher side does not hold
   on the whole sheet, and the state it was measured on is why.** The proposal was
   to flag a row only when it is closer to BOTH authored neighbours mirrored than
