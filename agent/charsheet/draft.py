@@ -304,12 +304,18 @@ class CharacterDraft:
         yet at ``characters start`` time — but no generation verb runs without it.
 
         *authored_by* is PROVENANCE and nothing else (launcher companion doc §13
-        decision 6): it records which persona drove the authoring run so a later
-        reader can ask "whose draft is this". It does not scope where the draft
-        lives — every draft is in ``$HERMES_HOME/characters/`` under the one home
-        the console shares — it is not an owner, and no verb checks it. Nothing
-        infers it: a caller that does not say stores nothing, because a guessed
-        author is worse than an absent one.
+        decision 6, which is the single statement of the home rule — this
+        docstring points at it and does not restate it): it records which persona
+        drove the authoring run so a later reader can ask "whose draft is this".
+        It does not scope where the draft lives — that is
+        ``$HERMES_HOME/characters/`` for whatever home the RUNNING TURN resolved,
+        which follows the persona's ``hermes_profile`` binding, not the process —
+        it is not an owner, and no verb checks it. What it does make possible is
+        checking: a consumer resuming a draft can ask whether the persona it is
+        about to open is bound to the profile that authored it, instead of
+        discovering the mismatch as an empty ``status``. Nothing infers it: a
+        caller that does not say stores nothing, because a guessed author is
+        worse than an absent one.
 
         "Stores nothing" is literal — the KEY is absent, not present-and-empty.
         An empty string would be a third spelling of "no author" that reads as a

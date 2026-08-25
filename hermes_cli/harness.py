@@ -1524,7 +1524,7 @@ def build_parser(parent_subparsers) -> None:
     characters_start.add_argument("--states", default="", help="Animation states as 'idle:6,walk:8[,cheer:5:fixed]'; default = the CHAR8 states")
     characters_start.add_argument("--directions", default="8", help="Direction scheme: 8 (five authored, three mirrored) or 4")
     characters_start.add_argument("--base-image", dest="base_image", default="", help="Identity-anchor image; copied into the draft")
-    characters_start.add_argument("--authored-by", dest="authored_by", default="", help="Persona driving this authoring run, recorded as provenance; drafts live under the one HERMES_HOME either way")
+    characters_start.add_argument("--authored-by", dest="authored_by", default="", help="Persona driving this authoring run, recorded as provenance; it never scopes where the draft lives (that is the HERMES_HOME this turn resolved) but it is what lets a later reader check a resume is opening under the profile that authored it")
     characters_start.add_argument("--json", action="store_true")
     characters_start.set_defaults(func=_cmd_characters_start)
     characters_list = characters_subs.add_parser("list", help="List character drafts and installed characters")

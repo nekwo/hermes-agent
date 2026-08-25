@@ -226,14 +226,23 @@ def test_charsheet_qa_line_fixture_pins_the_key_set_the_skill_promises():
     text = _charsheet_skill_text()
 
     # What the skill promises, read out of the skill rather than restated here.
+    #
+    # The KEY SET is the contract; the prose around it is not. So: the first
+    # ``":``-bearing span is the required object and the NEXT one is the optional
+    # tail — later spans are restatement, which the bullet is free to add — and
+    # both compare as SETS, because a JSON consumer cannot observe key order.
+    # Asserting `len(spans) == 2` and ordered list equality made this test red on
+    # two edits that changed nothing a consumer sees (a redundant restatement of
+    # the same keys; reordering the example), which is the same false-positive
+    # class already retired from the verb-table test.
     body = text.split("**`CHARSHEET-QA:{json}`**", 1)[1].split("- **Clarify chips**", 1)[0]
     spans = [span for span in re.findall(r"`([^`]+)`", body) if '":' in span]
-    assert len(spans) == 2, f"expected a required object and an optional tail, got {spans!r}"
-    promised_required = re.findall(r'"([A-Za-z]+)"\s*:', spans[0])
-    promised_optional = re.findall(r'"([A-Za-z]+)"\s*:', spans[1])
+    assert len(spans) >= 2, f"expected a required object and an optional tail, got {spans!r}"
+    promised_required = set(re.findall(r'"([A-Za-z]+)"\s*:', spans[0]))
+    promised_optional = set(re.findall(r'"([A-Za-z]+)"\s*:', spans[1]))
 
-    assert promised_required == contract["requiredKeys"]
-    assert promised_optional == contract["optionalKeys"]
+    assert promised_required == set(contract["requiredKeys"])
+    assert promised_optional == set(contract["optionalKeys"])
 
     # And every pinned line is that shape, literally — prefix, then one JSON
     # object, on one line. This is the byte sequence the launcher's twin parses.
@@ -284,12 +293,16 @@ def test_installed_canonical_skill_drift_fails_the_pre_push_gate(tmp_path, monke
     monkeypatch.setattr("agent_runtime.skill_install.get_shared_skills_dir", lambda: shared_root)
     monkeypatch.setattr("agent_runtime.skill_install.HARNESS_SKILLS", frozenset({skill}))
     monkeypatch.setattr("hermes_constants.CANONICAL_SHARED_SKILL_IDS", frozenset({skill}))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 
     _write_skill_package(source_root, skill, "# v1\n")
 
     # Never installed is not clean: the resolver would answer nothing at all.
     assert main(["--check"]) == 1
-    assert "NOT INSTALLED" in capsys.readouterr().out
+    report = capsys.readouterr().out
+    assert "NOT INSTALLED" in report
+    # …and the run says which tree it checked, from an EXPLICIT rung.
+    assert f"home      {tmp_path / 'home'}  (via env HERMES_HOME)" in report
 
     assert main([]) == 0
     installed = shared_root / skill / "SKILL.md"
@@ -309,6 +322,121 @@ def test_installed_canonical_skill_drift_fails_the_pre_push_gate(tmp_path, monke
     assert main(["--check"]) == 1
     assert "DIVERGED" in capsys.readouterr().out
     assert main([]) == 0
+
+
+def test_the_gate_refuses_to_guess_a_root_instead_of_targeting_the_shadow_tree(
+    monkeypatch, capsys
+):
+    """The destructive shape the first version of the gate had.
+
+    A git hook inherits the pushing shell's environment, and that shell usually
+    has no ``HERMES_HOME``. ``get_shared_skills_dir()`` then resolves through
+    ``get_default_hermes_root()`` to the platform default — on Windows
+    ``%LOCALAPPDATA%\\hermes``, a real populated shadow runtime, the very one
+    ``hermes_process_identity.dart`` pins ``HERMES_HOME`` to avoid. Measured on
+    this machine with it unset, that tree held six canonical packages whose bytes
+    were not this repo's; repair mode would have overwritten all six, reported
+    ``ok`` about the copy it had just written, and never looked at the root every
+    persona in the live roster reads.
+
+    So an unresolvable root is an ERROR (exit 2, the usage/environment code),
+    not a default. Printing the resolved root would not do: nobody reads a
+    passing hook's output.
+    """
+    from scripts.verify_harness_skill_install import main
+
+    monkeypatch.delenv("ETERNIA_HERMES_HOME", raising=False)
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    # No machine declaration either — the config rung answers nothing.
+    monkeypatch.setattr(
+        "agent_runtime.chat_session_scope.declared_chat_head_home", lambda: None
+    )
+
+    assert main(["--check"]) == 2
+    captured = capsys.readouterr()
+    assert "REFUSING to guess the hermes home" in captured.err
+    assert "HERMES_HOME=<hermes root>/profiles/base" in captured.err
+    # It refused BEFORE reporting on any tree.
+    assert "canonical shared skill(s)" not in captured.out
+
+
+def test_the_gate_reads_the_machine_declaration_before_it_would_ever_guess(
+    tmp_path, monkeypatch
+):
+    """The rungs, in order — and none of them is the platform default.
+
+    ``ETERNIA_HERMES_HOME`` first, matching ``hermes_cli_io.dart``'s
+    ``hermesProcessEnvironment`` (``ETERNIA_HERMES_HOME ?? HERMES_HOME``) so the
+    gate targets the home the launcher spawned serve with. Then ``HERMES_HOME``.
+    Then the machine root anchor ``harness serve`` publishes — a DECLARATION
+    written by the process that provably knew, read through the function that
+    owns that key rather than a second parser of it.
+    """
+    from scripts.verify_harness_skill_install import resolve_gate_hermes_home
+
+    declared = tmp_path / "declared-home"
+    declared.mkdir()
+    monkeypatch.setattr(
+        "agent_runtime.chat_session_scope.declared_chat_head_home", lambda: declared
+    )
+
+    monkeypatch.delenv("ETERNIA_HERMES_HOME", raising=False)
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    assert resolve_gate_hermes_home() == (str(declared), "config agent_runtime.head_home")
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "env-home"))
+    assert resolve_gate_hermes_home() == (str(tmp_path / "env-home"), "env HERMES_HOME")
+
+    monkeypatch.setenv("ETERNIA_HERMES_HOME", str(tmp_path / "launcher-home"))
+    assert resolve_gate_hermes_home() == (
+        str(tmp_path / "launcher-home"),
+        "env ETERNIA_HERMES_HOME",
+    )
+
+
+def test_a_repair_archives_the_package_it_displaces_rather_than_destroying_it(
+    tmp_path, monkeypatch
+):
+    """Repair-then-verify is the right design; unrecoverable repair is not.
+
+    ``install_harness_skill`` renames the installed package aside and used to
+    ``shutil.rmtree`` it in a ``finally``, so a repair aimed at the wrong root
+    destroyed whatever was there with no way back. The root is explicit now, but
+    the seatbelt is cheap: the displaced package moves into the shared root's
+    ``.archive/`` — already resolver-invisible via
+    ``agent.skill_utils.EXCLUDED_SKILL_DIRS`` and already the convention
+    ``tools/skill_usage.archive_skill`` uses — so a wrong repair is a ``mv``
+    away from undone. Nothing is written at all when the hashes already match.
+    """
+    from agent_runtime.skill_install import REPLACED_ARCHIVE_DIR_NAME, install_harness_skill
+
+    source_root = tmp_path / "repo-skills"
+    shared_root = tmp_path / "shared" / "skills"
+    skill = "harness-continuity"
+
+    monkeypatch.setattr(
+        "agent_runtime.skill_install.harness_skill_source_root", lambda: source_root
+    )
+    monkeypatch.setattr("agent_runtime.skill_install.get_shared_skills_dir", lambda: shared_root)
+
+    # A package this repo does not own is already installed there.
+    _write_skill_package(shared_root, skill, "# six packages that were not ours\n")
+    _write_skill_package(source_root, skill, "# v1\n")
+
+    result = install_harness_skill(skill)
+    assert result.changed and result.ok
+    assert (shared_root / skill / "SKILL.md").read_text(encoding="utf-8") == "# v1\n"
+
+    archived = sorted((shared_root / REPLACED_ARCHIVE_DIR_NAME).glob(f"{skill}-*"))
+    assert archived, "the displaced package must be archived, never rmtree'd"
+    assert (archived[0] / "SKILL.md").read_text(encoding="utf-8") == (
+        "# six packages that were not ours\n"
+    )
+
+    # An install with nothing to displace archives nothing.
+    before = list((shared_root / REPLACED_ARCHIVE_DIR_NAME).iterdir())
+    assert not install_harness_skill(skill).changed
+    assert list((shared_root / REPLACED_ARCHIVE_DIR_NAME).iterdir()) == before
 
 
 def test_mission_lead_skill_answers_graph_from_supplied_task_plan():

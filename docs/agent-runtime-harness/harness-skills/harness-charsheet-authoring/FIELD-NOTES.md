@@ -21,6 +21,20 @@ itself a note.
 **What does NOT go here.** Slice mechanics, gate output, commit shas — those live in the
 slice reports and the plan. This file holds only what an authoring agent needs to know.
 
+**Where this file lives — the package ROOT, and moving it is a behaviour change.**
+A turn receives NOTHING from this file today, which is exactly the point: the raw record
+stays out of the turn until AF rewrites the skill from it. That is a property of the ROOT
+placement, not of the filename. Measured at
+`agent/skill_commands.py::_build_skill_message` [READ, 2026-08-24]: the message body is
+`SKILL.md`'s content alone, and the "[This skill has supporting files:]" block is built
+from `linked_files` plus — when that is empty — a scan of exactly four subdirectories,
+`references/`, `templates/`, `scripts/` and `assets/`. A file at the package root is in
+neither path. Move this into `references/` as a tidy-up and it is advertised to **every**
+turn that loads the skill, with a `skill_view(file_path=…)` instruction beside it — the
+opposite of the owner's reason for the file. If it ever has to move, move it OUT of the
+package, never into one of those four. (It is also part of the package content hash the
+pre-push gate compares, so a file here is a file the gate reinstalls.)
+
 ---
 
 ## Environment

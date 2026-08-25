@@ -19,10 +19,29 @@
 # is correct by construction. The join lives on the machine, and a push is the
 # moment a repo-side edit and a machine are both in front of us.
 #
+# WHY A HOOK AND NOT CI — and NOT because CI skips on this fork; most of it does
+# not. Census 2026-08-24 of `.github/workflows/`: SIX job-level
+# `github.repository == 'NousResearch/hermes-agent'` guards across FOUR files
+# (`deploy-site.yml` deploy-docs; `docker.yml` build/publish/merge;
+# `skills-index.yml` build-index; `skills-index-freshness.yml` check-freshness).
+# `ci.yml`'s tests/lint/js-tests/uv-lockfile and `tests.yml` gate on
+# `needs.detect.outputs.*` instead and run here perfectly well — `origin` is
+# `nekwo/hermes-agent`, so exactly those six skip and the rest do not. The real
+# reason is structural: the destination is `get_shared_skills_dir()` under the
+# MACHINE's hermes root, and a GitHub-hosted runner has no such root. CI could
+# only install into a throwaway filesystem and then verify the copy it had just
+# written — the same false all-clear a wrong root produces locally. The join is
+# observable only where both halves exist, which is an operator's machine.
+#
 # It repairs before it verifies, on purpose. Divergence here is stale MACHINE
 # STATE, not a defect in the tree, and the right answer to it is to fix it —
 # the verify afterwards is what turns that into a gate: an install that did not
-# take fails the push instead of passing silently.
+# take fails the push instead of passing silently. Repair therefore has to know
+# WHICH root, and a hook inherits the pushing shell's environment — usually one
+# with no `HERMES_HOME` at all. So the script refuses to guess (see its
+# docstring): with no explicit pin and no machine declaration it exits 2 and
+# names what to set, rather than repairing into the `%LOCALAPPDATA%` shadow
+# runtime and reporting "ok" about a tree no persona reads.
 #
 # Cost when nothing drifted: one Python start plus seven small file hashes.
 # `install_harness_skill` writes nothing when the hashes already match.
