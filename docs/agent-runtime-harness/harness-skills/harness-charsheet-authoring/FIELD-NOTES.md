@@ -100,8 +100,15 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   `Image(fit: BoxFit.cover)` — no dimension probe anywhere above it. The square's side is
   `min(widthCap, heightCap)` and the HEIGHT cap usually binds (440 at 1280×800, 594 at
   1920×1080, 720 at 2560×1440).
-  *Consequence:* a tall crop is judged on its middle fifth. A defect outside that square
-  is invisible until the image is opened. Declare crops knowing this.
+  *Consequence:* ~~a tall crop is judged on its middle fifth. A defect outside that square
+  is invisible until the image is opened. Declare crops knowing this.~~
+  **Restated 2026-08-24 [REPORTED, launcher slice V1 — carried across from the launcher
+  half, not re-verified here].** The FACT above stands and was re-verified at the same
+  symbol; V1 changed the OPENED view, not the card. But "invisible until the image is
+  opened" now understates what opening gives you: `_openPreview` calls
+  `showFullscreenImageSet`, which pages the whole set with the arrow keys and enters compare
+  with `C`. So: a tall crop is still judged on its middle fifth, and the card was never the
+  verdict surface — judge crops by OPENING them.
 
 - **[READ] Side-by-side is what settles a seam; magnification is not.**
   Two independent agents each failed to identify the known seam at 5–6× on a single
@@ -110,6 +117,19 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   aligned.
   *Consequence:* compare, don't zoom. A brightness heuristic finds the character, not the
   defect.
+
+- **[REPORTED, launcher slice V1, 2026-08-24 — carried across from the launcher half, not
+  re-verified here; V1's own reviewer has this entry on its list] Compare mode aligns PANES,
+  not pixels.** One `TransformationController` spans both panes and side-by-side gives them
+  equal `Expanded` widths, but inside each pane the picture is `Image(fit: BoxFit.contain)`,
+  letterboxed to that pane. Same-dimension attempts land feature-for-feature — which is the
+  case the finding above was drawn from, so that finding stands — but DIFFERENT aspect ratios
+  do not, and the viewer will not tell you they did not.
+  *Consequence:* comparing a crop against a full sheet, or two attempts at different sizes,
+  gives an alignment you may trust for gross differences and not for a seam. Across unequal
+  sizes the A/B flip is the stronger instrument: one box, alternating, transform deliberately
+  not reset. Until V1's reviewer rules, treat this as unconfirmed — first-hand evidence from
+  your own comparison run outranks it.
 
 - **[READ] The seam's contrast is directional.** On the known artifact the band reads
   28.6 against 135.4 immediately BELOW it, while above it the hair darkens gradually over
