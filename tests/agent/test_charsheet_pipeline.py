@@ -2324,3 +2324,242 @@ def test_the_handedness_accounting_is_a_line_an_operator_can_read():
     )
     assert "1 accepted by the operator (idle-ne)" in accepted
     assert "refused" not in accepted
+
+# ───────────── the refusal as a MESSAGE: is the door findable, and does it fit ─────────────
+#
+# Everything below was written after 2026-08-26's fix and against real output,
+# not against the code. The two defects it pins were both found by running
+# `characters compose` on real mirrored art rather than by reading `pipeline.py`:
+# the refusal never mentioned `--accept-handedness` on the shape an operator
+# actually hits, and the whole diagnostic was one 1206-character line that a
+# console card cannot render.
+
+# Every spelling `--accept-handedness` accepts, taken from the code. A literal
+# list here would be the third copy of the map `accept_basis_token` exists to be
+# the only one of.
+BLOCKING_TOKEN = {
+    basis: pipeline.accept_basis_token(basis)
+    for basis in ("rotation and states", "states")
+}
+
+WHOLE_STATE_MIRRORED = REPAIRED + (
+    ("flip", "jump-s", "jump-se", "jump-e", "jump-ne", "jump-n"),
+)
+
+
+def tokens_offered(errors):
+    """Every ``--accept-handedness <token>`` an error text hands the operator."""
+    return re.findall(r"--accept-handedness (\S+?)[.\s]", "\n".join(errors) + "\n")
+
+
+@pytest.mark.parametrize(
+    ("ops", "refused", "basis"),
+    [
+        ((), ("idle-ne",), "rotation and states"),
+        (WHOLE_STATE_MIRRORED, ("jump-se", "jump-e", "jump-ne"), "states"),
+    ],
+    ids=["two-basis", "whole-state"],
+)
+def test_a_refusal_hands_over_a_token_that_actually_reopens_the_compose(
+    ops, refused, basis
+):
+    """The escape hatch has to be findable FROM the refusal, and it was not.
+
+    Run against real art 2026-08-26, the two-basis refusal — the shape a
+    mirrored authored row produces, and the one the founding `ne` defect hit —
+    named `characters reroll-row` and nothing else. `--accept-handedness` was
+    reachable only by guessing the flag existed; the whole-state branch spelled
+    it and this one did not, so what shipped was not a policy of not advertising
+    an override but a DRIFT between two spellings of the same thing. Ruling 18
+    tightens this gate *because* the row-named override is reachable, and an
+    operator who has LOOKED at the strip and believes the art was being sent to
+    the one remedy that destroys it: a re-roll auto-approves, there is no
+    approve-row verb, and the message says so itself.
+
+    This is a ROUND TRIP on purpose, not a grep for the flag name. It takes the
+    tokens out of the printed refusal, feeds exactly those back to
+    `validate_sheet`, and requires the install to go through — so it fails both
+    ways a message can lie: by not offering a token at all, and by offering one
+    the validator then rejects (which is what a second, hardcoded spelling of
+    the token would produce the moment a new basis can block).
+    """
+    spec, sheet = variant(EIGHT_WAY_FIXTURE, ops)
+    refusal = pipeline.validate_sheet(spec, sheet)
+
+    assert not refusal["ok"]
+    blocking = [
+        finding
+        for finding in refusal["handedness"]["flagged"]
+        if finding["severity"] == "error"
+    ]
+    assert sorted(finding["row"] for finding in blocking) == sorted(refused)
+    assert {finding["basis"] for finding in blocking} == {basis}
+
+    offered = tokens_offered(refusal["errors"])
+    assert sorted(offered) == sorted(f"{row}:{BLOCKING_TOKEN[basis]}" for row in refused)
+
+    reopened = pipeline.validate_sheet(spec, sheet, accept_handedness=offered)
+    assert reopened["ok"], reopened["errors"]
+    assert sorted(
+        entry["row"] for entry in reopened["handedness"]["accepted"]
+    ) == sorted(refused)
+
+
+def test_the_override_is_offered_with_its_price_and_never_before_the_re_roll():
+    """Shown, but not as the cheap door — the half of the ruling that is taste.
+
+    Not advertising an override that lets bad art ship is a defensible design;
+    what is not defensible is advertising it on one blocking shape and not the
+    other. Having chosen to show it, the text has to carry why it is the more
+    expensive door: a re-roll is private and costs art, while an acceptance
+    becomes a permanent public fact about the character — `{row, gain, basis}`
+    on the installed manifest, republished by `characters list`, by
+    `sprite_payload` and by the launcher's bundle warnings (decision 19).
+
+    Order is part of the meaning, so it is asserted: the remedy comes first and
+    the waiver after it, conditional on having LOOKED.
+    """
+    finding = fixture_findings(EIGHT_WAY_FIXTURE)["flagged"][0]
+
+    lines = pipeline.mirrored_art_error(finding).split("\n")
+    labels = [line.split(":")[0].strip() for line in lines[1:]]
+    assert labels.index("re-roll") < labels.index("accept")
+
+    accept = next(line for line in lines if line.strip().startswith("accept:"))
+    assert "only if you have LOOKED" in accept
+    assert "not the cheaper one" in accept
+
+    record = next(line for line in lines if line.strip().startswith("on record:"))
+    assert "handednessAccepted" in record
+    for republisher in ("characters list", "sprite_payload", "bundle warnings"):
+        assert republisher in record
+
+
+def test_a_refusal_says_a_re_roll_cannot_be_taken_back_even_with_nobody_to_blame():
+    """The cost of obeying was on the corroborating tail, which is optional.
+
+    `_REROLL_IS_ONE_WAY` rode only on "and do NOT re-roll these neighbours",
+    so a refusal about an ISOLATED row — which is exactly the founding `ne`
+    defect, one flagged row per state with clean neighbours — told the operator
+    to spend approved art and never told them the spending was one-way. The
+    checked-in fixture IS that shape, and the empty `corroborating` is asserted
+    so this cannot pass for the wrong reason.
+    """
+    finding = fixture_findings(EIGHT_WAY_FIXTURE)["flagged"][0]
+    assert finding["corroborating"] == [], "the premise: nobody else to warn about"
+
+    message = pipeline.mirrored_art_error(finding)
+
+    assert "characters reroll-row --row idle-ne" in message
+    assert "auto-approves" in message
+    assert "no approve-row verb to undo it" in message
+    assert "spends correct approved art" in message
+
+
+@pytest.mark.parametrize(
+    ("ops", "row", "named"),
+    [
+        ((), "idle-ne", "idle-ne"),
+        (WHOLE_STATE_MIRRORED, "jump-e", "jump-e"),
+        (REPAIRED + (("flip", "walk-ne"),), "walk-ne", "walk-ne"),
+        # The unattributed headline names the STATE and nobody in it, which is
+        # the whole point of that shape: the rotation cannot say which row of a
+        # run started it, so the ranking rides on a field and not the headline.
+        (REPAIRED + (("slide", "walk-e", -24),), "walk-ne", "walk"),
+    ],
+    ids=["two-basis", "whole-state", "one-basis-warning", "unattributed"],
+)
+def test_the_diagnostic_is_labelled_lines_and_not_one_paragraph(ops, row, named):
+    """All four shapes, and the property both consumers need.
+
+    Measured on the live sheet 2026-08-26, before this change: the refusal was
+    ONE line of 1206 characters, and 1519 when a malformed acceptance made the
+    validator restate the same finding underneath the acceptance error. A
+    terminal survives that by accident; the launcher console card that has to
+    render exactly this text (slice B2) cannot.
+
+    What is pinned is the shape rather than the prose: a headline that stands
+    alone, then one `label: value` line per fact, labels unique inside a block,
+    and no single line anywhere near the 1206 it used to be. Nothing here
+    asserts a wrap width — the module must not choose one, because a column
+    count picked here is wrong for every consumer that is not an 80-column
+    terminal.
+    """
+    found = variant_findings(EIGHT_WAY_FIXTURE, ops)
+    finding = next(entry for entry in found["flagged"] if entry["row"] == row)
+
+    lines = pipeline.mirrored_art_error(finding).split("\n")
+
+    assert len(lines) >= 6
+    headline, fields = lines[0], lines[1:]
+    assert not headline.startswith(" ") and named in headline
+    assert headline.endswith("REFUSED") or "does not block" in headline
+
+    labels = []
+    for line in fields:
+        label, separator, value = line.partition(":")
+        assert separator == ":", line
+        assert label.startswith("  ") and label.strip(), line
+        assert value.strip(), line
+        labels.append(label.strip())
+    assert len(labels) == len(set(labels)), labels
+    assert max(len(line) for line in lines) < 400
+
+
+def test_a_refusal_keeps_every_fact_it_carried_as_one_paragraph():
+    """The shape changed; the content did not, and that is the risk here.
+
+    A shorter message that dropped the warning about spending correct approved
+    art would be a regression wearing an improvement's clothes. This is the
+    inventory, on the one shape that carries all of it at once — a named
+    culprit with a neighbour riding along.
+    """
+    found = variant_findings(EIGHT_WAY_FIXTURE, REPAIRED + (("flip", "idle-se", "idle-ne"),))
+    finding = next(entry for entry in found["flagged"] if entry["row"] == "idle-ne")
+    assert finding["corroborating"], "the premise: a neighbour rode along"
+
+    message = pipeline.mirrored_art_error(finding)
+
+    # The per-neighbour before/after, every seam, both numbers.
+    for seam in finding["seams"]:
+        assert f"{seam['distance']:.2f}" in message
+        assert f"{seam['mirroredDistance']:.2f}" in message
+        assert seam["with"] in message
+    assert f"{finding['gain'] * 100:.0f}% better" in message
+    # The neighbour is not a second fault, and must not be re-rolled.
+    assert "NOT separate faults" in message
+    assert "Do NOT re-roll them" in message
+    # What obeying a wrong name costs.
+    assert "spends correct approved art" in message
+    # What a mirrored row does downstream.
+    assert "corrupts the derived direction" in message
+
+
+def test_a_malformed_acceptance_does_not_reprint_the_whole_diagnostic():
+    """One row is one block — it used to be the complaint plus a second copy.
+
+    Typing `--accept-handedness idle-ne` (the spelling a shell history keeps)
+    produced TWO entries in `errors` about one finding: the acceptance
+    complaint, and then the entire refusal again underneath it. Measured on real
+    art 2026-08-26 at 1519 characters against the plain refusal's 1206 — so the
+    message for getting the flag wrong was LONGER than the one that taught the
+    flag, and 79% of it was text the operator had just read.
+    """
+    plain = fixture_validation(EIGHT_WAY_FIXTURE)
+    bare = fixture_validation(EIGHT_WAY_FIXTURE, ("idle-ne",))
+
+    assert not bare["ok"] and bare["handedness"]["accepted"] == []
+    about_the_row = [error for error in bare["errors"] if "idle-ne" in error]
+    assert len(about_the_row) == 1, about_the_row
+    (folded,) = about_the_row
+
+    # The complaint is INSIDE the finding's block, not beside it: same string,
+    # and the evidence lines are still there with it.
+    assert "with no basis" in folded
+    assert "looks drawn as the MIRROR of 'ne'" in folded
+    assert f"--accept-handedness idle-ne:{TWO_BASIS_TOKEN}" in folded
+    assert "you typed" in folded
+
+    # And it grew by the complaint, not by a copy of the refusal.
+    (was,) = plain["errors"]
+    assert len(folded) < len(was) + len(was) // 2

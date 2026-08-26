@@ -1729,6 +1729,36 @@ def test_a_refused_compose_carries_the_accounting_it_used_to_discard(
     assert draft.stage == "rows", "a refused compose does not advance the stage"
 
 
+def test_a_refusal_leads_with_the_failure_and_the_scope_it_was_judged_at(
+    fake, base, defective_sheet
+):
+    """SCOPE FIRST — the accounting used to be the tail of a run-on.
+
+    The whole refusal was one line: the prefix, then every error joined with
+    "; ", then "— handedness: N judged, M unjudged; a refusal is not a full
+    audit" at the very end. Measured on real art 2026-08-26 that put the
+    sentence saying how much of the sheet was actually looked at 1100+
+    characters into a single line, which is the worst place for it on the
+    surface with the least room (the launcher console card renders exactly this
+    text). Head-first is what lets a consumer show two lines and be honest: what
+    failed, and how far the check could see.
+    """
+    draft = run_to_rows(base)
+    draft.run_rows()
+
+    with pytest.raises(ValueError) as excinfo:
+        draft.compose()
+
+    head, accounting, blank, first = str(excinfo.value).split("\n")[:4]
+    assert head == f"composed sheet for draft {draft.id} failed validation."
+    assert accounting.startswith("handedness: ")
+    assert accounting.endswith("; a refusal is not a full audit.")
+    assert blank == ""
+    # And the findings start on their own line, one block apiece, rather than
+    # being semicolon-welded into the sentence above.
+    assert first.startswith("row ") and first.endswith("REFUSED")
+
+
 def test_an_accepted_handedness_row_installs_and_is_recorded_on_the_character(
     fake, base, defective_sheet
 ):

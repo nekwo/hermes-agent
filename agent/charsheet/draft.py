@@ -1049,12 +1049,17 @@ class CharacterDraft:
             # payload carrying "and here are the six rows nobody judged" is
             # discarded at exactly the moment an operator is deciding whether to
             # trust the check.
+            # SCOPE FIRST, then the findings, one block apiece. The accounting
+            # used to trail a semicolon-joined run-on, so the sentence saying
+            # how much of the sheet was actually judged was the last thing on a
+            # 1200-character line — furthest from the eye on the surface with
+            # the least room. A consumer that shows only the head of this now
+            # shows what failed and how far the check could see.
             raise ValueError(
-                f"composed sheet for draft {self.id} failed validation: "
-                + "; ".join(validation["errors"])
-                + " — "
+                f"composed sheet for draft {self.id} failed validation.\n"
                 + pipeline.handedness_summary(validation["handedness"])
-                + "; a refusal is not a full audit"
+                + "; a refusal is not a full audit.\n\n"
+                + "\n\n".join(validation["errors"])
             )
 
         directory = characters_dir() / _safe_segment(slugify(self.slug))

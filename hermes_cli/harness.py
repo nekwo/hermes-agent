@@ -3429,7 +3429,13 @@ def _cmd_characters_compose(args) -> int:
             f"({validation['width']}x{validation['height']}) at {result['sheet']}; "
             + pipeline.handedness_summary(validation["handedness"])
         ]
-        lines += [f"  warning: {text}" for text in validation["warnings"]]
+        # A warning is a BLOCK now, not a sentence, so its continuation lines
+        # are pushed under the same indent rather than falling back to column
+        # zero and reading as separate output.
+        lines += [
+            "  warning: " + text.replace("\n", "\n  ")
+            for text in validation["warnings"]
+        ]
         return result, "\n".join(lines)
 
     return _characters_verb(args, call)
