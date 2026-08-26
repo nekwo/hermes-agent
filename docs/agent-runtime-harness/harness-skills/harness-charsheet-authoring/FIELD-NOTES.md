@@ -1228,6 +1228,106 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
 
 ## Appended by slice
 
+### The handedness refusal as a MESSAGE (2026-08-26, found by running the verb)
+
+- **[MEASURED] The refusal was ONE line of 1206 characters, and 1519 when the operator
+  spelled the acceptance wrong — of which 1206 was the refusal they had just read.**
+  Measured on a throwaway copy of the live alice home with `walk-e`'s approved attempt
+  flipped, `compose` refusing at exit 2. Plain refusal: 1206 chars, 1 line, longest line
+  1206. `--accept-handedness walk-e` (a bare row name): 1519 chars, 1 line — the
+  acceptance complaint, then the ENTIRE finding diagnostic again underneath it, because
+  the two were separate entries in `validation["errors"]` about one row and `draft.py`
+  joined them with `"; "`. So the message for getting the flag wrong was LONGER than the
+  message that taught the flag, and 79% of it was a second copy. After the repair:
+  12 lines, longest **286**, and the bare-acceptance case grows by the complaint only
+  (13 lines, longest 334) because the complaint folds into the block for the row it
+  names. One row is one block.
+  *Consequence:* the launcher console card (slice B2) renders exactly this text. When you
+  add a fact to a finding, add a LINE, never a clause — and never a second `errors` entry
+  about a row that already has one.
+
+- **[READ] THE DECISION on the escape hatch: it is SHOWN, on both blocking shapes.**
+  It was reachable only by guessing the flag existed on the shape an operator actually
+  hits. This was worth deciding rather than patching, because not advertising an override
+  that lets bad art ship is a defensible design — but that was not what shipped. The
+  whole-state branch of `mirrored_art_error` spelled `--accept-handedness` and the
+  two-basis branch did not, so what existed was a DRIFT between two spellings of one
+  thing, which is the class `accept_basis_token` exists to be the only copy of. Three
+  things settled it. (1) Ruling 18 tightens the gate *because* the row-named override is
+  reachable; an override an operator can only find by guessing is not reachable in any
+  sense that argument can use, and `validate_sheet`'s own docstring already says an error
+  with no way past it is a wall and `compose` has no other door. (2) The refusal can be
+  wrong — `max(false) ≈ +18.75%` against `min(true) = +7.64%`, and two bases can be
+  fooled by ONE displacement — so an operator who has LOOKED at the strip is better
+  evidence than the reading, and telling them only to re-roll spends the correct approved
+  art they just judged. (3) The costs run the other way from the prose: a re-roll is
+  private, silent, auto-approving and has no undo verb, while an acceptance is a
+  permanent public record (`{row, gain, basis}` on the manifest, republished by
+  `characters list`, `sprite_payload` and the launcher's bundle warnings, decision 19).
+  The message was promoting the irreversible unrecorded action and hiding the recorded
+  one. **How it is shown so it is not the easy door:** after the `re-roll` line, never
+  before it (asserted); opening "only if you have LOOKED at this row's strip"; carrying
+  its own price on an `on record` line; and absent entirely from warnings and from
+  unattributed findings, which say to reach for it only on a finding that actually
+  blocks.
+  *Consequence:* take the token from the refusal, never from shell history — it prints
+  the one the validator will accept, per finding. And say in the turn what you saw on the
+  strip; the acceptance outlives the session and names you nowhere.
+
+- **[READ] The cost of obeying a wrong name rode on an OPTIONAL clause, and the founding
+  defect's own shape did not get it.** `_REROLL_IS_ONE_WAY` ("a re-roll auto-approves and
+  there is no approve-row verb to undo it") was quoted by the warning branch, the
+  unattributed branch and the corroborating tail — but the corroborating tail only exists
+  when a neighbour rode along. The checked-in 8-way fixture's `idle-ne` finding has
+  `corroborating == []`, and that is exactly the founding `ne` defect: one isolated
+  flagged row per state with clean neighbours. So the two ERROR branches — the only two
+  that hand over `characters reroll-row` — told an operator to spend approved art and
+  never said the spending was one-way. It is now on every branch's action line, stated
+  once per block.
+  *Consequence:* when you add a branch that names a verb, the one-way sentence goes on
+  the line that names it, not on a tail that may not render.
+
+- **[READ] The message does NOT choose a wrap width, and must not.** The shape is a
+  headline that stands alone plus one `label: value` line per fact, with no hard wrap.
+  A column count picked inside `pipeline.py` is right for an 80-column terminal and wrong
+  for every other consumer, and a card that re-wraps hard-wrapped text looks worse than
+  one that never received it. What both consumers actually need is SEPARABLE FACTS: the
+  terminal soft-wraps each field, the card wraps each on its own width or shows the
+  headline and discloses the rest. The raise in `draft.compose` leads with the failure
+  and then the handedness accounting, so a surface that shows two lines shows what failed
+  and how far the check could see — that sentence used to be 1100+ characters into the
+  single line, the worst place for it on the surface with the least room.
+  *Consequence:* `mirrored_art_error` returns a BLOCK. `hermes_cli/harness.py` indents
+  continuation lines under `  warning: `; anything else that prints it must do the same
+  or the block falls back to column zero and reads as separate output.
+
+- **[MEASURED] The trap is still live, and it is a message pin standing in for a severity
+  pin.** `test_the_whole_state_message_names_the_state_and_the_override_it_accepts`
+  PASSES against the sabotage that deletes the whole-state refusal outright — remove
+  `or finding.get("wholeState")` from the severity rule and a wholly mirrored state stops
+  blocking, while that test stays green, because `mirrored_art_error` branches on
+  `wholeState` BEFORE it looks at severity, so the text still says WHOLE STATE and still
+  prints the token. Verified applied and reverted 2026-08-26: the sabotage reddens
+  `test_a_whole_state_drawn_mirrored_is_caught_across_the_states`,
+  `test_the_whole_state_refusal_is_overridable_row_by_row` and the new
+  `test_a_refusal_hands_over_a_token_that_actually_reopens_the_compose[whole-state]` —
+  the message test is one of the three that survive it.
+  *Consequence:* a test that reads `mirrored_art_error` is testing the SENTENCE. If the
+  guarantee is "this refuses", assert `validate_sheet(...)["ok"]` and the severity in the
+  same test, or the sentence will keep being true after the refusal is gone.
+
+- **[READ] The round trip is the honest test of an override, and a grep for the flag name
+  is not.** `test_a_refusal_hands_over_a_token_that_actually_reopens_the_compose` pulls
+  every `--accept-handedness <token>` out of the printed refusal with a regex, feeds
+  exactly those back to `validate_sheet`, and requires the install to go through. It
+  fails both ways a message can lie — by not offering a token, and by offering one the
+  validator rejects. Measured: replacing `accept_basis_token(...)` with a hardcoded
+  `rotation+states` reddens it on the whole-state shape (plus two older tests), which a
+  grep for `--accept-handedness` would not.
+  *Consequence:* if a third blocking basis is ever added, this test covers its override
+  for free as soon as the shape is added to its parametrize list. Add the shape, not a
+  new assertion about spelling.
+
 <!-- A2, A3, R1 and any slice standing in the HERMES repo: append your entries above this
      line, under the matching heading, or add a heading if none fits. Then say in your
      slice report that you did.
