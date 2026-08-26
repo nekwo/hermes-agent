@@ -1006,6 +1006,12 @@ EIGHT_WAY_FIXTURE = "handedness_8way.webp"
 # the mutation tests below build on.
 REPAIRED = (("flip", "idle-ne"),)
 
+# The acceptance token for a row BOTH passes agree about. Read off the code
+# rather than typed, because the whole point of `accept_basis_token` is that the
+# refusal that demands a spelling and the message that teaches it are one
+# function — a literal here would be a third copy free to disagree with both.
+TWO_BASIS_TOKEN = pipeline.accept_basis_token("rotation and states")
+
 
 @functools.lru_cache(maxsize=None)
 def variant(name: str, ops: tuple = ()):
@@ -1585,16 +1591,15 @@ def test_a_whole_state_drawn_mirrored_is_caught_across_the_states():
     halves are asserted here: the rotation finds nothing in `jump`, the states
     pass convicts all three of its judged rows.
 
-    **And it WARNS rather than refusing, which is the ruling's real cost.** One
-    basis is all there is here by construction — the rotation is a fixed point
-    of a wholly mirrored state — so nothing blocks. That is not an oversight: on
-    a two-state cut of this same art a whole mirrored state scores bit-identical
-    to the correct sheet, so this pass was already the only thing that could see
-    it at all, and a single reading does not separate the populations. Three
-    named warnings and an operator who reads them is what this buys; if the
-    owner wants a whole mirrored STATE to block, the rule to add is "a `states`
-    finding covering EVERY judged row of one state is an error", which is a
-    second-order consensus and not a second basis.
+    **And it REFUSES on that one basis (owner ruling 2026-08-25).** This test
+    asserted `{"warning"}` until then, and named the rule that would change it:
+    "a `states` finding covering EVERY judged row of one state is an error,
+    which is a second-order consensus and not a second basis". That is now the
+    code. Demanding a second basis here means demanding one that cannot exist —
+    the rotation is blind to this defect by algebra, not by bad luck — so the
+    wait would have been forever, and on the two-state default sheet a whole
+    mirrored state scores bit-identical to the correct sheet, which is the only
+    other reading there could have been.
     """
     mirrored_state = REPAIRED + (
         ("flip", "jump-s", "jump-se", "jump-e", "jump-ne", "jump-n"),
@@ -1609,11 +1614,221 @@ def test_a_whole_state_drawn_mirrored_is_caught_across_the_states():
     assert sorted(
         (finding["row"], finding["basis"]) for finding in found["flagged"]
     ) == [("jump-e", "states"), ("jump-ne", "states"), ("jump-se", "states")]
-    assert {finding["severity"] for finding in found["flagged"]} == {"warning"}
+    assert {finding["severity"] for finding in found["flagged"]} == {"error"}
     assert all(finding["attributed"] for finding in found["flagged"])
+    # Every flagged row carries the state's whole roster, in sheet order, so the
+    # message names the fault an operator has to fix rather than one row of it.
+    assert all(
+        finding["wholeState"] == ["jump-se", "jump-e", "jump-ne"]
+        for finding in found["flagged"]
+    )
+
     installed = variant_validation(EIGHT_WAY_FIXTURE, mirrored_state)
-    assert installed["ok"], installed["errors"]
-    assert len(installed["warnings"]) == 3
+    assert not installed["ok"]
+    assert len(installed["errors"]) == 3
+    assert not [text for text in installed["warnings"] if "handedness" in text]
+    assert pipeline.handedness_summary(dict(installed["handedness"], accepted=[])) \
+        .startswith("handedness: 9 row(s) judged, 3 refused")
+
+
+def test_the_whole_state_message_names_the_state_and_the_override_it_accepts():
+    """An error with no reachable override is a wall, so the text carries one.
+
+    Before this ruling the ONLY spelling the validator accepted was
+    `rotation+states` — a hardcoded constant — so a refusal raised on the
+    `states` basis alone had no legal acceptance at all. The message now spells
+    the token this finding's own basis needs, and `validate_sheet` derives the
+    demand from the same function, so the two cannot drift.
+    """
+    found = variant_findings(
+        EIGHT_WAY_FIXTURE,
+        REPAIRED + (("flip", "jump-s", "jump-se", "jump-e", "jump-ne", "jump-n"),),
+    )
+    finding = next(f for f in found["flagged"] if f["row"] == "jump-e")
+
+    message = pipeline.mirrored_art_error(finding)
+
+    assert "WHOLE STATE" in message
+    assert "'jump'" in message
+    # The roster, so the operator sees the size of what they are looking at.
+    for row in ("jump-se", "jump-e", "jump-ne"):
+        assert f"'{row}'" in message
+    # Why one basis is enough HERE, stated where it is read.
+    assert "FIXED POINT" in message
+    assert "add-state" in message
+    # The override, spelled the way the validator will accept it.
+    assert "--accept-handedness jump-e:states" in message
+    assert "rotation+states" not in message
+
+
+def test_a_single_mirrored_row_across_states_is_NOT_escalated():
+    """The half of the ruling that says what does NOT change.
+
+    A 4-way scheme authors `s, e, n`, so `turnaround_order(...)[1:-1]` is ONE
+    direction and the cross-state pass judges exactly one row per state. Without
+    the `>= 2` guard "every judged row of the state" would be satisfied by a
+    single row every time, and a 4-way sheet would refuse on precisely the
+    reading the owner declined to escalate.
+
+    Built from the real 4-way fixture's art rather than the 8-way one, because
+    the one-judged-row shape IS the 4-way scheme.
+    """
+    spec, source = load_fixture_sheet("handedness_4way.webp")
+    wide, sheet = four_way_three_states(spec, source, mirror=("extra-e",))
+    found = pipeline.detect_mirrored_art(wide, sheet)
+
+    states = gains_by_row(found, "states")
+    # The premise: exactly one row per state is cross-state judged.
+    assert sorted(states) == ["copy-e", "extra-e", "idle-e"]
+    flagged = {finding["row"]: finding for finding in found["flagged"]}
+    assert "extra-e" in flagged and flagged["extra-e"]["basis"] == "states"
+
+    assert "wholeState" not in flagged["extra-e"]
+    assert flagged["extra-e"]["severity"] == "warning"
+    assert pipeline.validate_sheet(wide, sheet)["ok"]
+
+
+def test_a_state_with_one_judged_row_still_CLEAN_is_not_a_whole_state():
+    """"Every judged row", never a majority — and this is the difference.
+
+    `idle-se` and `idle-ne` mirrored leaves `idle-e` judged and CLEAN across the
+    states (-97.62%). Two of three is a contiguous BLOCK of mirrored rows, which
+    the docstring already bounds; it is not a state drawn backwards, and the
+    sheet says so itself. A majority rule would have called this a whole state
+    and refused an install on evidence that contradicts it.
+    """
+    found = variant_findings(
+        EIGHT_WAY_FIXTURE, REPAIRED + (("flip", "idle-se", "idle-ne"),)
+    )
+
+    states = gains_by_row(found, "states")
+    assert sorted(states) == ["idle-e", "idle-ne", "idle-se", "jump-e", "jump-ne",
+                              "jump-se", "walk-e", "walk-ne", "walk-se"]
+    assert states["idle-e"] < 0, "the premise: one row of the state reads clean"
+
+    by_row = {finding["row"]: finding for finding in found["flagged"]}
+    assert "wholeState" not in by_row["idle-se"]
+    assert by_row["idle-se"]["severity"] == "warning"
+    # And the row both passes agree about still refuses, on the OTHER rule.
+    assert by_row["idle-ne"]["severity"] == "error"
+    assert "wholeState" not in by_row["idle-ne"]
+
+
+def test_the_whole_state_refusal_is_overridable_row_by_row():
+    """An error the operator cannot get past is a wall, and `compose` has no
+    other door.
+
+    The grammar that shipped on 2026-08-25 had a single hardcoded token
+    (`rotation+states`) and refused every other spelling, so promoting a
+    one-basis reading to an error without touching it would have produced
+    exactly that wall. The token is now derived from the finding's basis, and a
+    whole-state refusal is waived ONE ROW AT A TIME like any other — a
+    state-wide reading waived state-wide in one token is the blanket this
+    grammar exists to refuse.
+    """
+    mirrored_state = REPAIRED + (
+        ("flip", "jump-s", "jump-se", "jump-e", "jump-ne", "jump-n"),
+    )
+    rows = ("jump-se", "jump-e", "jump-ne")
+
+    # A bare row name is refused, and the refusal spells what to type.
+    bare = variant_validation(EIGHT_WAY_FIXTURE, mirrored_state, ("jump-e",))
+    assert not bare["ok"]
+    assert bare["handedness"]["accepted"] == []
+    assert any("with no basis" in error for error in bare["errors"])
+    assert any(
+        "--accept-handedness jump-e:states" in error for error in bare["errors"]
+    )
+    assert any("whole state reads as" in error for error in bare["errors"])
+
+    # So is the OTHER shape's token: this finding's bases are not those.
+    wrong = variant_validation(
+        EIGHT_WAY_FIXTURE, mirrored_state, ("jump-e:rotation+states",)
+    )
+    assert not wrong["ok"]
+    assert any("is spelled jump-e:states" in error for error in wrong["errors"])
+
+    # Accepting ONE of the three leaves the other two refusing.
+    partial = variant_validation(EIGHT_WAY_FIXTURE, mirrored_state, ("jump-e:states",))
+    assert not partial["ok"]
+    assert [entry["row"] for entry in partial["handedness"]["accepted"]] == ["jump-e"]
+    assert len([e for e in partial["errors"] if "MIRROR" in e]) == 2
+
+    # All three, and the install goes through carrying the record.
+    every = variant_validation(
+        EIGHT_WAY_FIXTURE, mirrored_state, tuple(f"{row}:states" for row in rows)
+    )
+    assert every["ok"], every["errors"]
+    assert [entry["row"] for entry in every["handedness"]["accepted"]] == list(rows)
+    assert all(entry["basis"] == "states" for entry in every["handedness"]["accepted"])
+    # Accepted, not erased: the refusal text survives as a warning, verbatim.
+    assert len(every["warnings"]) == 3
+    assert all("WHOLE STATE" in text for text in every["warnings"])
+
+
+def test_the_default_two_state_character_reaches_NEITHER_refusal():
+    """The premise this ruling was checked against, pinned so it stays honest.
+
+    `characters start` creates `idle:6, walk:8`. Two states is one cross-state
+    pair, and one pair cannot say which side is wrong, so the states pass says
+    nothing at all — no `rotation and states` finding is reachable and no
+    whole-state consensus is either. Mirror a whole state on such a sheet and
+    the check still only warns.
+
+    This is not a defect the whole-state rule failed to fix. It is the same
+    algebra: with one witness there is no consensus to take, and the honest
+    answer is the warning plus a third state.
+    """
+    cut, sheet = two_state_cut(
+        (("flip", "walk-s", "walk-se", "walk-e", "walk-ne", "walk-n"),)
+    )
+    found = pipeline.detect_mirrored_art(cut, sheet)
+
+    assert gains_by_row(found, "states") == {}
+    assert not [f for f in found["flagged"] if f.get("wholeState")]
+    assert "error" not in {f["severity"] for f in found["flagged"]}
+    assert pipeline.validate_sheet(cut, sheet)["ok"]
+
+
+def four_way_three_states(spec, source, mirror: tuple[str, ...] = ()):
+    """The 4-way fixture's one state, plus two more phase-rotated copies.
+
+    Three states is the cross-state pass's minimum, and a 4-way scheme judges
+    ONE direction (`e`) — which is the shape the `>= 2` guard exists for. A byte
+    copy would be useless (identical cells measure zero and drop out of the
+    ranking), so each added state rotates the frame order, exactly as
+    `four_state_sheet` does for the 8-way fixture.
+
+    NOT `lru_cache`d, unlike its 8-way sibling: a `SheetSpec` carries a dict
+    (`scheme.mirrored`) and is therefore unhashable, and the 4-way fixture is
+    2 frames over 3 rows per state — cheap enough that the cache would buy
+    nothing anyway.
+    """
+    wide = SheetSpec(
+        states=tuple(
+            list(spec.states)
+            + [StateSpec("copy", spec.states[0].frames, True),
+               StateSpec("extra", spec.states[0].frames, True)]
+        ),
+        scheme=spec.scheme,
+        frame_w=spec.frame_w,
+        frame_h=spec.frame_h,
+    )
+    out = Image.new("RGBA", wide.sheet_size(), (0, 0, 0, 0))
+    out.alpha_composite(source, (0, 0))
+    base_state = spec.states[0].name
+    for offset, name in ((1, "copy"), (2, "extra")):
+        for direction in spec.scheme.authored:
+            cells = pipeline._row_cells(
+                source, spec, spec.row_by_key(f"{base_state}-{direction}")
+            )
+            row = wide.row_by_key(f"{name}-{direction}")
+            for column in range(row.frames):
+                out.paste(
+                    cells[(column + offset) % len(cells)],
+                    (column * wide.frame_w, row.index * wide.frame_h),
+                )
+    return wide, flip_rows(wide, out, *mirror) if mirror else out
 
 
 @functools.lru_cache(maxsize=None)
@@ -1861,12 +2076,12 @@ def test_an_acceptance_must_name_the_bases_it_is_waiving():
     assert bare["handedness"]["accepted"] == []
     assert any("with no basis" in error for error in bare["errors"])
     assert any(
-        f"--accept-handedness idle-ne:{pipeline.ACCEPT_BASIS_TOKEN}" in error
+        f"--accept-handedness idle-ne:{TWO_BASIS_TOKEN}" in error
         for error in bare["errors"]
     )
 
     named = fixture_validation(
-        EIGHT_WAY_FIXTURE, (f"idle-ne:{pipeline.ACCEPT_BASIS_TOKEN}",)
+        EIGHT_WAY_FIXTURE, (f"idle-ne:{TWO_BASIS_TOKEN}",)
     )
     assert named["ok"], named["errors"]
 
@@ -1905,7 +2120,7 @@ def test_a_warning_cannot_be_accepted_because_it_never_blocked():
     warned = pipeline.validate_sheet(
         EIGHT,
         eight_way_sheet(mirror=("walk-ne",)),
-        accept_handedness=[f"walk-ne:{pipeline.ACCEPT_BASIS_TOKEN}"],
+        accept_handedness=[f"walk-ne:{TWO_BASIS_TOKEN}"],
     )
 
     assert not warned["ok"]
@@ -2104,7 +2319,7 @@ def test_the_handedness_accounting_is_a_line_an_operator_can_read():
 
     accepted = pipeline.handedness_summary(
         fixture_validation(
-            EIGHT_WAY_FIXTURE, (f"idle-ne:{pipeline.ACCEPT_BASIS_TOKEN}",)
+            EIGHT_WAY_FIXTURE, (f"idle-ne:{TWO_BASIS_TOKEN}",)
         )["handedness"]
     )
     assert "1 accepted by the operator (idle-ne)" in accepted

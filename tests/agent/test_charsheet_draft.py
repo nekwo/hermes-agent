@@ -1059,34 +1059,52 @@ def test_the_crop_budget_stays_under_pillows_decompression_bomb_threshold(fake, 
             crop.load()
 
 
-def test_the_card_budget_is_the_sheet_and_not_the_bomb_threshold(fake, base):
-    """Two bounds, two values. One number could not be right for both.
+def test_the_two_crop_bounds_answer_two_different_questions(fake, base):
+    """Three bounds, three values, and only one of them moves with the draft.
 
     `MAX_THUMB_PIXELS` answers "may this file exist?" and is set against
-    Pillow's bomb threshold. Risk D.3 asks a different question — "may a chat
-    card decode this?" — so the card budget is SIZED from `CHAR8`'s sheet, the
-    largest this package's default spec composes.
+    Pillow's bomb threshold. `MAX_CONSOLE_CARD_PIXELS` answers "may a chat card
+    DECODE this?" and is a module constant sized from `CHAR8`, the largest sheet
+    the package's default spec composes — it does not move. `fits_own_sheet`
+    answers the question launcher risk D.3 actually states — *a crop that is not
+    smaller than the sheet is not a mitigation* — against THIS draft's own
+    `spec.sheet_size()`, and it moves with every spec.
 
-    **What it is not, corrected 2026-08-25:** a comparison against the caller's
-    own sheet. This docstring used to say the budget was "derived from the spec
-    so it cannot drift from the thing it is measured against", and it does drift
-    — it is a module constant. An `add-state`-grown sheet measured 1.50x it and
-    a `--directions 4`, `idle:2` sheet 13.3x lighter. It is a fixed console
-    decode ceiling; see `pipeline.MAX_CARD_PIXELS`.
-
-    The killing mutation is the state this replaced: one constant serving both,
-    at which point a crop 3.94x heavier than the sheet passes the only bound
-    there is.
+    Until 2026-08-25 one boolean (`cardSafe`) answered the second question and
+    was read as the third. The killing mutation is the state this replaced: one
+    predicate serving both, at which point a crop 13.1x its own sheet passes the
+    only bound there is.
     """
     width, height = CHAR8.sheet_size()
+    grown = SheetSpec(
+        states=tuple(list(CHAR8.states) + [StateSpec("jumping", 6, True)]),
+        scheme=EIGHT_WAY,
+    )
 
-    assert pipeline.MAX_CARD_PIXELS == width * height
-    assert pipeline.MAX_CARD_PIXELS < pipeline.MAX_THUMB_PIXELS
-    assert pipeline.fits_card_budget(width, height)
-    assert not pipeline.fits_card_budget(width, height + 1)
+    # The fixed one: sized from CHAR8 and blind to whose sheet is asking.
+    assert pipeline.MAX_CONSOLE_CARD_PIXELS == width * height
+    assert pipeline.MAX_CONSOLE_CARD_PIXELS < pipeline.MAX_THUMB_PIXELS
+    assert pipeline.fits_console_budget(width, height)
+    assert not pipeline.fits_console_budget(width, height + 1)
+
+    # The moving one: the SAME pixel count, three different answers.
+    assert pipeline.fits_own_sheet(width, height, CHAR8)
+    assert not pipeline.fits_own_sheet(width, height + 1, CHAR8)
+    assert pipeline.fits_own_sheet(width, height, grown), (
+        "a grown sheet must accept a crop CHAR8's own sheet only just accepts"
+    )
+    assert not pipeline.fits_own_sheet(width, height, SPEC), (
+        "the 4-way test spec's sheet is far smaller — this crop cannot fit it"
+    )
+    # And the two disagree on a real draft, which is why they are two.
+    grown_w, grown_h = grown.sheet_size()
+    assert grown_w * grown_h == 4_792_320
+    assert grown_w * grown_h == round(1.50 * pipeline.MAX_CONSOLE_CARD_PIXELS)
+    assert not pipeline.fits_console_budget(grown_w, grown_h)
+    assert pipeline.fits_own_sheet(grown_w, grown_h, grown)
 
 
-def test_a_default_crop_heavier_than_the_sheet_is_refused_rather_than_declared(
+def test_a_default_crop_over_the_console_ceiling_is_refused_rather_than_declared(
     fake, base, tmp_path
 ):
     """The default crop is the one an agent hands to a card, so it is bounded.
@@ -1102,30 +1120,32 @@ def test_a_default_crop_heavier_than_the_sheet_is_refused_rather_than_declared(
     draft = run_to_rows(base)
     draft.run_rows(only=["walk-e"])
     frames = next(row.frames for row in SPEC.authored_rows() if row.key == "walk-e")
-    # Sized so ONE cell at the default 2x lands just over the sheet's own count.
+    # Sized so ONE cell at the default 2x lands just over the console ceiling.
     big = tmp_path / "oversized-strip.png"
     Image.new("RGBA", (512 * frames, 1600), MAGENTA).save(big)
     draft.store.propose(row_item("walk-e"), big)
     cell_pixels = 512 * 1600
-    assert cell_pixels * DEFAULT_THUMB_SCALE**2 > pipeline.MAX_CARD_PIXELS
+    assert cell_pixels * DEFAULT_THUMB_SCALE**2 > pipeline.MAX_CONSOLE_CARD_PIXELS
 
     with pytest.raises(ValueError) as refusal:
         draft.row_thumb("walk-e")
 
     message = str(refusal.value)
-    assert "card budget" in message
-    assert f"{pipeline.MAX_CARD_PIXELS:,}" in message
+    assert "console budget" in message
+    assert f"{pipeline.MAX_CONSOLE_CARD_PIXELS:,}" in message
     assert "--scale 1" in message
     # And it names a FIXED ceiling rather than a comparison it does not make.
     # It read "heavier than the sheet this crop exists to avoid decoding" until
     # 2026-08-25, which is false on exactly the drafts an operator reaches for
     # this verb on: an `add-state`-grown sheet is 1.50x the budget, so the
-    # refusal fires for crops lighter than that draft's own sheet.
+    # refusal fires for crops lighter than that draft's own sheet. It now points
+    # at the boolean that DOES answer that, instead of at a manual computation.
     assert "heavier than the sheet" not in message
     assert "NOT a comparison" in message
+    assert "withinOwnSheet" in message
     assert not (draft.directory / "thumbs").exists(), "the refusal wrote a file anyway"
     # ...and the escape the refusal names actually works.
-    assert draft.row_thumb("walk-e", scale=1)["cardSafe"] is True
+    assert draft.row_thumb("walk-e", scale=1)["withinConsoleBudget"] is True
 
 
 def test_a_deliberate_deep_zoom_is_written_and_labelled_viewer_only(fake, base):
@@ -1142,11 +1162,130 @@ def test_a_deliberate_deep_zoom_is_written_and_labelled_viewer_only(fake, base):
     default = draft.row_thumb("walk-e")
     zoomed = draft.row_thumb("walk-e", scale=10)
 
-    assert default["cardSafe"] is True
-    assert default["width"] * default["height"] <= pipeline.MAX_CARD_PIXELS
-    assert zoomed["cardSafe"] is False
-    assert zoomed["width"] * zoomed["height"] > pipeline.MAX_CARD_PIXELS
+    assert default["withinConsoleBudget"] is True
+    assert default["width"] * default["height"] <= pipeline.MAX_CONSOLE_CARD_PIXELS
+    assert zoomed["withinConsoleBudget"] is False
+    assert zoomed["width"] * zoomed["height"] > pipeline.MAX_CONSOLE_CARD_PIXELS
     assert Path(zoomed["path"]).is_file(), "a viewer artifact is still written"
+
+
+def hand_sized_draft(spec, *, slug, row_key, strip_size, base, tmp_path):
+    """A draft on *spec* carrying ONE hand-built attempt of *strip_size*.
+
+    The FIXTURE RULE above bans hand-built inputs for tests that judge PIXELS,
+    and this is the documented exception: what the two tests below judge is
+    ARITHMETIC on the source's dimensions against a spec's sheet size. The fake
+    draftsman draws 512x192 strips, which is why neither disagreement can be
+    reached through it, and a synthetic strip cannot make an arithmetic
+    assertion pass that the code would otherwise fail.
+    """
+    draft = CharacterDraft.create(
+        concept=CONCEPT, slug=slug, spec=spec, base_image=base
+    )
+    strip = tmp_path / f"{slug}-strip.png"
+    Image.new("RGBA", strip_size, MAGENTA).save(strip)
+    draft.store.propose(row_item(row_key), strip)
+    return draft
+
+
+def test_a_crop_under_the_console_ceiling_can_be_many_times_its_OWN_sheet(
+    fake, base, tmp_path
+):
+    """Measurement A, and the first half of why one boolean was two guarantees.
+
+    Live on a `--directions 4`, `idle:2` draft: the composed sheet is 384x624 =
+    239,616 px, and the DEFAULT crop (`--frame 0 --scale 2`) came back
+    1774x1774 = 3,147,076 px — **13.1x that whole sheet**, clearing the fixed
+    console ceiling by 1.5%. One reroll turn declared four of them, ~48 MiB
+    decoded, every one carrying `cardSafe: true`.
+
+    The two flags must DISAGREE here. A change where they always agree has not
+    been tested, because the single boolean this replaced agreed with itself.
+    """
+    small = SheetSpec(states=(StateSpec("idle", 2, True),), scheme=FOUR_WAY)
+    assert small.sheet_size() == (384, 624)
+    draft = hand_sized_draft(
+        small,
+        slug="small-4way",
+        row_key="idle-s",
+        strip_size=(1774, 887),
+        base=base,
+        tmp_path=tmp_path,
+    )
+
+    result = draft.row_thumb("idle-s")
+
+    assert (result["width"], result["height"]) == (1774, 1774)
+    pixels = result["width"] * result["height"]
+    sheet_pixels = small.sheet_size()[0] * small.sheet_size()[1]
+    assert pixels == 3_147_076
+    assert round(pixels / sheet_pixels, 1) == 13.1
+    assert result["withinConsoleBudget"] is True
+    assert result["withinOwnSheet"] is False, (
+        "a crop 13.1x its own sheet mitigated nothing — the flag that says so "
+        "is the one this split exists to add"
+    )
+
+
+def test_a_crop_over_the_console_ceiling_can_be_LIGHTER_than_its_own_sheet(
+    fake, base, tmp_path
+):
+    """Measurement B, and the disagreement running the other way.
+
+    `characters add-state --state jumping:6` recomposes the live 8-way
+    `anime-girl` at 1536x3120 = 4,792,320 px — **1.50x the fixed console
+    ceiling, which did not move**. On such a draft a crop can be over that
+    ceiling and still be genuinely lighter than the sheet it exists to avoid
+    decoding, so `withinConsoleBudget: false` cannot be read as "heavier than
+    your sheet" either.
+    """
+    grown = SheetSpec(
+        states=(
+            StateSpec("idle", 6, True),
+            StateSpec("walk", 8, True),
+            StateSpec("jumping", 6, True),
+        ),
+        scheme=EIGHT_WAY,
+    )
+    assert grown.sheet_size() == (1536, 3120)
+    draft = hand_sized_draft(
+        grown,
+        slug="grown-8way",
+        row_key="jumping-e",
+        strip_size=(2400, 1000),
+        base=base,
+        tmp_path=tmp_path,
+    )
+
+    # Scale 3: above the default, so the console refusal does not fire and the
+    # crop is written as the viewer artifact it is.
+    result = draft.row_thumb("jumping-e", scale=3)
+
+    pixels = result["width"] * result["height"]
+    sheet_pixels = grown.sheet_size()[0] * grown.sheet_size()[1]
+    assert pixels == 3_600_000
+    assert pipeline.MAX_CONSOLE_CARD_PIXELS < pixels < sheet_pixels
+    assert result["withinConsoleBudget"] is False
+    assert result["withinOwnSheet"] is True
+
+
+def test_both_flags_ride_in_every_crop_payload(fake, base):
+    """Neither is conditional, and neither may be inferred from the other.
+
+    The consumer rule is "inline card only when BOTH are true", which a consumer
+    can only apply if both are always there — including on the ordinary crop
+    where they agree.
+    """
+    draft = run_to_rows(base)
+    draft.run_rows(only=["walk-e"])
+
+    for scale in (1, 2, 10):
+        result = draft.row_thumb("walk-e", scale=scale)
+        assert isinstance(result["withinConsoleBudget"], bool), scale
+        assert isinstance(result["withinOwnSheet"], bool), scale
+        assert "cardSafe" not in result, (
+            "the old name is gone: two guarantees may not share one key"
+        )
 
 
 def test_a_row_with_no_attempt_yet_says_so_instead_of_cropping_nothing(fake, base):

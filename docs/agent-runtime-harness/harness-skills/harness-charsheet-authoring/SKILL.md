@@ -99,7 +99,7 @@ not the slug** (`20260824-140756-cd645a` vs `anime-girl`).
 | `rows --draft <id> [--only a,b]` | One generation per **row strip** — never per frame. | `rows` |
 | `reroll-row --draft <id> --row <key> [--note …]` | Re-draws one strip. **Auto-approved.** | `rows` |
 | `thumb --draft <id> --row <key> [--attempt n] [--frame n] [--scale n]` | Writes a card-size QA crop of ONE frame. | **any** |
-| `compose --draft <id> [--accept-handedness <row>:rotation+states,…]` | Composes, validates, installs; advances to `composed`. `--accept-handedness` overrides a mirrored-art REFUSAL for the rows you NAME, after looking at them — never blanket, the basis is spelled out beside the row, and a row nothing refused is itself refused. | `rows` |
+| `compose --draft <id> [--accept-handedness <row>:<basis>,…]` | Composes, validates, installs; advances to `composed`. `--accept-handedness` overrides a mirrored-art REFUSAL for the rows you NAME, after looking at them — never blanket, the basis is spelled out beside the row (take the spelling from the refusal: `rotation+states` for a two-basis row, `states` for one carried by a whole mirrored state), and a row nothing refused is itself refused. | `rows` |
 | `reopen --draft <id>` | Back to `rows` for fixes. Installed sheet untouched. | `composed` |
 | `add-state --draft <id> --state <name>:<frames>[:fixed]` | Adds ONE state; seeds its rows un-generated, touches no approved row. | `rows` |
 | `sprite <slug>` | The installed payload the launcher reads. | — |
@@ -146,37 +146,47 @@ that carried the defect. So:
   averages a defect away) onto flat dark, and writes
   `<draft>/thumbs/<row>-attempt-<n+1>-frame-<f+1>-x<scale>.png`. Its payload is
   a **superset** — `{ok, draft, stage, row, attempt, attempts, frame, frames,
-  scale, source, path, width, height, cardSafe}` today, and it grows additively,
-  so read the response you were handed rather than the list you remember.
+  scale, source, path, width, height, withinConsoleBudget, withinOwnSheet}`
+  today, and it grows additively, so read the response you were handed rather
+  than the list you remember. (`cardSafe` is GONE, replaced by those two on
+  2026-08-25; if you see it, the installed skill or the payload is stale.)
   `source` is the attempt file the crop came from, the same string
   `status --json` reports as that attempt's `path`.
 - **`--frame 0` is a default, not an answer.** A defect is hunted frame by frame;
   walk `--frame` across `frames`.
 - `--scale` (default 2) is bounded by **output**-pixel budgets and is
-  **refused, never clamped** — the refusal names the source dimensions. There
-  are two bounds: at or below the default the crop must clear the card budget
-  (`pipeline.MAX_CARD_PIXELS`), and a deeper zoom is allowed but comes back
-  **`cardSafe: false`**.
-- **That budget is a FIXED console ceiling. It is not a comparison against YOUR
-  sheet, and it never was.** `MAX_CARD_PIXELS` is a module constant sized from
-  `CHAR8` — 1536×2080 = 3,194,880 px — and it does not move with a draft.
-  Measured at both ends:
-  - **A grown sheet.** `add-state --state jumping:6` recomposed the live
-    `anime-girl` sheet at 1536×3120 = 4,792,320 px, **1.50× the budget**. On
-    such a draft the default scale can be REFUSED for a crop that is genuinely
-    lighter than the sheet it will compose — so read the refusal as "over the
-    console ceiling", not as "heavier than your sheet".
+  **refused, never clamped** — the refusal names the source dimensions. Only ONE
+  of the two crop bounds refuses: at or below the default the crop must clear
+  the console's decode ceiling (`pipeline.MAX_CONSOLE_CARD_PIXELS`), and a
+  deeper zoom is allowed but comes back **`withinConsoleBudget: false`**.
+- **TWO booleans, because there are two questions and they disagree on real
+  drafts.** They were one boolean (`cardSafe`) until 2026-08-25, and it answered
+  the first while being read as the second:
+  - **`withinConsoleBudget`** — under `MAX_CONSOLE_CARD_PIXELS`, a module
+    constant sized from `CHAR8` (1536×2080 = 3,194,880 px). It does **not** move
+    with a draft. *Will this file sink the console?*
+  - **`withinOwnSheet`** — no larger than the sheet THIS draft composes, from
+    its own `spec.sheet_size()`. It moves with every draft. *Did cropping buy
+    anything?* — launcher risk D.3's actual check: a crop that is not smaller
+    than the sheet is not a mitigation.
+  Measured at both ends, which is why neither can be inferred from the other:
   - **A small sheet.** A `--directions 4`, `idle:2` draft composes 384×624 =
-    239,616 px, and its DEFAULT crop came back `cardSafe: true` at **13.1× that
-    whole sheet**.
-  So take your own size from `status --json` →
-  `.status.spec.sheetWidth` × `.status.spec.sheetHeight` and weigh the crop
-  against it yourself. Never carry a copy of the threshold.
-- **Only declare a `cardSafe: true` crop with `MEDIA:`** — a false one is a
-  fullscreen-viewer artifact and hands the console a decode far past the
-  ceiling for a 420px square. Say the path and tell the operator to open it
-  instead. `cardSafe: true` is necessary, not sufficient: it says the file will
-  not sink the console, not that cropping bought you anything.
+    239,616 px, and its DEFAULT crop came back 1774×1774 = 3,147,076 px —
+    `withinConsoleBudget: true`, `withinOwnSheet: false` at **13.1× that whole
+    sheet**.
+  - **A grown sheet.** `add-state --state jumping:6` recomposed the live
+    `anime-girl` sheet at 1536×3120 = 4,792,320 px, **1.50× the console
+    ceiling**. There a crop can be `withinConsoleBudget: false` and
+    `withinOwnSheet: true` at the same time — so a refusal at the default scale
+    means "over the console ceiling", never "heavier than your sheet".
+  You no longer compute the second one by hand from `status --json`; read the
+  flag. Never carry a copy of either threshold.
+- **Declare a crop with `MEDIA:` only when BOTH flags are true** — that is the
+  same rule the launcher card follows. `withinConsoleBudget: false` hands the
+  console a decode far past the ceiling for a 420px square;
+  `withinOwnSheet: false` is a legal picture that mitigated nothing and may as
+  well have been the sheet. Either way say the path and tell the operator to
+  open it in the viewer instead.
 - **The single most reliable read is attempt N beside attempt N−1**, same row,
   same frame, declared in one turn and labelled. Two independent agents each
   failed to see this seam at 5–6× magnification on a single frame; side by side,
@@ -318,7 +328,7 @@ Three line shapes leave your reply, and two of them are parsed.
 - **On the DEFAULT character this check can only ever warn**, and you should say
   so. `characters start` creates `idle:6, walk:8`; the cross-state pass needs
   three states; so two states leave the rotation as the only reading there will
-  ever be, and one reading does not refuse. A two-state sheet is weak in its own
+  ever be, and neither refusing shape is reachable. A two-state sheet is weak in its own
   right, measured: a whole mirrored state scores bit-identical to the correct
   sheet, and two adjacent mirrored rows pass with their gains going negative.
   **The cheapest sensitivity available is a third state** — say that rather than
@@ -329,9 +339,14 @@ Three line shapes leave your reply, and two of them are parsed.
   THREE states before it can say anything, and it convicts a row only when a
   strict MINORITY of the states draw it that way: an even split (two states
   against two, one `add-state` away) convicts nobody and says "the states split
-  evenly". When it fires on every row of one state, suspect the state's
-  reference before its rows — but it is one basis, so it warns, and the decision
-  is the operator's.
+  evenly". **When it fires on EVERY row of one state that it could judge (two or
+  more), that is a WHOLE MIRRORED STATE and it REFUSES — on one basis** (owner
+  ruling 2026-08-25). One basis is all there can ever be here: the rotation is a
+  fixed point of a wholly mirrored state, so waiting for a second read means
+  waiting forever. Suspect the state's REFERENCE before its rows, and re-roll
+  the state rather than one row of it. A single mirrored row still only warns;
+  so does a state where one judged row reads clean, which is a block of bad rows
+  and not a bad state.
 - **A refusal you believe is wrong has exactly one door, it names rows, and it
   names what it waives.** `compose --accept-handedness idle-ne:rotation+states`
   installs despite that row's finding, records it on the character's manifest as
@@ -339,10 +354,14 @@ Three line shapes leave your reply, and two of them are parsed.
   `sprite` republish it), and keeps every other refused row refusing. The basis
   is spelled out because a bare row name waived two independent bodies of
   evidence at once: an operator overriding a PLACEMENT reading also silenced the
-  cross-state one, which placement cannot explain. Naming a row that was not
-  flagged is an error, and so is naming a WARNING — a warning did not block, so
-  there is nothing to accept. Use it only after looking at the strip with the
-  operator and saying what you saw.
+  cross-state one, which placement cannot explain. **Take the token from the
+  refusal — it prints the one the validator will accept.** Both refusing shapes
+  are overridable: a two-basis row is `<row>:rotation+states`, a row carried by
+  a whole mirrored state is `<row>:states`, and a whole-state refusal is waived
+  **one row at a time** like any other (three rows, three tokens). Naming a row
+  that was not flagged is an error, and so is naming a WARNING — a warning did
+  not block, so there is nothing to accept. Use it only after looking at the
+  strips with the operator and saying what you saw.
 - **`composed` is not terminal.** The post-install fix loop is
   `reopen → reroll-row → compose`, and the post-install GROWTH loop is
   `reopen → add-state → rows --only … → compose`. Both are non-destructive — the

@@ -318,7 +318,12 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   a statement about your sheet. Do not carry a copy of the threshold.
 
 - **[OPEN QUESTION for launcher slice B2, recorded 2026-08-25 — a decision nobody has
-  taken, not a finding.]** Two options were on the table when `MAX_CARD_PIXELS`'s comment was
+  taken, not a finding.] ~~OPEN~~ — RULED 2026-08-25, and the ruling took NEITHER of the
+  two options below. It SPLIT the boolean: (a)'s fixed console ceiling stays, under the
+  name `withinConsoleBudget`, and (b)'s draft-relative reading is added beside it as
+  `withinOwnSheet` rather than replacing it. Nothing about the two measurements below is
+  falsified — they are the reason the split happened and they are now the test inputs.
+  Read the entry below this one for what a consumer does with the pair.** Two options were on the table when `MAX_CARD_PIXELS`'s comment was
   corrected, and only one was taken. **(a) TAKEN:** the budget is a fixed CONSOLE DECODE
   ceiling — what a chat card may render — and the comment plus `row_thumb`'s refusal now say
   exactly that. No semantics changed; `cardSafe` means what it always meant. **(b) NOT taken,
@@ -1113,6 +1118,111 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   not by raising the cap. If you add a test that composes or validates a real
   sheet, put its mutation through the `variant_*` cache — two tests wanting the
   same broken sheet should pay for it once.
+
+---
+
+## The two 2026-08-25 owner rulings (appended by the hermes charsheet slice)
+
+- **[READ] `cardSafe` is GONE. Two booleans ride in every `thumb` payload, and the
+  consumer rule is BOTH.** The owner ruled 2026-08-25 that one name was carrying two
+  guarantees, and split it rather than re-aiming it:
+  - **`withinConsoleBudget`** — under `pipeline.MAX_CONSOLE_CARD_PIXELS` (the old
+    `MAX_CARD_PIXELS`, same value, honest name): a module constant sized once from
+    `CHAR8.sheet_size()` = 1536x2080 = 3,194,880 px. It does NOT move with a draft.
+    *Will this file sink the console?* This is the only one that REFUSES anything — a
+    crop at `--scale 2` or below over it is refused, exactly as before.
+  - **`withinOwnSheet`** — `pipeline.fits_own_sheet(w, h, spec)`, computed from THIS
+    draft's own `spec.sheet_size()` every time. *Did cropping buy anything?* — launcher
+    risk D.3's actual check. It refuses nothing and is reported at every scale.
+  Both are `<=`, both are always present, and neither may be inferred from the other.
+  *Consequence:* declare a crop with `MEDIA:` — and draw it in a launcher card — only
+  when BOTH are true. Otherwise route it to the fullscreen viewer, and say WHICH bound
+  it missed: over the console ceiling is an unsafe decode, over your own sheet is a
+  safe picture that mitigated nothing. Stop computing the second one by hand from
+  `status --json`; that instruction (which this file gave twice) is retired by the flag.
+
+- **[MEASURED] The two flags disagree in BOTH directions, on drafts that exist — which
+  is the whole proof that one boolean could not carry both.** Re-verified at the code
+  2026-08-25 before implementing, and both are now pinned as tests:
+  - `--directions 4`, `idle:2` composes 384x624 = **239,616 px**; its DEFAULT crop
+    (`--frame 0 --scale 2`) is 1774x1774 = **3,147,076 px** →
+    `withinConsoleBudget: true`, `withinOwnSheet: false`. **13.1x its own sheet**, and
+    1.5% under the console ceiling.
+  - `add-state --state jumping:6` on the 8-way 2-state sheet recomposes at 1536x3120 =
+    **4,792,320 px = exactly 1.50x** the console ceiling, which does not move. A crop
+    there can be `withinConsoleBudget: false` and `withinOwnSheet: true` at once (a
+    2400x1000 `jumping-e` strip at `--scale 3` measures 3,600,000 px, between the two).
+  *Consequence:* a change where the two flags always agree has not been tested. The
+  sabotage that proves it: make `fits_own_sheet` return `fits_console_budget` (the
+  pre-split state) — both measurements above go red.
+
+- **[READ] A WHOLE mirrored STATE is now an ERROR, on one basis or two.** The rule the
+  round-three test file proposed in its own docstring — "a `states` finding covering
+  EVERY judged row of one state is an error, which is a second-order consensus and not
+  a second basis" — is the code as of 2026-08-25. Two guards, both load-bearing:
+  **at least two rows** (a 4-way scheme cross-state-judges exactly ONE row per state,
+  and the ruling explicitly leaves a single mirrored row a WARNING), and **every judged
+  row, never a majority** (one row of the state judged CLEAN is a contiguous block of
+  bad rows, not a bad state — the sheet is contradicting the conclusion). Flagged rows
+  carry `wholeState`: that state's flagged rows in sheet order, so the message names
+  the fault rather than one row of it.
+  *Consequence:* when the cross-state pass fires on every row of a state, suspect the
+  state's REFERENCE and re-roll the state. Do not wait for the rotation to agree — it
+  is a fixed point of a wholly mirrored state and will never agree.
+
+- **[READ] The acceptance grammar had NO legal spelling for a one-basis error, and that
+  was a wall.** Before this change `ACCEPT_BASIS_TOKEN = "rotation+states"` was a single
+  hardcoded constant and `validate_sheet` refused every other token (there is a test
+  asserting `idle-ne:states` is answered with "is spelled idle-ne:rotation+states").
+  Promoting a `states`-only finding to an error without touching that would have
+  produced an error with no reachable override, on the verb that has no other door.
+  The token is now DERIVED from the finding — `pipeline.accept_basis_token(basis)` —
+  and the refusal that demands it and the message that teaches it call the same
+  function, so they cannot drift.
+  *Consequence:* **what an operator types for a whole-state refusal is
+  `--accept-handedness jump-se:states,jump-e:states,jump-ne:states` — one token per
+  row, spelled `states`, never a blanket.** Take the token from the refusal text; it
+  prints the one the validator will accept.
+
+- **[MEASURED] The default two-state character reaches NEITHER refusal, and the
+  whole-state rule does not change that.** Verified at the code before implementing:
+  `CHAR8` is `idle:6, walk:8`, the cross-state pass takes its `len(drawn) < 3` unjudged
+  branch for every direction, `state_flagged` stays empty, so no finding can reach
+  `basis: "rotation and states"` and no whole-state consensus exists either. Mirror an
+  ENTIRE state on a two-state cut and the check still only warns.
+  *Consequence:* this is not a gap the ruling failed to close — it is the same algebra
+  as the rotation's end rows. With one witness there is no consensus to take. The
+  cheapest sensitivity available is still a third state; say that to the operator
+  rather than quoting separation figures.
+
+- **[INFERENCE, not yet measured on real art] The whole-state rule buys blocking power
+  and takes on a whole-state FALSE positive with it.** The measured false population is
+  a CORRECT row displaced sideways, up to +18.75%, and `normalize_cells` centres each
+  row's union box — so a prop drawn on one side in EVERY direction of one state (a bag,
+  a cape, a sheathed sword added with the state) displaces every row of that state at
+  once, which is the exact shape this rule convicts. Nobody has produced that sheet.
+  *Consequence:* this is why the override had to work for the whole-state error, and
+  why it is per row. If you hit a whole-state refusal on art you have LOOKED at and
+  believe, accept it row by row and say in the turn what you saw on the strips.
+
+- **[READ] `Path.write_text` flips an LF file to CRLF on Windows, and three of these
+  source files are LF.** Patching `pipeline.py`, `draft.py` and `harness.py` through
+  `read_text`/`write_text` produced a 17,000-line whole-file diff before a single real
+  change was visible in `git diff --stat`. `write_text` opens with `newline=None`,
+  which translates `\n` to `os.linesep`.
+  *Consequence:* patch these files with `read_bytes`/`write_bytes` (or an explicit
+  `newline=`), and check `git diff --stat` before believing a diff. In this package:
+  `pipeline.py`, `draft.py`, `harness.py`, `SKILL.md`, `FIELD-NOTES.md` and
+  `tests/agent/test_charsheet_pipeline.py` are **LF**;
+  `tests/agent/test_charsheet_draft.py`, `tests/hermes_cli/test_harness_characters_cli.py`
+  and `scripts/verify_harness_skill_install.py` are **CRLF**.
+
+- **[READ] A `SheetSpec` is unhashable, so a fixture helper that takes one cannot be
+  `lru_cache`d.** `DirectionScheme.mirrored` is a dict; `four_state_sheet` gets away
+  with the cache only because it takes the mutation tuple and rebuilds the spec inside.
+  *Consequence:* a new fixture helper that accepts a spec drops the cache (or keys on
+  the fixture NAME the way `variant` does).
+
 
 ---
 

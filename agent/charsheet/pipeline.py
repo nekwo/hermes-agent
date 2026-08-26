@@ -64,15 +64,17 @@ from agent.pet.generate.atlas import (
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "ACCEPT_BASIS_TOKEN",
     "MAGENTA",
     "MIRROR_GAIN_THRESHOLD",
     "PREFIX_TURNAROUND",
     "REGISTRATION_WINDOW_DIVISOR",
+    "accept_basis_token",
     "atlas_to_webp_bytes",
     "build_sheet_palette",
     "compose_draft_frames",
     "compose_sheet",
+    "fits_console_budget",
+    "fits_own_sheet",
     "frame_cell",
     "generate_direction_view",
     "generate_row_strip",
@@ -123,24 +125,28 @@ QA_BACKDROP: tuple[int, int, int, int] = (18, 18, 22, 255)
 # crop this package writes always reopens cleanly.
 MAX_THUMB_PIXELS = 16_000_000
 
-# `MAX_CARD_PIXELS` is the CARD-WEIGHT budget, and it is the bound the crop verb
-# exists to serve. Launcher risk D.3 asks `thumb` to retire the cost of decoding
-# a full sheet into a chat card, and states the check plainly: *a crop that is
-# not smaller than the sheet is not a mitigation.* A bomb threshold cannot
-# express that — it sits 28x above the sheet, so `--scale 8` on a live attempt
-# passed the write ceiling at 2176x5792 = 12_603_392 px, 3.94x the sheet it is
-# supposed to be lighter than, and nothing in the payload said so.
+# `MAX_CONSOLE_CARD_PIXELS` is the CONSOLE DECODE ceiling — *will this file
+# sink a chat card* — and it is ONE of the two bounds a crop is weighed against.
+# Launcher risk D.3 asks `thumb` to retire the cost of decoding a full sheet
+# into a chat card, and states a second check plainly: *a crop that is not
+# smaller than the sheet is not a mitigation.* Those are two different
+# questions, and until 2026-08-25 one boolean answered both under one name.
 #
-# So the budget is SIZED from a sheet — `CHAR8`, 1536x2080 = 3_194_880 px /
+# A bomb threshold cannot express either — it sits 28x above the sheet, so
+# `--scale 8` on a live attempt passed the write ceiling at 2176x5792 =
+# 12_603_392 px, 3.94x the sheet it is supposed to be lighter than, and nothing
+# in the payload said so.
+#
+# So this budget is SIZED from a sheet — `CHAR8`, 1536x2080 = 3_194_880 px /
 # 12.2 MiB decoded RGBA, the largest sheet this package's default spec composes
-# — but what it MEANS is a fixed console decode ceiling: *will this file sink a
-# chat card*, never *is this lighter than the sheet in your hand*. It is a
-# module constant. It does not move with a draft, and `fits_card_budget` has
-# never compared anything to the caller's own sheet.
+# — but what it MEANS is a fixed console decode ceiling, never *is this lighter
+# than the sheet in your hand*. It is a module constant. It does not move with a
+# draft, and :func:`fits_console_budget` has never compared anything to the
+# caller's own sheet.
 #
 # An earlier wording of this comment claimed the opposite — "a sheet that grows
 # moves the budget with it, and the number can never drift from the thing it is
-# measured against" — and both halves are false, now measured at both ends:
+# measured against" — and both halves are false, measured at both ends:
 #
 #   * GROWN: `characters add-state --state jumping:6` recomposed the live
 #     `anime-girl` sheet at 1536x3120 = 4_792_320 px, **1.50x this number**,
@@ -148,14 +154,16 @@ MAX_THUMB_PIXELS = 16_000_000
 #     `draft.row_thumb` can reject a crop that is genuinely lighter than the
 #     sheet that draft will compose.
 #   * SMALL: a `--directions 4`, `idle:2` draft composes 384x624 = 239,616 px,
-#     **13.3x lighter than this number**, so a `cardSafe: True` crop there can
-#     be many times that draft's whole sheet (A2 measured 13.1x live).
+#     **13.3x lighter than this number**, so a crop that clears this budget can
+#     be many times that draft's whole sheet (A2 measured 1774x1774 =
+#     3_147_076 px live, 13.1x, and 1.5% under this ceiling).
 #
-# Whether the budget SHOULD become the draft's own `spec.sheet_size()` is an
-# open question for launcher slice B2, not a comment's to settle: it would
-# change what `cardSafe` MEANS to the consumer that reads it. Recorded with
-# these measurements in the authoring skill's FIELD-NOTES.
-MAX_CARD_PIXELS = CHAR8.sheet_size()[0] * CHAR8.sheet_size()[1]
+# Those two measurements are why the boolean was SPLIT rather than re-aimed
+# (owner ruling 2026-08-25). This constant answers the console question and
+# keeps its old value; :func:`fits_own_sheet` answers the sheet question against
+# the draft's OWN `spec.sheet_size()`; `draft.row_thumb` carries both answers.
+# The name says which one this is, because the name is what a reader trusts.
+MAX_CONSOLE_CARD_PIXELS = CHAR8.sheet_size()[0] * CHAR8.sheet_size()[1]
 
 
 def require_scale(scale) -> int:
@@ -173,15 +181,47 @@ def require_scale(scale) -> int:
     return scale
 
 
-def fits_card_budget(width: int, height: int) -> bool:
-    """Is a ``width`` x ``height`` image light enough to draw as a chat card?
+def fits_console_budget(width: int, height: int) -> bool:
+    """Is a ``width`` x ``height`` image under the console's fixed decode ceiling?
 
     Pure, and public because the answer is a FACT a payload has to carry: the
     verb that writes a crop cannot know whether its caller will declare the path
     to a card or open it in a fullscreen viewer, so it reports which the file is
-    fit for instead of guessing. See :data:`MAX_CARD_PIXELS`.
+    fit for instead of guessing.
+
+    This is HALF the question. It says the file will not sink the console; it
+    says nothing about whether cropping bought anything, which is
+    :func:`fits_own_sheet`. See :data:`MAX_CONSOLE_CARD_PIXELS`.
     """
-    return width * height <= MAX_CARD_PIXELS
+    return width * height <= MAX_CONSOLE_CARD_PIXELS
+
+
+def fits_own_sheet(width: int, height: int, spec: SheetSpec) -> bool:
+    """Is a ``width`` x ``height`` image no larger than *spec*'s own sheet?
+
+    The other half, and the one launcher risk D.3 actually states: *a crop that
+    is not smaller than the sheet is not a mitigation.* It moves with the draft,
+    because it is computed from that draft's ``spec.sheet_size()`` every time —
+    which is exactly what :data:`MAX_CONSOLE_CARD_PIXELS` is not, and why one
+    boolean could never carry both answers.
+
+    The two disagree on real drafts in BOTH directions, which is the whole
+    reason they are two booleans:
+
+    * a ``--directions 4``, ``idle:2`` draft (384x624 = 239,616 px) took a
+      default 1774x1774 = 3_147_076 px crop: under the console ceiling, 13.1x
+      its own sheet.
+    * an ``add-state``-grown ``anime-girl`` (1536x3120 = 4_792_320 px) can take
+      a crop over the console ceiling that is still lighter than the sheet that
+      draft will compose.
+
+    ``<=`` rather than ``<``, matching :func:`fits_console_budget`: the
+    guarantee is *not larger than*, and a name that promised *strictly smaller*
+    would be the same defect one word further along.
+    """
+    sheet_w, sheet_h = spec.sheet_size()
+    return width * height <= sheet_w * sheet_h
+
 
 # A non-directional state has no facing to hold, but the row prompt is built
 # around explicit view language. Front view is the neutral choice: it is the one
@@ -345,8 +385,9 @@ def upscale_on_backdrop(
     the resize (:data:`MAX_THUMB_PIXELS`) and the refusal names the source
     dimensions, so a caller can see which half of ``source x scale**2`` was the
     problem. That ceiling is about what may exist on disk, not about what a chat
-    card may decode — the card-weight bound is :data:`MAX_CARD_PIXELS`, and it
-    is applied by the verb that knows which crop is the default one.
+    card may decode — that is :data:`MAX_CONSOLE_CARD_PIXELS`, applied (with
+    the draft's own sheet bound) by the verb that knows which crop is the
+    default one.
 
     Returns an RGBA image whose alpha is 255 everywhere: the caller writes a
     picture, not a mask, and "is it opaque?" must be answerable from the file.
@@ -1038,18 +1079,31 @@ def detect_mirrored_art(spec: SheetSpec, image) -> dict:
     nobody: two camps of equal size, and nothing inside the sheet says which one
     is mirrored.
 
-    **Neither basis, alone, refuses an install.** A single-basis finding carries
-    ``severity: "warning"``; only ``basis: "rotation and states"`` — two
-    independent neighbourhoods agreeing about the SAME row — carries
-    ``severity: "error"``. The two populations do not separate at the threshold
-    on one basis: the quietest true reading measured on real art is +6.78%
-    rotation / +7.64% states, and the loudest false one, a CORRECT row displaced
-    sideways, is +18.75%. The line sits inside both populations, so no value of
-    :data:`MIRROR_GAIN_THRESHOLD` separates them and what changed instead is
-    what one reading is permitted to do. The consequence is stated rather than
-    hidden: ``characters start`` creates ``idle:6, walk:8``, two states have no
-    cross-state pass, and on that DEFAULT sheet this check can therefore only
-    ever warn.
+    **Two shapes refuse an install; everything else warns.** A single-basis
+    finding about a single ROW carries ``severity: "warning"``. Two carry
+    ``severity: "error"``:
+
+    * ``basis: "rotation and states"`` — two independent neighbourhoods agreeing
+      about the SAME row. The two populations do not separate at the threshold
+      on one basis: the quietest true reading measured on real art is +6.78%
+      rotation / +7.64% states, and the loudest false one, a CORRECT row
+      displaced sideways, is +18.75%. The line sits inside both populations, so
+      no value of :data:`MIRROR_GAIN_THRESHOLD` separates them and what changed
+      instead is what one reading is permitted to do.
+    * **a WHOLE STATE reading as mirrored** — every row of one state that the
+      cross-state pass could judge, at least two of them, flagged. Such findings
+      carry ``wholeState`` (the state's flagged rows, in sheet order) and are
+      errors on ONE basis or two (owner ruling 2026-08-25). The rotation cannot
+      corroborate this one *by algebra* — a wholly mirrored state is a fixed
+      point of it — so demanding a second basis would mean never refusing the
+      defect ``add_state`` is most likely to produce. A single row mirroring is
+      NOT escalated: that is the warning above, and the ``>= 2`` guard is what
+      keeps a 4-way scheme (one cross-state-judged row per state) out of here.
+
+    The consequence for the default character is stated rather than hidden:
+    ``characters start`` creates ``idle:6, walk:8``, two states have no
+    cross-state pass at all, so on that DEFAULT sheet neither error shape is
+    reachable and this check can only ever warn.
 
     **What this cannot see, written down so nobody has to rediscover it.** The
     measure is invariant under flipping every row at once, because
@@ -1088,7 +1142,9 @@ def detect_mirrored_art(spec: SheetSpec, image) -> dict:
     something a caller re-derives.
     ``flagged`` is the subset worth acting on after attribution. Each entry
     quotes the seams that voted and carries ``severity`` (above), ``attributed``
-    and ``attribution``. ``attributed`` is the honest half: ``True`` means the
+    and ``attribution`` — plus ``wholeState`` on the rows a whole mirrored state
+    carries, holding that state's flagged rows in sheet order. ``attributed`` is
+    the honest half: ``True`` means the
     evidence NAMES this row, and the entry then lists any ``corroborating`` rows
     that read high because of it ("do not re-roll them"); ``False`` means a
     neighbourhood is wrong but nothing here can say which row, and the entry
@@ -1117,6 +1173,7 @@ def detect_mirrored_art(spec: SheetSpec, image) -> dict:
     # cannot make on its own (see _attribute_run), so the second basis has to
     # exist before the first one is allowed to point at anybody.
     state_flagged: list[dict] = []
+    states_judged_per_state: dict[str, int] = {}
     directional = [state for state in spec.states if state.directional]
     for direction in turnaround_order(spec.scheme.authored)[1:-1]:
         drawn = [
@@ -1224,6 +1281,14 @@ def detect_mirrored_art(spec: SheetSpec, image) -> dict:
             )
             continue
         judged.extend(entries)
+        # Counted per STATE, not per direction, because the whole-state rule
+        # below asks "did EVERY row of this state that anyone could answer for
+        # read as a mirror?" — and a row this pass gave up on (unjudged above)
+        # must not be silently counted as agreement in either direction.
+        for entry in entries:
+            states_judged_per_state[entry["state"]] = (
+                states_judged_per_state.get(entry["state"], 0) + 1
+            )
         state_flagged.extend(
             dict(entry, corroborating=[], alternatives=[])
             for entry in entries
@@ -1238,6 +1303,48 @@ def detect_mirrored_art(spec: SheetSpec, image) -> dict:
         convicted_per_state[finding["state"]] = (
             convicted_per_state.get(finding["state"], 0) + 1
         )
+
+    # THE WHOLE-STATE RULE (owner ruling 2026-08-25). A state whose EVERY
+    # cross-state-judged row reads as a mirror is a whole state drawn backwards,
+    # and that is an ERROR on this one basis. It is not a second basis and it
+    # must not be mistaken for one: it is a second-order CONSENSUS over the same
+    # pass, and it is the only reading that can exist for this defect, because
+    # the rotation is a FIXED POINT of a wholly mirrored state — flip every row
+    # of one state and its chain still fits itself perfectly. Waiting for a
+    # second basis here means waiting forever.
+    #
+    # The shape is exactly what `add_state` produces: all of a new state's rows
+    # in ONE batch, against one reference and one prompt — the same generation
+    # shape that drew `ne` backwards three times along the other axis.
+    #
+    # TWO guards, and both are load-bearing:
+    #
+    #   * `>= 2` rows. A state with ONE judged row is the single-row case, which
+    #     the ruling leaves a WARNING; escalating it would be the 4-way scheme's
+    #     whole answer (`turnaround_order(...)[1:-1]` is one direction there), so
+    #     without this guard a 4-way sheet would refuse on exactly the reading
+    #     the owner declined to escalate.
+    #   * EVERY judged row, never a majority. One row of the state judged CLEAN
+    #     is the sheet saying the state faces the right way somewhere, which is
+    #     a contiguous block of mirrored rows, not a mirrored state.
+    #
+    # What this buys and what it costs, said out loud: it makes the `add-state`
+    # defect blocking on the only pass that can see it, and it makes a whole
+    # state of CORRECT art that is displaced in every direction (one prop, drawn
+    # in every direction of one state — the false population measured at +18.75%
+    # on a single row) blocking too. That is what `--accept-handedness` is for,
+    # and why the override had to work per row on this finding as well.
+    whole_state_rows: dict[str, list[str]] = {}
+    for state, convicted in convicted_per_state.items():
+        if convicted >= 2 and convicted == states_judged_per_state.get(state, 0):
+            whole_state_rows[state] = sorted(
+                (
+                    finding["row"]
+                    for finding in state_flagged
+                    if finding["state"] == state
+                ),
+                key=lambda key: rows_by_key[key].index,
+            )
 
     # The rotation pass.
     rotation_scored: list[tuple[int, dict]] = []
@@ -1404,28 +1511,63 @@ def detect_mirrored_art(spec: SheetSpec, image) -> dict:
             existing["alternatives"] = []
 
     for finding in flagged:
-        # THE SEVERITY RULE, and it is the whole ruling in one line: a single
-        # basis WARNS, two independent bases agreeing REFUSE. The two
-        # populations do not separate on one basis — measured in both
-        # directions, the true floor on real art is +6.78% rotation / +7.64%
-        # states (`jumping-se` mirrored, caught by neither pass) and the false
-        # ceiling on CORRECT art displaced sideways is +18.75%. An 8% line does
-        # not sit BETWEEN two populations there; it sits inside both of them.
-        # Moving the number cannot fix that, so what moved instead is what a
-        # single reading is allowed to DO.
+        # THE SEVERITY RULE, in two lines because there are two ways to refuse.
+        #
+        # (1) A single basis about a single ROW warns; two independent bases
+        # agreeing about it REFUSE. The two populations do not separate on one
+        # reading — measured in both directions, the true floor on real art is
+        # +6.78% rotation / +7.64% states (`jumping-se` mirrored, caught by
+        # neither pass) and the false ceiling on CORRECT art displaced sideways
+        # is +18.75%. An 8% line does not sit BETWEEN two populations there; it
+        # sits inside both of them. Moving the number cannot fix that, so what
+        # moved instead is what a single reading is allowed to DO.
+        #
+        # (2) A whole STATE reading as mirrored REFUSES on one basis or two
+        # (`whole_state_rows` above). That is not the rule in (1) relaxed: the
+        # evidence is every judged row of the state agreeing, which the rotation
+        # can never corroborate because it is blind to this defect by algebra.
+        # `wholeState` carries the roster rather than a bare flag, so the
+        # message can name the state's rows and nothing has to re-derive them.
+        if "states" in finding["basis"] and finding["row"] in whole_state_rows.get(
+            finding["state"], ()
+        ):
+            finding["wholeState"] = list(whole_state_rows[finding["state"]])
         finding["severity"] = (
-            "error" if finding["basis"] == "rotation and states" else "warning"
+            "error"
+            if finding["basis"] == "rotation and states" or finding.get("wholeState")
+            else "warning"
         )
 
     flagged.sort(key=lambda finding: rows_by_key[finding["row"]].index)
     return {"flagged": flagged, "judged": judged, "unjudged": unjudged}
 
 
-# How an operator spells "I am waiving BOTH bases" on the command line. Only a
-# two-basis finding blocks, so this is the only acceptance that can exist, and
-# spelling it out is what stops one row name from silently waiving a second,
-# independent body of evidence.
-ACCEPT_BASIS_TOKEN = "rotation+states"
+# How an operator spells WHICH evidence they are waiving, per finding. There is
+# no single constant here any more and there must not be one: two shapes block
+# now — a row two bases agree about (`rotation+states`) and a row carried by a
+# whole mirrored STATE (`states`) — and one hardcoded token would have made the
+# second unacceptable at all, which is an error with no override, which is a
+# wall. The token is DERIVED from the finding's own basis so the two can never
+# drift apart: `validate_sheet` demands it and `mirrored_art_error` prints it,
+# both through this one function.
+_ACCEPT_BASIS_TOKENS = {
+    "rotation": "rotation",
+    "states": "states",
+    "rotation and states": "rotation+states",
+}
+
+
+def accept_basis_token(basis: str) -> str:
+    """The ``--accept-handedness`` basis token for a finding on *basis*.
+
+    Public because the refusal that demands the spelling and the message that
+    teaches it are in two places, and a second spelling of this map is how an
+    operator gets told to type something the validator then rejects.
+    """
+    try:
+        return _ACCEPT_BASIS_TOKENS[basis]
+    except KeyError:  # pragma: no cover - a new basis would be a code change
+        raise ValueError(f"no acceptance token for basis {basis!r}") from None
 
 
 _MIRROR_BASIS = {
@@ -1453,14 +1595,22 @@ def mirrored_art_error(finding: dict) -> str:
     test asserts it, and a second copy is how a refusal starts naming a verb
     that no longer exists.
 
-    It renders three different things, and the difference is the point.
-    ``severity: "error"`` — two independent bases agreeing — is the only one
-    that blocks a compose, and the only one that hands the operator a
-    ``reroll-row`` command. A single-basis finding WARNS and says so, because
-    one basis does not separate the two populations. An UNATTRIBUTED finding
-    names no row at all: it lists the run and says the rotation alone cannot
-    tell which of them is the fault, which is true in the two shapes where the
-    run's maximum is an innocent row (see :func:`_attribute_run`).
+    It renders four different things, and the difference is the point.
+    ``severity: "error"`` blocks a compose and is the only severity that hands
+    the operator a ``reroll-row`` command; it arrives in two shapes, and they
+    get two texts because they have two remedies — two independent bases
+    agreeing about ONE row (re-roll that row), and a WHOLE STATE whose every
+    judged row reads mirrored (re-roll the state, and do not expect a second
+    basis that cannot exist). A single-basis finding about a single row WARNS
+    and says so, because one basis does not separate the two populations. An
+    UNATTRIBUTED finding names no row at all: it lists the run and says the
+    rotation alone cannot tell which of them is the fault, which is true in the
+    two shapes where the run's maximum is an innocent row (see
+    :func:`_attribute_run`).
+
+    Every branch that teaches an override spells it through
+    :func:`accept_basis_token` on THIS finding's basis, so the token an operator
+    is told to type is the token :func:`validate_sheet` will accept.
     """
     evidence = "; ".join(
         f"vs '{seam['with']}' {seam['distance']:.2f} -> "
@@ -1496,7 +1646,29 @@ def mirrored_art_error(finding: dict) -> str:
             "look at them, and reach for --accept-handedness only on a finding "
             "that actually blocks."
         )
-    if finding.get("severity") == "error":
+    if finding.get("wholeState"):
+        roster = ", ".join(f"'{row}'" for row in finding["wholeState"])
+        text = (
+            f"row '{finding['row']}' belongs to a WHOLE STATE that reads as "
+            f"MIRRORED: every one of the {len(finding['wholeState'])} rows of "
+            f"{finding['state']!r} this pass could judge ({roster}) reads as the "
+            "mirror of the direction it claims. This row: "
+            f"{_MIRROR_BASIS[finding['basis']]} {finding['gain'] * 100:.0f}% "
+            f"better ({evidence}). ONE basis refuses here, and that is not the "
+            "single-row rule relaxed — a wholly mirrored state is a FIXED POINT "
+            "of the rotation pass (flip every row of a state and its chain "
+            "still fits itself), so the rotation's silence is not a second "
+            "opinion and no second basis can ever arrive. It is the shape "
+            "`add-state` produces: one batch, one reference, one prompt. "
+            f"{corrupts} Re-roll the state's rows "
+            f"(characters reroll-row --row {finding['row']} --note ..., and the "
+            "same for the others) with the facing spelled in frame terms, and "
+            "look at the strips before composing. If you have LOOKED and this "
+            "state is right, accept each row by name with its own basis — this "
+            "one is --accept-handedness "
+            f"{finding['row']}:{accept_basis_token(finding['basis'])}."
+        )
+    elif finding.get("severity") == "error":
         text = (
             f"row '{finding['row']}' looks drawn as the MIRROR of "
             f"{finding['direction']!r}: {_MIRROR_BASIS[finding['basis']]} "
@@ -1623,34 +1795,42 @@ def validate_sheet(
     payload whether or not it found anything — including its ``unjudged`` list,
     so a caller can always see which rows this could not answer for.
 
-    **Only a finding carrying ``severity: "error"`` blocks**, and that is
-    exactly ``basis: "rotation and states"`` — two independent neighbourhoods
-    agreeing about one row. A single-basis finding is a WARNING with the whole
-    text intact. That is not a softening for convenience, it is what the
-    measurements force: the true floor on real art is +6.78% rotation / +7.64%
-    states and the false ceiling on correct art displaced sideways is +18.75%,
-    so on ONE basis the two populations overlap and no threshold separates them.
-    Round one made every flagged row a refusal, which bought certainty it did
-    not have and pointed ``reroll-row`` at correct art in two reachable shapes.
-    Say the consequence out loud: ``characters start`` creates ``idle:6,
+    **Only a finding carrying ``severity: "error"`` blocks**, and there are two
+    such shapes (see :func:`detect_mirrored_art`): one row that BOTH passes
+    agree about, and a whole STATE whose every judged row reads as a mirror. A
+    single-basis finding about a single row is a WARNING with the whole text
+    intact. That is not a softening for convenience, it is what the measurements
+    force: the true floor on real art is +6.78% rotation / +7.64% states and the
+    false ceiling on correct art displaced sideways is +18.75%, so on ONE
+    reading about ONE row the two populations overlap and no threshold separates
+    them. Round one made every flagged row a refusal, which bought certainty it
+    did not have and pointed ``reroll-row`` at correct art in two reachable
+    shapes. Say the consequence out loud: ``characters start`` creates ``idle:6,
     walk:8``, the cross-state pass needs three states, so on the DEFAULT
-    character this check can only ever warn — and on a two-state cut of the live
-    art a whole mirrored state already scored bit-identical to the correct
-    sheet, so it was nearly blind there before this rule existed.
+    character neither refusal is reachable and this check can only ever warn —
+    and on a two-state cut of the live art a whole mirrored state already scored
+    bit-identical to the correct sheet, so it was nearly blind there before any
+    of this existed.
 
     **``accept_handedness`` is the one way past a refusal, it names rows, and it
-    now names the basis with them.** It applies to the ERROR case only: there is
+    names the basis with them.** It applies to the ERROR cases only: there is
     nothing to accept about a warning, which does not block. A row refused on
     two bases is refused by two independent bodies of evidence, and a bare row
     name waived both at once — an operator accepting a PLACEMENT reading also
     silenced the cross-state one, which placement cannot explain. So the token
-    is ``<row>:rotation+states``; a bare ``<row>`` is refused with the spelling
-    it needs. An accepted row becomes a warning that still carries the whole
-    refusal text, and rides in ``handedness["accepted"]`` as ``{row, gain,
-    basis}`` — accepting a +40% finding and an +8.1% one used to be
-    indistinguishable afterwards. Naming a row that was NOT flagged is itself an
-    error: an acceptance with nothing to accept is a bypass lying in wait for
-    the next refusal.
+    names what is being waived and is DERIVED from the finding
+    (:func:`accept_basis_token`): ``<row>:rotation+states`` for a two-basis
+    refusal, ``<row>:states`` for a whole-state one. A bare ``<row>`` is refused
+    with the spelling it needs. **Both error shapes are overridable, and that is
+    a requirement rather than a convenience: an error with no way past it is a
+    wall, and ``compose`` has no other door.** A whole-state refusal is still
+    accepted one ROW at a time — a state-wide reading waived state-wide, in one
+    token, is the blanket this grammar exists to refuse. An accepted row becomes
+    a warning that still carries the whole refusal text, and rides in
+    ``handedness["accepted"]`` as ``{row, gain, basis}`` — accepting a +40%
+    finding and an +8.1% one used to be indistinguishable afterwards. Naming a
+    row that was NOT flagged is itself an error: an acceptance with nothing to
+    accept is a bypass lying in wait for the next refusal.
     """
     rgba = _open_rgba(image)
     errors: list[str] = []
@@ -1779,18 +1959,27 @@ def validate_sheet(
                 "a row both passes agree about is refused; drop it"
             )
         elif not basis:
+            wanted = accept_basis_token(finding["basis"])
             errors.append(
-                f"handedness acceptance names {key!r} with no basis. That row is "
-                "refused because TWO independent reads agree about it, and a bare "
-                "row name waives both — including the cross-state evidence, which "
-                "a placement or framing argument cannot explain. Name what you "
-                f"are waiving: --accept-handedness {key}:{ACCEPT_BASIS_TOKEN}"
+                f"handedness acceptance names {key!r} with no basis. "
+                + (
+                    "That row is refused because its whole state reads as "
+                    "mirrored, and the evidence is every judged row of "
+                    f"{finding['state']!r} — a bare row name waives a "
+                    "state-wide reading one row at a time without saying so. "
+                    if finding.get("wholeState")
+                    else "That row is refused because TWO independent reads "
+                    "agree about it, and a bare row name waives both — "
+                    "including the cross-state evidence, which a placement or "
+                    "framing argument cannot explain. "
+                )
+                + f"Name what you are waiving: --accept-handedness {key}:{wanted}"
             )
-        elif basis != ACCEPT_BASIS_TOKEN:
+        elif basis != accept_basis_token(finding["basis"]):
             errors.append(
                 f"handedness acceptance names {key!r} with basis {basis!r}; this "
                 f"finding's bases are {finding['basis']!r}, so the acceptance is "
-                f"spelled {key}:{ACCEPT_BASIS_TOKEN}"
+                f"spelled {key}:{accept_basis_token(finding['basis'])}"
             )
         else:
             accepted.append(

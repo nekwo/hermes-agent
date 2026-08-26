@@ -17,7 +17,8 @@ version — 14457 B against the repo's 14906 B — and the live gate turn's
 ``used_skills`` row carried the STALE package's content hash. The two edits it
 missed were the ones teaching an agent not to declare an over-budget crop, so
 the drift did not merely age the text: it re-armed the exact regression
-``pipeline.MAX_CARD_PIXELS`` had just been added to prevent.
+``pipeline.MAX_CONSOLE_CARD_PIXELS`` (then spelled
+``MAX_CARD_PIXELS``) had just been added to prevent.
 
 Tests read the repo copy, which is why every test A0 shipped was green while
 this was true. A guarantee about what the runtime reads has to be pinned where

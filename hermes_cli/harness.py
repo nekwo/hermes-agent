@@ -1543,7 +1543,7 @@ def build_parser(parent_subparsers) -> None:
     # where charsheet is imported — build_parser runs for EVERY harness call and
     # must not pull in Pillow.
     characters_thumb.add_argument("--frame", type=int, default=None, help="Which frame cell of the strip to crop, 0-based (default 0); the crop is the half that removes pixels, so there is always one")
-    characters_thumb.add_argument("--scale", type=int, default=None, help="NEAREST upscale factor (default 2); refused, never clamped. At or below the default the OUTPUT must fit the card budget (lighter than the sheet the crop replaces); above it the crop is a fullscreen-viewer artifact, bounded by the write ceiling and reported as cardSafe=false")
+    characters_thumb.add_argument("--scale", type=int, default=None, help="NEAREST upscale factor (default 2); refused, never clamped. At or below the default the OUTPUT must fit the console's fixed decode ceiling; above it the crop is a fullscreen-viewer artifact, bounded by the write ceiling and reported as withinConsoleBudget=false. The payload carries a SECOND bound, withinOwnSheet — is the crop no larger than the sheet THIS draft composes — which refuses nothing and is reported at every scale. Draw a crop inline only when BOTH are true; otherwise open it in the viewer")
     characters_thumb.add_argument("--json", action="store_true")
     characters_thumb.set_defaults(func=_cmd_characters_thumb)
     characters_base = characters_subs.add_parser("base", help="Set or replace the draft's base identity image")
@@ -1582,7 +1582,7 @@ def build_parser(parent_subparsers) -> None:
     characters_reroll_row.set_defaults(func=_cmd_characters_reroll_row)
     characters_compose = characters_subs.add_parser("compose", help="Compose, validate and install the sheet (stage 'rows' → 'composed')")
     characters_compose.add_argument("--draft", required=True)
-    characters_compose.add_argument("--accept-handedness", default="", help="Mirrored-art REFUSALS you have looked at and are overriding, spelled '<row>:rotation+states' (e.g. 'idle-e:rotation+states'). Per row, never blanket. Only a row BOTH passes agree about is refused, so only that shape can be accepted — a single-basis finding is a warning and there is nothing to accept. The basis is named on purpose: a bare row key waived two independent bodies of evidence at once. Naming a row that was not flagged is itself refused, and the honoured list rides on the installed manifest, 'characters list' and the sprite payload as {row, gain, basis}")
+    characters_compose.add_argument("--accept-handedness", default="", help="Mirrored-art REFUSALS you have looked at and are overriding, spelled '<row>:<basis>' — take the spelling from the refusal. Per row, never blanket. TWO shapes refuse and both can be accepted: a row BOTH passes agree about ('idle-e:rotation+states'), and a row carried by a whole mirrored STATE, where every judged row of that state reads as a mirror ('jumping-e:states') — that one is accepted row by row like any other. A single-basis finding about a single row is a warning and there is nothing to accept. The basis is named on purpose: a bare row key waived a second, independent body of evidence at once. Naming a row that was not flagged is itself refused, and the honoured list rides on the installed manifest, 'characters list' and the sprite payload as {row, gain, basis}")
     characters_compose.add_argument("--json", action="store_true")
     characters_compose.set_defaults(func=_cmd_characters_compose)
     characters_reopen = characters_subs.add_parser("reopen", help="Reopen a composed draft for fixes (stage 'composed' → 'rows'); the installed sheet stays until the next compose")
@@ -3299,7 +3299,18 @@ def _cmd_characters_thumb(args) -> int:
         # An agent reads the human line as often as the payload, and the one
         # thing it must not do with a deep zoom is declare it with `MEDIA:`. So
         # the line says which artifact this is, not just how big it came out.
-        weight = "" if result["cardSafe"] else " — too heavy for a card; open it in the viewer"
+        #
+        # TWO bounds, and the line names WHICH one a crop missed, because the
+        # remedy differs: over the console ceiling means the decode itself is
+        # unsafe, while heavier-than-your-own-sheet means the crop is safe and
+        # simply bought nothing. Inline only when both hold — the same rule
+        # `row_thumb`'s docstring states for the launcher card.
+        if not result["withinConsoleBudget"]:
+            weight = " — over the console's decode ceiling; open it in the viewer, never as a card"
+        elif not result["withinOwnSheet"]:
+            weight = " — heavier than this draft's own sheet, so cropping bought nothing; open it in the viewer"
+        else:
+            weight = ""
         return result, (
             f"Draft {draft.id}: row {result['row']} "
             f"{_attempt_label(result['attempt'], result['attempts'])}, "

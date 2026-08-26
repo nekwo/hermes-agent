@@ -381,9 +381,14 @@ def test_thumb_writes_the_crop_its_payload_describes(fake, base_image, capsys, t
 
     assert (code, payload["ok"]) == (0, True)
     assert set(payload) >= {
-        "ok", "path", "row", "attempt", "frame", "frames", "width", "height", "cardSafe",
+        "ok", "path", "row", "attempt", "frame", "frames", "width", "height",
+        "withinConsoleBudget", "withinOwnSheet",
     }
-    assert payload["cardSafe"] is True, "the default crop is the one a card may draw"
+    # BOTH bounds, because they answer two different questions and disagree on
+    # real drafts. `cardSafe` was the console one wearing the sheet one's name.
+    assert payload["withinConsoleBudget"] is True, "the default crop may be decoded"
+    assert payload["withinOwnSheet"] is True, "and it is lighter than this sheet"
+    assert "cardSafe" not in payload
     assert (payload["row"], payload["attempt"], payload["draft"]) == ("walk-e", 0, draft_id)
     assert (payload["frame"], payload["frames"]) == (0, 2)
     out = Path(payload["path"])
@@ -511,8 +516,52 @@ def test_a_deep_zoom_says_it_is_not_a_card_in_the_payload_and_in_the_line(
     line = capsys.readouterr().out.strip()
 
     assert code == 0, "a viewer artifact is written, not refused"
-    assert zoomed["cardSafe"] is False
-    assert zoomed["width"] * zoomed["height"] > pipeline.MAX_CARD_PIXELS
+    assert zoomed["withinConsoleBudget"] is False
+    assert zoomed["width"] * zoomed["height"] > pipeline.MAX_CONSOLE_CARD_PIXELS
+    # The line names WHICH bound was missed, because the two have two remedies:
+    # over the ceiling is an unsafe decode, over your own sheet is a safe crop
+    # that bought nothing.
+    assert "over the console's decode ceiling" in line
+    assert "open it in the viewer" in line
+
+
+def test_the_line_says_when_a_crop_is_heavier_than_the_draft_s_OWN_sheet(
+    fake, base_image, capsys, tmp_path
+):
+    """The second bound reaches the operator's sentence, not just the JSON.
+
+    A crop can clear the console ceiling and still be many times the sheet it
+    exists to avoid decoding — measured live at 13.1x on a `--directions 4`,
+    `idle:2` draft, every one carrying `cardSafe: true`. An agent reading only
+    the sentence would have declared it. The rule the line now enforces is the
+    one `row_thumb` states: inline only when BOTH bounds hold.
+    """
+    from agent.charsheet.draft import CharacterDraft, row_item
+
+    draft_id = start_draft(capsys, "--base-image", str(base_image))
+    # A hand-sized attempt, because the fake draftsman draws 512x192 strips and
+    # the disagreement lives in the arithmetic on a real-sized source.
+    strip = tmp_path / "wide-strip.png"
+    Image.new("RGBA", (1774, 887), (*pipeline.MAGENTA, 255)).save(strip)
+    draft = CharacterDraft.load(draft_id)
+    draft.store.propose(row_item("walk-e"), strip)
+
+    code, payload = run(
+        ["harness", "characters", "thumb", "--draft", draft_id, "--row", "walk-e",
+         "--frame", "0", "--json"],
+        capsys,
+    )
+    spoken = parser().parse_args(
+        ["harness", "characters", "thumb", "--draft", draft_id, "--row", "walk-e",
+         "--frame", "0"]
+    )
+    assert spoken.func(spoken) == 0
+    line = capsys.readouterr().out.strip()
+
+    assert code == 0
+    assert payload["withinConsoleBudget"] is True
+    assert payload["withinOwnSheet"] is False
+    assert "heavier than this draft's own sheet" in line
     assert "open it in the viewer" in line
 
 

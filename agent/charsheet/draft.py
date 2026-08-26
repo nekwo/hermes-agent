@@ -87,11 +87,16 @@ THUMBS_DIRNAME = "thumbs"
 # silently given 8x and left to wonder why the crop is small.
 #
 # This constant is also the line between the two pixel bounds (see
-# `pipeline.MAX_CARD_PIXELS` / `pipeline.MAX_THUMB_PIXELS`): at or below the
-# default a crop must be card-weight, because it is the crop a caller who just
-# asked for a picture gets and the one an agent declares to a card. Above it,
-# the caller has asked for a deep zoom on purpose and gets one — bounded by the
-# write ceiling, and labelled as viewer-only in the payload.
+# `pipeline.MAX_CONSOLE_CARD_PIXELS` / `pipeline.MAX_THUMB_PIXELS`): at or
+# below the default a crop must clear the console's decode ceiling, because it
+# is the crop a caller who just asked for a picture gets and the one an agent
+# declares to a card. Above it, the caller has asked for a deep zoom on purpose
+# and gets one — bounded by the write ceiling, and labelled in the payload.
+#
+# The SHEET bound (`pipeline.fits_own_sheet`) is not a line here at all: it is
+# reported at every scale and refuses nothing. A crop 13.1x its own draft's
+# sheet is still a legal picture of one frame — what it is not is a mitigation,
+# and the payload is where that gets said.
 DEFAULT_THUMB_SCALE = 2
 
 # Which frame cell a crop shows when the caller does not say. Frame 0 is the
@@ -845,27 +850,43 @@ class CharacterDraft:
         to render a picture at that point is the wall ``reopen`` was built to
         remove.
 
-        **Card-weight is enforced at the default and reported everywhere else.**
-        A crop taken at :data:`DEFAULT_THUMB_SCALE` or below — the crop a caller
-        gets by asking for a picture, and the one an agent declares with a
-        ``MEDIA:`` line — is REFUSED when it exceeds
-        ``pipeline.MAX_CARD_PIXELS``. A deliberate deeper zoom is a different
-        artifact with a different reader: it is allowed up to the write ceiling
-        and carries ``cardSafe: False``, which is how a consumer knows to open it
-        in the fullscreen viewer instead of drawing it in a 420px square. A
-        boolean rather than a silent clamp, because a caller who asked for 8x
-        wants 8x — they just must not be told it is a card.
+        **Two bounds, two booleans, and the payload carries both.** A crop is
+        weighed against two different things and they disagree on real drafts,
+        so one boolean could never have answered for both — it answered for one
+        and was READ as the other:
 
-        **That budget is a FIXED console ceiling, not a comparison against this
-        draft's sheet, and this docstring used to say otherwise.** It is sized
-        from ``CHAR8`` and is a module constant; it does not move with a spec.
-        Measured both ways: an ``add-state``-grown sheet is 1.50x it (so a crop
-        can be refused here while being lighter than the sheet the draft will
-        compose), and a ``--directions 4``, ``idle:2`` sheet is 13.3x lighter
-        than it (so a ``cardSafe: True`` crop can be many times that sheet).
-        A caller who needs "lighter than MY sheet" computes it from
-        ``spec.sheetWidth`` x ``spec.sheetHeight`` in the status payload.
-        See :data:`agent.charsheet.pipeline.MAX_CARD_PIXELS`.
+        * ``withinConsoleBudget`` — the crop is under
+          :data:`pipeline.MAX_CONSOLE_CARD_PIXELS`, a FIXED console decode
+          ceiling sized once from ``CHAR8``. It does not move with a spec. This
+          is the bound that is ENFORCED: a crop taken at
+          :data:`DEFAULT_THUMB_SCALE` or below — the crop a caller gets by
+          asking for a picture, and the one an agent declares with a ``MEDIA:``
+          line — is REFUSED when it exceeds it. A deliberate deeper zoom is a
+          different artifact with a different reader: allowed up to the write
+          ceiling and labelled ``withinConsoleBudget: false``. A boolean rather
+          than a silent clamp, because a caller who asked for 8x wants 8x — they
+          just must not be told it is a card.
+        * ``withinOwnSheet`` — the crop is no larger than the sheet THIS draft
+          composes, from its own ``spec.sheet_size()``
+          (:func:`pipeline.fits_own_sheet`). It moves with the draft. Nothing is
+          refused on it; it is reported at every scale, because a crop heavier
+          than its own sheet is a legal picture that simply mitigated nothing.
+
+        **THE CONSUMER RULE, for the launcher card (B2) and for any agent
+        declaring a crop: draw it inline ONLY when BOTH are true. Otherwise
+        route it to the fullscreen viewer** — ``withinConsoleBudget: false``
+        because the decode would sink the surface, ``withinOwnSheet: false``
+        because cropping bought nothing and the card may as well have opened
+        the sheet.
+
+        Measured both ways, which is why they are two: a ``--directions 4``,
+        ``idle:2`` draft's default crop came back 1774x1774 = 3,147,076 px —
+        ``withinConsoleBudget: true``, ``withinOwnSheet: false`` at 13.1x its
+        239,616-px sheet; and an ``add-state``-grown sheet (1536x3120 =
+        4,792,320 px, 1.50x the fixed budget) can take a crop the other way
+        round, over the console ceiling and still lighter than the sheet that
+        draft will compose. ``cardSafe``, which this payload carried until
+        2026-08-25, was the first of these two wearing the second one's name.
 
         Returns a PATH and never bytes (plan A-4): the launcher runs on this
         machine, and the trace lane that would carry an inline image is capped at
@@ -873,6 +894,10 @@ class CharacterDraft:
         """
         row = self._authored_row(row_key)
         store = self.store
+        # This draft's OWN spec, which is the whole point of the second bound:
+        # the sheet a crop is weighed against is the one THIS draft composes,
+        # never the package's largest.
+        spec = self.spec
         key = row_item(row.key)
         if not store.history(key):
             raise ValueError(
@@ -896,19 +921,21 @@ class CharacterDraft:
         # through the same helper `upscale_on_backdrop` uses — weighing an
         # output means multiplying by it, and `512 * "2"` is a string.
         scale = pipeline.require_scale(scale)
-        card_safe = pipeline.fits_card_budget(cell.width * scale, cell.height * scale)
-        if not card_safe and scale <= DEFAULT_THUMB_SCALE:
+        out_w, out_h = cell.width * scale, cell.height * scale
+        within_console_budget = pipeline.fits_console_budget(out_w, out_h)
+        within_own_sheet = pipeline.fits_own_sheet(out_w, out_h, spec)
+        if not within_console_budget and scale <= DEFAULT_THUMB_SCALE:
             raise ValueError(
                 f"scale {scale} on this {cell.width}x{cell.height} frame of row "
-                f"{row.key!r} would write {cell.width * scale}x{cell.height * scale} "
+                f"{row.key!r} would write {out_w}x{out_h} "
                 f"= {cell.width * cell.height * scale * scale:,} pixels, over the "
-                f"{pipeline.MAX_CARD_PIXELS:,}-pixel card budget — the fixed "
-                "ceiling on what a chat card may decode, which is NOT a "
-                "comparison against this draft's own sheet (weigh that yourself "
-                "against spec.sheetWidth x sheetHeight from `status --json`); "
+                f"{pipeline.MAX_CONSOLE_CARD_PIXELS:,}-pixel console budget — the "
+                "fixed ceiling on what a chat card may decode, which is NOT a "
+                "comparison against this draft's own sheet (the payload answers "
+                "that separately as withinOwnSheet); "
                 "ask for --scale 1, or a row with more frames to slice, or "
                 "--scale 3 or more to take it as a viewer artifact carrying "
-                "cardSafe: false"
+                "withinConsoleBudget: false"
             )
         image = pipeline.upscale_on_backdrop(cell, scale=scale)
         # The filename is a HUMAN surface — an operator correlating a crop back
@@ -942,7 +969,11 @@ class CharacterDraft:
             "path": str(out),
             "width": image.width,
             "height": image.height,
-            "cardSafe": card_safe,
+            # Both, always, at every scale — see the docstring's consumer rule.
+            # A consumer that reads one and infers the other is the defect this
+            # split exists to retire.
+            "withinConsoleBudget": within_console_budget,
+            "withinOwnSheet": within_own_sheet,
         }
 
     # -------------------------------------------------- stage 3: composed
@@ -966,15 +997,19 @@ class CharacterDraft:
         partially approved draft would install a sheet with blank rows that the
         consumer's spec claims are filled.
 
-        *accept_handedness* names ``<row>:rotation+states`` tokens whose
-        mirrored-art REFUSAL the operator has looked at and is overriding — see
-        :func:`pipeline.validate_sheet`. It is per ROW and never blanket, it
-        applies only to a finding both passes agree about (a single-basis
-        finding is a warning and does not block, so there is nothing to accept),
-        an accepted row that was not flagged is itself a refusal, and the
-        honoured list is written into the installed manifest as
-        ``{row, gain, basis}`` so the override survives as a fact about the
-        character rather than as a refusal nobody can see any more.
+        *accept_handedness* names ``<row>:<basis>`` tokens whose mirrored-art
+        REFUSAL the operator has looked at and is overriding — see
+        :func:`pipeline.validate_sheet`, and take the spelling from the refusal
+        itself (:func:`pipeline.accept_basis_token`). It is per ROW and never
+        blanket, and it applies to both refusing shapes: a row BOTH passes agree
+        about (``<row>:rotation+states``) and a row carried by a whole mirrored
+        STATE (``<row>:states``), the latter accepted one row at a time like any
+        other. A single-basis finding about a single row is a warning and does
+        not block, so there is nothing to accept about it; an accepted row that
+        was not flagged is itself a refusal; and the honoured list is written
+        into the installed manifest as ``{row, gain, basis}`` so the override
+        survives as a fact about the character rather than as a refusal nobody
+        can see any more.
         """
         self._require_stage("compose", "rows")
         spec = self.spec
