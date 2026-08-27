@@ -40,20 +40,16 @@ correlation is gone from the tree, (b) the intent is out of the ledger, (c) the
 refusal reason is on screen. Mutation: swallow the refusal — the "New chat does
 nothing" regression class — must turn it red.
 
-## Row 2 — UP-5: adoption still trusts the client's own content key
+## Row 2 — UP-5: DISCHARGED 2026-08-27 by the placement verb's S7
 
-**Evidence, re-verified 2026-08-22.** `mission_control_page.dart:2502-2506` calls
-`adoptServerWrite(..., contentKey: officeActorContentKey(payload))`, computed from
-the **launcher's** payload. Grep for `content_key` in `agent_runtime/serve_rpc.py`
-returns nothing, so no create or upsert ack carries the server's key. The skip
-guard therefore always fires: suppression means "I assume the server agrees", not
-"the server agrees" — the same infer-then-act shape as R#40, bounded only by the
-next read re-seeding.
+The ack now carries the actor as stored (`office_models.office_actor_wire_row`, plan D2/D11) and
+the launcher adopts THAT: `_adoptServerPlacement` computes the suppression key from the ack's
+payload through `officeActorPayloadFromRpcItems`, never from the payload it staged, and re-stages
+the scene onto the server's row when the two differ (launcher `f7160c3c7`). See
+[agent-placement-verb.md](agent-placement-verb.md) §A D2 and the launcher's
+`docs/mission_control/04-office-scene.md` "Drops end-to-end". One caveat this file should not
+lose: the adoption is keyed on the ack's CONTENT and the launcher additionally refuses to adopt a
+replay stamped `actor_fresh: false`. Row 1 (the refused-create retraction) is untouched and still
+open.
 
-**Gate.** The create/upsert reply carries the server's content key (or its actor
-payload); the launcher adopts THAT. Test: a server whose normalization produces a
-different key than the client computed must NOT be suppressed — the client asks
-for a corrective read. Mutation: adopt the client's key — the test reds.
-
-**Sequencing.** Row 2 is a two-repo change and moves no contract version if the
-field is additive on an existing ack. Row 1 is launcher-only and independent.
+**Sequencing.** Row 1 is launcher-only and independent.
