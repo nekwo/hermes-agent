@@ -175,6 +175,11 @@ def _live_generated_frames() -> dict[str, dict]:
     # persisted core and pays for a gated rebuild, so running it earlier would
     # rebuild every frame above against a store it had moved.
     stale_first, authoritative = _generator_module()._build_stale_first_convergence_pair()
+    # LAST of all, and again through the generator's own function: this one
+    # performs a REAL agent create, which seeds a persona, a workspace and an
+    # office surface and puts four events on the log. Running it earlier would
+    # rebuild every frame above against a store it had moved.
+    create_patch, create_demoted = _generator_module()._build_agent_create_frames()
     return {
         "hydrate.json": hydrate,
         "delta.json": delta_frame(first, offset=batch[0][0], snapshot=core),
@@ -183,6 +188,8 @@ def _live_generated_frames() -> dict[str, dict]:
         "hydrate_running_work_owner.json": owner_hydrate,
         "hydrate_stale_first.json": stale_first,
         "hydrate_authoritative_same_offset.json": authoritative,
+        "patch_agent_create.json": create_patch,
+        "delta_agent_create_narrow_profile.json": create_demoted,
     }
 
 
@@ -262,6 +269,12 @@ def test_manifest_pins_fixture_bytes():
         # offset. Read as a PAIR — the relation between them is the contract.
         "hydrate_stale_first.json",
         "hydrate_authoritative_same_offset.json",
+        # The placement verb's S0 pair (2026-08-26): one out-of-process
+        # ``agent create`` seen by a wide-profile subscriber and by a
+        # narrow-profile one. Read as a PAIR — see
+        # ``test_the_agent_create_pair_is_one_batch_seen_two_ways``.
+        "patch_agent_create.json",
+        "delta_agent_create_narrow_profile.json",
         "patch.json",
         "patch_upsert_profile.json",
         "patch_remove.json",
@@ -351,6 +364,7 @@ def test_every_frame_bearing_golden_pins_contract_version(isolate_agent_runtime_
             "hydrate_running_work_owner.json",
             "hydrate_stale_first.json",
             "hydrate_authoritative_same_offset.json",
+            "delta_agent_create_narrow_profile.json",
         )
     )
     for frame, origin in frames:
@@ -475,6 +489,177 @@ def test_the_stale_first_pair_is_same_offset_and_carries_both_freshness_tokens()
     assert stale["core"] != authoritative["core"], (
         "both frames carry the same core, so a launcher that dropped frame 2 "
         "entirely would still satisfy every content assertion downstream"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# S0 of the placement verb: one create, two subscribers
+# --------------------------------------------------------------------------- #
+def _events_from_demoted_golden() -> list:
+    """The batch's events, reconstructed from the demoted golden's own bytes.
+
+    ``delta_batch_frame`` carries every batched event under ``events[].event``,
+    so the demoted golden is a complete record of what the create appended. The
+    tests below feed those bytes back through the LIVE classifier rather than
+    re-deriving them from a store: a coverage rule that changed under the
+    goldens would then fail here, on the exact frames both repos ship, instead
+    of quietly agreeing with itself.
+    """
+
+    from agent_runtime.models import Event
+
+    rows = _fixture("delta_agent_create_narrow_profile.json")["events"]
+    return [
+        Event(
+            ts=datetime.fromisoformat(
+                str(row["event"]["ts"]).replace("Z", "+00:00")
+            ),
+            type=row["event"]["type"],
+            task_id=row["event"].get("task_id"),
+            run_id=row["event"].get("run_id"),
+            persona_id=row["event"].get("persona_id"),
+            payload=row["event"].get("payload") or {},
+        )
+        for row in rows
+    ]
+
+
+def test_the_agent_create_patch_golden_carries_exactly_the_two_creates():
+    """S0's answer, on the committed bytes.
+
+    F6 left open whether one out-of-process ``agent create`` reaches a
+    connected client as ONE ``patch`` frame carrying both halves — the roster
+    row and the placement — or demotes, or is dropped at the fold. It does not
+    demote: this golden is what the promotion decision produced for a
+    subscriber declaring the launcher's own fold set, and it carries exactly
+    two rows, both stamped ``created``.
+
+    ``created`` is asserted rather than assumed because it is part of the FOLD
+    contract, not merely of the negotiation: the launcher's generic
+    persona-instance fold inserts-on-absent only when the stamp is present, and
+    answers ``patch_without_target`` — a full re-hydrate — without it.
+    """
+
+    frame = _fixture("patch_agent_create.json")
+
+    assert frame["type"] == "patch", (
+        "the create's batch is no longer promoted — S0's answer would be no, "
+        "and every slice built on D3 is built on a lane that was assumed"
+    )
+    assert frame["schema_version"] == 2
+    assert "core" not in frame
+
+    rows = frame["patches"]
+    assert [(row["entity"], row["op"]) for row in rows] == [
+        ("persona_instance", "upsert"),
+        ("office_actor", "upsert"),
+    ], rows
+    assert all(row["created"] is True for row in rows), rows
+    assert rows[0]["id"] == "personainst_qa_fixture"
+    assert rows[1]["id"] == "ws_office_pilot/personainst_qa_fixture"
+    # The placement is instance-keyed by construction
+    # (``agent_create.placement_actor_payload``), which is what keeps the office
+    # store's class-key fence unreachable from this method.
+    assert rows[1]["changed"]["persona_instance_id"] == rows[0]["id"]
+    # ONE agent item and no desk: the verb authors no desk (plan D6), and a
+    # golden that grew one would be pinning a behaviour the launcher's own drop
+    # does not have.
+    items = rows[1]["changed"]["items"]
+    assert [item["kind"] for item in items] == ["agent"], items
+
+    # The fold's own precondition: the client folds only when its held
+    # watermark equals ``base_offset``, and its sequence gate is strict ``>``.
+    base = frame["base_offset"]
+    watermark = frame["watermark"]["event_offset"]
+    assert base < rows[0]["seq"] < rows[1]["seq"] <= watermark, frame
+
+
+def test_the_narrow_profile_golden_is_the_honest_full_core():
+    """The other arm of the plan's A.11 hazard, pinned on bytes.
+
+    ``accepted_fold_entities`` intersects across every subscriber in the room,
+    so ONE narrow-profile client demotes every placement to a full core for
+    everyone. Correct — never a wrong render — and expensive, which is the
+    whole point of pinning it: the demote is now observed rather than reasoned
+    about, and a producer that started shipping the patch to a client that
+    never declared ``office_actor`` would redden here on ``type``.
+    """
+
+    frame = _fixture("delta_agent_create_narrow_profile.json")
+
+    assert frame["type"] == "delta", (
+        "the narrow-profile subscriber was promoted to a patch it cannot fold "
+        "— that client pays the patch AND the re-hydrate, which is strictly "
+        "worse than the full core this frame is"
+    )
+    core = frame["core"]
+    assert isinstance(core, dict), "a demote that carries no core carries nothing"
+    # The demote is only correct because the core re-baselines what the patch
+    # would have folded: BOTH halves of the create are in it.
+    actors = core["offices"]["ws_office_pilot"]["actors"]
+    assert any(
+        actor["actor_key"] == "personainst_qa_fixture" for actor in actors
+    ), actors
+    assert "personainst_qa_fixture" in core["persona_instances"]
+
+
+def test_the_agent_create_pair_is_one_batch_seen_two_ways():
+    """Neither golden says anything alone; the relation between them is the
+    fixture.
+
+    They must describe the SAME create — same batch length, same final
+    watermark — because the claim is about the SUBSCRIBER's declaration and
+    nothing else. A pair regenerated from two different creates would pin two
+    unrelated frames and prove nothing about the negotiation.
+    """
+
+    patch = _fixture("patch_agent_create.json")
+    demoted = _fixture("delta_agent_create_narrow_profile.json")
+
+    assert patch["coalesced_count"] == demoted["coalesced_count"] == 4
+    assert (
+        patch["watermark"]["event_offset"]
+        == demoted["watermark"]["event_offset"]
+        == demoted["seq"]
+    ), (patch["watermark"], demoted["watermark"], demoted["seq"])
+    assert [row["event"]["type"] for row in demoted["events"]] == [
+        "state.patched",
+        "persona_instance.chat_opened",
+        "state.patched",
+        "office.actor.upserted",
+    ], demoted["events"]
+
+
+def test_the_live_classifier_still_splits_the_two_profiles(
+    isolate_agent_runtime_root,
+):
+    """The goldens' own events, back through the LIVE coverage rule.
+
+    A manifest hash proves the bytes did not move and proves nothing about what
+    they MEAN. This drives ``batch_is_patch_coverable`` — the predicate
+    ``_batch_frames_with_liveness`` consults — over the events the demoted
+    golden records, and asserts the split the pair claims: promotable for the
+    launcher's declared set, demoted for the historical two.
+
+    It is the anti-vacuity half of the pair. Un-gate the office lifecycle
+    token, or widen ``HISTORICAL_FOLD_ENTITIES``, and the narrow arm goes
+    coverable here while both goldens sit unchanged and green.
+    """
+
+    from agent_runtime.patch_coverage import batch_is_patch_coverable
+
+    generator = _generator_module()
+    events = _events_from_demoted_golden()
+
+    assert batch_is_patch_coverable(
+        iter(events), fold_entities=generator.FIXTURE_WIDE_FOLD_ENTITIES
+    ), "the create's batch stopped being coverable for the launcher's own set"
+    assert not batch_is_patch_coverable(
+        iter(events), fold_entities=generator.FIXTURE_NARROW_FOLD_ENTITIES
+    ), (
+        "the create's batch became coverable for a subscriber that declares "
+        "neither office_actor nor the lifecycle token — that client would be "
+        "sent a frame it answers with a full re-hydrate"
     )
 
 

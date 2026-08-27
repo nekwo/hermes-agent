@@ -81,6 +81,14 @@ GENERATED_FRAME_FILES = (
     # contract is a relation between the two frames, not a property of either.
     "hydrate_stale_first.json",
     "hydrate_authoritative_same_offset.json",
+    # S0 of the placement-verb plan (hermes
+    # ``docs/agent-runtime-harness/planned/agent-placement-verb.md`` §B). The
+    # SAME one-call ``perform_agent_create`` observed by two subscribers, so the
+    # pair pins both arms of that plan's §A.11 hazard. Read them as a PAIR for
+    # the same reason the convergence hydrates are a pair — see
+    # :func:`_build_agent_create_frames`.
+    "patch_agent_create.json",
+    "delta_agent_create_narrow_profile.json",
 )
 
 #: Identities the running-work owner fixture seeds. They are FIXTURE constants,
@@ -100,6 +108,141 @@ UNOWNED_SESSION = "cli_fixture_session"
 #: Fixed spawn stamp so ``started_at`` is stable before normalization even reads
 #: it (``elapsed_seconds`` is derived from wall time and is normalized instead).
 FIXTURE_DISPATCHED_AT = 1_760_000_000.0
+
+# ── S0 of the placement verb: the one-call create, seen from two subscribers ──
+#
+# Identities the agent-create pair seeds. FIXTURE constants, like the ones
+# above, but their DERIVATIONS are contractual and are asserted at generation
+# time rather than typed twice: the persona-instance id is
+# ``persona_instance_id_for_placement(FIXTURE_CREATE_PLACEMENT_ID)`` and the
+# office actor key is that same id, because ``placement_actor_payload`` is
+# instance-keyed by construction.
+FIXTURE_CREATE_PERSONA_ID = "qa"
+FIXTURE_CREATE_PERSONA_DISPLAY_NAME = "QA Agent"
+FIXTURE_CREATE_WORKSPACE_ID = "ws_office_pilot"
+FIXTURE_CREATE_PLACEMENT_ID = "qa_fixture"
+FIXTURE_CREATE_INSTANCE_ID = "personainst_qa_fixture"
+FIXTURE_CREATE_IDEMPOTENCY_KEY = "fixture-agent-create"
+FIXTURE_CREATE_POSITION = (0.0, 0.0)
+#: ``persona_chat_session_id_for`` mints ``persona_chat_<instance>_<12 hex of a
+#: uuid4>``. The tail is the one value in this create that is random rather than
+#: derived, and it rides four places in the emitted frames (the roster patch's
+#: three session keys and the ``chat_opened`` payload). Pinning it AT THE SOURCE
+#: — see :func:`_build_agent_create_frames` — rather than rewriting it after the
+#: fact keeps the frame the producer's own bytes; a post-hoc substitution would
+#: be a second normalizer able to disagree with the first.
+FIXTURE_CREATE_CHAT_SESSION_ID = f"persona_chat_{FIXTURE_CREATE_INSTANCE_ID}_0123456789ab"
+
+#: What the launcher declares today (``kMissionFoldDeclaredEntities``, used
+#: verbatim by both of its lanes) — the WIDE arm, whose batch is promoted.
+FIXTURE_WIDE_FOLD_ENTITIES = frozenset(
+    {
+        "persona_instance",
+        "incident",
+        "office_actor",
+        "office_actor_lifecycle",
+        "persona_instance_create",
+    }
+)
+#: The NARROW arm: a subscriber that declares only the historical two. It is
+#: exactly ``patch_coverage.HISTORICAL_FOLD_ENTITIES`` — what a client that says
+#: nothing is taken to fold, and what the placement plan's §A.11 names as the
+#: room-wide set the moment one narrow subscriber joins. Spelled out rather than
+#: imported so the golden's arm is legible in the file that writes it; the
+#: generator asserts the two are equal.
+FIXTURE_NARROW_FOLD_ENTITIES = frozenset({"persona_instance", "incident"})
+
+#: Synthetic event-log positions for the agent-create pair, in order:
+#: ``base_offset`` first, then one per batched event.
+#:
+#: **Why these are pinned and the other goldens' offsets are not.** Every other
+#: generated frame's offsets are real byte positions in a log whose only entries
+#: are two ``state.reconciled`` events with fixed payloads, so they reproduce
+#: anywhere. A CREATE's events embed absolute paths — ``runtime_root`` on the
+#: roster patch, ``chat_head_home`` on ``persona_instance.chat_opened`` — so the
+#: log's byte positions are a function of where the generating machine puts its
+#: temporary directory. That is the same class of machine-dependence
+#: :data:`_MACHINE_PROBED_FLAGS` retires, and it is retired the same way.
+#:
+#: What the frames CONTRACT is the ORDER and the strict inequalities —
+#: ``base_offset`` < every ``seq`` < ``watermark.event_offset`` — because the
+#: launcher folds only when its held watermark equals ``base_offset`` and its
+#: sequence gate is strict ``>``. Magnitudes say nothing to either repo. The
+#: stride is deliberately round so nobody mistakes them for measured sizes.
+_FIXTURE_CREATE_OFFSET_BASE = 4096
+_FIXTURE_CREATE_OFFSET_STRIDE = 512
+
+#: The two goldens the agent-create pair writes. Named once so ``main`` can ask
+#: "does this frame opt into the extra normalization" without re-listing them.
+AGENT_CREATE_FRAME_FILES = (
+    "patch_agent_create.json",
+    "delta_agent_create_narrow_profile.json",
+)
+
+#: Values in the agent-create pair that answer a question about the generating
+#: INTERPRETER rather than about the wire contract, pinned to the value the
+#: committed goldens carry.
+#:
+#: Same class and same treatment as :data:`_MACHINE_PROBED_FLAGS`, and the
+#: derivation is worth stating once. ``persona_instance_summary`` enriches a row
+#: with ``tool_count`` / ``blocked_tools_count`` / ``effective_toolsets`` /
+#: ``mutation_boundary`` ONLY when the persona behind it resolves — which is why
+#: no golden before this pair carried them (``hydrate_running_work_owner.json``
+#: seeds an instance whose persona deliberately does not exist). All four come
+#: out of ``tool_visibility.resolve_tool_visibility``, which counts the TOOL
+#: REGISTRY, and the registry is populated by import: a machine missing an
+#: optional tool package registers fewer tools and would emit different bytes.
+#:
+#: Only the four values are pinned. Every key path around them survives
+#: untouched, so the shape gate still fails the moment the producer stops
+#: emitting one of them — this is a normalization, not a rewrite of the block.
+_REGISTRY_PROBED_VALUES: dict[str, Any] = {
+    "mutation_boundary": {
+        "can_mutate_files": True,
+        "can_run_terminal": True,
+        "mutating_tools": [
+            "patch",
+            "terminal",
+            "write_file"
+        ]
+    },
+    "tool_count": 79,
+    "blocked_tools_count": 17,
+    "effective_toolsets": [
+        "agent_chat",
+        "bfl",
+        "board",
+        "browser",
+        "browser-cdp",
+        "clarify",
+        "code_execution",
+        "computer_use",
+        "cronjob",
+        "delegation",
+        "discord",
+        "discord_admin",
+        "feishu_doc",
+        "feishu_drive",
+        "file",
+        "hermes-yuanbao",
+        "homeassistant",
+        "image_gen",
+        "kanban",
+        "memory",
+        "project",
+        "session_search",
+        "skills",
+        "spotify",
+        "terminal",
+        "todo",
+        "tts",
+        "video",
+        "video_gen",
+        "vision",
+        "web",
+        "x_search"
+    ]
+}
 
 #: Hand-authored goldens this script only PINS: it hashes them into the manifest
 #: and never rewrites them. They are not regenerable from the current production
@@ -218,12 +361,71 @@ _MACHINE_PROBED_FLAGS = {
 }
 
 
-def _normalize(value: Any, *, isolated_root: Path, key: str = "") -> Any:
+#: Keys whose integer value is an EVENT-LOG BYTE POSITION.
+#:
+#: Only consulted when a caller passes an ``offset_map`` (today: the
+#: agent-create pair, whose events embed absolute paths — see
+#: :data:`_FIXTURE_CREATE_OFFSET_BASE`). Every other generated frame's offsets
+#: are already machine-independent and are left exactly as the producer built
+#: them.
+_OFFSET_KEYS = {"event_offset", "base_offset", "seq"}
+
+#: Wall-clock stamps that are volatile for SOME frames and CONTRACTUAL for
+#: others, so they can never join :data:`_TIME_KEYS`.
+#:
+#: ``delta.json`` / ``delta_batch.json`` seed their events with fixed stamps one
+#: second apart, and the ONE-second gap is the batch's own evidence that it
+#: coalesced two distinct events — folding both onto :data:`FIXED_TIME` would
+#: erase it. A frame built off a REAL store write has no such luxury: its
+#: ``ts`` is whenever the generator ran. So the two keys are opt-in per frame.
+_OPTIONAL_TIME_KEYS = frozenset({"ts", "last_event_ts"})
+
+
+def _normalize(
+    value: Any,
+    *,
+    isolated_root: Path,
+    key: str = "",
+    time_keys: frozenset[str] = frozenset(),
+    pinned_values: dict[str, Any] | None = None,
+    offset_map: dict[int, int] | None = None,
+) -> Any:
+    """Volatile values out, contract in.
+
+    ``time_keys`` adds to :data:`_TIME_KEYS` for THIS frame only (see
+    :data:`_OPTIONAL_TIME_KEYS`); ``pinned_values`` replaces a key's whole value
+    with a fixture constant (see :data:`_REGISTRY_PROBED_VALUES`); ``offset_map``
+    rewrites event-log byte positions through a rank map (see
+    :data:`_FIXTURE_CREATE_OFFSET_BASE`). All three default to "do nothing", so
+    every frame that predates them normalizes byte-identically.
+    """
+
+    forward = dict(
+        isolated_root=isolated_root,
+        time_keys=time_keys,
+        pinned_values=pinned_values,
+        offset_map=offset_map,
+    )
+    if pinned_values is not None and key in pinned_values:
+        return json.loads(json.dumps(pinned_values[key]))
+    if (
+        offset_map is not None
+        and key in _OFFSET_KEYS
+        and isinstance(value, int)
+        and not isinstance(value, bool)
+    ):
+        if value not in offset_map:
+            raise AssertionError(
+                f"offset {value!r} under key {key!r} was not collected by "
+                "_offset_rank_map, so this frame carries a byte position the "
+                "pin cannot reach and the golden would churn per machine"
+            )
+        return offset_map[value]
     if isinstance(value, dict):
         if key in _VOLATILE_METRIC_MAPS:
             return {str(item_key): 0 for item_key in value}
         normalized = {
-            str(item_key): _normalize(item, isolated_root=isolated_root, key=str(item_key))
+            str(item_key): _normalize(item, key=str(item_key), **forward)
             for item_key, item in value.items()
         }
         if key == "runtime_root" and "fingerprint" in normalized:
@@ -235,8 +437,8 @@ def _normalize(value: Any, *, isolated_root: Path, key: str = "") -> Any:
                     entry[flag_key] = pinned
         return normalized
     if isinstance(value, list):
-        return [_normalize(item, isolated_root=isolated_root) for item in value]
-    if key in _TIME_KEYS and value is not None:
+        return [_normalize(item, **forward) for item in value]
+    if (key in _TIME_KEYS or key in time_keys) and value is not None:
         return FIXED_TIME
     if key in _VOLATILE_METRICS and value is not None:
         return 0
@@ -244,6 +446,35 @@ def _normalize(value: Any, *, isolated_root: Path, key: str = "") -> Any:
         root = str(isolated_root)
         return value.replace(root, "<isolated-root>").replace(root.replace("\\", "/"), "<isolated-root>")
     return value
+
+
+def _offset_rank_map(*frames: Any) -> dict[int, int]:
+    """Every event-log byte position in ``frames``, ranked onto a fixed lattice.
+
+    Ranked BY VALUE across the whole pair at once, so the two frames stay
+    mutually consistent: the patch frame's ``base_offset`` and the demoted
+    frame's ``watermark.event_offset`` describe the same batch and must not be
+    pinned by two independent passes.
+    """
+
+    found: set[int] = set()
+
+    def walk(value: Any, key: str = "") -> None:
+        if isinstance(value, dict):
+            for item_key, item in value.items():
+                walk(item, str(item_key))
+        elif isinstance(value, list):
+            for item in value:
+                walk(item, key)
+        elif key in _OFFSET_KEYS and isinstance(value, int) and not isinstance(value, bool):
+            found.add(value)
+
+    for frame in frames:
+        walk(frame)
+    return {
+        real: _FIXTURE_CREATE_OFFSET_BASE + _FIXTURE_CREATE_OFFSET_STRIDE * rank
+        for rank, real in enumerate(sorted(found))
+    }
 
 
 def _fixture_persona_instance():
@@ -457,6 +688,236 @@ def _seed_running_work_owner() -> None:
         conn.execute("UPDATE async_delegations SET owner_started_at=NULL")
 
 
+def _build_agent_create_frames() -> tuple[dict, dict]:
+    """S0: ONE ``perform_agent_create``, rendered for two different subscribers.
+
+    =========================================================================
+    WHAT THE PAIR PINS, AND WHY IT IS A PAIR
+    =========================================================================
+
+    The placement plan's D3 rules that the notification a client gets from a
+    create is the ``office_actor`` + ``persona_instance`` create patch batch —
+    NOT a surface-revision bump. F6 recorded that nobody had ever captured that
+    frame: the 2026-08-24 "nothing notified the client" was observed against a
+    hand-assembled ``persona instance create`` + ``office actor-upsert`` pair,
+    and whether an out-of-process ``agent create`` reaches a connected launcher
+    as ONE ``patch`` frame — or demotes, or is dropped at the fold — was open.
+    ``patch_agent_create.json`` is that capture.
+
+    Its sibling is the other arm of the plan's A.11 hazard.
+    ``accepted_fold_entities`` takes the INTERSECTION across every subscriber in
+    the room, so the moment one narrow-profile client subscribes the room loses
+    ``office_actor`` and every placement DEMOTES to a full core for everyone.
+    That is correct and it is expensive, and until now it was reasoned about
+    rather than observed. ``delta_agent_create_narrow_profile.json`` is the SAME
+    create — same batch, same store, same instant — rendered for a subscriber
+    declaring only :data:`FIXTURE_NARROW_FOLD_ENTITIES`. Neither frame says
+    anything alone: together they say the promotion decision is the
+    SUBSCRIBER's declaration and nothing else about the create.
+
+    =========================================================================
+    THE REAL PRODUCER PATH, AND THE TWO ARRANGEMENTS
+    =========================================================================
+
+    The create is the production service — ``agent_create.perform_agent_create``,
+    the same function ``runtime.agent.create`` and ``harness agent create`` both
+    call — against a real seeded workspace. The frames come out of
+    ``stream._batch_frames_with_liveness``, which IS the promotion decision:
+    this generator does not choose ``patch`` or ``delta``, it asks, and it
+    asserts what came back. A demote on the wide arm fails generation rather
+    than quietly committing a golden that pins the bug.
+
+    Two arrangements, both forced rather than convenient:
+
+    1. **The chat root's random tail is pinned at the source.**
+       ``persona_chat_session_id_for`` mints a ``uuid4`` tail, which would make
+       these bytes differ on every run. It is replaced for the duration of the
+       create only — see :data:`FIXTURE_CREATE_CHAT_SESSION_ID` for why at the
+       source rather than after the fact.
+    2. **Personas and the workspace are seeded first**, because a hermetic
+       runtime root's roster is genuinely EMPTY (``agent_create``'s own UC-0
+       note) and ``OfficeStore.ensure_surface`` refuses a workspace no record
+       resolves (MC-8/P10) — the same precondition
+       ``tests/agent_runtime/office_seed.py`` states for every office suite.
+    3. **``HERMES_HEAD_HOME`` is asserted present, not assumed.**
+       ``open_chat`` puts ``chat_head_home`` on the ``persona_instance.chat_opened``
+       payload only when the head home is AUTHORITATIVE, and
+       ``hermes_constants.hermes_head_home_is_authoritative`` reads that off an
+       explicit ``HERMES_HEAD_HOME`` env value or a context-recorded outermost
+       home — an ambient resolution is deliberately NOT authoritative. So the
+       emitted frame's KEY SET depends on the caller's environment: ``main``
+       exports the variable and gets the key, a rebuild under a bare runtime
+       root does not, and the two would disagree about the golden's shape with
+       nothing saying why. Measured, not reasoned: the shape gate reddened on
+       exactly ``events[].event.payload.chat_head_home`` the first time this
+       builder was driven from the test suite. The builder therefore pins the
+       variable for the duration of the create, which is the same "state the
+       precondition rather than inherit it" rule arrangement 2 follows.
+
+    Returns ``(patch_frame, demoted_delta_frame)`` UN-normalized; the caller
+    pins their offsets and stamps.
+    """
+
+    from agent_runtime import paths, persona_assignments
+    from agent_runtime.agent_create import perform_agent_create
+    from agent_runtime.events import EventLog
+    from agent_runtime.models import AgentPersona
+    from agent_runtime.office_store import OfficeStore
+    from agent_runtime.parity import events_position
+    from agent_runtime.patch_coverage import HISTORICAL_FOLD_ENTITIES
+    from agent_runtime.persona_assignments import persona_instance_id_for_placement
+    from agent_runtime.state_patches import STATE_PATCHED_EVENT_TYPE
+    from agent_runtime.store import AgentStore, WorkspaceStore
+    from agent_runtime.stream import _batch_frames_with_liveness
+
+    assert FIXTURE_NARROW_FOLD_ENTITIES == HISTORICAL_FOLD_ENTITIES, (
+        "the narrow arm is supposed to BE the historical default set; it has "
+        f"drifted to {sorted(HISTORICAL_FOLD_ENTITIES)}"
+    )
+    assert (
+        persona_instance_id_for_placement(FIXTURE_CREATE_PLACEMENT_ID)
+        == FIXTURE_CREATE_INSTANCE_ID
+    )
+
+    AgentStore().save(
+        AgentPersona(
+            id=FIXTURE_CREATE_PERSONA_ID,
+            display_name=FIXTURE_CREATE_PERSONA_DISPLAY_NAME,
+            role="qa",
+            model=None,
+            provider=None,
+            api_mode=None,
+            toolsets=[],
+            system_prompt_path="",
+        )
+    )
+    WorkspaceStore().create(
+        name="Office Pilot", workspace_id=FIXTURE_CREATE_WORKSPACE_ID
+    )
+    OfficeStore().ensure_surface(
+        FIXTURE_CREATE_WORKSPACE_ID, created_by="fixture-seed"
+    )
+
+    base_offset = events_position()["event_offset"]
+
+    minted = persona_assignments.persona_chat_session_id_for
+    persona_assignments.persona_chat_session_id_for = (
+        lambda _instance_id: FIXTURE_CREATE_CHAT_SESSION_ID
+    )
+    head_home_before = os.environ.get("HERMES_HEAD_HOME")
+    os.environ.setdefault(
+        "HERMES_HEAD_HOME", os.environ.get("HERMES_HOME") or str(paths.store_root())
+    )
+    try:
+        outcome = perform_agent_create(
+            {
+                "persona_id": FIXTURE_CREATE_PERSONA_ID,
+                "workspace_id": FIXTURE_CREATE_WORKSPACE_ID,
+                "position": list(FIXTURE_CREATE_POSITION),
+                "idempotency_key": FIXTURE_CREATE_IDEMPOTENCY_KEY,
+                "placement_id": FIXTURE_CREATE_PLACEMENT_ID,
+            }
+        )
+    finally:
+        persona_assignments.persona_chat_session_id_for = minted
+        if head_home_before is None:
+            os.environ.pop("HERMES_HEAD_HOME", None)
+        else:
+            os.environ["HERMES_HEAD_HOME"] = head_home_before
+
+    assert outcome.refusal is None, outcome.refusal
+    result = outcome.result
+    assert result["persona_instance_id"] == FIXTURE_CREATE_INSTANCE_ID, result
+    assert result["actor_key"] == FIXTURE_CREATE_INSTANCE_ID, result
+    assert result["default_chat_session_id"] == FIXTURE_CREATE_CHAT_SESSION_ID, result
+
+    batch = list(EventLog().iter_from_offset(base_offset))
+    # The create's whole event trail, asserted at generation time. A create that
+    # started emitting a fifth event — or stopped emitting one of these — would
+    # otherwise silently regenerate a golden that no longer describes the
+    # gesture the plan's D3 is about.
+    assert [event.type for _, event in batch] == [
+        STATE_PATCHED_EVENT_TYPE,
+        "persona_instance.chat_opened",
+        STATE_PATCHED_EVENT_TYPE,
+        "office.actor.upserted",
+    ], [event.type for _, event in batch]
+    patched = [
+        event.payload for _, event in batch if event.type == STATE_PATCHED_EVENT_TYPE
+    ]
+    assert [row["entity"] for row in patched] == [
+        "persona_instance",
+        "office_actor",
+    ], patched
+    assert all(row["op"] == "upsert" for row in patched), patched
+    # D3's load-bearing stamp: the launcher's generic persona-instance fold
+    # inserts-on-absent ONLY when ``created`` is present, so a create that
+    # stopped stamping it would be answered with ``patch_without_target`` and a
+    # full re-hydrate at every connected client.
+    assert all(row.get("created") is True for row in patched), patched
+    chat_opened = next(
+        event.payload
+        for _, event in batch
+        if event.type == "persona_instance.chat_opened"
+    )
+    assert chat_opened.get("chat_head_home"), (
+        "the chat_opened payload lost its head home, so the frame's key set "
+        "now depends on whether HERMES_HEAD_HOME was exported — see "
+        "arrangement 3"
+    )
+
+    wide = list(
+        _batch_frames_with_liveness(
+            batch,
+            base_offset=base_offset,
+            delta_patches=True,
+            resync=False,
+            heartbeat_interval_seconds=5.0,
+            fold_entities=FIXTURE_WIDE_FOLD_ENTITIES,
+            caller="cli",
+        )
+    )
+    assert len(wide) == 1, [frame.get("type") for frame in wide]
+    patch_frame = wide[0]
+    # THE S0 QUESTION, asked of the promotion decision itself. A demote here is
+    # the plan's D-risk arriving, and it must stop generation rather than commit
+    # a golden that pins it.
+    assert patch_frame["type"] == "patch", (
+        "the wide-profile subscriber's batch DEMOTED to a full core — S0's "
+        f"answer is no. Frame type: {patch_frame.get('type')!r}. The remedy is "
+        "in patch_coverage or the read model, not in this generator."
+    )
+    assert [row["entity"] for row in patch_frame["patches"]] == [
+        "persona_instance",
+        "office_actor",
+    ], patch_frame["patches"]
+    assert all(row.get("created") is True for row in patch_frame["patches"])
+    assert patch_frame["base_offset"] == base_offset
+
+    narrow = list(
+        _batch_frames_with_liveness(
+            batch,
+            base_offset=base_offset,
+            delta_patches=True,
+            resync=False,
+            heartbeat_interval_seconds=5.0,
+            fold_entities=FIXTURE_NARROW_FOLD_ENTITIES,
+            caller="cli",
+        )
+    )
+    assert len(narrow) == 1, [frame.get("type") for frame in narrow]
+    demoted = narrow[0]
+    assert demoted["type"] == "delta", demoted["type"]
+    # The demote is only CORRECT because it carries the whole core: the client
+    # that could not fold the patch is re-baselined rather than left stale.
+    assert isinstance(demoted.get("core"), dict)
+    actors = demoted["core"]["offices"][FIXTURE_CREATE_WORKSPACE_ID]["actors"]
+    assert any(
+        actor["actor_key"] == FIXTURE_CREATE_INSTANCE_ID for actor in actors
+    ), actors
+    return patch_frame, demoted
+
+
 def _write_json(name: str, value: Any) -> None:
     payload = json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n"
     (FIXTURE_ROOT / name).write_text(payload, encoding="utf-8", newline="\n")
@@ -550,6 +1011,13 @@ def main() -> int:
         # churn the goldens above for reasons that have nothing to do with them.
         stale_first, authoritative_same_offset = _build_stale_first_convergence_pair()
 
+        # LAST of all, after even that: this one seeds a persona, a workspace
+        # and an office surface, then performs a REAL agent create — four events
+        # on the log and a store the frames above were all built against.
+        # Running it earlier would rewrite every golden above with a roster row
+        # and a placement that have nothing to do with them.
+        agent_create_patch, agent_create_demoted = _build_agent_create_frames()
+
         frames = {
             "hydrate.json": hydrate,
             "delta.json": delta_frame(first, offset=batch[0][0], snapshot=core),
@@ -558,6 +1026,8 @@ def main() -> int:
             "hydrate_running_work_owner.json": owner_hydrate,
             "hydrate_stale_first.json": stale_first,
             "hydrate_authoritative_same_offset.json": authoritative_same_offset,
+            "patch_agent_create.json": agent_create_patch,
+            "delta_agent_create_narrow_profile.json": agent_create_demoted,
         }
         # A frame that silently drops out of the built set while staying in
         # MANIFEST_FILES would become hand-maintained without anyone saying so —
@@ -576,10 +1046,22 @@ def main() -> int:
             assert frames[name]["core"]["parity"]["completeness"] == core["parity"][
                 "completeness"
             ]
+        # The agent-create pair alone carries real-store wall-clock stamps,
+        # registry-probed tool scalars and path-dependent byte offsets, so it
+        # alone opts into the extra normalization. Every other frame keeps the
+        # rules it has always had — see :func:`_normalize`.
+        agent_create_rules = dict(
+            time_keys=_OPTIONAL_TIME_KEYS,
+            pinned_values=_REGISTRY_PROBED_VALUES,
+            offset_map=_offset_rank_map(
+                to_jsonable(agent_create_patch), to_jsonable(agent_create_demoted)
+            ),
+        )
         for name, frame in frames.items():
+            extra = agent_create_rules if name in AGENT_CREATE_FRAME_FILES else {}
             _write_json(
                 name,
-                _normalize(to_jsonable(frame), isolated_root=isolated_root),
+                _normalize(to_jsonable(frame), isolated_root=isolated_root, **extra),
             )
         _write_manifest()
     return 0
