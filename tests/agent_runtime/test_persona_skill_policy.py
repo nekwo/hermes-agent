@@ -199,6 +199,62 @@ def test_charsheet_skill_teaches_all_three_environment_traps():
     assert "A relative `HERMES_HOME` resolves against the shell's cwd" in text
 
 
+def test_charsheet_skill_states_the_launcher_bindings_home_in_its_landed_meaning():
+    """The launcher's `home` field is a SIGHTING now, and the skill has to say so.
+
+    Launcher ``9e17d05ad`` (owner decision §13.24) redefined
+    ``CharaDraftBinding.home`` from *the home the authoring turn resolved* — a
+    fact nothing in that launcher has ever known — to *a home this launcher
+    OBSERVED the draft readable in*, gave it its one production writer (Studio's
+    adopt door) and renamed the sealed family ``CharaAuthoringHome`` ->
+    ``CharaDraftHome``. ``9b44617c5`` (§13.25) then flipped the fold from
+    first-observation-wins to freshest-wins, with an unknown never clobbering an
+    observed home. Both landed with ``grep -ri "authoring home" lib/ test/``
+    returning zero hits on that side; this is the hermes end of the same sweep.
+
+    It is a gate and not a tidy-up. An authoring agent that reads "the binding
+    records the AUTHORING home" believes the launcher stores the one fact its
+    own doc comment says nothing there can produce, and will then trust a seeded
+    home instead of echoing the home it resolved — the single failure this
+    skill's entire preflight exists to prevent.
+
+    The seed spelling is pinned at BOTH ends on purpose. The launcher pins it in
+    ``test/features/mission_control/agent_chat/mission_character_resume_seed_test.dart``
+    and ``MissionCharacterResumeSeed.message``'s own doc comment says the
+    spelling is "a contract across two repos rather than launcher copy". This is
+    the other end of that contract: if the launcher re-words the line, this test
+    is what says the skill quoting it went stale.
+    """
+    text = _charsheet_skill_text()
+
+    # The phrase is banned outright, in all three places it stood (the preflight
+    # echo, the `CHARSHEET-QA:` line's ruling, and the Studio-project bullet).
+    # Not a style rule: since §13.24 the words name a fact no launcher field
+    # holds, so a sentence built on them is wrong wherever it appears.
+    assert "authoring home" not in text.lower(), (
+        "the skill still says 'authoring home' about a launcher field that, "
+        "since §13.24, records a home the launcher OBSERVED the draft readable "
+        "in — never the home the authoring turn resolved"
+    )
+
+    # Stated positively, so deleting the sentences is not a way to pass.
+    assert "observed the draft readable in" in text.lower()
+    assert "§13.24" in text
+    # §13.25: the fold, in both directions, because a stale sighting is the
+    # thing that makes the seeded home untrustworthy.
+    assert "§13.25" in text
+    # §13.22 is UNTOUCHED by §13.24 and must still be taught: the line itself
+    # carries no home, so prose remains the only carrier of the authored one.
+    assert "§13.22" in text
+
+    # The resume seed's home line, spelled exactly as the launcher composes it.
+    assert "last observed home:" in text
+    assert "never observed by the launcher" in text
+    # ...and the seed's own closing sentence, which is what makes a stale
+    # sighting harmless when the agent obeys it.
+    assert "Echo the home you resolve; do not assume it." in text
+
+
 def _charsheet_qa_line_contract() -> dict:
     """The fixture risk D.5 names, hermes-side."""
     import json

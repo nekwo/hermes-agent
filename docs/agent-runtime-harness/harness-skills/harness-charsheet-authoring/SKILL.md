@@ -59,11 +59,15 @@ hermes harness characters list --json
 ```
 
 **Echo that path in your first reply, in prose.** Nothing else carries it. The
-`CHARSHEET-QA:` line deliberately does not (§13.22), so the console records the
-authoring home as UNKNOWN and your transcript is the only place it exists. Do
-not derive a home from a profile name or from a spawn environment; a derived
-home looks exactly like an observed one, and this is the one fact that is not
-derivable.
+`CHARSHEET-QA:` line deliberately does not (§13.22), so the console mints the
+character's binding with its home UNKNOWN, and your transcript is the only place
+the home your turn resolved will ever exist. The launcher does record a home of
+its own on that binding — but it is a SIGHTING, *a home the launcher OBSERVED
+the draft readable in* (§13.24), written when an operator opens Studio's adopt
+door and never by anything you emit. It is not the home you authored from, and
+nothing downstream will turn it into one. Do not derive a home from a profile
+name or from a spawn environment; a derived home looks exactly like an observed
+one, and this is the one fact that is not derivable.
 
 Three ways this goes wrong, all seen live:
 
@@ -582,11 +586,12 @@ Three line shapes leave your reply, and two of them are parsed out of it.
   IMAGE PROVIDER, and nothing in any payload sources it — pick one spelling and
   use the same one on every line of one draft, item-level lines included. Nothing
   keys on it; the DRAFT ID is the key, and project creation is idempotent on it,
-  so emitting the line again for the same draft is safe by design. **The line does
-  not carry the authoring home and is not to grow one** (§13.22) — put the home in
-  your prose instead. A parsed line is lifted out of the visible text; a malformed
-  one is deliberately left in, because a stage change that vanished would be one
-  the operator cannot see went wrong.
+  so emitting the line again for the same draft is safe by design. **The line
+  carries no home and is not to grow one** (§13.22, which §13.24 explicitly left
+  standing) — put the home your turn resolved in your prose instead. A parsed
+  line is lifted out of the visible text; a malformed one is deliberately left
+  in, because a stage change that vanished would be one the operator cannot see
+  went wrong.
 - **Clarify chips** — use the `clarify` tool with `choices` (up to 4) so the
   answers render as pickable rows directly under the card. Keep them verbs, not
   sentences: `Approve all` · `Reroll ne` · `Reroll with a note` · `Show another
@@ -630,10 +635,30 @@ conversation outlives leaving the Mission Control tab.
   press Compose into a refusal they see the refusal block and nothing happens.
 - **The character becomes a named Studio project on the first `CHARSHEET-QA:`
   line**, keyed by draft id, and that project — not a drafts listing — is what the
-  operator later resumes from. The binding records the authoring home as UNKNOWN
-  (§13.22) and its authoring persona from `authored_by`, which is the whole reason
-  probe 3 matters. A draft authored before projects existed is reachable only
-  through an adopt door scoped to the lane's own home (§13.23).
+  operator later resumes from. The binding takes its authoring persona from
+  `authored_by`, which is the whole reason probe 3 matters, and its home is minted
+  UNKNOWN, because the line carries none (§13.22). The one thing that ever writes
+  a home onto that binding is an operator opening Studio's adopt door, which
+  stamps *a home the launcher OBSERVED the draft readable in* — the home that
+  lane read back at that moment, and never the home you authored from (§13.24).
+  The fold takes the FRESHEST sighting and an unknown never clobbers an observed
+  one (§13.25), so the field is the launcher's most recent sighting and nothing
+  more. A draft authored before projects existed is reachable only through that
+  door (§13.23); one the console already adopted is offered it again whenever the
+  fold would learn something, which is how a moved draft gets corrected.
+- **What a resume hands you, and what it does not.** Resuming from the project
+  seeds your first message with the draft id and one home line, spelled
+  `last observed home: <path>` — or, when no sighting exists,
+  `last observed home: never observed by the launcher`. That is the sighting
+  above, and a sighting goes STALE: the draft may have been read from another
+  home since, and the launcher fills nothing in when it has none. The seed says
+  so in its own closing sentence:
+  *"Echo the home you resolve; do not assume it."*
+  So resume exactly the way you start: run the preflight probes, echo
+  `.runtime_health.hermes_home` in prose, and if the draft is not in your list,
+  say which home you are in and which home the seed named. Never quote the
+  seeded home back as though you had resolved it, and never author a second copy
+  because a seeded home disagreed with yours.
 
 ## Cost, batches, and what breaks
 
