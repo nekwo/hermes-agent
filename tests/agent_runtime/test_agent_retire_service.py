@@ -350,3 +350,172 @@ def test_the_error_codes_equal_serve_rpcs(qa_persona):
     assert agent_retire.ERR_INVALID_PARAMS == serve_rpc.ERR_INVALID_PARAMS
     assert agent_retire.ERR_NOT_FOUND == serve_rpc.ERR_NOT_FOUND
     assert agent_retire.ERR_CONFLICT == serve_rpc.ERR_CONFLICT
+
+
+# ── the gesture token: the join this verb was the only one to be missing ─────
+#
+# S8b. Every other level-mutating verb (`runtime.agent.create`,
+# `runtime.office.upsert` / `.remove` / `.surface.update`, `runtime.persona.prewarm`)
+# threads `correlation_id` onto the events and patches it produces;
+# `perform_agent_retire` read three params and nothing else, so an operator
+# gesture that CREATED an agent under one token and DELETED it later emitted a
+# removal nothing could join to it. The pins below are about the OFFICE half
+# specifically, because that is the half the token never reached: the roster
+# archive has always had its own `persona_instance.retired` event.
+
+
+def _payloads(event_type: str) -> list[dict]:
+    """Every payload of one event type in the isolated log, oldest first.
+
+    Through a fresh ``EventLog`` rather than a store handle, for the reason
+    ``test_correlation_id`` states: the service constructs its own stores, so a
+    fixture's handle names a different reader of the same file and would only
+    happen to agree.
+    """
+
+    from agent_runtime.events import EventLog
+
+    return [event.payload for _, event in EventLog().iter_from_offset(0) if event.type == event_type]
+
+
+#: A token in the shape the launcher mints: ``g-<lane>-<micros>-<rand4>``.
+GESTURE = "g-office-1755400000123456-a1b2"
+
+
+def test_the_gesture_token_rides_the_office_removal_event_and_its_patch_row(
+    qa_persona, seeded_workspace
+):
+    """KILLING MUTATION (run, observed, reverted): drop
+    ``correlation_id=correlation_id`` from ``archive_actors_for_instance``'s
+    ``remove_actor`` call. Observed red::
+
+        E       AssertionError: assert [None] == ['g-office-1755400000123456-a1b2']
+
+    on the removal-event arm — while the sibling
+    ``test_the_ack_echoes_the_token_on_the_call_that_worked_and_on_its_replay``
+    stays GREEN under that same mutation (measured, not assumed). That is
+    exactly the half-threaded state an ack-only suite would have shipped: the
+    reply names the gesture and the wire the operator actually greps does not,
+    which is the defect wearing the fix's costume. So this asserts the WIRE.
+
+    BOTH halves of the emitted pair, on ``test_correlation_id``'s standing rule:
+    the office push lane forwards ``state.patched`` rows and the stream lane's
+    demote carries the DOMAIN events, so a token on only one of them leaves
+    whichever lane the client actually took joining by timestamp.
+    """
+
+    from agent_runtime.state_patches import CORRELATION_ID_KEY, PATCH_OP_REMOVE
+
+    placed = _place()
+    actor_key = placed["actor_key"]
+
+    outcome = perform_agent_retire(
+        {
+            "persona_instance_id": placed["persona_instance_id"],
+            "correlation_id": GESTURE,
+        }
+    )
+
+    assert outcome.refusal is None, outcome.refusal
+    assert outcome.result["archived_actor_keys"] == [actor_key]
+
+    removed = _payloads("office.actor.removed")
+    rows = [
+        payload
+        for payload in _payloads("state.patched")
+        if payload.get("op") == PATCH_OP_REMOVE and payload.get("entity") == "office_actor"
+    ]
+    # Exactly one archive happened, and it is attributable on both lanes.
+    assert [payload.get(CORRELATION_ID_KEY) for payload in removed] == [GESTURE]
+    assert [payload.get(CORRELATION_ID_KEY) for payload in rows] == [GESTURE]
+    # ANTI-VACUITY: the token is on the payload for the actor that actually left,
+    # not on some unrelated row that happened to be last.
+    assert [payload.get("actor_key") for payload in removed] == [actor_key]
+
+
+def test_a_retire_with_no_token_leaves_the_wire_exactly_as_it_was(
+    qa_persona, seeded_workspace
+):
+    """The additive fence. A producer that stamped a token unconditionally — or
+    minted one when the caller sent none — would red here, and it is the same
+    fence ``test_correlation_id``'s CI-0 golden keeps for the office writes:
+    ``None`` in, ``None`` out, so every payload without a gesture behind it is
+    byte-identical to before this key existed.
+
+    KILLING MUTATION: default ``_correlation_id`` to a minted value → the ack
+    arm reds on the ``not in`` and the payload arm on the ``[None]``.
+    """
+
+    from agent_runtime.state_patches import CORRELATION_ID_KEY
+
+    placed = _place()
+
+    outcome = perform_agent_retire(
+        {"persona_instance_id": placed["persona_instance_id"]}
+    )
+
+    assert outcome.refusal is None, outcome.refusal
+    # ABSENT, never null: "absent" and "null" are different answers to "which
+    # gesture was this", and every script that parses this ack predates the key.
+    assert "correlation_id" not in outcome.result
+    removed = _payloads("office.actor.removed")
+    assert [payload.get(CORRELATION_ID_KEY) for payload in removed] == [None]
+
+
+def test_the_ack_echoes_the_token_on_the_call_that_worked_and_on_its_replay(
+    qa_persona, seeded_workspace
+):
+    """Idempotence and attribution have to hold TOGETHER, which is why this is
+    one test and not two.
+
+    Plan D11's whole point is that a client which lost its ack asks again; a
+    replay that dropped the echo would hand that client an ack it cannot join to
+    the gesture it made — the failure mode of losing the ack, reintroduced by
+    the recovery path for losing the ack.
+
+    KILLING MUTATION: route only the fresh return through ``_with_correlation``
+    → the replay arm reds while the fresh arm stays green.
+    """
+
+    placed = _place()
+    instance_id = placed["persona_instance_id"]
+
+    first = perform_agent_retire(
+        {"persona_instance_id": instance_id, "correlation_id": GESTURE}
+    )
+    assert first.refusal is None, first.refusal
+    assert first.result["already_retired"] is False
+    assert first.result["correlation_id"] == GESTURE
+
+    replay = perform_agent_retire(
+        {"persona_instance_id": instance_id, "correlation_id": GESTURE}
+    )
+    assert replay.refusal is None, replay.refusal
+    assert replay.result["already_retired"] is True
+    assert replay.result["correlation_id"] == GESTURE
+
+
+def test_an_illegal_token_is_dropped_rather_than_stamped(qa_persona, seeded_workspace):
+    """The normalisation is ``agent_create``'s, one spelling, and this is the
+    anti-vacuity for saying so: a prose sentence a mile long about "the same
+    fence" is worth nothing if the fence is a pass-through.
+
+    A newline-bearing id fails ``safe_assignment_text``'s own sanitation, and
+    whatever survives that, the payload-side ``normalize_correlation_id`` refuses
+    — so no illegal token reaches an event payload by ANY route into this verb.
+    """
+
+    from agent_runtime.state_patches import CORRELATION_ID_KEY
+
+    placed = _place()
+
+    outcome = perform_agent_retire(
+        {
+            "persona_instance_id": placed["persona_instance_id"],
+            "correlation_id": "the operator dragged qa off the level",
+        }
+    )
+
+    assert outcome.refusal is None, outcome.refusal
+    removed = _payloads("office.actor.removed")
+    assert [payload.get(CORRELATION_ID_KEY) for payload in removed] == [None]

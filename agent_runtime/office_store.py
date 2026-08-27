@@ -1221,7 +1221,13 @@ class OfficeStore:
             canonical_persona_instance_id(bound, persona_id=actor.persona_id) or bound
         ) == canonical
 
-    def archive_actors_for_instance(self, persona_instance_id: str, *, reason: str = "instance_reaped") -> dict:
+    def archive_actors_for_instance(
+        self,
+        persona_instance_id: str,
+        *,
+        reason: str = "instance_reaped",
+        correlation_id: str | None = None,
+    ) -> dict:
         """Hermes prune-lane hook: archive every active placement bound to a
         reaped persona instance so no phantom desk file re-materializes the
         agent (NEVER a launcher-side filter — the orphan-tombstone precedent).
@@ -1243,6 +1249,15 @@ class OfficeStore:
 
         The counts stay, and are the lists' lengths by construction; every
         existing caller keeps reading exactly the two keys it read before.
+
+        ``correlation_id`` is the RETIRE GESTURE's token, and it rides down to
+        each :meth:`remove_actor` so the ``office.actor.removed`` event and the
+        ``state.patched`` remove row this loop produces carry the same id the
+        operator's create half carried. It defaults to ``None``, which is what
+        keeps the janitor/prune callers — who have no gesture behind them —
+        byte-identical to before this parameter existed. A default of "mint one"
+        would be worse than nothing: it would join a prune to a gesture that
+        never happened.
         """
 
         target = str(persona_instance_id or "").strip()
@@ -1258,7 +1273,13 @@ class OfficeStore:
                 if not self._instance_bound_actor(actor, canonical):
                     continue
                 try:
-                    self.remove_actor(wsid, actor.actor_key, reason=reason, updated_by="harness")
+                    self.remove_actor(
+                        wsid,
+                        actor.actor_key,
+                        reason=reason,
+                        updated_by="harness",
+                        correlation_id=correlation_id,
+                    )
                 except Exception as exc:  # noqa: BLE001 — the loop survives one bad file
                     failures.append(
                         {

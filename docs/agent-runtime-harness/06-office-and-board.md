@@ -25,7 +25,7 @@ JSON-RPC methods on the serve child today (`agent_runtime/serve_rpc.py`,
 | folder taxonomy | `runtime.office.surface.update` | `_runtime_office_surface_update` (`serve_rpc.py:1515`) | `{workspace_id, folders, revision}` |
 | realm-sync resolve | `runtime.office.resolve_conflict` | `_runtime_office_resolve_conflict` (`serve_rpc.py:1693`) | `{actor_key, take, state, revision?}` |
 | place an AGENT (roster row + chat root + actor) | `runtime.agent.create` | `_runtime_agent_create` (`serve_rpc.py:1992`) | `{persona_instance_id, actor_key, revision, position, actor, phases, …}` |
-| retire an agent (row + every actor bound to it) | `runtime.agent.retire` | `_runtime_agent_retire` (`serve_rpc.py:2055`) | `{persona_instance_id, archive_path, archived_actor_keys, office_archive_failures, already_retired, …}` |
+| retire an agent (row + every actor bound to it) | `runtime.agent.retire` | `_runtime_agent_retire` (`serve_rpc.py`) | `{persona_instance_id, archive_path, archived_actor_keys, office_archive_failures, already_retired, correlation_id?, …}` |
 
 The last two are the only ones whose write crosses BOTH stores — the roster and
 the office — and they are each other's inverse. The four above them are office-only
@@ -294,6 +294,18 @@ An EMPTY failures list is the positive claim that every bound actor is off the
 level. The roster archive stays authoritative either way — a locked desk file
 must never make a placement un-retirable — so a failure is a report, never a
 refusal.
+
+**The gesture token rides this verb too (S8b).** `correlation_id` is optional,
+normalised exactly as `agent create`'s is (`safe_assignment_text(limit=200)`),
+and it is threaded `perform_agent_retire` → `PersonaInstanceStore.retire` →
+`_archive_office_placements` → `OfficeStore.archive_actors_for_instance` →
+`remove_actor`, so the `office.actor.removed` event AND the `state.patched`
+remove row carry it — then echoed on the ack (present only when sent, so a call
+without one is byte-identical to before the key existed). Until S8b this was the
+ONLY level-mutating verb with no token, which meant one operator gesture's
+create half and delete half lived in two correlation spaces that no single grep
+joined. `harness agent retire --correlation-id <token>` is the argv door;
+`harness persona instance retire` deliberately does not publish the flag.
 
 **Refusals are `PersonaInstanceRetireError`'s codes one-to-one**: `not_found` →
 `ERR_NOT_FOUND` (4001); `canonical_persona_channel` / `instance_active` /

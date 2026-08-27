@@ -1387,6 +1387,12 @@ def build_parser(parent_subparsers) -> None:
     agent_retire.add_argument("persona_instance_id", help="Persona-instance id of the placement to retire")
     agent_retire.add_argument("--reason", default="placement removed")
     agent_retire.add_argument("--requested-by", dest="requested_by", default="cli")
+    # S8b: the flag `agent create` has carried since D-V2, on the verb that
+    # undoes it. A script that placed an agent under one gesture token can now
+    # delete it under that token, and ONE grep over the event log joins both
+    # halves — which is the whole point of the token and was true of every
+    # level-mutating verb except this one.
+    agent_retire.add_argument("--correlation-id", dest="correlation_id", default=None)
     agent_retire.add_argument("--json", action="store_true")
     agent_retire.set_defaults(func=_cmd_agent_retire)
 

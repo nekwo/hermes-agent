@@ -395,7 +395,7 @@
       "path": "agent_runtime/persona_assignments.py",
       "symbol": "PersonaInstanceStore.retire",
       "operator": "drop-the-office-half",
-      "find": "        office = self._archive_office_placements(instance)",
+      "find": "        office = self._archive_office_placements(\n            instance, correlation_id=correlation_id\n        )",
       "replace": "        office = {\"archived\": 0, \"failed\": 0, \"archived_actor_keys\": [], \"failures\": []}",
       "test": [
         "{python}",
@@ -538,6 +538,66 @@
         "pytest",
         "-q",
         "tests/scripts/test_changed_line_mutation_check.py::test_a_resolving_claim_the_diff_never_touched_is_listed_as_unselected"
+      ]
+    },
+    {
+      "id": "s8b-retire-office-removal-loses-the-gesture-token",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "OfficeStore.archive_actors_for_instance",
+      "operator": "drop-correlation-thread",
+      "find": "                    self.remove_actor(\n                        wsid,\n                        actor.actor_key,\n                        reason=reason,\n                        updated_by=\"harness\",\n                        correlation_id=correlation_id,\n                    )",
+      "replace": "                    self.remove_actor(\n                        wsid,\n                        actor.actor_key,\n                        reason=reason,\n                        updated_by=\"harness\",\n                    )",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_the_gesture_token_rides_the_office_removal_event_and_its_patch_row"
+      ]
+    },
+    {
+      "id": "s8b-retire-store-drops-the-token-before-the-office-half",
+      "path": "agent_runtime/persona_assignments.py",
+      "symbol": "PersonaInstanceStore.retire",
+      "operator": "drop-correlation-thread",
+      "find": "        office = self._archive_office_placements(\n            instance, correlation_id=correlation_id\n        )",
+      "replace": "        office = self._archive_office_placements(instance)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_the_gesture_token_rides_the_office_removal_event_and_its_patch_row"
+      ]
+    },
+    {
+      "id": "s8b-retire-ack-mints-a-token-nobody-sent",
+      "path": "agent_runtime/agent_retire.py",
+      "symbol": "_with_correlation",
+      "operator": "stamp-unconditionally",
+      "find": "    if not correlation_id:\n        return result\n    return {**result, \"correlation_id\": correlation_id}",
+      "replace": "    return {**result, \"correlation_id\": correlation_id}",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_a_retire_with_no_token_leaves_the_wire_exactly_as_it_was"
+      ]
+    },
+    {
+      "id": "s8b-retire-cli-flag-parses-and-goes-nowhere",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_agent_retire_outcome",
+      "operator": "drop-param-from-service-call",
+      "find": "            \"correlation_id\": getattr(args, \"correlation_id\", None),\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_agent_retire_verb.py::test_the_correlation_flag_reaches_the_office_removal_and_the_ack"
       ]
     }
   ]

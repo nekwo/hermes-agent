@@ -2081,15 +2081,21 @@ def _runtime_agent_retire(
 ) -> dict:
     """ONE call retires an agent: the roster row AND every actor bound to it.
 
-    Params: ``persona_instance_id`` (required); ``reason``, ``requested_by``
-    (optional).
+    Params: ``persona_instance_id`` (required); ``reason``, ``requested_by``,
+    ``correlation_id`` (optional).
 
     Result::
 
         {persona_instance_id, persona_id, display_name, mode, reason,
          requested_by, archive_path, archive_dir, archived_actor_keys: [...],
          office_archive_failures: [{actor_key, workspace_id, error}],
-         already_retired}
+         already_retired, correlation_id?}
+
+    ``correlation_id`` (S8b) rides onto the ``office.actor.removed`` event and
+    the ``state.patched`` remove row this call produces, and is echoed on the
+    ack when sent. Until it existed this was the ONLY level-mutating verb with
+    no gesture token, so a launcher's create half and delete half could not be
+    joined by one grep — see ``agent_retire.perform_agent_retire``.
 
     The INVERSE of ``runtime.agent.create``, and the join its absence left
     unmade: the launcher removed a deliberate placement through two unjoined

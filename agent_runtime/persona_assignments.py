@@ -1481,7 +1481,9 @@ class PersonaInstanceStore:
                 return candidate
         return None
 
-    def _archive_office_placements(self, instance: PersonaInstance) -> dict[str, Any]:
+    def _archive_office_placements(
+        self, instance: PersonaInstance, *, correlation_id: str | None = None
+    ) -> dict[str, Any]:
         """Archive office actors when a live placement is retired, and SAY what happened.
 
         The office half stays best-effort — placement retirement is
@@ -1501,6 +1503,11 @@ class PersonaInstanceStore:
         reported with ``actor_key: None``: naming an actor there would be a
         guess, and the whole point of this return value is that it stops
         guessing.
+
+        ``correlation_id`` is the retiring GESTURE's token and it travels no
+        further than the office writes: the row archive above already carries
+        its own ``persona_instance.retired`` event, and the office half is the
+        part that was landing in a second, unjoinable correlation space.
         """
 
         try:
@@ -1509,6 +1516,7 @@ class PersonaInstanceStore:
             return OfficeStore(event_log=self.event_log).archive_actors_for_instance(
                 instance.id,
                 reason="instance_reaped",
+                correlation_id=correlation_id,
             )
         except Exception as exc:  # noqa: BLE001 - the retire is authoritative regardless
             logging.getLogger(__name__).warning(
@@ -1533,6 +1541,7 @@ class PersonaInstanceStore:
         *,
         reason: str = "placement removed",
         requested_by: str | None = None,
+        correlation_id: str | None = None,
     ) -> dict[str, Any]:
         """Instance end-of-life: archive a placement-backed (or otherwise
         deliberate) persona-instance ROW and emit an EventLog event.
@@ -1655,7 +1664,16 @@ class PersonaInstanceStore:
         # Prune-lane hook (mirrors close_for_task / the janitor): a retired
         # instance must not leave a phantom office desk. Best-effort; office
         # archival never fails the retire.
-        office = self._archive_office_placements(instance)
+        #
+        # The gesture's token rides INTO the office half (S8b). Before it, a
+        # removal gesture's two verbs lived in two correlation spaces: the
+        # create/office writes stamped `correlation_id` on their patches and
+        # the retire's office removes stamped nothing, so one grep over the two
+        # logs could not join the halves of a single operator action — the
+        # exact defect EG-2.3 built the token to retire.
+        office = self._archive_office_placements(
+            instance, correlation_id=correlation_id
+        )
         return {
             "persona_instance_id": instance.id,
             "persona_id": instance.persona_id,

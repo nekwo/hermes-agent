@@ -112,6 +112,52 @@ def _canonical_instance_id(raw: Any) -> str | None:
     return canonical_persona_instance_id(token) or token
 
 
+def _correlation_id(raw: Any) -> str | None:
+    """The gesture token off the params map, normalised EXACTLY as
+    ``agent_create._request_from_params`` normalises its own.
+
+    One spelling on purpose: the create half and the retire half of a single
+    operator gesture must accept or reject the identical token, or a launcher
+    that mints one id for both would find it on one patch and not the other —
+    which is the two-correlation-spaces defect in a subtler dress.
+
+    ``safe_assignment_text`` is the LOOSER of the two fences this token passes.
+    The payload-side ``normalize_correlation_id`` in ``state_patches`` is the
+    strict one and drops anything this lets through, so an illegal id reaches no
+    event payload however it got here — this cap only decides what the ACK
+    echoes.
+    """
+
+    from .persona_assignments import safe_assignment_text
+
+    if raw is None:
+        return None
+    return safe_assignment_text(raw, limit=200) or None
+
+
+def _with_correlation(
+    result: dict[str, Any], correlation_id: str | None
+) -> dict[str, Any]:
+    """Echo the gesture token onto an ack — ONLY when the caller sent one.
+
+    ``agent_create``'s rule verbatim (``if request.correlation_id: result[...]``)
+    and for its reason: a key stamped unconditionally would put ``None`` on
+    every ack a script has ever parsed, and "absent" and "null" are not the same
+    answer to "which gesture was this".
+
+    Both arms go through here — the fresh ack and the REPLAY. The replay's
+    ``reason``/``requested_by`` are already this call's rather than the first
+    call's, on the stated grounds that echoing a payload nothing persisted would
+    be inventing it; the token is the same kind of field and gets the same
+    treatment, so a client that lost its ack and asked again joins the reply to
+    the gesture it actually made.
+    """
+
+    if not correlation_id:
+        return result
+    return {**result, "correlation_id": correlation_id}
+
+
 def _already_retired_ack(
     instance_id: str,
     tombstone,
@@ -175,14 +221,26 @@ def perform_agent_retire(params: dict[str, Any]) -> AgentRetireOutcome:
 
     Params: ``persona_instance_id`` (required); ``reason`` and ``requested_by``
     (optional, normalised by the store exactly as ``persona instance retire``
-    normalises them).
+    normalises them); ``correlation_id`` (optional, threaded and echoed).
 
     Result::
 
         {persona_instance_id, persona_id, display_name, mode, reason,
          requested_by, archive_path, archive_dir,
          archived_actor_keys: [...], office_archive_failures: [{actor_key,
-         workspace_id, error}], already_retired}
+         workspace_id, error}], already_retired, correlation_id?}
+
+    ``correlation_id`` is the LEVEL-MUTATION join, and it was this verb's alone
+    to be missing (S8b). ``runtime.agent.create``, ``runtime.office.*`` and
+    ``runtime.persona.prewarm`` all thread the gesture token onto the patches
+    they emit; a retire emitted ``office.actor.removed`` with no token, so one
+    operator gesture's create half and delete half lived in two correlation
+    spaces and no single grep joined them. It rides through
+    ``PersonaInstanceStore.retire`` → ``_archive_office_placements`` →
+    ``OfficeStore.archive_actors_for_instance`` → ``remove_actor`` → the
+    ``office.actor.removed`` event AND the ``state.patched`` remove row, and it
+    is echoed here — present on the ack ONLY when the caller sent one, so a call
+    without it is byte-identical to before the key existed.
 
     ``already_retired`` is ``False`` for the call that did the work and ``True``
     for every replay of it. ``office_archive_failures`` entries carry
@@ -210,10 +268,16 @@ def perform_agent_retire(params: dict[str, Any]) -> AgentRetireOutcome:
 
     reason = (params or {}).get("reason") or "placement removed"
     requested_by = (params or {}).get("requested_by")
+    correlation_id = _correlation_id((params or {}).get("correlation_id"))
 
     store = PersonaInstanceStore()
     try:
-        result = store.retire(instance_id, reason=reason, requested_by=requested_by)
+        result = store.retire(
+            instance_id,
+            reason=reason,
+            requested_by=requested_by,
+            correlation_id=correlation_id,
+        )
     except PersonaInstanceRetireError as exc:
         if exc.code == "not_found":
             # Asked AFTER the attempt, never before it, so the answer covers the
@@ -223,11 +287,14 @@ def perform_agent_retire(params: dict[str, Any]) -> AgentRetireOutcome:
             tombstone = store.retired_instance_archive_path(instance_id)
             if tombstone is not None:
                 return AgentRetireOutcome(
-                    result=_already_retired_ack(
-                        instance_id,
-                        tombstone,
-                        reason=reason,
-                        requested_by=requested_by,
+                    result=_with_correlation(
+                        _already_retired_ack(
+                            instance_id,
+                            tombstone,
+                            reason=reason,
+                            requested_by=requested_by,
+                        ),
+                        correlation_id,
                     )
                 )
             return _refused(
@@ -249,4 +316,6 @@ def perform_agent_retire(params: dict[str, Any]) -> AgentRetireOutcome:
             },
         )
 
-    return AgentRetireOutcome(result={**result, "already_retired": False})
+    return AgentRetireOutcome(
+        result=_with_correlation({**result, "already_retired": False}, correlation_id)
+    )

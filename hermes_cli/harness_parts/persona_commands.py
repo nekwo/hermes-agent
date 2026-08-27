@@ -584,6 +584,13 @@ def _agent_retire_outcome(args):
     change and the ack is IDENTICAL down to the key order. The two handlers
     below differ only in their envelope, which is the operator surface each has
     always had, and in the coordinator gate, which is `persona instance`'s.
+
+    ``correlation_id`` is read through ``getattr`` with the same ``None``
+    default as its siblings, which is what lets `persona instance retire` — a
+    parser that does NOT carry the flag — keep calling this unchanged: an absent
+    dest reads as "no gesture behind this call", which is the truth for it. Only
+    `agent retire` publishes `--correlation-id` (S8b), because only it is the
+    scripted inverse of `agent create --correlation-id`.
     """
 
     from agent_runtime.agent_retire import perform_agent_retire
@@ -593,6 +600,7 @@ def _agent_retire_outcome(args):
             "persona_instance_id": getattr(args, "persona_instance_id", None),
             "reason": getattr(args, "reason", None),
             "requested_by": getattr(args, "requested_by", None),
+            "correlation_id": getattr(args, "correlation_id", None),
         }
     )
 

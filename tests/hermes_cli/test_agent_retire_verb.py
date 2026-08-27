@@ -262,3 +262,70 @@ def test_the_human_readable_line_names_what_left_the_canvas(
     assert code == 0
     assert placed["persona_instance_id"] in out
     assert placed["actor_key"] in out
+
+
+# ── the gesture token reaches the store from argv (S8b) ─────────────────────
+
+
+def test_the_correlation_flag_reaches_the_office_removal_and_the_ack(
+    qa_persona, seeded_workspace, capsys
+):
+    """`agent create --correlation-id` has always existed; its inverse did not,
+    so a script could place an agent under a gesture token and had no way to
+    delete it under the same one.
+
+    KILLING MUTATION (run, observed, reverted): drop
+    ``"correlation_id": getattr(args, "correlation_id", None)`` from
+    ``_agent_retire_outcome``'s params dict. Observed red::
+
+        E       KeyError: 'correlation_id'
+
+    on the ack arm — the flag parses, the handler runs, and the token goes
+    nowhere, which is what "argparse accepts it" alone would have proved.
+
+    The EVENT is asserted as well as the ack, because the ack is this process's
+    own return value: a handler that echoed the flag it was handed would satisfy
+    the ack arm with nothing on the wire an operator can grep.
+    """
+
+    from agent_runtime.state_patches import CORRELATION_ID_KEY
+
+    token = "g-office-1755400000999999-c3d4"
+    placed = _place(capsys, placement_id="qa_verb_retire_corr")
+
+    code, data = _retire(
+        capsys, placed["persona_instance_id"], "--correlation-id", token
+    )
+
+    assert code == 0
+    assert data["correlation_id"] == token
+
+    from agent_runtime.events import EventLog
+
+    removed = [
+        event.payload
+        for _, event in EventLog().iter_from_offset(0)
+        if event.type == "office.actor.removed"
+    ]
+    assert [payload.get(CORRELATION_ID_KEY) for payload in removed] == [token]
+    assert [payload.get("actor_key") for payload in removed] == [placed["actor_key"]]
+
+
+def test_a_retire_typed_without_the_flag_carries_no_token(
+    qa_persona, seeded_workspace, capsys
+):
+    """The additive half, at the operator surface: the flag defaults to ``None``
+    and an operator who does not type it gets the ack they always got.
+
+    Also the fence for the OTHER door — ``harness persona instance retire`` has
+    no ``--correlation-id`` and reaches the same ``_agent_retire_outcome``
+    through ``getattr(..., None)``; if that default were anything else, this arm
+    would be the first thing to say so.
+    """
+
+    placed = _place(capsys, placement_id="qa_verb_retire_no_corr")
+
+    code, data = _retire(capsys, placed["persona_instance_id"])
+
+    assert code == 0
+    assert "correlation_id" not in data
