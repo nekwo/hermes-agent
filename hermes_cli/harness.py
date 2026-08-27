@@ -29,7 +29,7 @@ from agent_runtime.dispatch_session_policy import (
 )
 from agent_runtime.coordinator_permissions import (
     CoordinatorPermissionScope,
-    authorize_coordinator_action,
+    review_coordinator_budget,
     scope_for_persona,
 )
 from agent_runtime.default_scope import (

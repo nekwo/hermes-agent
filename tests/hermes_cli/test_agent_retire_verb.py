@@ -223,6 +223,89 @@ def test_persona_instance_retire_produces_the_identical_ack(
     assert ack["persona_id"] == agent_door["persona_id"] == "qa"
 
 
+# ── the CLI's authorization identity (chokepoint plan A4) ────────────────────
+
+
+def test_both_retire_doors_carry_the_SAME_console_identity(
+    qa_persona, seeded_workspace, capsys, monkeypatch
+):
+    """A4-iii. The asymmetry canon 06 recorded — one door consults a gate and
+    the other does not, on the same service function — disappears here.
+
+    Not by giving `agent retire` the coordinator review (that answers a different
+    question) but because both doors reach ``_agent_retire_outcome``, and the
+    console identity is minted THERE. Asserted by refusing it and watching both
+    doors refuse identically: a mirror on only one door would let exactly one of
+    these through.
+    """
+
+    # Patched on ``hermes_cli.harness``, not on ``persona_commands``: this file
+    # is exec'd into harness.py's globals, so the name the running handler
+    # resolves is harness's. A patch on the source module would go green while
+    # the shipped path ran unpatched — the vacuous-test shape this repo has been
+    # bitten by before.
+    from hermes_cli import harness
+
+    first = _place(capsys, placement_id="qa_verb_retire_auth_1")
+    second = _place(capsys, placement_id="qa_verb_retire_auth_2")
+
+    monkeypatch.setattr(
+        harness,
+        "_console_denial",
+        lambda action: {
+            "code": -32000,
+            "message": f"{action} requires the console tier",
+            "data": {"reason": "scope_denied", "tier": "console", "caller": "unknown"},
+        },
+    )
+
+    agent_code, agent_door = _retire(capsys, first["persona_instance_id"])
+
+    instance_code = _dispatch(
+        [
+            "harness", "persona", "instance", "retire",
+            second["persona_instance_id"],
+            "--json",
+        ]
+    )
+    instance_door = json.loads(capsys.readouterr().out)
+
+    assert agent_code != 0 and instance_code != 0
+    assert agent_door["ok"] is False and instance_door["ok"] is False
+    assert agent_door["reason"] == "scope_denied"
+    assert instance_door["code"] == "scope_denied"
+    # ANTI-VACUITY: the refusal landed BEFORE the service, so both rows survive.
+    assert first["actor_key"] in _live_actor_keys()
+    assert second["actor_key"] in _live_actor_keys()
+
+
+def test_a_plain_operator_retire_is_unchanged_by_the_mirror(
+    qa_persona, seeded_workspace, capsys
+):
+    """The A3/A4 promise, on the verb: landing the gate must not change what an
+    operator at their own shell observes.
+
+    The console identity is a CONSTANT and reads nothing off the invocation, so
+    a retire typed with the default ``--requested-by`` and one typed with any
+    other spelling answer identically — which is also the proof that
+    authorization no longer depends on the argv field the old coordinator gate
+    keyed on.
+    """
+
+    plain = _place(capsys, placement_id="qa_verb_retire_plain")
+    spelled = _place(capsys, placement_id="qa_verb_retire_spelled")
+
+    plain_code, plain_ack = _retire(capsys, plain["persona_instance_id"])
+    spelled_code, spelled_ack = _retire(
+        capsys, spelled["persona_instance_id"], "--requested-by", "launcher"
+    )
+
+    assert plain_code == spelled_code == 0
+    assert plain_ack["ok"] is spelled_ack["ok"] is True
+    assert set(plain_ack) == set(spelled_ack)
+    assert plain_ack["already_retired"] is spelled_ack["already_retired"] is False
+
+
 def test_the_instance_door_refuses_with_the_services_typed_reason(
     qa_persona, seeded_workspace, capsys
 ):

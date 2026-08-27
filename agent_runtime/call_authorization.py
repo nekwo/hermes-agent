@@ -67,6 +67,7 @@ __all__ = [
     "LOCAL_CONSOLE",
     "STDIO_OWNER",
     "UNKNOWN_CALLER",
+    "CLI_CONSOLE",
     "caller_for_connection",
     "REASON_SCOPE_DENIED",
     "REASON_UNKNOWN_TIER",
@@ -149,6 +150,17 @@ class RpcCaller:
 LOCAL_CONSOLE = RpcCaller(kind=CALLER_LOCAL_CONSOLE, transport="socket")
 STDIO_OWNER = RpcCaller(kind=CALLER_STDIO_OWNER, transport="stdio")
 UNKNOWN_CALLER = RpcCaller(kind=CALLER_UNKNOWN, transport="unknown")
+
+#: The operator at the install's own shell (Stage A4's mirror). ``transport``
+#: says ``cli`` because there is no wire: the argv reached this process from a
+#: terminal the machine owner already controls, or from ``serve.py``'s argv lane
+#: on a socket that already passed the HMAC. Either way the caller IS the
+#: console, and this value is the greppable spelling of that grandfather clause.
+#:
+#: It is a CONSTANT and takes no arguments on purpose. Deriving the CLI's
+#: identity from anything the invocation carries — ``--requested-by``, an env
+#: var, a config key — would rebuild the self-declaration hole one door over.
+CLI_CONSOLE = RpcCaller(kind=CALLER_LOCAL_CONSOLE, transport="cli")
 
 
 def caller_for_connection(connection: Any) -> RpcCaller:

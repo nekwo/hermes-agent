@@ -30,7 +30,7 @@ from agent_runtime.config import (
 from agent_runtime.continuity import return_summary_to_parent_session
 from agent_runtime.coordinator_permissions import (
     CoordinatorPermissionScope,
-    authorize_coordinator_action,
+    review_coordinator_budget,
     scope_for_persona,
 )
 from agent_runtime.dispatch_session_policy import (
@@ -532,12 +532,24 @@ def _cmd_agent_create(args) -> int:
     # `persona_roster_unavailable`. Same fault, same reason, both lanes; the
     # refusal falls through to the ONE rendering arm below, so it also inherits
     # the same exit code and the same root-observability envelope.
-    try:
-        persona = _cli_create_persona(persona_id)
-    except PersonaRosterUnavailable as exc:
-        outcome = roster_unavailable_outcome(exc)
+    # The CLI half of the front-door gate (chokepoint plan A4-ii), the mirror of
+    # what `serve_rpc.handle_request` runs for `runtime.agent.create`. Asked
+    # BEFORE the roster read for the same reason the coordinator review is asked
+    # before it one handler over: a caller who may not place an agent should be
+    # told that, not handed a probe of which persona ids exist. Today it always
+    # allows — see `_console_denial`.
+    denial = _console_denial("runtime.agent.create")
+    if denial is not None:
+        from agent_runtime.agent_create import AgentCreateOutcome, AgentCreateRefusal
+
+        outcome = AgentCreateOutcome(refusal=AgentCreateRefusal(**denial))
     else:
-        outcome = perform_agent_create(params, persona=persona)
+        try:
+            persona = _cli_create_persona(persona_id)
+        except PersonaRosterUnavailable as exc:
+            outcome = roster_unavailable_outcome(exc)
+        else:
+            outcome = perform_agent_create(params, persona=persona)
 
     if outcome.refusal is not None:
         refusal = outcome.refusal
@@ -575,6 +587,55 @@ def _cmd_agent_create(args) -> int:
 _AGENT_RETIRE_EXIT_CODES = {-32602: 2, 4001: 3, 4090: 4}
 
 
+def _console_denial(action: str) -> dict | None:
+    """The CLI's half of the front-door gate. ``None`` when the call may run.
+
+    The MIRROR of ``serve_rpc.handle_request``'s check (chokepoint plan, Ruling
+    A option (b)), evaluated by the same predicate against the same tier
+    vocabulary, so the two doors onto ``perform_agent_create`` /
+    ``perform_agent_retire`` cannot answer differently.
+
+    The identity is a CONSTANT — ``CLI_CONSOLE`` — and takes nothing off the
+    invocation. That is the whole point: an argv-derived identity is what
+    ``coordinator_permissions`` already is, and rebuilding it here would put a
+    self-declaration at the one door the machine owner types into. The operator
+    at their own shell IS the console; there is nothing to prove and nothing to
+    read.
+
+    So today this returns ``None`` unconditionally, and that is honest rather
+    than vestigial: it is the grandfather clause §2 of the plan names, spelled as
+    a call so it is greppable, so both retire doors provably share it, and so the
+    day a non-console CLI identity exists (a sudo-less service account, a
+    delegated shell) the refusal is a predicate edit and not a new concept.
+
+    The refusal it WOULD render is shaped as the two service functions' own
+    refusal kwargs, so both CLI envelopes print it through the arm they already
+    have for a refused create/retire.
+    """
+
+    from agent_runtime.call_authorization import (
+        CLI_CONSOLE,
+        TIER_CONSOLE,
+        authorize_call,
+    )
+    from agent_runtime.serve_rpc import ERR_HANDLER_FAILED
+
+    decision = authorize_call(TIER_CONSOLE, CLI_CONSOLE)
+    if decision.ok:
+        return None
+    return {
+        "code": ERR_HANDLER_FAILED,
+        "message": f"{action} requires the {decision.tier} tier",
+        "data": {
+            **decision.refusal_data(),
+            "next_expected": (
+                "run this verb from an operator console on the install that owns "
+                "this runtime root"
+            ),
+        },
+    }
+
+
 def _agent_retire_outcome(args):
     """The ONE retire the CLI performs, whichever verb the operator typed.
 
@@ -589,6 +650,26 @@ def _agent_retire_outcome(args):
     default as its siblings, so an operator who does not type the flag on either
     door reaches the store with no token and gets the ack they always got.
 
+    **The authorization identity is the same on both doors, because it is minted
+    here** (chokepoint plan A4-ii/iii). Canon 06 recorded the asymmetry as "one
+    retire consults the coordinator gate and the other does not, on the same
+    service function" — and the survey found it was worse than an asymmetry: the
+    consulted gate never ran either, because it only recognises
+    ``--requested-by coordinator`` and the two spellings anyone actually sends
+    are ``cli`` (the CLI's own default) and ``launcher``.
+
+    The asymmetry disappears not by giving `agent retire` the coordinator gate —
+    that gate answers a different question, see
+    ``agent_runtime.coordinator_permissions`` — but because BOTH doors now carry
+    ``CLI_CONSOLE``, evaluated by the same predicate the RPC front door uses. It
+    is minted in this function rather than in the two handlers precisely so the
+    two cannot drift apart a second time: there is one retire, so there is one
+    identity.
+
+    Today it always allows — the operator at the machine's own shell IS the
+    console — and that is the grandfather clause, made greppable instead of
+    implicit in an absent check.
+
     BOTH doors publish ``--correlation-id``. S8b gave it to `agent retire` alone,
     on the reasoning that only it is the scripted inverse of `agent create
     --correlation-id` and that "no gesture behind it" was the truth for `persona
@@ -602,7 +683,12 @@ def _agent_retire_outcome(args):
     grep over the event log is the only join an operator has (S8b-b).
     """
 
+    from agent_runtime.agent_retire import AgentRetireOutcome, AgentRetireRefusal
     from agent_runtime.agent_retire import perform_agent_retire
+
+    denial = _console_denial("runtime.agent.retire")
+    if denial is not None:
+        return AgentRetireOutcome(refusal=AgentRetireRefusal(**denial))
 
     return perform_agent_retire(
         {
@@ -685,7 +771,7 @@ def _cmd_persona_instance_create(args) -> int:
     coordinator_scope = None
     if coordinator_id and (display_name or add_instance):
         coordinator_scope = _coordinator_scope_from_args(args, cfg, persona)
-        auth = authorize_coordinator_action(
+        auth = review_coordinator_budget(
             "persona.instance.create",
             coordinator_scope,
             actor=coordinator_id,
@@ -834,7 +920,7 @@ def _cmd_persona_instance_open_chat(args) -> int:
     coordinator_scope = None
     if coordinator_id and bool(getattr(args, "add_instance", False)):
         coordinator_scope = _coordinator_scope_from_args(args, cfg, persona)
-        auth = authorize_coordinator_action(
+        auth = review_coordinator_budget(
             "persona.instance.open_chat",
             coordinator_scope,
             actor=coordinator_id,
@@ -851,7 +937,7 @@ def _cmd_persona_instance_open_chat(args) -> int:
             target = PersonaInstanceStore().get(persona_instance_id_for(persona_id))
         except Exception:
             target = None
-        auth = authorize_coordinator_action(
+        auth = review_coordinator_budget(
             "persona.instance.close",
             coordinator_scope,
             target,
@@ -4824,7 +4910,7 @@ def _cmd_persona_instance_close(args) -> int:
             target = None
             persona = None
         scope = _coordinator_scope_from_args(args, cfg, persona)
-        auth = authorize_coordinator_action(
+        auth = review_coordinator_budget(
             "persona.instance.close",
             scope,
             target,
@@ -4861,7 +4947,7 @@ def _cmd_persona_instance_retire(args) -> int:
             target = None
             persona = None
         scope = _coordinator_scope_from_args(args, cfg, persona)
-        auth = authorize_coordinator_action(
+        auth = review_coordinator_budget(
             "persona.instance.retire",
             scope,
             target,
@@ -5010,7 +5096,7 @@ def _cmd_persona_instance_steer(args) -> int:
     if coordinator_id:
         persona = _persona_by_id(cfg, target.persona_id)
         scope = _coordinator_scope_from_args(args, cfg, persona)
-        auth = authorize_coordinator_action("re_route", scope, target, actor=coordinator_id, coordinator_id=coordinator_id)
+        auth = review_coordinator_budget("re_route", scope, target, actor=coordinator_id, coordinator_id=coordinator_id)
         if not auth.ok:
             data = _coordinator_confirm_payload("re_route", coordinator_id, auth)
             print(emit_json(data) if args.json else data["status"])
@@ -5085,7 +5171,7 @@ def _cmd_persona_instance_update_profile(args) -> int:
     if coordinator_id:
         persona = _persona_by_id(cfg, target.persona_id)
         scope = _coordinator_scope_from_args(args, cfg, persona)
-        auth = authorize_coordinator_action("persona.instance.update_profile", scope, target, actor=coordinator_id, coordinator_id=coordinator_id)
+        auth = review_coordinator_budget("persona.instance.update_profile", scope, target, actor=coordinator_id, coordinator_id=coordinator_id)
         if not auth.ok:
             data = _coordinator_confirm_payload("persona.instance.update_profile", coordinator_id, auth)
             print(emit_json(data) if args.json else data["status"])
@@ -5255,7 +5341,7 @@ def _cmd_persona_instance_set_model(args) -> int:
     if coordinator_id:
         persona = _persona_by_id(cfg, target.persona_id)
         scope = _coordinator_scope_from_args(args, cfg, persona)
-        auth = authorize_coordinator_action("persona.instance.set_model", scope, target, actor=coordinator_id, coordinator_id=coordinator_id)
+        auth = review_coordinator_budget("persona.instance.set_model", scope, target, actor=coordinator_id, coordinator_id=coordinator_id)
         if not auth.ok:
             data = _coordinator_confirm_payload("persona.instance.set_model", coordinator_id, auth)
             print(emit_json(data) if args.json else data["status"])

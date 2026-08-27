@@ -931,3 +931,67 @@ def test_an_unresolvable_skill_is_one_typed_refusal_and_the_agent_stays(
         for actor in _actors().values()
     )
 
+
+
+# ── the CLI's authorization identity (chokepoint plan A4) ────────────────────
+
+
+def test_a_refused_console_identity_stops_the_create_before_any_write(
+    qa_persona, seeded_workspace, capsys, monkeypatch
+):
+    """A4-ii, on the create door.
+
+    The mirror is asked BEFORE the roster read, for the same reason the
+    coordinator review is asked before it one handler over: a caller who may not
+    place an agent should be told that, not handed a probe of which persona ids
+    exist. ANTI-VACUITY is the store — a refusal that still wrote a row would
+    leave one here.
+
+    Patched on ``hermes_cli.harness`` rather than on ``persona_commands``: that
+    file is exec'd into harness.py's globals, so the name the running handler
+    resolves is harness's, and a patch on the source module would go green while
+    the shipped path ran unpatched.
+    """
+
+    from hermes_cli import harness
+
+    monkeypatch.setattr(
+        harness,
+        "_console_denial",
+        lambda action: {
+            "code": -32000,
+            "message": f"{action} requires the console tier",
+            "data": {"reason": "scope_denied", "tier": "console", "caller": "unknown"},
+        },
+    )
+
+    code, data = _create(capsys, "--idempotency-key", "verb-create-denied")
+
+    assert code != 0
+    assert data["ok"] is False
+    assert data["reason"] == "scope_denied"
+    assert data["tier"] == "console"
+    assert _actors() == {}
+
+
+def test_a_plain_operator_create_is_unchanged_by_the_mirror(
+    qa_persona, seeded_workspace, capsys
+):
+    """The A3/A4 promise on the create: an operator at their own shell observes
+    exactly what they observed before the gate landed.
+
+    The identity is a CONSTANT and reads nothing off the invocation — asserted
+    directly on the real helper, because "it happened to allow this run" is a
+    weaker claim than "there is no input by which it could have refused".
+    """
+
+    from hermes_cli import harness
+
+    assert harness._console_denial("runtime.agent.create") is None
+
+    code, ack = _create(capsys, "--idempotency-key", "verb-create-plain")
+
+    assert code == 0
+    assert ack["ok"] is True
+    # The refusal vocabulary never appears on an allowed ack.
+    assert "scope_denied" not in json.dumps(ack)
