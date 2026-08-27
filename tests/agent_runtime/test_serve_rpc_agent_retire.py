@@ -66,7 +66,7 @@ def seeded_workspace():
     return store
 
 
-def _place(placement_id: str = "qa_rpc_retire_1") -> dict:
+def _place(placement_id: str = "qa_rpc_retire_1_agent_2") -> dict:
     """Place through the REAL create method, over the same lane."""
 
     reply = serve_rpc.handle_request(
@@ -210,7 +210,7 @@ def test_the_placement_is_gone_from_both_stores_after_one_call(
     from agent_runtime import paths
     from agent_runtime.office_store import OfficeStore
 
-    placed = _place(placement_id="qa_rpc_retire_2")
+    placed = _place(placement_id="qa_rpc_retire_2_agent_2")
     reply = _call({"persona_instance_id": placed["persona_instance_id"]})
 
     assert "error" not in reply, reply
@@ -230,7 +230,7 @@ def test_second_retire_is_already_retired(qa_persona, seeded_workspace):
     get an ANSWER rather than an error about a state its own first call caused.
     """
 
-    placed = _place(placement_id="qa_rpc_retire_3")
+    placed = _place(placement_id="qa_rpc_retire_3_agent_2")
     first = _call({"persona_instance_id": placed["persona_instance_id"]})["result"]
 
     second = _call({"persona_instance_id": placed["persona_instance_id"]}, rid="r2")

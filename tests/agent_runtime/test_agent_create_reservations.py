@@ -93,7 +93,7 @@ def test_legacy_done_receipt(qa_persona, seeded_workspace, monkeypatch):
             "workspace_id": WORKSPACE,
             "position": [1.0, 2.0],
             "idempotency_key": "legacy-done",
-            "placement_id": "qa_legacy",
+            "placement_id": "qa_legacy_agent_2",
         }
     )
     assert first.refusal is None
@@ -119,7 +119,7 @@ def test_legacy_done_receipt(qa_persona, seeded_workspace, monkeypatch):
             "workspace_id": WORKSPACE,
             "position": [1.0, 2.0],
             "idempotency_key": "legacy-done",
-            "placement_id": "qa_legacy",
+            "placement_id": "qa_legacy_agent_2",
             # Asking for a skill on the replay is the sharpest form of the
             # question: a resume that read the request rather than the receipt's
             # state would install here.
@@ -156,7 +156,7 @@ def test_a_skill_less_create_writes_a_receipt_that_is_shaped_like_a_legacy_one(
             "workspace_id": WORKSPACE,
             "position": [0.0, 0.0],
             "idempotency_key": "no-skills",
-            "placement_id": "qa_noskills",
+            "placement_id": "qa_noskills_agent_2",
         }
     )
 
@@ -181,7 +181,7 @@ def test_an_explicitly_empty_request_is_recorded_as_empty_not_absent(
             "workspace_id": WORKSPACE,
             "position": [0.0, 0.0],
             "idempotency_key": "empty-skills",
-            "placement_id": "qa_emptyskills",
+            "placement_id": "qa_emptyskills_agent_2",
             "skills": [],
         }
     )
@@ -208,7 +208,7 @@ def test_a_placed_receipt_records_the_requested_list(qa_persona, seeded_workspac
             "workspace_id": WORKSPACE,
             "position": [0.0, 0.0],
             "idempotency_key": "placed-receipt",
-            "placement_id": "qa_placedreceipt",
+            "placement_id": "qa_placedreceipt_agent_2",
             "skills": ["no-such-skill-anywhere"],
         }
     )
@@ -220,7 +220,7 @@ def test_a_placed_receipt_records_the_requested_list(qa_persona, seeded_workspac
     # The placement ack is recorded too, because a resume must hand back what
     # the FIRST attempt wrote rather than a second read of the store.
     assert raw["result"]["actor_key"]
-    assert raw["result"]["persona_instance_id"] == "personainst_qa_placedreceipt"
+    assert raw["result"]["persona_instance_id"] == "personainst_qa_placedreceipt_agent_2"
 
 
 def test_an_unknown_state_is_still_reservation_corrupt(qa_persona, seeded_workspace):
@@ -239,7 +239,7 @@ def test_an_unknown_state_is_still_reservation_corrupt(qa_persona, seeded_worksp
             "workspace_id": WORKSPACE,
             "position": [0.0, 0.0],
             "idempotency_key": "weird-state",
-            "placement_id": "qa_weird",
+            "placement_id": "qa_weird_agent_2",
         }
     )
     raw = _receipt("weird-state")

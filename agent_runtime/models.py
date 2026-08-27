@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+import re
 from typing import Any
 
 from .states import RunState, WorkerSessionState
@@ -27,6 +28,60 @@ def looks_like_persona_instance_id(token: object) -> bool:
     phantom "steered by <principal>" edge.
     """
     return isinstance(token, str) and token.strip().startswith(PERSONA_INSTANCE_ID_PREFIX)
+
+
+#: THE deliberate-placement discriminator, mirrored byte-for-byte from the
+#: launcher's ``_deliberatePlacementSuffix``
+#: (``mission_agent_identity.dart:121``). Both repos must answer the same
+#: question the same way about the same id: hermes derives the instance id from
+#: the placement id (``persona_instance_id_for_placement`` — prefix + token),
+#: and the launcher then asks THIS pattern of the derived id to decide whether
+#: the row is a deliberate placement or a conversational channel. An id that
+#: clears one side and not the other is the wrong-alice incident of 2026-08-27:
+#: a hand-typed ``--placement-id known_alice`` minted
+#: ``personainst_known_alice``, which the launcher read as conversational,
+#: folded into the operator-channel dedupe, and — newer-wins — evicted the
+#: operator's own ``personainst_profile_alice`` from the roster.
+#:
+#: The ``_agent_`` marker is the load-bearing half, not the tail: a bare hex
+#: tail would make any persona token ending in eight hex characters read as a
+#: deliberate placement forever. Two tails are legal because two mints are
+#: live — ``_agent_<hex8>`` is current, ``_agent_<n>`` is the legacy counter
+#: still carried by rows that predate it.
+DELIBERATE_PLACEMENT_SUFFIX = re.compile(r"_agent_(\d+|[0-9a-f]{8})$")
+
+
+def looks_like_deliberate_placement(token: object) -> bool:
+    """True when ``token`` ends in the deliberate-placement shape.
+
+    Asked of a PLACEMENT id, not an instance id, because the tail survives the
+    derivation unchanged (the prefix is prepended, the token is not rewritten),
+    so fencing the input fences the derived id too.
+    """
+    return isinstance(token, str) and bool(DELIBERATE_PLACEMENT_SUFFIX.search(token.strip()))
+
+
+#: The refusal a caller-supplied placement id earns when it would derive an
+#: instance id neither repo's discriminator can classify. Spelled once and
+#: spent by all three placement doors (``agent create`` and the two
+#: ``persona instance`` verbs) so the operator reads one sentence whichever
+#: door they knocked on.
+PLACEMENT_ID_NOT_DISCRIMINABLE_REASON = "placement_id_not_discriminable"
+
+
+def placement_id_not_discriminable_message(placement_id: str) -> str:
+    """Name BOTH cures, because both are legitimate and they are not equivalent.
+
+    Omitting the flag is right for a caller that only wants an agent placed;
+    supplying the shape is right for a caller that is PREDICTING the actor key
+    from the id it sent. Canonicalizing silently would serve the first and
+    strand the second, which is why this refuses instead of rewriting.
+    """
+    return (
+        f"invalid params: placement_id {placement_id!r} is not a deliberate-placement id "
+        "— omit --placement-id to have one minted, or supply the "
+        "<persona-token>_agent_<hex8> shape"
+    )
 
 
 @dataclass(slots=True)

@@ -175,7 +175,7 @@ def _agent_create_into(workspace_id: str, monkeypatch) -> object:
             "workspace_id": workspace_id,
             "position": [3.5, -1.25],
             "idempotency_key": "one-fence-create",
-            "placement_id": "backend_dev_one_fence",
+            "placement_id": "backend_dev_one_fence_agent_2",
         }
     )
 

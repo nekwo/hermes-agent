@@ -107,18 +107,18 @@ def test_the_service_places_an_agent_with_no_rpc_layer_involved(qa_persona):
 
     _seed_workspace()
 
-    outcome = perform_agent_create(_params(placement_id="qa_service"))
+    outcome = perform_agent_create(_params(placement_id="qa_service_agent_2"))
 
     assert outcome.refusal is None
     assert outcome.refusal is None
     result = outcome.result
-    assert result["persona_instance_id"] == "personainst_qa_service"
+    assert result["persona_instance_id"] == "personainst_qa_service_agent_2"
     assert result["idempotent_replay"] is False
 
     # Witness 1 — the roster row is a FILE, not a reply field.
-    assert paths.persona_instance_path("personainst_qa_service").exists()
+    assert paths.persona_instance_path("personainst_qa_service_agent_2").exists()
     assert (
-        paths.persona_instance_path("personainst_qa_service").parent
+        paths.persona_instance_path("personainst_qa_service_agent_2").parent
         == paths.persona_instances_dir()
     )
 
@@ -126,7 +126,7 @@ def test_the_service_places_an_agent_with_no_rpc_layer_involved(qa_persona):
     actors = _actors()
     assert result["actor_key"] in actors
     assert actors[result["actor_key"]].revision == 1
-    assert actors[result["actor_key"]].persona_instance_id == "personainst_qa_service"
+    assert actors[result["actor_key"]].persona_instance_id == "personainst_qa_service_agent_2"
 
     # Witness 3 — the shared naming rule came with the sequence, not with the
     # RPC handler. "Qa" here means the hoist dropped the policy layer.
@@ -140,12 +140,12 @@ def test_the_service_refuses_a_bad_position_without_a_reply_envelope(qa_persona)
     _seed_workspace()
     before = set(_actors())
 
-    outcome = perform_agent_create(_params(position="3,4", placement_id="qa_badpos"))
+    outcome = perform_agent_create(_params(position="3,4", placement_id="qa_badpos_agent_2"))
 
     assert outcome.refusal is not None
     assert outcome.result is None
     assert outcome.refusal.data["reason"] == "position_invalid"
-    assert not paths.persona_instance_path("personainst_qa_badpos").exists()
+    assert not paths.persona_instance_path("personainst_qa_badpos_agent_2").exists()
     assert set(_actors()) == before
 
 
@@ -157,9 +157,9 @@ def test_a_replay_through_the_service_writes_nothing(qa_persona):
     moving the probed field."""
 
     _seed_workspace()
-    first = perform_agent_create(_params(placement_id="qa_svc_replay")).result
+    first = perform_agent_create(_params(placement_id="qa_svc_replay_agent_2")).result
 
-    second = perform_agent_create(_params(placement_id="qa_svc_replay")).result
+    second = perform_agent_create(_params(placement_id="qa_svc_replay_agent_2")).result
 
     assert second["idempotent_replay"] is True
     assert second["persona_instance_id"] == first["persona_instance_id"]
@@ -182,12 +182,12 @@ def test_the_service_itself_refuses_an_unknown_bare_persona(qa_persona):
     _seed_workspace()
 
     outcome = perform_agent_create(
-        _params(persona_id="qa_agent", placement_id="qa_agent_svc")
+        _params(persona_id="qa_agent", placement_id="qa_agent_svc_agent_2")
     )
 
     assert outcome.refusal is not None
     assert outcome.refusal.data["reason"] == "persona_not_found"
-    assert not paths.persona_instance_path("personainst_qa_agent_svc").exists()
+    assert not paths.persona_instance_path("personainst_qa_agent_svc_agent_2").exists()
     assert _actors() == {}
 
 
@@ -212,7 +212,7 @@ def test_a_caller_supplied_persona_object_settles_the_question(qa_persona):
     )
 
     outcome = perform_agent_create(
-        _params(persona_id="only_in_the_callers_hand", placement_id="handed_in"),
+        _params(persona_id="only_in_the_callers_hand", placement_id="handed_in_agent_2"),
         persona=synthesized,
     )
 
@@ -294,7 +294,7 @@ def test_verb_authors_no_desk(qa_persona):
         },
     )
 
-    outcome = perform_agent_create(_params(placement_id="qa_no_desk"))
+    outcome = perform_agent_create(_params(placement_id="qa_no_desk_agent_2"))
 
     assert outcome.refusal is None, outcome.refusal
     placed = _actors()[outcome.result["actor_key"]]
@@ -466,6 +466,10 @@ _INVALID_ARM_PARAMS: dict[str, dict] = {
     "idempotency_key_required": {"idempotency_key": ""},
     "idempotency_key_invalid": {"idempotency_key": "k" * 241},
     "placement_id_invalid": {"placement_id": "!!!"},
+    # R1. The id the wrong-alice incident was actually typed with: it TOKENISES
+    # (so it clears the arm above) and still derives an instance id neither
+    # repo's discriminator can classify.
+    "placement_id_not_discriminable": {"placement_id": "known_alice"},
     # A bare string is the client mistake this arm exists for: iterating it
     # would assign one skill per CHARACTER, so the container shape is refused
     # before any write rather than normalised into nonsense.
@@ -507,14 +511,14 @@ def test_invalid_arms_stamp_rolled_back(reason, qa_persona):
     _seed_workspace()
     before = set(_actors())
 
-    overrides = {"placement_id": "qa_stamp", **_INVALID_ARM_PARAMS[reason]}
+    overrides = {"placement_id": "qa_stamp_agent_2", **_INVALID_ARM_PARAMS[reason]}
     outcome = perform_agent_create(_params(**overrides))
 
     assert outcome.refusal is not None
     assert outcome.refusal.data["reason"] == reason
     assert outcome.refusal.data["rolled_back"] is True
     # The claim, not just the key.
-    assert not paths.persona_instance_path("personainst_qa_stamp").exists()
+    assert not paths.persona_instance_path("personainst_qa_stamp_agent_2").exists()
     assert set(_actors()) == before
 
 
@@ -536,7 +540,7 @@ def test_the_roster_fault_arm_stamps_rolled_back(monkeypatch, qa_persona):
 
     monkeypatch.setattr(runtime_config, "load_agent_runtime_config", _explode)
 
-    outcome = perform_agent_create(_params(placement_id="qa_roster_stamp"))
+    outcome = perform_agent_create(_params(placement_id="qa_roster_stamp_agent_2"))
 
     assert outcome.refusal is not None
     assert (
@@ -596,7 +600,7 @@ def test_a_create_with_no_position_lands_on_the_policys_slot(
     """
 
     _seed_workspace()
-    outcome = perform_agent_create(_no_position(placement_id="qa_unaimed"), persona=qa_persona)
+    outcome = perform_agent_create(_no_position(placement_id="qa_unaimed_agent_2"), persona=qa_persona)
 
     assert outcome.refusal is None, outcome.refusal
     stored = _actors()[outcome.result["actor_key"]]
@@ -615,7 +619,7 @@ def test_a_create_with_a_position_still_lands_there_verbatim(
     """
 
     _seed_workspace()
-    outcome = perform_agent_create(_params(placement_id="qa_aimed"), persona=qa_persona)
+    outcome = perform_agent_create(_params(placement_id="qa_aimed_agent_2"), persona=qa_persona)
 
     assert outcome.refusal is None, outcome.refusal
     stored = _actors()[outcome.result["actor_key"]]
@@ -633,7 +637,7 @@ def test_an_explicit_null_position_is_absence_not_a_malformed_aim(
 
     _seed_workspace()
     outcome = perform_agent_create(
-        _params(position=None, placement_id="qa_null"), persona=qa_persona
+        _params(position=None, placement_id="qa_null_agent_2"), persona=qa_persona
     )
 
     assert outcome.refusal is None, outcome.refusal
@@ -649,7 +653,7 @@ def test_a_malformed_position_still_refuses(qa_persona, isolate_agent_runtime_ro
     _seed_workspace()
     for bad in ([1.0], "3,4", [float("inf"), 0.0], [True, False]):
         outcome = perform_agent_create(
-            _params(position=bad, placement_id="qa_bad"), persona=qa_persona
+            _params(position=bad, placement_id="qa_bad_agent_2"), persona=qa_persona
         )
         assert outcome.refusal is not None, bad
         assert outcome.refusal.data["reason"] == "position_invalid", bad
@@ -673,11 +677,11 @@ def test_the_policy_scans_the_requests_folder_and_skips_the_occupied_slot(
 
     _seed_workspace()
     first = perform_agent_create(
-        _no_position(idempotency_key="unaimed-1", placement_id="qa_one"),
+        _no_position(idempotency_key="unaimed-1", placement_id="qa_one_agent_2"),
         persona=qa_persona,
     )
     second = perform_agent_create(
-        _no_position(idempotency_key="unaimed-2", placement_id="qa_two"),
+        _no_position(idempotency_key="unaimed-2", placement_id="qa_two_agent_2"),
         persona=qa_persona,
     )
 
@@ -697,11 +701,11 @@ def test_a_different_folder_is_a_different_scan(qa_persona, isolate_agent_runtim
 
     _seed_workspace()
     perform_agent_create(
-        _no_position(idempotency_key="folder-1", placement_id="qa_agents"),
+        _no_position(idempotency_key="folder-1", placement_id="qa_agents_agent_2"),
         persona=qa_persona,
     )
     other = perform_agent_create(
-        _no_position(idempotency_key="folder-2", placement_id="qa_ops", folder="Ops"),
+        _no_position(idempotency_key="folder-2", placement_id="qa_ops_agent_2", folder="Ops"),
         persona=qa_persona,
     )
 
@@ -732,7 +736,7 @@ def test_the_policy_excludes_the_actor_it_is_about_to_write(
 
     store = _seed_workspace()
     request = normalize_agent_create(
-        _no_position(placement_id="qa_resume"), persona=qa_persona
+        _no_position(placement_id="qa_resume_agent_2"), persona=qa_persona
     )
     store.upsert_actor(
         WORKSPACE,
@@ -763,9 +767,9 @@ def test_the_ack_carries_the_position_that_was_written(
     """
 
     _seed_workspace()
-    aimed = perform_agent_create(_params(placement_id="qa_ack_a"), persona=qa_persona)
+    aimed = perform_agent_create(_params(placement_id="qa_ack_a_agent_2"), persona=qa_persona)
     unaimed = perform_agent_create(
-        _no_position(idempotency_key="ack-2", placement_id="qa_ack_b"),
+        _no_position(idempotency_key="ack-2", placement_id="qa_ack_b_agent_2"),
         persona=qa_persona,
     )
 
@@ -796,7 +800,7 @@ def test_the_acks_actor_is_the_row_the_store_returned(
     from agent_runtime.office_store import OfficeStore
 
     _seed_workspace()
-    first = perform_agent_create(_params(placement_id="qa_row"), persona=qa_persona)
+    first = perform_agent_create(_params(placement_id="qa_row_agent_2"), persona=qa_persona)
     actor_key = first.result["actor_key"]
 
     assert first.result["actor"] == office_actor_wire_row(
@@ -860,7 +864,7 @@ def test_an_idempotent_replay_re_reads_the_actor_instead_of_echoing_the_receipt(
 
     _seed_workspace()
     first = perform_agent_create(
-        _no_position(idempotency_key="replay-1", placement_id="qa_replay"),
+        _no_position(idempotency_key="replay-1", placement_id="qa_replay_agent_2"),
         persona=qa_persona,
     )
     actor_key = first.result["actor_key"]
@@ -888,7 +892,7 @@ def test_an_idempotent_replay_re_reads_the_actor_instead_of_echoing_the_receipt(
     assert moved_actor.revision > stored.revision
 
     again = perform_agent_create(
-        _no_position(idempotency_key="replay-1", placement_id="qa_replay"),
+        _no_position(idempotency_key="replay-1", placement_id="qa_replay_agent_2"),
         persona=qa_persona,
     )
 
@@ -932,14 +936,14 @@ def test_a_replay_whose_actor_is_gone_says_so_instead_of_inventing_one(
 
     _seed_workspace()
     first = perform_agent_create(
-        _no_position(idempotency_key="replay-gone", placement_id="qa_replay_gone"),
+        _no_position(idempotency_key="replay-gone", placement_id="qa_replay_gone_agent_2"),
         persona=qa_persona,
     )
     actor_key = first.result["actor_key"]
     OfficeStore().remove_actor(WORKSPACE, actor_key, updated_by="operator")
 
     again = perform_agent_create(
-        _no_position(idempotency_key="replay-gone", placement_id="qa_replay_gone"),
+        _no_position(idempotency_key="replay-gone", placement_id="qa_replay_gone_agent_2"),
         persona=qa_persona,
     )
 
@@ -1018,7 +1022,7 @@ def test_skill_refusal_keeps_placement_and_resumes(
     refused = perform_agent_create(
         _params(
             idempotency_key=key,
-            placement_id="qa_skills_resume",
+            placement_id="qa_skills_resume_agent_2",
             skills=["not-a-skill-anyone-has"],
         ),
         persona=qa_persona,
@@ -1035,16 +1039,16 @@ def test_skill_refusal_keeps_placement_and_resumes(
     assert "SAME idempotency_key" in data["next_expected"]
 
     # The agent is STANDING. Both stores, not the reply.
-    assert paths.persona_instance_path("personainst_qa_skills_resume").exists()
+    assert paths.persona_instance_path("personainst_qa_skills_resume_agent_2").exists()
     actors = _actors()
     placed = [
         actor
         for actor in actors.values()
-        if actor.persona_instance_id == "personainst_qa_skills_resume"
+        if actor.persona_instance_id == "personainst_qa_skills_resume_agent_2"
     ]
     assert len(placed) == 1
     assert placed[0].revision == 1
-    assert _overrides("personainst_qa_skills_resume") is None
+    assert _overrides("personainst_qa_skills_resume_agent_2") is None
 
     # ...and the receipt says where to resume from.
     assert _reservation_state(key) == "placed"
@@ -1053,16 +1057,16 @@ def test_skill_refusal_keeps_placement_and_resumes(
     resumed = perform_agent_create(
         _params(
             idempotency_key=key,
-            placement_id="qa_skills_resume",
+            placement_id="qa_skills_resume_agent_2",
             skills=["harness-qa-verdict"],
         ),
         persona=qa_persona,
     )
 
     assert resumed.refusal is None
-    assert resumed.result["persona_instance_id"] == "personainst_qa_skills_resume"
+    assert resumed.result["persona_instance_id"] == "personainst_qa_skills_resume_agent_2"
     assert resumed.result["skills"]["assigned"] == ["harness-qa-verdict"]
-    assert _overrides("personainst_qa_skills_resume") == ["harness-qa-verdict"]
+    assert _overrides("personainst_qa_skills_resume_agent_2") == ["harness-qa-verdict"]
     # No second roster row, and no second placement write.
     assert len(_actors()) == len(actors)
     assert _actors()[placed[0].actor_key].revision == 1
@@ -1091,7 +1095,7 @@ def test_a_retry_that_is_still_wrong_refuses_again_and_still_keeps_the_agent(
     first = perform_agent_create(
         _params(
             idempotency_key=key,
-            placement_id="qa_retry_wrong",
+            placement_id="qa_retry_wrong_agent_2",
             skills=["still-not-a-skill"],
         ),
         persona=qa_persona,
@@ -1101,7 +1105,7 @@ def test_a_retry_that_is_still_wrong_refuses_again_and_still_keeps_the_agent(
     again = perform_agent_create(
         _params(
             idempotency_key=key,
-            placement_id="qa_retry_wrong",
+            placement_id="qa_retry_wrong_agent_2",
             skills=["also-not-a-skill"],
         ),
         persona=qa_persona,
@@ -1113,9 +1117,9 @@ def test_a_retry_that_is_still_wrong_refuses_again_and_still_keeps_the_agent(
     assert again.refusal.data["phase"] == "skills"
     assert again.refusal.data["rolled_back"] is False
     # Still standing, still resumable.
-    assert paths.persona_instance_path("personainst_qa_retry_wrong").exists()
+    assert paths.persona_instance_path("personainst_qa_retry_wrong_agent_2").exists()
     assert any(
-        actor.persona_instance_id == "personainst_qa_retry_wrong"
+        actor.persona_instance_id == "personainst_qa_retry_wrong_agent_2"
         for actor in _actors().values()
     )
     assert _reservation_state(key) == "placed"
@@ -1164,7 +1168,7 @@ def test_a_resumed_placed_create_reports_the_actor_as_it_is(
     refused = perform_agent_create(
         _params(
             idempotency_key=key,
-            placement_id="qa_resume_moved",
+            placement_id="qa_resume_moved_agent_2",
             skills=["not-a-skill-anyone-has"],
         ),
         persona=qa_persona,
@@ -1203,7 +1207,7 @@ def test_a_resumed_placed_create_reports_the_actor_as_it_is(
     resumed = perform_agent_create(
         _params(
             idempotency_key=key,
-            placement_id="qa_resume_moved",
+            placement_id="qa_resume_moved_agent_2",
             skills=["harness-qa-verdict"],
         ),
         persona=qa_persona,
@@ -1270,7 +1274,7 @@ def test_a_resumed_create_whose_actor_is_gone_says_so_instead_of_inventing_one(
     refused = perform_agent_create(
         _params(
             idempotency_key=key,
-            placement_id="qa_resume_gone",
+            placement_id="qa_resume_gone_agent_2",
             skills=["not-a-skill-anyone-has"],
         ),
         persona=qa_persona,
@@ -1282,7 +1286,7 @@ def test_a_resumed_create_whose_actor_is_gone_says_so_instead_of_inventing_one(
     resumed = perform_agent_create(
         _params(
             idempotency_key=key,
-            placement_id="qa_resume_gone",
+            placement_id="qa_resume_gone_agent_2",
             skills=["harness-qa-verdict"],
         ),
         persona=qa_persona,
@@ -1328,11 +1332,11 @@ def test_the_skills_block_says_whether_the_agent_inherits_or_was_overridden(
     _seed_workspace()
 
     absent = perform_agent_create(
-        _params(idempotency_key="inh-absent", placement_id="qa_inh_absent"),
+        _params(idempotency_key="inh-absent", placement_id="qa_inh_absent_agent_2"),
         persona=qa_persona,
     )
     assert absent.refusal is None
-    assert _overrides("personainst_qa_inh_absent") is None
+    assert _overrides("personainst_qa_inh_absent_agent_2") is None
     assert absent.result["skills"] == {
         "assigned": [],
         "installed": [],
@@ -1340,11 +1344,11 @@ def test_the_skills_block_says_whether_the_agent_inherits_or_was_overridden(
     }
 
     explicit_empty = perform_agent_create(
-        _params(idempotency_key="inh-empty", placement_id="qa_inh_empty", skills=[]),
+        _params(idempotency_key="inh-empty", placement_id="qa_inh_empty_agent_2", skills=[]),
         persona=qa_persona,
     )
     assert explicit_empty.refusal is None
-    assert _overrides("personainst_qa_inh_empty") == []
+    assert _overrides("personainst_qa_inh_empty_agent_2") == []
     # The same ``assigned`` as the arm above, and the opposite meaning.
     assert explicit_empty.result["skills"]["assigned"] == []
     assert explicit_empty.result["skills"]["inherited"] is False
@@ -1352,13 +1356,13 @@ def test_the_skills_block_says_whether_the_agent_inherits_or_was_overridden(
     overridden = perform_agent_create(
         _params(
             idempotency_key="inh-set",
-            placement_id="qa_inh_set",
+            placement_id="qa_inh_set_agent_2",
             skills=["harness-qa-verdict"],
         ),
         persona=qa_persona,
     )
     assert overridden.refusal is None
-    assert _overrides("personainst_qa_inh_set") == ["harness-qa-verdict"]
+    assert _overrides("personainst_qa_inh_set_agent_2") == ["harness-qa-verdict"]
     assert overridden.result["skills"]["inherited"] is False
 
 
@@ -1378,7 +1382,7 @@ def test_a_resume_that_sends_no_skills_renders_the_same_block(
     refused = perform_agent_create(
         _params(
             idempotency_key=key,
-            placement_id="qa_inh_resume",
+            placement_id="qa_inh_resume_agent_2",
             skills=["not-a-skill-anyone-has"],
         ),
         persona=qa_persona,
@@ -1386,7 +1390,7 @@ def test_a_resume_that_sends_no_skills_renders_the_same_block(
     assert refused.refusal is not None
 
     resumed = perform_agent_create(
-        _params(idempotency_key=key, placement_id="qa_inh_resume"),
+        _params(idempotency_key=key, placement_id="qa_inh_resume_agent_2"),
         persona=qa_persona,
     )
 
@@ -1397,7 +1401,7 @@ def test_a_resume_that_sends_no_skills_renders_the_same_block(
         "inherited": True,
     }
     # The phase never ran, so nothing was written and the agent still inherits.
-    assert _overrides("personainst_qa_inh_resume") is None
+    assert _overrides("personainst_qa_inh_resume_agent_2") is None
 
 
 def test_an_absent_skills_key_leaves_the_override_inheriting(
@@ -1415,12 +1419,12 @@ def test_an_absent_skills_key_leaves_the_override_inheriting(
 
     _seed_workspace()
     outcome = perform_agent_create(
-        _params(idempotency_key="skills-absent", placement_id="qa_skills_absent"),
+        _params(idempotency_key="skills-absent", placement_id="qa_skills_absent_agent_2"),
         persona=qa_persona,
     )
 
     assert outcome.refusal is None
-    assert _overrides("personainst_qa_skills_absent") is None
+    assert _overrides("personainst_qa_skills_absent_agent_2") is None
     # The ack block is still PRESENT and empty: one shape whatever was asked.
     assert outcome.result["skills"] == {
         "assigned": [],
@@ -1441,14 +1445,14 @@ def test_an_explicitly_empty_skills_list_is_an_explicit_override(
     outcome = perform_agent_create(
         _params(
             idempotency_key="skills-empty",
-            placement_id="qa_skills_empty",
+            placement_id="qa_skills_empty_agent_2",
             skills=[],
         ),
         persona=qa_persona,
     )
 
     assert outcome.refusal is None
-    assert _overrides("personainst_qa_skills_empty") == []
+    assert _overrides("personainst_qa_skills_empty_agent_2") == []
 
 
 def test_the_ack_reports_the_install_it_actually_did(
@@ -1468,7 +1472,7 @@ def test_the_ack_reports_the_install_it_actually_did(
     first = perform_agent_create(
         _params(
             idempotency_key="skills-receipt-1",
-            placement_id="qa_receipt_1",
+            placement_id="qa_receipt_1_agent_2",
             skills=["harness-qa-verdict"],
         ),
         persona=qa_persona,
@@ -1481,7 +1485,7 @@ def test_the_ack_reports_the_install_it_actually_did(
     second = perform_agent_create(
         _params(
             idempotency_key="skills-receipt-2",
-            placement_id="qa_receipt_2",
+            placement_id="qa_receipt_2_agent_2",
             skills=["harness-qa-verdict"],
         ),
         persona=qa_persona,
@@ -1516,7 +1520,7 @@ def test_a_traversal_shaped_skill_id_never_reaches_the_filesystem(
     outcome = perform_agent_create(
         _params(
             idempotency_key="skills-traversal",
-            placement_id="qa_traversal",
+            placement_id="qa_traversal_agent_2",
             skills=["../../../etc/passwd"],
         ),
         persona=qa_persona,
@@ -1542,7 +1546,7 @@ def test_the_skills_phase_is_billed_in_phases(qa_persona, isolated_shared_skills
     outcome = perform_agent_create(
         _params(
             idempotency_key="skills-phases",
-            placement_id="qa_phases",
+            placement_id="qa_phases_agent_2",
             skills=["harness-qa-verdict"],
         ),
         persona=qa_persona,

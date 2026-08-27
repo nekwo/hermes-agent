@@ -930,7 +930,7 @@ def test_a_delete_gesture_batch_promotes_for_a_lifecycle_declared_client(
     # global-singleton redesign), so a canonical row could never reproduce this
     # batch at all.
     instance = store.add_instance(
-        persona_id="qa", placement_id="scene_child_2", display_name="QA Agent (2)"
+        persona_id="qa", placement_id="scene_child_2_agent_2", display_name="QA Agent (2)"
     )
     # Bind the placement to the instance so the retire's office fan-out finds it.
     seeded_office.upsert_actor(

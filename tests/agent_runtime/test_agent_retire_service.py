@@ -60,7 +60,7 @@ def seeded_workspace():
     return store
 
 
-def _place(placement_id: str = "qa_retire_1", persona_id: str = "qa") -> dict:
+def _place(placement_id: str = "qa_retire_1_agent_2", persona_id: str = "qa") -> dict:
     """A REAL placement through the real create door. Returns its ack."""
 
     from agent_runtime.agent_create import perform_agent_create
@@ -142,7 +142,7 @@ def test_a_persona_keyed_actor_is_not_this_instances_and_is_left_standing(
 
     from agent_runtime.office_store import OfficeStore
 
-    placed = _place(placement_id="qa_retire_2")
+    placed = _place(placement_id="qa_retire_2_agent_2")
     OfficeStore().upsert_actor(
         WORKSPACE,
         {
@@ -191,7 +191,7 @@ def test_an_office_archive_fault_lands_on_the_ack_instead_of_being_swallowed(
 
     from agent_runtime.office_store import OfficeStore
 
-    placed = _place(placement_id="qa_retire_3")
+    placed = _place(placement_id="qa_retire_3_agent_2")
     actor_key = placed["actor_key"]
 
     def _refuse(*_args, **_kwargs):
@@ -228,7 +228,7 @@ def test_a_fault_in_the_office_projection_itself_is_not_blamed_on_an_actor(
 
     import agent_runtime.office_store as office_store_module
 
-    placed = _place(placement_id="qa_retire_4")
+    placed = _place(placement_id="qa_retire_4_agent_2")
 
     def _explode(*_args, **_kwargs):
         raise RuntimeError("office root unreadable")
@@ -263,7 +263,7 @@ def test_a_second_retire_replays_the_ack_rather_than_refusing(
     the prune that produced them cannot find them a second time.
     """
 
-    placed = _place(placement_id="qa_retire_5")
+    placed = _place(placement_id="qa_retire_5_agent_2")
     first = perform_agent_retire(
         {"persona_instance_id": placed["persona_instance_id"]}
     ).result

@@ -70,7 +70,7 @@ def instance_with_two_overrides():
     store = PersonaInstanceStore()
     instance = store.add_instance(
         persona_id="qa",
-        placement_id="qa_upskills",
+        placement_id="qa_upskills_agent_2",
         display_name="QA Agent",
         default_display_name="QA Agent",
         workspace_id="ws_upskills",

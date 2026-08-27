@@ -361,12 +361,12 @@ def test_sender_session_scopes_candidates_to_sender_workspace(tmp_path, monkeypa
     # TWO dev placements in ws_a (so the sender-scoped set stays ambiguous under
     # "placements shadow canonical"; canonical + one placement would auto-route)
     # plus one in ws_b that must never leak into ws_a's candidates.
-    store.add_instance(persona_id="dev", placement_id="dev_ws_a", workspace_id="ws_a", display_name="Dev A")
-    store.add_instance(persona_id="dev", placement_id="dev_ws_a2", workspace_id="ws_a", display_name="Dev A2")
-    store.add_instance(persona_id="dev", placement_id="dev_ws_b", workspace_id="ws_b", display_name="Dev B")
+    store.add_instance(persona_id="dev", placement_id="dev_ws_a_agent_2", workspace_id="ws_a", display_name="Dev A")
+    store.add_instance(persona_id="dev", placement_id="dev_ws_a2_agent_2", workspace_id="ws_a", display_name="Dev A2")
+    store.add_instance(persona_id="dev", placement_id="dev_ws_b_agent_2", workspace_id="ws_b", display_name="Dev B")
     # The sender lives in ws_a; its chat-root session id encodes its owner.
     sender = store.add_instance(
-        persona_id="neko_supervisor", placement_id="sender", workspace_id="ws_a", display_name="Sender"
+        persona_id="neko_supervisor", placement_id="sender_agent_2", workspace_id="ws_a", display_name="Sender"
     )
     sender_session = f"persona_chat_{sender.id}_{'a' * 12}"
 
@@ -392,9 +392,9 @@ def test_sender_session_scopes_candidates_to_sender_workspace(tmp_path, monkeypa
     assert scoped.allowed is False
     assert scoped.error_kind == "ambiguous_target"
     handles = {c.instance_id for c in scoped.candidates}
-    assert handles == {"personainst_dev_ws_a", "personainst_dev_ws_a2"}
+    assert handles == {"personainst_dev_ws_a_agent_2", "personainst_dev_ws_a2_agent_2"}
     assert "personainst_dev" not in handles
-    assert "personainst_dev_ws_b" not in handles
+    assert "personainst_dev_ws_b_agent_2" not in handles
 
 
 # --------------------------------------------------------------------------- #

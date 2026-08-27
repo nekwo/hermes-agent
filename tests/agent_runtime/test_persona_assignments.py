@@ -328,12 +328,12 @@ def test_additional_placement_does_not_reuse_another_instance_session(isolate_ag
 
     placed = store.add_instance(
         persona_id="profile:alice",
-        placement_id="operator_2c1f1de674e74942",
+        placement_id="operator_2c1f1de674e74942_agent_2",
         display_name="Alice Agent",
         session_id=profile.session_id,
     )
 
-    assert placed.id == persona_instance_id_for_placement("operator_2c1f1de674e74942")
+    assert placed.id == persona_instance_id_for_placement("operator_2c1f1de674e74942_agent_2")
     assert placed.session_id != profile.session_id
     assert placed.session_id.startswith(f"persona_chat_{placed.id}_")
 
@@ -342,7 +342,7 @@ def test_additional_placement_stamps_scope_pointers(isolate_agent_runtime_root):
     store = PersonaInstanceStore()
     placed = store.add_instance(
         persona_id="qa",
-        placement_id="agent_a1b2c3d4",
+        placement_id="agent_a1b2c3d4_agent_2",
         display_name="QA Agent (2)",
         workspace_id="ws_testv4",
         realm_id="realm_test",
@@ -645,7 +645,7 @@ def test_coordinator_create_beyond_spawn_scope_returns_confirm_without_creating(
             session_id=None,
             kill_active=False,
             add_instance=True,
-            placement_id="scene_child_1",
+            placement_id="scene_child_1_agent_2",
             json=True,
         )
     )
@@ -1618,7 +1618,7 @@ def test_persona_chat_history_separates_a_retired_instance_from_a_lost_binding(
     # the row exists ONLY in the archive now, and its chat session is the residue.
     retiring = store.add_instance(
         persona_id="qa",
-        placement_id="scene_child_9",
+        placement_id="scene_child_9_agent_2",
         display_name="QA (9)",
     )
     retired_session_id = retiring.session_id
@@ -1684,7 +1684,7 @@ def test_retired_persona_instance_ids_lists_only_retirement_tombstones(
     store = PersonaInstanceStore()
     retiring = store.add_instance(
         persona_id="dev",
-        placement_id="scene_child_11",
+        placement_id="scene_child_11_agent_2",
         display_name="Dev (11)",
     )
     store.retire(retiring.id, reason="placement deleted")
@@ -2473,7 +2473,7 @@ def test_persona_chat_delete_rejects_foreign_instance_before_mutation(
     store = PersonaInstanceStore()
     owner = store.create_operator_chat(persona_id="dev", display_name="Owner")
     foreign = store.add_instance(
-        persona_id="qa", placement_id="foreign-delete", display_name="Foreign"
+        persona_id="qa", placement_id="foreign-delete_agent_2", display_name="Foreign"
     )
     db.create_session(owner.session_id, "agent_runtime_persona_chat")
     db.append_message(owner.session_id, "user", "must survive")
@@ -3147,7 +3147,7 @@ def test_mission_chat_turn_resolve_requires_exact_owner_and_records_abandon(
         persona_id="dev", session_id="persona_chat_personainst_dev"
     )
     foreign = PersonaInstanceStore().add_instance(
-        persona_id="qa", placement_id="foreign-placement"
+        persona_id="qa", placement_id="foreign-placement_agent_2"
     )
     db.create_session(
         owner.session_id,
@@ -4529,17 +4529,17 @@ def test_retire_releases_child_backlinks_without_clearing_child_context(
     store = PersonaInstanceStore()
     retiring = _placement_instance(
         persona_id="neko_supervisor",
-        placement_id="lead_retiring",
+        placement_id="lead_retiring_agent_2",
         display_name="Retiring lead",
     )
     remaining = _placement_instance(
         persona_id="neko_supervisor",
-        placement_id="lead_remaining",
+        placement_id="lead_remaining_agent_2",
         display_name="Remaining lead",
     )
     child = _placement_instance(
         persona_id="dev",
-        placement_id="dev_child",
+        placement_id="dev_child_agent_2",
         display_name="Dev child",
     )
     child = store.set_parents(
@@ -4564,12 +4564,12 @@ def test_retire_last_parent_preserves_child_mission_context(
     store = PersonaInstanceStore()
     retiring = _placement_instance(
         persona_id="neko_supervisor",
-        placement_id="lead_only",
+        placement_id="lead_only_agent_2",
         display_name="Only lead",
     )
     child = _placement_instance(
         persona_id="dev",
-        placement_id="dev_only_child",
+        placement_id="dev_only_child_agent_2",
         display_name="Dev child",
     )
     child = store.set_parents(child.id, [retiring.id], goal_id="goal_live")

@@ -665,6 +665,66 @@
         "no:cacheprovider",
         "tests/hermes_cli/test_persona_set_skills.py::test_a_stale_issued_at_is_superseded_not_applied"
       ]
+    },
+    {
+      "id": "r1-mint-loses-the-agent-marker",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "mint_placement_id",
+      "operator": "drop-discriminator-marker",
+      "find": "    return f\"{token}_agent_{uuid.uuid4().hex[:8]}\"",
+      "replace": "    return f\"{token}_{uuid.uuid4().hex[:8]}\"",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_placement_id_discriminability.py::test_the_server_mint_clears_the_fence_it_installs"
+      ]
+    },
+    {
+      "id": "r1-create-stops-fencing-the-supplied-placement",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "_parse_request",
+      "operator": "remove-guard",
+      "find": "        if not looks_like_deliberate_placement(placement_id):\n            raise AgentCreateInvalid(\n                PLACEMENT_ID_NOT_DISCRIMINABLE_REASON,\n                placement_id_not_discriminable_message(placement_id),\n            )",
+      "replace": "        pass",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_placement_id_discriminability.py::test_agent_create_refuses_the_incident_id"
+      ]
+    },
+    {
+      "id": "r1-discriminator-weakened-to-a-bare-marker",
+      "path": "agent_runtime/models.py",
+      "symbol": "DELIBERATE_PLACEMENT_SUFFIX",
+      "operator": "widen-pattern",
+      "find": "DELIBERATE_PLACEMENT_SUFFIX = re.compile(r\"_agent_(\\d+|[0-9a-f]{8})$\")",
+      "replace": "DELIBERATE_PLACEMENT_SUFFIX = re.compile(r\"_agent_\")",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_placement_id_discriminability.py::test_near_misses_are_refused_by_the_predicate"
+      ]
+    },
+    {
+      "id": "r1-persona-instance-doors-stop-refusing",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_placement_discriminability_refusal",
+      "operator": "collapse-refusal-to-accept",
+      "find": "    if looks_like_deliberate_placement(placement_id):\n        return None",
+      "replace": "    return None",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_placement_id_discriminability.py::test_the_refusal_is_the_same_reason_on_all_three_doors"
+      ]
     }
   ]
 }

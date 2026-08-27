@@ -264,7 +264,7 @@ def test_the_method_answers_through_the_REAL_serve_loop_and_the_argv_lane_is_unt
                     "workspace_id": WORKSPACE,
                     "position": [3.5, -1.25],
                     "idempotency_key": "serve-loop-1",
-                    "placement_id": "qa_via_serve",
+                    "placement_id": "qa_via_serve_agent_2",
                 },
             ),
             SHUTDOWN,
@@ -272,9 +272,9 @@ def test_the_method_answers_through_the_REAL_serve_loop_and_the_argv_lane_is_unt
     )
 
     result = _reply(out, "create-1")["result"]
-    assert result["persona_instance_id"] == "personainst_qa_via_serve"
+    assert result["persona_instance_id"] == "personainst_qa_via_serve_agent_2"
     # The row is durable, not merely answered.
-    assert "personainst_qa_via_serve" in _instances()
+    assert "personainst_qa_via_serve_agent_2" in _instances()
     assert result["actor_key"] in _actors()
 
     # The argv lane's own lines, byte for byte, with a create beside them.
@@ -295,9 +295,9 @@ def test_an_unknown_method_name_is_still_unknown():
 
 def test_an_explicit_display_name_wins(qa_persona):
     _seed_workspace()
-    reply = _call(_params(placement_id="qa_two", display_name="QA Agent (2)"))
+    reply = _call(_params(placement_id="qa_two_agent_2", display_name="QA Agent (2)"))
     assert reply["result"]["display_name"] == "QA Agent (2)"
-    assert _instances()["personainst_qa_two"].display_name == "QA Agent (2)"
+    assert _instances()["personainst_qa_two_agent_2"].display_name == "QA Agent (2)"
 
 
 def test_an_omitted_display_name_falls_back_to_the_persona_not_the_template(
@@ -307,7 +307,7 @@ def test_an_omitted_display_name_falls_back_to_the_persona_not_the_template(
     layer and went straight to the store template."""
 
     _seed_workspace()
-    reply = _call(_params(placement_id="qa_solo"))
+    reply = _call(_params(placement_id="qa_solo_agent_2"))
     assert reply["result"]["display_name"] == "QA Agent"
     # Independent witness: the name the OFFICE item carries, which is what the
     # canvas paints — not just the roster row the reply echoes.
@@ -320,12 +320,12 @@ def test_an_omitted_display_name_falls_back_to_the_persona_not_the_template(
 
 def test_replay_returns_the_same_reply_and_writes_nothing(qa_persona):
     _seed_workspace()
-    first = _call(_params(placement_id="qa_replay"))["result"]
+    first = _call(_params(placement_id="qa_replay_agent_2"))["result"]
 
-    before = _instances()["personainst_qa_replay"].updated_at
+    before = _instances()["personainst_qa_replay_agent_2"].updated_at
     events_before = _event_count()
 
-    second = _call(_params(placement_id="qa_replay"), rid="c2")["result"]
+    second = _call(_params(placement_id="qa_replay_agent_2"), rid="c2")["result"]
 
     assert second["idempotent_replay"] is True
     assert second["persona_instance_id"] == first["persona_instance_id"]
@@ -334,7 +334,7 @@ def test_replay_returns_the_same_reply_and_writes_nothing(qa_persona):
     # from the placement id, so a duplicating replay returns them unchanged; the
     # revision and the row timestamp are what actually move when a write lands.
     assert _actors()[first["actor_key"]].revision == 1
-    assert _instances()["personainst_qa_replay"].updated_at == before
+    assert _instances()["personainst_qa_replay_agent_2"].updated_at == before
     assert _event_count() == events_before
 
 
@@ -347,14 +347,14 @@ def test_reusing_a_key_for_a_different_persona_is_refused(qa_persona, dev_person
     """
 
     _seed_workspace()
-    _call(_params(placement_id="qa_scope"))
+    _call(_params(placement_id="qa_scope_agent_2"))
     reply = _call(
-        _params(persona_id="dev", placement_id="dev_scope"), rid="c2"
+        _params(persona_id="dev", placement_id="dev_scope_agent_2"), rid="c2"
     )
     assert reply["error"]["data"]["reason"] == "idempotency_conflict"
     assert reply["error"]["code"] == serve_rpc.ERR_CONFLICT
     # Nothing was written for the second persona.
-    assert "personainst_dev_scope" not in _instances()
+    assert "personainst_dev_scope_agent_2" not in _instances()
 
 
 def test_a_crash_after_the_mint_replays_into_the_placement(qa_persona):
@@ -376,27 +376,27 @@ def test_a_crash_after_the_mint_replays_into_the_placement(qa_persona):
     with pytest.MonkeyPatch.context() as crashed:
         crashed.setattr(OfficeStore, "upsert_actor", _boom)
         with pytest.raises(KeyboardInterrupt):
-            _call(_params(placement_id="qa_resume"))
+            _call(_params(placement_id="qa_resume_agent_2"))
 
         # Half-state 1, exactly as a crash leaves it: roster row, no placement.
-        assert "personainst_qa_resume" in _instances()
+        assert "personainst_qa_resume_agent_2" in _instances()
         assert _actors() == {}
-        crashed_row = _instances()["personainst_qa_resume"]
+        crashed_row = _instances()["personainst_qa_resume_agent_2"]
         minted_at = crashed_row.updated_at
         minted_session = crashed_row.default_chat_session_id
 
-    reply = _call(_params(placement_id="qa_resume"), rid="c2")["result"]
+    reply = _call(_params(placement_id="qa_resume_agent_2"), rid="c2")["result"]
 
-    assert reply["persona_instance_id"] == "personainst_qa_resume"
+    assert reply["persona_instance_id"] == "personainst_qa_resume_agent_2"
     assert reply["actor_key"] in _actors()
     # It RESUMED rather than re-minting. The witness is the CHAT ROOT, not the
     # instance id: the id is derived from the placement id and a re-mint returns
     # it unchanged, while ``add_instance`` mints a fresh random session id every
     # time — so a duplicate create is visible here and nowhere else in the reply.
     assert reply["default_chat_session_id"] == minted_session
-    assert _instances()["personainst_qa_resume"].updated_at == minted_at
+    assert _instances()["personainst_qa_resume_agent_2"].updated_at == minted_at
     # And exactly one instance exists for this persona placement.
-    assert len([i for i in _instances() if i.startswith("personainst_qa_resume")]) == 1
+    assert len([i for i in _instances() if i.startswith("personainst_qa_resume_agent_2")]) == 1
 
 
 # ── compensation ─────────────────────────────────────────────────────────────
@@ -417,7 +417,7 @@ def test_a_refused_placement_retires_the_instance_and_says_so(qa_persona, monkey
     _seed_workspace()
     _refuse_placement(monkeypatch, SyncConflict("unresolved realm sync sidecar"))
 
-    reply = _call(_params(placement_id="qa_rollback"))
+    reply = _call(_params(placement_id="qa_rollback_agent_2"))
     data = reply["error"]["data"]
 
     assert reply["error"]["code"] == serve_rpc.ERR_CONFLICT
@@ -431,10 +431,10 @@ def test_a_refused_placement_retires_the_instance_and_says_so(qa_persona, monkey
     from agent_runtime import paths
     from agent_runtime.persona_assignments import PersonaInstanceStore
 
-    assert "personainst_qa_rollback" not in _instances()
-    assert not paths.persona_instance_path("personainst_qa_rollback").exists()
+    assert "personainst_qa_rollback_agent_2" not in _instances()
+    assert not paths.persona_instance_path("personainst_qa_rollback_agent_2").exists()
     assert (
-        PersonaInstanceStore().retired_instance_archive_path("personainst_qa_rollback")
+        PersonaInstanceStore().retired_instance_archive_path("personainst_qa_rollback_agent_2")
         is not None
     )
     assert _actors() == {}
@@ -450,14 +450,14 @@ def test_a_rolled_back_key_refuses_its_own_replay(qa_persona):
     _seed_workspace()
     with pytest.MonkeyPatch.context() as refused:
         _refuse_placement(refused, SyncConflict("unresolved realm sync sidecar"))
-        _call(_params(placement_id="qa_burned"))
+        _call(_params(placement_id="qa_burned_agent_2"))
 
-    reply = _call(_params(placement_id="qa_burned"), rid="c2")
+    reply = _call(_params(placement_id="qa_burned_agent_2"), rid="c2")
     data = reply["error"]["data"]
     assert data["reason"] == "placement_failed"
     assert data["idempotent_replay"] is True
     # And it really did not re-attempt: no roster row, no placement.
-    assert "personainst_qa_burned" not in _instances()
+    assert "personainst_qa_burned_agent_2" not in _instances()
     assert _actors() == {}
 
 
@@ -478,14 +478,14 @@ def test_a_compensation_that_itself_fails_is_reported_honestly(
 
     monkeypatch.setattr(PersonaInstanceStore, "retire", _retire_refuses)
 
-    reply = _call(_params(placement_id="qa_orphan"))
+    reply = _call(_params(placement_id="qa_orphan_agent_2"))
     data = reply["error"]["data"]
 
     assert data["rolled_back"] is False
-    assert data["persona_instance_id"] == "personainst_qa_orphan"
+    assert data["persona_instance_id"] == "personainst_qa_orphan_agent_2"
     assert "read-only" in data["rollback_error"]
     # The orphan is real and is NAMED on disk, which is the whole point.
-    assert "personainst_qa_orphan" in _instances()
+    assert "personainst_qa_orphan_agent_2" in _instances()
 
 
 def test_an_unexpected_store_fault_still_compensates(qa_persona, monkeypatch):
@@ -495,10 +495,10 @@ def test_an_unexpected_store_fault_still_compensates(qa_persona, monkeypatch):
     _seed_workspace()
     _refuse_placement(monkeypatch, OSError("disk went away"))
 
-    reply = _call(_params(placement_id="qa_fault"))
+    reply = _call(_params(placement_id="qa_fault_agent_2"))
     assert reply["error"]["code"] == serve_rpc.ERR_HANDLER_FAILED
     assert reply["error"]["data"]["rolled_back"] is True
-    assert "personainst_qa_fault" not in _instances()
+    assert "personainst_qa_fault_agent_2" not in _instances()
 
 
 # ── refusals that must write NOTHING ─────────────────────────────────────────
@@ -506,17 +506,17 @@ def test_an_unexpected_store_fault_still_compensates(qa_persona, monkeypatch):
 
 def test_an_unknown_workspace_is_refused_before_any_write(qa_persona):
     # Deliberately NOT seeded.
-    reply = _call(_params(workspace_id="ws_never_authored", placement_id="qa_nows"))
+    reply = _call(_params(workspace_id="ws_never_authored", placement_id="qa_nows_agent_2"))
     assert reply["error"]["code"] == serve_rpc.ERR_NOT_FOUND
     assert reply["error"]["data"]["reason"] == "workspace_not_found"
-    assert "personainst_qa_nows" not in _instances()
+    assert "personainst_qa_nows_agent_2" not in _instances()
     # And it left NO reservation: a client fixing a typo must not be answered
     # with its own stale error under the same key.
     _seed_workspace("ws_never_authored")
     retry = _call(
-        _params(workspace_id="ws_never_authored", placement_id="qa_nows"), rid="c2"
+        _params(workspace_id="ws_never_authored", placement_id="qa_nows_agent_2"), rid="c2"
     )
-    assert retry["result"]["persona_instance_id"] == "personainst_qa_nows"
+    assert retry["result"]["persona_instance_id"] == "personainst_qa_nows_agent_2"
 
 
 @pytest.mark.parametrize(
@@ -532,6 +532,7 @@ def test_an_unknown_workspace_is_refused_before_any_write(qa_persona):
         ({"idempotency_key": ""}, "idempotency_key_required"),
         ({"idempotency_key": "k" * 241}, "idempotency_key_invalid"),
         ({"placement_id": "///"}, "placement_id_invalid"),
+        ({"placement_id": "known_alice"}, "placement_id_not_discriminable"),
     ],
 )
 def test_malformed_params_are_refused_with_a_typed_reason(qa_persona, params, reason):
@@ -579,7 +580,7 @@ def test_an_unknown_bare_persona_is_refused_and_provably_wrote_nothing(qa_person
     before_instances = set(_instances())
     before_events = _event_count()
 
-    reply = _call(_params(persona_id="qa_agent", placement_id="qa_agent_probe"))
+    reply = _call(_params(persona_id="qa_agent", placement_id="qa_agent_probe_agent_2"))
 
     assert reply["error"]["code"] == serve_rpc.ERR_INVALID_PARAMS
     assert reply["error"]["data"]["reason"] == "persona_not_found"
@@ -587,7 +588,7 @@ def test_an_unknown_bare_persona_is_refused_and_provably_wrote_nothing(qa_person
     assert "harness agent list" in reply["error"]["message"]
 
     assert set(_instances()) == before_instances
-    assert not paths.persona_instance_path("personainst_qa_agent_probe").exists()
+    assert not paths.persona_instance_path("personainst_qa_agent_probe_agent_2").exists()
     digest = hashlib.sha256("gesture-1".encode("utf-8")).hexdigest()
     assert not paths.agent_create_reservation_path(digest).exists()
     assert _event_count() == before_events
@@ -599,8 +600,8 @@ def test_a_seeded_persona_still_creates(qa_persona):
     the test above pass forever."""
 
     _seed_workspace()
-    reply = _call(_params(placement_id="qa_still_works"))
-    assert reply["result"]["persona_instance_id"] == "personainst_qa_still_works"
+    reply = _call(_params(placement_id="qa_still_works_agent_2"))
+    assert reply["result"]["persona_instance_id"] == "personainst_qa_still_works_agent_2"
     # And the persona lookup that gated it is the SAME one that supplies the
     # honest default name, so a guard consulting a different roster than the
     # namer would show up here.
@@ -627,12 +628,12 @@ def test_a_profile_id_for_a_profile_that_owns_nothing_still_creates(qa_persona):
 
     _seed_workspace()
     reply = _call(
-        _params(persona_id="profile:nosuchprofile", placement_id="profile_lane")
+        _params(persona_id="profile:nosuchprofile", placement_id="profile_lane_agent_2")
     )
 
     result = reply["result"]
     assert result["persona_id"] == "profile:nosuchprofile"
-    assert paths.persona_instance_path("personainst_profile_lane").exists()
+    assert paths.persona_instance_path("personainst_profile_lane_agent_2").exists()
     assert result["actor_key"] in _actors()
 
 
@@ -642,7 +643,7 @@ def test_an_unusable_persona_id_is_still_a_SYNTAX_refusal_not_a_roster_one(qa_pe
     client that sent garbage down the "add the persona" path."""
 
     _seed_workspace()
-    reply = _call(_params(persona_id="!!!", placement_id="qa_garbage"))
+    reply = _call(_params(persona_id="!!!", placement_id="qa_garbage_agent_2"))
     assert reply["error"]["data"]["reason"] == "persona_id_required"
 
 
@@ -669,7 +670,7 @@ def test_the_emitted_events_equal_the_two_call_flow(qa_persona):
     marker = _event_count()
     instance = PersonaInstanceStore().add_instance(
         persona_id="qa",
-        placement_id="qa_two_call",
+        placement_id="qa_two_call_agent_2",
         display_name=None,
         default_display_name="QA Agent",
         workspace_id=WORKSPACE,
@@ -699,7 +700,7 @@ def test_the_emitted_events_equal_the_two_call_flow(qa_persona):
 
     # Flow B — one call.
     marker = _event_count()
-    _call(_params(placement_id="qa_one_call"))
+    _call(_params(placement_id="qa_one_call_agent_2"))
     one_call = _event_types_since(marker)
 
     assert one_call == two_call
@@ -748,7 +749,7 @@ def _chat_row(session_id: str):
 
 def test_the_root_the_create_returns_resolves_in_the_operator_chat_store(qa_persona):
     _seed_workspace()
-    reply = _call(_params(placement_id="qa_agent_durable"))
+    reply = _call(_params(placement_id="qa_agent_durable_agent_2"))
     result = reply["result"]
     root = result["default_chat_session_id"]
 
@@ -770,7 +771,7 @@ def test_the_created_root_carries_its_persona_ownership(qa_persona):
     """
 
     _seed_workspace()
-    reply = _call(_params(placement_id="qa_agent_owned"))
+    reply = _call(_params(placement_id="qa_agent_owned_agent_2"))
     result = reply["result"]
 
     row = _chat_row(result["default_chat_session_id"])
@@ -802,7 +803,7 @@ def test_a_chat_store_that_cannot_persist_leaves_no_agent_behind(
     )
 
     _seed_workspace()
-    reply = _call(_params(placement_id="qa_agent_no_store"))
+    reply = _call(_params(placement_id="qa_agent_no_store_agent_2"))
 
     assert "result" not in reply
     error = reply["error"]
@@ -810,7 +811,7 @@ def test_a_chat_store_that_cannot_persist_leaves_no_agent_behind(
     assert error["data"]["persistence_operation"] == "session_db_acquire"
     # BOTH rows absent — the same "durable, or neither" property every other
     # failure row here asserts.
-    assert "personainst_qa_agent_no_store" not in _instances()
+    assert "personainst_qa_agent_no_store_agent_2" not in _instances()
     assert _actors() == {}
 
 
@@ -861,7 +862,7 @@ def test_the_chat_store_refusal_says_nothing_survives_it(qa_persona, monkeypatch
     _refuse_the_chat_store(monkeypatch)
     _seed_workspace()
 
-    data = _call(_params(placement_id="qa_agent_signal"))["error"]["data"]
+    data = _call(_params(placement_id="qa_agent_signal_agent_2"))["error"]["data"]
 
     assert data["reason"] == "chat_session_persist_failed"
     assert data["rolled_back"] is True, (
@@ -892,7 +893,7 @@ def test_the_chat_store_refusal_spells_it_like_its_siblings(qa_persona):
 
     with pytest.MonkeyPatch.context() as patch:
         _refuse_the_chat_store(patch)
-        persist = _call(_params(placement_id="qa_agent_vocab"))["error"]["data"]
+        persist = _call(_params(placement_id="qa_agent_vocab_agent_2"))["error"]["data"]
     assert persist["reason"] == "chat_session_persist_failed"
 
     # The sibling: a placement that failed and WAS compensated. Its chat store
@@ -905,7 +906,7 @@ def test_the_chat_store_refusal_spells_it_like_its_siblings(qa_persona):
         )
         compensated = _call(
             _params(
-                placement_id="qa_agent_vocab_sibling", idempotency_key="gesture-sib"
+                placement_id="qa_agent_vocab_sibling_agent_2", idempotency_key="gesture-sib"
             )
         )["error"]["data"]
     assert compensated["reason"] == "placement_failed"
@@ -931,7 +932,7 @@ def test_the_chat_store_refusal_leaves_no_durable_trace_at_all(
     _refuse_the_chat_store(monkeypatch)
     _seed_workspace()
 
-    reply = _call(_params(placement_id="qa_agent_no_trace"))
+    reply = _call(_params(placement_id="qa_agent_no_trace_agent_2"))
     assert reply["error"]["data"]["reason"] == "chat_session_persist_failed"
 
     assert _instances() == {}
@@ -959,7 +960,7 @@ def test_the_chat_store_refusal_asks_for_a_retry_the_client_can_make(
     _refuse_the_chat_store(monkeypatch)
     _seed_workspace()
 
-    data = _call(_params(placement_id="qa_agent_next"))["error"]["data"]
+    data = _call(_params(placement_id="qa_agent_next_agent_2"))["error"]["data"]
 
     assert data["next_expected"] == (
         "restore canonical persona chat transcript storage and retry the "
@@ -1047,7 +1048,7 @@ def test_the_unknown_workspace_refusal_says_nothing_survives_it(qa_persona):
     _seed_workspace()  # a real office exists; this create names another one.
 
     data = _call(
-        _params(workspace_id="ws_never_authored", placement_id="qa_nows")
+        _params(workspace_id="ws_never_authored", placement_id="qa_nows_agent_2")
     )["error"]["data"]
 
     assert data["reason"] == "workspace_not_found"
@@ -1072,7 +1073,7 @@ def test_the_unknown_workspace_refusal_touches_no_path_at_all(qa_persona):
     _seed_workspace()
     before = _store_paths()
 
-    reply = _call(_params(workspace_id="ws_never_authored", placement_id="qa_nows"))
+    reply = _call(_params(workspace_id="ws_never_authored", placement_id="qa_nows_agent_2"))
 
     assert reply["error"]["data"]["reason"] == "workspace_not_found"
     assert _store_paths() == before
@@ -1085,13 +1086,13 @@ def test_the_retired_placement_refusal_says_nothing_survives_it(qa_persona):
     from agent_runtime.persona_assignments import PersonaInstanceStore
 
     _seed_workspace()
-    _call(_params(placement_id="qa_ret"))
+    _call(_params(placement_id="qa_ret_agent_2"))
     PersonaInstanceStore().retire(
-        "personainst_qa_ret", reason="test", requested_by="test"
+        "personainst_qa_ret_agent_2", reason="test", requested_by="test"
     )
 
     data = _call(
-        _params(placement_id="qa_ret", idempotency_key="gesture-after-retire"),
+        _params(placement_id="qa_ret_agent_2", idempotency_key="gesture-after-retire"),
         rid="c2",
     )["error"]["data"]
 
@@ -1115,15 +1116,15 @@ def test_the_retired_placement_refusal_leaves_only_the_lock_it_took(qa_persona):
     from agent_runtime.persona_assignments import PersonaInstanceStore
 
     _seed_workspace()
-    _call(_params(placement_id="qa_ret"))
+    _call(_params(placement_id="qa_ret_agent_2"))
     PersonaInstanceStore().retire(
-        "personainst_qa_ret", reason="test", requested_by="test"
+        "personainst_qa_ret_agent_2", reason="test", requested_by="test"
     )
     before = _store_paths()
     receipts_before = set(paths.agent_create_reservations_dir().glob("*"))
 
     reply = _call(
-        _params(placement_id="qa_ret", idempotency_key="gesture-after-retire"),
+        _params(placement_id="qa_ret_agent_2", idempotency_key="gesture-after-retire"),
         rid="c2",
     )
 
@@ -1139,7 +1140,7 @@ def test_the_invalid_placement_refusal_says_nothing_survives_it(
     qa_persona, dev_persona
 ):
     _seed_workspace()
-    _call(_params(placement_id="qa_taken"))
+    _call(_params(placement_id="qa_taken_agent_2"))
 
     # A REAL ValueError out of ``add_instance``: ``dev`` claiming a placement id
     # that already belongs to ``qa``. Injecting the raise would prove only that
@@ -1147,7 +1148,7 @@ def test_the_invalid_placement_refusal_says_nothing_survives_it(
     # raised.
     data = _call(
         _params(
-            persona_id="dev", placement_id="qa_taken", idempotency_key="gesture-dev"
+            persona_id="dev", placement_id="qa_taken_agent_2", idempotency_key="gesture-dev"
         ),
         rid="c2",
     )["error"]["data"]
@@ -1164,13 +1165,13 @@ def test_the_invalid_placement_refusal_leaves_only_the_lock_it_took(
     from agent_runtime import paths
 
     _seed_workspace()
-    _call(_params(placement_id="qa_taken"))
+    _call(_params(placement_id="qa_taken_agent_2"))
     before = _store_paths()
     receipts_before = set(paths.agent_create_reservations_dir().glob("*"))
 
     reply = _call(
         _params(
-            persona_id="dev", placement_id="qa_taken", idempotency_key="gesture-dev"
+            persona_id="dev", placement_id="qa_taken_agent_2", idempotency_key="gesture-dev"
         ),
         rid="c2",
     )
@@ -1181,7 +1182,7 @@ def test_the_invalid_placement_refusal_leaves_only_the_lock_it_took(
     assert set(paths.agent_create_reservations_dir().glob("*")) == receipts_before
     # The colliding placement still belongs to ``qa`` — the refusal did not
     # half-rewrite the row it refused to take.
-    assert _instances()["personainst_qa_taken"].persona_id == "qa"
+    assert _instances()["personainst_qa_taken_agent_2"].persona_id == "qa"
 
 
 # ── reserved_instance_missing: the arm whose honest answer is the opposite ───
@@ -1205,7 +1206,7 @@ def test_the_missing_reserved_instance_refusal_admits_what_it_leaves(qa_persona)
     from agent_runtime.persona_assignments import PersonaInstanceStore
 
     _seed_workspace()
-    _minted_but_unplaceable("qa_resv", "gesture-resv")
+    _minted_but_unplaceable("qa_resv_agent_2", "gesture-resv")
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(
@@ -1214,7 +1215,7 @@ def test_the_missing_reserved_instance_refusal_admits_what_it_leaves(qa_persona)
             lambda self, instance_id: (_ for _ in ()).throw(KeyError(instance_id)),
         )
         data = _call(
-            _params(placement_id="qa_resv", idempotency_key="gesture-resv"), rid="c3"
+            _params(placement_id="qa_resv_agent_2", idempotency_key="gesture-resv"), rid="c3"
         )["error"]["data"]
 
     assert data["reason"] == "reserved_instance_missing"
@@ -1226,7 +1227,7 @@ def test_the_missing_reserved_instance_refusal_admits_what_it_leaves(qa_persona)
     assert type(data["rolled_back"]) is bool
     assert data["phase"] == "instance"
     # The id the launcher republishes as ``orphanInstanceId``.
-    assert data["persona_instance_id"] == "personainst_qa_resv"
+    assert data["persona_instance_id"] == "personainst_qa_resv_agent_2"
     # The same-key cure comes FIRST and is real: the receipt is left at
     # ``instance_minted``, so a retry once the row is readable RESUMES into the
     # placement instead of minting a second agent. Burning the key here (by
@@ -1254,7 +1255,7 @@ def test_the_missing_reserved_instance_refusal_really_does_leave_a_receipt(
     from agent_runtime.persona_assignments import PersonaInstanceStore
 
     _seed_workspace()
-    _minted_but_unplaceable("qa_resv", "gesture-resv")
+    _minted_but_unplaceable("qa_resv_agent_2", "gesture-resv")
 
     receipts = sorted(paths.agent_create_reservations_dir().glob("*.json"))
     assert len(receipts) == 1
@@ -1267,7 +1268,7 @@ def test_the_missing_reserved_instance_refusal_really_does_leave_a_receipt(
             lambda self, instance_id: (_ for _ in ()).throw(KeyError(instance_id)),
         )
         reply = _call(
-            _params(placement_id="qa_resv", idempotency_key="gesture-resv"), rid="c3"
+            _params(placement_id="qa_resv_agent_2", idempotency_key="gesture-resv"), rid="c3"
         )
 
     data = reply["error"]["data"]
@@ -1275,7 +1276,7 @@ def test_the_missing_reserved_instance_refusal_really_does_leave_a_receipt(
     assert _store_paths() == before
     record = _json.loads(receipts[0].read_text(encoding="utf-8"))
     assert record["state"] == "instance_minted"
-    assert record["persona_instance_id"] == "personainst_qa_resv"
+    assert record["persona_instance_id"] == "personainst_qa_resv_agent_2"
 
     # …and the CROSS-CHECK, which is what makes this an honesty gate rather
     # than a second copy of the assertion above: the value is compared against
@@ -1304,11 +1305,11 @@ def test_a_key_spent_on_another_persona_says_nothing_survives_this_gesture(
     """
 
     _seed_workspace()
-    _call(_params(placement_id="qa_scope"))
+    _call(_params(placement_id="qa_scope_agent_2"))
     before = _store_paths()
 
     data = _call(
-        _params(persona_id="dev", placement_id="dev_scope"), rid="c2"
+        _params(persona_id="dev", placement_id="dev_scope_agent_2"), rid="c2"
     )["error"]["data"]
 
     assert data["reason"] == "idempotency_conflict"
@@ -1337,7 +1338,7 @@ def test_a_key_another_process_is_holding_refuses_to_claim_it_is_clean(qa_person
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(agent_create_reservations, "agent_create_lock", _busy)
-        data = _call(_params(placement_id="qa_lock"))["error"]["data"]
+        data = _call(_params(placement_id="qa_lock_agent_2"))["error"]["data"]
 
     assert data["reason"] == "create_lock_unavailable"
     assert data["rolled_back"] is False
@@ -1364,7 +1365,7 @@ def test_an_unreadable_receipt_is_the_one_arm_that_means_check_the_runtime(
     receipt.parent.mkdir(parents=True, exist_ok=True)
     receipt.write_text("{not json", encoding="utf-8")
 
-    data = _call(_params(placement_id="qa_corrupt"))["error"]["data"]
+    data = _call(_params(placement_id="qa_corrupt_agent_2"))["error"]["data"]
 
     assert data["reason"] == "reservation_corrupt"
     assert data["rolled_back"] is False
@@ -1450,26 +1451,26 @@ def test_each_refusal_names_the_half_it_failed_in(
 
     with pytest.MonkeyPatch.context() as patch:
         if arm == "instance_retired":
-            _call(_params(placement_id="qa_phase"))
+            _call(_params(placement_id="qa_phase_agent_2"))
             PersonaInstanceStore().retire(
-                "personainst_qa_phase", reason="test", requested_by="test"
+                "personainst_qa_phase_agent_2", reason="test", requested_by="test"
             )
-            params = _params(placement_id="qa_phase", idempotency_key="k-phase")
+            params = _params(placement_id="qa_phase_agent_2", idempotency_key="k-phase")
         elif arm == "instance_invalid":
-            _call(_params(placement_id="qa_phase"))
+            _call(_params(placement_id="qa_phase_agent_2"))
             params = _params(
-                persona_id="dev", placement_id="qa_phase", idempotency_key="k-phase"
+                persona_id="dev", placement_id="qa_phase_agent_2", idempotency_key="k-phase"
             )
         elif arm == "chat_session_persist_failed":
             _refuse_the_chat_store(patch)
-            params = _params(placement_id="qa_phase", idempotency_key="k-phase")
+            params = _params(placement_id="qa_phase_agent_2", idempotency_key="k-phase")
         elif arm == "placement_failed":
             patch.setattr(
                 OfficeStore,
                 "upsert_actor",
                 lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("no desk")),
             )
-            params = _params(placement_id="qa_phase", idempotency_key="k-phase")
+            params = _params(placement_id="qa_phase_agent_2", idempotency_key="k-phase")
         elif arm == "workspace_not_found":
             params = _params(workspace_id="ws_nope", idempotency_key="k-phase")
         else:
@@ -1478,7 +1479,7 @@ def test_each_refusal_names_the_half_it_failed_in(
                 "agent_create_lock",
                 lambda digest: (_ for _ in ()).throw(HarnessLockUnavailable("busy")),
             )
-            params = _params(placement_id="qa_phase", idempotency_key="k-phase")
+            params = _params(placement_id="qa_phase_agent_2", idempotency_key="k-phase")
 
         data = _call(params, rid="c9")["error"]["data"]
 
@@ -1516,7 +1517,7 @@ def test_the_wire_accepts_an_absent_position_and_reports_the_policys_slot(
     from agent_runtime.office_layout_policy import slot_at
 
     _seed_workspace()
-    params = _params(placement_id="qa_wire_unaimed")
+    params = _params(placement_id="qa_wire_unaimed_agent_2")
     params.pop("position")
     reply = _call(params)
 
@@ -1531,7 +1532,7 @@ def test_the_wire_still_takes_a_sent_position_verbatim(
     qa_persona, isolate_agent_runtime_root
 ):
     _seed_workspace()
-    reply = _call(_params(placement_id="qa_wire_aimed"))
+    reply = _call(_params(placement_id="qa_wire_aimed_agent_2"))
 
     assert "error" not in reply, reply
     assert reply["result"]["position"] == [3.5, -1.25]
@@ -1553,7 +1554,7 @@ def test_ack_actor_matches_store(qa_persona, isolate_agent_runtime_root):
     """
 
     _seed_workspace()
-    reply = _call(_params(placement_id="qa_wire_row"))
+    reply = _call(_params(placement_id="qa_wire_row_agent_2"))
     assert "error" not in reply, reply
 
     result = reply["result"]
@@ -1600,7 +1601,7 @@ def test_a_malformed_position_on_the_wire_still_refuses_and_writes_nothing(
 
     _seed_workspace()
     for bad in ([1.0], "3,4", [float("inf"), 0.0], [True, False]):
-        reply = _call(_params(position=bad, placement_id="qa_wire_bad"))
+        reply = _call(_params(position=bad, placement_id="qa_wire_bad_agent_2"))
         assert "error" in reply, bad
         assert reply["error"]["data"]["reason"] == "position_invalid", bad
     assert _actors() == {}

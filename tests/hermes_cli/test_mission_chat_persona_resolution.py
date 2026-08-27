@@ -222,7 +222,7 @@ def test_explicit_sibling_owned_session_is_still_refused(tmp_path, monkeypatch, 
     # never adopted by the target instance, and nothing binds.
     store, placement_id = _seed_qa_placement(monkeypatch, tmp_path)
     sibling = store.add_instance(
-        persona_id="qa", placement_id="qa_agent_sibling", display_name="QA Agent (3)"
+        persona_id="qa", placement_id="qa_agent_sibling_agent_2", display_name="QA Agent (3)"
     )
     sibling_session = f"persona_chat_{sibling.id}_{uuid.uuid4().hex[:12]}"
 

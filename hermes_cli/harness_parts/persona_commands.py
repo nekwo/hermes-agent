@@ -759,6 +759,39 @@ def _cmd_agent_retire(args) -> int:
     return 0
 
 
+def _placement_discriminability_refusal(placement_id: str) -> dict | None:
+    """R1's fence for the two ``--add-instance`` doors, or ``None`` to proceed.
+
+    These verbs do not pass through ``agent_create``, so the fence there covers
+    neither of them; the SHAPE and the SENTENCE still come from the one
+    authority in ``agent_runtime.models`` rather than being re-spelled per door.
+
+    Returns a payload rather than raising because both callers already answer
+    their own placement refusals this way (``placement_id is required when
+    add_instance is true``), and neither catches ``ValueError`` around the
+    store call — a raise here would surface as a traceback, not a refusal.
+    """
+
+    from agent_runtime.models import (
+        PLACEMENT_ID_NOT_DISCRIMINABLE_REASON,
+        looks_like_deliberate_placement,
+        placement_id_not_discriminable_message,
+    )
+
+    if looks_like_deliberate_placement(placement_id):
+        return None
+    return {
+        "ok": False,
+        "reason": PLACEMENT_ID_NOT_DISCRIMINABLE_REASON,
+        "error": placement_id_not_discriminable_message(placement_id),
+        "placement_id": placement_id,
+        "next_expected": (
+            "re-run without --placement-id to have a discriminable one minted, "
+            "or send the <persona-token>_agent_<hex8> shape"
+        ),
+    }
+
+
 def _cmd_persona_instance_create(args) -> int:
     # Function-local: this file is exec'd into harness.py's globals, so a
     # module-level import here would need a matching harness.py import or it
@@ -809,6 +842,10 @@ def _cmd_persona_instance_create(args) -> int:
                 if not placement_id:
                     data = {"ok": False, "error": "placement_id is required when add_instance is true"}
                     print(emit_json(data) if args.json else data["error"])
+                    return 2
+                refusal = _placement_discriminability_refusal(placement_id)
+                if refusal is not None:
+                    print(emit_json(refusal) if args.json else refusal["error"])
                     return 2
                 instance = PersonaInstanceStore().add_instance(
                     persona_id=persona_id,
@@ -967,6 +1004,10 @@ def _cmd_persona_instance_open_chat(args) -> int:
             if not placement_id:
                 data = {"ok": False, "error": "placement_id is required when add_instance is true"}
                 print(emit_json(data) if args.json else data["error"])
+                return 2
+            placement_refusal = _placement_discriminability_refusal(placement_id)
+            if placement_refusal is not None:
+                print(emit_json(placement_refusal) if args.json else placement_refusal["error"])
                 return 2
             # UC-H4, scoped to --add-instance ONLY. The other branches of this
             # verb REBIND an instance that already exists (and the recorded

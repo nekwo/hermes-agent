@@ -1101,7 +1101,7 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_create.add_argument("--session-id", default=None)
     persona_instance_create.add_argument("--kill-active", action="store_true", help="Cancel the current run/worker before replacing the active chat")
     persona_instance_create.add_argument("--add-instance", action="store_true", help="Create an additional placement-backed instance instead of targeting the primary placement")
-    persona_instance_create.add_argument("--placement-id", default=None, help="Scene itemId for an additional placement-backed instance")
+    persona_instance_create.add_argument("--placement-id", default=None, help="Scene itemId for an additional placement-backed instance; must end in the deliberate-placement shape <persona-token>_agent_<hex8>")
     persona_instance_create.add_argument("--workspace-id", "--workspace", dest="workspace_id", default=None, help="Mission Control workspace the placement belongs to (scope-provenance pointer; only meaningful with --add-instance)")
     persona_instance_create.add_argument("--realm-id", dest="realm_id", default=None, help="Mission Control realm the placement belongs to (scope-provenance pointer; only meaningful with --add-instance)")
     # S70 removed `--auto-run` / `--stream` / `--max-actions` / `--max-seconds`:
@@ -1117,7 +1117,7 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_open.add_argument("--idempotency-key", default=None, help="Stable retry key required with --new-session")
     persona_instance_open.add_argument("--kill-active", action="store_true", help="Cancel the current run/worker before replacing the active chat")
     persona_instance_open.add_argument("--add-instance", action="store_true", help="Open the chat on an additional placement-backed instance")
-    persona_instance_open.add_argument("--placement-id", default=None, help="Scene itemId for an additional placement-backed instance")
+    persona_instance_open.add_argument("--placement-id", default=None, help="Scene itemId for an additional placement-backed instance; must end in the deliberate-placement shape <persona-token>_agent_<hex8>")
     persona_instance_open.add_argument("--workspace-id", "--workspace", dest="workspace_id", default=None, help="Mission Control workspace the placement belongs to (scope-provenance pointer; only meaningful with --add-instance)")
     persona_instance_open.add_argument("--realm-id", dest="realm_id", default=None, help="Mission Control realm the placement belongs to (scope-provenance pointer; only meaningful with --add-instance)")
     persona_instance_open.add_argument("--display-name", default=None, help="Authoritative name for a deliberately placed additional instance; ignored unless --add-instance")
@@ -1533,7 +1533,7 @@ def build_parser(parent_subparsers) -> None:
     # `--skill a --skill b` one request rather than a last-one-wins.
     agent_create.add_argument("--skill", dest="skills", action="append", default=None, help="Assign a skill to the new instance (repeatable); a canonical harness skill is installed and hash-verified first")
     agent_create.add_argument("--display-name", default=None, help="Authoritative name; omitted falls back to the persona's configured display name")
-    agent_create.add_argument("--placement-id", default=None, help="Scene itemId to predict the actor key from; omitted mints one server-side")
+    agent_create.add_argument("--placement-id", default=None, help="Scene itemId to predict the actor key from; must end in <persona-token>_agent_<hex8>, and omitted mints one server-side")
     agent_create.add_argument("--realm-id", dest="realm_id", default=None)
     agent_create.add_argument("--folder", default=None, help="Office folder for the placement (default: Agents)")
     # A re-run is a NEW gesture unless the caller says otherwise — the same rule

@@ -60,6 +60,11 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+from .models import (
+    PLACEMENT_ID_NOT_DISCRIMINABLE_REASON,
+    looks_like_deliberate_placement,
+    placement_id_not_discriminable_message,
+)
 from .persona_assignments import (
     _display_name_for_template,
     _normalize_instance_source_persona,
@@ -343,10 +348,17 @@ def mint_placement_id(persona_id: str) -> str:
     <persona> at (x, y)". The hex tail is what keeps two rapid creates of one
     persona distinct — the id is IDENTITY, and the cosmetic "(2)" suffix is a
     separate concern that stays with the client (decision D-A1).
+
+    The ``_agent_`` marker is not decoration: it is what
+    ``DELIBERATE_PLACEMENT_SUFFIX`` matches, and it was MISSING here until
+    2026-08-27. This function claimed parity with the launcher mint and did not
+    have it, so every server-minted placement derived an instance id the
+    launcher classified as a conversational channel — the wrong-alice incident
+    reached through the door that requires no operator input at all.
     """
 
     token = safe_assignment_token(persona_id) or "persona"
-    return f"{token}_{uuid.uuid4().hex[:8]}"
+    return f"{token}_agent_{uuid.uuid4().hex[:8]}"
 
 
 def _position(value: Any) -> tuple[float, float] | None:
@@ -545,6 +557,15 @@ def normalize_agent_create(
             raise AgentCreateInvalid(
                 "placement_id_invalid",
                 "invalid params: placement_id must be a non-empty token when sent",
+            )
+        # Asked of the SENT id only. A minted id clears this by construction,
+        # and an id that reaches the store from anywhere else is a row that
+        # already exists — this fence validates operator input, it does not
+        # police the id space.
+        if not looks_like_deliberate_placement(placement_id):
+            raise AgentCreateInvalid(
+                PLACEMENT_ID_NOT_DISCRIMINABLE_REASON,
+                placement_id_not_discriminable_message(placement_id),
             )
 
     display_name = safe_assignment_text(params.get("display_name"), limit=120) or None

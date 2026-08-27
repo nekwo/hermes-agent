@@ -83,7 +83,7 @@ def _dispatch(argv: list[str]) -> int:
     return args.func(args)
 
 
-def _place(capsys, placement_id: str = "qa_verb_retire_1") -> dict:
+def _place(capsys, placement_id: str = "qa_verb_retire_1_agent_2") -> dict:
     code = _dispatch(
         [
             "harness", "agent", "create",
@@ -147,7 +147,7 @@ def test_a_second_retire_is_answered_not_refused(qa_persona, seeded_workspace, c
     tell "already done" apart from "wrong id" by reading prose.
     """
 
-    placed = _place(capsys, placement_id="qa_verb_retire_2")
+    placed = _place(capsys, placement_id="qa_verb_retire_2_agent_2")
     _retire(capsys, placed["persona_instance_id"])
 
     code, data = _retire(capsys, placed["persona_instance_id"])
@@ -199,8 +199,8 @@ def test_persona_instance_retire_produces_the_identical_ack(
     same ack" can mean across two different targets.
     """
 
-    first = _place(capsys, placement_id="qa_verb_retire_3")
-    second = _place(capsys, placement_id="qa_verb_retire_4")
+    first = _place(capsys, placement_id="qa_verb_retire_3_agent_2")
+    second = _place(capsys, placement_id="qa_verb_retire_4_agent_2")
 
     _, agent_door = _retire(capsys, first["persona_instance_id"])
 
@@ -246,8 +246,8 @@ def test_both_retire_doors_carry_the_SAME_console_identity(
     # bitten by before.
     from hermes_cli import harness
 
-    first = _place(capsys, placement_id="qa_verb_retire_auth_1")
-    second = _place(capsys, placement_id="qa_verb_retire_auth_2")
+    first = _place(capsys, placement_id="qa_verb_retire_auth_1_agent_2")
+    second = _place(capsys, placement_id="qa_verb_retire_auth_2_agent_2")
 
     monkeypatch.setattr(
         harness,
@@ -292,8 +292,8 @@ def test_a_plain_operator_retire_is_unchanged_by_the_mirror(
     keyed on.
     """
 
-    plain = _place(capsys, placement_id="qa_verb_retire_plain")
-    spelled = _place(capsys, placement_id="qa_verb_retire_spelled")
+    plain = _place(capsys, placement_id="qa_verb_retire_plain_agent_2")
+    spelled = _place(capsys, placement_id="qa_verb_retire_spelled_agent_2")
 
     plain_code, plain_ack = _retire(capsys, plain["persona_instance_id"])
     spelled_code, spelled_ack = _retire(
@@ -337,7 +337,7 @@ def test_the_human_readable_line_names_what_left_the_canvas(
     go look.
     """
 
-    placed = _place(capsys, placement_id="qa_verb_retire_5")
+    placed = _place(capsys, placement_id="qa_verb_retire_5_agent_2")
 
     code = _dispatch(["harness", "agent", "retire", placed["persona_instance_id"]])
     out = capsys.readouterr().out
@@ -374,7 +374,7 @@ def test_the_correlation_flag_reaches_the_office_removal_and_the_ack(
     from agent_runtime.state_patches import CORRELATION_ID_KEY
 
     token = "g-office-1755400000999999-c3d4"
-    placed = _place(capsys, placement_id="qa_verb_retire_corr")
+    placed = _place(capsys, placement_id="qa_verb_retire_corr_agent_2")
 
     code, data = _retire(
         capsys, placed["persona_instance_id"], "--correlation-id", token
@@ -406,7 +406,7 @@ def test_a_retire_typed_without_the_flag_carries_no_token(
     to say so.
     """
 
-    placed = _place(capsys, placement_id="qa_verb_retire_no_corr")
+    placed = _place(capsys, placement_id="qa_verb_retire_no_corr_agent_2")
 
     code, data = _retire(capsys, placed["persona_instance_id"])
 
@@ -444,7 +444,7 @@ def test_the_persona_instance_door_carries_the_token_too(
     from agent_runtime.state_patches import CORRELATION_ID_KEY
 
     token = "g-office-1755400000999998-b2c3"
-    placed = _place(capsys, placement_id="qa_verb_retire_corr_other_door")
+    placed = _place(capsys, placement_id="qa_verb_retire_corr_other_door_agent_2")
 
     code = _dispatch(
         [

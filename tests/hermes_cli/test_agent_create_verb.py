@@ -118,20 +118,20 @@ def test_the_verb_creates_both_rows_and_echoes_the_rpc_reply_shape(
     row is not the probe.
     """
 
-    code, data = _create(capsys, "--idempotency-key", "verb-1", "--placement-id", "qa_verb")
+    code, data = _create(capsys, "--idempotency-key", "verb-1", "--placement-id", "qa_verb_agent_2")
 
     assert code == 0
     assert data["ok"] is True
-    assert data["persona_instance_id"] == "personainst_qa_verb"
+    assert data["persona_instance_id"] == "personainst_qa_verb_agent_2"
 
     # The witness the two-call door cannot produce.
     actors = _actors()
     assert data["actor_key"] in actors
-    assert actors[data["actor_key"]].persona_instance_id == "personainst_qa_verb"
+    assert actors[data["actor_key"]].persona_instance_id == "personainst_qa_verb_agent_2"
     assert [float(v) for v in actors[data["actor_key"]].items[0].position] == [3.5, -1.25]
 
     # And the roster half is durable on disk, not merely reported.
-    assert paths.persona_instance_path("personainst_qa_verb").exists()
+    assert paths.persona_instance_path("personainst_qa_verb_agent_2").exists()
 
     # The shared naming rule rode along: "Qa" here would mean the CLI lane went
     # to the store template instead of the persona's configured name.
@@ -155,7 +155,7 @@ def test_the_verb_returns_the_same_dict_the_rpc_returns(
 
     from agent_runtime import serve_rpc
 
-    _, cli = _create(capsys, "--idempotency-key", "verb-parity-cli", "--placement-id", "qa_p_cli")
+    _, cli = _create(capsys, "--idempotency-key", "verb-parity-cli", "--placement-id", "qa_p_cli_agent_2")
 
     rpc = serve_rpc.handle_request(
         {
@@ -167,7 +167,7 @@ def test_the_verb_returns_the_same_dict_the_rpc_returns(
                 "workspace_id": WORKSPACE,
                 "position": [3.5, -1.25],
                 "idempotency_key": "verb-parity-rpc",
-                "placement_id": "qa_p_rpc",
+                "placement_id": "qa_p_rpc_agent_2",
             },
         }
     )["result"]
@@ -191,10 +191,10 @@ def test_rerunning_with_the_same_idempotency_key_replays_and_writes_nothing(
     cannot re-write the actor without moving the revision.
     """
 
-    _, first = _create(capsys, "--idempotency-key", "verb-same", "--placement-id", "qa_same")
+    _, first = _create(capsys, "--idempotency-key", "verb-same", "--placement-id", "qa_same_agent_2")
     assert first["idempotent_replay"] is False
 
-    code, second = _create(capsys, "--idempotency-key", "verb-same", "--placement-id", "qa_same")
+    code, second = _create(capsys, "--idempotency-key", "verb-same", "--placement-id", "qa_same_agent_2")
 
     assert code == 0
     assert second["idempotent_replay"] is True
@@ -209,8 +209,8 @@ def test_an_omitted_idempotency_key_makes_every_run_a_new_gesture(
     across runs would turn the operator's second create into a silent replay of
     the first — the surprise this default exists to avoid."""
 
-    _, first = _create(capsys, "--placement-id", "qa_gesture_one")
-    _, second = _create(capsys, "--placement-id", "qa_gesture_two")
+    _, first = _create(capsys, "--placement-id", "qa_gesture_one_agent_2")
+    _, second = _create(capsys, "--placement-id", "qa_gesture_two_agent_2")
 
     assert first["idempotent_replay"] is False
     assert second["idempotent_replay"] is False
@@ -233,7 +233,7 @@ def test_an_unknown_persona_refuses_before_any_write(
     before = set(_actors())
 
     code, data = _create(
-        capsys, "--idempotency-key", "verb-bogus", "--placement-id", "qa_agent_x",
+        capsys, "--idempotency-key", "verb-bogus", "--placement-id", "qa_agent_x_agent_2",
         persona="qa_agent",
     )
 
@@ -242,7 +242,7 @@ def test_an_unknown_persona_refuses_before_any_write(
     assert data["reason"] == "persona_not_found"
     assert "harness agent list" in data["error"]
 
-    assert not paths.persona_instance_path("personainst_qa_agent_x").exists()
+    assert not paths.persona_instance_path("personainst_qa_agent_x_agent_2").exists()
     digest = hashlib.sha256("verb-bogus".encode("utf-8")).hexdigest()
     assert not paths.agent_create_reservation_path(digest).exists()
     assert set(_actors()) == before
@@ -304,7 +304,7 @@ def test_an_unreadable_roster_is_a_typed_refusal_not_a_traceback(
     before = set(_actors())
 
     code, data = _create(
-        capsys, "--idempotency-key", "verb-roster-fault", "--placement-id", "qa_fault"
+        capsys, "--idempotency-key", "verb-roster-fault", "--placement-id", "qa_fault_agent_2"
     )
     captured = capsys.readouterr()
 
@@ -321,7 +321,7 @@ def test_an_unreadable_roster_is_a_typed_refusal_not_a_traceback(
     assert "Traceback" not in captured.out
 
     # A refusal before the service is still a refusal that wrote nothing.
-    assert not paths.persona_instance_path("personainst_qa_fault").exists()
+    assert not paths.persona_instance_path("personainst_qa_fault_agent_2").exists()
     digest = hashlib.sha256("verb-roster-fault".encode("utf-8")).hexdigest()
     assert not paths.agent_create_reservation_path(digest).exists()
     assert set(_actors()) == before
@@ -344,7 +344,7 @@ def test_both_create_lanes_name_the_same_roster_fault(
     from agent_runtime import serve_rpc
 
     _, cli = _create(
-        capsys, "--idempotency-key", "verb-parity-fault", "--placement-id", "qa_pf_cli"
+        capsys, "--idempotency-key", "verb-parity-fault", "--placement-id", "qa_pf_cli_agent_2"
     )
     rpc = serve_rpc.handle_request(
         {
@@ -356,7 +356,7 @@ def test_both_create_lanes_name_the_same_roster_fault(
                 "workspace_id": WORKSPACE,
                 "position": [3.5, -1.25],
                 "idempotency_key": "rpc-parity-fault",
-                "placement_id": "qa_pf_rpc",
+                "placement_id": "qa_pf_rpc_agent_2",
             },
         }
     )["error"]
@@ -411,12 +411,12 @@ def test_a_roster_read_that_faults_once_refuses_instead_of_renaming_the_agent(
     monkeypatch.setattr(AgentStore, "list_all", _fault_once)
 
     code, data = _create(
-        capsys, "--idempotency-key", "verb-transient", "--placement-id", "qa_transient"
+        capsys, "--idempotency-key", "verb-transient", "--placement-id", "qa_transient_agent_2"
     )
 
     assert code == 2
     assert data["reason"] == "persona_roster_unavailable"
-    assert not paths.persona_instance_path("personainst_qa_transient").exists()
+    assert not paths.persona_instance_path("personainst_qa_transient_agent_2").exists()
     # The second read really would have succeeded — otherwise this test would
     # pass against a permanently broken roster and prove nothing about the
     # one-shot case.
@@ -453,7 +453,7 @@ def test_the_verb_refuses_a_missing_workspace_before_any_write(qa_persona, capsy
     from agent_runtime.office_store import OfficeStore
 
     code, data = _create(
-        capsys, "--idempotency-key", "verb-nows", "--placement-id", "qa_nows",
+        capsys, "--idempotency-key", "verb-nows", "--placement-id", "qa_nows_agent_2",
         workspace="ws_never_authored",
     )
 
@@ -469,11 +469,11 @@ def test_the_verb_refuses_a_missing_workspace_before_any_write(qa_persona, capsy
     seed_workspace_record("ws_never_authored")
     OfficeStore().ensure_surface("ws_never_authored", created_by="seed")
     code, retry = _create(
-        capsys, "--idempotency-key", "verb-nows", "--placement-id", "qa_nows",
+        capsys, "--idempotency-key", "verb-nows", "--placement-id", "qa_nows_agent_2",
         workspace="ws_never_authored",
     )
     assert code == 0
-    assert retry["persona_instance_id"] == "personainst_qa_nows"
+    assert retry["persona_instance_id"] == "personainst_qa_nows_agent_2"
 
 
 def test_a_malformed_position_is_one_refusal_not_an_argparse_traceback(
@@ -506,12 +506,12 @@ def test_the_human_output_path_prints_rather_than_raising(
             "--persona", "qa",
             "--workspace", WORKSPACE,
             "--pos", "1", "2",
-            "--placement-id", "qa_human",
+            "--placement-id", "qa_human_agent_2",
         ]
     )
     out = capsys.readouterr().out
     assert code == 0
-    assert "personainst_qa_human" in out
+    assert "personainst_qa_human_agent_2" in out
 
     # And the refusal's human path, which formats a different dict.
     code = _dispatch(
@@ -579,7 +579,7 @@ def test_a_chat_store_refusal_backs_the_verbs_wrote_nothing_sentence(
     )
 
     code, data = _create(
-        capsys, "--idempotency-key", "verb-nostore", "--placement-id", "qa_nostore"
+        capsys, "--idempotency-key", "verb-nostore", "--placement-id", "qa_nostore_agent_2"
     )
 
     assert code == 1  # -32000
@@ -631,7 +631,7 @@ def test_the_verbs_rolled_back_sentence_is_answerable_both_ways(
             lambda digest: (_ for _ in ()).throw(HarnessLockUnavailable("busy")),
         )
         code, data = _create(
-            capsys, "--idempotency-key", "verb-lock", "--placement-id", "qa_lock"
+            capsys, "--idempotency-key", "verb-lock", "--placement-id", "qa_lock_agent_2"
         )
         assert code == 4  # 4090
     else:
@@ -640,7 +640,7 @@ def test_the_verbs_rolled_back_sentence_is_answerable_both_ways(
             "--idempotency-key",
             "verb-nows",
             "--placement-id",
-            "qa_nows",
+            "qa_nows_agent_2",
             workspace="ws_never_authored",
         )
         assert code == 3  # 4001
@@ -687,7 +687,7 @@ def test_the_verb_places_without_pos_and_the_agent_is_on_the_policys_slot(
     from agent_runtime.office_layout_policy import slot_at
 
     code, data = _create_unaimed(
-        capsys, "--idempotency-key", "verb-unaimed", "--placement-id", "qa_cli_unaimed"
+        capsys, "--idempotency-key", "verb-unaimed", "--placement-id", "qa_cli_unaimed_agent_2"
     )
 
     assert code == 0, data
@@ -701,7 +701,7 @@ def test_the_verb_still_honours_pos_when_it_is_given(
     qa_persona, seeded_workspace, capsys
 ):
     code, data = _create(
-        capsys, "--idempotency-key", "verb-aimed", "--placement-id", "qa_cli_aimed"
+        capsys, "--idempotency-key", "verb-aimed", "--placement-id", "qa_cli_aimed_agent_2"
     )
 
     assert code == 0, data
@@ -721,7 +721,7 @@ def test_the_json_ack_carries_the_actor_row_the_store_holds(
     from agent_runtime.office_store import OfficeStore
 
     code, data = _create_unaimed(
-        capsys, "--idempotency-key", "verb-row", "--placement-id", "qa_cli_row"
+        capsys, "--idempotency-key", "verb-row", "--placement-id", "qa_cli_row_agent_2"
     )
 
     assert code == 0, data
@@ -803,7 +803,7 @@ def test_the_skill_flag_and_the_rpc_param_render_the_same_request(
     _, cli = _create(
         capsys,
         "--idempotency-key", "verb-skills-cli",
-        "--placement-id", "qa_sk_cli",
+        "--placement-id", "qa_sk_cli_agent_2",
         "--skill", "harness-qa-verdict",
     )
     rpc = serve_rpc.handle_request(
@@ -816,7 +816,7 @@ def test_the_skill_flag_and_the_rpc_param_render_the_same_request(
                 "workspace_id": WORKSPACE,
                 "position": [3.5, -1.25],
                 "idempotency_key": "verb-skills-rpc",
-                "placement_id": "qa_sk_rpc",
+                "placement_id": "qa_sk_rpc_agent_2",
                 "skills": ["harness-qa-verdict"],
             },
         }
@@ -824,8 +824,8 @@ def test_the_skill_flag_and_the_rpc_param_render_the_same_request(
 
     assert cli["skills"]["assigned"] == ["harness-qa-verdict"]
     assert cli["skills"]["assigned"] == rpc["skills"]["assigned"]
-    assert _overrides("personainst_qa_sk_cli") == ["harness-qa-verdict"]
-    assert _overrides("personainst_qa_sk_rpc") == ["harness-qa-verdict"]
+    assert _overrides("personainst_qa_sk_cli_agent_2") == ["harness-qa-verdict"]
+    assert _overrides("personainst_qa_sk_rpc_agent_2") == ["harness-qa-verdict"]
     # The shape too, not just the assignment: one ack, two printers. By
     # EQUALITY on the key set, so a new key is a deliberate edit here rather
     # than a silent wire change — which is what caught S4b adding inherited.
@@ -853,13 +853,13 @@ def test_the_flag_is_repeatable_and_keeps_the_operators_order(
     _, data = _create(
         capsys,
         "--idempotency-key", "verb-skills-two",
-        "--placement-id", "qa_sk_two",
+        "--placement-id", "qa_sk_two_agent_2",
         "--skill", "harness-continuity",
         "--skill", "harness-qa-verdict",
     )
 
     assert data["ok"] is True
-    assert _overrides("personainst_qa_sk_two") == [
+    assert _overrides("personainst_qa_sk_two_agent_2") == [
         "harness-continuity",
         "harness-qa-verdict",
     ]
@@ -881,7 +881,7 @@ def test_an_omitted_skill_flag_leaves_the_instance_inheriting(
     code, data = _create(
         capsys,
         "--idempotency-key", "verb-skills-none",
-        "--placement-id", "qa_sk_none",
+        "--placement-id", "qa_sk_none_agent_2",
     )
 
     assert code == 0
@@ -892,7 +892,7 @@ def test_an_omitted_skill_flag_leaves_the_instance_inheriting(
         # having been overridden with nothing.
         "inherited": True,
     }
-    assert _overrides("personainst_qa_sk_none") is None
+    assert _overrides("personainst_qa_sk_none_agent_2") is None
 
 
 def test_an_unresolvable_skill_is_one_typed_refusal_and_the_agent_stays(
@@ -911,7 +911,7 @@ def test_an_unresolvable_skill_is_one_typed_refusal_and_the_agent_stays(
     code, data = _create(
         capsys,
         "--idempotency-key", "verb-skills-bad",
-        "--placement-id", "qa_sk_bad",
+        "--placement-id", "qa_sk_bad_agent_2",
         "--skill", "not-a-skill-at-all",
     )
 
@@ -922,12 +922,12 @@ def test_an_unresolvable_skill_is_one_typed_refusal_and_the_agent_stays(
     assert data["status"] == "missing"
     assert data["phase"] == "skills"
     assert data["rolled_back"] is False
-    assert data["persona_instance_id"] == "personainst_qa_sk_bad"
+    assert data["persona_instance_id"] == "personainst_qa_sk_bad_agent_2"
 
     # The claim, off the stores.
-    assert paths.persona_instance_path("personainst_qa_sk_bad").exists()
+    assert paths.persona_instance_path("personainst_qa_sk_bad_agent_2").exists()
     assert any(
-        actor.persona_instance_id == "personainst_qa_sk_bad"
+        actor.persona_instance_id == "personainst_qa_sk_bad_agent_2"
         for actor in _actors().values()
     )
 
