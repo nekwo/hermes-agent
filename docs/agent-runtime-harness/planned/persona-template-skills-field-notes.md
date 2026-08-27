@@ -1,10 +1,23 @@
-# Field notes — persona-template skills survey (hermes half)
+# Field notes — persona-template skills (hermes half)
 
-Running record of the 2026-08-27 planning survey behind
-[persona-template-skills.md](persona-template-skills.md). Survey only — no
-production line was changed in this repo by this session. Hermes HEAD moved
-under the survey from `5f33b5add0` to `add7edd584` (gateway S1a,
-`serve_gateway_auth.py` — no overlap with this lane).
+> **SHIPPED 2026-08-27 — this is a build record, not a design, and it is not
+> authority.** The plan these notes were written under
+> (`planned/persona-template-skills.md`) is DELETED, per the index rule
+> ([00-index.md](../00-index.md) § planned/); recover it with
+> `git log --diff-filter=D --oneline -- docs/agent-runtime-harness/planned/persona-template-skills.md`
+> (which returns `cf69a0d842`, another session's commit — see the S5 entry).
+> The shipped truth lives in
+> [06 — Office and board](../06-office-and-board.md) § "Two tiers write skills,
+> and only the template one reaches the next placement", and the launcher half
+> in `EterniaLauncher/docs/mission_control/06-board-and-aux-surfaces.md`
+> § "Skills surfaces". Where these notes and those docs disagree, the docs win —
+> what survives here is the evidence (measurements, killing-mutation reds, the
+> live probe) that canon states the conclusion of rather than the proof.
+
+Running record of the 2026-08-27 planning survey and build passes. Survey half
+first — no production line was changed in this repo by the surveying session.
+Hermes HEAD moved under the survey from `5f33b5add0` to `add7edd584` (gateway
+S1a, `serve_gateway_auth.py` — no overlap with this lane).
 
 ## What was measured, in the order it changed the plan
 
@@ -304,3 +317,119 @@ un-unified here.
   if the house rule is "every supersede clock is in the ledger", it is a
   one-line follow-up.
 - No launcher work was touched; S3–S5 are somebody else's slices.
+
+---
+
+# Build pass — S1 follow-up (root observability), 2026-08-27
+
+Landed `9c79143346`, and it landed with NO entry here — recorded now by S5
+rather than left as a hole in the running record. That is the first finding: the
+field-notes lane records slices, and a follow-up commit is a slice.
+
+`tests/hermes_cli/test_harness_json_root_observability.py` reddened on
+`_cmd_persona_set_skills` the moment S1 landed — a JSON-emitting harness verb
+that states no runtime root. **Found by another session's whole-repo run, not by
+the S1 verification**, which ran the persona and create/retire suites and never
+reached a cross-cutting gate. The miss is the useful part: a new JSON verb needs
+the whole-repo gates, not just its own neighbourhood.
+
+The tempting fix was the wrong one. `persona set-model` — the verb this one is
+deliberately twinned with — is named in that test's LEDGER, so copying the
+precedent would have meant one more name beside it. But the LEDGER maps every
+entry to `_BACKLOG_REASON`: a debt list, not a justification, and the gate's
+purpose is to stop NEW verbs shipping into it. `agent create` / `agent retire`
+attach the block instead, and so does this verb now — all four payload sites,
+refusals included, for the reason those two record: a `persona_not_found`
+answered out of the WRONG root refuses exactly as plausibly as one answered out
+of the right one, and this verb writes the template every later placement
+inherits.
+
+Gates: root-observability 5, set-skills 18, both green; the three S1 mutation
+claims re-checked and unaffected.
+
+---
+
+# Build pass — S5 (the docs fold), 2026-08-27
+
+Docs only; no production line and no test changed, in either repo.
+
+## What moved
+
+- Canon [06 — Office and board](../06-office-and-board.md) gained
+  § "Two tiers write skills, and only the template one reaches the next
+  placement", under `## The write verbs` and immediately after the placement
+  verb's own skills prose: the two-tier write, the store-first measurement, live
+  inheritance, the refusal matrix, the warn-not-refuse rule for unresolvable
+  ids, root observability, the launcher half, and the gap this did NOT close.
+  The D10(ii) correction sub-bullet (store wins over config, so the write target
+  is the store row) was FOLDED INTO the shipped prose rather than deleted with
+  the row — it is load-bearing: it is the reason Option A was taken and the
+  reason a config write would be a write nobody reads.
+- The `## Open rows` D10(ii) entry closed as **REOPENED and SHIPPED**, naming
+  all five shas. Its previous spelling was also malformed, not merely stale: the
+  same-day correction commit `f784f0f996` left the plan pointer written twice,
+  the second copy dedented out of its own sub-bullet. Fixed by the replacement.
+- Anchors in the new section are SYMBOLS only (`_cmd_persona_set_skills`,
+  `_validated_set_skills_request`, `_unresolvable_skill_ids`,
+  `_template_write_store_target`, `config.ensure_persisted_personas`,
+  `models.apply_instance_model_overrides`,
+  `AgentPersona.skills_override_issued_at`). This doc's own RPC handler table
+  already records what `file:line` citations cost here.
+
+## The plan file — deleted, and why the fresher precedent was not followed
+
+DELETED, per [00-index.md](../00-index.md) § planned/: "when a plan ships, its
+file's content moves into the owning domain doc as verified truth and the
+planned file is deleted in the same commit". The plan's own §6 offered the
+alternative — `planned/authorization-chokepoint.md` survived its landing with a
+receipt table — and said either way the canonical home is canon 06. The index
+rule was followed rather than the fresher precedent, because a shipped design
+left in `planned/` is a second authority free to disagree with the doc, and this
+one would: it carries recommendations the build deliberately diverged from (the
+`--skill "   "` refusal it never specified, helpers extracted rather than
+re-spelled, and an S2 test shape rewritten when `agent create --skill` turned
+out to hard-gate on resolution).
+
+These field notes STAY. They are a running record, not a design — the evidence
+canon states the conclusion of, and the launcher queue's own "Closing a row"
+rule ("delete it; the evidence note keeps the history") depends on an evidence
+note existing. The header now says SHIPPED, points at canon in both repos, and
+carries the `--diff-filter=D` recipe for reading the deleted plan back.
+
+### …and the deletion landed in somebody else's commit
+
+`git rm` was run on the plan file EARLY in this slice, while the prose was still
+being written. Between then and the commit, the gateway session ran a plain
+`git commit` in this repo — which commits the whole index — and swept the staged
+deletion into `cf69a0d842` ("the receipt claimed it never carried the id…"), a
+commit about `chat_turn_reservations.py` whose message says nothing about a
+664-line doc removal. Not rewritten: nothing was pushed, but another session is
+live in this checkout and rewriting shared history under it is worse than a
+misfiled deletion.
+
+**The lesson is narrower than "don't `git add -A`", which this session already
+obeyed.** The index is SHARED between concurrent sessions in one checkout, so
+anything staged is exposed to the next `git commit` any of them runs, whatever
+paths that session meant. Stage immediately before committing, never at the
+moment the change is made. Consequence taken here: canon 06 and this header name
+no sha for the deletion and hand the reader `--diff-filter=D` instead — the
+recipe survives the misfiling, a quoted sha would have been a lie by the time it
+was written.
+
+## What the landing got wrong, found while folding
+
+- **The S1 follow-up shipped with no field note** (entry above). The running
+  record had a hole where a slice was.
+- **The plan file's deletion landed in another session's commit** (above) —
+  a process finding about the shared index, not about this lane.
+- **The D10(ii) row was malformed**, described above — a duplicated pointer and
+  a broken list level, which is the kind of thing that survives because nobody
+  re-reads a row they only appended to.
+- **`skills_override_issued_at` is not in `PERSONA_IDENTITY_FIELDS`** while
+  `model_override_issued_at` is. S2's notes flagged it for an operator's eye;
+  re-read at S5 and left alone, because the clock only ever advances on a write
+  that also changes `skills`, and `skills` IS in the tuple — so listing it would
+  rotate no cache key that is not already rotating. A one-line follow-up if the
+  house rule turns out to be "every supersede clock is in the ledger".
+- Nothing above went into canon. Canon 06 states what the verbs DO; this is
+  build history and belongs here.

@@ -303,6 +303,110 @@ hash-equal says so. `skills_ms` is what makes the cold-machine `copytree` billed
 rather than hidden, and `total_ms` is re-stamped after the phase so it is not
 short by exactly that cost.
 
+### Two tiers write skills, and only the template one reaches the next placement
+
+A skills write lands at one of two tiers, and until 2026-08-27 only the narrow
+one had a door. `harness persona instance update-profile --skill` — the launcher
+Skills Context sheet's write, capability `persona.instance.update_profile` —
+writes ONE agent's `skill_overrides` through
+`PersonaInstanceStore.update_profile`. A placement made LATER inherits
+`persona.skills`, the template, and no operator verb wrote that. So "set the
+skills, then place a new agent from that persona" was broken by construction,
+not by a bug — D10(ii). `harness persona set-skills <persona_id>
+[--skill]... [--clear-skills] [--issued-at] [--requested-by] [--json]`
+(`_cmd_persona_set_skills`) is the template-tier door that closes it: hermes
+`9cfb63769e` + `f515d6bbfe` + `9c79143346`, launcher `008f7be3c` + `4d3d30c3f`.
+
+**The write target is the STORE row, and that is a measurement, not a
+preference.** `config.ensure_persisted_personas` merges `{**catalog, **stored}`
+and a store row wins **wholesale** over the config record of the same id — so
+for every persona in live use (all five rows on the default root carry populated
+`skills`) the config `skills:` / `skills_remove:` merge is already dead, and a
+config write would be a write the runtime never reads. The verb therefore does
+exactly what `harness persona set-model` does one field over: `AgentStore.save`
+on the row, ack `persistence: "agent_store"`, `persona.updated` emitted at the
+store chokepoint (no new event type), and a config-only catalog id REFUSED
+`persona_not_persisted` rather than promoted — minting a row to move one field
+would freeze every OTHER field of that persona at its write-time value. The two
+verbs now share the CODE and not merely the shape: `_template_write_store_target`
+(the `profile:<name>` resolution plus both refusals) and `_parse_issued_at_arg`
+were extracted and `set-model` rewritten onto them, so a second spelling cannot
+drift from the first. The supersede clock is its own field,
+`AgentPersona.skills_override_issued_at`, deliberately not shared with
+`model_override_issued_at`: a model write must not supersede a skills write.
+
+**Inheritance is LIVE, so a template write also moves agents that already
+exist.** `models.apply_instance_model_overrides` falls back to
+`list(persona.skills)` at EVERY resolution for an instance whose
+`skill_overrides` is `None` — it is not a copy taken at placement. The ack's
+`next_expected` says both halves out loud (null-override instances follow the
+new set on their next resolution; instances carrying their own keep them),
+because promising only the future would be disproved by the first idle agent in
+the roster — the same class of lie D10(ii) was filed for. Proven end to end in
+`f515d6bbfe`, through the real argparse tree into `perform_agent_create`: a new
+placement with `--skill` absent answers `inherited: true`, keeps
+`skill_overrides = None`, and resolves the just-written set; a pre-existing
+non-overridden instance follows it; an instance with its own overrides does not;
+and both `ensure_persisted_personas` and `snapshot._agent_summary` report the
+write with zero read-side changes.
+
+**Absent is NEVER a write at this tier.** `--skill` keeps the tree's
+`action="append", default=None` spelling, but the template is the ROOT of the
+cascade — there is nothing for an omitted flag to inherit from — so
+`_validated_set_skills_request` refuses rather than writing `[]`. That collapse
+already shipped once at the instance tier (`list(args.skills or [])`, THE BUG
+THIS REPLACES) and cleared every skill of every renamed agent; the refusal is
+what keeps a transport-mangled argv from doing it to a template.
+
+| argv | answer |
+|---|---|
+| `--skill a --skill b` | REPLACE the template set with `[a, b]` (full-set write, token-safety + dedupe + cap 40 through the instance tier's own `_safe_skill_overrides`) |
+| `--clear-skills` | the set becomes `[]`, `cleared: true` — every future inheriting placement starts with none |
+| neither | `nothing_to_write`, exit 2, row untouched |
+| both | `conflicting_args`, exit 2 |
+| `--skill "   "` | `invalid_value` — a present flag whose every value token safety drops is the same empty set the absent branch just refused to infer, so it gets the same answer |
+| config-only persona id | `persona_not_persisted`; an unknown id answers `persona_not_found` first |
+| stale `--issued-at` | `status: "superseded"`, no write, no event |
+
+Unresolvable skill ids are **warned, not refused** — `unresolved: [...]` on the
+ack (`_unresolvable_skill_ids`, which answers "nothing unresolved" on a resolver
+fault so a resolver problem cannot fail a write that already landed). Hard-gating
+here would make a realm-synced persona uneditable on any machine missing one of
+its skills; placement-time strictness already lives in the create verb's skills
+phase, and readiness carries the standing truth. Every payload site including the
+refusals goes through `attach_root_observability` (`9c79143346`): a
+`persona_not_found` answered out of the WRONG runtime root refuses exactly as
+plausibly as one out of the right one, and this verb writes the template every
+later placement inherits. `persona set-model` is in
+`test_harness_json_root_observability`'s LEDGER, but that LEDGER maps to
+`_BACKLOG_REASON` — a debt list, not a justification — so a NEW verb attaches
+rather than joining it.
+
+**The launcher half puts the choice on screen at the moment of the write.**
+Capability `persona.set_skills` is `persona.set_model`'s twin in
+`EterniaLauncher/lib/features/mission_control/data/harness_capability_registry.dart`
+(targetKind `persona`, gateway exposure, auto-stamped `--issued-at`), and the
+Skills Context sheet gained an APPLY TO control — "This agent" vs "<Persona>
+default" — **defaulting to this agent**, so an operator who never reads the
+control keeps the narrow write the sheet has always made. The template write
+goes through the SAME chokepoint as the instance write
+(`MissionAgentSkillWrite.replaceTemplate`), proving its baseline against a
+DIFFERENT fact: the snapshot roster row's `MissionPersonaRuntime.skills` with its
+own `skillsSourced` flag, which defaults to false, so a surface that never read
+the template refuses instead of writing over a set nobody saw. The launcher canon
+half is `EterniaLauncher/docs/mission_control/06-board-and-aux-surfaces.md`
+§ "Skills surfaces".
+
+**What this did NOT close: there is no instance re-inherit door.** Once an
+instance has `skill_overrides` set, nothing returns it to `None` —
+`--clear-skills` at the instance tier writes `[]`, "explicitly none", which is a
+different agent from "follow the template again". So "fix the template and let
+existing agents follow" is impossible for any agent the panel has ever touched,
+and the more the template door is used the more agents that door has pinned.
+Deliberately out of scope here (it changes an existing verb's semantics surface —
+`update-profile` would need an `--inherit-skills` arm and the capability an arg)
+and it needs its own ruling; filed as a launcher queue row, not as a silence.
+
 ### The inverse — one call takes an agent off the level, and says what left
 
 `runtime.agent.retire` / `harness agent retire <persona_instance_id>` are two
@@ -769,25 +873,27 @@ omit it — the office's revision guard lives on the RPC lane only.
     `position` (the server decides), and the server's answer is now the world
     origin with a full-grid-step climb on collision. Both repos and the
     byte-pinned `cases.json` moved together; see the placement section above.
-  - **D10(ii) — REOPENED 2026-08-27, and it is a real gap, not a scope call.**
-    The operator's expectation is that skills set on the context panel apply to
-    the next agent placed from that persona. They do not: the panel writes
-    `--skill` to the INSTANCE (`persona.instance.update_profile` →
-    `skill_overrides`), while a new placement inherits `persona.skills` — the
-    template — read LIVE (`models.py::apply_instance_model_overrides`). **No
-    operator verb and no launcher capability writes `persona.skills`.**
-    "Out of scope" was the wrong call.
-    - CORRECTED 2026-08-27: an earlier spelling of this row said template skills
-      "come from config". They do not, for any persona in live use.
-      `config.ensure_persisted_personas` merges `{**catalog, **stored}` — the
-      STORE row wins wholesale — and every live persona is a store row with
-      populated `skills`, so the config `skills` / `skills_remove` merge is dead
-      for them. The write target is the store row, which is what
-      `harness persona set-model` already does for a different field.
-      Plan: [planned/persona-template-skills.md](planned/persona-template-skills.md). Staged
-    design (with two corrections to this row's storage claim — the live
-    personas are store rows, and the store shadows config):
-    [planned/persona-template-skills.md](planned/persona-template-skills.md).
+  - **D10(ii) — REOPENED and SHIPPED 2026-08-27.** "Skills set on the context
+    panel do not reach the next agent placed from that persona" was closed once
+    as out of scope; that was the wrong call, and the gap was real. The template
+    tier now has an operator door — `harness persona set-skills` and launcher
+    capability `persona.set_skills`, with the sheet's APPLY TO control defaulting
+    to this agent — writing the STORE row, because
+    `config.ensure_persisted_personas` merges `{**catalog, **stored}` with the
+    store winning wholesale and every live persona is a store row, so the config
+    `skills` / `skills_remove` merge is dead for them. Receipts: hermes
+    `9cfb63769e` (verb + `skills_override_issued_at`), `f515d6bbfe` (the
+    inheritance proof), `9c79143346` (root observability on all four payload
+    sites); launcher `008f7be3c` (capability + the post-capture roster the
+    byte-equal gate was keying on by accident), `4d3d30c3f` (the sheet, the
+    scope control, the stale-docstring sweep). Its plan file is DELETED, per the
+    index rule ([00-index.md](00-index.md) § planned/) —
+    `git log --diff-filter=D --oneline -- docs/agent-runtime-harness/planned/persona-template-skills.md`
+    is how you get the sha and the file back. **One named gap stays open and is
+    not this row:** there is no instance re-inherit door — instance
+    `--clear-skills` writes `[]`, never `None` — so an agent the panel has ever
+    touched can never be handed back to the template. It needs its own ruling
+    and is filed in `EterniaLauncher/Launcher_Brain/20 — Active Initiatives/mission-control-queue.md`.
   - **Owner decisions still standing on their defaults**, none blocking: D10(iv) `console`
     scope for both methods is no longer prose — it is declared on `rpc.tiers`
     and evaluated at the front door (A1/A3 above); WHICH tiers exist beyond
