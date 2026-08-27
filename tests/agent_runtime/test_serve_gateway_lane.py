@@ -651,3 +651,177 @@ def test_an_attached_device_is_named_on_the_connections_block(gateway_on):
     # …and the loopback lane's own rows are unchanged in shape: no device keys
     # where there is no device.
     assert all("device_id" not in row for row in frame["connections"])
+
+
+# ── the ceremony's second half: a code becomes a device, over the wire ──────
+
+
+def test_a_pairing_code_becomes_a_credential_in_one_round_trip(gateway_on):
+    """Without this the device tier is a tier no device can ever enter: the
+    operator prints eight characters and there is nowhere to spend them."""
+
+    code = mint_pairing_code(_store_root(), tier=TIER_READ, name="the phone")
+    assert isinstance(code, PairingCode)
+
+    with running_serve() as handle:
+        connection = ServeSocketClient(
+            "127.0.0.1",
+            handle.gateway_port,
+            timeout_seconds=WAIT,
+            cert_fingerprint=handle.fingerprint,
+        )
+        connection.connect()
+        try:
+            reply = connection.pair_hello(pairing_code=code.code, client="the phone")
+        finally:
+            connection.close()
+
+        assert reply["event"] == "hello_ok"
+        paired = reply["paired"]
+        assert paired["tier"] == TIER_READ
+        assert len(paired["device_token"]) == 64
+        credential = DeviceCredential(
+            device_id=paired["device_id"],
+            token=paired["device_token"],
+            tier=paired["tier"],
+            name="the phone",
+        )
+        # …and the credential works on the NEXT connection, which is the only
+        # thing that proves the token is real rather than decorative.
+        with device_client(handle, credential) as (_c, second):
+            assert second["event"] == "hello_ok"
+            # The secret rides exactly ONE frame. A second handshake with the
+            # same device carries no `paired` block, because there is nothing
+            # left on the connection to carry — the slot is read-and-cleared.
+            assert "paired" not in second
+
+
+def test_a_code_is_one_shot_and_the_second_attempt_is_refused(gateway_on):
+    code = mint_pairing_code(_store_root(), tier=TIER_CONSOLE)
+    assert isinstance(code, PairingCode)
+
+    with running_serve() as handle:
+        replies = []
+        for _ in range(2):
+            connection = ServeSocketClient(
+                "127.0.0.1",
+                handle.gateway_port,
+                timeout_seconds=WAIT,
+                cert_fingerprint=handle.fingerprint,
+            )
+            connection.connect()
+            try:
+                replies.append(
+                    connection.pair_hello(pairing_code=code.code, client="phone")
+                )
+            finally:
+                connection.close()
+
+    assert replies[0]["event"] == "hello_ok"
+    assert replies[1]["event"] == "hello_rejected"
+    assert replies[1]["reason"] == "bad_proof"
+
+
+def test_a_wrong_code_is_refused_and_looks_like_every_other_credential_failure(
+    gateway_on,
+):
+    with running_serve() as handle:
+        connection = ServeSocketClient(
+            "127.0.0.1",
+            handle.gateway_port,
+            timeout_seconds=WAIT,
+            cert_fingerprint=handle.fingerprint,
+        )
+        connection.connect()
+        try:
+            reply = connection.pair_hello(pairing_code="ZZZZZZZZ", client="phone")
+        finally:
+            connection.close()
+
+    assert reply["event"] == "hello_rejected"
+    assert reply["reason"] == "bad_proof"
+
+
+def test_a_hello_carrying_both_a_code_and_a_device_id_is_refused(gateway_on):
+    """A handshake with two credentials in it is where a downgrade lives: the
+    server must not get to pick which one it liked."""
+
+    credential = pair_device(tier=TIER_READ)
+    code = mint_pairing_code(_store_root(), tier=TIER_CONSOLE)
+    assert isinstance(code, PairingCode)
+
+    with running_serve() as handle:
+        connection = ServeSocketClient(
+            "127.0.0.1",
+            handle.gateway_port,
+            timeout_seconds=WAIT,
+            cert_fingerprint=handle.fingerprint,
+        )
+        connection.connect()
+        try:
+            connection.read_frame()
+            connection.send(
+                {
+                    "op": "hello",
+                    "client": "phone",
+                    "device_id": credential.device_id,
+                    "pairing_code": code.code,
+                }
+            )
+            reply = connection.read_frame()
+        finally:
+            connection.close()
+
+    assert reply["event"] == "hello_rejected"
+    assert reply["reason"] == "bad_proof"
+
+
+def test_the_pairing_code_is_not_a_credential_on_the_loopback_lane(gateway_on):
+    """The doors do not trade credentials in either direction: the root token is
+    refused on the gateway lane (above) and a pairing code is refused here."""
+
+    code = mint_pairing_code(_store_root(), tier=TIER_CONSOLE)
+    assert isinstance(code, PairingCode)
+
+    with running_serve() as handle:
+        connection = ServeSocketClient("127.0.0.1", handle.port, timeout_seconds=WAIT)
+        connection.connect()
+        try:
+            connection.read_frame()
+            connection.send({"op": "hello", "client": "x", "pairing_code": code.code})
+            reply = connection.read_frame()
+        finally:
+            connection.close()
+
+    assert reply["event"] == "hello_rejected"
+    assert reply["reason"] == "bad_proof"
+
+
+def test_a_paired_device_never_shows_its_credential_on_the_connections_block(
+    gateway_on,
+):
+    """The one-shot slot must not survive into anything an operator, a log, or
+    another attached client can read."""
+
+    code = mint_pairing_code(_store_root(), tier=TIER_CONSOLE)
+    assert isinstance(code, PairingCode)
+
+    with running_serve() as handle:
+        connection = ServeSocketClient(
+            "127.0.0.1",
+            handle.gateway_port,
+            timeout_seconds=WAIT,
+            cert_fingerprint=handle.fingerprint,
+        )
+        connection.connect()
+        try:
+            reply = connection.pair_hello(pairing_code=code.code, client="phone")
+            token = reply["paired"]["device_token"]
+            connection.send({"op": "connections"})
+            frame = connection.read_frame()
+        finally:
+            connection.close()
+
+    assert token not in json.dumps(frame)
+    assert code.code not in json.dumps(frame)
+    assert frame["gateway"]["connections"][0]["device_id"] == reply["paired"]["device_id"]

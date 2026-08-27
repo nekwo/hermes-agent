@@ -651,6 +651,17 @@ class HelloAuthOutcome:
     #: connection cannot be stamped with a device whose proof did not verify.
     device_id: str | None = None
     device_tier: str | None = None
+    #: A credential MINTED by this handshake — the pairing ceremony's second
+    #: half, and the only frame in this lane that ever carries a secret. It
+    #: exists because a code that cannot be redeemed by the party it was printed
+    #: for is half a ceremony: the operator runs `harness gateway pair`, reads
+    #: eight characters onto a phone, and the phone has to be able to turn them
+    #: into something durable over the link it just pinned.
+    #:
+    #: Handed to the ``hello_payload`` builder through a one-shot slot on the
+    #: connection and cleared there, so it lives for the microseconds between
+    #: the handshake and the reply and is never a field anything can read later.
+    issued_token: str | None = None
 
 
 # ── connections ──────────────────────────────────────────────────────────────
@@ -674,6 +685,12 @@ class SocketConnection:
     #: other. Set once, in ``_handshake``, after the proof verified.
     device_id: str | None = None
     device_tier: str | None = None
+    #: ONE-SHOT, and the only secret this dataclass ever holds. Set by
+    #: ``_handshake`` when a pairing code was redeemed, read and CLEARED by the
+    #: ``hello_payload`` builder on the very next statement. It is deliberately
+    #: absent from ``payload()`` — the block that renders a connection to an
+    #: operator, to a log, and to every other attached client.
+    pairing_token: str | None = None
     subscribed: bool = False
     frames_out: int = 0
     bytes_out: int = 0
@@ -1321,6 +1338,7 @@ class ServeSocketServer:
             return None
         connection.device_id = outcome.device_id
         connection.device_tier = outcome.device_tier
+        connection.pairing_token = outcome.issued_token
         self._rate_limiter.record_success()
         # Symmetry the first pass missed: a completed handshake proves the lane
         # is reachable and answering, so the SILENCE throttle has nothing left
@@ -1852,6 +1870,52 @@ class ServeSocketClient:
                 "proof": device_proof(
                     token, nonce, port=self._port, device_id=device_id
                 ),
+            }
+        )
+        return self.read_frame()
+
+    def pair_hello(
+        self,
+        *,
+        pairing_code: str,
+        client: str,
+        client_build: str | None = None,
+        expect_hello_contract: int | None = HELLO_CONTRACT_VERSION,
+    ) -> dict[str, Any] | None:
+        """Redeem a pairing code and become a device, in one round trip.
+
+        The only exchange in this lane where the client presents something it
+        was given out of band — eight characters off the operator's terminal —
+        and the only reply that carries a secret. A caller MUST store
+        ``hello_ok["paired"]["device_token"]``: the install keeps a digest of it
+        and cannot reissue it, so a client that drops the frame has paired a
+        device it can never be again.
+
+        No proof is computed and none is possible: the code IS the credential
+        for this one exchange. What protects it is the pinned TLS link it rides
+        (an impostor cannot receive it), its one-shot nature (redeemed, it is
+        deleted before the token is minted), and the store's lockout.
+        """
+
+        greeting = self.read_frame()
+        if not isinstance(greeting, dict) or greeting.get("event") != "server_hello":
+            raise ServeHelloProtocolError(
+                "the peer did not open with a server_hello challenge", frame=greeting
+            )
+        contract = greeting.get("hello_contract")
+        if expect_hello_contract is not None and contract != expect_hello_contract:
+            raise ServeHelloProtocolError(
+                f"unsupported hello_contract {contract!r} "
+                f"(this client speaks {expect_hello_contract})",
+                frame=greeting,
+            )
+        self.server_hello = greeting
+        self.send(
+            {
+                "op": "hello",
+                "client": client,
+                "client_build": client_build,
+                "pairing_code": str(pairing_code).strip().upper(),
             }
         )
         return self.read_frame()

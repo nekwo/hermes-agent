@@ -362,6 +362,30 @@ def ops_manifest(*, transport: str) -> dict[str, Any]:
     }
 
 
+def _pairing_block(connection: Any) -> dict[str, Any]:
+    """Pop the one-shot credential onto the greeting, or contribute nothing.
+
+    A function rather than an inline expression because the CLEAR has to be
+    unconditional and unmissable: a `getattr` that read the token without
+    clearing it would leave a secret on a long-lived object for the life of the
+    session, and the bug would be invisible until somebody logged a connection.
+    """
+
+    token = getattr(connection, "pairing_token", None)
+    if not token:
+        return {}
+    connection.pairing_token = None
+    return {
+        "paired": {
+            "device_id": connection.device_id,
+            "tier": connection.device_tier,
+            # Store it now — this is the only time it is ever sent, and the
+            # install itself keeps only a digest of it.
+            "device_token": token,
+        }
+    }
+
+
 def _is_device(connection: Any) -> bool:
     """Did this frame arrive on the gateway lane, from a paired device?
 
@@ -531,12 +555,57 @@ def _device_authenticator(store_root: Any):
     the SAME ``bad_proof`` rejection, so a peer that has proven nothing cannot
     enumerate which device ids exist by watching the reason change. The runtime's
     own log keeps the distinction; the wire does not.
+
+    **The other arm is the pairing ceremony's second half**, and it is here
+    rather than in a stage of its own because the alternative is shipping a
+    device tier no device can ever enter. A hello carrying ``pairing_code``
+    instead of ``device_id`` is a phone that has just been shown eight
+    characters on the operator's terminal; the store redeems them under all of
+    ``gateway/pairing.py``'s discipline (TTL, pending cap, lockout, constant-time
+    compare) and the connection is admitted as the device it just created, with
+    the minted token riding the ``hello_ok`` it was going to send anyway.
+
+    Three properties make that safe enough to do in one round trip. The link is
+    already TLS with a fingerprint the operator handed over out of band, so the
+    token is not readable and not deliverable to an impostor. The code is
+    one-shot — redeemed, it is deleted before the token is minted — so a replay
+    finds nothing. And a failed redemption collapses into the same ``bad_proof``
+    as every other credential failure and charges the same limiter, so the code
+    space cannot be ground down any faster than the device-id space can.
     """
 
-    from agent_runtime.serve_gateway_auth import note_device_seen, verify_device_proof
+    from agent_runtime.serve_gateway_auth import (
+        DeviceCredential,
+        note_device_seen,
+        redeem_pairing_code,
+        verify_device_proof,
+    )
     from agent_runtime.serve_socket import HelloAuthOutcome, REJECT_BAD_PROOF
 
     def _authenticate(message: dict[str, Any], nonce: str, port: int):
+        code = message.get("pairing_code")
+        if isinstance(code, str) and code.strip():
+            # A device NAMED in the same frame as a code is a client that has
+            # not decided what it is. Refused rather than resolved to either
+            # one: a handshake with two credentials in it is exactly where a
+            # downgrade lives.
+            if message.get("device_id"):
+                return HelloAuthOutcome(ok=False, reject_reason=REJECT_BAD_PROOF)
+            outcome = redeem_pairing_code(
+                store_root,
+                code,
+                device_name=message.get("client")
+                if isinstance(message.get("client"), str)
+                else None,
+            )
+            if not isinstance(outcome, DeviceCredential):
+                return HelloAuthOutcome(ok=False, reject_reason=REJECT_BAD_PROOF)
+            return HelloAuthOutcome(
+                ok=True,
+                device_id=outcome.device_id,
+                device_tier=outcome.tier,
+                issued_token=outcome.token,
+            )
         auth = verify_device_proof(
             store_root,
             message.get("device_id"),
@@ -2765,6 +2834,13 @@ def serve_loop(
                 # install reachable from my phone", which nothing else on this
                 # frame can give it.
                 "gateway": gateway_block,
+                # The ONE frame in this lane that ever carries a secret, and it
+                # carries it exactly once: the credential a pairing code was
+                # just redeemed for. Read-and-CLEAR, so the value is gone from
+                # the connection before this function returns and cannot reach
+                # `payload()`, a log line, or a second reply. Absent on every
+                # other handshake, which is every handshake after the first.
+                **_pairing_block(connection),
             }
 
         def _connections_frame() -> dict[str, Any]:
