@@ -105,6 +105,14 @@ def test_the_method_is_advertised_without_moving_the_contract_version():
     assert serve_rpc.RPC_CONTRACT_VERSION == 1
 
 
+def test_the_advertised_tier_is_console_because_this_is_a_level_mutation():
+    """Stage A1. The scope canon 06 and this handler's own docstring stated as
+    prose (owner decision D10-iv) is now a machine-readable fact a connector can
+    read BEFORE it tries the call. Widening it to ``read`` reds here."""
+
+    assert serve_rpc.manifest()["tiers"]["runtime.agent.retire"] == "console"
+
+
 def test_the_marker_never_appears_without_the_capability_it_stands_for(qa_persona):
     """D12, asserted where the marker lives.
 

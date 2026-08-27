@@ -201,6 +201,9 @@ def test_the_method_is_advertised_on_the_manifest():
     # The launcher gates on the advertisement, never on its own release notes.
     assert "runtime.agent.create" in serve_rpc.manifest()["methods"]
     assert serve_rpc.manifest()["contract"] == 1
+    # Stage A1: the ``console`` scope canon 06 recorded as prose is now declared
+    # beside the name, and the integer still did not move for it.
+    assert serve_rpc.manifest()["tiers"]["runtime.agent.create"] == "console"
 
 
 def test_the_method_answers_through_the_REAL_serve_loop_and_the_argv_lane_is_untouched(

@@ -688,6 +688,18 @@ def test_stdio_learns_the_method_set_from_ready_and_can_re_ask_version():
             "runtime.office.upsert",
             "runtime.persona.prewarm",
         ],
+        "tiers": {
+            "runtime.agent.create": "console",
+            "runtime.agent.retire": "console",
+            "runtime.office.get": "read",
+            "runtime.office.remove": "console",
+            "runtime.office.resolve_conflict": "console",
+            "runtime.office.subscribe": "read",
+            "runtime.office.surface.update": "console",
+            "runtime.office.unsubscribe": "read",
+            "runtime.office.upsert": "console",
+            "runtime.persona.prewarm": "read",
+        },
     }
     ready = next(f for f in frames if f.get("event") == "ready")
     assert ready["rpc"] == expected
@@ -738,6 +750,18 @@ def test_the_method_surface_is_transport_agnostic_and_answers_on_the_socket():
                     "runtime.office.upsert",
                     "runtime.persona.prewarm",
                 ],
+                "tiers": {
+                    "runtime.agent.create": "console",
+                    "runtime.agent.retire": "console",
+                    "runtime.office.get": "read",
+                    "runtime.office.remove": "console",
+                    "runtime.office.resolve_conflict": "console",
+                    "runtime.office.subscribe": "read",
+                    "runtime.office.surface.update": "console",
+                    "runtime.office.unsubscribe": "read",
+                    "runtime.office.upsert": "console",
+                    "runtime.persona.prewarm": "read",
+                },
             }
 
             connection.send(

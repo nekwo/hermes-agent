@@ -2103,6 +2103,9 @@ def test_the_reclaim_pair_joins_the_manifest_without_moving_the_contract_version
 
     assert serve_rpc.method_names() == [
         "runtime.agent.create",
+        # Added by S5 after this literal was written; the pin had been red ever
+        # since, and the Stage A1 manifest refresh is what walked past it.
+        "runtime.agent.retire",
         "runtime.office.get",
         "runtime.office.remove",
         "runtime.office.resolve_conflict",

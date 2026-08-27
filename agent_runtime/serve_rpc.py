@@ -120,6 +120,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from .call_authorization import TIER_CONSOLE, TIER_READ, TIERS
+
 logger = logging.getLogger(__name__)
 
 # The method-surface contract. Bump ONLY when an existing method's request or
@@ -139,6 +141,26 @@ ERR_NOT_FOUND = 4001
 ERR_CONFLICT = 4090
 
 _METHODS: dict[str, Callable[[Any, dict, "RpcContext"], dict]] = {}
+
+#: name → the tier a caller must hold to run it. A PARALLEL registry rather than
+#: a field on the handler, for the same reason ``_METHODS`` is a dict and not an
+#: attribute sweep: the manifest and the gate both want the whole mapping, and a
+#: thing you can iterate is a thing a test can assert is complete. Every entry is
+#: written by :func:`method`, which has no default — see there.
+#:
+#: The classification rule is one line: **a level MUTATION is ``console``,
+#: everything else is ``read``.** So the four ``runtime.office`` writes and both
+#: ``runtime.agent`` verbs are ``console`` (the word their own docstrings and
+#: canon 06 already used), while ``get`` / ``subscribe`` / ``unsubscribe`` are
+#: ``read``.
+#:
+#: ``runtime.persona.prewarm`` is the one row worth arguing, and it is ``read``:
+#: its contract is that it "writes no store state, emits no event and mints no
+#: id", which is the same sentence that makes ``runtime.office.get`` a read. It
+#: spends CPU, but spending CPU is a rate-limiting question and rate limiting is
+#: not a tier — a viewer device that may not place an agent may certainly warm
+#: the cache that makes its own reads fast.
+_METHOD_TIERS: dict[str, str] = {}
 
 
 def ok(rid: Any, result: dict) -> dict:
@@ -231,9 +253,30 @@ class RpcContext:
         return True
 
 
-def method(name: str):
+def method(name: str, tier: str):
+    """Register a handler AND declare the tier a caller must hold to run it.
+
+    ``tier`` is REQUIRED and has no default. A default is what turns a
+    registration into a hole — either it defaults open, and a new verb ships
+    unguarded the day someone forgets, or it defaults closed and a forgotten
+    read verb breaks a client that was working. Requiring the word makes
+    "which tier is this?" a question the author answers at the moment they know
+    the answer, and makes a tierless method unrepresentable rather than merely
+    untested.
+
+    An unknown tier raises HERE, at import, rather than at the first call: the
+    registry is built when the module loads, so a typo is a boot failure with a
+    name in it instead of a verb that mysteriously refuses in the field.
+    """
+
+    if tier not in TIERS:
+        raise ValueError(
+            f"unknown tier {tier!r} for method {name!r}; expected one of {TIERS}"
+        )
+
     def dec(fn):
         _METHODS[name] = fn
+        _METHOD_TIERS[name] = tier
         return fn
 
     return dec
@@ -243,6 +286,24 @@ def method_names() -> list[str]:
     return sorted(_METHODS)
 
 
+def method_tier(name: str) -> str:
+    """The declared tier, or ``console`` for a name that has none.
+
+    Unreachable through :func:`method`, which requires the word. It is the
+    fallback for a registry mutated by some other path (a test monkeypatching
+    ``_METHODS``, a future dynamic registration), and it fails CLOSED because the
+    only safe answer to "nobody declared what this needs" is the strongest tier.
+    """
+
+    return _METHOD_TIERS.get(name, TIER_CONSOLE)
+
+
+def method_tiers() -> dict[str, str]:
+    """The whole mapping, sorted, for the manifest and for tests."""
+
+    return {name: method_tier(name) for name in method_names()}
+
+
 def manifest() -> dict[str, Any]:
     """What this runtime's method lane offers, for the greeting frames.
 
@@ -250,9 +311,26 @@ def manifest() -> dict[str, Any]:
     once and knows both which methods exist and whether it understands their
     shape; a runtime that predates the lane carries no ``rpc`` block at all,
     which reads as "argv only" rather than as an error.
+
+    ``tiers`` (Stage A1) says WHAT CREDENTIAL each method wants, so a connector
+    can know before it tries. Additive by the set-plus-integer rule this
+    module's header states and the D12 rollout already proved: it adds a key
+    beside ``methods`` and changes no existing method's request or result shape,
+    so ``RPC_CONTRACT_VERSION`` does not move. A client that ignores it is a
+    client that keeps working — which is the point of shipping the declaration
+    one stage ahead of the enforcement.
+
+    It is deliberately a MAP and not a per-method sub-object. A tier is one
+    string, and ``{"runtime.office.get": "read"}`` is the shape a client can
+    index; wrapping each value in ``{"tier": …}`` would buy room for fields that
+    do not exist and would make the addition of one look like a shape change.
     """
 
-    return {"contract": RPC_CONTRACT_VERSION, "methods": method_names()}
+    return {
+        "contract": RPC_CONTRACT_VERSION,
+        "methods": method_names(),
+        "tiers": method_tiers(),
+    }
 
 
 def is_rpc_frame(message: Any) -> bool:
@@ -452,7 +530,7 @@ def log_office_write(
         pass
 
 
-@method("runtime.office.get")
+@method("runtime.office.get", tier=TIER_READ)
 def _runtime_office_get(
     rid: Any, params: dict, context: RpcContext | None = None
 ) -> dict:
@@ -575,7 +653,7 @@ def _office_projection(workspace_id: str) -> dict | None:
     }
 
 
-@method("runtime.office.subscribe")
+@method("runtime.office.subscribe", tier=TIER_READ)
 def _runtime_office_subscribe(
     rid: Any, params: dict, context: RpcContext | None = None
 ) -> dict:
@@ -903,7 +981,7 @@ def _runtime_office_subscribe(
     )
 
 
-@method("runtime.office.unsubscribe")
+@method("runtime.office.unsubscribe", tier=TIER_READ)
 def _runtime_office_unsubscribe(
     rid: Any, params: dict, context: RpcContext | None = None
 ) -> dict:
@@ -964,7 +1042,7 @@ def _runtime_office_unsubscribe(
     return ok(rid, {"workspace_id": workspace_id, "released": bool(released)})
 
 
-@method("runtime.office.upsert")
+@method("runtime.office.upsert", tier=TIER_CONSOLE)
 def _runtime_office_upsert(
     rid: Any, params: dict, context: RpcContext | None = None
 ) -> dict:
@@ -1297,7 +1375,7 @@ def _runtime_office_upsert(
     return ok(rid, result)
 
 
-@method("runtime.office.remove")
+@method("runtime.office.remove", tier=TIER_CONSOLE)
 def _runtime_office_remove(
     rid: Any, params: dict, context: RpcContext | None = None
 ) -> dict:
@@ -1512,7 +1590,7 @@ def _runtime_office_remove(
     return ok(rid, result)
 
 
-@method("runtime.office.surface.update")
+@method("runtime.office.surface.update", tier=TIER_CONSOLE)
 def _runtime_office_surface_update(
     rid: Any, params: dict, context: RpcContext | None = None
 ) -> dict:
@@ -1690,7 +1768,7 @@ def _runtime_office_surface_update(
     return ok(rid, result)
 
 
-@method("runtime.office.resolve_conflict")
+@method("runtime.office.resolve_conflict", tier=TIER_CONSOLE)
 def _runtime_office_resolve_conflict(
     rid: Any, params: dict, context: RpcContext | None = None
 ) -> dict:
@@ -1989,7 +2067,7 @@ def _runtime_office_resolve_conflict(
 # ── runtime.agent.create ─────────────────────────────────────────────────────
 
 
-@method("runtime.agent.create")
+@method("runtime.agent.create", tier=TIER_CONSOLE)
 def _runtime_agent_create(
     rid: Any, params: dict, context: RpcContext | None = None
 ) -> dict:
@@ -2075,7 +2153,7 @@ def _runtime_agent_create(
 # ── runtime.agent.retire ─────────────────────────────────────────────────────
 
 
-@method("runtime.agent.retire")
+@method("runtime.agent.retire", tier=TIER_CONSOLE)
 def _runtime_agent_retire(
     rid: Any, params: dict, context: RpcContext | None = None
 ) -> dict:
@@ -2141,7 +2219,7 @@ def _runtime_agent_retire(
 # ── runtime.persona.prewarm ──────────────────────────────────────────────────
 
 
-@method("runtime.persona.prewarm")
+@method("runtime.persona.prewarm", tier=TIER_READ)
 def _runtime_persona_prewarm(
     rid: Any, params: dict, context: RpcContext | None = None
 ) -> dict:

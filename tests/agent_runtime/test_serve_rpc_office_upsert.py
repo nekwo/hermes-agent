@@ -1045,6 +1045,10 @@ def test_the_method_set_grew_and_the_contract_integer_did_not_move():
 
     expected = {"contract": 1, "methods": [
             "runtime.agent.create",
+            # S5's inverse. The literal here predated it and was never grown,
+            # so this pin had been red since ``runtime.agent.retire`` landed —
+            # closed in passing by the Stage A1 refresh that had to touch it.
+            "runtime.agent.retire",
             "runtime.office.get",
             "runtime.office.remove",
             "runtime.office.resolve_conflict",
@@ -1053,7 +1057,20 @@ def test_the_method_set_grew_and_the_contract_integer_did_not_move():
             "runtime.office.unsubscribe",
             "runtime.office.upsert",
             "runtime.persona.prewarm",
-    ]}
+    ],
+        "tiers": {
+            "runtime.agent.create": "console",
+            "runtime.agent.retire": "console",
+            "runtime.office.get": "read",
+            "runtime.office.remove": "console",
+            "runtime.office.resolve_conflict": "console",
+            "runtime.office.subscribe": "read",
+            "runtime.office.surface.update": "console",
+            "runtime.office.unsubscribe": "read",
+            "runtime.office.upsert": "console",
+            "runtime.persona.prewarm": "read",
+        },
+    }
     assert serve_rpc.manifest() == expected
     assert serve_rpc.RPC_CONTRACT_VERSION == 1
     assert next(f for f in frames if f.get("event") == "ready")["rpc"] == expected
@@ -1168,6 +1185,7 @@ def test_the_write_method_is_transport_agnostic_and_answers_on_the_socket():
                 "contract": 1,
                 "methods": [
                     "runtime.agent.create",
+                    "runtime.agent.retire",
                     "runtime.office.get",
                     "runtime.office.remove",
                     "runtime.office.resolve_conflict",
@@ -1177,6 +1195,18 @@ def test_the_write_method_is_transport_agnostic_and_answers_on_the_socket():
                     "runtime.office.upsert",
                     "runtime.persona.prewarm",
                 ],
+                "tiers": {
+                    "runtime.agent.create": "console",
+                    "runtime.agent.retire": "console",
+                    "runtime.office.get": "read",
+                    "runtime.office.remove": "console",
+                    "runtime.office.resolve_conflict": "console",
+                    "runtime.office.subscribe": "read",
+                    "runtime.office.surface.update": "console",
+                    "runtime.office.unsubscribe": "read",
+                    "runtime.office.upsert": "console",
+                    "runtime.persona.prewarm": "read",
+                },
             }
 
             connection.send(
