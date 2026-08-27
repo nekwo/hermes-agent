@@ -527,6 +527,10 @@ def test_the_envelope_itself_is_validated_with_upstreams_codes():
     assert unknown["error"]["message"] == "unknown method: runtime.nope.get"
     # The refusal names what DOES exist — the manifest a client may have missed.
     assert unknown["error"]["data"]["methods"] == [
+        # Gateway Stage 6, and the first name outside the ``runtime.*``
+        # family: ``peer.*`` verbs are about the EDGE between two
+        # installs and touch no level. Additive, so the integer holds.
+        "peer.ping",
         "runtime.agent.create",
         "runtime.agent.retire",
         # Gateway Stage 3, additive: the set grows, the integer does not.
@@ -678,6 +682,7 @@ def test_stdio_learns_the_method_set_from_ready_and_can_re_ask_version():
     expected = {
         "contract": 1,
         "methods": [
+            "peer.ping",
             "runtime.agent.create",
             # S5's inverse. It joined the SET; the integer beside it did not
             # move, which is the whole discipline this frame advertises.
@@ -695,6 +700,7 @@ def test_stdio_learns_the_method_set_from_ready_and_can_re_ask_version():
             "runtime.persona.prewarm",
         ],
         "tiers": {
+            "peer.ping": "read",
             "runtime.agent.create": "console",
             "runtime.agent.retire": "console",
             "runtime.chat.message": "console",
@@ -747,6 +753,7 @@ def test_the_method_surface_is_transport_agnostic_and_answers_on_the_socket():
             assert hello_ok["rpc"] == {
                 "contract": 1,
                 "methods": [
+                    "peer.ping",
                     "runtime.agent.create",
                     "runtime.agent.retire",
                     # Gateway Stage 3, additive: the set grows, the integer does not.
@@ -762,6 +769,7 @@ def test_the_method_surface_is_transport_agnostic_and_answers_on_the_socket():
                     "runtime.persona.prewarm",
                 ],
                 "tiers": {
+                    "peer.ping": "read",
                     "runtime.agent.create": "console",
                     "runtime.agent.retire": "console",
                     "runtime.chat.message": "console",

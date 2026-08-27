@@ -57,6 +57,20 @@ verb's declared tier. Everything A3 grandfathered is grandfathered still —
 ``_CONSOLE_KINDS`` was not touched — because a device's authority was added
 BESIDE the machine owner's rather than folded into it. Two callers whose
 authority comes from different kinds of fact should not share a membership test.
+
+**Gateway Stage 6 is the third caller, and it is not a third tier.** A paired
+INSTALL (``gateway_peers.py``) arrives as :data:`CALLER_PEER`, and what it holds
+is not a tier word at all but an explicit ALLOWLIST of method names
+(:data:`PEER_METHOD_ALLOWLIST`). The device arm stayed an equality against a
+stored tier because a device is a client of THIS install whose operator chose
+how much of the surface to hand it; a peer is a different KIND of caller — an
+autonomous runtime whose own agents drive it — and the question "how much of my
+runtime may another runtime's agents reach" has a different answer shape. The
+canon already committed to that answer: 06's remote-connector table says the
+peer tier is "deliberately excluded: agents never mint or retire agents on
+another install; a remote OPERATOR does". An allowlist is that sentence as code
+— the exclusion holds BY CONSTRUCTION rather than by a tier comparison that
+would silently include every future ``read`` verb the moment one was added.
 """
 
 from __future__ import annotations
@@ -71,7 +85,9 @@ __all__ = [
     "CALLER_STDIO_OWNER",
     "CALLER_LOCAL_CONSOLE",
     "CALLER_DEVICE",
+    "CALLER_PEER",
     "CALLER_UNKNOWN",
+    "PEER_METHOD_ALLOWLIST",
     "TRANSPORT_GATEWAY",
     "RpcCaller",
     "LOCAL_CONSOLE",
@@ -118,10 +134,38 @@ CALLER_LOCAL_CONSOLE = "local_console"
 #: secret" but "is this named device", which is why it is the first caller kind
 #: that carries a tier of its own instead of inheriting the machine owner's.
 CALLER_DEVICE = "device"
+#: A peer on the GATEWAY listener that presented a per-INSTALL credential
+#: (``gateway/peers.json``, minted by a ceremony an operator ran at BOTH
+#: installs — R5). Proven the way ``device`` is, and narrower in exactly one
+#: respect that matters: what is on the other end is not a person holding a
+#: screen but ANOTHER RUNTIME, whose agents drive it. So this kind carries no
+#: tier and is answered from :data:`PEER_METHOD_ALLOWLIST` instead — see
+#: :func:`authorize_call`.
+CALLER_PEER = "peer"
 #: A caller the transport could not place. Minted by tests, by the defensive arm
 #: of :func:`caller_for_connection`, and — the arm Stage A5 adds — by a gateway
 #: connection that somehow reached the dispatcher without a device stamp.
 CALLER_UNKNOWN = "unknown"
+
+#: **Exactly what a paired install may call on this one.** One name today, and
+#: the shortness is the design: Stage 6 proves an edge exists and nothing else,
+#: so the only verb on it is the one that answers "are you there".
+#:
+#: An ALLOWLIST and not a tier, and the difference is what it does when the
+#: registry grows. A tier comparison admits every future verb that happens to
+#: declare the same word — so the day somebody registers a new ``read`` method,
+#: every paired install on the LAN can call it, and nobody decided that. A
+#: membership test admits nothing it was not edited to admit, which makes
+#: widening the peer surface a visible line in a diff with a reason attached.
+#:
+#: The canon's exclusion therefore holds BY CONSTRUCTION rather than by a rule
+#: about two names: ``runtime.agent.create`` and ``runtime.agent.retire`` are
+#: not absent from this set because someone remembered to leave them out, they
+#: are absent because everything is absent unless it is here. 06's table says
+#: agents never mint or retire agents on another install; a test iterates the
+#: whole registry against this set rather than naming those two, because a rule
+#: pinned by two literals stops being pinned the moment a third verb arrives.
+PEER_METHOD_ALLOWLIST: frozenset[str] = frozenset({"peer.ping"})
 
 #: The transport name the gateway listener tags its connections with. Named here
 #: rather than imported from ``serve_socket`` for the reason
@@ -166,6 +210,14 @@ class RpcCaller:
     #: fixed at the pairing ceremony, read off the authenticated connection,
     #: never off anything the request carries.
     device_tier: str | None = None
+    #: Set only for :data:`CALLER_PEER`. The OTHER install's id, as its row in
+    #: ``gateway/peers.json`` names it — so a refusal can say which paired
+    #: install was turned away, which is the fact an operator auditing a
+    #: cross-install call needs and the one a per-connection key cannot supply.
+    #: There is no ``peer_tier`` beside it, deliberately: a peer's authority is
+    #: a membership in :data:`PEER_METHOD_ALLOWLIST`, and a tier field that
+    #: nothing read would be a field that looked like a door.
+    peer_install_id: str | None = None
 
     def describe(self) -> dict[str, Any]:
         """The caller as it appears on a log line or a refusal's ``data``.
@@ -185,6 +237,8 @@ class RpcCaller:
             payload["device_id"] = self.device_id
         if self.device_tier is not None:
             payload["device_tier"] = self.device_tier
+        if self.peer_install_id is not None:
+            payload["peer_install_id"] = self.peer_install_id
         return payload
 
 
@@ -233,6 +287,16 @@ def caller_for_connection(connection: Any) -> RpcCaller:
     keeps retiring. The grandfathered ``local_console`` therefore requires
     ``transport != "gateway"``, which is a property of the LISTENER the peer
     reached rather than of anything the peer said.
+
+    **Stage 6's arm sits FIRST among the stamped ones, and a connection that
+    carries both stamps is ``unknown``.** The gateway handshake writes exactly
+    one of them — a hello naming a device credential and a hello naming a peer
+    credential are different frames and the authenticator refuses a frame that
+    is both — so a connection wearing two identities is a state the transport
+    does not produce. It is answered anyway, and answered with the least
+    authority, because the alternative is an ordering that decides which
+    identity wins: a rule like "peer beats device" is a rule somebody can flip,
+    and the flip would be invisible.
     """
 
     if connection is None:
@@ -246,6 +310,19 @@ def caller_for_connection(connection: Any) -> RpcCaller:
     device_id = device_id if isinstance(device_id, str) and device_id else None
     device_tier = getattr(connection, "device_tier", None)
     device_tier = device_tier if device_tier in TIERS else None
+    peer_install_id = getattr(connection, "peer_install_id", None)
+    peer_install_id = (
+        peer_install_id if isinstance(peer_install_id, str) and peer_install_id else None
+    )
+    if peer_install_id is not None and device_id is not None:
+        return RpcCaller(kind=CALLER_UNKNOWN, connection_key=key, transport=transport)
+    if peer_install_id is not None:
+        return RpcCaller(
+            kind=CALLER_PEER,
+            connection_key=key,
+            transport=transport,
+            peer_install_id=peer_install_id,
+        )
     if device_id is not None and device_tier is not None:
         return RpcCaller(
             kind=CALLER_DEVICE,
@@ -296,7 +373,9 @@ class CallAuthorization:
         return {"reason": self.reason, "tier": self.tier, "caller": self.caller_kind}
 
 
-def authorize_call(tier: str, caller: RpcCaller | None) -> CallAuthorization:
+def authorize_call(
+    tier: str, caller: RpcCaller | None, *, method: str | None = None
+) -> CallAuthorization:
     """May *caller* run a verb declared at *tier*?
 
     ``caller is None`` is :data:`UNKNOWN_CALLER`, NOT the owner. Every production
@@ -331,6 +410,25 @@ def authorize_call(tier: str, caller: RpcCaller | None) -> CallAuthorization:
     handshake refuses it — and if one ever did it would arrive as ``unknown``
     and be refused by the fall-through, which is the ruling's own words for "I
     do not know who this is".
+
+    **The peer arm is Stage 6, and its POSITION is the load-bearing part.** It
+    runs before the read-tier arm, because the read arm is open to everyone —
+    that is its whole point, and A5 kept it deliberately — so a peer evaluated
+    after it would inherit the entire read surface of this runtime: the office
+    core, the subscribe lane, every read verb that has not been written yet.
+    That is not what an operator approves when they approve an edge between two
+    installs, and it is not what 06's exclusion describes. So a peer is answered
+    from :data:`PEER_METHOD_ALLOWLIST` and from nothing else, and the tier the
+    verb declares does not enter into it.
+
+    ``method`` is therefore REQUIRED in practice for a peer and optional in the
+    signature, and the asymmetry is intentional: every other caller kind is
+    decided by tier alone, so forcing the argument on all of them would rewrite
+    call sites that have no use for it (the A4 CLI mirror asks "may the console
+    run a console verb", a question with no method in it). A peer arriving with
+    no method name is REFUSED rather than defaulted — absence of a name is
+    absence of a decision, and the module's second rule is that absence of a
+    decision is never an allow.
     """
 
     resolved = caller if caller is not None else UNKNOWN_CALLER
@@ -339,6 +437,21 @@ def authorize_call(tier: str, caller: RpcCaller | None) -> CallAuthorization:
         return CallAuthorization(
             ok=False,
             reason=REASON_UNKNOWN_TIER,
+            tier=normalized,
+            caller_kind=resolved.kind,
+        )
+    if resolved.kind == CALLER_PEER:
+        name = str(method or "").strip()
+        if name and name in PEER_METHOD_ALLOWLIST:
+            return CallAuthorization(
+                ok=True,
+                reason="peer_allowlisted",
+                tier=normalized,
+                caller_kind=resolved.kind,
+            )
+        return CallAuthorization(
+            ok=False,
+            reason=REASON_SCOPE_DENIED,
             tier=normalized,
             caller_kind=resolved.kind,
         )

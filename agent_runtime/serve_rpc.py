@@ -129,6 +129,7 @@ from .call_authorization import (
     authorize_call,
     caller_for_connection,
 )
+from .store_file_io import iso_stamp as _now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -475,7 +476,13 @@ def handle_request(req: Any, context: RpcContext | None = None) -> dict:
             f"unknown method: {name}",
             {"reason": "unknown_method", "methods": method_names()},
         )
-    decision = authorize_call(method_tier(name), context.caller)
+    # The NAME travels beside the tier because gateway Stage 6's caller kind is
+    # answered by an allowlist rather than by a tier word (``PEER_METHOD_ALLOWLIST``).
+    # Passed unconditionally rather than only for peers: a gate that received
+    # the method sometimes would be a gate whose answer depended on which arm
+    # the caller happened to reach, which is the shape this module exists to
+    # retire.
+    decision = authorize_call(method_tier(name), context.caller, method=name)
     if not decision.ok:
         return err(
             rid,
@@ -2345,7 +2352,7 @@ def _runtime_persona_prewarm(
 # Gateway Stage 3. The plan's Stage 3 sketch said "RPC where methods exist,
 # op/argv lane otherwise — same union", and that union has a hole a device falls
 # through: ``mission.chat.*`` has no methods, it lowers to argv, and Stage 1
-# REFUSES the argv lane to devices outright (``serve.py``'s ``_is_device``
+# REFUSES the argv lane to devices outright (``serve.py``'s ``_is_gateway``
 # branch — the refusal that stops a ``read`` device from sending as argv what it
 # was refused on the method lane). A remote device therefore could not send a
 # chat turn at all, and chat is what this gateway is for.
@@ -2474,3 +2481,87 @@ def _runtime_chat_steer(
         refusal = outcome.refusal
         return err(rid, refusal.code, refusal.message, refusal.data)
     return ok(rid, outcome.result)
+
+
+# ── peer.ping ────────────────────────────────────────────────────────────────
+#
+# Gateway Stage 6. The FIRST method outside the ``runtime.*`` family, and the
+# prefix is the declaration: ``runtime.*`` verbs act on this install's level —
+# they read it, mutate it, or run an agent on it — while ``peer.*`` verbs are
+# about the EDGE between two installs and touch no level at all. A client
+# reading the manifest can therefore tell the two apart without a table, which
+# matters more here than usual because the peer surface is the one an operator
+# on another machine is being asked to trust.
+
+
+#: The peer lane's own shape number, and a THIRD beside ``RPC_CONTRACT_VERSION``
+#: (this manifest's) and the two handshake ones. It describes the ``peer.ping``
+#: RESULT and nothing else, so a Stage 7 that grows the peer surface can move it
+#: without telling every ``runtime.*`` client that something changed.
+PEER_PING_CONTRACT = 1
+
+
+@method("peer.ping", tier=TIER_READ)
+def _peer_ping(rid: Any, params: dict, context: RpcContext | None = None) -> dict:
+    """Is the edge alive? Answers, and touches nothing.
+
+    Params: ``echo`` (optional, a short opaque string returned verbatim).
+
+    Result::
+
+        {pong: true, contract: 1, peer: <caller's install id | null>,
+         at: <iso8601>, echo?: <the string, bounded>}
+
+    **Why the declared tier is ``read`` and why that is not a lie to device or
+    console readers.** The ``tiers`` map answers one question — *what strength
+    of credential does this verb require* — and the honest answer for a liveness
+    ping that reads no store, writes nothing and mints no id is the same answer
+    ``runtime.office.get`` gets. A ``console`` declaration would say a level
+    mutation's credential is needed, which is false, and would make the map
+    lie to exactly the readers it is for: a launcher rendering "what can this
+    connection do" would grey out a ping any read-tier device may in fact call.
+
+    What the tier map deliberately does NOT say is who may call this BESIDES
+    a credential of that strength — and that asymmetry is already in the
+    contract, not invented here. A manifest says what a call WANTS, never what a
+    connection HOLDS (canon 03 §2, and the launcher's ``MissionRuntimeRpcManifest``
+    branches on nothing). A PEER holds no tier at all: it is answered from
+    ``call_authorization.PEER_METHOD_ALLOWLIST``, which contains this name and
+    no other, so the peer lane is NARROWED by the allowlist rather than widened
+    by this row. Nothing in the map would be more true if this said ``peer`` —
+    there is no such tier, ``TIERS`` has two members, and inventing a third word
+    that only one caller kind can hold would put a value in the map that every
+    existing reader must be taught to ignore.
+
+    So the row reads exactly as it should: any read-tier credential may ping,
+    and a peer may ping AND NOTHING ELSE. The second half is the allowlist's to
+    state, and it is stated where it is enforced.
+
+    **No store read, and that is a property worth keeping.** The obvious
+    temptation is to answer with this install's ``install_id`` — but the
+    ``hello_ok`` the caller has already read carries the ``install`` block, so
+    repeating it here would be a second authority for one fact, and it would
+    make the cheapest verb on the wire open a file. What the result DOES name is
+    the caller: ``peer`` is the install id the TRANSPORT proved, echoed back so
+    the dialer can confirm it was recognised as the install it meant to be —
+    which is a real answer to "is my credential still the one you know me by",
+    and one no client-side check can give.
+    """
+
+    caller = None if context is None else context.caller
+    echo = params.get("echo")
+    result: dict[str, Any] = {
+        "pong": True,
+        "contract": PEER_PING_CONTRACT,
+        # ``None`` for a non-peer caller (a console client or a device may call
+        # this too — see the tier note above), and the key is present either way
+        # so a client never has to branch on absence to read it.
+        "peer": None if caller is None else caller.peer_install_id,
+        "at": _now_iso(None),
+    }
+    if isinstance(echo, str) and echo.strip():
+        # Bounded, because it comes off the wire and goes straight back onto it.
+        # An echo is a correlation aid, never a channel: 128 characters is more
+        # than any token this repo mints and less than anything worth smuggling.
+        result["echo"] = echo.strip()[:128]
+    return ok(rid, result)
