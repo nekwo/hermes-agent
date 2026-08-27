@@ -381,6 +381,67 @@ def build_parser(parent_subparsers) -> None:
     _add_stage42_global_args(gateway_devices_revoke, controls=frozenset({"dry_run"}))
     gateway_devices_revoke.set_defaults(func=_cmd_gateway_devices_revoke)
 
+    # Stage 6's four. A `peers` subtree beside `devices` rather than more verbs
+    # under it, because the two answer different questions about different
+    # stores: `devices` is "which phones may reach this install", `peers` is
+    # "which INSTALLS has an operator approved an edge with". Folding them would
+    # make a list that mixes a phone and a workstation and needs a `kind` column
+    # to be readable — which is a discriminator standing in for the two verbs
+    # this tree already has room for.
+    #
+    # `pair` and `join` take the reader's flag set for `gateway pair`'s reason
+    # (a dry run would have to print a code it did not mint, or perform half a
+    # handshake); `revoke` takes `dry_run`, because there the preview is a real
+    # row an operator can recognise before they cut an install off.
+    gateway_peers = gateway_subs.add_parser(
+        "peers",
+        help="Installs paired with this one (operator-approved on BOTH sides) — pair, join, list, revoke",
+    )
+    gateway_peers_subs = gateway_peers.add_subparsers(
+        dest="gateway_peers_command", required=True
+    )
+    gateway_peers_pair = gateway_peers_subs.add_parser(
+        "pair",
+        help="Mint a short-TTL PEER code plus the payload another install's operator runs `peers join` with",
+    )
+    gateway_peers_pair.add_argument(
+        "--note", help="What this edge is for, e.g. \"laptop\" — shown while the code is pending"
+    )
+    _add_stage42_global_args(gateway_peers_pair)
+    gateway_peers_pair.set_defaults(func=_cmd_gateway_peers_pair)
+    gateway_peers_join = gateway_peers_subs.add_parser(
+        "join",
+        help="Redeem a peer code from ANOTHER install: dials it, and records the edge in both stores",
+    )
+    gateway_peers_join.add_argument(
+        "payload",
+        help="The join_payload string from `harness gateway peers pair` over there, or the bare 8-character code with --host/--port",
+    )
+    gateway_peers_join.add_argument("--host", help="Override the address in the payload (a second interface, a NAT, a machine that moved)")
+    gateway_peers_join.add_argument("--port", type=int, help="Override the port in the payload")
+    gateway_peers_join.add_argument("--fingerprint", help="Override the certificate fingerprint to pin; omitting it pins NOTHING, which is weaker")
+    gateway_peers_join.add_argument("--timeout", type=float, default=20.0, help="Seconds to wait for the other install's handshake")
+    _add_stage42_global_args(gateway_peers_join)
+    gateway_peers_join.set_defaults(func=_cmd_gateway_peers_join)
+    gateway_peers_list = gateway_peers_subs.add_parser(
+        "list",
+        help="Every paired install, oldest first, revoked ones included (never the credential — there is no field for it)",
+    )
+    # No `sort` control, for `devices list`'s reason: `list_peers` returns one
+    # deterministic order (approved_at, then install id) and nothing here
+    # re-sorts, so advertising the flag would be a wrong answer believed.
+    _add_stage42_global_args(gateway_peers_list)
+    gateway_peers_list.set_defaults(func=_cmd_gateway_peers_list)
+    gateway_peers_revoke = gateway_peers_subs.add_parser(
+        "revoke",
+        help="Refuse a paired install from its next handshake on — ONE-SIDED: the other install keeps its own row",
+    )
+    gateway_peers_revoke.add_argument(
+        "peer_install_id", help="The install id from `harness gateway peers list`"
+    )
+    _add_stage42_global_args(gateway_peers_revoke, controls=frozenset({"dry_run"}))
+    gateway_peers_revoke.set_defaults(func=_cmd_gateway_peers_revoke)
+
     workspace = subs.add_parser("workspace", help="Manage Harness workspaces")
     workspace_subs = workspace.add_subparsers(dest="workspace_command", required=True)
     workspace_list = workspace_subs.add_parser("list", help="List workspaces")
@@ -2006,6 +2067,30 @@ def _cmd_gateway_devices_revoke(args) -> int:
     from hermes_cli.harness_parts.gateway_commands import cmd_gateway_devices_revoke
 
     return cmd_gateway_devices_revoke(args)
+
+
+def _cmd_gateway_peers_pair(args) -> int:
+    from hermes_cli.harness_parts.gateway_commands import cmd_gateway_peers_pair
+
+    return cmd_gateway_peers_pair(args)
+
+
+def _cmd_gateway_peers_join(args) -> int:
+    from hermes_cli.harness_parts.gateway_commands import cmd_gateway_peers_join
+
+    return cmd_gateway_peers_join(args)
+
+
+def _cmd_gateway_peers_list(args) -> int:
+    from hermes_cli.harness_parts.gateway_commands import cmd_gateway_peers_list
+
+    return cmd_gateway_peers_list(args)
+
+
+def _cmd_gateway_peers_revoke(args) -> int:
+    from hermes_cli.harness_parts.gateway_commands import cmd_gateway_peers_revoke
+
+    return cmd_gateway_peers_revoke(args)
 
 
 def _cmd_roots_migrate(args) -> int:

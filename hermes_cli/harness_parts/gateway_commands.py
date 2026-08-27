@@ -1,9 +1,10 @@
-"""The operator's door onto the gateway's device credentials (Stage 1, R3).
+"""The operator's door onto the gateway's credentials (Stage 1 devices, Stage 6 peers).
 
-Three verbs — ``harness gateway pair``, ``harness gateway devices list``,
-``harness gateway devices revoke <device_id>`` — sitting beside Stage 0b's
-``id`` / ``rename`` in the same subtree, because they answer questions about
-THIS machine's runtime root rather than about anything in the store.
+Seven verbs — ``harness gateway pair``, ``devices list``, ``devices revoke
+<device_id>``, and Stage 6's ``peers pair`` / ``peers join`` / ``peers list`` /
+``peers revoke <peer_install_id>`` — sitting beside Stage 0b's ``id`` /
+``rename`` in the same subtree, because they answer questions about THIS
+machine's runtime root rather than about anything in the store.
 
 They hold no rule of their own. What a code may be, how long it lives, how many
 may be outstanding, what a lockout is, and when a device is refused are all
@@ -33,6 +34,38 @@ against a predicate that allows every caller that can reach it. When a paired
 DEVICE may pair another device, the door is a `gateway.*` method with a tier
 declaration and the gate goes there, where the caller is something the transport
 proved.
+
+Stage 6 and "agents can never mint peers" (R5) — what the CLI-only shape buys
+------------------------------------------------------------------------------
+
+R5 is ADOPTED (primary plan §5): every install⇄install edge is explicitly
+approved on BOTH sides, and agents can never initiate pairing. The four peer
+verbs are the operator's half of that, and their being CLI verbs is what
+enforces the second clause **against remote callers, structurally**:
+
+* there is no ``gateway.*`` RPC method for any of them, so the method lane has
+  nothing to call — a peer or device holding any tier finds no name;
+* and the argv lane, which is where a CLI verb would otherwise be reachable
+  over the wire, is REFUSED outright to every gateway connection (Stage 1,
+  ``serve.py``'s ``argv_lane_unavailable``). So "send the verb as argv" is not
+  a second door standing beside a missing method; it is a door that answers one
+  typed error.
+
+Together those close the remote half completely: no caller on the gateway
+listener, at any tier, on either lane, can mint a peer anywhere.
+
+**The residual, named rather than claimed closed.** A LOCAL agent with shell
+access on this machine can run these verbs — exactly as it can run ``harness
+gateway pair``, read ``serve_auth_token``, or open ``peers.json`` in an editor.
+Every tool-using agent on an install already holds the machine owner's
+authority; that is what ``CALLER_STDIO_OWNER``'s docstring says, and it is no
+less true here. So the accurate claim is: *no agent on install A can cause
+install B to trust it* — because minting a code on A does nothing until a human
+at B types it into ``peers join`` — *and no remote caller of any tier can mint a
+peer anywhere.* An agent that has already taken over the machine its operator is
+sitting at was never a case this ceremony could fix, and writing "agents cannot
+mint peers" without that sentence beside it would put a false claim in the file
+an auditor would read first.
 """
 
 from __future__ import annotations
@@ -53,6 +86,10 @@ __all__ = [
     "cmd_gateway_pair",
     "cmd_gateway_devices_list",
     "cmd_gateway_devices_revoke",
+    "cmd_gateway_peers_pair",
+    "cmd_gateway_peers_join",
+    "cmd_gateway_peers_list",
+    "cmd_gateway_peers_revoke",
 ]
 
 
@@ -76,6 +113,15 @@ _REFUSAL_CODES = {
     "invalid_code": "invalid_payload",
     "unknown_device": "not_found",
     "store_corrupt": "store_corrupt",
+    # Stage 6's peer refusals, split on the same rule — the operator's next
+    # MOVE. A malformed install id or a secret the remote never returned is a
+    # bad argument or a bad exchange (2); an install nobody paired is nothing to
+    # act on (3). The shared refusals above (`locked_out`, `too_many_pending`,
+    # every I/O condition) are shared because the store is shared: one
+    # `pairing.json`, one lockout, one cap across both ceremonies.
+    "invalid_peer_id": "invalid_payload",
+    "invalid_secret": "invalid_payload",
+    "unknown_peer": "not_found",
 }
 
 
@@ -278,5 +324,448 @@ def cmd_gateway_devices_revoke(args) -> int:
     row = outcome.payload()
     row["takes_effect"] = "next_handshake"
     envelope = attach_root_observability(_object_envelope("gateway_device", row))
+    _print_stage42(envelope, args=args, default_output="json")
+    return 0
+
+
+# ── Stage 6: peers ───────────────────────────────────────────────────────────
+
+
+def _install_and_certificate(args):
+    """This root's install identity and gateway certificate, both ENSURED.
+
+    Shared by ``peers pair`` and ``peers join`` because both need the same two
+    facts about THIS install and for the same reason ``pair`` needs them: a peer
+    edge is symmetric, so each side has to be nameable and dialable by the
+    other, and a payload with a hole in it is a payload that tells the far side
+    to trust whatever certificate answers.
+
+    Returns ``(pair, 0)`` or ``(None, exit_code)`` — the error branch is already
+    rendered when it returns, so callers propagate the int.
+    """
+
+    from agent_runtime import paths
+    from agent_runtime.gateway_identity import ensure_install_identity
+    from agent_runtime.gateway_tls import ensure_certificate
+
+    root = paths.store_root()
+    identity = ensure_install_identity(root)
+    if not identity.ok or not identity.install_id:
+        return None, emit_harness_error(
+            RuntimeError(identity.state),
+            args=args,
+            code="runtime_unavailable",
+            message=(
+                f"{identity.path}: this root's install identity is "
+                f"{identity.state}, so it has no id to name itself to a peer. "
+                "A peer edge is keyed by install id on both sides; there is "
+                "nothing to pair without one."
+            ),
+        )
+    certificate = ensure_certificate(root, common_name=identity.display_name)
+    if not certificate.ok:
+        return None, emit_harness_error(
+            RuntimeError(certificate.state),
+            args=args,
+            code="runtime_unavailable",
+            message=(
+                f"{certificate.cert_path}: the gateway certificate is "
+                f"{certificate.state}, so there is no fingerprint for the other "
+                "install to pin. Pairing without one would tell it to trust "
+                "whatever certificate answers."
+            ),
+        )
+    return (identity, certificate), 0
+
+
+def _self_endpoints(store_root) -> list[dict]:
+    """Where the OTHER install should dial this one, as a peer row's list.
+
+    Built from :func:`_endpoint` — the same three sources, the same confidence
+    ordering — and reduced to the shape ``gateway_peers.clean_endpoints`` keeps.
+    Empty when this root has no address to offer, which is a real state and not
+    an error: an install that has never opened its gateway listener can still
+    JOIN another install and talk to it. The edge simply works in one direction
+    until it listens, and the ack says so rather than leaving the operator to
+    find out when a call from the far side never arrives.
+    """
+
+    endpoint = _endpoint(store_root)
+    host, port = endpoint.get("host"), endpoint.get("port")
+    if not host or not port:
+        return []
+    if str(host) in {"0.0.0.0", "::"}:
+        # A wildcard bind is what this install LISTENS on, never an address
+        # another machine can dial. Passing it through would write a row whose
+        # every dial fails, and fails in a way that looks like the peer being
+        # down. The operator has to name a reachable address themselves.
+        return []
+    return [{"host": str(host), "port": int(port)}]
+
+
+def cmd_gateway_peers_pair(args) -> int:
+    """``harness gateway peers pair`` — mint a PEER code plus the join payload.
+
+    Run on install A. The operator carries the payload (or the eight characters)
+    to install B and runs ``peers join`` there. Nothing is written to
+    ``peers.json`` by this verb: a code is an invitation, and an install that
+    never redeems it leaves no row behind.
+
+    R3's two halves from one mint, exactly as ``gateway pair`` does it — and the
+    payload's code field is ``peer_code`` rather than ``code``, so a device
+    payload pasted into ``peers join`` (or the reverse) is refused for its shape
+    rather than half-parsed into the wrong ceremony.
+    """
+
+    from agent_runtime import paths
+    from agent_runtime.gateway_peers import mint_peer_code
+    from agent_runtime.serve_gateway_auth import StoreRefusal
+
+    root = paths.store_root()
+    resolved, code_or_error = _install_and_certificate(args)
+    if resolved is None:
+        return code_or_error
+    identity, certificate = resolved
+
+    minted = mint_peer_code(root, note=getattr(args, "note", None))
+    if isinstance(minted, StoreRefusal):
+        return _refusal(minted, args=args)
+
+    endpoint = _endpoint(root)
+    payload = {
+        "host": endpoint["host"],
+        "port": endpoint["port"],
+        "install_id": identity.install_id,
+        "cert_fingerprint": certificate.fingerprint,
+        "peer_code": minted.code,
+    }
+    row = {
+        "peer_code": minted.code,
+        "expires_in_seconds": minted.expires_in_seconds(),
+        "note": minted.note,
+        "install_id": identity.install_id,
+        "display_name": identity.display_name,
+        "cert_fingerprint": certificate.fingerprint,
+        "endpoint": endpoint,
+        # A STRING, not a nested object, for ``gateway pair``'s reason: what a QR
+        # encodes is bytes, and handing the operator the exact bytes removes the
+        # chance that two renderers serialise the same object differently and
+        # only one of them scans.
+        "join_payload": json.dumps(payload, separators=(",", ":"), sort_keys=True),
+        # Said out loud on the mint, because this is the half an operator can get
+        # wrong silently: a code that is never carried to the other machine pairs
+        # nothing, and R5 is the reason there is no way around that.
+        "next_step": (
+            "run `harness gateway peers join <join_payload>` on the OTHER "
+            "install. Both sides approve an edge; nothing here can pair on its "
+            "own."
+        ),
+    }
+    if endpoint["source"] != "live":
+        row["note_endpoint"] = (
+            "no running serve advertised a gateway listener for this root, so "
+            "the endpoint in the payload is what the config says the NEXT boot "
+            "will use. The joining install dials it — if nothing is listening "
+            "there when they run `join`, the code is still valid and the join "
+            "will simply fail to connect."
+            if endpoint["source"] == "config"
+            else "remote_gateway.listen is off for this root: nothing will "
+            "accept this code until an interface is configured and the runtime "
+            "restarts. The code is valid either way."
+        )
+
+    envelope = attach_root_observability(_object_envelope("gateway_peer_pairing", row))
+    _print_stage42(envelope, args=args, default_output="json")
+    return 0
+
+
+def _parse_join_payload(raw: Any, args) -> dict[str, Any] | None:
+    """The join payload as fields, or ``None`` with the refusal already printed.
+
+    Accepts BOTH halves of R3: the JSON blob a QR carries, and a bare
+    eight-character code with ``--host`` / ``--port`` / ``--fingerprint``
+    supplied beside it. One parser, so the typed and the scanned paths cannot
+    disagree about what a payload means.
+    """
+
+    text = str(raw or "").strip()
+    fields: dict[str, Any] = {}
+    if text.startswith("{"):
+        try:
+            decoded = json.loads(text)
+        except (json.JSONDecodeError, ValueError) as exc:
+            emit_harness_error(
+                exc,
+                args=args,
+                code="invalid_payload",
+                message=f"the join payload is not JSON: {exc}",
+            )
+            return None
+        if not isinstance(decoded, dict):
+            emit_harness_error(
+                RuntimeError("payload_not_an_object"),
+                args=args,
+                code="invalid_payload",
+                message="the join payload must be a JSON object",
+            )
+            return None
+        fields = decoded
+    else:
+        fields = {"peer_code": text}
+
+    # Flags OVERRIDE the payload rather than filling in behind it. An operator
+    # who typed --host did so because the payload's address is wrong for their
+    # network (a second interface, a NAT, a machine that moved), and a merge that
+    # preferred the payload would silently ignore the correction.
+    for flag, key in (
+        ("host", "host"),
+        ("port", "port"),
+        ("fingerprint", "cert_fingerprint"),
+    ):
+        value = getattr(args, flag, None)
+        if value:
+            fields[key] = value
+
+    code = str(fields.get("peer_code") or "").strip().upper()
+    host = str(fields.get("host") or "").strip()
+    try:
+        port = int(fields.get("port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+    missing = [
+        name
+        for name, value in (("peer_code", code), ("host", host), ("port", port))
+        if not value
+    ]
+    if missing:
+        emit_harness_error(
+            RuntimeError("incomplete_payload"),
+            args=args,
+            code="invalid_payload",
+            message=(
+                f"the join payload is missing {', '.join(missing)}. Paste the "
+                "join_payload string from `harness gateway peers pair` on the "
+                "other install, or pass the code with --host/--port. A payload "
+                "carrying `code` rather than `peer_code` is a DEVICE pairing "
+                "payload and cannot be joined as a peer."
+            ),
+        )
+        return None
+    return {
+        "peer_code": code,
+        "host": host,
+        "port": port,
+        "install_id": str(fields.get("install_id") or "").strip() or None,
+        "cert_fingerprint": str(fields.get("cert_fingerprint") or "").strip() or None,
+    }
+
+
+def cmd_gateway_peers_join(args) -> int:
+    """``harness gateway peers join <payload|code>`` — redeem, and record BOTH halves.
+
+    Run on install B, the second of R5's two operators. It dials install A's
+    gateway listener with a PEER hello carrying the code and B's own identity, A
+    redeems it and writes B's row, and the ``hello_ok`` carries the symmetric
+    secret back so B can write A's row. One command, two stores, one edge.
+
+    Three things it refuses rather than papers over:
+
+    * a payload that names an ``install_id`` the far side does not turn out to
+      have — that is a different install answering on that address, and
+      recording the row anyway would pin a credential to the wrong machine;
+    * a ``hello_ok`` with no ``peered`` block — the code did not redeem, and a
+      row written on hope is a row whose every dial fails;
+    * any dial failure at all, as ``runtime_unavailable`` (family 7, retryable),
+      because a listener that is not up yet is exactly the condition where the
+      identical command succeeds five seconds later.
+    """
+
+    from agent_runtime import paths
+    from agent_runtime.gateway_peers import record_peer
+    from agent_runtime.serve_gateway_auth import StoreRefusal
+    from agent_runtime.serve_socket import ServeSocketClient
+
+    root = paths.store_root()
+    parsed = _parse_join_payload(getattr(args, "payload", None), args)
+    if parsed is None:
+        return 2
+    resolved, code_or_error = _install_and_certificate(args)
+    if resolved is None:
+        return code_or_error
+    identity, certificate = resolved
+
+    endpoints = _self_endpoints(root)
+    connection = ServeSocketClient(
+        parsed["host"],
+        parsed["port"],
+        timeout_seconds=float(getattr(args, "timeout", None) or 20.0),
+        tls=True,
+        cert_fingerprint=parsed["cert_fingerprint"],
+    )
+    try:
+        connection.connect()
+        reply = connection.peer_join_hello(
+            peer_code=parsed["peer_code"],
+            peer_install_id=identity.install_id,
+            display_name=identity.display_name,
+            endpoints=endpoints,
+            cert_fingerprint=certificate.fingerprint,
+        )
+    except Exception as exc:
+        return emit_harness_error(
+            exc,
+            args=args,
+            code="runtime_unavailable",
+            message=(
+                f"{parsed['host']}:{parsed['port']}: could not complete the peer "
+                f"handshake ({type(exc).__name__}: {exc}). The other install's "
+                "gateway listener must be running, reachable, and presenting the "
+                "certificate whose fingerprint is in the payload."
+            ),
+        )
+    finally:
+        connection.close()
+
+    if not isinstance(reply, dict) or reply.get("event") != "hello_ok":
+        reason = (reply or {}).get("reason") or "no hello_ok"
+        return emit_harness_error(
+            RuntimeError(str(reason)),
+            args=args,
+            code="invalid_payload",
+            message=(
+                f"the other install refused the join ({reason}). Every credential "
+                "failure on that lane reports the same reason on purpose, so the "
+                "cause is one of: the code expired, it was already redeemed, it "
+                "was a DEVICE code, or the install is locked out after repeated "
+                "failed attempts. Mint a fresh code with `harness gateway peers "
+                "pair` over there."
+            ),
+        )
+
+    peered = reply.get("peered")
+    remote = reply.get("install") if isinstance(reply.get("install"), dict) else {}
+    remote_id = str(remote.get("install_id") or "").strip()
+    if not isinstance(peered, dict) or not peered.get("peer_secret"):
+        return emit_harness_error(
+            RuntimeError("no_peer_secret"),
+            args=args,
+            code="invalid_payload",
+            message=(
+                "the other install completed a handshake but returned no peer "
+                "secret, so this side has no credential to store. That frame is "
+                "the only time the secret is ever sent; re-run the ceremony with "
+                "a fresh code."
+            ),
+        )
+    if parsed["install_id"] and remote_id and parsed["install_id"] != remote_id:
+        return emit_harness_error(
+            RuntimeError("install_id_mismatch"),
+            args=args,
+            code="invalid_payload",
+            message=(
+                f"the payload names install {parsed['install_id']!r} but "
+                f"{parsed['host']}:{parsed['port']} answered as {remote_id!r}. "
+                "Something else is on that address; the row was NOT written."
+            ),
+        )
+
+    outcome = record_peer(
+        root,
+        peer_install_id=remote_id or parsed["install_id"] or "",
+        secret=str(peered["peer_secret"]),
+        display_name=remote.get("display_name"),
+        endpoints=[{"host": parsed["host"], "port": parsed["port"]}],
+        cert_fingerprint=parsed["cert_fingerprint"],
+    )
+    if isinstance(outcome, StoreRefusal):
+        return _refusal(outcome, args=args)
+
+    row = outcome.payload()
+    # What the OTHER side now holds about us, so one ack answers "is this edge
+    # symmetric" without an operator walking to the other machine to check.
+    row["this_install"] = {
+        "install_id": identity.install_id,
+        "display_name": identity.display_name,
+        "endpoints": endpoints,
+        "cert_fingerprint": certificate.fingerprint,
+    }
+    if not endpoints:
+        row["note"] = (
+            "this root advertised no dialable gateway endpoint, so the other "
+            "install recorded the edge with no address for it. Calls from here "
+            "to there work; calls from there to here will not until this root's "
+            "remote_gateway.listen names a reachable interface and a `peers "
+            "join` is re-run."
+        )
+    envelope = attach_root_observability(_object_envelope("gateway_peer", row))
+    _print_stage42(envelope, args=args, default_output="json")
+    return 0
+
+
+def cmd_gateway_peers_list(args) -> int:
+    """``harness gateway peers list`` — every paired install, revoked included.
+
+    Revoked rows are SHOWN, for ``devices list``'s reason: a list that hid them
+    would make "never paired" and "thrown out" the same answer, and the second is
+    the one an operator auditing a decommissioned machine needs. The credential
+    has no field here and none on ``PeerRecord`` either.
+    """
+
+    from agent_runtime import paths
+    from agent_runtime.gateway_peers import list_peers
+
+    rows = [record.payload() for record in list_peers(paths.store_root())]
+    envelope = attach_root_observability(_list_envelope("gateway_peer", rows))
+    _print_stage42(envelope, args=args, default_output="json")
+    return 0
+
+
+def cmd_gateway_peers_revoke(args) -> int:
+    """``harness gateway peers revoke <peer_install_id>`` — refuse it from here on.
+
+    Takes effect on the NEXT handshake, not on connections already open, and —
+    the fact that distinguishes this from ``devices revoke`` — it is ONE-SIDED.
+    A peer edge holds a credential at both ends, so revoking here stops that
+    install from reaching this one and does nothing to the row it keeps about us.
+    The ack says so rather than leaving an operator to assume symmetry: a
+    revocation that reached across the wire would be one install writing into
+    another's credential store, which is the authority R5 says an install never
+    has over another.
+    """
+
+    from agent_runtime import paths
+    from agent_runtime.gateway_peers import lookup_peer, revoke_peer
+    from agent_runtime.serve_gateway_auth import StoreRefusal
+
+    peer_install_id = str(getattr(args, "peer_install_id", "") or "").strip()
+    if bool(getattr(args, "dry_run", False)):
+        record = lookup_peer(paths.store_root(), peer_install_id)
+        if record is None:
+            return emit_harness_error(
+                RuntimeError("unknown_peer"),
+                args=args,
+                code="not_found",
+                message=f"no install {peer_install_id!r} is paired with this root",
+            )
+        row = record.payload()
+        # What the WRITE would land, not what is there now.
+        row["revoked"] = True
+        envelope = attach_root_observability(_object_envelope("gateway_peer", row))
+        envelope["dry_run"] = True
+        _print_stage42(envelope, args=args, default_output="json")
+        return 0
+
+    outcome = revoke_peer(paths.store_root(), peer_install_id)
+    if isinstance(outcome, StoreRefusal):
+        return _refusal(outcome, args=args)
+    row = outcome.payload()
+    row["takes_effect"] = "next_handshake"
+    row["scope"] = "this_install_only"
+    row["note"] = (
+        f"{peer_install_id} can no longer reach this install. Its own store "
+        "still holds a row for this one — run `harness gateway peers revoke` "
+        "over there to cut the edge in both directions."
+    )
+    envelope = attach_root_observability(_object_envelope("gateway_peer", row))
     _print_stage42(envelope, args=args, default_output="json")
     return 0
