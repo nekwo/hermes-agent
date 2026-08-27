@@ -578,3 +578,225 @@ refusal is counted on the terminal frame exactly as an argv refusal is.
    not see.
 5. **No second machine, still.** Everything binds loopback — Stage 1's gap,
    unchanged and not this stage's to close.
+
+## Stage 6 — peer pairing, install⇄install (2026-08-27)
+
+Landed: hermes `dd8a8ad716` (the store + the shared code discipline),
+`77768eea27` (37 store tests), `6775911bbc` (the peer caller kind, the
+allowlist, `peer.ping`, five manifest pins), `db6bbdc899` (the wire),
+`5439595880` (the four verbs), `c246b648ba` (the two-roots acceptance).
+Canon: [03 §1.2](../03-transport-and-wire.md).
+
+### The design decision that took the longest: a KIND, not a tier
+
+The natural build is a third tier word. Add `peer` to `TIERS`, declare it on the
+verbs a peer may call, compare it the way A5 compares a device's. It reads
+cleanly and it is wrong, and what makes it wrong is only visible when you ask
+what happens as the registry GROWS.
+
+A tier comparison admits every future verb that declares the matching word. So
+the day somebody registers a new `read` method — and this repo registers one
+every few stages — every paired install on the LAN can call it, and nobody
+decided that. Canon 06's exclusion (*"agents never mint or retire agents on
+another install"*) would still hold for the two verbs it names, and would have
+quietly stopped being a statement about the peer surface as a whole.
+
+An allowlist inverts the default. `PEER_METHOD_ALLOWLIST = {peer.ping}` admits
+nothing it was not edited to admit, so create/retire are absent not because
+anyone remembered to leave them out but because everything is absent. Widening
+the peer surface becomes a visible line in a diff with a reason attached, which
+is the property the canon's sentence actually needs.
+
+The test follows from that and is the one to read first:
+`test_a_peer_is_refused_every_registered_method_except_the_allowlist` iterates
+`serve_rpc.method_names()`. It does not name create and retire (except as a
+readability assertion sitting on top of the iterated one), because a rule pinned
+by two literals stops being pinned the moment a third verb arrives — the
+loops-not-literals lesson, applied where it changes what the test can catch
+rather than just how it reads.
+
+**The asymmetry with the device arm is now explicable rather than incidental.**
+Stage 3's note said the device arm is an equality against a stored tier
+"deliberately"; that note is untouched. A device is a client of THIS install
+whose operator chose how much surface to hand it, so a stored tier is the right
+question to ask. A peer is another RUNTIME whose own agents drive it, and "how
+much of my runtime may another runtime's agents reach" is a different question
+with a different answer shape.
+
+### The arm's POSITION is load-bearing, and no console-verb test can see it
+
+`authorize_call`'s read arm returns ok for every caller including `unknown` —
+A5 kept that deliberately and the reasoning is still right. But it means a peer
+evaluated AFTER the read arm inherits this runtime's entire read surface: the
+office core, the subscribe lane, every read verb not yet written. Every
+console-verb test would still pass.
+
+So the peer arm runs before the read arm, and
+`test_a_peer_is_refused_read_verbs_too_which_is_the_arm_ordering` asserts it
+against real read-tier methods discovered from the registry. If someone later
+moves the arm for tidiness, that test is the only thing in the suite that
+notices.
+
+### `peer.ping` declares `read`, and the argument for why that is not a lie
+
+The row an operator or a launcher reads says what a call WANTS, never what a
+connection HOLDS — canon 03 §2, and the launcher's `MissionRuntimeRpcManifest`
+branches on nothing. So the honest tier for a verb that reads no store, writes
+nothing and mints no id is the same one `runtime.office.get` gets. A `console`
+declaration would claim a level mutation's credential is needed, which is false,
+and would grey out a ping any read-tier device may in fact call.
+
+What the map does not say is who may call it BESIDES a credential of that
+strength, and that asymmetry is already in the contract rather than invented
+here. The allowlist NARROWS the peer lane; it does not widen this row. Inventing
+a third tier word only one caller kind can hold would put a value in the map
+every existing reader must be taught to ignore.
+
+### The frame-level rule turned out to be a COUNTING rule
+
+Four hellos now reach the listener — device credential, device pairing code,
+peer credential, peer join code. Stage 1's authenticator was a chain of `if`s,
+which is fine at two, and writing the third branch exposed what a chain does
+with a malformed frame: it picks a winner. "A code beats an id", "a peer beats a
+device" — every such rule is one refactor away from picking the MORE privileged
+one, and the flip is invisible in review because the code still reads sensibly.
+
+`_credential_kind` counts instead. Exactly one credential field named is a
+credential; zero or two is a refusal. The one pair that is not two credentials
+(a join frame carrying `peer_code` AND `peer_install_id`, where the code is the
+credential and the id is the name being claimed under it) is spelled out as an
+explicit allowance, so the counting rule stays intact for the combination an
+attacker would actually try.
+
+### One symmetric secret needed the install id in the message, or it would relay
+
+Both ends of a peer edge store `sha256(secret)` and key the HMAC with it
+directly — unlike the device lane, where the phone holds a token and digests it
+per connection. That is what makes the edge symmetric: either install can dial
+the other with the row it already has, which is required, because Stage 7's
+cross-install chat has A dialling B while Stage 6's ceremony had B dialling A.
+
+The consequence is a hole that does not exist on the device lane. With one key
+and one nonce, A's proof to B and B's proof to A would be the same bytes, and a
+relay that bounced one back would authenticate. Binding the DIALER's own install
+id into the message closes it. `test_the_proof_binds_the_port_the_nonce_and_the_install_id`
+pairs a second install against the same secret specifically so the refusal is
+the binding and not a missing row.
+
+The `pwv`/`gwv` prefix split is the other guard, and the store suite constructs
+the case it exists for rather than assuming it impossible: a device proof
+computed over the very bytes a peer holds still does not verify as a peer proof.
+
+### Why the shared `pairing.json`, argued rather than assumed
+
+The first sketch gave peers their own pending file. It is wrong for one reason
+that outweighs the tidiness: a guesser grinding codes does not care which
+ceremony a code belongs to. Same 32^8 space, same listener, same handshake
+budget. Two failure counters would mean an attacker locked out of the device
+ceremony simply grinds the peer one with a fresh budget — the lockout would gate
+minting rather than guessing, i.e. gate nothing. That is the same defect class
+`gateway/pairing.py` fixed as #10195, arriving by a different door.
+
+So the pending map, the cap and the lockout are one, and
+`test_failed_peer_redeems_lock_out_the_device_ceremony_too` is the test that
+would have caught the design going the other way — it looks like an odd thing to
+assert until you notice every per-ceremony test passes under the wrong design.
+
+What is NOT shared is what a code redeems into: every entry carries a `kind` and
+`match_pending` matches against it, so the plan's "never interchangeable" is
+enforced at the lookup rather than by two files a refactor could merge.
+
+### What the acceptance had to be, and why threads would have lied
+
+The plan says "two isolated roots on one machine". The cheap build is two
+`serve_loop` threads in one interpreter with `HERMES_AGENT_RUNTIME_ROOT` set
+before each boot. It cannot work and the failure is silent: a runtime root is
+resolved from the ENVIRONMENT, an environment is process-global, so whichever
+serve boots last owns the ambient value and every later re-resolution inside the
+FIRST serve answers for the SECOND root. The test would pass while demonstrating
+the opposite of its own claim.
+
+Two real `harness serve` children make the isolation a property of the operating
+system rather than of nobody having called `store_root()` at the wrong moment.
+29 seconds for both acceptance tests, which is cheap for what it buys.
+
+The step worth reading is the ping. A dials B at an address it learned from
+`peers.json`, because that is the only place it COULD have learned it: B's serve
+registry is on a root A cannot read, and B's port is ephemeral so it exists in no
+config file either. The only path from B's kernel-assigned port to A's dial is
+the endpoint B asserted at join time. The plan's Stage 6 risk line — "peer
+dialing needs the remote port from the pairing record, not a registry file" —
+is therefore not a convention this code follows but the only mechanism available
+to it, which is the strongest form that requirement could take.
+
+### The ceremony, as it actually ran
+
+```
+A: harness gateway peers pair --note "install B"
+   → peer_code W8UWTBMM, endpoint {127.0.0.1:60369, source: "live"}, TTL 599s
+   → join_payload {cert_fingerprint, host, install_id, peer_code, port}
+   → next_step: "run `harness gateway peers join <join_payload>` on the OTHER install"
+   → A's peers list: []            ← an invitation nobody accepted leaves no row
+
+B: harness gateway peers join <join_payload> --timeout 60
+   → exit 0; row for 6f88e215-… (A), endpoints [127.0.0.1:60369],
+     cert_fingerprint bed16d6b…, revoked false
+   → this_install: 72e85ad1-… (B), endpoints [127.0.0.1:60374], fingerprint 8498c328…
+
+A: harness gateway peers list → one row: 72e85ad1-… (B) @ 127.0.0.1:60374
+B: harness gateway peers list → one row: 6f88e215-… (A) @ 127.0.0.1:60369
+
+A → B  peer.ping {"echo": "two-roots"}
+   → {pong: true, contract: 1, peer: "6f88e215-…", at: …, echo: "two-roots"}
+
+A verifier == B verifier: True
+verifier in any printed ack: False      'peer_secret' in any printed ack: False
+```
+
+Both approvals are visible in that transcript as two commands run against two
+different roots. Neither install can perform the other's half.
+
+### Honest gaps
+
+1. **No second machine.** Every listener binds loopback. A config VALUE and not
+   different code — the same `bind()` with a host string the operator chose —
+   but "install A reached install B across a LAN" is unproven. Stage 1's gap,
+   unchanged; Stage 6 does not close it and does not claim to.
+2. **"Agents can never mint peers" is closed against REMOTE callers and not
+   against a local agent.** The remote half is structural and complete: no
+   `gateway.*` method exists for any peer verb, and the argv lane is refused
+   outright to every gateway connection, so there is no lane at any tier that
+   reaches them. The residual is that a local agent with shell access can run
+   `harness gateway peers pair` exactly as it can read `serve_auth_token` or
+   edit `peers.json` in an editor — every tool-using agent already holds the
+   machine owner's authority. The accurate claim, written into
+   `gateway_commands.py`'s docstring rather than left implied: *no agent on
+   install A can cause install B to trust it, and no remote caller of any tier
+   can mint a peer anywhere.*
+3. **A revocation is one-sided and the other install is never told.** Correct —
+   reaching across would be one install writing into another's credential store,
+   the authority R5 says an install never has — but an operator who revokes on
+   one side and assumes symmetry is wrong. The ack says so; nothing enforces
+   that they read it.
+4. **Both installs on this machine display the same name.** `display_name`
+   defaults to the hostname, so the transcript above shows `DESKTOP-QJ7DDV2` on
+   both sides of the edge. The `install_id` is the discriminator and every code
+   path uses it, but an operator picking from a `peers list` on a machine with
+   two roots sees two identical names. `harness gateway rename` fixes it per
+   root; nothing prompts them to.
+5. **The endpoint a peer records is what the other side ASSERTED.** Bounded and
+   cleaned (`clean_endpoints`), and safe only because R5's second operator
+   minted the code seconds earlier — but an install that later moves to a new
+   address is unreachable until someone re-runs the ceremony. R8's retry posture
+   is the intended answer and Stage 7 owns it.
+6. **A wildcard bind advertises nothing.** `_self_endpoints` returns `[]` for
+   `0.0.0.0`, because a wildcard is what an install LISTENS on and never an
+   address another machine can dial. The join then records an edge with no
+   address for the joining side, and the ack says so — but an operator who
+   configured `listen: 0.0.0.0` gets a one-directional edge and has to notice
+   the note to understand why.
+7. **`icacls` narrowing is reported, not asserted**, on `peers.json` as on
+   `devices.json`. Stage 1's gap, inherited.
+8. **The store lock still falls THROUGH rather than refusing** when the
+   filesystem will not lock. Stage 1's gap, inherited, and now covering two
+   stores.

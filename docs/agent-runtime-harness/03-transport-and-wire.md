@@ -77,9 +77,9 @@ default, forever.**
 |---|---|---|
 | host / port | `127.0.0.1`, ephemeral | operator-chosen, usually fixed |
 | link | plaintext | TLS, self-signed per-install cert, client PINS the fingerprint (R1) |
-| credential | the per-root `serve_auth` token | a per-DEVICE token, `gateway/devices.json` |
+| credential | the per-root `serve_auth` token | a per-DEVICE token (`gateway/devices.json`) or a per-INSTALL secret (`gateway/peers.json`) |
 | `connection.transport` | `socket` | `gateway` |
-| caller kind | `local_console` | `device`, carrying its stored tier |
+| caller kind | `local_console` | `device`, carrying its stored tier — or `peer`, carrying an allowlist |
 | ops | every op minus `shutdown` | that, minus `drain` |
 | argv lane | yes | **no** |
 
@@ -128,6 +128,69 @@ from a connection failure. A pinned `remote_gateway.port` is what makes a
 Stage 1 honest gaps in
 [planned/remote-gateway.md](planned/remote-gateway.md).
 
+### 1.2 The peer hello — the same door, a second kind of caller
+
+Since the remote gateway's Stage 6 the gateway listener admits a second
+credential: a paired INSTALL, not a paired device. `gateway/peers.json`, beside
+`devices.json`, one row per edge — `{peer_install_id, display_name, endpoints,
+cert_fingerprint, secret_verifier, approved_at, last_seen, revoked,
+revoked_at}`.
+
+The peer hello names `peer_install_id` — **the DIALER's own install id**, the
+name it asks to be recognised under — and proves
+`HMAC-SHA256(key=secret_verifier, msg="pwv1|<port>|<peer_install_id>|<nonce>")`
+(`gateway_peers.peer_proof`). A hello naming `peer_code` instead redeems a
+short-TTL code minted by `harness gateway peers pair` on the OTHER install, and
+carries the joining install's own name, endpoints and fingerprint so the edge
+can be dialled back; the minted secret rides that one `hello_ok` in a `peered`
+block and never again.
+
+**Both ends store `sha256(secret)` and key the HMAC with it directly.** That is
+the difference from the device lane, where a phone holds a token and digests it
+per connection, and it is what makes the edge symmetric: either install can dial
+the other with the row it already holds. The install id in the message is what
+that symmetry then requires — with one key and one nonce, A's proof to B and B's
+proof to A would otherwise be identical bytes and a relay could bounce one back.
+The `pwv` prefix (against the device lane's `gwv`) means a device proof does not
+verify as a peer proof even at equal contract numbers.
+
+**Exactly one credential per hello, counted rather than ranked.** A frame naming
+two of `pairing_code` / `peer_code` / `peer_install_id` / `device_id` is refused
+(`serve.py::_credential_kind`); the sole exception is a join's `peer_code` plus
+`peer_install_id`, where the code is the credential and the id is the name being
+claimed under it. Counting rather than a precedence, because a rule like "a peer
+beats a device" is one refactor away from picking the more privileged one.
+Neither door accepts the other's credential in ANY direction: the root token is
+refused on the gateway lane, a pairing code on loopback, a device credential on
+the peer field, a peer credential on the device field, and each code in the
+other ceremony's verb.
+
+**A peer holds an ALLOWLIST, not a tier** (`call_authorization.PEER_METHOD_ALLOWLIST`
+= `{peer.ping}`), and the arm runs BEFORE the read-tier arm — which is open to
+every caller, so a peer evaluated after it would inherit the whole read surface.
+This is where canon 06's exclusion ("agents never mint or retire agents on
+another install") stops being a sentence: `runtime.agent.create` and
+`runtime.agent.retire` are absent from the peer surface because EVERYTHING is
+absent unless it is in the set, and a test iterates the whole registry against
+it rather than naming those two. A peer is refused every other method with the
+same typed `data.reason: "scope_denied"`, and inherits Stage 1's two door
+refusals (`drain`, the argv lane) because both key on the LANE and not on the
+device stamp.
+
+The four operator verbs are `harness gateway peers pair | join | list | revoke`.
+**Every edge is approved on both sides (R5)** — not by a flag on a row but
+because neither half of the ceremony can be performed by the other install: A
+never learns B's address until B dials, and B cannot mint a code in A's store.
+Revocation is likewise one-sided; reaching across would be one install writing
+into another's credential store.
+
+**Peer dialling reads endpoints from the PAIRING RECORD and never from a
+registry file** (`gateway_peers.dial_peer`): the serve registry names ports on
+the local machine, so a cross-machine read of it is not stale but impossible.
+Staleness is R8's retry posture. Acceptance:
+`tests/agent_runtime/test_gateway_peer_two_roots_e2e.py` — two real serve
+children, two isolated roots, both CLI verbs, `peer.ping` A→B.
+
 ## 2. Capability advertisement — `rpc` and `ops`
 
 A durable service outlives the install it was started from, so "what does the
@@ -145,10 +208,10 @@ paired device does not get to decide even at `console` tier. A device learns
 what it may ask by MEMBERSHIP; the manifest and the dispatcher cannot disagree,
 because both read one tuple (`OPS_EVERY_TRANSPORT` minus `OPS_GATEWAY_DENIED`).
 
-**The `rpc` roster is TEN methods, and each is named by its handler** — every
-one registered by a `@method("…")` decorator in `serve_rpc.py`, which is the
-only registration site, so this list is `grep -n '@method(' agent_runtime/serve_rpc.py`
-and nothing else:
+**The `rpc` roster is THIRTEEN methods, and each is named by its handler** —
+every one registered by a `@method("…")` decorator in `serve_rpc.py`, which is
+the only registration site, so this list is
+`grep -n '@method(' agent_runtime/serve_rpc.py` and nothing else:
 
 | Method | Handler | Domain |
 |---|---|---|
@@ -162,6 +225,21 @@ and nothing else:
 | `runtime.agent.create` | `_runtime_agent_create` | roster row + chat root + actor |
 | `runtime.agent.retire` | `_runtime_agent_retire` | the inverse of the above |
 | `runtime.persona.prewarm` | `_runtime_persona_prewarm` | warm a persona |
+| `runtime.chat.message` | `_runtime_chat_message` | send one mission-chat turn |
+| `runtime.chat.steer` | `_runtime_chat_steer` | steer the running turn |
+| `peer.ping` | `_peer_ping` | is the install⇄install edge alive |
+
+**Row count corrected 2026-08-27 (gateway Stage 6).** This table said TEN and
+listed ten while the runtime had twelve: Stage 3's `runtime.chat.*` pair landed
+in the manifest and in four literal pins but not here. The two rows above are
+that correction, made while adding the thirteenth rather than filed for later.
+
+`peer.ping` is the first name outside the `runtime.*` family, and the prefix is
+a declaration: `runtime.*` verbs act on this install's level — read it, mutate
+it, or run an agent on it — while `peer.*` verbs are about the EDGE between two
+installs and touch no level at all. A client can tell them apart without
+consulting a table, which matters most for the one surface an operator on
+another machine is asked to trust.
 
 **Each method also declares a TIER, and the map rides `rpc` beside `methods`**
 (`"tiers": {"runtime.office.get": "read", …}`, hermes `8d69f8858b`). The
@@ -194,6 +272,26 @@ authority was added BESIDE that set rather than folded into it — two callers
 whose authority comes from different kinds of fact should not share one
 membership test. Reads stay open to `unknown`, deliberately and not by
 omission: nothing on the read side mutates a level.
+
+**A PEER is refused by an allowlist rather than by a tier** (Stage 6, §1.2).
+`PEER_METHOD_ALLOWLIST` is `{peer.ping}` and the arm runs before the read-tier
+arm — which is open to every caller, so a peer evaluated after it would hold
+this runtime's entire read surface including verbs nobody has written yet. The
+choice of an allowlist over a third tier word is about what happens as the
+registry GROWS: a tier comparison admits every future verb declaring that word,
+where a membership test admits nothing it was not edited to admit. So canon 06's
+exclusion holds by construction, and the test that pins it iterates
+`method_names()` rather than naming `runtime.agent.create` and
+`runtime.agent.retire` — a rule pinned by two literals stops being pinned the
+moment a third verb arrives.
+
+`peer.ping` itself declares `read`, and that is not a lie to device or console
+readers. The map answers what a call WANTS, never what a connection HOLDS, so a
+verb that reads no store, writes nothing and mints no id belongs with
+`runtime.office.get`; a read-tier device may indeed call it. The allowlist
+NARROWS the peer lane and does not widen this row. A third tier word only one
+caller kind could hold would put a value in the map every existing reader must
+be taught to ignore.
 
 This table used to be a list of ten LINE NUMBERS. Two of them (`2055`, `2115`)
 had already rotted by 2026-08-27 — a slice landing above them moved both — while

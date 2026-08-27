@@ -62,9 +62,17 @@ ceremony both have upstream reuse material in `gateway/` (`platform_registry.py`
   incident, under the name `client_message_id` plus the per-session turn journal.
   The grep for `turn_request_id` was accurate twice and answered the wrong
   question both times.
-- **Stage 6 — peer pairing (install⇄install):** `gateway/peers.json` both sides,
-  distinct peer hello, operator-approval gate (R5 — agents can never mint peers),
-  `harness gateway peers` verbs, `peer.ping` RPC.
+- **Stage 6 — peer pairing (install⇄install): SHIPPED 2026-08-27.** hermes
+  `dd8a8ad716` (S6a, the peer store + the pairing-code discipline both
+  ceremonies now share), `77768eea27` (37 store tests), `6775911bbc` (S6b, the
+  `peer` caller kind, `PEER_METHOD_ALLOWLIST`, `peer.ping`, five manifest
+  pins), `db6bbdc899` (S6c, the peer hello), `5439595880` (S6d, the four
+  operator verbs), `c246b648ba` (S6e, the two-roots acceptance). Canon:
+  [03 §1.2](../03-transport-and-wire.md). `gateway/peers.json` on both sides, a
+  distinct peer hello (`peer_install_id` / `peer_code`, proof prefix `pwv`), R5
+  honoured by a ceremony neither install can complete alone, `harness gateway
+  peers pair | join | list | revoke`, and `peer.ping` as the whole peer
+  surface. Full notes, deviations and honest gaps in "Stage 6 notes" below.
 - **Stage 7 — cross-install `agent_chat_send`:** install-qualified target grammar
   (R4, recommended `@install_name/target`; unqualified = local forever), dispatch row
   stays on the SENDER install with a remote-execution leg (`peer.agent_chat.execute`
@@ -501,6 +509,103 @@ serve-frame fixtures were regenerated from a clean detached worktree at
 `cf69a0d842` and `generate.py --check` is green twice consecutively; `ready.json`
 grew the two method names and their tier rows, with zero removals and no contract
 integer moved.
+
+## Stage 6 notes — landed 2026-08-27
+
+### What shipped, in the order it landed
+
+| sha | what |
+|---|---|
+| `dd8a8ad716` | `agent_runtime/gateway_peers.py` (the peer store) + `gateway_pairing_codes.py` (the code discipline both ceremonies share) + four more helpers hoisted into `store_file_io`. |
+| `77768eea27` | 37 store tests. |
+| `6775911bbc` | `RpcCaller` grows a `peer` kind; `PEER_METHOD_ALLOWLIST`; `peer.ping`; five manifest-literal pins in the same commit. 18 + 122 passed. |
+| `db6bbdc899` | The peer hello on the gateway listener, `_credential_kind`, two client hellos, `_is_device` → `_is_gateway`. 49 passed across both lane suites. |
+| `5439595880` | `harness gateway peers pair / join / list / revoke`. 23 + 58 passed. |
+| `c246b648ba` | Two isolated roots, two real serve children, both verbs, `peer.ping` A→B. 2 passed. |
+
+### Deviations from the plan, and the argument for each
+
+- **A peer holds an ALLOWLIST, not a tier.** §4 says "peer tier" throughout and
+  the brief inherited the word. What shipped is a caller KIND answered from
+  `PEER_METHOD_ALLOWLIST = {peer.ping}`, and the argument is about registry
+  growth rather than about this stage: a tier comparison admits every future
+  verb declaring that word, so the next `read` method somebody registers would
+  silently join the peer surface. Canon 06's exclusion needs the opposite
+  default. The word "tier" survives in the plan; the mechanism is a membership
+  test, and the test that pins it iterates the registry.
+- **`peer.ping` declares `read` rather than a peer-only tier.** `TIERS` has two
+  members and a third that only one caller kind can hold would put a value in
+  the manifest every existing reader must learn to ignore. The map says what a
+  call WANTS; the allowlist says who may call it. Argued at length on the
+  handler.
+- **The two ceremonies SHARE `pairing.json`** — one pending map, one cap, one
+  lockout, with a `kind` on each entry. Not in the brief and load-bearing: a
+  guesser grinds one code space through one listener, so two failure counters
+  would mean a lockout on one ceremony left the other's budget intact. The
+  credentials stay disjoint because `match_pending` matches on the kind.
+- **Four more helpers moved into `store_file_io`.** The brief said reuse it and
+  do not restate bodies; making that true for a second credential store meant
+  hoisting the JSON read, the atomic write, the cross-process lock and the UTC
+  stamp out of `serve_gateway_auth` rather than importing its privates. Nothing
+  was rewritten and the private names stayed as aliases, so Stage 1's call sites
+  and tests read unchanged.
+- **`ServeSocketClient` lost three copies of the challenge read.** Adding the
+  fourth and fifth hello made the duplication a decision rather than an
+  accident; `_challenge` is that half once, and the three existing hellos were
+  folded onto it rather than left beside it.
+- **`_is_device` → `_is_gateway`.** A rename, no behaviour change. The refusals
+  it guards were always keyed on the door rather than the device stamp, which is
+  why a peer inherits both — and the old name had started to say otherwise.
+- **No `peers ping` verb.** `peer.ping` is the wire proof, not an operator
+  surface, and inventing a verb to make a test convenient would ship a door
+  nobody asked for. The acceptance dials through `gateway_peers.dial_peer`.
+
+### The acceptance had to be two PROCESSES, and threads would have lied
+
+A runtime root resolves from the environment and an environment is
+process-global. Two `serve_loop` threads in one interpreter race over
+`HERMES_AGENT_RUNTIME_ROOT`: whichever boots last owns the ambient value, and
+every later re-resolution inside the FIRST serve answers for the SECOND root.
+Such a test passes while demonstrating the opposite of its claim. Two real
+`harness serve` children make the isolation the operating system's property
+instead. 29s for both tests.
+
+The step that carries the stage is the ping: A dials B at an address it learned
+from `peers.json`, because that is the only place it could have. B's serve
+registry is on a root A cannot read, and B's port is ephemeral so it is in no
+config file either. §4's risk line ("peer dialing needs the remote port from the
+pairing record, not a registry file") is therefore not a convention this code
+follows but the only mechanism available to it.
+
+### Honest gaps
+
+1. **No second machine.** Every listener binds loopback — Stage 1's gap,
+   unchanged, and not closed by two roots on one box.
+2. **"Agents can never mint peers" is closed against REMOTE callers only.** No
+   `gateway.*` method exists for any peer verb and the argv lane is refused
+   outright to every gateway connection, so no caller on that listener at any
+   tier can reach them. A LOCAL agent with shell access can run them, exactly as
+   it can read `serve_auth_token` — every tool-using agent already holds the
+   machine owner's authority. Written into `gateway_commands.py`'s docstring
+   rather than left implied.
+3. **Revocation is one-sided** and the far install is never told. Correct (the
+   alternative is writing into another install's credential store) but an
+   operator assuming symmetry is wrong; the ack says so and nothing enforces
+   reading it.
+4. **Two roots on one machine share a `display_name`** — it defaults to the
+   hostname, so a `peers list` shows two identical names and only the
+   `install_id` discriminates. `harness gateway rename` fixes it per root.
+5. **A recorded endpoint is what the far side ASSERTED**, bounded and cleaned,
+   safe because R5's second operator minted the code seconds earlier. An install
+   that moves is unreachable until the ceremony is re-run; R8 owns the retry
+   posture.
+6. **A wildcard bind advertises no endpoint** (`0.0.0.0` is what an install
+   listens on, never an address to dial), so that operator gets a
+   one-directional edge and a note explaining it.
+7. **`icacls` narrowing reported not asserted**, and **the store lock still
+   falls through** on a filesystem that will not lock. Stage 1's gaps, now
+   covering two stores.
+
 
 ## Drift addendum — audited 2026-08-27
 
