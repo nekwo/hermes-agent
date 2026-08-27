@@ -42,9 +42,10 @@ def run_harness_doctor(
     """Report surviving chat-runtime health without reviving mission records.
 
     Checks: orphan worktrees, snapshot null-id rows, event-log health, model
-    authority, and persona/profile binding. The mission-era threshold/store
-    parameters and the event-compaction switch were removed with the mission
-    lane (doc 16); the CLI stopped passing them in 126976088.
+    authority, persona/profile binding, root-only config misplacement, and the
+    roster/office placement census. The mission-era threshold/store parameters
+    and the event-compaction switch were removed with the mission lane (doc 16);
+    the CLI stopped passing them in 126976088.
 
     **The verdict spans every section.** ``ok`` was a hardcoded ``True`` on every
     path and ``needs_fix`` was derived from two of the five sections, so a report
@@ -86,6 +87,7 @@ def run_harness_doctor(
     model_authority = _model_authority_report()
     persona_binding = _persona_binding_report()
     root_config = _root_config_misplacement_report()
+    placement_census = _placement_census_report()
     # A count is an OBSERVATION. When the probe for a class did not run, the
     # honest count is ``None`` ("not observed"), never ``0`` ("observed none") —
     # a zero here is what sends an investigator hunting a defect class the
@@ -104,6 +106,21 @@ def run_harness_doctor(
             if root_config.get("health") == HEALTH_UNKNOWN
             else len(root_config.get("misplaced") or [])
         ),
+        # The census contributes TWO counts because they are two different
+        # verdicts: an orphan actor is a defect and an unplaced row is a legal
+        # state of a supported door. Folding them into one number would make the
+        # doctor's headline count climb every time the roster-only recovery
+        # door is used correctly.
+        "orphan_actors": (
+            None
+            if placement_census.get("health") == HEALTH_UNKNOWN
+            else len(placement_census.get("orphan_actors") or [])
+        ),
+        "unplaced_rows": (
+            None
+            if placement_census.get("health") == HEALTH_UNKNOWN
+            else len(placement_census.get("unplaced_rows") or [])
+        ),
     }
     section_health = {
         "orphan_worktrees": worktrees.get("health", HEALTH_UNKNOWN),
@@ -112,6 +129,7 @@ def run_harness_doctor(
         "model_authority": model_authority.get("health", HEALTH_UNKNOWN),
         "persona_binding": persona_binding.get("health", HEALTH_UNKNOWN),
         "root_config_misplacement": root_config.get("health", HEALTH_UNKNOWN),
+        "placement_census": placement_census.get("health", HEALTH_UNKNOWN),
     }
     defective = sorted(k for k, v in section_health.items() if v == HEALTH_DEFECT)
     unexamined = sorted(k for k, v in section_health.items() if v == HEALTH_UNKNOWN)
@@ -134,7 +152,10 @@ def run_harness_doctor(
         # a DEFECT rather than a notice because the value is silently inert:
         # the 2026-08-13 case left the S7-A patch producer dark for its whole
         # life while ``harness status`` reported the flag as on.
-        "schema_version": 4,
+        # 5: ``findings.placement_census`` is new — the roster/office join
+        # (plan D8), read-only, with ``summary.finding_counts`` gaining
+        # ``orphan_actors`` and ``unplaced_rows``.
+        "schema_version": 5,
         "generated_at": ref,
         "ok": not defective and not unexamined,
         "mode": {"fix": bool(fix), "dry_run": bool(dry_run)},
@@ -158,6 +179,7 @@ def run_harness_doctor(
             "snapshot_build": snapshot_build,
             "event_log": event_health,
             "root_config_misplacement": root_config,
+            "placement_census": placement_census,
         },
         "model_authority": model_authority,
         "persona_binding": persona_binding,
@@ -373,3 +395,223 @@ def _snapshot_null_id_defects(
         "health": HEALTH_DEFECT if defects else HEALTH_OK,
         "observed": True,
     }
+
+
+# -- the roster/office join, as a READ (plan D1/D8) ---------------------------
+#
+# Two stores answer two different questions and neither is folded into the
+# other: the persona-instance row answers "does this agent exist" (the
+# roster-only recovery door ``persona instance create --add-instance``
+# legitimately mints rows that were never placed), and the instance-keyed
+# office actor answers "is it on this level". Nothing had ever looked at the
+# JOIN — ``harness doctor`` reported six sections and none of them was this
+# one, and ``persona instance reconcile`` prunes orphan ROWS without ever
+# opening the office. So a half-state (a retired instance whose actor survived,
+# a placement whose compensation archived the row and not the desk) was
+# representable, durable, and invisible to the tool an operator runs to find it.
+#
+# This section is a READ and only a read. The repairs already exist and are
+# deliberate operator gestures — a retire for an orphan actor, a resumed create
+# for an unplaced row — so a doctor that silently reconciled them would be
+# choosing which of the two stores was wrong on the operator's behalf, on
+# evidence it can only see one snapshot of.
+
+
+def _census_instance_key(instance: Any) -> str:
+    """The one spelling both stores are compared in.
+
+    ``OfficeStore.upsert_actor`` stores ``persona_instance_id`` through
+    ``canonical_persona_instance_id`` (via ``_canonical_actor_key``), so a
+    roster row still carrying a legacy spelling would read as an orphan against
+    its own actor if the two sides were compared raw. Routing BOTH sides through
+    the single derivation authority is what keeps this census from inventing
+    findings out of the id drift that ``persona instance reconcile`` exists to
+    fold.
+    """
+
+    from .persona_assignments import canonical_persona_instance_id
+
+    raw = str(getattr(instance, "id", "") or "").strip()
+    canonical = canonical_persona_instance_id(
+        raw, persona_id=getattr(instance, "persona_id", None)
+    )
+    return canonical or raw
+
+
+def _census_unknown(detail: str, *, unreadable: list[str] | None = None) -> dict[str, Any]:
+    """The census as UNEXAMINED. Every count is ``None``, never ``0``/``[]``.
+
+    A store this section could not read leaves it with no world to count, and an
+    empty list here would read to an operator as "looked, found none" — the
+    false all-clear the whole doctor is written against.
+
+    A SHORT world takes this path too, and that is the subtle half. Both scans
+    return the rows they could read beside a count of the ones they could not
+    (``PersonaInstanceScan`` / ``ActorScan`` carry that count for exactly this
+    reason). A census that partitioned the readable remainder would report a
+    perfectly healthy placement as an ORPHAN — because the file that would not
+    decode is its roster row — inventing a defect out of an outage and pointing
+    the operator's remediation at the wrong store. So a partition is computed
+    only over a world that was read in full.
+    """
+
+    report: dict[str, Any] = {
+        "health": HEALTH_UNKNOWN,
+        "error": detail,
+        "observed": False,
+        "placed": None,
+        "unplaced_rows": None,
+        "orphan_actors": None,
+        "workspaces": None,
+    }
+    if unreadable:
+        report["unreadable"] = sorted(unreadable)
+    return report
+
+
+def _placement_census_report() -> dict[str, Any]:
+    """Per-workspace roster/office join: placed, unplaced rows, orphan actors.
+
+    The definitions are the plan's (D1), stated once here because three
+    different readings of "placed" is how the two stores drifted in the first
+    place:
+
+    * ``placed`` — a LIVE instance-keyed actor whose ``persona_instance_id``
+      names a LIVE roster row. Both halves present is the only whole shape.
+    * ``unplaced_rows`` — a live placement-backed row (i.e. NOT a canonical
+      persona channel, per ``is_canonical_persona_channel``) that no live actor
+      references. LEGAL, not a defect: the roster-only door mints exactly this,
+      on purpose. Reported as a ``notice`` so an operator can see them without
+      the doctor calling a supported gesture broken.
+    * ``orphan_actors`` — a live instance-keyed actor whose instance is retired
+      or missing. A DEFECT: it renders on the level as an agent nothing can
+      message.
+
+    ``health`` is ``unknown`` — never ``ok`` — when either store could not be
+    read in full. That includes a scan that returned rows AND a nonzero
+    ``unreadable`` count: a census computed over a short world reports an actor
+    as orphaned because its roster row is the file that would not decode, which
+    is the exact false finding this doctor's None-not-zero counting rule exists
+    to forbid.
+    """
+
+    from .office_store import OfficeStore
+    from .persona_assignments import PersonaInstanceStore, is_canonical_persona_channel
+
+    unreadable: list[str] = []
+
+    try:
+        roster = PersonaInstanceStore().scan_all()
+    except Exception as exc:
+        return _census_unknown(_error_text(exc))
+    if roster.unreadable:
+        unreadable.append(f"persona_instances:{roster.unreadable}")
+
+    live_rows = {_census_instance_key(row): row for row in roster.instances}
+
+    store = OfficeStore()
+    try:
+        workspace_ids = list(store.list_workspaces())
+    except Exception as exc:
+        return _census_unknown(_error_text(exc))
+
+    placed: list[dict[str, Any]] = []
+    orphan_actors: list[dict[str, Any]] = []
+    per_workspace: dict[str, dict[str, Any]] = {}
+    referenced: set[str] = set()
+
+    scans: list[tuple[str, Any]] = []
+    for workspace_id in workspace_ids:
+        try:
+            scan = store.scan_actors(workspace_id)
+        except Exception as exc:
+            unreadable.append(f"office:{workspace_id} ({_error_text(exc)})")
+            continue
+        if scan.unreadable:
+            unreadable.append(f"office:{workspace_id}:{scan.unreadable}")
+        scans.append((workspace_id, scan))
+
+    # EVERY scan first, the partition second, and the gate between them. One
+    # unreadable file anywhere in either store is enough to make the JOIN — not
+    # merely one row of it — untrustworthy, because the census's two findings
+    # are both statements about ABSENCE ("no live actor references this row",
+    # "no live row backs this actor") and absence is precisely what a file that
+    # would not open is indistinguishable from.
+    if unreadable:
+        return _census_unknown(
+            "unreadable: " + ", ".join(sorted(unreadable)), unreadable=unreadable
+        )
+
+    for workspace_id, scan in scans:
+        ws_placed: list[dict[str, Any]] = []
+        ws_orphans: list[dict[str, Any]] = []
+        for actor in scan.actors:
+            if actor.state == "archived":
+                continue
+            instance_id = str(actor.persona_instance_id or "").strip()
+            if not instance_id:
+                # A class-keyed actor answers no roster question: it is keyed on
+                # the persona, not on an instance, so it is out of this join by
+                # construction rather than by omission.
+                continue
+            referenced.add(instance_id)
+            row = {
+                "workspace_id": workspace_id,
+                "actor_key": actor.actor_key,
+                "persona_id": actor.persona_id,
+                "persona_instance_id": instance_id,
+            }
+            if instance_id in live_rows:
+                ws_placed.append(row)
+            else:
+                ws_orphans.append(row)
+        placed.extend(ws_placed)
+        orphan_actors.extend(ws_orphans)
+        per_workspace[workspace_id] = {
+            "placed": len(ws_placed),
+            "unplaced_rows": [],
+            "orphan_actors": ws_orphans,
+            "observed": True,
+        }
+
+    unplaced_rows: list[dict[str, Any]] = []
+    for key, row in sorted(live_rows.items()):
+        if key in referenced:
+            continue
+        if is_canonical_persona_channel(row):
+            # The persona's global operator channel is not a placement and was
+            # never meant to hold one. Counting it would report one "unplaced"
+            # row per persona on every healthy runtime — a finding the operator
+            # can never clear, which is how a census stops being read.
+            continue
+        entry = {
+            "persona_instance_id": key,
+            "persona_id": row.persona_id,
+            "workspace_id": row.workspace_id,
+        }
+        unplaced_rows.append(entry)
+        bucket = per_workspace.get(row.workspace_id or "")
+        if isinstance(bucket, dict) and isinstance(bucket.get("unplaced_rows"), list):
+            bucket["unplaced_rows"].append(entry)
+
+    if orphan_actors:
+        health = HEALTH_DEFECT
+    elif unplaced_rows:
+        health = HEALTH_NOTICE
+    else:
+        health = HEALTH_OK
+    report: dict[str, Any] = {
+        "health": health,
+        "observed": True,
+        "placed": len(placed),
+        "placed_actors": placed,
+        "unplaced_rows": unplaced_rows,
+        "orphan_actors": orphan_actors,
+        "workspaces": per_workspace,
+        "remediation": (
+            "an orphan actor is cleared by retiring or re-creating its agent; "
+            "an unplaced row is either awaiting a placement or is the "
+            "roster-only recovery door working as designed"
+        ),
+    }
+    return report

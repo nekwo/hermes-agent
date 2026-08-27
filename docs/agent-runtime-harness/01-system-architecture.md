@@ -101,6 +101,26 @@ that is not arbitrary: a placement written first would be a half-state naming
 an instance the runtime never minted, and the launcher's codec refuses to
 derive a binding for an actor that has none (`:726-732`).
 
+**"Placed" is the JOIN, and neither store is folded into the other** (placement
+plan D1). Entity 2 answers *does this agent exist* — `persona instance create
+--add-instance` is the roster-only recovery door and mints rows with no
+placement, on purpose — while entity 4 answers *is it on this level*. So:
+
+- **placed** — a live instance-keyed `OfficeActor` whose `persona_instance_id`
+  names a live `PersonaInstance` row. Both halves, or it is not placed.
+- **unplaced row** — a live placement-backed row (`is_canonical_persona_channel`
+  is the discriminator; a canonical operator channel is not a placement and
+  never was) that no live actor references. **Legal**, and the recovery door's
+  normal output.
+- **orphan actor** — a live instance-keyed actor whose instance is retired or
+  missing. A **defect**: it renders as an agent nothing can message.
+
+The join gets a **read**, never a merge: `harness doctor`'s `placement_census`
+(`harness_doctor.py::_placement_census_report`) reports the three per workspace
+and repairs nothing, because both repairs are operator gestures and a doctor
+reconciling them would be picking which store was wrong from one snapshot. See
+[07 — Observability](07-observability.md#the-doctors-report-roster).
+
 The chain ends there. There is no Goal and no Task — `Chat → Goal/Task` is
 gone; see [the removal section](#what-the-mission-lane-removal-deleted-and-why).
 

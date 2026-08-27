@@ -305,6 +305,64 @@ honest and release-visible for days while nothing read them, which is how the
   (`.github/workflows/ci.yml:42`), at the step `:82-85`.
 * **`scripts/core_cache_demote_census.py`** — see the core-cache section.
 
+## The doctor's report roster
+
+`harness doctor` (`agent_runtime/harness_doctor.py::run_harness_doctor`) is the
+triage surface, and the honesty contract binds it harder than anything else
+here: a false all-clear does not merely misreport, it TERMINATES the
+investigation that would have found the real defect. Both headline flags are
+therefore derived from `summary.section_health`, never asserted —
+`summary.needs_fix` is "some section observed a defect", `ok` is "every section
+was examined AND none observed one".
+
+Four health values, and the fourth is the load-bearing one. `ok` / `notice`
+(examined, informational — a stale model pin never turns the doctor into a fix
+job) / `defect` (examined, actionable) / **`unknown`** (NOT examined — the
+probe raised). `unknown` clears `ok` without claiming a defect nobody saw, and
+its counterpart in `summary.finding_counts` is `None`, never `0`: a zero there
+is what sends an investigator hunting a class the doctor never looked at.
+
+The sections, each contributing one health value (`schema_version: 5`):
+
+| Section | What it observes | Verdict weight |
+|---|---|---|
+| `orphan_worktrees` | the git sweep across registered worktrees | defect on a reap |
+| `snapshot_null_id_rows` | id-less rows in the built frame; the BUILD outcome rides its own `snapshot_build` key so a crash is never counted as rows | defect / unknown |
+| `event_log` | live slice + rotation manifest (`event_log_health`) | defect off `index_health` |
+| `model_authority` | shadowing/redundant pins (`describe_runtime_default_authority`) | notice only |
+| `persona_binding` | config-vs-store divergence (`binding_index`) | defect, with the remediation command |
+| `root_config_misplacement` | root-only keys set in a PROFILE, where nothing reads them | defect when inert, notice when duplicated |
+| `placement_census` | the roster/office join — see below | defect on an orphan actor, notice on an unplaced row |
+
+**`placement_census`** (placement plan D8) is the join nothing watched:
+`persona instance reconcile` prunes orphan ROWS without ever opening the office,
+and no doctor section read the two stores together, so a half-state — a retired
+instance whose actor survived, a placement whose compensation archived the row
+and not the desk — was representable, durable and invisible. It reports, per
+workspace, `placed` / `unplaced_rows` / `orphan_actors` with ids; the three
+terms are defined once in
+[01 — System architecture](01-system-architecture.md#the-entity-chain).
+Two properties are the section's contract:
+
+- **Read-only.** No repair, because both repairs are deliberate operator
+  gestures and the doctor sees one snapshot.
+- **`unknown`, never `ok`, on a short world.** Either store raising, and also
+  either scan returning rows beside a nonzero `unreadable` count
+  (`PersonaInstanceScan` / `ActorScan` carry that count precisely so a reader
+  cannot mistake a short list for a complete one), forces `unknown`. A census
+  computed over a short world reports an actor as orphaned because its roster
+  row is the file that would not decode — inventing the finding out of the
+  outage.
+
+Both sides of the join are compared through `canonical_persona_instance_id`, the
+single derivation authority, so id drift the reconcile verb exists to fold does
+not surface here as a fabricated orphan.
+
+The text renderer prints every non-`ok` section with its own error text, then
+names each orphan actor individually — that id is the remediation argument —
+while counting unplaced rows, since a healthy runtime can legitimately carry
+several.
+
 ## The BO-1 fixture mirror
 
 Two families, each a producer directory in hermes mirrored byte-for-byte into a

@@ -78,6 +78,10 @@ def test_harness_doctor_reports_snapshot_null_ids(isolate_agent_runtime_root):
         "orphan_worktrees",
         "snapshot_null_id_rows",
         "misplaced_root_only_keys",
+        # The census contributes TWO counts, because an orphan actor is a
+        # defect and an unplaced row is a legal state of a supported door.
+        "orphan_actors",
+        "unplaced_rows",
     }
     assert report["findings"]["snapshot_null_id_rows"] == [
         {"collection": "persona_instances", "index": 0, "id_key": "persona_instance_id"}
@@ -111,6 +115,8 @@ def test_harness_doctor_fix_is_idempotent(isolate_agent_runtime_root):
         "orphan_worktrees": 0,
         "snapshot_null_id_rows": 0,
         "misplaced_root_only_keys": 0,
+        "orphan_actors": 0,
+        "unplaced_rows": 0,
     }
 
 
@@ -270,6 +276,7 @@ def test_harness_doctor_clean_runtime_still_reads_ok(isolate_agent_runtime_root)
         "model_authority": "ok",
         "persona_binding": "ok",
         "root_config_misplacement": "ok",
+        "placement_census": "ok",
     }
     assert report["summary"]["needs_fix"] is False
     assert report["ok"] is True
@@ -287,3 +294,252 @@ def test_harness_doctor_thresholds_and_findings_carry_no_mission_rows(isolate_ag
     assert "event_log_compaction" not in report["findings"]
     assert "stale_incidents" not in report["summary"]["finding_counts"]
     assert "closed_incident_ids" not in report["repairs"]
+
+
+# ── the roster/office placement census (plan D8) ──────────────────────────────
+
+
+def _qa_persona_saved():
+    from agent_runtime.store import AgentStore
+
+    persona = AgentPersona(
+        id="qa",
+        display_name="QA Agent",
+        role="qa",
+        model=None,
+        provider=None,
+        api_mode=None,
+        toolsets=[],
+        system_prompt_path="",
+    )
+    AgentStore().save(persona)
+    return persona
+
+
+def _create(workspace_id: str, placement_id: str):
+    """One REAL placement through the create service, not a hand-built pair.
+
+    Deliberate: a census seeded by writing the two stores by hand would pin the
+    census against the fixture's idea of how a placement looks, and the
+    2026-08-24 incident that produced this plan was exactly a hand-assembled
+    pair behaving unlike the verb's. This goes through the same function both
+    doors call.
+    """
+
+    from agent_runtime.agent_create import perform_agent_create
+
+    outcome = perform_agent_create(
+        {
+            "persona_id": "qa",
+            "workspace_id": workspace_id,
+            "position": [0.0, 0.0],
+            "idempotency_key": f"census-{placement_id}",
+            "placement_id": placement_id,
+        }
+    )
+    assert outcome.refusal is None, outcome.refusal
+    return outcome.result
+
+
+def _seed_office(workspace_id: str):
+    from agent_runtime.office_store import OfficeStore
+    from tests.agent_runtime.office_seed import seed_workspace_record
+
+    seed_workspace_record(workspace_id)
+    store = OfficeStore()
+    store.ensure_surface(workspace_id, created_by="seed")
+    return store
+
+
+def _census(**kwargs):
+    report = run_harness_doctor(
+        include_worktrees=False,
+        snapshot_builder=lambda: {},
+        **kwargs,
+    )
+    return report, report["findings"]["placement_census"]
+
+
+def test_placement_census(isolate_agent_runtime_root):
+    """One of each shape, in one workspace, read back off the real stores.
+
+    ANTI-VACUITY. Every row asserted here is reachable only if the census
+    actually opened BOTH stores: ``placed`` needs the actor and the roster row
+    to be joined, the orphan needs an actor whose row was removed *after* the
+    actor was written, and the unplaced row needs a row whose actor was
+    archived. A census that read one store and guessed cannot produce this
+    partition — it can only produce all-placed or all-orphan.
+    """
+
+    from agent_runtime import paths
+
+    workspace = "ws_census"
+    _qa_persona_saved()
+    store = _seed_office(workspace)
+
+    placed = _create(workspace, "qa_placed")
+
+    # An orphan actor: the ROW goes, the actor survives. This is the field shape
+    # the plan names — a retire whose best-effort office half was swallowed, or
+    # a compensation that archived the row and not the desk.
+    orphan = _create(workspace, "qa_orphan")
+    paths.persona_instance_path(orphan["persona_instance_id"]).unlink()
+
+    # An unplaced row: the ACTOR goes (archived, as removals always are) and the
+    # row stays live. Legal, and what the roster-only recovery door mints.
+    unplaced = _create(workspace, "qa_unplaced")
+    store.remove_actor(workspace, unplaced["actor_key"], reason="census fixture")
+
+    report, census = _census()
+
+    assert census["observed"] is True
+    assert census["placed"] == 1
+    assert [row["actor_key"] for row in census["placed_actors"]] == [
+        placed["actor_key"]
+    ]
+    assert [row["persona_instance_id"] for row in census["orphan_actors"]] == [
+        orphan["persona_instance_id"]
+    ]
+    assert [row["persona_instance_id"] for row in census["unplaced_rows"]] == [
+        unplaced["persona_instance_id"]
+    ]
+    # Per workspace, not just in aggregate (D8).
+    assert census["workspaces"][workspace]["placed"] == 1
+    assert len(census["workspaces"][workspace]["orphan_actors"]) == 1
+    assert len(census["workspaces"][workspace]["unplaced_rows"]) == 1
+
+    # An orphan actor is a DEFECT and must move the verdict; the doctor is the
+    # triage tool, so a half-state it can see must not report ``ok``.
+    assert census["health"] == "defect"
+    assert report["summary"]["section_health"]["placement_census"] == "defect"
+    assert report["summary"]["needs_fix"] is True
+    assert report["ok"] is False
+    assert report["summary"]["finding_counts"]["orphan_actors"] == 1
+    assert report["summary"]["finding_counts"]["unplaced_rows"] == 1
+
+
+def test_the_census_repairs_nothing(isolate_agent_runtime_root):
+    """Read-only, including under ``--fix``.
+
+    ``harness doctor --fix`` reaps worktrees. The census must not acquire a
+    repair by riding that flag: both of its remediations are deliberate operator
+    gestures against two stores the doctor sees one snapshot of.
+    """
+
+    from agent_runtime import paths
+
+    workspace = "ws_census_readonly"
+    _qa_persona_saved()
+    _seed_office(workspace)
+    orphan = _create(workspace, "qa_readonly")
+    paths.persona_instance_path(orphan["persona_instance_id"]).unlink()
+    actor_path = paths.office_actor_path(workspace, orphan["actor_key"])
+    before = actor_path.read_bytes()
+
+    _report, census = _census(fix=True)
+
+    assert len(census["orphan_actors"]) == 1
+    assert actor_path.exists()
+    assert actor_path.read_bytes() == before
+
+
+def test_the_canonical_operator_channel_is_never_an_unplaced_row(
+    isolate_agent_runtime_root,
+):
+    """``is_canonical_persona_channel`` is the discriminator, and it is load-bearing.
+
+    A persona's global operator channel holds no placement and never did.
+    Counting it would put one permanent "unplaced" row per persona on every
+    healthy runtime — a finding no operator can clear, which is how a census
+    stops being read at all.
+
+    KILLING MUTATION: drop the ``is_canonical_persona_channel`` guard and this
+    reds with the canonical row listed.
+    """
+
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    persona = _qa_persona_saved()
+    _seed_office("ws_census_canonical")
+    canonical = PersonaInstanceStore().ensure_for_persona(persona)
+
+    _report, census = _census()
+
+    assert census["unplaced_rows"] == []
+    assert census["health"] == "ok"
+    # The row EXISTS — otherwise the assertion above is satisfied by an empty
+    # roster and proves nothing about the discriminator.
+    assert PersonaInstanceStore().get(canonical.id).id == canonical.id
+
+
+def test_the_census_is_unknown_when_the_office_is_unreadable(
+    isolate_agent_runtime_root,
+):
+    """Unknown, never ok — the load-bearing arm.
+
+    A census that answered ``ok`` here would be the doctor's worst shape: the
+    triage tool telling an operator to stop looking, on a store it never opened.
+
+    KILLING MUTATION: report ``ok`` (or an empty ``[]``) on an unreadable office
+    and this reds on the health, on ``report["ok"]``, and on the two counts,
+    which are ``None`` — "not observed" — rather than ``0``.
+    """
+
+    from agent_runtime import paths
+
+    office_root = paths.office_root()
+    office_root.parent.mkdir(parents=True, exist_ok=True)
+    # A FILE where the office directory belongs: ``list_workspaces`` finds it
+    # present and then cannot enumerate it, which is the real shape of "the
+    # store is there and will not open".
+    office_root.write_text("not a directory", encoding="utf-8")
+
+    report, census = _census()
+
+    assert census["health"] == "unknown"
+    assert census["observed"] is False
+    assert census["placed"] is None
+    assert census["unplaced_rows"] is None
+    assert census["orphan_actors"] is None
+    assert census["error"]
+    assert report["summary"]["section_health"]["placement_census"] == "unknown"
+    assert report["summary"]["finding_counts"]["orphan_actors"] is None
+    assert report["summary"]["finding_counts"]["unplaced_rows"] is None
+    assert "placement_census" in report["summary"]["unexamined_sections"]
+    assert report["ok"] is False
+    # UNKNOWN is not a defect: nothing was observed, so nothing is claimed.
+    assert report["summary"]["needs_fix"] is False
+
+
+def test_a_short_world_is_unknown_rather_than_a_fabricated_orphan(
+    isolate_agent_runtime_root,
+):
+    """An undecodable ROSTER row must not turn its live actor into an orphan.
+
+    This is the subtler half of the rule, and the one a naive implementation
+    gets wrong: ``scan_all`` returns the rows it could read and a count of the
+    ones it could not, so a census that reads only the list computes a complete
+    answer over a short world and reports a perfectly healthy placement as
+    orphaned — inventing a defect out of an outage.
+    """
+
+    from agent_runtime import paths
+
+    workspace = "ws_census_short"
+    _qa_persona_saved()
+    _seed_office(workspace)
+    row = _create(workspace, "qa_short")
+    paths.persona_instance_path(row["persona_instance_id"]).write_text(
+        "{ this is not json", encoding="utf-8"
+    )
+
+    _report, census = _census()
+
+    assert census["health"] == "unknown"
+    assert census["observed"] is False
+    assert "persona_instances:1" in (census.get("unreadable") or [])
+    # The point: NO partition is computed at all. Under the mutation this test
+    # exists for — partition the readable remainder anyway — ``orphan_actors``
+    # would be a one-row list naming a placement that is entirely healthy.
+    assert census["orphan_actors"] is None
+    assert census["placed"] is None

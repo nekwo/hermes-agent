@@ -650,7 +650,14 @@ def roster_unavailable_outcome(cause: Any = None) -> AgentCreateOutcome:
     return _refused(
         ERR_INVALID_PARAMS,
         persona_roster_unavailable_message(cause),
-        {"reason": PERSONA_ROSTER_UNAVAILABLE_REASON},
+        # Carries the same stamp as the service's own arm, and must: the whole
+        # point of this constructor is that the two lanes render ONE refusal,
+        # and a ``data`` block that differed by a key would put the parity
+        # witness in ``tests/hermes_cli/test_agent_create_verb.py`` back to
+        # comparing two blocks that agree on the fields it happens to check.
+        # The fault is met BEFORE ``perform_agent_create`` is entered, so
+        # "nothing was written" is if anything more literally true here.
+        {"reason": PERSONA_ROSTER_UNAVAILABLE_REASON, "rolled_back": True},
     )
 
 
@@ -774,7 +781,23 @@ def perform_agent_create(
     try:
         request = normalize_agent_create(params, persona=persona)
     except AgentCreateInvalid as exc:
-        return _refused(ERR_INVALID_PARAMS, exc, {"reason": exc.reason})
+        # ``rolled_back: True`` on EVERY arm of this except, and the claim is
+        # structural rather than per-reason: :func:`normalize_agent_create` runs
+        # before ``OfficeStore`` is even constructed, so there is no roster row,
+        # no chat root, no placement and no reservation receipt for any of its
+        # eight refusals to have left behind. Its own docstring is the guarantee
+        # ("a refusal here provably wrote nothing").
+        #
+        # It was absent, and an absent stamp is not neutral: the launcher's
+        # decoder reads a missing ``rolled_back`` as ``false`` and renders "the
+        # placement could not be undone" — so every mistyped persona id told the
+        # operator to go check the runtime for wreckage that could not exist.
+        # ``workspace_not_found`` one arm below has carried the stamp since
+        # 1da669d908 for exactly this reason; these arms refuse EARLIER than it
+        # does.
+        return _refused(
+            ERR_INVALID_PARAMS, exc, {"reason": exc.reason, "rolled_back": True}
+        )
 
     store = OfficeStore()
     # Before the reservation, and before any store write: an unknown workspace

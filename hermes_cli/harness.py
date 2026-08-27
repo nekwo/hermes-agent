@@ -646,7 +646,7 @@ def build_parser(parent_subparsers) -> None:
     board = subs.add_parser("board", help="Manage Mission Board planning boards + cards (planning only — cards never drive runtime execution)")
     board_subs = board.add_subparsers(dest="board_command", required=True)
     board_list = board_subs.add_parser("list", help="List boards")
-    board_list.add_argument("--workspace", default=None)
+    board_list.add_argument("--workspace", "--workspace-id", default=None)
     _add_stage42_global_args(board_list, controls=frozenset({"sort"}))
     board_list.set_defaults(func=_cmd_board_list)
     board_show = board_subs.add_parser("show", help="Show one board")
@@ -655,7 +655,7 @@ def build_parser(parent_subparsers) -> None:
     _add_stage42_global_args(board_show)
     board_show.set_defaults(func=_cmd_board_show)
     board_create = board_subs.add_parser("create", help="Create a board")
-    board_create.add_argument("--workspace", required=True)
+    board_create.add_argument("--workspace", "--workspace-id", required=True)
     board_create.add_argument("--title", default=None)
     _add_stage42_global_args(board_create, controls=frozenset({"dry_run"}))
     board_create.set_defaults(func=_cmd_board_create)
@@ -671,7 +671,7 @@ def build_parser(parent_subparsers) -> None:
     board_card_subs = board_card.add_subparsers(dest="board_card_command", required=True)
     card_add = board_card_subs.add_parser("add", help="Add a card")
     card_add.add_argument("--board", default=None, help="Board id (default: active workspace's default board)")
-    card_add.add_argument("--workspace", default=None)
+    card_add.add_argument("--workspace", "--workspace-id", default=None)
     card_add.add_argument("--title", required=True)
     card_add.add_argument("--description", default="")
     card_add.add_argument("--column", default=None, help="Column id or kind (default: first queued column)")
@@ -724,12 +724,12 @@ def build_parser(parent_subparsers) -> None:
     office = subs.add_parser("office", help="Manage the Mission Office layout (one file per actor placement; realm-synced like boards)")
     office_subs = office.add_subparsers(dest="office_command", required=True)
     office_show = office_subs.add_parser("show", help="Show a workspace's office surface + actors")
-    office_show.add_argument("--workspace", default=None)
+    office_show.add_argument("--workspace", "--workspace-id", default=None)
     office_show.add_argument("--full", action="store_true", help="Include actor item bodies")
     _add_stage42_global_args(office_show)
     office_show.set_defaults(func=_cmd_office_show)
     office_actor_upsert = office_subs.add_parser("actor-upsert", help="Create or update one actor placement (keys are minted store-side)")
-    office_actor_upsert.add_argument("--workspace", default=None)
+    office_actor_upsert.add_argument("--workspace", "--workspace-id", default=None)
     office_actor_upsert.add_argument("--actor-json", dest="actor_json", required=True, help="Actor object (path or inline JSON): {persona_id, persona_instance_id?, backing_profile?, items:[...]}")
     # Optional, never required: class-keyed placements are a legal shape (see
     # OfficeStore.archive_actors_for_instance). The re-key migration's fence is
@@ -743,7 +743,7 @@ def build_parser(parent_subparsers) -> None:
     )
     office_actor_upsert.set_defaults(func=_cmd_office_actor_upsert)
     office_actor_remove = office_subs.add_parser("actor-remove", help="Archive an actor placement (archive-never-delete)")
-    office_actor_remove.add_argument("--workspace", default=None)
+    office_actor_remove.add_argument("--workspace", "--workspace-id", default=None)
     office_actor_remove.add_argument("--actor", required=True, help="Actor key")
     office_actor_remove.add_argument("--reason", default=None)
     office_actor_remove.add_argument("--expect-revision", dest="expect_revision", type=int, default=None)
@@ -752,14 +752,14 @@ def build_parser(parent_subparsers) -> None:
     )
     office_actor_remove.set_defaults(func=_cmd_office_actor_remove)
     office_actor_restore = office_subs.add_parser("actor-restore", help="Restore an archived actor placement")
-    office_actor_restore.add_argument("--workspace", default=None)
+    office_actor_restore.add_argument("--workspace", "--workspace-id", default=None)
     office_actor_restore.add_argument("--actor", required=True, help="Actor key")
     _add_stage42_global_args(
         office_actor_restore, controls=frozenset({"dry_run"})
     )
     office_actor_restore.set_defaults(func=_cmd_office_actor_restore)
     office_set_folders = office_subs.add_parser("set-folders", help="Replace the surface's shared folder taxonomy")
-    office_set_folders.add_argument("--workspace", default=None)
+    office_set_folders.add_argument("--workspace", "--workspace-id", default=None)
     office_set_folders.add_argument("--folders", required=True, help="Comma-separated folder names (structural defaults always kept)")
     office_set_folders.add_argument("--expect-revision", dest="expect_revision", type=int, default=None)
     _add_stage42_global_args(
@@ -767,7 +767,7 @@ def build_parser(parent_subparsers) -> None:
     )
     office_set_folders.set_defaults(func=_cmd_office_set_folders)
     office_resolve = office_subs.add_parser("resolve-conflict", help="Resolve a realm-sync conflict on an actor placement")
-    office_resolve.add_argument("--workspace", default=None)
+    office_resolve.add_argument("--workspace", "--workspace-id", default=None)
     office_resolve.add_argument("--actor", required=True, help="Actor key")
     office_resolve.add_argument("--take", required=True, choices=["local", "remote"])
     office_resolve.add_argument("--allow-class-key", dest="allow_class_key", action="store_true", help="Escape hatch: adopt a remote actor on a persona CLASS key the re-key migration archived (re-creates the class-keyed placement beside its instance-keyed sibling)")
@@ -779,7 +779,7 @@ def build_parser(parent_subparsers) -> None:
         "archive-surface",
         help="Archive an ORPHANED office surface (a surface whose workspace no longer resolves); clears its orphaned_office parity warning",
     )
-    office_archive_surface.add_argument("--workspace", default=None)
+    office_archive_surface.add_argument("--workspace", "--workspace-id", default=None)
     _add_stage42_global_args(
         office_archive_surface, controls=frozenset({"dry_run"})
     )
@@ -944,7 +944,7 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_create.add_argument("--kill-active", action="store_true", help="Cancel the current run/worker before replacing the active chat")
     persona_instance_create.add_argument("--add-instance", action="store_true", help="Create an additional placement-backed instance instead of targeting the primary placement")
     persona_instance_create.add_argument("--placement-id", default=None, help="Scene itemId for an additional placement-backed instance")
-    persona_instance_create.add_argument("--workspace-id", dest="workspace_id", default=None, help="Mission Control workspace the placement belongs to (scope-provenance pointer; only meaningful with --add-instance)")
+    persona_instance_create.add_argument("--workspace-id", "--workspace", dest="workspace_id", default=None, help="Mission Control workspace the placement belongs to (scope-provenance pointer; only meaningful with --add-instance)")
     persona_instance_create.add_argument("--realm-id", dest="realm_id", default=None, help="Mission Control realm the placement belongs to (scope-provenance pointer; only meaningful with --add-instance)")
     # S70 removed `--auto-run` / `--stream` / `--max-actions` / `--max-seconds`:
     # they belonged to the retired free-floating assignment queue (argparse now
@@ -960,7 +960,7 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_open.add_argument("--kill-active", action="store_true", help="Cancel the current run/worker before replacing the active chat")
     persona_instance_open.add_argument("--add-instance", action="store_true", help="Open the chat on an additional placement-backed instance")
     persona_instance_open.add_argument("--placement-id", default=None, help="Scene itemId for an additional placement-backed instance")
-    persona_instance_open.add_argument("--workspace-id", dest="workspace_id", default=None, help="Mission Control workspace the placement belongs to (scope-provenance pointer; only meaningful with --add-instance)")
+    persona_instance_open.add_argument("--workspace-id", "--workspace", dest="workspace_id", default=None, help="Mission Control workspace the placement belongs to (scope-provenance pointer; only meaningful with --add-instance)")
     persona_instance_open.add_argument("--realm-id", dest="realm_id", default=None, help="Mission Control realm the placement belongs to (scope-provenance pointer; only meaningful with --add-instance)")
     persona_instance_open.add_argument("--display-name", default=None, help="Authoritative name for a deliberately placed additional instance; ignored unless --add-instance")
     persona_instance_open.add_argument("--requested-by", default="cli")
@@ -1097,7 +1097,7 @@ def build_parser(parent_subparsers) -> None:
     mission_chat_message.add_argument("--use-agent-default", action="store_true", help="Clear the chat-scoped provider/model override before sending")
     mission_chat_message.add_argument("--surface-prompt", default="")
     mission_chat_message.add_argument("--agents-file", default=None, help="Absolute path to one operator-selected workspace AGENTS.md to inject for this turn")
-    mission_chat_message.add_argument("--workspace-id", default=None)
+    mission_chat_message.add_argument("--workspace-id", "--workspace", default=None)
     mission_chat_message.add_argument("--workspace-name", default=None)
     mission_chat_message.add_argument("--intent-hint", default="chat")
     mission_chat_message.add_argument("--requested-by", default="cli")
@@ -1350,7 +1350,7 @@ def build_parser(parent_subparsers) -> None:
         help="Place an agent: roster row, chat root and office placement in ONE atomic call",
     )
     agent_create.add_argument("--persona", dest="persona_id", required=True, help="Roster persona id (or profile:<token>); an unknown id is refused before any write")
-    agent_create.add_argument("--workspace", dest="workspace_id", required=True, help="Mission Control workspace the placement lands in; must already exist")
+    agent_create.add_argument("--workspace", "--workspace-id", dest="workspace_id", required=True, help="Mission Control workspace the placement lands in; must already exist")
     agent_create.add_argument("--pos", dest="pos", nargs=2, metavar=("X", "Y"), required=True, help="Canvas position for the placement")
     agent_create.add_argument("--display-name", default=None, help="Authoritative name; omitted falls back to the persona's configured display name")
     agent_create.add_argument("--placement-id", default=None, help="Scene itemId to predict the actor key from; omitted mints one server-side")
@@ -4592,6 +4592,7 @@ def _cmd_doctor(args) -> int:
             "event_log": hygiene.get("findings", {}).get("event_log"),
             "model_authority": hygiene.get("model_authority"),
             "persona_binding": hygiene.get("persona_binding"),
+            "placement_census": hygiene.get("findings", {}).get("placement_census"),
         }
         for name, health in sorted((summary.get("section_health") or {}).items()):
             if health in (None, "ok"):
@@ -4608,6 +4609,24 @@ def _cmd_doctor(args) -> int:
                 f"archive_slices={event_log.get('archived_event_slices')} "
                 f"index={event_log.get('index_health')}"
             )
+        census = hygiene.get("findings", {}).get("placement_census") or {}
+        if census.get("observed"):
+            # The census's own line, because its two lists are the payload an
+            # operator acts on and the ``findings:`` counts above only say how
+            # many. Orphans are named individually — that id IS the remediation
+            # argument — while unplaced rows are counted, since a healthy
+            # runtime can legitimately carry several.
+            print(
+                f"placement census: placed={census.get('placed')} "
+                f"unplaced_rows={len(census.get('unplaced_rows') or [])} "
+                f"orphan_actors={len(census.get('orphan_actors') or [])}"
+            )
+            for orphan in census.get("orphan_actors") or []:
+                print(
+                    f"  orphan actor: {orphan.get('workspace_id')}/"
+                    f"{orphan.get('actor_key')} -> "
+                    f"{orphan.get('persona_instance_id')} (no live roster row)"
+                )
         binding = hygiene.get("persona_binding") or {}
         if binding.get("diverged_count"):
             print(

@@ -331,3 +331,153 @@ def test_an_empty_roster_that_LOADED_still_refuses_as_persona_not_found(
 
     assert caught.value.reason == agent_create.PERSONA_NOT_FOUND_REASON
     assert caught.value.reason != agent_create.PERSONA_ROSTER_UNAVAILABLE_REASON
+
+
+# ── every pre-store refusal stamps ``rolled_back: true`` (plan F3) ────────────
+#
+# ``1da669d908`` stamped the reservation and placement arms and stopped there,
+# leaving every ``AgentCreateInvalid`` arm — the eight refusals that provably
+# run before ``OfficeStore`` is even constructed — with NO ``rolled_back`` key.
+# An absent key is not neutral: the launcher's decoder reads it as ``false`` and
+# renders "the placement could not be undone", so a mistyped persona id told the
+# operator to go check the runtime for wreckage that cannot exist.
+
+
+def _invalid_reasons_declared_in_the_module() -> set[str]:
+    """Every ``AgentCreateInvalid`` reason the module can RAISE, read off its AST.
+
+    Enumerated from the source rather than typed here, and the split matters:
+    the source walk only builds the PARAMETER LIST, and every reason it finds is
+    then driven through the live ``perform_agent_create`` below and asserted at
+    runtime. A typed list would go stale the day somebody adds a ninth arm — the
+    parametrisation would keep passing while the new arm shipped unstamped,
+    which is precisely the shape of the hole this test closes.
+    """
+
+    import ast
+    import inspect
+
+    from agent_runtime import agent_create
+
+    tree = ast.parse(inspect.getsource(agent_create))
+    reasons: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Name) and func.id == "AgentCreateInvalid"):
+            continue
+        assert node.args, "AgentCreateInvalid is constructed reason-first"
+        first = node.args[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            reasons.add(first.value)
+        elif isinstance(first, ast.Name):
+            # A module-level constant (``PERSONA_NOT_FOUND_REASON``); resolved
+            # through the module so a renamed constant cannot go unnoticed.
+            reasons.add(getattr(agent_create, first.id))
+        else:  # pragma: no cover - a shape nobody has written
+            raise AssertionError(f"unrecognised reason expression: {ast.dump(first)}")
+    return reasons
+
+
+#: One request per arm, each keeping every EARLIER field valid so the refusal
+#: under test is the one the normaliser actually reaches.
+_INVALID_ARM_PARAMS: dict[str, dict] = {
+    "persona_id_required": {"persona_id": ""},
+    "persona_not_found": {"persona_id": "qa_agent"},
+    "workspace_id_required": {"workspace_id": ""},
+    "position_invalid": {"position": "3,4"},
+    "idempotency_key_required": {"idempotency_key": ""},
+    "idempotency_key_invalid": {"idempotency_key": "k" * 241},
+    "placement_id_invalid": {"placement_id": "!!!"},
+}
+
+
+def test_every_invalid_arm_has_a_case():
+    """The parametrisation covers the module, not the author's memory.
+
+    ``persona_roster_unavailable`` is driven by its own test below (it needs a
+    fault injected, not a parameter), so it is excluded here by name rather than
+    by being forgotten.
+    """
+
+    from agent_runtime import agent_create
+
+    declared = _invalid_reasons_declared_in_the_module()
+    assert declared, "the AST walk found no arms at all"
+    covered = set(_INVALID_ARM_PARAMS) | {
+        agent_create.PERSONA_ROSTER_UNAVAILABLE_REASON
+    }
+    assert declared == covered, {
+        "unparametrised": sorted(declared - covered),
+        "stale": sorted(covered - declared),
+    }
+
+
+@pytest.mark.parametrize("reason", sorted(_INVALID_ARM_PARAMS))
+def test_invalid_arms_stamp_rolled_back(reason, qa_persona):
+    """KILLING MUTATION: drop the stamp on one arm and that parameter reds.
+
+    ANTI-VACUITY. The stamp is asserted beside the two witnesses that make it
+    TRUE rather than merely present — no roster row file and no new actor — so a
+    mutant that stamped ``rolled_back: True`` on an arm that had in fact written
+    something would fail on the witnesses, not pass on the stamp.
+    """
+
+    _seed_workspace()
+    before = set(_actors())
+
+    overrides = {"placement_id": "qa_stamp", **_INVALID_ARM_PARAMS[reason]}
+    outcome = perform_agent_create(_params(**overrides))
+
+    assert outcome.refusal is not None
+    assert outcome.refusal.data["reason"] == reason
+    assert outcome.refusal.data["rolled_back"] is True
+    # The claim, not just the key.
+    assert not paths.persona_instance_path("personainst_qa_stamp").exists()
+    assert set(_actors()) == before
+
+
+def test_the_roster_fault_arm_stamps_rolled_back(monkeypatch, qa_persona):
+    """The eighth arm, which needs a fault rather than a parameter.
+
+    Patched at the config loader for the same reason the sibling test one file
+    section up is: patching ``persona_roster`` itself would prove the wrapper's
+    absence rather than the typed fault's presence.
+    """
+
+    from agent_runtime import agent_create
+    from agent_runtime import config as runtime_config
+
+    _seed_workspace()
+
+    def _explode(*args, **kwargs):
+        raise OSError("config file is locked by another process")
+
+    monkeypatch.setattr(runtime_config, "load_agent_runtime_config", _explode)
+
+    outcome = perform_agent_create(_params(placement_id="qa_roster_stamp"))
+
+    assert outcome.refusal is not None
+    assert (
+        outcome.refusal.data["reason"]
+        == agent_create.PERSONA_ROSTER_UNAVAILABLE_REASON
+    )
+    assert outcome.refusal.data["rolled_back"] is True
+
+
+def test_the_argv_lanes_roster_refusal_renders_the_same_block(qa_persona):
+    """``roster_unavailable_outcome`` is the CLI's copy of one refusal.
+
+    The two constructions are compared for equality rather than trusted to
+    agree — a ``data`` block that differed by a key would put the two lanes back
+    to rendering one fault two ways, which is the defect that constructor exists
+    to end. This is the stamp's half of that comparison.
+    """
+
+    from agent_runtime.agent_create import roster_unavailable_outcome
+
+    outcome = roster_unavailable_outcome(OSError("locked"))
+
+    assert outcome.refusal is not None
+    assert outcome.refusal.data["rolled_back"] is True
