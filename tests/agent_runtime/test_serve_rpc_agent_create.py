@@ -206,6 +206,37 @@ def test_the_method_is_advertised_on_the_manifest():
     assert serve_rpc.manifest()["tiers"]["runtime.agent.create"] == "console"
 
 
+def test_a_caller_without_the_console_tier_is_refused_before_the_service_runs():
+    """Stage A3. The declaration above became a check, and it fires ahead of
+    every one of this method's own refusals — so a caller that may not place an
+    agent is never told which persona ids exist. ``data.reason`` is the
+    assertion because that is what the launcher's decoders branch on."""
+
+    from agent_runtime.call_authorization import RpcCaller
+
+    frame = serve_rpc.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": "r-denied",
+            "method": "runtime.agent.create",
+            "params": {
+                "persona_id": "qa",
+                "workspace_id": "ws_whatever",
+                "idempotency_key": "k1",
+            },
+        },
+        serve_rpc.RpcContext(caller=RpcCaller(kind="unknown", transport="unknown")),
+    )
+
+    assert "result" not in frame
+    assert frame["error"]["code"] == serve_rpc.ERR_HANDLER_FAILED
+    assert frame["error"]["data"] == {
+        "reason": "scope_denied",
+        "tier": "console",
+        "caller": "unknown",
+    }
+
+
 def test_the_method_answers_through_the_REAL_serve_loop_and_the_argv_lane_is_untouched(
     qa_persona,
 ):

@@ -126,6 +126,7 @@ from .call_authorization import (
     TIER_READ,
     TIERS,
     RpcCaller,
+    authorize_call,
     caller_for_connection,
 )
 
@@ -422,6 +423,23 @@ def handle_request(req: Any, context: RpcContext | None = None) -> dict:
     guarding the argument itself. A caller that omits it (every test, and the
     argv lane's own probes) gets a caller with no push channel, which is the
     truth about it.
+
+    **The authorization gate is here, and it is here rather than in
+    :func:`method`'s wrapper on purpose** (Stage A3). This is the single point
+    every frame on both transports passes through, so a method cannot be
+    registered around it: the tier declaration rides the decorator, the decision
+    runs here, and there is no per-method opt-out to forget. It also leaves the
+    handlers callable directly — which every unit test in this repo does — so
+    landing the gate did not rewrite the suites that exercise the functions
+    below.
+
+    Ordering matters and is deliberate: an UNKNOWN method is answered
+    ``-32601`` before the gate runs. A refusal that told a caller which names
+    exist would be leaking the surface to someone who may not use it; a
+    ``method_not_found`` tells them nothing they could not learn from a manifest
+    they were already sent. And a caller refused for scope must not be able to
+    probe the registry by watching which name changes the error code — which it
+    cannot, because the gate's refusal names only the tier it wanted.
     """
 
     context = context or RpcContext()
@@ -437,6 +455,14 @@ def handle_request(req: Any, context: RpcContext | None = None) -> dict:
             ERR_METHOD_NOT_FOUND,
             f"unknown method: {name}",
             {"reason": "unknown_method", "methods": method_names()},
+        )
+    decision = authorize_call(method_tier(name), context.caller)
+    if not decision.ok:
+        return err(
+            rid,
+            ERR_HANDLER_FAILED,
+            f"{name} requires the {decision.tier} tier",
+            decision.refusal_data(),
         )
     try:
         return fn(rid, params, context)

@@ -43,8 +43,12 @@ already said ``console``, and everything that is not a level mutation is
 the gateway plan's R11 question and is answered there, not by adding a constant
 here on the way past.
 
-Stage A1 landed the vocabulary and the declaration; Stage A2 adds the caller
-model below. Nothing in this file refuses anything yet — the predicate is A3.
+Stage A1 landed the vocabulary and the declaration, A2 the caller model, A3 the
+predicate. The POLICY A3 ships is empty on purpose: every caller that exists
+today is allowed, and the value of the stage is that a NEW caller — a paired
+device — arrives at a place where a decision is made, instead of arriving at
+three doors that never asked. Turning a device's scope into a refusal (Stage A5)
+is then an edit to :func:`authorize_call`, not an architecture change.
 """
 
 from __future__ import annotations
@@ -64,6 +68,10 @@ __all__ = [
     "STDIO_OWNER",
     "UNKNOWN_CALLER",
     "caller_for_connection",
+    "REASON_SCOPE_DENIED",
+    "REASON_UNKNOWN_TIER",
+    "CallAuthorization",
+    "authorize_call",
 ]
 
 #: Anything that neither writes store state, emits an event, nor mints an id.
@@ -168,4 +176,86 @@ def caller_for_connection(connection: Any) -> RpcCaller:
         return RpcCaller(kind=CALLER_UNKNOWN, connection_key=key, transport=transport)
     return RpcCaller(
         kind=CALLER_LOCAL_CONSOLE, connection_key=key, transport=transport
+    )
+
+
+# ── the decision (Stage A3) ──────────────────────────────────────────────────
+
+#: The caller does not hold the tier this verb wants. CONTRACT, not prose: the
+#: launcher's decoders branch on ``data.reason`` first and the numeric code
+#: second, so this string is as much a shape as the frame around it.
+REASON_SCOPE_DENIED = "scope_denied"
+#: The verb declared a tier this build does not know. A programming error
+#: surfaced as a refusal rather than as an allow — see :func:`authorize_call`.
+REASON_UNKNOWN_TIER = "unknown_tier"
+
+#: Kinds that may run a ``console`` verb today. EVERY caller that exists is in
+#: it, which is A3's whole point: the enforcement POINT lands with an empty
+#: policy, so nothing observable moves for the local launcher, the CLI or the
+#: tests, and Stage A5 turns a device's scope into a refusal by editing this
+#: rather than by moving the check.
+_CONSOLE_KINDS = frozenset({CALLER_STDIO_OWNER, CALLER_LOCAL_CONSOLE})
+
+
+@dataclass(frozen=True, slots=True)
+class CallAuthorization:
+    """The answer, with the reason spelled for a machine."""
+
+    ok: bool
+    reason: str
+    tier: str
+    caller_kind: str
+
+    def refusal_data(self) -> dict[str, Any]:
+        """The ``data`` block of the typed refusal. ``reason`` leads because
+        that is what a client branches on."""
+
+        return {"reason": self.reason, "tier": self.tier, "caller": self.caller_kind}
+
+
+def authorize_call(tier: str, caller: RpcCaller | None) -> CallAuthorization:
+    """May *caller* run a verb declared at *tier*?
+
+    ``caller is None`` is :data:`UNKNOWN_CALLER`, NOT the owner. Every production
+    construction site fills the field; a ``None`` arriving here means somebody
+    built a context by a path that never asked the transport, and the ruling's
+    own words for "I do not know who this is" are refuse-console-verbs.
+
+    An unrecognised TIER refuses too. The temptation is to wave it through as a
+    typo — but a typo in a registration is exactly the case where a door is open
+    and nobody meant it to be, and this arm is unreachable anyway because
+    :func:`serve_rpc.method` rejects an unknown tier at import.
+
+    Read verbs are open to everyone including ``unknown``, and that is a
+    deliberate line rather than an oversight at this stage: a read tier is what a
+    caller who has proved nothing may still do, and Stage A5 gates reads (if it
+    gates them at all) on the device record, not on the absence of one. Nothing
+    on the read side mutates a level.
+    """
+
+    resolved = caller if caller is not None else UNKNOWN_CALLER
+    normalized = str(tier or "").strip() or TIER_CONSOLE
+    if normalized not in TIERS:
+        return CallAuthorization(
+            ok=False,
+            reason=REASON_UNKNOWN_TIER,
+            tier=normalized,
+            caller_kind=resolved.kind,
+        )
+    if normalized == TIER_READ:
+        return CallAuthorization(
+            ok=True, reason="read_tier", tier=normalized, caller_kind=resolved.kind
+        )
+    if resolved.kind in _CONSOLE_KINDS:
+        return CallAuthorization(
+            ok=True,
+            reason="console_grandfathered",
+            tier=normalized,
+            caller_kind=resolved.kind,
+        )
+    return CallAuthorization(
+        ok=False,
+        reason=REASON_SCOPE_DENIED,
+        tier=normalized,
+        caller_kind=resolved.kind,
     )

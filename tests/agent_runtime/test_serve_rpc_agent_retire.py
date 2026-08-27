@@ -113,6 +113,36 @@ def test_the_advertised_tier_is_console_because_this_is_a_level_mutation():
     assert serve_rpc.manifest()["tiers"]["runtime.agent.retire"] == "console"
 
 
+def test_a_caller_without_the_console_tier_is_refused_before_the_service_runs():
+    """Stage A3, on the verb the whole chokepoint plan was written about.
+
+    Asserted on ``data.reason`` rather than on the message, because that is what
+    the launcher's decoders branch on — the same rule the refusal frames below
+    follow. The caller kind used here is one nothing yet mints; the day Stage A5
+    mints a device credential, this is the frame it gets.
+    """
+
+    from agent_runtime.call_authorization import RpcCaller
+
+    frame = serve_rpc.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": "r-denied",
+            "method": "runtime.agent.retire",
+            "params": {"persona_instance_id": "personainst_whatever"},
+        },
+        serve_rpc.RpcContext(caller=RpcCaller(kind="unknown", transport="unknown")),
+    )
+
+    assert "result" not in frame
+    assert frame["error"]["code"] == serve_rpc.ERR_HANDLER_FAILED
+    assert frame["error"]["data"] == {
+        "reason": "scope_denied",
+        "tier": "console",
+        "caller": "unknown",
+    }
+
+
 def test_the_marker_never_appears_without_the_capability_it_stands_for(qa_persona):
     """D12, asserted where the marker lives.
 
