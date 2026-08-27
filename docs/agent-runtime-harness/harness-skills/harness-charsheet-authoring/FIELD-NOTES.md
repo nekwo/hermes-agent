@@ -1762,6 +1762,213 @@ which is exactly the shape that caused the 2026-08-26/27 cross-session incident.
   field to a draft that already exists, ask what `updated` is being used to prove before
   you call `_save`.
 
+## Running the backfill (appended by the OP slice, 2026-08-27)
+
+The plan's OP strip, run against the live runtime from a worktree at `c2ab3628b0` (H1).
+No code changed; this section is the receipt and what running it taught.
+
+- **[READ] The receipts, verbatim.** Two homes, three runs each: the stamping run, a second
+  `--json` run to show idempotence, and a third plain run for the human line.
+
+  `HERMES_HOME=X:\Eternia\.hermes\profiles\base`, `harness characters backfill-home --json`:
+
+  ```json
+  {
+    "home": "X:\\Eternia\\.hermes\\profiles\\base",
+    "ok": true,
+    "skipped": [],
+    "stamped": [
+      {
+        "directory": "X:\\Eternia\\.hermes\\profiles\\base\\characters\\.drafts\\20260825-025720-b9f5ae",
+        "id": "20260825-025720-b9f5ae"
+      },
+      {
+        "directory": "X:\\Eternia\\.hermes\\profiles\\base\\characters\\.drafts\\20260825-030335-2f653e",
+        "id": "20260825-030335-2f653e"
+      },
+      {
+        "directory": "X:\\Eternia\\.hermes\\profiles\\base\\characters\\.drafts\\20260827-150945-7ba0cb",
+        "id": "20260827-150945-7ba0cb"
+      }
+    ]
+  }
+  ```
+
+  Second run, same shell:
+
+  ```json
+  {
+    "home": "X:\\Eternia\\.hermes\\profiles\\base",
+    "ok": true,
+    "skipped": [
+      {
+        "directory": "X:\\Eternia\\.hermes\\profiles\\base\\characters\\.drafts\\20260825-025720-b9f5ae",
+        "hermesHome": "X:\\Eternia\\.hermes\\profiles\\base",
+        "id": "20260825-025720-b9f5ae"
+      },
+      {
+        "directory": "X:\\Eternia\\.hermes\\profiles\\base\\characters\\.drafts\\20260825-030335-2f653e",
+        "hermesHome": "X:\\Eternia\\.hermes\\profiles\\base",
+        "id": "20260825-030335-2f653e"
+      },
+      {
+        "directory": "X:\\Eternia\\.hermes\\profiles\\base\\characters\\.drafts\\20260827-150945-7ba0cb",
+        "hermesHome": "X:\\Eternia\\.hermes\\profiles\\base",
+        "id": "20260827-150945-7ba0cb"
+      }
+    ],
+    "stamped": []
+  }
+  ```
+
+  Third run, no `--json`:
+
+  ```text
+  0 draft(s) stamped with X:\Eternia\.hermes\profiles\base; 3 already recorded
+    skipped 20260825-025720-b9f5ae  already X:\Eternia\.hermes\profiles\base
+    skipped 20260825-030335-2f653e  already X:\Eternia\.hermes\profiles\base
+    skipped 20260827-150945-7ba0cb  already X:\Eternia\.hermes\profiles\base
+  ```
+
+  `HERMES_HOME=X:\Eternia\.hermes\profiles\alice`, stamping run:
+
+  ```json
+  {
+    "home": "X:\\Eternia\\.hermes\\profiles\\alice",
+    "ok": true,
+    "skipped": [],
+    "stamped": [
+      {
+        "directory": "X:\\Eternia\\.hermes\\profiles\\alice\\characters\\.drafts\\20260824-140756-cd645a",
+        "id": "20260824-140756-cd645a"
+      },
+      {
+        "directory": "X:\\Eternia\\.hermes\\profiles\\alice\\characters\\.drafts\\20260824-140756-cd645a.backup-2026-08-25-nefix",
+        "id": "20260824-140756-cd645a"
+      }
+    ]
+  }
+  ```
+
+  Second run:
+
+  ```json
+  {
+    "home": "X:\\Eternia\\.hermes\\profiles\\alice",
+    "ok": true,
+    "skipped": [
+      {
+        "directory": "X:\\Eternia\\.hermes\\profiles\\alice\\characters\\.drafts\\20260824-140756-cd645a",
+        "hermesHome": "X:\\Eternia\\.hermes\\profiles\\alice",
+        "id": "20260824-140756-cd645a"
+      },
+      {
+        "directory": "X:\\Eternia\\.hermes\\profiles\\alice\\characters\\.drafts\\20260824-140756-cd645a.backup-2026-08-25-nefix",
+        "hermesHome": "X:\\Eternia\\.hermes\\profiles\\alice",
+        "id": "20260824-140756-cd645a"
+      }
+    ],
+    "stamped": []
+  }
+  ```
+
+  Third run, no `--json`:
+
+  ```text
+  0 draft(s) stamped with X:\Eternia\.hermes\profiles\alice; 2 already recorded
+    skipped 20260824-140756-cd645a  already X:\Eternia\.hermes\profiles\alice
+    skipped 20260824-140756-cd645a  already X:\Eternia\.hermes\profiles\alice
+  ```
+
+- **[READ] Before and after, from `characters list --json`.** Every `hermesHome` was `null`
+  before and carries this home after; no `authoredBy` moved.
+
+  | home | draft id | directory leaf | `authoredBy` | `hermesHome` before to after |
+  | --- | --- | --- | --- | --- |
+  | base | `20260825-025720-b9f5ae` | `20260825-025720-b9f5ae` | `"chara_a2"` | `null` to `...\profiles\base` |
+  | base | `20260825-030335-2f653e` | `20260825-030335-2f653e` | `"chara_a2"` | `null` to `...\profiles\base` |
+  | base | `20260827-150945-7ba0cb` | `20260827-150945-7ba0cb` | `"base"` | `null` to `...\profiles\base` |
+  | alice | `20260824-140756-cd645a` | `20260824-140756-cd645a` | `null` | `null` to `...\profiles\alice` |
+  | alice | `20260824-140756-cd645a` | `20260824-140756-cd645a.backup-2026-08-25-nefix` | `null` | `null` to `...\profiles\alice` |
+
+  The two `chara_a2` rows are the mis-attribution exhibits and they are untouched: the
+  string `"chara_a2"` still resolves to no roster persona, which is the lesson they are
+  kept for. A home stamp does not disturb it. The base home held THREE drafts, not the two
+  the plan's fact 8 named — `teal-lantern-keeper` (`20260827-150945-7ba0cb`,
+  `authored_by: "base"`) was created by a later strip on the same day, and the plan's own
+  "plus any W5-era additions" clause covers it.
+
+- **[READ] The exhibits' `updated` and `authored_by` survived byte-for-byte, and that is
+  checkable rather than asserted.** Each `draft.json` was hashed before the run. After it,
+  deleting the single `"hermes_home": ...` line from the file reproduces the pre-run
+  SHA-256 exactly, on all five:
+
+  ```text
+  20260825-025720-b9f5ae                          ece79d75721e6261bbbf968205dab5cd54b5e5f547d55cd26653a0921b91527b
+  20260825-030335-2f653e                          0575bc123145a9a03b82ecabb99a40bf4b331d74f71825da0844d47177360fa7
+  20260827-150945-7ba0cb                          2deddfdc810b8770bc901f145ce20fd2857643cfd85f0e911bb9cc4a7b33515f
+  20260824-140756-cd645a                          56112a8697953b6f0b57760babc510972343e0aef618379ed9ca15fb60c09274
+  20260824-140756-cd645a.backup-2026-08-25-nefix  1e6ed66c9c4dc2cea818df78d258b390e542f105d264c38c4fc4440d7ef61b95
+  ```
+
+  **Consequence:** this is the check to run after any provenance stamp, and it is stronger
+  than reading `updated` back — it proves nothing ELSE moved either. Do not re-serialise
+  the file to build the comparison (see the CRLF trap below); delete the one line from the
+  bytes you already have.
+
+- **[TRAP — it is silent, and it answers a home you did not ask for] a bare shell can have
+  `HERMES_HOME` pointing at the runtime ROOT, and `harness status --json` still answers a
+  PROFILE.** With `HERMES_HOME=X:\Eternia\.hermes` — the root, not a profile — the status
+  payload reports `...\profiles\alice` and warns about nothing. Every command in this run
+  therefore set `HERMES_HOME` explicitly and read `.runtime_health.hermes_home` back out of
+  `harness status --json` before doing anything: it answered
+  `X:\Eternia\.hermes\profiles\base` and `X:\Eternia\.hermes\profiles\alice` respectively.
+  **Consequence:** for a verb that WRITES, "which home am I in" is not a thing to infer
+  from the shell — ask the runtime and put the answer in the receipt. The `backfill-home`
+  receipt's own `home` key is the second copy of that answer, and it agreed with the
+  read-back both times.
+
+- **[TRAP] the installed `hermes` shim runs the PRIMARY checkout, not your worktree.** The
+  venv at `X:\Eternia\.hermes\venvs\hermes-agent` carries an editable install pointing at
+  `X:\Eternia\hermes-agent`, whose `main` was two commits *sideways* of `origin/main` and
+  did not contain H1 at all — so `hermes harness characters backfill-home` would have been
+  an unknown verb, or, for a verb that already existed, silently the old code. Run the
+  venv's interpreter with the worktree as the working directory instead:
+  `X:\Eternia\.hermes\venvs\hermes-agent\Scripts\python.exe -m hermes_cli.main harness ...`
+  puts the worktree first on `sys.path` and keeps every dependency. **Consequence:** when a
+  strip's whole point is "this build has the new producer in it", prove which code ran —
+  `python -c "import hermes_cli; print(hermes_cli.__file__)"` from that same cwd, plus
+  `git log -1` in that tree — before trusting the output.
+
+- **[READ] Two drafts, one id: only the JSON receipt tells them apart.** The alice home
+  holds `anime-girl` twice — `20260824-140756-cd645a` and its
+  `...-cd645a.backup-2026-08-25-nefix` sibling — and both `draft.json` files carry the same
+  `id`. The `--json` receipt's `{id, directory}` rows name both distinctly and both appear
+  in `stamped`; the HUMAN line does not, and prints two rows that read identically
+  (`skipped 20260824-140756-cd645a  already ...` twice). **Consequence:** the human line is
+  fine for "did it do anything"; take the `--json` receipt when the question is WHICH file
+  was written. This is the case the receipt shape was designed for, and it is live on disk
+  rather than hypothetical.
+
+- **[TRAP — it will make a byte comparison lie] `draft.json` is CRLF on Windows.**
+  `_write_json_atomic` opens its temp file in text mode (`"w"`), so `json.dump`'s `\n`
+  becomes `\r\n` on the way out and the files on disk are 100% CRLF. A "reconstruct the
+  original by re-dumping the parsed dict without the new key" check therefore fails on all
+  five drafts even though nothing but the new key changed — the reconstruction is LF.
+  **Consequence:** compare draft bytes textually (drop the line, hash what is left), never
+  by re-serialising. Nothing was wrong with the files; the checker was.
+
+- **[READ — it matters to anyone capturing a payload as a fixture] `--json` output is
+  already `ensure_ascii=False`, pretty-printed and key-sorted at source.**
+  `agent_runtime.cli_format.emit_json` is
+  `json.dumps(..., indent=2, ensure_ascii=False, sort_keys=True)`, so an em dash in a QA
+  note is emitted as the literal character and never as a `\uXXXX` escape.
+  **Consequence:** a captured payload needs no post-processing at all, and any capture
+  carrying `\uXXXX` escapes went through a re-serialising step someone added — which is the
+  moment a "verbatim capture" stops being one. Capture the stdout and commit it. The
+  launcher's `test/fixtures/charsheet/status.json` was carrying exactly those escapes; the
+  2026-08-27 re-capture removed them by not re-serialising.
+
 <!-- A2, A3, R1 and any slice standing in the HERMES repo: append your entries above this
      line, under the matching heading, or add a heading if none fits. Then say in your
      slice report that you did.
