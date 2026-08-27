@@ -1284,7 +1284,9 @@ class OfficeStore:
         Read-only, and the reason it exists is idempotence: ``agent retire``
         answers a second call for an already-archived instance with the same ack
         rather than ``not_found`` (plan D11), and "the same ack" has to include
-        the actor keys the FIRST call archived. The prune above cannot supply
+        every ARCHIVED actor bound to this instance — a SUPERSET of what the
+        first call archived whenever another lane (``runtime.office.remove``)
+        archived one earlier; a replay names the union, never the first call's list. The prune above cannot supply
         them a second time — it archived them, so they are no longer live for it
         to find — and a caller that reconstructed the list from a scene snapshot
         would be re-deriving a store fact from a render. This asks the archive.

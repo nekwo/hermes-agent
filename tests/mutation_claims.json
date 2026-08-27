@@ -389,6 +389,81 @@
         "-q",
         "tests/agent_runtime/test_agent_create_service.py::test_a_replay_whose_actor_is_gone_says_so_instead_of_inventing_one"
       ]
+    },
+    {
+      "id": "s5-retire-drops-the-office-half",
+      "path": "agent_runtime/persona_assignments.py",
+      "symbol": "PersonaInstanceStore.retire",
+      "operator": "drop-the-office-half",
+      "find": "        office = self._archive_office_placements(instance)",
+      "replace": "        office = {\"archived\": 0, \"failed\": 0, \"archived_actor_keys\": [], \"failures\": []}",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_retiring_a_placed_agent_archives_the_row_and_names_every_actor"
+      ]
+    },
+    {
+      "id": "s5-prune-archives-without-naming-what-left",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "OfficeStore.archive_actors_for_instance",
+      "operator": "drop-the-identity-keep-the-count",
+      "find": "                archived_keys.append(actor.actor_key)",
+      "replace": "                pass",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_retiring_a_placed_agent_archives_the_row_and_names_every_actor"
+      ]
+    },
+    {
+      "id": "s5-office-prune-swallows-its-failures",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "OfficeStore.archive_actors_for_instance",
+      "operator": "restore-the-swallow",
+      "find": "            \"failures\": failures,",
+      "replace": "            \"failures\": [],",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_an_office_archive_fault_lands_on_the_ack_instead_of_being_swallowed"
+      ]
+    },
+    {
+      "id": "s5-second-retire-refuses-instead-of-replaying",
+      "path": "agent_runtime/agent_retire.py",
+      "symbol": "perform_agent_retire",
+      "operator": "delete-the-tombstone-probe",
+      "find": "            tombstone = store.retired_instance_archive_path(instance_id)",
+      "replace": "            tombstone = None",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_a_second_retire_replays_the_ack_rather_than_refusing"
+      ]
+    },
+    {
+      "id": "s5-replay-reconstructs-no-actor-keys",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "OfficeStore.archived_actor_keys_for_instance",
+      "operator": "empty-the-archive-read",
+      "find": "            keys.append(actor.actor_key)",
+      "replace": "            pass",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_a_second_retire_replays_the_ack_rather_than_refusing"
+      ]
     }
   ]
 }

@@ -280,7 +280,8 @@ def test_pos_is_optional_whenever_agent_retire_exists():
     while ``--pos`` is still required.
 
     State at S2 (2026-08-26), recorded rather than left to be inferred:
-    ``--pos`` is OPTIONAL and ``agent retire`` does not exist yet. That is the
+    ``--pos`` is OPTIONAL and ``agent retire`` exists since S5 (``748687daa3``) — so the live arm is
+    the ``(retire=True, pos_required=False)`` one. That is the
     safe half of the implication, not a vacuous pass — the assertion below is
     live on every combination, because it asks the predicate rather than
     branching on which one we are in.
