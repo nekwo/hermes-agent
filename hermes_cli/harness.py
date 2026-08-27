@@ -986,6 +986,23 @@ def build_parser(parent_subparsers) -> None:
     persona_set_model.add_argument("--requested-by", default="operator")
     persona_set_model.add_argument("--json", action="store_true")
     persona_set_model.set_defaults(func=_cmd_persona_set_model)
+    persona_set_skills = persona_subs.add_parser("set-skills", help="Persist a persona's default skill set (profile-default lane; future instances inherit it)")
+    persona_set_skills.add_argument("persona_id", help="Persona id or profile:<name>")
+    # `--skill` keeps the tree's ONE spelling — `action="append", default=None`
+    # — so an omitted flag arrives as ABSENT and not as `[]`. What absent MEANS
+    # is what differs by tier: on `persona instance update-profile` and `agent
+    # create` absent means "inherit the persona's skills", and `[]` means
+    # "override with none". The template tier is the ROOT of that cascade and
+    # has no one to inherit from, so absent cannot be a write at all — it is a
+    # typed `nothing_to_write` refusal (see `_cmd_persona_set_skills`). Keeping
+    # `default=None` is what lets the handler tell the two apart; `default=[]`
+    # would hand a transport-mangled argv a silent clear-every-skill.
+    persona_set_skills.add_argument("--skill", dest="skills", action="append", default=None, help="Skill id for the persona default set (repeatable); the flags given REPLACE the stored set")
+    persona_set_skills.add_argument("--clear-skills", action="store_true", help="Write an empty default set: every future inheriting placement starts with no skills")
+    persona_set_skills.add_argument("--issued-at", default=None, help="ISO-8601 issue timestamp; stale writes are superseded instead of applied")
+    persona_set_skills.add_argument("--requested-by", default="operator")
+    persona_set_skills.add_argument("--json", action="store_true")
+    persona_set_skills.set_defaults(func=_cmd_persona_set_skills)
     persona_instance = persona_subs.add_parser("instance", help="Create, open, steer, retire, and maintain persona instances (chat is the only messaging lane)")
     persona_instance_subs = persona_instance.add_subparsers(dest="persona_instance_command")
     persona_instance_create = persona_instance_subs.add_parser("create", help="Create an Agent Profile (operator chat channel) or an additional placement-backed instance (--add-instance); requires --display-name")

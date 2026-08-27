@@ -72,6 +72,12 @@ from agent_runtime.models import AgentPersona, Event, apply_instance_model_overr
 from agent_runtime.persona_assignments import (
     CHAT_BINDING_CLEARED_REASON_DELETED,
     PERSONA_INSTANCE_ID_PREFIX,
+    # The instance tier's skill-id discipline (token safety, dedupe, cap 40).
+    # IMPORTED rather than re-spelled: two spellings of one cap is exactly how
+    # `agent_create.MAX_SKILLS`'s comment says drift starts, and the template
+    # tier must normalize the same way the instance tier does or the two
+    # surfaces disagree about what an operator just typed.
+    _safe_skill_overrides,
     PersonaAssignmentStore,
     PersonaInstanceRetireError,
     PersonaInstanceStore,
@@ -5242,6 +5248,26 @@ def _set_model_error_payload(exc: _SetModelRequestError, **identity) -> dict:
     }
 
 
+def _parse_issued_at_arg(raw_value) -> datetime | None:
+    """``--issued-at`` → aware/naive datetime, or ``None`` when not supplied.
+
+    One spelling for every supersede-clock verb (``persona set-model``,
+    ``persona instance set-model``, ``persona set-skills``): the launcher stamps
+    ``Z``-suffixed timestamps that ``datetime.fromisoformat`` rejects on the
+    Python versions this repo still supports, and a second copy of that
+    workaround is a second place for it to go stale.
+    """
+
+    raw_issued = str(raw_value or "").strip()
+    if not raw_issued:
+        return None
+    text = raw_issued[:-1] + "+00:00" if raw_issued.endswith("Z") else raw_issued
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise _SetModelRequestError("invalid_value", f"--issued-at is not an ISO-8601 timestamp: {raw_issued}") from exc
+
+
 def _validated_set_model_request(args) -> dict:
     """Shared validation for `persona set-model` / `persona-instance set-model`.
 
@@ -5304,14 +5330,7 @@ def _validated_set_model_request(args) -> dict:
                     "message": f"no API-key env var ({', '.join(env_vars)}) detected on this host; OAuth/auth-store credentials may still apply at runtime",
                 }
             )
-    issued_at = None
-    raw_issued = str(getattr(args, "issued_at", None) or "").strip()
-    if raw_issued:
-        text = raw_issued[:-1] + "+00:00" if raw_issued.endswith("Z") else raw_issued
-        try:
-            issued_at = datetime.fromisoformat(text)
-        except ValueError as exc:
-            raise _SetModelRequestError("invalid_value", f"--issued-at is not an ISO-8601 timestamp: {raw_issued}") from exc
+    issued_at = _parse_issued_at_arg(getattr(args, "issued_at", None))
     return {
         "use_default": use_default,
         "provider": provider,
@@ -5408,6 +5427,55 @@ def _cmd_persona_instance_set_model(args) -> int:
     return 0
 
 
+def _template_write_store_target(store, persona_id: str, *, what: str):
+    """Resolve the STORE row a template-tier (profile-default) write lands on.
+
+    Shared by ``persona set-model`` and ``persona set-skills`` because both
+    write the same tier and must answer the same three questions identically:
+
+    * ``profile:<name>`` resolves to the SINGLE store row bound to that profile
+      (several rows ⇒ ``ambiguous_profile_persona``, none ⇒ the refusal below);
+    * a config-only catalog id is REFUSED ``persona_not_persisted`` rather than
+      promoted into a store row. Minting a row to persist one field would
+      freeze EVERY other field of that persona at its write-time value, because
+      ``config.ensure_persisted_personas`` merges ``{**catalog, **stored}`` and
+      a store row wins wholesale. The refusal names what would have happened;
+      silent promotion could not.
+
+    Returns ``(target, None)`` or ``(None, refusal_payload)`` — never both, and
+    never raises for a resolution outcome.
+    """
+
+    if persona_id.startswith("profile:"):
+        profile_name = persona_id.split(":", 1)[1]
+        candidates = [item for item in store.list_all() if str(getattr(item, "hermes_profile", "") or "") == profile_name]
+        if not candidates:
+            return None, {
+                "ok": False,
+                "error_code": "persona_not_persisted",
+                "error": f"{what} can only be set on store-persisted agents; {persona_id} has no backing agent record",
+                "persona_id": persona_id,
+            }
+        if len(candidates) > 1:
+            return None, {
+                "ok": False,
+                "error_code": "ambiguous_profile_persona",
+                "error": f"{persona_id} is backed by multiple store personas; target one explicitly",
+                "persona_id": persona_id,
+                "candidates": sorted(str(item.id) for item in candidates),
+            }
+        return candidates[0], None
+    try:
+        return store.get(persona_id), None
+    except Exception:
+        return None, {
+            "ok": False,
+            "error_code": "persona_not_persisted",
+            "error": f"{what} can only be set on store-persisted agents; {persona_id} is not in the agent store",
+            "persona_id": persona_id,
+        }
+
+
 def _cmd_persona_set_model(args) -> int:
     cfg = load_agent_runtime_config()
     raw_id = str(getattr(args, "persona_id", "") or "").strip()
@@ -5441,41 +5509,10 @@ def _cmd_persona_set_model(args) -> int:
         return 2
     store = AgentStore()
     persona_id = str(getattr(persona, "id", "") or "")
-    if persona_id.startswith("profile:"):
-        profile_name = persona_id.split(":", 1)[1]
-        candidates = [item for item in store.list_all() if str(getattr(item, "hermes_profile", "") or "") == profile_name]
-        if not candidates:
-            data = {
-                "ok": False,
-                "error_code": "persona_not_persisted",
-                "error": f"agent defaults can only be set on store-persisted agents; {persona_id} has no backing agent record",
-                "persona_id": persona_id,
-            }
-            print(emit_json(data) if args.json else data["error"])
-            return 2
-        if len(candidates) > 1:
-            data = {
-                "ok": False,
-                "error_code": "ambiguous_profile_persona",
-                "error": f"{persona_id} is backed by multiple store personas; target one explicitly",
-                "persona_id": persona_id,
-                "candidates": sorted(str(item.id) for item in candidates),
-            }
-            print(emit_json(data) if args.json else data["error"])
-            return 2
-        target = candidates[0]
-    else:
-        try:
-            target = store.get(persona_id)
-        except Exception:
-            data = {
-                "ok": False,
-                "error_code": "persona_not_persisted",
-                "error": f"agent defaults can only be set on store-persisted agents; {persona_id} is not in the agent store",
-                "persona_id": persona_id,
-            }
-            print(emit_json(data) if args.json else data["error"])
-            return 2
+    target, refusal = _template_write_store_target(store, persona_id, what="agent defaults")
+    if target is None:
+        print(emit_json(refusal) if args.json else refusal["error"])
+        return 2
     status = "applied"
     issued_at = request["issued_at"]
     if issued_at is not None and getattr(target, "model_override_issued_at", None) is not None:
@@ -5532,6 +5569,175 @@ def _cmd_persona_set_model(args) -> int:
     return 0
 
 
+def _set_skills_error_payload(error_code: str, message: str, **identity) -> dict:
+    return {
+        "ok": False,
+        "error_code": error_code,
+        "error": safe_assignment_text(message, limit=320),
+        "scope": "persona_template",
+        **identity,
+        "next_expected": "fix the arguments and retry; no persona skills were changed",
+    }
+
+
+def _validated_set_skills_request(args) -> dict:
+    """Turn the argv into the set the template will hold — or refuse.
+
+    **Absent is NEVER a write here.** ``--skill`` is ``default=None`` so the
+    handler can tell "the operator listed skills" from "the operator listed
+    none", and at THIS tier the second one has no meaning: the template is the
+    root of the cascade, so there is nothing for an omitted flag to inherit
+    from. Writing ``[]`` for it would turn any transport that dropped the
+    repeated flag — a stale launcher build, a mangled argv, a capability whose
+    ``allowedArgs`` lost a row — into a silent clear-every-skill. That exact
+    collapse already shipped once at the instance tier (``list(args.skills or
+    [])``; see THE BUG THIS REPLACES in ``_cmd_persona_instance_update_profile``)
+    and cost every skill of every renamed agent. So absent is a typed
+    ``nothing_to_write`` refusal, and emptying the set has its own flag.
+    """
+
+    raw_skills = getattr(args, "skills", None)
+    clear = bool(getattr(args, "clear_skills", False))
+    if raw_skills is not None and clear:
+        raise _SetModelRequestError(
+            "conflicting_args",
+            "--clear-skills cannot be combined with --skill; pass one or the other",
+        )
+    if raw_skills is None and not clear:
+        raise _SetModelRequestError(
+            "nothing_to_write",
+            "pass --skill (repeatable) to replace the persona's default skill set, or --clear-skills to empty it",
+        )
+    skills = [] if clear else _safe_skill_overrides([str(item) for item in raw_skills])
+    if not clear and not skills:
+        # Every id the operator supplied was dropped by token safety (or they
+        # were all blank). Writing the survivors here would be an empty set —
+        # i.e. the clear the previous branch just refused to infer — so it gets
+        # the same answer rather than a different route to the same damage.
+        raise _SetModelRequestError(
+            "invalid_value",
+            "every --skill value was rejected by token safety; pass --clear-skills to deliberately empty the set",
+        )
+    return {
+        "skills": skills,
+        "clear": clear,
+        "issued_at": _parse_issued_at_arg(getattr(args, "issued_at", None)),
+    }
+
+
+def _cmd_persona_set_skills(args) -> int:
+    """Persist a persona TEMPLATE's default skill set (profile-default tier).
+
+    The skills half of ``persona set-model``, and deliberately its twin: same
+    store-row write target (``_template_write_store_target``), same
+    ``persona_not_persisted`` refusal for a config-only catalog id, same
+    ``profile:<name>`` resolution, same supersede clock — on its OWN field
+    (``skills_override_issued_at``), so a skills write and a model write can
+    never supersede each other.
+
+    Why the tier needs a verb at all: ``persona instance update-profile
+    --skill`` writes ``skill_overrides`` on ONE agent, and a placement made
+    later inherits ``persona.skills`` — not that agent's overrides. Before this
+    verb no operator door wrote ``persona.skills``, so "set the skills, then
+    place a new agent from that persona" could not work by construction.
+
+    Inheritance is LIVE, not a copy: ``models.apply_instance_model_overrides``
+    falls back to ``list(persona.skills)`` at EVERY resolution for an instance
+    whose ``skill_overrides`` is ``None``. So this write also moves existing
+    non-overridden instances, and the ack says that out loud instead of
+    pretending only the future is affected — the first idle agent would
+    disprove the pretence anyway.
+    """
+
+    cfg = load_agent_runtime_config()
+    raw_id = str(getattr(args, "persona_id", "") or "").strip()
+    try:
+        persona = _persona_by_id(cfg, raw_id)
+    except ValueError:
+        persona = None
+    if persona is None:
+        data = {"ok": False, "error_code": "persona_not_found", "error": f"unknown persona: {safe_assignment_token(raw_id)}"}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    persona_id = str(getattr(persona, "id", "") or raw_id)
+    try:
+        request = _validated_set_skills_request(args)
+    except _SetModelRequestError as exc:
+        data = _set_skills_error_payload(exc.error_code, str(exc), persona_id=persona_id)
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    store = AgentStore()
+    target, refusal = _template_write_store_target(store, persona_id, what="persona default skills")
+    if target is None:
+        print(emit_json(refusal) if args.json else refusal["error"])
+        return 2
+    status = "applied"
+    issued_at = request["issued_at"]
+    if issued_at is not None and getattr(target, "skills_override_issued_at", None) is not None:
+        issued = issued_at if issued_at.tzinfo is not None else issued_at.replace(tzinfo=timezone.utc)
+        applied_at = target.skills_override_issued_at
+        applied_at = applied_at if applied_at.tzinfo is not None else applied_at.replace(tzinfo=timezone.utc)
+        if issued <= applied_at:
+            status = "superseded"
+    changed = False
+    if status == "applied":
+        requested = list(request["skills"])
+        if list(target.skills or []) != requested:
+            target.skills = requested
+            changed = True
+        if changed:
+            target.skills_override_issued_at = issued_at or datetime.now(timezone.utc)
+            store.save(target)
+    stored_skills = list(target.skills or [])
+    data = {
+        "ok": True,
+        "status": status,
+        "applied": status == "applied",
+        "changed": changed,
+        "scope": "persona_template",
+        "cleared": bool(request["clear"]) and status == "applied",
+        "persona_id": persona_id,
+        "applied_to_persona_id": str(target.id),
+        "skills": stored_skills,
+        "unresolved": _unresolvable_skill_ids(stored_skills),
+        "persistence": "agent_store",
+        "next_expected": (
+            "a newer skills write already applied for this persona; refresh the Harness snapshot for current truth"
+            if status == "superseded"
+            else "refresh Harness snapshot; instances whose skill_overrides is null follow this set live on their next resolution, and instances carrying their own overrides keep them"
+        ),
+    }
+    print(emit_json(data) if args.json else f"{status}: {target.id} skills={','.join(stored_skills) or '(none)'}")
+    return 0
+
+
+def _unresolvable_skill_ids(skills: list[str]) -> list[str]:
+    """Which of these ids no skills root on THIS machine can resolve.
+
+    A WARNING, never a refusal (plan R3). The instance tier does not refuse
+    them either; placement-time strictness already lives in the create verb's
+    skills phase, and the readiness projection carries the standing truth for a
+    template that names a skill this host lacks. Hard-gating here would make a
+    realm-synced persona uneditable on any machine missing one of its skills.
+
+    A resolver FAULT answers "nothing unresolved" rather than failing the verb:
+    the store write has already landed by the time this runs, so a resolver
+    problem must not turn a successful write into a non-zero exit.
+    """
+
+    if not skills:
+        return []
+    try:
+        from agent.skill_utils import resolve_skills
+
+        resolutions = resolve_skills(list(skills))
+    except Exception:  # noqa: BLE001 - advisory warning list, never a gate
+        return []
+    return [
+        name
+        for name in skills
+        if str(getattr(resolutions.get(name), "status", "missing")) != "resolved"
+    ]
 
 
 def _emit_chat_final(payload: dict[str, object]) -> None:

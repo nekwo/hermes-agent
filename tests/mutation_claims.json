@@ -614,6 +614,57 @@
         "-q",
         "tests/hermes_cli/test_agent_retire_verb.py::test_the_persona_instance_door_carries_the_token_too"
       ]
+    },
+    {
+      "id": "pts-s1-absent-becomes-clear",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_validated_set_skills_request",
+      "operator": "collapse-absent-into-clear",
+      "find": "    if raw_skills is None and not clear:\n        raise _SetModelRequestError(\n            \"nothing_to_write\",\n            \"pass --skill (repeatable) to replace the persona's default skill set, or --clear-skills to empty it\",\n        )",
+      "replace": "    if raw_skills is None and not clear:\n        clear = True",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "tests/hermes_cli/test_persona_set_skills.py::test_omitted_skill_flag_is_a_refusal_not_a_clear"
+      ]
+    },
+    {
+      "id": "pts-s1-store-write-dropped",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_cmd_persona_set_skills",
+      "operator": "drop-store-persist",
+      "find": "            target.skills_override_issued_at = issued_at or datetime.now(timezone.utc)\n            store.save(target)",
+      "replace": "            target.skills_override_issued_at = issued_at or datetime.now(timezone.utc)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "tests/hermes_cli/test_persona_set_skills.py::test_the_write_lands_on_the_store_row_and_stamps_its_own_clock"
+      ]
+    },
+    {
+      "id": "pts-s1-stale-write-applies",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_cmd_persona_set_skills",
+      "operator": "invert-supersede-comparison",
+      "find": "        applied_at = target.skills_override_issued_at\n        applied_at = applied_at if applied_at.tzinfo is not None else applied_at.replace(tzinfo=timezone.utc)\n        if issued <= applied_at:",
+      "replace": "        applied_at = target.skills_override_issued_at\n        applied_at = applied_at if applied_at.tzinfo is not None else applied_at.replace(tzinfo=timezone.utc)\n        if issued > applied_at:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "tests/hermes_cli/test_persona_set_skills.py::test_a_stale_issued_at_is_superseded_not_applied"
+      ]
     }
   ]
 }

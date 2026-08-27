@@ -275,6 +275,13 @@ class AgentPersona:
     # issued_at of the last applied model-default write; stale writes are
     # superseded (same guard as PersonaInstance.model_override_issued_at).
     model_override_issued_at: datetime | None = None
+    # issued_at of the last applied template SKILLS write (`harness persona
+    # set-skills`). Its OWN clock, deliberately not shared with the model one:
+    # the two verbs write disjoint fields, so a skills write must never
+    # supersede — or be superseded by — a model write that happened to be
+    # stamped later. Defaults to ``None`` so rows written before this field
+    # existed load unchanged.
+    skills_override_issued_at: datetime | None = None
     schema_version: int = 1
 
 
