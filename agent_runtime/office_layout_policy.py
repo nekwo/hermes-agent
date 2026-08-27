@@ -130,10 +130,13 @@ def slot_at(row: int, column: int, *, lane_offset: Point | None = None) -> Point
     lane = _lane(lane_offset)
     return (
         ORIGIN_X + column * COLUMN_SPACING + lane[0],
-        # PLUS, not minus: rows climb. A second unaimed placement stands a full
-        # grid step ABOVE the first rather than beside it, so the stack stays
-        # visible instead of marching off the side of the canvas.
-        ORIGIN_Y + row * ROW_SPACING + lane[1],
+        # MINUS: rows climb UP THE SCREEN. The office canvas renders +y
+        # downward (measured on a live Stage C capture 2026-08-27: ~32 px per
+        # world unit, world y increasing toward the bottom of the window), so a
+        # row offset that ADDS to y stacks each new placement BELOW the last —
+        # the opposite of the ruling. Subtracting is what puts the second
+        # placement a full grid step above the first on screen.
+        ORIGIN_Y - row * ROW_SPACING + lane[1],
     )
 
 
