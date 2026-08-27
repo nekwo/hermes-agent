@@ -94,6 +94,7 @@ __all__ = [
     "INSTALL_RECORD_FILENAME",
     "DISPLAY_NAME_MAX_CHARS",
     "InstallIdentity",
+    "clean_display_name",
     "default_display_name",
     "ensure_install_identity",
     "gateway_dir",
@@ -179,7 +180,7 @@ def default_display_name(store_root: Path | str) -> str:
         _safe_hostname(),
         Path(store_root).name,
     ):
-        cleaned = _clean_display_name(candidate)
+        cleaned = clean_display_name(candidate)
         if cleaned:
             return cleaned
     return "hermes"
@@ -258,7 +259,7 @@ def set_display_name(store_root: Path | str, name: str) -> InstallIdentity:
     is always the id that is now on disk — never the one we hoped to write.
     """
 
-    cleaned = _clean_display_name(name)
+    cleaned = clean_display_name(name)
     if not cleaned:
         return _error(install_record_path(store_root), "empty_display_name")
     current = ensure_install_identity(store_root)
@@ -279,7 +280,14 @@ def set_display_name(store_root: Path | str, name: str) -> InstallIdentity:
         return _error(path, _error_reason(exc))
     except Exception:  # pragma: no cover - defensive
         return _error(path, "rename_failed")
-    return _identity(STATE_LOADED, path, record)
+    # The state is the one the LOAD-OR-MINT above reported, not a constant
+    # ``loaded``. A rename against a root that had no record created the install
+    # — that is the fact ``minted`` exists to say, and it is the fact an operator
+    # running ``harness gateway rename`` on a fresh root most needs told. Writing
+    # ``loaded`` here would have this call report the opposite of what it did,
+    # which is the "stated either way, never inferred" rule broken on its own
+    # module.
+    return _identity(current.state, path, record)
 
 
 # ---------------------------------------------------------------------------
@@ -298,8 +306,15 @@ def _safe_hostname() -> str:
         return ""
 
 
-def _clean_display_name(value: Any) -> str:
-    """Printable, single-line, bounded. A name is chrome, not an identifier."""
+def clean_display_name(value: Any) -> str:
+    """Printable, single-line, bounded. A name is chrome, not an identifier.
+
+    PUBLIC because ``harness gateway rename --dry-run`` (Stage 0b) has to print
+    the string that WOULD land, and the only way to get that without a second
+    copy of this rule is to ask the rule. A preview that echoes the operator's
+    raw argument is worse than no preview: a 200-character paste would preview
+    at 200 and land at :data:`DISPLAY_NAME_MAX_CHARS`.
+    """
 
     text = str(value or "").strip()
     if not text:
@@ -340,7 +355,7 @@ def _decode(path: Path, raw: str) -> InstallIdentity:
     install_id = str(record.get("install_id") or "").strip()
     if not install_id:
         return _error(path, "record_without_id")
-    display_name = _clean_display_name(record.get("display_name"))
+    display_name = clean_display_name(record.get("display_name"))
     created_at = str(record.get("created_at") or "").strip() or None
     return InstallIdentity(
         state=STATE_LOADED,

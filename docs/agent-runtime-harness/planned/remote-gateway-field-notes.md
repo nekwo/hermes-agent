@@ -273,3 +273,75 @@ keep the renamed coordinator review alone. (4) `_coordinator_scope_from_args`
 still lets four argv flags widen a coordinator's self-declared budget. That is
 `coordinator_permissions`' MODEL, explicitly out of scope per plan §4, and it is
 now labelled rather than fixed.
+
+## 2026-08-27 — Stage 0b, the CLI verbs
+
+**Two subverbs where the plan wrote one verb and a flag.** Stage 0a's remainder
+note (and the launcher queue row) both spell this `harness gateway id` /
+`--set-name`. What landed is `harness gateway id` and `harness gateway rename
+<name>`, and the reason is mechanical rather than taste:
+`_add_stage42_global_args` is where every stage42 verb gets its flags, and the
+writer's set and the reader's set are DIFFERENT — a mutation opts into
+`--dry-run` (`roots set`, `workspace rename`, 29 call sites), a read does not.
+One parser cannot carry both truthfully, and that helper's own docstring is
+built around the rule that an advertised flag which does nothing is "a WRONG
+ANSWER believed, not an error seen". `rename` rather than `set-name` because
+`workspace rename` is the house word for exactly this operation and
+`set_display_name`'s own docstring opens "Rename this install".
+
+**No authorization gate, and it is a decision.** The A4 mirror
+(`persona_commands._console_denial`) exists so two doors onto ONE service
+function cannot answer differently — `perform_agent_create` /
+`perform_agent_retire` each have a CLI door and an RPC door. Stage 0b adds no
+RPC method, so there is one door and nothing to disagree with; `CLI_CONSOLE`
+here would gate against a predicate that allows every caller that exists, with
+no wire twin to keep it honest, and `_console_denial` is shaped as the two
+service functions' refusal kwargs so reusing it means generalising a helper for
+a caller that is always allowed. The record is also not a level and not a
+secret. When a paired DEVICE may rename an install, the door is a `gateway.*`
+method with a tier declaration (Stage 1 / A5) and the gate goes there — where
+the caller is something the transport proved. Written into the handler block in
+`harness.py` rather than left as an absent check, on A4's own reasoning that a
+grandfather clause should be greppable.
+
+**A read that mints is a side effect on a root somebody only asked about.**
+`gateway id` routes at `read_install_identity`, never `ensure_install_identity`,
+and the test probes the FILESYSTEM rather than the ack — the kill-mutation
+(route at ensure) returns a perfectly plausible exit-0 ack. Stage 4's install
+picker will run this against roots it does not own.
+
+**One Stage 0a service wart, found by shipping the verb and fixed:**
+`set_display_name` returned a constant `STATE_LOADED`, so a rename against a
+fresh root — which MINTS, by its own documented contract — reported `loaded`.
+That is the call reporting the opposite of what it did, on the one module whose
+whole contract is "state it, never infer it from absence". It now propagates the
+load-or-mint outcome it already had in hand. No test pinned the old constant; a
+new one pins the new behaviour both ways.
+
+**`clean_display_name` became public**, because `--dry-run` has to print the
+string that WOULD land and the only way to get it without a second copy of the
+rule is to ask the rule. A preview that echoes the raw argument shows a
+500-character paste at 500 and lands it at 64 — a preview that disagrees with
+its own write is worse than no preview.
+
+**Typed states become exit families, never tracebacks.** `error:absent` → 3
+(nothing to show — a root that never served genuinely has no identity);
+`malformed_record` / `record_without_id` → 1 (`store_corrupt`, and deliberately
+NOT a re-mint, per the asymmetry `_decode` documents: those bytes may hold the
+id a paired device names); `empty_display_name` → 2; every other I/O reason → 7,
+retryable in the sense that family already means. The typed reason travels
+verbatim in the message, so an operator comparing a greeting frame's `install`
+block against the verb reads one spelling, not two.
+
+**Root observability is not decoration here.** The identity is per STORE ROOT,
+so a `gateway id` against the wrong root returns a well-formed identity for a
+runtime the operator did not mean — the 2026-08-12 incident's shape with an id
+in it. Both handlers stamp the block; the ledger in
+`test_harness_json_root_observability.py` gains no new row.
+
+**Cross-repo.** A new verb changes the argparse tree the launcher pins. The
+serve-frame captures should NOT move — a CLI verb touches no greeting frame —
+and that was proven rather than assumed with a `generate.py --check` at the end.
+
+**Run, not inferred.** Receipts and honest gaps are in the Stage 0b block of
+`remote-gateway.md`.

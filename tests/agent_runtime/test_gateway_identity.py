@@ -122,6 +122,23 @@ def test_a_rename_on_an_unnamed_root_mints_first(tmp_path: Path):
     assert uuid.UUID(renamed.install_id).version == 4
 
 
+def test_a_rename_reports_which_of_the_two_things_it_did(tmp_path: Path):
+    """``state`` is the load-or-mint outcome, not a constant.
+
+    ``harness gateway rename`` on a fresh root CREATES the install, and that is
+    the fact ``minted`` exists to carry — a rename that always answered
+    ``loaded`` would report the opposite of what it did, on the one module whose
+    whole contract is "state it, never infer it from absence".
+    """
+
+    first = set_display_name(tmp_path, "kitchen")
+    second = set_display_name(tmp_path, "kitchen table")
+
+    assert first.state == "minted"
+    assert second.state == "loaded"
+    assert second.install_id == first.install_id
+
+
 def test_an_empty_name_is_refused_rather_than_written(tmp_path: Path):
     minted = ensure_install_identity(tmp_path)
 
