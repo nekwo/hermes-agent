@@ -89,6 +89,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .store_file_io import os_error_reason as _error_reason
+from .store_file_io import read_raw_text as _read_raw
+
 __all__ = [
     "GATEWAY_DIRNAME",
     "INSTALL_RECORD_FILENAME",
@@ -324,17 +327,6 @@ def clean_display_name(value: Any) -> str:
     return text[:DISPLAY_NAME_MAX_CHARS].strip()
 
 
-def _read_raw(path: Path) -> str | None:
-    """The file's text, ``None`` when it is absent or holds only whitespace."""
-
-    if not path.is_file():
-        return None
-    # read_bytes + decode, never read_text: the repo's standing EOL rule — a
-    # record an operator saved with CRLF must still parse.
-    value = path.read_bytes().decode("utf-8", errors="replace").strip()
-    return value or None
-
-
 def _decode(path: Path, raw: str) -> InstallIdentity:
     """Parse a record that EXISTS. A broken one is a typed error, not a re-mint.
 
@@ -423,11 +415,5 @@ def _error(path: Path, reason: str) -> InstallIdentity:
     )
 
 
-def _error_reason(exc: OSError) -> str:
-    if isinstance(exc, PermissionError):
-        return "permission_denied"
-    if isinstance(exc, FileNotFoundError):
-        return "root_missing"
-    if isinstance(exc, NotADirectoryError):
-        return "root_not_a_directory"
-    return "unwritable"
+# The bodies live in ``store_file_io`` (one authority); the conventional
+# private names stay so call sites and tests read unchanged.

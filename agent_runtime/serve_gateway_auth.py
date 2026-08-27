@@ -122,7 +122,6 @@ import hmac
 import json
 import os
 import secrets
-import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
@@ -132,6 +131,8 @@ from typing import Any, Iterator
 
 from .call_authorization import TIER_CONSOLE, TIER_READ, TIERS
 from .gateway_identity import gateway_dir
+from .store_file_io import narrow_windows_acl as _narrow_windows_acl
+from .store_file_io import os_error_reason as _os_reason
 
 if os.name == "nt":  # pragma: no cover - platform split
     import errno as _errno
@@ -868,51 +869,10 @@ def _write_secure(path: Path, payload: dict[str, Any]) -> None:
         _narrow_windows_acl(path)
 
 
-def _narrow_windows_acl(path: Path) -> str:
-    """Best-effort DACL narrowing on Windows. Returns the outcome, never raises.
-
-    ``serve_auth.py`` recorded that Windows mode bits are not a permission and
-    declined to fix it, on the grounds that the real control belongs with the
-    transport slice that introduces the exposure. This IS that slice: the file
-    below gates a listener reachable from another machine. So the narrowing is
-    attempted — ``icacls`` with inheritance removed and a single grant to the
-    current user — and its outcome is RETURNED rather than assumed, because a
-    permission posture that cannot be enforced must never be claimed.
-
-    Not fatal on failure by design: a device store that could not be narrowed is
-    still a device store, and refusing to write one would take the lane down over
-    a hardening.
-    """
-
-    user = os.environ.get("USERNAME") or ""
-    if not user:
-        return "skipped:no_username"
-    try:
-        completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
-            [
-                "icacls",
-                str(path),
-                "/inheritance:r",
-                "/grant:r",
-                f"{user}:(R,W)",
-            ],
-            capture_output=True,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return f"error:{type(exc).__name__}"
-    return "narrowed" if completed.returncode == 0 else f"error:rc{completed.returncode}"
-
-
-def _os_reason(exc: OSError) -> str:
-    if isinstance(exc, PermissionError):
-        return "permission_denied"
-    if isinstance(exc, FileNotFoundError):
-        return "root_missing"
-    if isinstance(exc, NotADirectoryError):
-        return "root_not_a_directory"
-    return "unwritable"
+# The bodies live in ``store_file_io`` (one authority) — including the
+# "this IS the transport slice that introduces the exposure" rationale that
+# used to sit on the ACL helper here; the conventional private names stay so
+# call sites and tests read unchanged.
 
 
 @contextlib.contextmanager

@@ -89,13 +89,14 @@ import datetime as _datetime
 import hashlib
 import os
 import ssl
-import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .gateway_identity import gateway_dir
+from .store_file_io import narrow_windows_acl as _narrow_windows_acl
+from .store_file_io import os_error_reason as _os_reason
 
 __all__ = [
     "CERTIFICATE_FILENAME",
@@ -373,22 +374,8 @@ def _write_public(path: Path, payload: bytes) -> None:
         raise
 
 
-def _narrow_windows_acl(path: Path) -> str:
-    """Best effort, reported not assumed — the note is in ``serve_gateway_auth``."""
-
-    user = os.environ.get("USERNAME") or ""
-    if not user:
-        return "skipped:no_username"
-    try:
-        completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
-            ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:(R,W)"],
-            capture_output=True,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return f"error:{type(exc).__name__}"
-    return "narrowed" if completed.returncode == 0 else f"error:rc{completed.returncode}"
+# ``_narrow_windows_acl`` / ``_os_reason`` bodies live in ``store_file_io``
+# (one authority); the alias imports above keep the conventional names.
 
 
 def _error(store_root: Path | str, reason: str) -> GatewayCertificate:
@@ -398,13 +385,3 @@ def _error(store_root: Path | str, reason: str) -> GatewayCertificate:
         cert_path=str(certificate_path(store_root)),
         key_path=str(private_key_path(store_root)),
     )
-
-
-def _os_reason(exc: OSError) -> str:
-    if isinstance(exc, PermissionError):
-        return "permission_denied"
-    if isinstance(exc, FileNotFoundError):
-        return "root_missing"
-    if isinstance(exc, NotADirectoryError):
-        return "root_not_a_directory"
-    return "unwritable"

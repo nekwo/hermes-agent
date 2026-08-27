@@ -61,6 +61,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .store_file_io import os_error_reason as _error_token
+from .store_file_io import read_raw_text as _read_raw
+
 __all__ = [
     "SERVE_AUTH_TOKEN_FILENAME",
     "TOKEN_BYTES",
@@ -190,15 +193,6 @@ def verify(presented: str | None, store_root: Path | str) -> bool:
     )
 
 
-def _read_raw(path: Path) -> str | None:
-    if not path.is_file():
-        return None
-    # read_bytes + decode, never read_text: the repo's standing EOL rule, and a
-    # token must survive a file someone saved with CRLF.
-    value = path.read_bytes().decode("utf-8", errors="replace").strip()
-    return value or None
-
-
 def _mint(path: Path) -> None:
     """Create the token file exclusively, 0600 where that is meaningful."""
 
@@ -274,11 +268,6 @@ def _heal_empty(path: Path) -> str | None:
         return None
 
 
-def _error_token(exc: OSError) -> str:
-    if isinstance(exc, PermissionError):
-        return "permission_denied"
-    if isinstance(exc, FileNotFoundError):
-        return "root_missing"
-    if isinstance(exc, NotADirectoryError):
-        return "root_not_a_directory"
-    return "unwritable"
+# The bodies live in ``store_file_io`` (one authority); the conventional
+# private names stay so call sites and tests read unchanged. The token value
+# still never leaves this module — these helpers carry no secret.
