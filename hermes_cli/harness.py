@@ -360,9 +360,16 @@ def build_parser(parent_subparsers) -> None:
     )
     gateway_devices_list = gateway_devices_subs.add_parser(
         "list",
-        help="Every paired device, revoked ones included (never the credential — there is no field for it)",
+        help="Every paired device, oldest first, revoked ones included (never the credential — there is no field for it)",
     )
-    _add_stage42_global_args(gateway_devices_list, controls=frozenset({"sort"}))
+    # No `sort` control, and that is the honest registration rather than the
+    # generous one: `list_devices` returns one deterministic order (created_at,
+    # then device_id) and nothing here re-sorts, so advertising the flag would
+    # be a WRONG ANSWER believed — an operator who passes `--sort name` gets the
+    # unsorted answer and no signal the flag was ignored. Exactly what
+    # `_add_stage42_global_args`' own docstring is built around, and what
+    # `test_every_stage42_global_flag_is_honored` caught here.
+    _add_stage42_global_args(gateway_devices_list)
     gateway_devices_list.set_defaults(func=_cmd_gateway_devices_list)
     gateway_devices_revoke = gateway_devices_subs.add_parser(
         "revoke",
