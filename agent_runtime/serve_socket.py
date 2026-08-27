@@ -673,6 +673,18 @@ class HelloAuthOutcome:
     #: connection and cleared there, so it lives for the microseconds between
     #: the handshake and the reply and is never a field anything can read later.
     issued_token: str | None = None
+    #: Set only when ``ok`` and only by a PEER-credential authenticator (gateway
+    #: Stage 6): which paired INSTALL this connection is. Never set beside
+    #: ``device_id`` — a hello names one credential or the other, and the
+    #: authenticator refuses a frame that names both.
+    peer_install_id: str | None = None
+    #: The peer half of ``issued_token``: the symmetric secret a ``peer_code``
+    #: hello just minted, riding the one ``hello_ok`` that carries it and read-
+    #: and-cleared exactly as the device token is. Two slots rather than one
+    #: because the two ceremonies mint different credentials into different
+    #: stores, and a single field would let a future edit put a device token on
+    #: a peer's greeting by getting one branch wrong.
+    issued_peer_secret: str | None = None
 
 
 # ── connections ──────────────────────────────────────────────────────────────
@@ -696,12 +708,19 @@ class SocketConnection:
     #: other. Set once, in ``_handshake``, after the proof verified.
     device_id: str | None = None
     device_tier: str | None = None
-    #: ONE-SHOT, and the only secret this dataclass ever holds. Set by
+    #: WHICH paired INSTALL this is (gateway Stage 6), or ``None`` on every
+    #: other connection this runtime ever accepts. ``caller_for_connection``
+    #: reads it through ``getattr`` to mint a ``peer`` caller, and reads it
+    #: BEFORE the device pair, refusing a connection that somehow carries both.
+    #: Set once, in ``_handshake``, after the proof verified.
+    peer_install_id: str | None = None
+    #: ONE-SHOT, and the only secrets this dataclass ever holds. Set by
     #: ``_handshake`` when a pairing code was redeemed, read and CLEARED by the
-    #: ``hello_payload`` builder on the very next statement. It is deliberately
-    #: absent from ``payload()`` — the block that renders a connection to an
-    #: operator, to a log, and to every other attached client.
+    #: ``hello_payload`` builder on the very next statement. Both are
+    #: deliberately absent from ``payload()`` — the block that renders a
+    #: connection to an operator, to a log, and to every other attached client.
     pairing_token: str | None = None
+    peer_secret: str | None = None
     subscribed: bool = False
     frames_out: int = 0
     bytes_out: int = 0
@@ -771,6 +790,15 @@ class SocketConnection:
                 # answer once there is more than one client.
                 payload["device_id"] = self.device_id
                 payload["device_tier"] = self.device_tier
+            if self.peer_install_id is not None:
+                # Additive on a PEER row only, same rule and same reason: an
+                # install id is not a secret (the peer names it in its own
+                # hello, in the clear under TLS), and "which paired install is
+                # attached right now" is the question an operator asks the
+                # moment a cross-install call misbehaves. No tier key beside it,
+                # because a peer holds an allowlist rather than a tier — a
+                # ``peer_tier: null`` here would invite a reader to look for one.
+                payload["peer_install_id"] = self.peer_install_id
             return payload
 
     def close(self, reason: str | None = None, *, linger_seconds: float = 0.0) -> None:
@@ -1350,6 +1378,8 @@ class ServeSocketServer:
         connection.device_id = outcome.device_id
         connection.device_tier = outcome.device_tier
         connection.pairing_token = outcome.issued_token
+        connection.peer_install_id = outcome.peer_install_id
+        connection.peer_secret = outcome.issued_peer_secret
         self._rate_limiter.record_success()
         # Symmetry the first pass missed: a completed handshake proves the lane
         # is reachable and answering, so the SILENCE throttle has nothing left
@@ -1384,6 +1414,13 @@ class ServeSocketServer:
             open_log["transport"] = self._transport_name
             open_log["device_id"] = connection.device_id
             open_log["device_tier"] = connection.device_tier
+        if connection.peer_install_id is not None:
+            # The peer half of the same line, and the reason is the same one:
+            # an install id is what makes a cross-install connection auditable
+            # after the fact. The credential that proved it appears here as it
+            # appears everywhere else, which is nowhere.
+            open_log["transport"] = self._transport_name
+            open_log["peer_install_id"] = connection.peer_install_id
         self._emit_log(open_log)
         try:
             connection.emit(self._hello_payload(message, connection))
@@ -1789,28 +1826,12 @@ class ServeSocketClient:
         neither is a case where sending a credential is the right next move.
         """
 
-        greeting = self.read_frame()
-        if not isinstance(greeting, dict) or greeting.get("event") != "server_hello":
-            raise ServeHelloProtocolError(
-                "the peer did not open with a server_hello challenge",
-                frame=greeting,
-            )
+        greeting = self._challenge(expect_hello_contract)
         nonce = greeting.get("nonce")
         if not isinstance(nonce, str) or len(nonce) < 2 * NONCE_BYTES:
             raise ServeHelloProtocolError(
                 "server_hello carried no usable nonce", frame=greeting
             )
-        contract = greeting.get("hello_contract")
-        if expect_hello_contract is not None and contract != expect_hello_contract:
-            # Refused, not adapted. A client that guesses at an unknown
-            # handshake version is a client that will eventually guess "send
-            # the token" — which is the shape this contract exists to retire.
-            raise ServeHelloProtocolError(
-                f"unsupported hello_contract {contract!r} "
-                f"(this client speaks {expect_hello_contract})",
-                frame=greeting,
-            )
-        self.server_hello = greeting
         self.send(
             {
                 "op": "hello",
@@ -1852,24 +1873,12 @@ class ServeSocketClient:
 
         from .serve_gateway_auth import device_proof
 
-        greeting = self.read_frame()
-        if not isinstance(greeting, dict) or greeting.get("event") != "server_hello":
-            raise ServeHelloProtocolError(
-                "the peer did not open with a server_hello challenge", frame=greeting
-            )
+        greeting = self._challenge(expect_hello_contract)
         nonce = greeting.get("nonce")
         if not isinstance(nonce, str) or len(nonce) < 2 * NONCE_BYTES:
             raise ServeHelloProtocolError(
                 "server_hello carried no usable nonce", frame=greeting
             )
-        contract = greeting.get("hello_contract")
-        if expect_hello_contract is not None and contract != expect_hello_contract:
-            raise ServeHelloProtocolError(
-                f"unsupported hello_contract {contract!r} "
-                f"(this client speaks {expect_hello_contract})",
-                frame=greeting,
-            )
-        self.server_hello = greeting
         self.send(
             {
                 "op": "hello",
@@ -1884,6 +1893,144 @@ class ServeSocketClient:
             }
         )
         return self.read_frame()
+
+    def peer_hello(
+        self,
+        *,
+        peer_install_id: str,
+        verifier: str,
+        client: str,
+        client_build: str | None = None,
+        expect_hello_contract: int | None = HELLO_CONTRACT_VERSION,
+    ) -> dict[str, Any] | None:
+        """The GATEWAY lane's PEER hello: same frames, a per-INSTALL credential.
+
+        Structurally identical to :meth:`hello` and :meth:`device_hello`, and
+        that sameness is again the point — Stage 6 is not a third protocol.
+        Two things differ, and both are what keep the credentials from being
+        interchangeable: the frame names ``peer_install_id`` where a device
+        names ``device_id`` (so the server knows which store to look in as well
+        as which key to recompute with), and the derivation carries a different
+        prefix (``gateway_peers.peer_proof``).
+
+        ``verifier`` — ``sha256(secret)`` — is what a paired install actually
+        holds; see ``gateway_peers``' docstring for why both ends store the
+        digest and key the HMAC with it directly, and for the honest limit of
+        that. It never goes on the wire, in either direction.
+        """
+
+        from .gateway_peers import peer_proof
+
+        greeting = self._challenge(expect_hello_contract)
+        nonce = greeting.get("nonce")
+        if not isinstance(nonce, str) or len(nonce) < 2 * NONCE_BYTES:
+            raise ServeHelloProtocolError(
+                "server_hello carried no usable nonce", frame=greeting
+            )
+        self.send(
+            {
+                "op": "hello",
+                "client": client,
+                "client_build": client_build,
+                "peer_install_id": peer_install_id,
+                # `self._port` again — the port THIS client dialled, from its own
+                # socket rather than from anything the greeting claims.
+                "proof": peer_proof(
+                    verifier, nonce, port=self._port, peer_install_id=peer_install_id
+                ),
+            }
+        )
+        return self.read_frame()
+
+    def peer_join_hello(
+        self,
+        *,
+        peer_code: str,
+        peer_install_id: str,
+        display_name: str | None = None,
+        endpoints: Any = None,
+        cert_fingerprint: str | None = None,
+        client: str = "hermes-peer",
+        client_build: str | None = None,
+        expect_hello_contract: int | None = HELLO_CONTRACT_VERSION,
+    ) -> dict[str, Any] | None:
+        """Redeem a PEER code and become a paired install, in one round trip.
+
+        The ceremony's second half and the mirror of :meth:`pair_hello`. What is
+        different is the direction the facts flow: a phone redeeming a device
+        code tells the install nothing about itself worth storing, while a
+        joining INSTALL must tell the other side who it is (``peer_install_id``),
+        what to call it, where to dial it back, and what certificate to pin —
+        because the edge is symmetric and the other install will one day be the
+        one dialling.
+
+        Those four fields are ASSERTIONS by the joining side, and are treated as
+        such: the server bounds and cleans them (``gateway_peers.clean_endpoints``)
+        and stores them as a starting point rather than as a proof. What makes
+        them trustworthy is not the wire — it is that an operator at the other
+        machine minted the code seconds earlier and is standing there. That is
+        R5's "both sides", and it is the only thing that makes the assertion
+        safe to keep.
+
+        No proof is computed and none is possible: the code IS the credential for
+        this one exchange, exactly as in the device ceremony, protected by the
+        same three properties (a pinned TLS link, a one-shot code deleted before
+        the secret is minted, and a failed redeem that looks like every other
+        credential failure and charges the same limiter).
+
+        A caller MUST store ``hello_ok["peered"]["peer_secret"]``: the remote
+        install keeps only a digest of it and cannot reissue it, so a client that
+        drops the frame has paired an edge it can never use.
+        """
+
+        self._challenge(expect_hello_contract)
+        frame: dict[str, Any] = {
+            "op": "hello",
+            "client": client,
+            "client_build": client_build,
+            # A DIFFERENT key from the device ceremony's ``pairing_code``, and
+            # deliberately: the two codes redeem into different stores, and a
+            # shared field name is the one thing that could make a server's
+            # branch pick the wrong one.
+            "peer_code": str(peer_code).strip().upper(),
+            "peer_install_id": peer_install_id,
+        }
+        if display_name:
+            frame["peer_display_name"] = display_name
+        if endpoints:
+            frame["peer_endpoints"] = endpoints
+        if cert_fingerprint:
+            frame["peer_cert_fingerprint"] = cert_fingerprint
+        self.send(frame)
+        return self.read_frame()
+
+    def _challenge(self, expect_hello_contract: int | None) -> dict[str, Any]:
+        """Read and validate the ``server_hello``. The common half of four hellos.
+
+        Extracted when Stage 6 added the fourth and fifth: the same fifteen
+        lines had been copied per hello, and a fifth copy is how one of them
+        eventually stops checking the contract. The validation is unchanged —
+        anything that is not a well-formed ``server_hello`` RAISES with the
+        offending frame attached rather than pressing on, because the two ways
+        that happens (a service that refused us before the challenge, and
+        something on this port that is not this service) are both cases where
+        sending a credential is the wrong next move.
+        """
+
+        greeting = self.read_frame()
+        if not isinstance(greeting, dict) or greeting.get("event") != "server_hello":
+            raise ServeHelloProtocolError(
+                "the peer did not open with a server_hello challenge", frame=greeting
+            )
+        contract = greeting.get("hello_contract")
+        if expect_hello_contract is not None and contract != expect_hello_contract:
+            raise ServeHelloProtocolError(
+                f"unsupported hello_contract {contract!r} "
+                f"(this client speaks {expect_hello_contract})",
+                frame=greeting,
+            )
+        self.server_hello = greeting
+        return greeting
 
     def pair_hello(
         self,
@@ -1908,19 +2055,7 @@ class ServeSocketClient:
         deleted before the token is minted), and the store's lockout.
         """
 
-        greeting = self.read_frame()
-        if not isinstance(greeting, dict) or greeting.get("event") != "server_hello":
-            raise ServeHelloProtocolError(
-                "the peer did not open with a server_hello challenge", frame=greeting
-            )
-        contract = greeting.get("hello_contract")
-        if expect_hello_contract is not None and contract != expect_hello_contract:
-            raise ServeHelloProtocolError(
-                f"unsupported hello_contract {contract!r} "
-                f"(this client speaks {expect_hello_contract})",
-                frame=greeting,
-            )
-        self.server_hello = greeting
+        self._challenge(expect_hello_contract)
         self.send(
             {
                 "op": "hello",

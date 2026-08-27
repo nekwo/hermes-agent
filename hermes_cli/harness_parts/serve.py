@@ -368,39 +368,68 @@ def ops_manifest(*, transport: str) -> dict[str, Any]:
 
 
 def _pairing_block(connection: Any) -> dict[str, Any]:
-    """Pop the one-shot credential onto the greeting, or contribute nothing.
+    """Pop the one-shot credentials onto the greeting, or contribute nothing.
 
     A function rather than an inline expression because the CLEAR has to be
     unconditional and unmissable: a `getattr` that read the token without
     clearing it would leave a secret on a long-lived object for the life of the
     session, and the bug would be invisible until somebody logged a connection.
+
+    Two slots, one function, and they are mutually exclusive by construction —
+    a hello redeems a device code or a peer code, never both, because the
+    authenticator refuses a frame that names two credentials. Rendered as two
+    differently-named blocks (`paired` / `peered`) rather than one with a
+    discriminator, so a client that only understands devices cannot mistake a
+    peer secret for a device token by reading a field it already knows.
     """
 
     token = getattr(connection, "pairing_token", None)
-    if not token:
-        return {}
-    connection.pairing_token = None
-    return {
-        "paired": {
-            "device_id": connection.device_id,
-            "tier": connection.device_tier,
-            # Store it now — this is the only time it is ever sent, and the
-            # install itself keeps only a digest of it.
-            "device_token": token,
+    if token:
+        connection.pairing_token = None
+        return {
+            "paired": {
+                "device_id": connection.device_id,
+                "tier": connection.device_tier,
+                # Store it now — this is the only time it is ever sent, and the
+                # install itself keeps only a digest of it.
+                "device_token": token,
+            }
         }
-    }
+    secret = getattr(connection, "peer_secret", None)
+    if secret:
+        connection.peer_secret = None
+        return {
+            # Gateway Stage 6. The joining install writes its own half of the
+            # edge from this block; the `install` block on the same frame is
+            # what names WHICH install it just paired with, so nothing is
+            # repeated here that the greeting already carries.
+            "peered": {
+                "peer_install_id": connection.peer_install_id,
+                # The only time it is ever sent. BOTH installs keep only a
+                # digest of it — see ``gateway_peers`` — so a client that drops
+                # this frame has paired an edge it can never use.
+                "peer_secret": secret,
+            }
+        }
+    return {}
 
 
-def _is_device(connection: Any) -> bool:
-    """Did this frame arrive on the gateway lane, from a paired device?
+def _is_gateway(connection: Any) -> bool:
+    """Did this frame arrive on the gateway lane — from a device or a peer?
 
-    Keyed on the TRANSPORT and not on the device stamp, deliberately. The stamp
-    answers "which device"; this answers "did this come through the door that is
-    open to the network", and those are different questions whose answers must
-    not be allowed to diverge. A gateway connection that somehow lacks a stamp
-    is exactly the case where the narrower test would silently grant local
-    authority — the same reasoning, and the same guard, as
+    Keyed on the TRANSPORT and not on the credential stamp, deliberately. The
+    stamp answers "which device" or "which install"; this answers "did this come
+    through the door that is open to the network", and those are different
+    questions whose answers must not be allowed to diverge. A gateway connection
+    that somehow lacks a stamp is exactly the case where the narrower test would
+    silently grant local authority — the same reasoning, and the same guard, as
     ``call_authorization.caller_for_connection``'s gateway arm.
+
+    Named ``_is_device`` until gateway Stage 6, when the name became false: the
+    refusals it guards (`argv_lane_unavailable`, `op_not_available_on_gateway`)
+    were always about the DOOR and now genuinely have two kinds of caller behind
+    them. The behaviour did not change and neither did the predicate; a peer
+    inherits both refusals for free, which is the point of keying on the lane.
     """
 
     return (
@@ -516,7 +545,7 @@ def start_gateway_listener(
         # find it. There is no path on this listener that consults the install's
         # own secret.
         token_provider=lambda: None,
-        authenticator=_device_authenticator(store_root),
+        authenticator=_gateway_authenticator(store_root),
         ssl_context=context,
         host=host,
         port=port,
@@ -551,15 +580,26 @@ def start_gateway_listener(
     }
 
 
-def _device_authenticator(store_root: Any):
+def _gateway_authenticator(store_root: Any):
     """The gateway lane's credential check, as a ``ServeSocketServer`` seam.
+
+    FOUR hellos reach this function and it is the only place that tells them
+    apart: a device credential, a device pairing code, a peer credential, and a
+    peer join code. The dispatch is on which FIELD the frame names, and the
+    first thing it does is refuse a frame that names more than one — see
+    ``_credential_kind`` below, which is where Stage 6's "device-tier and
+    peer-tier credentials are never interchangeable" is actually enforced.
 
     A device names itself in the hello (``device_id``) and answers the challenge
     with an HMAC keyed by its own token's digest, bound to the port it dialled.
-    Every failure — no id, unknown id, revoked row, wrong proof — comes back as
-    the SAME ``bad_proof`` rejection, so a peer that has proven nothing cannot
-    enumerate which device ids exist by watching the reason change. The runtime's
-    own log keeps the distinction; the wire does not.
+    A peer names itself with ``peer_install_id`` and answers with an HMAC keyed
+    by the shared verifier, over a message with a different prefix, bound to the
+    same port. Every failure of any kind — no id, unknown id, revoked row, wrong
+    proof, wrong code, wrong ceremony — comes back as the SAME ``bad_proof``
+    rejection, so a caller that has proven nothing cannot enumerate which device
+    ids or which paired installs exist by watching the reason change, and cannot
+    even learn which of the two ceremonies it just failed. The runtime's own log
+    keeps the distinction; the wire does not.
 
     **The other arm is the pairing ceremony's second half**, and it is here
     rather than in a stage of its own because the alternative is shipping a
@@ -577,8 +617,23 @@ def _device_authenticator(store_root: Any):
     finds nothing. And a failed redemption collapses into the same ``bad_proof``
     as every other credential failure and charges the same limiter, so the code
     space cannot be ground down any faster than the device-id space can.
+
+    **The peer join (Stage 6) is those same three properties over the same
+    machinery**, plus one the device ceremony has no need of: it is the only arm
+    that WRITES facts the other side asserted — the joining install's name, its
+    endpoints, its certificate fingerprint. They are bounded and cleaned by
+    ``gateway_peers`` before they land, and what makes them safe to keep at all
+    is R5's second operator: the code was minted seconds earlier by a human at
+    THIS machine, which is a stronger provenance than anything the wire could
+    supply.
     """
 
+    from agent_runtime.gateway_peers import (
+        PeerCredential,
+        note_peer_seen,
+        redeem_peer_code,
+        verify_peer_proof,
+    )
     from agent_runtime.serve_gateway_auth import (
         DeviceCredential,
         note_device_seen,
@@ -587,30 +642,70 @@ def _device_authenticator(store_root: Any):
     )
     from agent_runtime.serve_socket import HelloAuthOutcome, REJECT_BAD_PROOF
 
+    def _reject():
+        return HelloAuthOutcome(ok=False, reject_reason=REJECT_BAD_PROOF)
+
     def _authenticate(message: dict[str, Any], nonce: str, port: int):
-        code = message.get("pairing_code")
-        if isinstance(code, str) and code.strip():
-            # A device NAMED in the same frame as a code is a client that has
-            # not decided what it is. Refused rather than resolved to either
-            # one: a handshake with two credentials in it is exactly where a
-            # downgrade lives.
-            if message.get("device_id"):
-                return HelloAuthOutcome(ok=False, reject_reason=REJECT_BAD_PROOF)
+        kind = _credential_kind(message)
+        if kind is None:
+            # Zero credentials named, or more than one. A handshake with two
+            # credentials in it is exactly where a downgrade lives, and the
+            # server must not get to pick which one it liked.
+            return _reject()
+
+        if kind == "pairing_code":
             outcome = redeem_pairing_code(
                 store_root,
-                code,
+                message.get("pairing_code"),
                 device_name=message.get("client")
                 if isinstance(message.get("client"), str)
                 else None,
             )
             if not isinstance(outcome, DeviceCredential):
-                return HelloAuthOutcome(ok=False, reject_reason=REJECT_BAD_PROOF)
+                return _reject()
             return HelloAuthOutcome(
                 ok=True,
                 device_id=outcome.device_id,
                 device_tier=outcome.tier,
                 issued_token=outcome.token,
             )
+
+        if kind == "peer_code":
+            # The joining install must NAME itself in the same frame: the edge
+            # is symmetric, so a row keyed by nothing would be a peer this
+            # install could never dial back and could never recognise again.
+            outcome = redeem_peer_code(
+                store_root,
+                message.get("peer_code"),
+                peer_install_id=str(message.get("peer_install_id") or ""),
+                display_name=message.get("peer_display_name")
+                or message.get("client"),
+                endpoints=message.get("peer_endpoints"),
+                cert_fingerprint=message.get("peer_cert_fingerprint"),
+            )
+            if not isinstance(outcome, PeerCredential):
+                return _reject()
+            return HelloAuthOutcome(
+                ok=True,
+                peer_install_id=outcome.peer_install_id,
+                issued_peer_secret=outcome.secret,
+            )
+
+        if kind == "peer_install_id":
+            peer = verify_peer_proof(
+                store_root,
+                message.get("peer_install_id"),
+                message.get("proof"),
+                nonce,
+                port=port,
+            )
+            if not peer.ok or peer.record is None:
+                return _reject()
+            note_peer_seen(store_root, peer.record.peer_install_id)
+            return HelloAuthOutcome(
+                ok=True, peer_install_id=peer.record.peer_install_id
+            )
+
         auth = verify_device_proof(
             store_root,
             message.get("device_id"),
@@ -619,7 +714,7 @@ def _device_authenticator(store_root: Any):
             port=port,
         )
         if not auth.ok or auth.record is None:
-            return HelloAuthOutcome(ok=False, reject_reason=REJECT_BAD_PROOF)
+            return _reject()
         note_device_seen(store_root, auth.record.device_id)
         return HelloAuthOutcome(
             ok=True,
@@ -628,6 +723,49 @@ def _device_authenticator(store_root: Any):
         )
 
     return _authenticate
+
+
+#: The four credential fields a gateway hello may name, in the order
+#: :func:`_credential_kind` reports them. A TUPLE and not four ``if``s, because
+#: the rule being enforced is "exactly one of these" and a rule about a set is
+#: only checkable against a set — four independent branches is how a fifth field
+#: eventually gets added to three of them.
+_CREDENTIAL_FIELDS: tuple[str, ...] = (
+    "pairing_code",
+    "peer_code",
+    "peer_install_id",
+    "device_id",
+)
+
+
+def _credential_kind(message: dict[str, Any]) -> str | None:
+    """Which ONE credential this hello names, or ``None`` for zero or many.
+
+    The whole of "device-tier and peer-tier credentials are never
+    interchangeable" at the FRAME level, and it is a counting rule rather than a
+    precedence rule on purpose. A precedence — "a code beats an id", "a peer
+    beats a device" — answers a malformed frame by picking a winner, and every
+    such rule is one refactor away from picking the more privileged one.
+    Counting cannot be got wrong in that direction: two credentials is a
+    refusal, and the refusal looks exactly like every other credential failure
+    on this lane.
+
+    The ONE pair that is not two credentials is spelled out rather than hidden:
+    a join frame carries ``peer_code`` AND ``peer_install_id``, where the code
+    is the credential and the id is the name being claimed under it. Writing
+    that as an explicit allowance keeps the counting rule intact for every other
+    combination, including the one an attacker would actually try — a peer id
+    beside a device id, or a device code beside a peer code.
+    """
+
+    named = [
+        field
+        for field in _CREDENTIAL_FIELDS
+        if isinstance(message.get(field), str) and str(message.get(field)).strip()
+    ]
+    if named == ["peer_code", "peer_install_id"]:
+        return "peer_code"
+    return named[0] if len(named) == 1 else None
 
 
 # ── Drain ────────────────────────────────────────────────────────────────────
@@ -3437,7 +3575,7 @@ def serve_loop(
                 )
                 return None
             if op == "drain":
-                if _is_device(connection):
+                if _is_gateway(connection):
                     # A paired device does not get to end a runtime other
                     # clients are using — not even at `console` tier, because
                     # `drain` is not a level mutation the tier speaks about: it
@@ -3775,7 +3913,7 @@ def serve_loop(
                     )
                 )
                 return None
-            if _is_device(connection):
+            if _is_gateway(connection):
                 # THE ARGV LANE IS NOT REACHABLE FROM A DEVICE, and this is the
                 # load-bearing refusal of the whole stage. The front-door tier
                 # gate (`authorize_call`) sits on the METHOD lane; the argv lane
