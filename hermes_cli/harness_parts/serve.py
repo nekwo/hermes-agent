@@ -274,6 +274,17 @@ FINGERPRINT_HOME_BOOT_SITE = "serve_loop:booting_frame_emitted"
 #     exists to retire. The block names the transport it describes so a client
 #     that cached it cannot mis-apply it to the other lane.
 #
+# A THIRD block rides the same three frames, and it is not a manifest: ``install``
+# (``{install_id, display_name, state}``, from
+# ``agent_runtime.gateway_identity``) names WHICH runtime a client reached, where
+# ``rpc``/``ops`` say what it can do. It is on the greeting for the same reason
+# they are — a remote client (gateway plan Stage 2+) has no ``runtime_root`` path
+# it can interpret and no second question it can afford to ask — but it is a pair
+# of strings rather than a set plus an integer, so nothing negotiates on it and
+# no contract integer moves when it appears. Absent from a runtime that predates
+# it; ``state`` says ``error:<reason>`` rather than vanishing when this one could
+# not mint. It NAMES; it never authorises (see the module's own docstring).
+#
 # ``hello`` is deliberately absent from both sets. It is the socket's FIRST line
 # and is consumed by ``serve_socket`` before this dispatcher ever sees a frame;
 # reaching the dispatcher means it is a SECOND hello, which is answered
@@ -1562,6 +1573,33 @@ def serve_loop(
                 auth_block = ensure_token(store_root_path).payload()
             except Exception as exc:
                 auth_block = {"token_file": f"error:{type(exc).__name__}"}
+        # 2b. WHICH INSTALL. The secret above says a caller MAY talk to this
+        #     runtime; this says WHICH runtime it reached. Two facts, two
+        #     mechanisms, deliberately — an id that both names and authorises is
+        #     how "I know your install id" becomes "I am you", and the gateway
+        #     plan's device/peer tiers (Stage 1/6) hang their credentials off the
+        #     auth block, never off this one. Nothing here is secret: the id and
+        #     the operator-set name travel in the clear on every greeting.
+        #
+        #     Mint-iff-absent, per root, and NOT the monitoring/telemetry
+        #     ``install_id``s — those are rotatable and home/db-scoped, and the
+        #     argument is written out in ``agent_runtime/gateway_identity.py``.
+        install_block: dict[str, Any] = {
+            "install_id": None,
+            "display_name": None,
+            "state": "error:root_unresolved",
+        }
+        if store_root_path is not None:
+            try:
+                from agent_runtime.gateway_identity import ensure_install_identity
+
+                install_block = ensure_install_identity(store_root_path).frame_payload()
+            except Exception as exc:
+                install_block = {
+                    "install_id": None,
+                    "display_name": None,
+                    "state": f"error:{type(exc).__name__}",
+                }
         # 3. THE TRANSPORT (slice 3). One serve per root owns the socket lane,
         #    decided by an OS-held exclusive lock rather than by who booted
         #    first: two serves against one root is a real, ordinary concurrency
@@ -1796,6 +1834,11 @@ def serve_loop(
             "boot_id": boot_id,
             "build": build_block,
             "auth": auth_block,
+            # WHICH INSTALL this is, by the same "always present, states its own
+            # outcome" rule as ``auth`` above — a picker with two installs in it
+            # needs a stable id and a human name, and absence would be
+            # indistinguishable from a runtime that predates the lane.
+            "install": install_block,
             "instance": instance_block,
             # ``disabled`` (no socket lane asked for), ``listening`` with the
             # port, ``lock_held_by`` with the winner's pid, or ``error:<reason>``
@@ -2389,6 +2432,12 @@ def serve_loop(
                 "connection": connection.key,
                 "runtime_root": runtime_root,
                 "build": build_block,
+                # The socket greeting's half of the install identity. A socket
+                # client never reads ``ready``, and from Stage 1 a REMOTE client
+                # reads nothing else — which install it just reached has to be
+                # answerable from the handshake it already performs, not from a
+                # ``runtime_root`` path that means nothing on another machine.
+                "install": install_block,
                 # Visible, never fatal: a client on other code still gets to
                 # work, and now KNOWS it is talking to a different build.
                 "build_mismatch": _build_mismatch(connection.client_build),
@@ -2702,6 +2751,14 @@ def serve_loop(
                         "runtime_root": runtime_root,
                         "build": version_build,
                         "auth": auth_block,
+                        # Re-askable like the two blocks above it. Resolved ONCE
+                        # at boot and echoed, not re-read: an operator rename
+                        # (``harness gateway id --set-name``) writes the file,
+                        # but the identity this SESSION greeted with is the one
+                        # its clients correlate against, and re-reading here
+                        # would let a frame disagree with the greeting that
+                        # opened the connection.
+                        "install": install_block,
                         "draining": drain_state is not None,
                         # Additive: what else is attached to this runtime, on
                         # the reply a client already asks for.

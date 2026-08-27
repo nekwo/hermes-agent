@@ -91,3 +91,86 @@ The concurrent session committed (`13dd0c4ae7`, merged at `795cad1ee6`) before
 this work was staged, the working tree went clean, and the one-line pointer went
 into the authorization Open row after that. Recorded because the decision was
 "wait, do not interleave", and it was only the timing that made it free.
+
+## 2026-08-27 — Stage 0a, the install identity
+
+**Brief.** Build Stage 0 — the one un-gated stage. Identity module, additive
+`install` block on the three greeting frames, `gateway.*` config keys, CLI
+verbs, docs. Mandatory first move: the install-id inventory, written down.
+
+**The inventory, before any code.** Read both existing mechanisms end to end
+(`agent/monitoring/policy.py` whole file, 57 lines; the `_install_id` method in
+`hermes_cli/observability/shared_metrics.py`; both consumers in
+`gateway_health_export.py:86,292` and `otlp_exporter.py:120-124`). Verdict
+DISTINCT, and the argument is now in `gateway_identity.py`'s docstring and in
+the plan's "Stage 0 notes". What made it easy rather than a judgement call was
+the monitoring module's own docstring: it advertises **rotatability as a
+feature** ("clearing `monitoring.install_id` rotates the id on the next gateway
+start"). That is precisely the property a paired-device identity must not have,
+so the two facts were never one fact wearing two names.
+
+**What the brief said to reuse, and what actually got reused.** Not the id —
+the *contract*. `serve_auth.py` is the same shape one field over (per store
+root, mint-iff-absent, root-is-an-input, never-raises, typed state instead of an
+exception), and its docstring already argues each rule. `gateway_identity.py`
+restates that contract for a non-secret and says where it came from, so the two
+files read as one discipline rather than two inventions.
+
+**Where the brief was wrong, measured.**
+
+- **The frame-vocabulary gate does not police top-level keys.**
+  `mission_serve_frame_fixture_gate_test.dart` reads the launcher's own AST
+  switch for frame `event` NAMES (`_frameVocabularySize = 15`) and scans test
+  sources for hand-authored frames. A new `install` key on `ready` cannot trip
+  it, and `_frameVocabularySize` did not move. The launcher-side reader the
+  brief made conditional on that trip was therefore not forced by it.
+- **The entanglement the brief warned about had cleared.** Both repos' foreign
+  hunks were committed by their sessions mid-flight (hermes `a7655ccf01`,
+  `6dbd789e8c`; launcher `406b7fc87`) before anything here was staged. Checked
+  with `git diff -- <file>` per file rather than trusted from the brief's
+  snapshot — `hermes_cli/harness.py` and the launcher's `hermes_cli_contract.json`
+  were both clean, so the CLI-verb split the brief pre-authorised was not
+  forced by entanglement either. It was still taken, for scope: see below.
+
+**The determinism problem, and why seeding beat scrubbing.** A fresh uuid4 in
+`ready` breaks the launcher's byte-pinned captures. The generator's existing
+volatility machinery is key-based scrubbing (`pid`, `port`, `boot_id`,
+`commit`), and using it here would have left the committed bytes proving only
+that two keys exist. Seeding a fixed `gateway/install.json` into each sandbox
+root instead makes hermes take its LOAD path — which is what a real install does
+on every boot after its first — so the fixture pins the values the launcher
+parses, and the mint path stays covered where it can be tested properly
+(`tests/agent_runtime/test_gateway_identity.py`, 18 cases). The precedent was
+already in the file: `Sandbox.make_storelike` exists for exactly this reason
+("put the runtime root in the state a Launcher-spawned serve's root is in").
+
+Secondary reason, not the main one but decisive against a hostname default
+reaching a fixture: hermes' default `display_name` is `socket.gethostname()`, so
+an unseeded capture would have committed the capturing operator's machine name.
+
+**One asymmetry decided deliberately.** An EMPTY `install.json` (killed between
+the `O_EXCL` create and the write) is healed; a non-empty but unparseable one is
+a typed `error:malformed_record` and is never overwritten. A zero-byte file's id
+is held by nobody, but a file with bytes in it may be a record whose id a Stage 1
+paired device still names, and re-minting to make a boot look tidy would destroy
+the only copy of that join key. Both are pinned as tests.
+
+**Two deviations from the primary plan's `{install_id, display_name, build}`.**
+`build` dropped (the frames already carry a top-level `build`; a nested copy is a
+second authority), `state` added (absence cannot say "could not mint"). Recorded
+in the plan doc rather than only in a commit message.
+
+**Scope call: Stage 0b split off.** The CLI verbs were un-entangled and
+buildable, but they add a second cross-repo fixture landing (hermes's argparse
+tree is dumped into the launcher's `hermes_cli_contract.json` and driven through
+the argv conformance suite), on top of the serve-frame refresh Stage 0a already
+pays. The verbs' service half (`set_display_name`, `read_install_identity`) is
+built and tested, so the remainder is registration plus a dump refresh.
+
+**Run, not inferred.** `pytest tests/agent_runtime/test_gateway_identity.py`
+18 passed; `test_serve_service_foundations.py` 27 passed;
+`test_serve_socket_lane.py` 57 passed. `generate.py --check` red on exactly one
+frame (`ready.json`) with the change in, green twice after the refresh. Note:
+the venv at `X:/Eternia/.hermes/venvs/hermes-agent` has no `pytest` installed —
+`C:\Python312\python.exe` is what runs the suite, while the serve-frame
+generator still needs `--python` pointed at the venv interpreter.

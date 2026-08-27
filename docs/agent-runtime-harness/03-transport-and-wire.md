@@ -101,6 +101,36 @@ not as a failure. The advertisement exists because a probe cannot distinguish
 "too old" from "refused THIS subscribe": `unsupported_lane`, `draining` and
 `already_subscribed` are all real answers a live lane gives (`:2595-2651`).
 
+**A third block rides the same three frames, and it is not a manifest.**
+`"install"` — `{install_id, display_name, state}`, resolved once per boot from
+`agent_runtime/gateway_identity.py` and echoed on `ready`, `hello_ok` and every
+`version` re-ask — answers *which runtime you reached*, where `rpc`/`ops` answer
+*what it can do*. It rides the greeting for the same reason they do: a client
+that must ask a second question has a window in which it does not know, and from
+the remote gateway's Stage 2 a client on another machine has no `runtime_root`
+path it can interpret. It is a pair of strings, not a set plus an integer, so
+nothing negotiates on it and its arrival moved no contract integer
+(`SERVE_SCHEMA_VERSION`, `RPC_CONTRACT_VERSION` and `OPS_CONTRACT_VERSION` are
+all unchanged by it). Three rules hold it:
+
+- **It names; it never authorises.** The per-root `serve_auth` token proves a
+  caller may talk to this runtime, and the device/peer tiers will do so remotely.
+  An id that did both is how "I know your install id" becomes "I am you".
+  Nothing secret is reachable from the block.
+- **It states its own outcome.** `state` is `loaded` | `minted` |
+  `error:<reason>`, so a runtime that could not write its identity is
+  distinguishable from one that predates the lane — which absence alone cannot
+  say. Same rule as `auth.token_file` and `socket.outcome`.
+- **It is resolved at boot, not per frame.** A `version` re-ask echoes the block
+  the greeting carried, so an operator rename mid-session cannot make a later
+  frame disagree with the handshake a client correlates against.
+
+The record is `<store_root>/gateway/install.json`, per store root and
+mint-iff-absent — deliberately NOT `monitoring.install_id` (home-scoped and
+rotatable by design) nor the telemetry `install_id` (an anonymity primitive).
+The argument is in the module's own docstring; the staged plan is
+`planned/remote-gateway.md`.
+
 ## 3. The mission-control stream
 
 `agent_runtime/stream.py::stream_frames` (`:841`) is the single producer body.

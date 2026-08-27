@@ -23,11 +23,14 @@ ceremony both have upstream reuse material in `gateway/` (`platform_registry.py`
 
 ## hermes-owned stages (numbering matches the primary plan)
 
-- **Stage 0 — install identity:** mint-if-absent `<store_root>/gateway/install.json`
-  (`install_id` + operator-set display name), additive `install` block on
-  `ready`/`hello_ok`/`version`, `harness gateway id` verbs, `gateway.listen`/`gateway.port`
-  config (default off). Fixture-mirror caution: additive only, run the launcher
-  producer-contract check.
+- **Stage 0 — install identity: SHIPPED 2026-08-27** (hermes `HERMES_0A_SHA`,
+  launcher `LAUNCHER_0A_SHA`). `agent_runtime/gateway_identity.py` load-or-mints
+  `<store_root>/gateway/install.json` = `{install_id, display_name, created_at}`;
+  the additive `install` block rides `ready`/`hello_ok`/`version`;
+  `gateway.listen` (False) / `gateway.port` (0) are declared in
+  `config_defaults.py` and **read by nothing** — no network behaviour changed and
+  `serve_socket.SOCKET_HOST` is still `127.0.0.1`. Neither contract integer
+  moved. See the Stage 0 notes below.
 - **Stage 1 — device pairing + LAN bind:** `serve_gateway_auth.py` (hashed per-device
   tokens, scopes R11, revocation; `gateway/pairing.py` discipline), pairing verbs with
   QR payload `{host, port, install_id, cert_fingerprint, code}`, second listener bound
@@ -54,6 +57,82 @@ ceremony both have upstream reuse material in `gateway/` (`platform_registry.py`
 relay (2026-07-16/19, `gateway_state/v1` desktop→Django fan-out, no phone consumer ever
 built) — retirement is its own small plan. `mobile_core/` is orthogonal (on-device
 provider runtime, no agent loop by contract) and NOT superseded.
+
+## Stage 0 notes — landed 2026-08-27
+
+### The install-id inventory decision: DISTINCT
+
+The drift addendum below ordered an inventory before minting a third
+`install_id`. It was done, both existing mechanisms were read, and the verdict is
+**distinct** — the argument lives in `agent_runtime/gateway_identity.py`'s
+module docstring (the file that would be deleted if the verdict were ever
+reversed), and is summarised here so
+[duplicate-implementation-retirement.md](duplicate-implementation-retirement.md)
+reads a decision rather than an accident:
+
+| | scope | lifetime | audience |
+|---|---|---|---|
+| `monitoring.install_id` (`agent/monitoring/policy.py`) | a HERMES **home**'s `config.yaml` | **rotatable by design** — clearing the key mints a new one next start | OTel `service.instance.id`; "carries no account identity" |
+| telemetry `install_id` (`hermes_cli/observability/shared_metrics.py`) | the shared-metrics sqlite `telemetry_state` | per metrics db | anonymous counter aggregation, never shown |
+| **`gateway/install.json`** (new) | a **store root** | **never rotates** | an operator, in a picker, with a name they chose |
+
+Three independent disqualifiers, any one of them sufficient. **Scope:** a gateway
+addresses a store root, and homes and roots are provably not the same scope on
+this machine — the launcher's serve spawns with `HERMES_HOME=profiles/base`
+against the shared `agent-runtime` root, so one monitoring id would span several
+roots while several roots shared one id. **Lifetime:** rotatability is the
+feature there and a lockout here — Stage 1 pairs a device *against* this id, and
+`serve_auth.py` already states the rule ("rotating it under them is a lockout,
+not a hardening"). **Audience:** a telemetry id put on a wire frame stops being
+an anonymity primitive and becomes a network address.
+
+What is deliberately NOT duplicated is the *mechanism*: mint-iff-absent,
+root-is-an-input, never-raises, typed `state` instead of an exception — all of it
+is `serve_auth.py`'s contract restated for a non-secret, and the docstring says
+so rather than re-deriving it.
+
+### Two deviations from the primary plan's §3.3 `install` shape
+
+The plan specified `{install_id, display_name, build}`. What shipped is
+`{install_id, display_name, state}`:
+
+- **`build` dropped.** All three frames already carry a top-level `build` block.
+  A nested second copy is a second authority that can disagree with the first —
+  the shape the build stamp itself exists to retire.
+- **`state` added** (`loaded` | `minted` | `error:<reason>`). Absence cannot
+  distinguish "this runtime predates the lane" from "this runtime could not write
+  its identity", and the greeting's standing rule is that a block states its own
+  outcome rather than vanishing (`auth.token_file`, `socket.outcome`). The block
+  is therefore always present once the runtime has the lane.
+
+The block **names, and never authorises.** `serve_auth` (today) and the device /
+peer tiers (Stage 1/6) are what prove a caller may talk to this runtime; an id
+that did both is how "I know your install id" becomes "I am you". Pinned by
+`test_the_install_block_carries_nothing_secret`.
+
+### How the byte-pinned capture stayed deterministic
+
+A freshly minted uuid4 in `ready` would have made the launcher's
+`test/fixtures/hermes_serve_frames/` captures unreproducible across regens, on
+the CI lane that closed days earlier. Fixed by **seeding**, not scrubbing: the
+generator writes a fixed `gateway/install.json` into each sandbox root before
+boot (`tool/hermes_serve_frames/generate.py`, `Sandbox.seed_gateway_identity`),
+so hermes takes its **load** path — the path a real install takes on every boot
+after its first — and the committed bytes pin the real field values instead of
+two sentinels. It is the same argument `Sandbox.make_storelike` already makes
+about the store marker dirs. The mint path is covered hermes-side in
+`tests/agent_runtime/test_gateway_identity.py`, where it belongs.
+
+Receipt: `generate.py --check` went red on exactly one frame (`ready.json`) with
+the change in place and green twice consecutively after the refresh.
+
+### Stage 0b — the CLI verbs, filed separately
+
+`harness gateway id` / `--set-name` did **not** land with Stage 0a. See the
+Stage 0b note wherever it is resolved; `set_display_name()` and
+`read_install_identity()` already exist in `gateway_identity.py` as the verb's
+service half, so the remainder is parser registration plus the launcher's
+argparse-dump fixture (`test/features/mission_control/fixtures/hermes_cli_contract.json`).
 
 ## Drift addendum — audited 2026-08-27
 
@@ -85,6 +164,9 @@ ride them, don't re-derive:
   `service.instance.id`) and the telemetry `install_id`
   (`hermes_cli/observability/shared_metrics.py:259`) already ship. Inventory and
   reuse-or-distinguish, per `planned/duplicate-implementation-retirement.md`.
+  **ANSWERED 2026-08-27 — DISTINCT, on scope + lifetime + audience. The
+  three-row table and the full argument are in "Stage 0 notes" above; the
+  mechanism is `serve_auth.py`'s, deliberately not re-derived.**
 - **Stage 1 is blocked on an authorization chokepoint that does not exist.** Canon 06
   ("What a remote connector inherits" + its Open row): `authorize_coordinator_action`
   is called from CLI handlers only — `runtime.agent.create`/`runtime.agent.retire`

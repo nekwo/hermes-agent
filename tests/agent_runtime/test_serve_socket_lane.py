@@ -390,6 +390,21 @@ def test_a_good_token_gets_the_build_handshake():
             assert reply["build_mismatch"] in (True, None)
 
 
+def test_the_socket_greeting_names_which_install_the_client_reached():
+    """A socket client never reads ``ready``, and from Stage 1 of the remote
+    gateway a client on another machine reads nothing else — so the handshake it
+    already performs has to answer "which install is this", identically to the
+    stdio greeting rather than in a second spelling."""
+
+    with running_serve() as handle:
+        with client(handle, name="probe") as (_conn, reply):
+            assert set(reply["install"]) == {"install_id", "display_name", "state"}
+            assert reply["install"] == handle.ready["install"]
+            assert reply["install"]["install_id"]
+            # Still additive: the handshake integers did not move.
+            assert reply["contract"] == serve_module.SERVE_SCHEMA_VERSION
+
+
 def test_a_client_on_the_same_build_is_not_flagged_and_one_on_another_build_is():
     from agent_runtime.build_stamp import build_stamp
 

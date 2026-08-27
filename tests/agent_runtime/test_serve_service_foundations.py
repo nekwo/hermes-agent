@@ -109,6 +109,82 @@ def test_the_version_op_answers_the_full_stamp_at_any_time():
     assert version["draining"] is False
 
 
+# ── which install (remote gateway, Stage 0) ─────────────────────────────────
+
+
+def test_the_ready_frame_names_which_install_it_is(isolate_agent_runtime_root):
+    """``runtime_root`` answers "which path"; from Stage 2 a client on another
+    machine cannot interpret a path, so the greeting has to answer "which
+    install" too."""
+
+    from agent_runtime.gateway_identity import install_record_path
+
+    frames, _ = _run([SHUTDOWN])
+
+    install = _one(frames, "ready")["install"]
+    assert set(install) == {"install_id", "display_name", "state"}
+    assert install["state"] == "minted"
+    assert install["install_id"] and install["display_name"]
+    # Minted into THIS root, not a home and not a telemetry db.
+    record = json.loads(
+        install_record_path(isolate_agent_runtime_root).read_bytes().decode("utf-8")
+    )
+    assert record["install_id"] == install["install_id"]
+
+
+def test_the_install_block_is_the_same_on_ready_and_on_a_version_re_ask():
+    """One resolution per boot, echoed. A ``version`` reply that re-read the
+    file could disagree with the greeting that opened the connection — and the
+    id is what a client correlates its whole session against."""
+
+    frames, _ = _run([json.dumps({"op": "version"}) + "\n", SHUTDOWN])
+
+    assert _one(frames, "version")["install"] == _one(frames, "ready")["install"]
+
+
+def test_the_install_id_survives_a_restart_because_rotation_is_a_lockout():
+    """The property the two existing ``install_id`` mechanisms deliberately do
+    NOT have: ``monitoring.install_id`` rotates when its config key is cleared,
+    which here would orphan every device paired against this install."""
+
+    first, _ = _run([SHUTDOWN])
+    second, _ = _run([SHUTDOWN])
+
+    assert _one(second, "ready")["install"]["install_id"] == (
+        _one(first, "ready")["install"]["install_id"]
+    )
+    # First boot minted it; the second one found it.
+    assert _one(first, "ready")["install"]["state"] == "minted"
+    assert _one(second, "ready")["install"]["state"] == "loaded"
+
+
+def test_the_install_block_carries_nothing_secret(isolate_agent_runtime_root):
+    """It NAMES, it never authorises. The per-root serve token is the thing that
+    proves a caller may talk to this runtime, and it must not be reachable from
+    a block that travels in the clear on every greeting."""
+
+    from agent_runtime.serve_auth import read_token
+
+    frames, _ = _run([SHUTDOWN])
+
+    install = _one(frames, "ready")["install"]
+    token = read_token(isolate_agent_runtime_root)
+    assert token is not None
+    assert token not in json.dumps(install)
+
+
+def test_the_greeting_still_carries_every_block_it_did_before():
+    """Additive, checked as such: Stage 0 adds a key and moves neither the frame
+    schema integer nor any existing block."""
+
+    frames, _ = _run([SHUTDOWN])
+
+    ready = _one(frames, "ready")
+    assert ready["schema_version"] == 1
+    assert {"build", "auth", "instance", "socket", "rpc", "ops", "install"} <= set(ready)
+    assert ready["auth"] == {"token_file": "minted"}
+
+
 # ── discovery ───────────────────────────────────────────────────────────────
 
 

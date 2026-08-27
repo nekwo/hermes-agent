@@ -1236,6 +1236,30 @@ DEFAULT_CONFIG = {
     },
 
     # Web dashboard settings
+    # ── Remote gateway (agent-runtime serve socket lane), Stage 0 scaffold ────
+    #
+    # DECLARED, READ BY NOTHING. Stage 1 of the remote-gateway plan
+    # (docs/agent-runtime-harness/planned/remote-gateway.md) is what binds a
+    # non-loopback listener; these keys land now so the surface is reviewable
+    # and an operator's config is forward-compatible, and setting either one
+    # today changes NO network behaviour whatsoever. `serve_socket.py` still
+    # pins SOCKET_HOST = "127.0.0.1".
+    #
+    # NOT the messaging gateway. `hermes gateway start/stop/restart`, the
+    # `gateway_*` keys under `agent:` and the `platforms.api_server` port are
+    # the chat-platform gateway and are unrelated to this block — the word is
+    # overloaded in this codebase and these two lanes must not be conflated.
+    "gateway": {
+        # Off by default, and that is a security posture rather than a
+        # convenience default: the runtime executes agents with tools, so a
+        # listener beyond loopback is opt-in per install, forever.
+        "listen": False,
+        # 0 = ephemeral, matching the loopback socket lane's existing
+        # behaviour (the real port is advertised on `ready` and in
+        # `<store_root>/serve_instances/<pid>.json`). A fixed port is for
+        # operators who must pin a firewall rule.
+        "port": 0,
+    },
     "dashboard": {
         "theme": "default",  # Dashboard visual theme: "default", "midnight", "ember", "mono", "cyberpunk", "rose"
         # Process-isolation rollout controls. Runtime reads these through the
