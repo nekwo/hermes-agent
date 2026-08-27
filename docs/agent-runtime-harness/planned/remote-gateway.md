@@ -23,8 +23,8 @@ ceremony both have upstream reuse material in `gateway/` (`platform_registry.py`
 
 ## hermes-owned stages (numbering matches the primary plan)
 
-- **Stage 0 — install identity: SHIPPED 2026-08-27** (hermes `HERMES_0A_SHA`,
-  launcher `LAUNCHER_0A_SHA`). `agent_runtime/gateway_identity.py` load-or-mints
+- **Stage 0 — install identity: SHIPPED 2026-08-27** (hermes `b5bc9761a3`,
+  launcher `7444119ce`). `agent_runtime/gateway_identity.py` load-or-mints
   `<store_root>/gateway/install.json` = `{install_id, display_name, created_at}`;
   the additive `install` block rides `ready`/`hello_ok`/`version`;
   `gateway.listen` (False) / `gateway.port` (0) are declared in
@@ -128,11 +128,17 @@ the change in place and green twice consecutively after the refresh.
 
 ### Stage 0b — the CLI verbs, filed separately
 
-`harness gateway id` / `--set-name` did **not** land with Stage 0a. See the
-Stage 0b note wherever it is resolved; `set_display_name()` and
-`read_install_identity()` already exist in `gateway_identity.py` as the verb's
-service half, so the remainder is parser registration plus the launcher's
-argparse-dump fixture (`test/features/mission_control/fixtures/hermes_cli_contract.json`).
+`harness gateway id` / `--set-name` did **not** land with Stage 0a. Deferred for
+SCOPE, not entanglement (both trees were clean by the time this was staged): the
+verbs change hermes' argparse tree, which the launcher pins in
+`test/features/mission_control/fixtures/hermes_cli_contract.json` and drives
+through its argv conformance suite — a second cross-repo fixture landing stacked
+on the serve-frame refresh Stage 0a already paid for. Filed as a row in the
+launcher queue's gateway section (`Launcher_Brain/20 — Active Initiatives/mission-control-queue.md`).
+Until it lands, renaming an install means editing `install.json` by hand and the
+default name is the machine hostname. `set_display_name()` and `read_install_identity()` already exist in
+`gateway_identity.py` as the verb's service half and are tested, so the remainder
+is parser registration in `hermes_cli/harness.py` plus a dump refresh.
 
 ## Drift addendum — audited 2026-08-27
 
