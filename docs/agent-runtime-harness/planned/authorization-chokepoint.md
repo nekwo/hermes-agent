@@ -301,8 +301,9 @@ proved).
   the registry, not by a hand-written list (the tombstone-census lesson: loops,
   never literals). **Cross-repo caution:** the launcher's serve-frame fixtures
   (`tool/hermes_serve_frames/generate.py --check`) capture `hello_ok`/`ready`
-  byte-for-byte and that check is on no CI lane — regenerate and land the
-  fixture in the same wave, or Stage A1 breaks a check nobody runs.
+  byte-for-byte; since launcher `406b7fc87` (2026-08-27, same day as this plan)
+  that check runs on CI as the `hermes-serve-frames` windows-latest job —
+  regenerate and land the fixture in the same wave, or Stage A1 reds that job.
 
 ### Stage A2 — carry a caller identity into the handler
 
@@ -434,8 +435,8 @@ expensive option, and its whole value is the non-bypassability.
   `verify_hello_proof`) and the module docstring, not on a review of the HMAC.
 - **Stage A1's manifest addition is asserted additive by the same rule the D12
   gate proved, not re-proved here.** The launcher's byte-pinned serve-frame
-  fixture is the thing that would catch it, and that check is on no CI lane —
-  which is itself a gateway-plan Stage 0 row.
+  fixture is the thing that would catch it — on CI since launcher `406b7fc87`
+  (the `hermes-serve-frames` job; runner-green still unproven).
 - **No sizing was measured.** The test-count figures (46 / 10 / 8 / 6) are
   `grep -c "def test"` counts, which bound the churn and do not measure it.
 - **This file makes no claim about the RIGHT policy.** It designs where a policy
