@@ -43,16 +43,27 @@ already said ``console``, and everything that is not a level mutation is
 the gateway plan's R11 question and is answered there, not by adding a constant
 here on the way past.
 
-Stage A1 lands the vocabulary and the declaration. Nothing in this file refuses
-anything yet — the predicate and the caller model are A2/A3.
+Stage A1 landed the vocabulary and the declaration; Stage A2 adds the caller
+model below. Nothing in this file refuses anything yet — the predicate is A3.
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
 
 __all__ = [
     "TIER_READ",
     "TIER_CONSOLE",
     "TIERS",
+    "CALLER_STDIO_OWNER",
+    "CALLER_LOCAL_CONSOLE",
+    "CALLER_UNKNOWN",
+    "RpcCaller",
+    "LOCAL_CONSOLE",
+    "STDIO_OWNER",
+    "UNKNOWN_CALLER",
+    "caller_for_connection",
 ]
 
 #: Anything that neither writes store state, emits an event, nor mints an id.
@@ -65,3 +76,96 @@ TIER_CONSOLE = "console"
 #: error, not a policy question: the registry refuses one at registration time
 #: rather than letting a typo widen a door.
 TIERS: tuple[str, ...] = (TIER_READ, TIER_CONSOLE)
+
+
+# ── who is calling (Stage A2) ────────────────────────────────────────────────
+
+#: The serve owner's own pipe. There is no connection, no key and no third
+#: party: whoever holds this process's stdin already holds the process, so
+#: refusing them would be refusing the operator their own machine.
+CALLER_STDIO_OWNER = "stdio_owner"
+#: A socket peer that presented THIS install's serve token.
+#: ``verify_hello_proof`` fails CLOSED on a missing token (``serve_socket.py``),
+#: so this is proven rather than asserted — but it proves exactly one thing, that
+#: the peer holds the one install-wide credential. There is no device
+#: granularity because there is one token; until Stage A5 mints per-device
+#: credentials, holding the install token IS being the machine owner.
+CALLER_LOCAL_CONSOLE = "local_console"
+#: A caller the transport could not place. Minted today only by tests and by the
+#: defensive arm of :func:`caller_for_connection`; from Stage A5 also by a device
+#: credential that is revoked, expired, or absent from ``gateway/devices.json``.
+CALLER_UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class RpcCaller:
+    """What the TRANSPORT proved about who is asking. Never built from params.
+
+    Deliberately separate from ``RpcContext.connection_key``, whose own
+    docstring already commits that field to being the SUBSCRIPTION identity —
+    the name a teardown sweep uses to find the registrations it must drop. An
+    authorization fact riding it would silently redefine a key two other systems
+    index on, so the key is REPEATED here (a refusal has to be able to name the
+    connection it refused) rather than borrowed.
+
+    The default is the stdio owner, and that is the honest value rather than a
+    convenient one. An ``RpcCaller`` can only be constructed by code already
+    inside this process; nothing on either wire reaches the constructor. So a
+    context assembled with no arguments describes an in-process caller, which is
+    what the sibling ``transport: str = "stdio"`` default has always said. The
+    transport builder — :func:`caller_for_connection`, the ONE place a live
+    connection becomes a caller — always passes the value explicitly, so the
+    default is never what a remote peer gets.
+    """
+
+    kind: str = CALLER_STDIO_OWNER
+    connection_key: str | None = None
+    transport: str = "stdio"
+
+    def describe(self) -> dict[str, Any]:
+        """The caller as it appears on a log line or a refusal's ``data``.
+
+        No secrets by construction: a kind, a transport, and a connection key
+        the server already echoes back to that same peer on ``hello_ok``.
+        """
+
+        return {
+            "kind": self.kind,
+            "transport": self.transport,
+            "connection_key": self.connection_key,
+        }
+
+
+#: The machine owner at its own console, over the socket. Spelled as a value so
+#: the grandfather clause is greppable rather than implicit in an absent check.
+LOCAL_CONSOLE = RpcCaller(kind=CALLER_LOCAL_CONSOLE, transport="socket")
+STDIO_OWNER = RpcCaller(kind=CALLER_STDIO_OWNER, transport="stdio")
+UNKNOWN_CALLER = RpcCaller(kind=CALLER_UNKNOWN, transport="unknown")
+
+
+def caller_for_connection(connection: Any) -> RpcCaller:
+    """Turn a live serve connection into the one authorization fact it proves.
+
+    ``None`` is stdio: ``serve.py``'s dispatcher passes the connection it is
+    answering for, and there is no connection object on the owner's own pipe.
+
+    ``authenticated`` is READ rather than assumed, even though
+    ``ServeSocketServer`` only enters a connection into ``_connections`` after
+    ``verify_hello_proof`` succeeds. The check costs one attribute read and makes
+    the claim local: a future transport that hands the dispatcher a
+    pre-handshake connection gets ``unknown`` instead of silently inheriting a
+    guarantee it never made. Duck-typed on ``getattr`` for the same reason the
+    two fields beside it are — this must not import the socket module to answer a
+    question about an object it was handed.
+    """
+
+    if connection is None:
+        return STDIO_OWNER
+    transport = str(getattr(connection, "transport", "stdio") or "stdio")
+    key = getattr(connection, "key", None)
+    key = key if isinstance(key, str) and key else None
+    if not bool(getattr(connection, "authenticated", False)):
+        return RpcCaller(kind=CALLER_UNKNOWN, connection_key=key, transport=transport)
+    return RpcCaller(
+        kind=CALLER_LOCAL_CONSOLE, connection_key=key, transport=transport
+    )

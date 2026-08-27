@@ -1281,6 +1281,11 @@ def serve_loop(
     # for its stores function-locally when it is actually called.
     from agent_runtime import serve_rpc
 
+    # The one function that turns a live connection into an authorization
+    # identity (chokepoint plan A2). Beside ``serve_rpc`` because it is the same
+    # lane and the same stdlib-only cost.
+    from agent_runtime.call_authorization import caller_for_connection
+
     from agent_runtime.persona_chat_continuity import (
         initialize_persona_chat_runtime_registry,
     )
@@ -3194,12 +3199,21 @@ def serve_loop(
             # _cut_off_half_done` in tests/agent_runtime/test_serve_rpc_office_
             # upsert.py — this is a decision, not an oversight.)
             #
-            # The handler is told WHO asked, not just what. Both facts come
+            # The handler is told WHO asked, not just what. All of it comes
             # from this frame's own dispatch — ``sink`` is the stable
             # per-connection writer ``_sink_for`` hands out, and ``connection``
             # is None exactly on stdio. Nothing here is office-specific: it is
             # the argument a method needs before it can push to its caller
             # LATER, which request/response methods simply ignore.
+            #
+            # ``caller`` is the AUTHORIZATION half (chokepoint plan, Stage A2),
+            # and this is the ONE place a live connection becomes one. It is
+            # derived from the connection object the transport handed us — never
+            # from ``message`` — so no field a client can type reaches the front
+            # door's predicate. ``caller_for_connection`` reads the connection's
+            # own ``authenticated`` flag, which is set only after
+            # ``verify_hello_proof``, so the socket lane's identity is proven
+            # here rather than assumed, and stdio's is the process owner's.
             if serve_rpc.is_rpc_frame(message):
                 sink.emit(
                     serve_rpc.handle_request(
@@ -3208,6 +3222,7 @@ def serve_loop(
                             connection_key=getattr(connection, "key", None),
                             transport=getattr(connection, "transport", "stdio"),
                             emit=sink.emit,
+                            caller=caller_for_connection(connection),
                         ),
                     )
                 )

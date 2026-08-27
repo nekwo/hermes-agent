@@ -152,6 +152,95 @@ def test_the_context_reports_the_caller_and_defaults_to_stdio():
     assert serve_rpc.RpcContext().connection_key is None
 
 
+def test_the_default_caller_is_the_stdio_owner_because_that_is_who_can_build_one():
+    """Stage A2. The default is the HONEST value, not a convenient one.
+
+    An ``RpcCaller`` can only be constructed by code already inside this
+    process — nothing on either wire reaches the constructor — so a context
+    assembled with no arguments describes an in-process caller, which is exactly
+    what the ``transport = "stdio"`` default beside it has always said. The
+    transport builder fills the field explicitly on every real dispatch, so this
+    default is never what a remote peer gets.
+    """
+
+    from agent_runtime.call_authorization import CALLER_STDIO_OWNER
+
+    assert serve_rpc.RpcContext().caller.kind == CALLER_STDIO_OWNER
+    assert serve_rpc.RpcContext().caller.transport == "stdio"
+    assert serve_rpc.RpcContext().caller.connection_key is None
+
+
+def test_the_caller_does_not_borrow_the_subscription_key_field():
+    """``connection_key`` stays the subscription identity. The caller REPEATS
+    the key rather than the gate reading it off the field a teardown sweep and
+    the office subscription registry both index on — two meanings on one field
+    is how the next rename breaks a system that never mentioned it."""
+
+    from agent_runtime.call_authorization import LOCAL_CONSOLE, RpcCaller
+
+    context = serve_rpc.RpcContext(
+        connection_key="conn-7",
+        transport="socket",
+        caller=RpcCaller(
+            kind=LOCAL_CONSOLE.kind, connection_key="conn-7", transport="socket"
+        ),
+    )
+
+    assert context.connection_key == context.caller.connection_key == "conn-7"
+    # And the two are independently settable, which is what makes them two facts.
+    assert (
+        serve_rpc.RpcContext(connection_key="conn-9").caller.connection_key is None
+    )
+
+
+def test_a_caller_describes_itself_without_leaking_anything_secret():
+    """What a refusal or a log line may carry: a kind, a lane, and a key the
+    server already echoed back to that same peer on ``hello_ok``."""
+
+    from agent_runtime.call_authorization import caller_for_connection
+
+    class _Conn:
+        key = "conn-3"
+        transport = "socket"
+        authenticated = True
+
+    assert caller_for_connection(_Conn()).describe() == {
+        "kind": "local_console",
+        "transport": "socket",
+        "connection_key": "conn-3",
+    }
+
+
+def test_a_connection_that_never_finished_the_handshake_is_not_the_console():
+    """``caller_for_connection`` reads ``authenticated`` rather than assuming it.
+
+    ``ServeSocketServer`` only enters a connection into ``_connections`` after
+    ``verify_hello_proof``, so today this arm is unreachable from the dispatcher
+    — which is the point of asserting it. A future transport that hands the
+    dispatcher a pre-handshake connection gets ``unknown`` instead of silently
+    inheriting a guarantee it never made.
+    """
+
+    from agent_runtime.call_authorization import (
+        CALLER_LOCAL_CONSOLE,
+        CALLER_STDIO_OWNER,
+        CALLER_UNKNOWN,
+        caller_for_connection,
+    )
+
+    class _Conn:
+        key = "conn-4"
+        transport = "socket"
+        authenticated = False
+
+    assert caller_for_connection(_Conn()).kind == CALLER_UNKNOWN
+    # stdio has no connection object at all, and is the process owner.
+    assert caller_for_connection(None).kind == CALLER_STDIO_OWNER
+    # A connection missing the attribute entirely fails closed the same way.
+    assert caller_for_connection(object()).kind == CALLER_UNKNOWN
+    assert caller_for_connection(object()).kind != CALLER_LOCAL_CONSOLE
+
+
 def test_a_handler_that_omits_the_context_still_answers():
     """Back-compat, and the reason ``handle_request`` defaults to an EMPTY
     context rather than to None: the direct-call sites (the rekey script's own

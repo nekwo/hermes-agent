@@ -120,7 +120,14 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from .call_authorization import TIER_CONSOLE, TIER_READ, TIERS
+from .call_authorization import (
+    STDIO_OWNER,
+    TIER_CONSOLE,
+    TIER_READ,
+    TIERS,
+    RpcCaller,
+    caller_for_connection,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -216,8 +223,9 @@ class RpcContext:
     ``runtime.office.subscribe`` cannot be written against ``(rid, params)`` at
     all — not because the emitter is missing (``SocketConnection.emit`` and
     ``ServeSocketServer.broadcast`` have always existed) but because a handler
-    had no way to name the connection it would later push to. This is that
-    missing argument, and it is deliberately the ONLY new one.
+    had no way to name the connection it would later push to. That was the
+    first added argument, and for the whole life of the notification lane it
+    was the only one.
 
     ``emit`` is the caller's own frame sink, already per-connection and stable
     across a connection's lifetime (``serve.py``'s ``_sink_for``). ``None``
@@ -230,11 +238,21 @@ class RpcContext:
     can be swept when the socket dies. On stdio there is one implicit caller
     and no key, which is why a stdio subscribe is a different question from a
     socket one rather than the same code with a null.
+
+    ``caller`` (Stage A2) is the second, and the only one that is not about
+    talking back. It is what the transport PROVED about who is asking — the
+    argument the front-door gate needs and the one no field here could supply,
+    because ``connection_key`` is a subscription name and ``transport`` is a
+    lane, and neither is an identity. It is built in one place
+    (``call_authorization.caller_for_connection``, called from ``serve.py``'s
+    dispatcher) and is never assembled from ``params``: a request that could
+    name its own caller would be a request that authorizes itself.
     """
 
     connection_key: str | None = None
     transport: str = "stdio"
     emit: Callable[[dict], None] | None = None
+    caller: RpcCaller = STDIO_OWNER
 
     def push(self, method_name: str, params: dict) -> bool:
         """Send one notification to THIS caller. False when there is no channel.
