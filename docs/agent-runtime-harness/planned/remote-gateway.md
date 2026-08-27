@@ -6,7 +6,11 @@ self-signed pinned baseline + launcher-reuse survey) and the authorization
 chokepoint RULED (front door; tier = account auth) — see
 [authorization-chokepoint.md](authorization-chokepoint.md) § the three rulings;
 Stage 1's two prerequisites are now decisions, and its remaining gates are R3/R11's
-vocabulary details.
+vocabulary details. **Evening 2026-08-27: R3 RULED (QR + typed-code fallback;
+CLI-first pairing surface), and R2/R4–R10 ADOPTED at their recommended options
+under the operator's "implement it all" directive (overridable until the
+consuming stage lands) — the primary plan's §5 carries the status block. Stage 1
+is fully unblocked.**
 **Primary plan (full architecture, stages, rulings):** EterniaLauncher repo,
 `docs/mission_control/planned/universal-remote-gateway.md`. This pointer carries only
 the hermes-owned half so the harness canon names its own work.
