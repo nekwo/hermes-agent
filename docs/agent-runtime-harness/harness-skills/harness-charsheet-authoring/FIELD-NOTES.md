@@ -1553,6 +1553,86 @@ because every draft on disk failed an EARLIER gate than the one that wave is fix
   merge rule and a launcher relaunched from that build. W6 owes the capture; until then
   nobody has watched `CharacterResumeThisLane` fire.
 
+### W4 — `hermes_home` on serve-instance records (2026-08-27, gap-closure wave, D-3)
+
+Strip §W4 of launcher `docs/spatial/CHARA_GAP_CLOSURE_WAVE_2026-08-27.md`. Hermes-only,
+observability-only, no behaviour branches on the new key. Worktree cut at `origin/main` =
+`1295212f2e`; `origin/main` moved twice while the strip ran (S8b-b, then W5's note above),
+so it landed rebased onto `d4dbd4f2f5`. The wave's branching rule earned its keep here —
+local `main` was ahead of `origin/main` by another session's unpushed commit at cut time,
+which is exactly the shape that caused the 2026-08-26/27 cross-session incident.
+
+- **[VERIFIED] The hole was real, and I read it off the operator's live runtime, not off
+  source.** Both live serve children — `30248` (stdio) and `30740` (stdio+socket, port
+  61629), both `commit 1295212f2e`, `dirty: false` — had records under
+  `X:\Eternia\.hermes\agent-runtime\serve_instances\` carrying `store_root` and **no**
+  `hermes_home`. That is fact 4 of the wave plan confirmed on disk at 14:32Z.
+
+- **[THE DISTINCTION WORTH KEEPING] `store_root` is not the home, and one does not imply
+  the other.** They are separate axes. A serve child spawned with `HERMES_HOME` pointed at
+  `profiles\base` writes the *same* `store_root` as one that resolved `profiles\alice` —
+  which is exactly the trap the repo-paths memory already records ("the running Launcher's
+  serve spawns with `HERMES_HOME=profiles/base`, not alice; measuring under alice measures a
+  different runtime"). `harness status --json` answers the home live, but only for a process
+  you can already talk to; that is the wrong end of the question when you are staring at a
+  directory of records. Now the record answers it.
+
+- **[RULED, D-3] Always-written, nullable, `schema_version` still 1.** Three states, three
+  spellings, and a reader must keep them apart: a path says *this home*; `null` says *this
+  serve could not resolve one*; an **absent key** says *this entry predates the field*. The
+  `port` / `socket_started_at` precedent, reused verbatim. The empty string is a fourth
+  spelling of the second that reads like a PATH — pinned against, and the pin is
+  load-bearing: mutating the writer to `""` reds
+  `test_an_unresolvable_home_is_written_as_null_never_as_an_empty_string` with
+  `assert '' is None`.
+
+- **[VERIFIED — the absent-key case is not hypothetical, it is on disk today.]** The two
+  live children above registered before this landed, so their records will carry no
+  `hermes_home` for as long as they run. A reader that treated the missing key as a signal
+  would have reclassified two live serves on the day it shipped. So nothing classifies on
+  it: `test_a_record_written_before_the_field_existed_classifies_exactly_as_before` strips
+  the key back out of a written record and pins `live` / reason `""`. That test is a
+  **control, not a red** — it passed before the field existed and after, which is the point.
+
+- **[BOUNDARY] The registry resolves nothing.** `agent_runtime/serve_registry.py` imports no
+  `hermes_constants` (the only two mentions of the name in that file are prose saying so);
+  the value is computed by the caller in `hermes_cli/harness_parts/serve.py` as
+  `str(get_hermes_home())`, wrapped so a resolution failure degrades to `None` rather than
+  failing registration — a registry entry is bookkeeping, and bookkeeping must not be able
+  to fail a boot. The field is therefore unit-testable against an injected string.
+
+- **[SAY THE LIMIT OUT LOUD] It is a BOOT-time observation, not per-turn authority.** The
+  runtime may rebind a home for a single turn and this key will not have moved. Anyone
+  reading it as "the home this serve is using right now" is misusing it. The field's own
+  comment and the module docstring both say so, because this is precisely the kind of fact
+  that gets over-read six months later.
+
+- **[VERIFIED, not inferred] A real fresh serve boot writes it.** Not just the unit test
+  with an injected string: I spawned `python -m hermes_cli.main harness serve --ndjson` as a
+  subprocess against an **isolated** `HERMES_AGENT_RUNTIME_ROOT` + `HERMES_HOME` under Temp,
+  read the record off disk while it served, and got
+  `"hermes_home": "…\\w4boot-dmu628u4\\profiles\\base"` beside its `store_root` of
+  `…\\w4boot-dmu628u4\\agent-runtime` — two different paths in one record, which is the
+  whole point. Clean shutdown then removed the record (exit 0, directory empty), so the
+  unregister path is unchanged. The two live children were never signalled, restarted or
+  read-locked; I checked their pids and record bytes afterwards and both were untouched.
+  Isolation mattered here for a second reason: my child took the socket lock at port 57217,
+  and that lock is per-root — against the live root it would have contended with pid 30740.
+
+- **[TRAP FOR THE NEXT AGENT — cost me a diff of 1069 lines] `Path.write_text()` from a
+  Python one-liner silently converts this repo's files LF → CRLF on Windows.** `core.autocrlf`
+  is **false** here and the index is LF, so a round-trip through `read_text`/`write_text`
+  rewrites every line of the file as far as git is concerned. Two files went from a genuine
+  `+43 / +69` to `556 / 411` changed lines and I nearly committed it. `git diff --numstat
+  --ignore-cr-at-eol` is how you see through it, and `git ls-files --eol` (`i/lf w/crlf`) is
+  how you confirm it. Use the Edit tool, or `write_bytes`, or pass `newline="\n"`.
+
+- **[FOUND, contradicts nothing but worth recording] The wave plan's gate command is not
+  this repo's canonical runner.** §W4 names `python -m pytest …`; `AGENTS.md` says **ALWAYS**
+  use `scripts/run_tests.sh` (CI-parity: cleaned env, `TZ=UTC`, `PYTHONHASHSEED=0`, per-file
+  subprocess isolation). I ran both and both are green at 49/49 — but the plan-named command
+  is the weaker of the two, and a future strip quoting a bare `pytest` gate should say so.
+  The runner needs `HERMES_PYTHON` set in a fresh worktree, which has no `.venv`.
 
 <!-- A2, A3, R1 and any slice standing in the HERMES repo: append your entries above this
      line, under the matching heading, or add a heading if none fits. Then say in your

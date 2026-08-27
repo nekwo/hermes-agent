@@ -132,6 +132,13 @@ def test_the_instance_file_exists_while_serving_and_is_gone_after_a_clean_exit(
     assert seen["exists"] is True
     assert seen["record"]["transport"] == "stdio"
     assert seen["record"]["build"]["source"] in {"git", "build_sha_file", "unknown"}
+    # D-3: the home THIS serve resolved at boot, written by the caller. The
+    # unit test injects a string; only a real boot proves the caller passes
+    # one, and the autouse fixture points HERMES_HOME at a temp dir, so a
+    # blank here would mean the wire is not connected.
+    from hermes_constants import get_hermes_home
+
+    assert seen["record"]["hermes_home"] == str(get_hermes_home())
     assert not path.exists()
 
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -292,6 +293,74 @@ def test_the_socket_fields_are_always_present_even_on_a_stdio_only_serve(tmp_pat
     assert with_socket["transport"] == "stdio+socket"
     assert with_socket["port"] == 51515
     assert with_socket["socket_started_at"] == "2026-08-13T00:00:00.000Z"
+
+
+# ── the resolved home (D-3) ─────────────────────────────────────────────────
+
+
+def test_the_record_carries_the_home_the_caller_resolved(tmp_path):
+    """From outside, nothing said which home a running serve resolved.
+
+    ``store_root`` answers "which runtime root" and that is a DIFFERENT
+    question: one machine's roots and its profile homes are separate axes, and
+    a serve child spawned with ``HERMES_HOME`` pointed at ``profiles/base``
+    writes the same ``store_root`` as one that resolved ``profiles/alice``.
+    The value is passed IN — this module never imports ``hermes_constants``,
+    so the field stays unit-testable against an injected string and the
+    resolution stays the caller's job.
+    """
+
+    home = str(Path("X:/Eternia/.hermes/profiles/base"))
+    _register(tmp_path, hermes_home=home)
+
+    record = json.loads(serve_instance_path(tmp_path, 4242).read_bytes().decode("utf-8"))
+
+    assert record["hermes_home"] == home
+    # Additive-null, exactly like port/socket_started_at: no version bump.
+    assert record["schema_version"] == 1
+
+
+def test_an_unresolvable_home_is_written_as_null_never_as_an_empty_string(tmp_path):
+    """Three states, three spellings, and the reader must tell them apart:
+    a path says "this home"; ``null`` says "this serve could not resolve one";
+    an ABSENT key says "this entry predates the field". An empty string is a
+    fourth spelling of the second that reads like a PATH — the path-field
+    lesson this repo has already paid for once.
+    """
+
+    _register(tmp_path, pid=4243)
+
+    raw = serve_instance_path(tmp_path, 4243).read_bytes().decode("utf-8")
+    record = json.loads(raw)
+
+    assert "hermes_home" in record, "the key is ALWAYS written; absence is a fact"
+    assert record["hermes_home"] is None
+    assert '"hermes_home": null' in raw
+    assert '"hermes_home": ""' not in raw
+
+
+def test_a_record_written_before_the_field_existed_classifies_exactly_as_before(
+    tmp_path,
+):
+    """Absence predates the field, and nothing branches on it.
+
+    The two serve children running on the operator's runtime the day this
+    landed carry no ``hermes_home`` — they registered before it existed. A
+    reader that read the missing key as a signal would reclassify them on the
+    day it shipped. Classification must not notice.
+    """
+
+    _register(tmp_path, pid=4244)
+    path = serve_instance_path(tmp_path, 4244)
+    legacy = json.loads(path.read_bytes().decode("utf-8"))
+    legacy.pop("hermes_home", None)
+    path.write_text(json.dumps(legacy, indent=2) + "\n", encoding="utf-8", newline="\n")
+
+    rows = list_serve_instances(tmp_path, probe=_probe())
+
+    assert [row["classification"] for row in rows] == [CLASSIFICATION_LIVE]
+    assert rows[0]["classification_reason"] == ""
+    assert "hermes_home" not in rows[0]
 
 
 def test_unregistering_retries_a_transiently_locked_entry(tmp_path, monkeypatch):
