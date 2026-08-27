@@ -582,27 +582,46 @@ def _read_event(connection, event: str, *, limit: int = 200) -> dict:
 # ── the receipt itself ──────────────────────────────────────────────────────
 
 
-def test_the_receipt_carries_the_digest_and_never_the_id():
-    """A ``client_message_id`` is client text; this directory is swept and read
-    by operators. The receipt must be findable BY the key without carrying it."""
+def test_the_receipt_is_KEYED_by_digest_and_the_ack_it_replays_is_verbatim():
+    """Two different questions, and the first draft of this test conflated them.
+
+    The KEY is a digest — the filename and the field — because a client-chosen
+    string must never become a path component: ``../`` and a 200-character name
+    are both things a remote device can send. That is NOT a claim that the id is
+    absent from the file. The ack is recorded verbatim so the replay is
+    byte-identical to the original accept, and an ack echoes the
+    ``turn_request_id`` the client itself sent and is waiting to see. Digesting
+    the key and echoing the ack answer different questions; the launcher
+    acceptance asserted the wrong one first and this is what it found.
+    """
 
     import json
 
     from agent_runtime import paths
 
+    hostile = "../../escape me"
     with reserve_chat_turn(
-        turn_request_id="secret-looking-id",
+        turn_request_id=hostile,
         verb=CHAT_MESSAGE_METHOD,
         session_scope="root-1",
     ) as reservation:
-        reservation.mark_accepted({"accepted": True}, request_id="chat-abc")
+        reservation.mark_accepted(
+            {"accepted": True, "turn_request_id": hostile}, request_id="chat-abc"
+        )
 
-    path = paths.chat_turn_reservation_path(turn_request_digest("secret-looking-id"))
+    digest = turn_request_digest(hostile)
+    path = paths.chat_turn_reservation_path(digest)
+    # The id reached no path component: the file sits in the receipts directory
+    # under its digest, and nothing walked out of it.
+    assert path.parent == paths.chat_turn_reservations_dir()
+    assert path.name == f"{digest}.json"
+
     raw = json.loads(path.read_text(encoding="utf-8"))
-    assert raw["turn_request_id_sha256"] == turn_request_digest("secret-looking-id")
-    assert "secret-looking-id" not in path.read_text(encoding="utf-8")
+    assert raw["turn_request_id_sha256"] == digest
     assert raw["state"] == STATE_ACCEPTED
     assert raw["request_id"] == "chat-abc"
+    # And the ack is what it was, so the replay can be what the client saw.
+    assert raw["ack"]["turn_request_id"] == hostile
 
 
 def test_settling_a_receipt_records_the_exit_and_never_raises():

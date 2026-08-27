@@ -349,9 +349,15 @@ def _write(record: ChatTurnRecord) -> None:
         paths.chat_turn_reservation_path(record.key_digest),
         {
             "schema_version": _SCHEMA_VERSION,
-            # The DIGEST, never the id. A ``client_message_id`` is client text
-            # and this directory is read by operators and sweeps; the receipt
-            # needs to be findable by key, not to carry the key.
+            # The KEY is a digest — the filename and this field both — because
+            # a client-chosen string must never become a path component. It is
+            # NOT a claim that the id is absent from the file: ``ack`` is
+            # recorded verbatim so the replay is byte-identical to the original
+            # accept, and that ack echoes the ``turn_request_id`` the client
+            # itself sent and is waiting to see. Digesting the key and echoing
+            # the ack are answers to two different questions, and conflating
+            # them would mean either an unsafe filename or a replay that
+            # returned something the client did not send.
             "turn_request_id_sha256": record.key_digest,
             "verb": record.verb,
             "session_scope": record.session_scope,
