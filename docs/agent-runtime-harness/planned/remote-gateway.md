@@ -50,10 +50,18 @@ ceremony both have upstream reuse material in `gateway/` (`platform_registry.py`
   `afd0667df7` (the handshake prose truth-up); launcher `8891351ed` (fixtures
   only). Canon: [03 §1.1](../03-transport-and-wire.md). Full notes, deviations
   and honest gaps in "Stage 1 notes" below.
-- **Stage 3 (shared) — send idempotency:** mission-chat send needs a server-side
-  turn-request-id dedupe hook for the remote write path (still absent there — no
-  `turn_request_id` anywhere, re-verified 2026-08-27 — but the precedent now ships on
-  a sibling verb; see the drift addendum).
+- **Stage 3 (shared) — the remote write path: SHIPPED 2026-08-27.** hermes
+  `3debed5977` (the method lane + the accept receipt), `296a983340` (20 tests +
+  four manifest-literal pins), `704151cb22` (field notes), `cf69a0d842` (a claim
+  the launcher acceptance disproved); launcher `2632d9ce0`, `9e9bd7aa8`,
+  `c01b665a5`. Two new methods — `runtime.chat.message` / `runtime.chat.steer`,
+  both `console` — plus `agent_runtime/chat_turn.py` and
+  `agent_runtime/chat_turn_reservations.py`. Full notes in "Stage 3 notes" below.
+  **The row above was WRONG and is kept here corrected rather than deleted:**
+  mission-chat send has had server-side exactly-once since the 2026-08-24
+  incident, under the name `client_message_id` plus the per-session turn journal.
+  The grep for `turn_request_id` was accurate twice and answered the wrong
+  question both times.
 - **Stage 6 — peer pairing (install⇄install):** `gateway/peers.json` both sides,
   distinct peer hello, operator-approval gate (R5 — agents can never mint peers),
   `harness gateway peers` verbs, `peer.ping` RPC.
@@ -337,6 +345,163 @@ claimed as enforced.
    way, so the loss is a lost update and not a corrupt store — but a pairing
    minted during that window can be dropped.
 
+## Stage 3 notes — landed 2026-08-27
+
+### The finding: the stage's premise was false
+
+This plan and the primary plan both recorded that mission-chat send has no
+server-side dedupe, "no `turn_request_id` anywhere, re-verified 2026-08-27". The
+grep was right and the conclusion was wrong. Mission chat has carried
+exactly-once for months under a different name — **`client_message_id`** plus the
+per-session **turn journal** (`persona_commands._mission_chat_busy_outcome`,
+`mission_chat_turn_record`) — and it answers a repeated presentation with
+`idempotent_replay: True` and the committed reply, `chat_turn_duplicate_in_flight`
+while the turn is still running, and `chat_turn_outcome_unknown` when the provider
+outcome cannot be proven. That machinery came out of the 2026-08-24 incident and
+is richer than anything this stage would have re-derived.
+
+**A grep for the NAME a plan chose is not a survey of the CAPABILITY.** The
+re-verification ran twice, months apart, and both times asked "is the word here"
+rather than "does a second send of one message run twice". The second question
+takes one test and cannot be answered wrong.
+
+So `turn_request_id` is **not a second key**: the RPC door passes the bytes to
+`--client-message-id` unchanged, and `chat_turn_reservations.py` covers only the
+ACCEPT window the journal provably cannot — between the accept and the journal's
+first write (which happens inside the chat-root lease, after a worker is already
+running) a duplicate accept would otherwise spawn a second worker. That worker is
+not a second TURN (it loses the lease), so correctness was never at risk; what was
+missing is the `idempotent_replay` marker the remote outbox has to branch on.
+
+### The design collision, and why it was invisible per-stage
+
+Stage 3's sketch said "RPC where methods exist, op/argv lane otherwise — same
+union". `mission.chat.*` has no methods and lowers to argv; Stage 1 refuses the
+argv lane to devices, correctly, because the tier gate lives on the method lane
+and an argv lane open to devices makes every tier declaration bypassable in one
+frame. So the union's fallback arm was closed for exactly the caller the gateway
+exists for, and the gateway had shipped a device that could place an agent and
+could not talk to it. Neither stage is wrong on its own — the hole is in the
+SEAM, which a per-stage review cannot find and a cross-stage read can.
+
+### The door lands one step LOWER than the precedent, and that is stronger
+
+`runtime.agent.retire`'s door calls `perform_agent_retire`, the same function the
+CLI calls. Mission chat has no such function: its service IS
+`_cmd_mission_chat_message`, an argparse handler, and its one existing second
+door (`dispatch_delivery.deliver_via_mission_chat`) reaches it by BUILDING a
+namespace. So this door builds ARGV, which the worker dispatches through the same
+argparse tree a local send uses. A parallel Python call site would be two
+implementations that agree today; this is one execution — same handler, same
+lease, same journal, same frames — and no future edit to the chat handler can
+move one without moving the other. The hazard that makes argv-building
+acceptable is pinned rather than asserted
+(`test_a_client_cannot_smuggle_a_flag_through_a_value`): the argv is a LIST,
+flags are literals, and a value is always the element after its flag.
+
+### The tier is `console`, and the decisive reason is mechanical
+
+The taste argument is right — a chat turn runs an agent with tools, so anything
+below `console` is a door around `console`, and a `read` device refused
+`runtime.agent.retire` could ask an agent to retire one. But the fact that
+settles it is that `call_authorization.authorize_call`'s device arm is an
+**equality** against the stored word, not an ordering. A new `chat` tier would
+have refused every already-paired `console` device the very thing R11 says it may
+do, on the first frame. Declaring chat at `console` satisfies R11 exactly, keeps
+the vocabulary at two words and changes no predicate. **Any future third tier has
+to make that arm an ordering first; that is a decision, not a constant.**
+
+### The ack is an ACCEPT, and the lane forces it
+
+`serve.py` answers the method lane INLINE on the reader loop — its own comment
+names chat turns as the reason the worker pool exists — so a method that ran a
+turn would stall every other client on this serve for its length. The chat
+methods therefore validate, dedupe, hand the turn to the pool through the new
+`RpcContext.spawn_chat_turn` seam, and return
+`{turn_request_id, request_id, accepted, state, idempotent_replay, settled,
+exit_code?}`. The turn's frames ride the EXISTING per-request frame lane under
+`request_id`; no second streaming transport was invented.
+
+The spawn builds the same `_ArgvRequest` an argv send does, so `is_chat_turn`
+comes off the same `_CHAT_TURN_COMMANDS` shapes and **`held_by_chat_turns` counts
+a remote turn exactly as it counts a local one**. A serve recycling mid-turn
+because the turn arrived on the other lane is the exact defect that ledger exists
+to prevent, and it is the load-bearing test of the stage.
+
+A draining serve REFUSES a new chat turn, which is an addition to the method
+lane's own rule. That lane deliberately keeps answering during a drain, on the
+argument that an inline handler "cannot be cut off half-done" — and a chat turn is
+the counter-example that argument itself names. The seam RAISES to decline rather
+than being absent, because "this transport has no worker lane" and "this transport
+is shutting down" are different facts and a client retries only one of them. The
+refusal is counted on the terminal drain frame exactly as an argv refusal is, and
+the accept receipt is REMOVED, so the retry against the replacement runtime is a
+fresh accept rather than a replay of a turn that never ran.
+
+### Two things a test found that neither draft's comment had guessed
+
+1. **Where the settle goes.** The worker records its exit onto the accept receipt
+   in `_run`'s `finally`. The first draft put it between the inflight pop and the
+   exit frame, on the argument that a client reading the exit must not then see a
+   receipt still saying `accepted`. The drain monitor polls the pending set, so
+   that placement opens a window in which a request is out of `inflight`, has not
+   emitted, and the drain can complete and close the lane **under its own exit
+   frame**. Reproduced as a lost exit within ten minutes. It goes FIRST in the
+   `finally`, before the pop, where the monitor still counts the request — both
+   properties held.
+2. **The receipt does carry the id, and had to.** `_write`'s comment said "the
+   DIGEST, never the id", and the launcher acceptance asserted it against a real
+   serve and failed. It cannot be true: the ack is recorded verbatim so a replay
+   is byte-identical to the accept the client saw, and an ack echoes the
+   `turn_request_id` the client sent. Two questions had been conflated — the KEY
+   is digested (a client-chosen string must never become a path component) and the
+   ACK is echoed. The hermes test passed only because it stored an ack shape this
+   lane never writes; it now uses a hostile id and asserts the file landed under
+   its digest and nowhere else.
+
+### Honest gaps, hermes side
+
+1. **No real provider turn ran over the method lane.** Every serve test injects
+   `dispatch`, which is the seam every other serve-loop test uses — what is under
+   test is the lane (accept, dedupe, hand off, account, settle), and the argv it
+   builds is pinned literally against the real verb. "A remote device got a model
+   reply" is unproven here; the launcher acceptance's sandbox has no provider
+   either, and asserting on a reply would be asserting on the provider.
+2. **`correlation_id` is accepted, fenced and echoed — and rides no further.**
+   `harness mission-chat message` has no `--correlation-id` flag, so unlike the six
+   office/agent write verbs there is nowhere for the token to join the turn's
+   events. Closing it means an argv flag on the chat verb, i.e. a change to the
+   LOCAL lane, which this stage's contract forbids. Filed against
+   `planned/correlation-id-coverage.md`.
+3. **The accept receipt over-claims on one crash.** Between `mark_accepted` and
+   the submit, a crash leaves a receipt for a turn that never ran, so the retry is
+   answered `idempotent_replay` for work that did not happen. Deliberate: the other
+   ordering duplicates an operator's message, which a client cannot undo. A hung
+   turn is visible (no journal record) and `turn-resolve` exists for the unprovable
+   case.
+4. **Steer rides the worker lane even though a steer is cheap.** Uniformity,
+   argued: `_CHAT_TURN_COMMANDS` counts both verbs, and a steer that skipped the
+   pool would be a chat turn the recycle protection could not see.
+5. **No second machine.** Everything binds loopback — Stage 1's gap, unchanged.
+6. **Inherited red, not this stage's:**
+   `tests/agent_runtime/test_duplicate_helper_bodies.py` fails on
+   `gateway_identity` / `gateway_tls` / `serve_auth` / `serve_gateway_auth`
+   helper bodies from the Stage 0/1 wave. `git diff eb29bf248b HEAD` over those
+   four files and that test is empty — none of them moved in this stage.
+
+### Receipts
+
+`C:\Python312\python.exe -m pytest` (the venv still has no pytest):
+`tests/agent_runtime/test_serve_rpc_chat_turn.py` 20 passed; the four
+manifest-literal pins across `test_serve_rpc_office.py` /
+`test_serve_rpc_office_subscribe.py` / `test_serve_rpc_office_upsert.py` green
+(125 in those three plus the parity suite); the whole `tests/agent_runtime/`
+tree **6654 passed, 2 skipped, 1 failed** (gap 6 above). Launcher-side, the
+serve-frame fixtures were regenerated from a clean detached worktree at
+`cf69a0d842` and `generate.py --check` is green twice consecutively; `ready.json`
+grew the two method names and their tier rows, with zero removals and no contract
+integer moved.
+
 ## Drift addendum — audited 2026-08-27
 
 Architecture re-verified at HEAD (`1295212f2e`) after the S0–S10 placement wave: no
@@ -362,6 +527,15 @@ ride them, don't re-derive:
   `idempotency_key` reservations replaying the ack as `idempotent_replay: true`
   (`agent_create.py:522`, `agent_create_reservations.py:248`); `already_retired: true`
   is the retire analogue. Copy this to mission-chat send.
+  **ANSWERED 2026-08-27, and the premise underneath it was false.** Mission-chat
+  send did NOT need this hook: `client_message_id` plus the per-session turn
+  journal has answered a repeated send with `idempotent_replay: True` since the
+  2026-08-24 incident, and it is richer than the create's (it distinguishes
+  still-running from committed from unprovable). What Stage 3 built is the
+  create's SHAPE over a strictly narrower claim — the ACCEPT window the journal
+  cannot cover, because the journal's first write happens inside the chat-root
+  lease, after a worker is already running. `turn_request_id` is passed to
+  `--client-message-id` unchanged, so there is one key and not two.
 - **Stage 0 must not mint another install id.** `monitoring.install_id`
   (`agent/monitoring/policy.py::ensure_install_id`, consumed as OTel
   `service.instance.id`) and the telemetry `install_id`
