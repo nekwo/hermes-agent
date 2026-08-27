@@ -1236,28 +1236,49 @@ DEFAULT_CONFIG = {
     },
 
     # Web dashboard settings
-    # ── Remote gateway (agent-runtime serve socket lane), Stage 0 scaffold ────
+    # ── Remote gateway (agent-runtime serve socket lane) ──────────────────────
     #
-    # DECLARED, READ BY NOTHING. Stage 1 of the remote-gateway plan
-    # (docs/agent-runtime-harness/planned/remote-gateway.md) is what binds a
-    # non-loopback listener; these keys land now so the surface is reviewable
-    # and an operator's config is forward-compatible, and setting either one
-    # today changes NO network behaviour whatsoever. `serve_socket.py` still
-    # pins SOCKET_HOST = "127.0.0.1".
+    # Stage 1 of the remote-gateway plan
+    # (docs/agent-runtime-harness/planned/remote-gateway.md) reads these, and
+    # they are what bind the second listener. Off by default, forever.
     #
-    # NOT the messaging gateway. `hermes gateway start/stop/restart`, the
-    # `gateway_*` keys under `agent:` and the `platforms.api_server` port are
-    # the chat-platform gateway and are unrelated to this block — the word is
-    # overloaded in this codebase and these two lanes must not be conflated.
-    "gateway": {
+    # **The key is `remote_gateway`, and Stage 0a's `gateway` was a defect
+    # rather than a rename.** Stage 0a declared this block under `"gateway"`
+    # and its receipts say the keys were "declared, read by nothing". The first
+    # half was not true: `"gateway"` is ALREADY a top-level key in this same
+    # dict literal (the messaging gateway's, further down), and a duplicate key
+    # in a Python dict literal does not merge or warn — the later one wins and
+    # the earlier one is discarded at parse time. So `gateway.listen` never
+    # existed to be read, and "read by nothing" hid that: a key nobody reads and
+    # a key that is not there look identical from every angle except a reader's.
+    # Found by becoming the first reader, which is the only thing that could
+    # have found it. `test_config_defaults_has_no_duplicate_keys` now walks the
+    # source AST so the next one is a test failure instead of a silent drop.
+    #
+    # The rename is also the honest spelling. Stage 0a's own comment said the
+    # word `gateway` is overloaded in this codebase and that the two lanes must
+    # not be conflated — `hermes gateway start/stop/restart`, the `gateway_*`
+    # keys under `agent:`, and `platforms.api_server` are the chat-platform
+    # gateway and are unrelated to this block. Two lanes cannot share one key
+    # and stay unconflated; that was the contradiction the duplicate made
+    # visible.
+    "remote_gateway": {
         # Off by default, and that is a security posture rather than a
         # convenience default: the runtime executes agents with tools, so a
         # listener beyond loopback is opt-in per install, forever.
+        #
+        # A STRING when it is on: the interface to bind. `0.0.0.0` is every
+        # interface; a specific address pins it to one network. Boolean `false`
+        # is off, and a boolean `true` is deliberately NOT accepted as "guess an
+        # interface for me" — an operator opening a port onto a LAN should have
+        # to say which one.
         "listen": False,
-        # 0 = ephemeral, matching the loopback socket lane's existing
-        # behaviour (the real port is advertised on `ready` and in
-        # `<store_root>/serve_instances/<pid>.json`). A fixed port is for
-        # operators who must pin a firewall rule.
+        # 0 = ephemeral, matching the loopback socket lane's behaviour (the real
+        # port is advertised on `ready` and in
+        # `<store_root>/serve_instances/<pid>.json`). A FIXED port is the usual
+        # answer here rather than the exotic one: an operator has to write a
+        # firewall rule for it and a paired phone has to find it again after a
+        # restart.
         "port": 0,
     },
     "dashboard": {

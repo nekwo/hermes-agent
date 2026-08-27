@@ -308,6 +308,25 @@ OPS_EVERY_TRANSPORT: tuple[str, ...] = (
 #: ``shutdown`` refusal in ``_handle_message``.
 OPS_STDIO_ONLY: tuple[str, ...] = ("shutdown",)
 
+#: The transport name the gateway listener tags its connections and frames with.
+#: The same string ``call_authorization.TRANSPORT_GATEWAY`` keys its structural
+#: guard on; spelled in both places rather than imported across the boundary,
+#: for the reason that module gives (it must not import a transport to answer a
+#: question about an object it was handed) and pinned equal by a test.
+GATEWAY_TRANSPORT = "gateway"
+
+#: Ops a paired DEVICE is refused, on top of the stdio-only set. One entry, and
+#: it is the one that ends the process.
+#:
+#: ``drain`` is not a read and it is not a level mutation — it is the multi-client
+#: lifecycle verb, and its whole effect is that this runtime stops and every
+#: OTHER attached client is disconnected. A phone deciding that for the desktop
+#: it is a guest on is the wrong default even at ``console`` tier, and "the
+#: operator wanted to restart the runtime from their phone" is a verb somebody
+#: can add deliberately later. The refusal mirrors ``shutdown``'s
+#: (``op_not_available_on_socket``) rather than inventing a shape.
+OPS_GATEWAY_DENIED: tuple[str, ...] = ("drain",)
+
 #: The push lanes ``{"op":"subscribe","lane":…}`` accepts. ONE today, and the
 #: value EG-4.2's launcher gate reads: the argv stream stays the backstop until
 #: a runtime says this word, because the launcher must never unilaterally switch
@@ -328,12 +347,213 @@ def ops_manifest(*, transport: str) -> dict[str, Any]:
     ops = set(OPS_EVERY_TRANSPORT)
     if transport == "stdio":
         ops |= set(OPS_STDIO_ONLY)
+    if transport == GATEWAY_TRANSPORT:
+        # The per-transport shape earning its keep a second time. A device
+        # learns what it may ask by MEMBERSHIP — the set-plus-integer rule the
+        # D12 rollout gate proved — rather than by trying `drain` and reading an
+        # error, and the manifest cannot disagree with the dispatcher because
+        # both read this tuple.
+        ops -= set(OPS_GATEWAY_DENIED)
     return {
         "contract": OPS_CONTRACT_VERSION,
         "transport": transport,
         "ops": sorted(ops),
         "subscribe_lanes": sorted(SUBSCRIBE_LANES),
     }
+
+
+def _is_device(connection: Any) -> bool:
+    """Did this frame arrive on the gateway lane, from a paired device?
+
+    Keyed on the TRANSPORT and not on the device stamp, deliberately. The stamp
+    answers "which device"; this answers "did this come through the door that is
+    open to the network", and those are different questions whose answers must
+    not be allowed to diverge. A gateway connection that somehow lacks a stamp
+    is exactly the case where the narrower test would silently grant local
+    authority — the same reasoning, and the same guard, as
+    ``call_authorization.caller_for_connection``'s gateway arm.
+    """
+
+    return (
+        connection is not None
+        and str(getattr(connection, "transport", "") or "") == GATEWAY_TRANSPORT
+    )
+
+
+def gateway_listen_config() -> tuple[str | None, int]:
+    """``(host, port)`` from ``remote_gateway.*``; ``(None, …)`` means off.
+
+    The FIRST reader of the keys Stage 0a declared — and the read that found
+    they had never existed: Stage 0a put them under ``"gateway"``, which is
+    already a top-level key in ``config_defaults``' one big dict literal, so
+    Python kept the later entry and dropped this one at parse time. They are
+    ``remote_gateway.*`` now, guarded by an AST test.
+
+    ``listen`` is a HOST STRING when it is on, and a boolean ``True`` is
+    deliberately refused rather than resolved to a default interface: an
+    operator opening a port onto a LAN should have to say which one, and
+    "guessed an interface for you" is not a sentence this runtime should be able
+    to say about a listener that executes agents with tools. Anything unreadable
+    is off, because the failure direction for a config that cannot be parsed is
+    "do not bind".
+    """
+
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        block = load_config_readonly().get("remote_gateway") or {}
+    except Exception:
+        return None, 0
+    if not isinstance(block, dict):
+        return None, 0
+    listen = block.get("listen")
+    if not isinstance(listen, str):
+        return None, 0
+    host = listen.strip()
+    if not host or host.lower() in {"false", "off", "no", "true"}:
+        return None, 0
+    try:
+        port = int(block.get("port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+    return host, max(0, min(65535, port))
+
+
+def start_gateway_listener(
+    store_root: Any,
+    *,
+    boot_id: str,
+    display_name: Any,
+    dispatch_line: Any,
+    hello_payload: Any,
+    on_disconnect: Any,
+    log: Any,
+    frame_contract: int,
+) -> tuple[Any, dict[str, Any]]:
+    """Bind the second listener, or say precisely why there is none.
+
+    Returns ``(server_or_None, block)`` where ``block`` is what rides the
+    greeting frames. It follows the ``socket`` block's standing rule — a block
+    states its own outcome rather than vanishing — because the failure this
+    guards against is specific and quiet: an operator sets ``remote_gateway.listen``,
+    restarts, and a phone cannot reach the install. Without a stated outcome
+    that looks identical whether the port was taken, the certificate could not be
+    minted, or the config was never read at all.
+
+    Module-level rather than a closure inside ``serve_loop`` so it is testable
+    without standing up a runtime, and so the credential wiring — the one part
+    that must not be got wrong — is readable in one screen instead of inside a
+    2000-line function.
+    """
+
+    host, port = gateway_listen_config()
+    if host is None:
+        return None, {"outcome": "disabled"}
+
+    from agent_runtime.gateway_tls import ensure_certificate, server_ssl_context
+    from agent_runtime.serve_socket import ServeSocketServer
+
+    certificate = ensure_certificate(
+        store_root, common_name=display_name if isinstance(display_name, str) else None
+    )
+    if not certificate.ok:
+        # R1 ruled ENCRYPT, so a listener that cannot encrypt does not open.
+        # Degrading to plaintext here would be the single worst thing this file
+        # could do: the operator asked for a LAN door, would get one, and the
+        # only thing missing would be the property they were promised.
+        return None, {
+            "outcome": f"error:{certificate.state}",
+            "host": host,
+            "port": port,
+        }
+    try:
+        context = server_ssl_context(store_root)
+    except Exception as exc:
+        return None, {
+            "outcome": f"error:{type(exc).__name__}",
+            "host": host,
+            "port": port,
+        }
+
+    server = ServeSocketServer(
+        store_root,
+        boot_id=boot_id,
+        dispatch_line=dispatch_line,
+        hello_payload=hello_payload,
+        # The per-root token is NOT this lane's credential, and the provider is
+        # wired to refuse rather than left absent: `token_provider` is a required
+        # argument, and one that returned the root token while `authenticator`
+        # happened to be set would be a live fallback waiting for a refactor to
+        # find it. There is no path on this listener that consults the install's
+        # own secret.
+        token_provider=lambda: None,
+        authenticator=_device_authenticator(store_root),
+        ssl_context=context,
+        host=host,
+        port=port,
+        transport_name=GATEWAY_TRANSPORT,
+        frame_contract=frame_contract,
+        on_disconnect=on_disconnect,
+        log=log,
+    )
+    try:
+        bound = server.bind()
+    except Exception as exc:
+        # A port already in use is the ordinary case here, not the exotic one:
+        # this lane's port is usually FIXED (an operator wrote a firewall rule
+        # for it), so a stale process holding it is a Tuesday. Typed, and never
+        # fatal — the loopback lane and the stdio lane are unaffected.
+        return None, {
+            "outcome": f"error:{type(exc).__name__}",
+            "host": host,
+            "port": port,
+        }
+    return server, {
+        "outcome": "listening",
+        "host": host,
+        "port": bound,
+        "started_at": server.started_at,
+        # The value a pairing payload carries and a client pins. Published on
+        # the greeting because a client that has to ask a second question to
+        # learn what it should have pinned has a window in which it is trusting
+        # nothing — and this is the same argument the `build` block beside it
+        # makes about code.
+        "cert_fingerprint": certificate.fingerprint,
+    }
+
+
+def _device_authenticator(store_root: Any):
+    """The gateway lane's credential check, as a ``ServeSocketServer`` seam.
+
+    A device names itself in the hello (``device_id``) and answers the challenge
+    with an HMAC keyed by its own token's digest, bound to the port it dialled.
+    Every failure — no id, unknown id, revoked row, wrong proof — comes back as
+    the SAME ``bad_proof`` rejection, so a peer that has proven nothing cannot
+    enumerate which device ids exist by watching the reason change. The runtime's
+    own log keeps the distinction; the wire does not.
+    """
+
+    from agent_runtime.serve_gateway_auth import note_device_seen, verify_device_proof
+    from agent_runtime.serve_socket import HelloAuthOutcome, REJECT_BAD_PROOF
+
+    def _authenticate(message: dict[str, Any], nonce: str, port: int):
+        auth = verify_device_proof(
+            store_root,
+            message.get("device_id"),
+            message.get("proof"),
+            nonce,
+            port=port,
+        )
+        if not auth.ok or auth.record is None:
+            return HelloAuthOutcome(ok=False, reject_reason=REJECT_BAD_PROOF)
+        note_device_seen(store_root, auth.record.device_id)
+        return HelloAuthOutcome(
+            ok=True,
+            device_id=auth.record.device_id,
+            device_tier=auth.record.tier,
+        )
+
+    return _authenticate
 
 
 # ── Drain ────────────────────────────────────────────────────────────────────
@@ -1377,6 +1597,14 @@ def serve_loop(
     # serve wins the per-root ownership lock) ────────────────────────────────
     socket_server: Any = None
     socket_lock: Any = None
+    #: The SECOND listener (remote-gateway Stage 1). ``None`` unless
+    #: ``remote_gateway.listen`` names an interface AND this serve owns the
+    #: loopback lane — the gateway lane is not a separate ownership question, it
+    #: is the same dispatcher answering on a second door, so a serve that lost
+    #: the per-root lock must not open one either. It shares the loopback lane's
+    #: lock, its pool, its stream hub and its drain; what it does not share is
+    #: the credential (per device, not per root) and the encryption (TLS).
+    gateway_server: Any = None
     #: The ONE stream producer, built on the first ``subscribe`` and stopped
     #: when the last subscriber leaves. Never per client: a delta batch rebuilds
     #: a full snapshot core, so N generators would cost N of them.
@@ -1691,6 +1919,34 @@ def serve_loop(
                 socket_server = None
                 socket_lock = None
                 socket_block = {"outcome": f"error:{type(exc).__name__}"}
+        # 3b. THE SECOND DOOR (remote-gateway Stage 1). Off unless an operator
+        #     names an interface in `remote_gateway.listen`, and the block SAYS
+        #     which of those it is either way — `disabled` is a different fact
+        #     from `error:port_in_use`, and a listener that silently failed to
+        #     come up while the config said it should is the false-all-clear
+        #     shape the `socket` block beside it already exists to retire.
+        #
+        #     Three things differ from the lane above and nothing else does: the
+        #     bind (an operator-chosen interface and usually a fixed port), the
+        #     credential (per DEVICE — `serve_gateway_auth`, not the per-root
+        #     token), and the link (TLS, R1). Same dispatcher, same ops, same
+        #     stream hub, same drain.
+        gateway_block: dict[str, Any] = {"outcome": "disabled"}
+        if socket_server is not None and store_root_path is not None:
+            gateway_server, gateway_block = start_gateway_listener(
+                store_root_path,
+                boot_id=boot_id,
+                display_name=install_block.get("display_name"),
+                dispatch_line=lambda line, connection: _handle_socket_line(
+                    line, connection
+                ),
+                hello_payload=lambda message, connection: _hello_ok_frame(
+                    message, connection
+                ),
+                on_disconnect=lambda connection: _release_subscription(connection),
+                log=_service_log,
+                frame_contract=SERVE_SCHEMA_VERSION,
+            )
         # 4. DISCOVERY. Multiple runtime roots legitimately coexist on this
         #    machine (QA lanes, isolated worktree roots), and until now
         #    "how many serves are running against this root, on what code"
@@ -1849,6 +2105,15 @@ def serve_loop(
             # port, ``lock_held_by`` with the winner's pid, or ``error:<reason>``
             # — the outcome is stated either way, never inferred from absence.
             "socket": socket_block,
+            # The SECOND door, by the same rule and for a sharper reason. An
+            # operator who sets ``remote_gateway.listen`` and restarts has one
+            # question — can my phone reach this install — and every way the
+            # answer is no is quiet: the port was taken, the certificate could
+            # not be minted, the config key was never read. ``disabled`` when
+            # nobody asked, ``listening`` with host/port and the
+            # ``cert_fingerprint`` a client pins, ``error:<reason>`` otherwise.
+            # Never absent, never inferred.
+            "gateway": gateway_block,
             # The METHOD lane's capability manifest — ``{"contract":N,
             # "methods":[…]}``. This is stdio's greeting, so this is where a
             # stdio client learns the method set; the socket's equivalent is
@@ -2348,6 +2613,25 @@ def serve_loop(
                 with connection_sinks_lock:
                     connection_sinks.pop(connection.key, None)
 
+        def _broadcast_lanes(frame: dict[str, Any]) -> None:
+            """Tell every attached client, on whichever door it came through.
+
+            One call site per announcement rather than two, because the failure
+            mode of two is silent and asymmetric: a drain that reached the
+            loopback launcher and not the paired phone leaves the phone waiting
+            on a runtime that has gone, and nothing anywhere says so. Every
+            broadcast in this loop goes through here, so a lane added later is
+            added once.
+            """
+
+            for server in (socket_server, gateway_server):
+                if server is None:
+                    continue
+                try:
+                    server.broadcast(frame)
+                except Exception:
+                    pass
+
         def _close_socket_lane(reason: str) -> None:
             """Stop the hub, close every connection, release the ownership lock.
 
@@ -2355,7 +2639,7 @@ def serve_loop(
             shutdown path, and the EOF path, and any of them may be second.
             """
 
-            nonlocal socket_server, socket_lock, stream_hub
+            nonlocal socket_server, socket_lock, stream_hub, gateway_server
             # Unbound FIRST, so a subscribe racing the drain is refused with a
             # typed `push_lane_unavailable` instead of registering against a hub
             # that is about to be stopped. The registry is process-global and
@@ -2373,8 +2657,19 @@ def serve_loop(
             with lane_lock:
                 hub, stream_hub = stream_hub, None
                 server, socket_server = socket_server, None
+                # The gateway listener is swapped under the SAME lock and by the
+                # same closer. It has no lock and no registry entry of its own —
+                # it is the loopback lane's dispatcher answering on a second
+                # door — so a teardown that closed one and not the other would
+                # leave a runtime that has drained still accepting devices.
+                gateway, gateway_server = gateway_server, None
                 lock, socket_lock = socket_lock, None
                 stream_fold_entities.clear()
+            if gateway is not None:
+                try:
+                    gateway.close(reason=reason)
+                except Exception:
+                    pass
             if hub is not None:
                 try:
                     # One TOTAL budget for the hub, not one per subscriber
@@ -2433,7 +2728,12 @@ def serve_loop(
                 # completed.
                 "hello_contract": HELLO_CONTRACT_VERSION,
                 "schema_version": SERVE_SCHEMA_VERSION,
-                "transport": "socket",
+                # Which DOOR this client came through, read off the connection
+                # rather than written as a constant. It was "socket" when there
+                # was one listener; a device reading "socket" here would be told
+                # it is on the local lane, and `ops` below would then advertise
+                # a verb this connection is refused.
+                "transport": connection.transport,
                 "connection": connection.key,
                 "runtime_root": runtime_root,
                 "build": build_block,
@@ -2453,9 +2753,18 @@ def serve_loop(
                 # asking ``version`` — one extra round trip on every connect,
                 # for something the handshake it already performs can carry.
                 "rpc": serve_rpc.manifest(),
-                # Same argument, the OP lane's half — and the one place the two
-                # advertisements differ, because ``shutdown`` is refused here.
-                "ops": ops_manifest(transport="socket"),
+                # Same argument, the OP lane's half — and the place the
+                # advertisements differ per door: ``shutdown`` is refused on
+                # both sockets, and ``drain`` additionally on the gateway one.
+                # A device learns what it may ask by MEMBERSHIP rather than by
+                # trying and reading an error.
+                "ops": ops_manifest(transport=connection.transport),
+                # What the SECOND door is doing, on the greeting a client
+                # already reads. For a device this is the lane it is standing
+                # on; for the local launcher it is the answer to "is this
+                # install reachable from my phone", which nothing else on this
+                # frame can give it.
+                "gateway": gateway_block,
             }
 
         def _connections_frame() -> dict[str, Any]:
@@ -2470,6 +2779,22 @@ def serve_loop(
             else:
                 payload["enabled"] = True
                 payload.update(server.connections_payload())
+            with lane_lock:
+                gateway = gateway_server
+            # The gateway lane gets its OWN sub-block rather than having its
+            # rows merged into the list above, and the reason is that the
+            # top-level keys are per-listener facts: `port`, `host`, `count`,
+            # `max_connections`, `rejected_by_reason`. Merged, every one of them
+            # would answer for two listeners at once and none of them would say
+            # which. Additive and absent-when-off, so every existing consumer of
+            # this frame reads exactly the shape it was written against.
+            if gateway is not None:
+                payload["gateway"] = {
+                    "enabled": True,
+                    **gateway.connections_payload(),
+                }
+            else:
+                payload["gateway"] = {"enabled": False, "outcome": gateway_block.get("outcome")}
             with lane_lock:
                 hub = stream_hub
             payload["subscriptions"] = (
@@ -2530,11 +2855,7 @@ def serve_loop(
             # merely attached, learns how it ended on the transport it is on.
             # Broadcast before teardown — after ``_close_socket_lane`` there is
             # nobody left to tell.
-            if socket_server is not None:
-                try:
-                    socket_server.broadcast(frame)
-                except Exception:
-                    pass
+            _broadcast_lanes(frame)
             _close_socket_lane(reason="drain")
             _unregister_instance()
             drain_finished.set()
@@ -2631,11 +2952,7 @@ def serve_loop(
                         state.note_deadline_held()
                         expiry.update(state.counters())
                         frames.emit(expiry)
-                        if socket_server is not None:
-                            try:
-                                socket_server.broadcast(expiry)
-                            except Exception:
-                                pass
+                        _broadcast_lanes(expiry)
                         deadline = now + state.deadline_seconds
                         last_progress = now
                         time.sleep(max(0.0, drain_poll_interval_seconds))
@@ -2658,11 +2975,7 @@ def serve_loop(
                     # minimum deadline, a drain holding a chat turn open puts
                     # the first socket-visible frame 30s out, so a healthy,
                     # completing drain reported a transport failure and exit 6.
-                    if socket_server is not None:
-                        try:
-                            socket_server.broadcast(progress)
-                        except Exception:
-                            pass
+                    _broadcast_lanes(progress)
                     last_progress = now
                 time.sleep(max(0.0, min(drain_poll_interval_seconds, deadline - now)))
 
@@ -2752,7 +3065,9 @@ def serve_loop(
                         "boot_id": boot_id,
                         # The transport THIS reply came over — honest per
                         # connection, and unchanged for every stdio consumer.
-                        "transport": "stdio" if connection is None else "socket",
+                        "transport": (
+                            "stdio" if connection is None else connection.transport
+                        ),
                         "runtime_root": runtime_root,
                         "build": version_build,
                         "auth": auth_block,
@@ -2768,6 +3083,11 @@ def serve_loop(
                         # Additive: what else is attached to this runtime, on
                         # the reply a client already asks for.
                         "socket": socket_block,
+                        # Re-askable like the socket block above it: a client
+                        # that reconnects after an operator turned the lane on
+                        # (or after it failed to come up) must be able to learn
+                        # that without a restart it cannot cause.
+                        "gateway": gateway_block,
                         "connections": _connections_frame(),
                         # Re-askable, like the build stamp beside it and for the
                         # same reason: a durable service outlives the install it
@@ -2780,7 +3100,9 @@ def serve_loop(
                         # transport it just came over: ``shutdown`` is in the
                         # stdio answer and out of the socket one.
                         "ops": ops_manifest(
-                            transport="stdio" if connection is None else "socket"
+                            transport=(
+                                "stdio" if connection is None else connection.transport
+                            )
                         ),
                     }
                 )
@@ -2969,6 +3291,29 @@ def serve_loop(
                 )
                 return None
             if op == "drain":
+                if _is_device(connection):
+                    # A paired device does not get to end a runtime other
+                    # clients are using — not even at `console` tier, because
+                    # `drain` is not a level mutation the tier speaks about: it
+                    # is the lifecycle verb, and its effect is that this process
+                    # stops and every other attached client is disconnected. A
+                    # phone deciding that for the desktop it is a guest on is
+                    # the wrong default, and "restart the runtime from my phone"
+                    # is a verb somebody can add on purpose later. The refusal
+                    # mirrors `shutdown`'s rather than inventing a shape, and
+                    # `ops_manifest(transport="gateway")` already said so, so a
+                    # well-behaved client never reaches this line.
+                    sink.emit(
+                        {
+                            "event": "error",
+                            "error": "op_not_available_on_gateway",
+                            "detail": (
+                                "drain ends this runtime for every attached "
+                                "client; it is the local console's verb"
+                            ),
+                        }
+                    )
+                    return None
                 if connection is not None and message.get("force") is not True:
                     # The socket lane's second key. `shutdown` is refused there
                     # outright because a client does not get to kill a service
@@ -3054,15 +3399,17 @@ def serve_loop(
                     "minimum_deadline_seconds": effective_minimum,
                 }
                 frames.emit(draining_frame)
-                if socket_server is not None:
-                    # New sockets are refused from here (existing ones stay up
-                    # to be told how it ends), and every attached client hears
-                    # it at the same moment the stdio supervisor does.
+                # New connections are refused from here on BOTH doors (existing
+                # ones stay up to be told how it ends), and every attached
+                # client hears it at the same moment the stdio supervisor does.
+                for _lane in (socket_server, gateway_server):
+                    if _lane is None:
+                        continue
                     try:
-                        socket_server.begin_drain()
-                        socket_server.broadcast(draining_frame)
+                        _lane.begin_drain()
                     except Exception:
                         pass
+                _broadcast_lanes(draining_frame)
                 threading.Thread(
                     target=_drain_monitor,
                     args=(started,),
@@ -3227,6 +3574,36 @@ def serve_loop(
                     )
                 )
                 return None
+            if _is_device(connection):
+                # THE ARGV LANE IS NOT REACHABLE FROM A DEVICE, and this is the
+                # load-bearing refusal of the whole stage. The front-door tier
+                # gate (`authorize_call`) sits on the METHOD lane; the argv lane
+                # runs `harness <anything>` through the CLI dispatcher, where a
+                # tier declaration does not exist and every verb is the local
+                # operator's. Without this line a `read`-tier device refused
+                # `runtime.agent.retire` on the method lane could simply send
+                # `{"argv": ["harness", "agent", "retire", ...]}` and be obeyed —
+                # the gate would be real and bypassable in one frame.
+                #
+                # This is a refusal rather than a second gate on purpose. Gating
+                # argv would mean deciding a tier for every CLI verb this repo
+                # has and keeping that map correct forever, which is the
+                # duplicated-authority shape this stack keeps retiring. A device
+                # has the method lane, whose tiers ride the manifest it already
+                # reads.
+                sink.emit(
+                    {
+                        "id": message.get("id") if isinstance(message.get("id"), str) else None,
+                        "event": "error",
+                        "error": "argv_lane_unavailable",
+                        "detail": (
+                            "the argv lane is the local console's; a paired "
+                            "device calls JSON-RPC methods, whose tiers ride "
+                            "the rpc manifest on hello_ok"
+                        ),
+                    }
+                )
+                return None
             rid = message.get("id")
             argv = message.get("argv")
             if (
@@ -3320,6 +3697,24 @@ def serve_loop(
                     }
                 )
                 _close_socket_lane(reason="accept_start_failed")
+        if gateway_server is not None:
+            # Same two-phase start, same reason: the port was bound before the
+            # ready frame so it could be published, and accepting waits for the
+            # pool. A gateway lane that cannot start accepting closes BOTH doors
+            # through the shared closer, because a half-open runtime — loopback
+            # serving, gateway bound but deaf — is a state nothing downstream
+            # can describe.
+            try:
+                gateway_server.start_accepting()
+            except Exception as exc:
+                _service_log(
+                    {
+                        "event": "serve_gateway_accept_start_failed",
+                        "boot_id": boot_id,
+                        "reason": type(exc).__name__,
+                    }
+                )
+                _close_socket_lane(reason="gateway_accept_start_failed")
         # Explicit construction + shutdown rather than ``with``: the drain's
         # timeout path must be able to stop waiting on work that has proven it
         # will not finish, and a context manager always joins.
@@ -3377,11 +3772,7 @@ def serve_loop(
                     ),
                 }
                 frames.emit(abandoned)
-                if socket_server is not None:
-                    try:
-                        socket_server.broadcast(abandoned)
-                    except Exception:
-                        pass
+                _broadcast_lanes(abandoned)
                 _close_socket_lane(reason="drain_abandoned")
                 _unregister_instance()
                 # Nonzero on purpose, and the SAME code a timeout uses: a
@@ -3395,11 +3786,7 @@ def serve_loop(
         # attached client whose socket simply died could not tell a clean
         # service shutdown from a crash, which is the distinction the durable
         # service exists to make legible.
-        if socket_server is not None:
-            try:
-                socket_server.broadcast(shutdown_frame)
-            except Exception:
-                pass
+        _broadcast_lanes(shutdown_frame)
         _close_socket_lane(reason="shutdown")
         _unregister_instance()
         frames.emit(shutdown_frame)

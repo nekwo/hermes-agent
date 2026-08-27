@@ -76,6 +76,41 @@ their own, and pre-hello connections have a bound of their own: counting only
 AUTHENTICATED peers against ``max_connections`` let 64 silent sockets sit on
 the runtime's threads without a single rejection.
 
+Two listeners, one implementation (Stage 1)
+-------------------------------------------
+
+This class binds the LOOPBACK lane, and — when an operator opts in — a second
+GATEWAY listener bound beyond loopback. They are the same class with three
+constructor arguments filled in, deliberately, because the hardened parts here
+are the parts a second copy would get wrong: the accept loop that announces its
+own death, the pre-auth bound that counts peers who have proven nothing, the two
+rate limiters and the rule that server-state refusals never charge the auth one,
+the lingering close that keeps a rejection frame alive. A second listener class
+would be a second place all of that has to stay true.
+
+The three arguments, all defaulted to what the loopback lane has always done, so
+a server constructed without them is byte-identical to the one that shipped:
+
+* ``port`` — 0 (ephemeral) by default; pinned for an operator who has to write a
+  firewall rule and tell a phone a number that survives a restart.
+* ``ssl_context`` — ``None`` by default. The loopback lane stays PLAINTEXT and
+  that is the local trust model unchanged: a local process that could read the
+  token file gains nothing from a TLS layer, and adding one would cost every
+  local client a handshake to protect a wire that never leaves the machine. The
+  gateway lane is wrapped (R1: encrypt, self-signed per-install certificate,
+  fingerprint pinned by the client).
+* ``authenticator`` — ``None`` means the per-root token, i.e. the code that was
+  inline here before the seam existed. The gateway lane injects a per-DEVICE
+  check (``serve_gateway_auth.py``), which is the only way a connection ever
+  gets a ``device_id``/``device_tier`` stamp, which is in turn the only way
+  ``call_authorization`` mints a ``device`` caller.
+
+What the gateway lane does NOT get is a second dispatcher, a second op table, or
+a second hello contract. It answers the same ``server_hello``, over the same
+frame vocabulary, into the same ``dispatch_line`` callback. Where it must differ
+— the credential, the encryption, the ops it is offered — it differs by an
+argument, not by a branch.
+
 One owner per root
 ------------------
 
@@ -153,6 +188,8 @@ else:  # pragma: no cover - platform split
 __all__ = [
     "AUTH_FAILURE_REJECT_REASONS",
     "CLASSIFICATION_OWNER_FILE_UNVERIFIED",
+    "HelloAuthOutcome",
+    "REJECT_TLS_HANDSHAKE_FAILED",
     "DEFAULT_MAX_CONNECTIONS",
     "DEFAULT_MAX_PENDING_CONNECTIONS",
     "HELLO_CONTRACT_VERSION",
@@ -188,8 +225,16 @@ __all__ = [
     "verify_hello_proof",
 ]
 
-#: Loopback only. Never configurable: a knob here can only ever widen exposure,
-#: and this runtime executes agents with tools.
+#: The LOOPBACK lane's host. Never configurable, and the sentence that follows
+#: is unchanged from the day it was written: a knob HERE can only ever widen
+#: exposure, and this runtime executes agents with tools.
+#:
+#: Stage 1 did not turn this into a knob. It added a SECOND listener — off by
+#: default, per-config, TLS-wrapped, and accepting only per-device credentials —
+#: precisely so that widening exposure is a different object with a different
+#: credential story rather than a different value in this constant. A caller
+#: that reads ``SOCKET_HOST`` is asking about the local lane and still gets the
+#: local answer.
 SOCKET_HOST = "127.0.0.1"
 
 SOCKET_LOCK_FILENAME = "serve_socket.lock"
@@ -247,6 +292,16 @@ REJECT_HELLO_REQUIRED = "hello_required"
 REJECT_HELLO_MALFORMED = "hello_malformed"
 REJECT_HELLO_TOO_LONG = "hello_too_long"
 REJECT_BAD_PROOF = "bad_proof"
+#: The peer could not complete TLS. Only reachable on a listener configured with
+#: an ``ssl_context`` (the gateway lane); the loopback lane never mints it.
+#:
+#: NOT an auth failure — a TLS failure says nothing about whether the peer holds
+#: a credential, and charging it to the auth limiter is the same mistake that
+#: made capacity refusals self-sustaining. It IS a way to spend the runtime's
+#: threads, so it charges the SILENCE throttle instead, alongside the peer that
+#: connects and says nothing: from the accept loop's point of view a half-open
+#: TLS handshake is exactly that.
+REJECT_TLS_HANDSHAKE_FAILED = "tls_handshake_failed"
 
 #: The ONLY reasons that charge the auth rate limiter: a peer that presented a
 #: bad credential, or that spoke something other than a hello where a hello was
@@ -571,6 +626,33 @@ def verify_hello_proof(
     )
 
 
+# ── who a hello turned out to be ─────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class HelloAuthOutcome:
+    """What an :class:`ServeSocketServer` authenticator decided about one hello.
+
+    The seam that lets ONE listener implementation serve two credential models
+    without either one growing a branch on the other. The loopback lane's
+    authenticator checks the per-root token and returns no identity beyond
+    "yes"; the gateway lane's checks a per-device credential and returns the
+    device it belongs to.
+
+    ``reject_reason`` is a member of the typed vocabulary above rather than free
+    text, because ``_reject`` derives whether a refusal charges the auth rate
+    limiter FROM the reason and from nothing else — a caller-supplied flag there
+    is exactly how capacity refusals came to be counted as attacks.
+    """
+
+    ok: bool
+    reject_reason: str = REJECT_BAD_PROOF
+    #: Set only when ``ok`` and only by a device-credential authenticator, so a
+    #: connection cannot be stamped with a device whose proof did not verify.
+    device_id: str | None = None
+    device_tier: str | None = None
+
+
 # ── connections ──────────────────────────────────────────────────────────────
 
 
@@ -585,6 +667,13 @@ class SocketConnection:
     client: str | None = None
     client_build: str | None = None
     authenticated: bool = False
+    #: WHICH paired device this is, and the tier its record holds — both ``None``
+    #: on the loopback lane, forever. ``call_authorization.caller_for_connection``
+    #: reads exactly these two fields to mint a ``device`` caller, and reads them
+    #: through ``getattr`` so this module and that one need not import each
+    #: other. Set once, in ``_handshake``, after the proof verified.
+    device_id: str | None = None
+    device_tier: str | None = None
     subscribed: bool = False
     frames_out: int = 0
     bytes_out: int = 0
@@ -635,7 +724,7 @@ class SocketConnection:
 
     def payload(self) -> dict[str, Any]:
         with self._stats_lock:
-            return {
+            payload = {
                 "connection": self.key,
                 "client": self.client,
                 "client_build": self.client_build,
@@ -645,6 +734,16 @@ class SocketConnection:
                 "frames_out": self.frames_out,
                 "bytes_out": self.bytes_out,
             }
+            if self.device_id is not None:
+                # ADDITIVE, and only on a row that has one — so every existing
+                # `connections` consumer reads the shape it was written against.
+                # A device id is not a secret (the device names it in its own
+                # hello, in the clear under TLS), and "which of my paired devices
+                # is attached right now" is the question this block exists to
+                # answer once there is more than one client.
+                payload["device_id"] = self.device_id
+                payload["device_tier"] = self.device_tier
+            return payload
 
     def close(self, reason: str | None = None, *, linger_seconds: float = 0.0) -> None:
         # Deliberately NOT under the write lock: a connection is closed exactly
@@ -712,6 +811,11 @@ class ServeSocketServer:
         on_disconnect: Callable[[SocketConnection], None] | None = None,
         log: Callable[[dict[str, Any]], None] | None = None,
         host: str = SOCKET_HOST,
+        port: int = 0,
+        ssl_context: Any = None,
+        authenticator: Callable[[dict[str, Any], str, int], HelloAuthOutcome]
+        | None = None,
+        transport_name: str = "socket",
         frame_contract: int = 1,
         max_connections: int = DEFAULT_MAX_CONNECTIONS,
         max_pending_connections: int = DEFAULT_MAX_PENDING_CONNECTIONS,
@@ -733,6 +837,23 @@ class ServeSocketServer:
         self._on_disconnect = on_disconnect
         self._log = log
         self._host = host
+        #: 0 = ephemeral, which is what the loopback lane has always done and
+        #: what every existing caller gets by omission. A FIXED port exists for
+        #: the gateway lane, where an operator has to write a firewall rule and
+        #: a phone has to be told a number that survives a restart.
+        self._bind_port = max(0, int(port))
+        #: ``None`` on the loopback lane — local trust model unchanged, and a
+        #: local process pays no handshake to reach a service it could read the
+        #: token file of anyway. Set on the gateway lane (R1).
+        self._ssl_context = ssl_context
+        #: The credential model. ``None`` means the per-root token, i.e. exactly
+        #: what this class did before the seam existed — see
+        #: :meth:`_authenticate_hello`.
+        self._authenticator = authenticator
+        #: What every frame this listener answers is tagged with, and what
+        #: ``call_authorization`` keys its structural guard on. ``socket`` for
+        #: loopback, ``gateway`` for the second listener.
+        self._transport_name = str(transport_name or "socket")
         self._frame_contract = int(frame_contract)
         self._max_connections = max(1, int(max_connections))
         self._max_pending = max(1, int(max_pending_connections))
@@ -785,11 +906,21 @@ class ServeSocketServer:
         return self._started_at
 
     def bind(self) -> int:
-        """Bind an ephemeral loopback port and listen. Returns the port."""
+        """Bind this listener's host/port and listen. Returns the port.
+
+        Ephemeral by default, which is the loopback lane's unchanged behaviour;
+        a non-zero ``port`` constructor argument pins it. Still no
+        ``SO_REUSEADDR``, and that matters MORE with a fixed port than it ever
+        did with an ephemeral one: on Windows it permits a second process to
+        bind a port already in use, so on a pinned port it would turn "the
+        address is taken" into a silent hijack of a listener a phone is about to
+        dial. A bind that cannot have the port RAISES, and the caller reports a
+        typed outcome rather than serving from somewhere else.
+        """
 
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         # No SO_REUSEADDR — see the module docstring.
-        listener.bind((self._host, 0))
+        listener.bind((self._host, self._bind_port))
         listener.listen(max(8, self._max_connections))
         self._listener = listener
         self._port = int(listener.getsockname()[1])
@@ -1023,7 +1154,11 @@ class ServeSocketServer:
                 self._pending += 1
                 self._pending_peak = max(self._pending_peak, self._pending)
         connection = SocketConnection(
-            key=key, sock=sock, peer=_peer_text(peer), connected_at=_now_iso()
+            key=key,
+            sock=sock,
+            peer=_peer_text(peer),
+            connected_at=_now_iso(),
+            transport=self._transport_name,
         )
         try:
             sock.settimeout(self._hello_deadline)
@@ -1031,6 +1166,41 @@ class ServeSocketServer:
             pass
         reader: "_LineReader | None" = None
         try:
+            # TLS BEFORE the admission checks, not after, and the cost is
+            # deliberate. Every one of those checks answers with a typed
+            # ``hello_rejected`` frame, and on an encrypted listener a frame
+            # written to a socket the peer has not negotiated is bytes it cannot
+            # read — so refusing before the wrap would turn every capacity and
+            # throttle refusal into an unexplained disconnect. The typed reason
+            # IS the observability; paying a handshake to deliver one is the
+            # right trade.
+            if self._ssl_context is not None:
+                wrapped = self._wrap_tls(sock)
+                if wrapped is None:
+                    # Nothing readable can be sent to a peer that never
+                    # negotiated, so this refusal is COUNTED rather than
+                    # announced — and counted against the silence throttle,
+                    # because a half-open TLS handshake is, from the accept
+                    # loop's point of view, exactly a peer that said nothing.
+                    with self._lock:
+                        self._rejected += 1
+                        self._rejected_by_reason[REJECT_TLS_HANDSHAKE_FAILED] = (
+                            self._rejected_by_reason.get(REJECT_TLS_HANDSHAKE_FAILED, 0)
+                            + 1
+                        )
+                    self._timeout_limiter.record_failure()
+                    self._emit_log(
+                        {
+                            "event": "serve_socket_connection_rejected",
+                            "connection": connection.key,
+                            "peer": connection.peer,
+                            "reason": REJECT_TLS_HANDSHAKE_FAILED,
+                        }
+                    )
+                    connection.close(REJECT_TLS_HANDSHAKE_FAILED)
+                    return
+                connection.sock = wrapped
+                sock = wrapped
             if at_capacity:
                 self._reject(connection, REJECT_TOO_MANY_CONNECTIONS)
                 return
@@ -1138,20 +1308,19 @@ class ServeSocketServer:
         if message.get("op") != "hello":
             self._reject(connection, REJECT_HELLO_REQUIRED)
             return None
-        try:
-            token = self._token_provider()
-        except Exception:
-            token = None
         # `self._port` — what this server actually listens on — never a value
         # from the peer's frame, which is the whole point of the binding.
-        if not verify_hello_proof(
-            message.get("proof"), nonce, token, port=self._port or 0
-        ):
+        outcome = self._authenticate_hello(message, nonce, self._port or 0)
+        if not outcome.ok:
             # ONE typed frame, and nothing else: a rejected connection never
-            # learns anything about the runtime it failed to reach.
-            self._reject(connection, REJECT_BAD_PROOF)
+            # learns anything about the runtime it failed to reach. On the
+            # gateway lane every credential failure — no device named, unknown
+            # id, revoked row, wrong proof — collapses into this single reason,
+            # so a peer cannot map which device ids exist by watching it change.
+            self._reject(connection, outcome.reject_reason)
             return None
-        del token
+        connection.device_id = outcome.device_id
+        connection.device_tier = outcome.device_tier
         self._rate_limiter.record_success()
         # Symmetry the first pass missed: a completed handshake proves the lane
         # is reachable and answering, so the SILENCE throttle has nothing left
@@ -1170,21 +1339,84 @@ class ServeSocketServer:
             sock.settimeout(self._io_timeout)
         except OSError:
             pass
-        self._emit_log(
-            {
-                "event": "serve_socket_connection_open",
-                "connection": key,
-                "client": connection.client,
-                "client_build": connection.client_build,
-                "peer": connection.peer,
-            }
-        )
+        open_log: dict[str, Any] = {
+            "event": "serve_socket_connection_open",
+            "connection": key,
+            "client": connection.client,
+            "client_build": connection.client_build,
+            "peer": connection.peer,
+        }
+        if connection.device_id is not None:
+            # Additive on a gateway row only, so every existing consumer of this
+            # line reads the shape it was written against. A device id is the
+            # one thing that makes a remote connection auditable after the fact;
+            # the credential that proved it appears here as it appears
+            # everywhere else, which is nowhere.
+            open_log["transport"] = self._transport_name
+            open_log["device_id"] = connection.device_id
+            open_log["device_tier"] = connection.device_tier
+        self._emit_log(open_log)
         try:
             connection.emit(self._hello_payload(message, connection))
         except Exception:
             self._drop_connection(connection, reason="hello_write_failed")
             return None
         return reader
+
+    def _authenticate_hello(
+        self, message: dict[str, Any], nonce: str, port: int
+    ) -> HelloAuthOutcome:
+        """Who is this? The per-root token by default; a device when injected.
+
+        The DEFAULT arm is the loopback lane's original code, moved and not
+        rewritten: read this root's shared secret, recompute the proof over the
+        nonce and the listening port, compare in constant time. A server built
+        with no ``authenticator`` therefore behaves byte-for-byte as it did
+        before this seam existed, which is the invariant Stage 1 owes the local
+        launcher and the CLI.
+
+        An authenticator that RAISES is a refusal, never an admission. The
+        gateway lane's reads a store off disk on a path an unauthenticated peer
+        drives, so the failure is ordinary rather than exotic — and the one
+        answer that must never come out of an exception handler here is "yes".
+        """
+
+        if self._authenticator is not None:
+            try:
+                outcome = self._authenticator(message, nonce, port)
+            except Exception:
+                with self._lock:
+                    self._handshake_errors += 1
+                    self._last_handshake_error = "authenticator_failed"
+                return HelloAuthOutcome(ok=False, reject_reason=REJECT_BAD_PROOF)
+            if not isinstance(outcome, HelloAuthOutcome):  # pragma: no cover
+                return HelloAuthOutcome(ok=False, reject_reason=REJECT_BAD_PROOF)
+            return outcome
+        try:
+            token = self._token_provider()
+        except Exception:
+            token = None
+        ok = verify_hello_proof(message.get("proof"), nonce, token, port=port)
+        del token
+        return HelloAuthOutcome(ok=ok, reject_reason=REJECT_BAD_PROOF)
+
+    def _wrap_tls(self, sock: socket.socket) -> Any | None:
+        """Server-side TLS handshake. Returns the wrapped socket, or ``None``.
+
+        Never raises: a peer that cannot speak TLS — a port scanner, a browser,
+        a client that has not been told this lane is encrypted — is an ordinary
+        event on a listener bound beyond loopback, and an exception escaping
+        here would land on the pre-auth path the module docstring says must have
+        no uncaught calls on it.
+
+        The raw socket is closed by the caller's rejection path; this only
+        reports.
+        """
+
+        try:
+            return self._ssl_context.wrap_socket(sock, server_side=True)
+        except Exception:
+            return None
 
     def _read_loop(self, connection: SocketConnection, reader: "_LineReader") -> None:
         reason = "client_disconnect"
@@ -1429,10 +1661,25 @@ class ServeSocketClient:
     migrates off the stdio child.
     """
 
-    def __init__(self, host: str, port: int, *, timeout_seconds: float = 10.0) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        *,
+        timeout_seconds: float = 10.0,
+        tls: bool = False,
+        cert_fingerprint: str | None = None,
+    ) -> None:
         self._host = host
         self._port = int(port)
         self._timeout = float(timeout_seconds)
+        #: Off by default — the loopback lane is plaintext and stays that way.
+        #: On for the gateway lane, where the client trusts NO certificate
+        #: authority and pins instead (R1).
+        self._tls = bool(tls) or cert_fingerprint is not None
+        self._cert_fingerprint = (
+            str(cert_fingerprint).strip().lower() if cert_fingerprint else None
+        )
         self._sock: socket.socket | None = None
         self._reader: _LineReader | None = None
         #: The challenge frame this connection was greeted with, once
@@ -1444,8 +1691,49 @@ class ServeSocketClient:
     def connect(self) -> None:
         sock = socket.create_connection((self._host, self._port), timeout=self._timeout)
         sock.settimeout(self._timeout)
+        if self._tls:
+            sock = self._wrap_tls(sock)
         self._sock = sock
         self._reader = _LineReader(sock)
+
+    def _wrap_tls(self, sock: socket.socket) -> Any:
+        """Negotiate TLS and PIN the certificate. The reference pinning path.
+
+        There is no CA and no hostname to check: the install's certificate is
+        self-signed and the address is whatever the operator's LAN gave the
+        machine, so both of the usual checks would fail on a link that is
+        exactly as it should be. What replaces them is a fingerprint the client
+        was given out of band — through the pairing payload — and comparing it
+        is not optional decoration: without it the encryption stops any
+        eavesdropper and stops no impostor, and the pairing payload's
+        ``cert_fingerprint`` field would be a value nobody uses.
+
+        Written here rather than only in a test because this class is the
+        reference client — the shape the launcher's own connector mirrors, where
+        the same comparison lives inside ``badCertificateCallback``.
+        """
+
+        import ssl
+
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        wrapped = context.wrap_socket(sock, server_hostname=None)
+        if self._cert_fingerprint is not None:
+            presented = wrapped.getpeercert(binary_form=True) or b""
+            actual = hashlib.sha256(presented).hexdigest()
+            if not hmac.compare_digest(
+                actual.encode("ascii"), self._cert_fingerprint.encode("ascii")
+            ):
+                try:
+                    wrapped.close()
+                except OSError:
+                    pass
+                raise ServeHelloProtocolError(
+                    "the peer's certificate does not match the pinned fingerprint"
+                )
+        wrapped.settimeout(self._timeout)
+        return wrapped
 
     def hello(
         self,
@@ -1504,6 +1792,66 @@ class ServeSocketClient:
                 # relay that forwards our answer to a different port cannot
                 # use it.
                 "proof": hello_proof(token, nonce, port=self._port),
+            }
+        )
+        return self.read_frame()
+
+    def device_hello(
+        self,
+        *,
+        device_id: str,
+        token: str,
+        client: str,
+        client_build: str | None = None,
+        expect_hello_contract: int | None = HELLO_CONTRACT_VERSION,
+    ) -> dict[str, Any] | None:
+        """The GATEWAY lane's hello: same frames, a per-device credential.
+
+        Structurally identical to :meth:`hello` — server speaks first, one
+        ``server_hello`` carrying a fresh nonce, one answer carrying a proof —
+        and that sameness is the point: the gateway lane is this contract made
+        reachable beyond loopback, not a second protocol. The two differences
+        are that the frame NAMES a device (so the server knows which key to
+        recompute with) and that the proof derivation binds that name
+        (``serve_gateway_auth.device_proof``).
+
+        The device token never goes on the wire, in either direction — and it is
+        not even the HMAC key: its digest is, so the value on this device and
+        the value in the install's store are different bytes. See
+        ``serve_gateway_auth``'s docstring for the honest limit of that.
+        """
+
+        from .serve_gateway_auth import device_proof
+
+        greeting = self.read_frame()
+        if not isinstance(greeting, dict) or greeting.get("event") != "server_hello":
+            raise ServeHelloProtocolError(
+                "the peer did not open with a server_hello challenge", frame=greeting
+            )
+        nonce = greeting.get("nonce")
+        if not isinstance(nonce, str) or len(nonce) < 2 * NONCE_BYTES:
+            raise ServeHelloProtocolError(
+                "server_hello carried no usable nonce", frame=greeting
+            )
+        contract = greeting.get("hello_contract")
+        if expect_hello_contract is not None and contract != expect_hello_contract:
+            raise ServeHelloProtocolError(
+                f"unsupported hello_contract {contract!r} "
+                f"(this client speaks {expect_hello_contract})",
+                frame=greeting,
+            )
+        self.server_hello = greeting
+        self.send(
+            {
+                "op": "hello",
+                "client": client,
+                "client_build": client_build,
+                "device_id": device_id,
+                # `self._port` again — the port THIS client dialled, from its own
+                # socket rather than from anything the greeting claims.
+                "proof": device_proof(
+                    token, nonce, port=self._port, device_id=device_id
+                ),
             }
         )
         return self.read_frame()
