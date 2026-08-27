@@ -2106,6 +2106,10 @@ def test_the_reclaim_pair_joins_the_manifest_without_moving_the_contract_version
         # Added by S5 after this literal was written; the pin had been red ever
         # since, and the Stage A1 manifest refresh is what walked past it.
         "runtime.agent.retire",
+        # Gateway Stage 3. Two more additive names; the integer still does not
+        # move, because a client only calls methods it found in the set.
+        "runtime.chat.message",
+        "runtime.chat.steer",
         "runtime.office.get",
         "runtime.office.remove",
         "runtime.office.resolve_conflict",

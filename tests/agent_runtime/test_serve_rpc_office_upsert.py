@@ -1049,6 +1049,9 @@ def test_the_method_set_grew_and_the_contract_integer_did_not_move():
             # so this pin had been red since ``runtime.agent.retire`` landed —
             # closed in passing by the Stage A1 refresh that had to touch it.
             "runtime.agent.retire",
+            # Gateway Stage 3, additive.
+            "runtime.chat.message",
+            "runtime.chat.steer",
             "runtime.office.get",
             "runtime.office.remove",
             "runtime.office.resolve_conflict",
@@ -1061,6 +1064,9 @@ def test_the_method_set_grew_and_the_contract_integer_did_not_move():
         "tiers": {
             "runtime.agent.create": "console",
             "runtime.agent.retire": "console",
+            # A chat turn runs an agent with tools; see _runtime_chat_message.
+            "runtime.chat.message": "console",
+            "runtime.chat.steer": "console",
             "runtime.office.get": "read",
             "runtime.office.remove": "console",
             "runtime.office.resolve_conflict": "console",
@@ -1186,6 +1192,8 @@ def test_the_write_method_is_transport_agnostic_and_answers_on_the_socket():
                 "methods": [
                     "runtime.agent.create",
                     "runtime.agent.retire",
+                    "runtime.chat.message",
+                    "runtime.chat.steer",
                     "runtime.office.get",
                     "runtime.office.remove",
                     "runtime.office.resolve_conflict",
@@ -1198,6 +1206,8 @@ def test_the_write_method_is_transport_agnostic_and_answers_on_the_socket():
                 "tiers": {
                     "runtime.agent.create": "console",
                     "runtime.agent.retire": "console",
+                    "runtime.chat.message": "console",
+                    "runtime.chat.steer": "console",
                     "runtime.office.get": "read",
                     "runtime.office.remove": "console",
                     "runtime.office.resolve_conflict": "console",

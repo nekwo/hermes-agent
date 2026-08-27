@@ -1793,6 +1793,33 @@ def serve_loop(
                     }
                 )
         finally:
+            if request.turn_request_id:
+                # Gateway Stage 3. The accept receipt learns its worker ended,
+                # and the code goes on it.
+                #
+                # Placed FIRST in the finally, and that position was found by a
+                # test rather than reasoned to. It has to be before the exit
+                # frame, or a client that reads the exit and immediately retries
+                # the same ``turn_request_id`` can observe a receipt still
+                # saying ``accepted``. But putting it between the inflight POP
+                # and the frame is worse than either: the drain monitor polls
+                # the pending set, so a request that is out of ``inflight`` and
+                # not yet emitted is a window in which the drain can complete
+                # and close the lane UNDER the exit frame — reproduced, as a
+                # lost exit, the first time this was written that way. Before
+                # the pop, the monitor still counts this request and the window
+                # does not exist.
+                #
+                # Best-effort by contract (``settle_chat_turn`` never raises):
+                # the ack it settles is long since on the wire, the receipt's
+                # REPLAY answer does not depend on the exit code, and a
+                # bookkeeping failure must never take the place of a turn's own
+                # exit frame.
+                from agent_runtime.chat_turn_reservations import settle_chat_turn
+
+                settle_chat_turn(
+                    turn_request_id=request.turn_request_id, exit_code=code
+                )
             stdout_proxy.flush_request(request.rid)
             stderr_proxy.flush_request(request.rid)
             if capturing:
@@ -1836,21 +1863,6 @@ def serve_loop(
             if served_from_cache:
                 exit_frame["served_from_cache"] = True
                 exit_frame["cache_age_ms"] = cache_age_ms
-            if request.turn_request_id:
-                # Gateway Stage 3. The accept receipt learns its worker ended,
-                # and the code goes on it. Best-effort by contract
-                # (``settle_chat_turn`` never raises): the ack this settles is
-                # already on the wire, the receipt's REPLAY answer does not
-                # depend on the exit code, and a bookkeeping failure must never
-                # take the place of a turn's real exit frame. It is stamped
-                # BEFORE the frame is emitted so a client that reads the exit
-                # and immediately retries the same ``turn_request_id`` cannot
-                # observe a receipt that is still ``accepted``.
-                from agent_runtime.chat_turn_reservations import settle_chat_turn
-
-                settle_chat_turn(
-                    turn_request_id=request.turn_request_id, exit_code=code
-                )
             sink.emit(exit_frame)
 
     original_stdout, original_stderr = sys.stdout, sys.stderr
