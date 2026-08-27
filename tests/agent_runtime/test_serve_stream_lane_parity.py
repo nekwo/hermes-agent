@@ -496,10 +496,14 @@ def test_the_advertisement_grew_and_no_contract_integer_moved():
     # records that the contract had reached 54 when the lane landed, a
     # historical fact that stays true across every future bump.
     assert SNAPSHOT_CONTRACT_VERSION >= 54
-    # The method lane's own advertisement is untouched by this stage: the ops
-    # ride BESIDE it, they do not join it. A future edit that merged the two
-    # would break every client that folds ``rpc.methods`` as the method set.
-    assert set(serve_rpc.manifest()) == {"contract", "methods"}
+    # The method lane's own advertisement holds its shape: the ops ride BESIDE
+    # it, they do not join it. A future edit that merged the two would break
+    # every client that folds ``rpc.methods`` as the method set. ``tiers``
+    # joined 2026-08-27 (chokepoint A1, `8d69f8858b`) — a key beside
+    # ``methods``, which is exactly the additive growth this test's docstring
+    # permits; this pin was red from that landing until it learned the key,
+    # because A1 updated the shape and missed the pin.
+    assert set(serve_rpc.manifest()) == {"contract", "methods", "tiers"}
 
 
 # ── byte parity against argv ``harness stream`` ──────────────────────────────
