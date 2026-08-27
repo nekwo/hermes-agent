@@ -3,18 +3,18 @@
   "purpose": "The cross-repo pin for the unaimed-placement lattice: hermes `agent_runtime/office_layout_policy.py` and the launcher's `MissionOfficePlacementPolicy` must resolve every case below to the same slot within 1e-4. Hand-maintained; see README.md for the update rule.",
   "tolerance": 0.0001,
   "constants": {
-    "origin_x": -5.0,
-    "origin_y": 6.4,
+    "origin_x": 0.0,
+    "origin_y": 0.0,
     "column_spacing": 1.4,
     "row_spacing": 1.6,
-    "columns_per_row": 8,
+    "rows_per_column": 8,
     "occupancy_radius": 0.7,
     "desk_lane_offset": 0.7
   },
   "cases": [
     {
       "name": "empty_floor",
-      "why": "Nothing placed yet: the first unaimed agent lands on the lattice origin, not on a viewport guess.",
+      "why": "Nothing placed yet: the first unaimed agent lands on the WORLD ORIGIN (operator ruling 2026-08-27), not on a viewport guess and not on the old canvas drop band.",
       "kind": "agent",
       "folder": "Agents",
       "lane_offset": [
@@ -23,13 +23,13 @@
       ],
       "items": [],
       "expected": [
-        -5.0,
-        6.4
+        0.0,
+        0.0
       ]
     },
     {
-      "name": "gap_is_filled_not_appended",
-      "why": "Columns 0 and 2 taken: the scan fills the HOLE at column 1 rather than appending past the end, which is what makes it deterministic under removal.",
+      "name": "occupied_origin_steps_up_one_full_row",
+      "why": "THE ruling, as a case: the origin is taken, so the next placement stands one FULL grid step above it — never beside it. A policy that stepped sideways here would satisfy every other case in this file.",
       "kind": "agent",
       "folder": "Agents",
       "lane_offset": [
@@ -42,8 +42,34 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -5.0,
-            6.4
+            0.0,
+            0.0
+          ],
+          "hidden": false
+        }
+      ],
+      "expected": [
+        0.0,
+        1.6
+      ]
+    },
+    {
+      "name": "gap_is_filled_not_appended",
+      "why": "Rows 0 and 2 of column 0 taken: the scan fills the HOLE at row 1 rather than appending past the end, which is what makes it deterministic under removal.",
+      "kind": "agent",
+      "folder": "Agents",
+      "lane_offset": [
+        0.0,
+        0.0
+      ],
+      "items": [
+        {
+          "item_id": "a0",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            0.0,
+            0.0
           ],
           "hidden": false
         },
@@ -52,20 +78,20 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -2.2,
-            6.4
+            0.0,
+            3.2
           ],
           "hidden": false
         }
       ],
       "expected": [
-        -3.6,
-        6.4
+        0.0,
+        1.6
       ]
     },
     {
-      "name": "full_first_row_wraps",
-      "why": "All eight columns of row 0 taken: the next slot wraps to row 1 column 0 instead of marching off the right edge of the floor.",
+      "name": "full_first_column_wraps",
+      "why": "All eight rows of column 0 taken: the next slot wraps SIDEWAYS to column 1 row 0 instead of climbing off the top of the floor.",
       "kind": "agent",
       "folder": "Agents",
       "lane_offset": [
@@ -78,8 +104,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -5.0,
-            6.4
+            0.0,
+            0.0
           ],
           "hidden": false
         },
@@ -88,8 +114,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -3.6,
-            6.4
+            0.0,
+            1.6
           ],
           "hidden": false
         },
@@ -98,8 +124,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -2.2,
-            6.4
+            0.0,
+            3.2
           ],
           "hidden": false
         },
@@ -108,8 +134,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -0.8,
-            6.4
+            0.0,
+            4.800000000000001
           ],
           "hidden": false
         },
@@ -118,7 +144,7 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            0.6,
+            0.0,
             6.4
           ],
           "hidden": false
@@ -128,8 +154,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            2.0,
-            6.4
+            0.0,
+            8.0
           ],
           "hidden": false
         },
@@ -138,8 +164,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            3.4,
-            6.4
+            0.0,
+            9.600000000000001
           ],
           "hidden": false
         },
@@ -148,20 +174,20 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            4.8,
-            6.4
+            0.0,
+            11.200000000000001
           ],
           "hidden": false
         }
       ],
       "expected": [
-        -5.0,
-        4.8
+        1.4,
+        0.0
       ]
     },
     {
       "name": "hidden_item_blocks",
-      "why": "A HIDDEN item still occupies its slot. Hiding is launcher-local view state \u2014 hermes has no `hidden` field at all and counts every item it reads \u2014 so both sides skip column 0 here, one by honouring the flag and one by never having had it. Un-hiding must never reveal two agents stacked on one point.",
+      "why": "A hidden item keeps its coordinates and can be un-hidden at any time, so it occupies its slot. `hidden` is launcher-only; hermes passes this by never having had the field.",
       "kind": "agent",
       "folder": "Agents",
       "lane_offset": [
@@ -170,24 +196,24 @@
       ],
       "items": [
         {
-          "item_id": "tucked-away",
+          "item_id": "a0",
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -5.0,
-            6.4
+            0.0,
+            0.0
           ],
           "hidden": true
         }
       ],
       "expected": [
-        -3.6,
-        6.4
+        0.0,
+        1.6
       ]
     },
     {
       "name": "other_folder_does_not_block",
-      "why": "A desk sitting on the agent lattice does not push an agent placement: the scan is folder-scoped, and agents sit AT desks.",
+      "why": "The scan is folder-scoped: a desk sitting on the agent origin does not push an agent off it.",
       "kind": "agent",
       "folder": "Agents",
       "lane_offset": [
@@ -200,20 +226,20 @@
           "kind": "desk",
           "folder": "Desks",
           "position": [
-            -5.0,
-            6.4
+            0.0,
+            0.0
           ],
           "hidden": false
         }
       ],
       "expected": [
-        -5.0,
-        6.4
+        0.0,
+        0.0
       ]
     },
     {
       "name": "blank_folder_falls_back_to_kind",
-      "why": "hermes STORES a blank folder (`office_store._safe_folder` returns \"\" for an absent one) while the launcher's decoder substitutes the kind's default at read time. An item filed under \"\" is therefore an AGENTS item on one side and would be an unfiled item on the other, so a policy that scanned the raw string would miss this blocker on exactly one of the two repos.",
+      "why": "hermes persists `folder: \"\"` for an item written without one and the launcher substitutes the kind default at decode. Both must treat this agent as being in Agents, or a legacy item blocks on one repo and is invisible on the other.",
       "kind": "agent",
       "folder": "Agents",
       "lane_offset": [
@@ -222,24 +248,24 @@
       ],
       "items": [
         {
-          "item_id": "legacy",
+          "item_id": "a0",
           "kind": "agent",
           "folder": "",
           "position": [
-            -5.0,
-            6.4
+            0.0,
+            0.0
           ],
           "hidden": false
         }
       ],
       "expected": [
-        -3.6,
-        6.4
+        0.0,
+        1.6
       ]
     },
     {
       "name": "blank_folder_desk_falls_back_to_desks",
-      "why": "The same fallback, the other kind: a blank-foldered DESK belongs to Desks, so it blocks the desk lane and not the agent lattice.",
+      "why": "The same fallback on the desk lane: a blank-foldered desk occupies the DESK lattice, not the agent one.",
       "kind": "desk",
       "folder": "Desks",
       "lane_offset": [
@@ -248,24 +274,24 @@
       ],
       "items": [
         {
-          "item_id": "legacy_desk",
+          "item_id": "d0",
           "kind": "desk",
           "folder": "",
           "position": [
-            -4.3,
-            7.1
+            0.7,
+            0.7
           ],
           "hidden": false
         }
       ],
       "expected": [
-        -2.9,
-        7.1
+        0.7,
+        2.3
       ]
     },
     {
       "name": "desk_lane_offset",
-      "why": "The desk lane is the agent lattice nudged diagonally by the desk lane offset. Both folders start empty here except for an agent on the agent origin, so without the nudge the first unaimed desk would land exactly under it \u2014 the cross-folder stack this policy exists to retire.",
+      "why": "Desks scan their own lane, offset diagonally off the agent lattice, so the first unaimed desk and the first unaimed agent never stack on one point.",
       "kind": "desk",
       "folder": "Desks",
       "lane_offset": [
@@ -278,20 +304,20 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -5.0,
-            6.4
+            0.0,
+            0.0
           ],
           "hidden": false
         }
       ],
       "expected": [
-        -4.3,
-        7.1
+        0.7,
+        0.7
       ]
     },
     {
       "name": "desk_lane_second_desk",
-      "why": "A desk already on the lane's origin pushes the next one along the LANE, never back onto the agent lattice.",
+      "why": "A second unaimed desk climbs its own lane by one full row, the same rule the agent lane follows.",
       "kind": "desk",
       "folder": "Desks",
       "lane_offset": [
@@ -304,20 +330,20 @@
           "kind": "desk",
           "folder": "Desks",
           "position": [
-            -4.3,
-            7.1
+            0.7,
+            0.7
           ],
           "hidden": false
         }
       ],
       "expected": [
-        -2.9,
-        7.1
+        0.7,
+        2.3
       ]
     },
     {
       "name": "off_lattice_item_blocks_its_nearest_slot",
-      "why": "A canvas drag lands anywhere. An item 0.14 away from the origin slot blocks it (inside the occupancy radius) and leaves column 1 free (1.30 away, outside it). Neither distance is near the 0.7 boundary, so float32 storage on the launcher side cannot flip the verdict.",
+      "why": "An item dropped between lattice points blocks the slot it is NEAREST, so a hand-placed agent still pushes the next unaimed one up a step.",
       "kind": "agent",
       "folder": "Agents",
       "lane_offset": [
@@ -326,24 +352,24 @@
       ],
       "items": [
         {
-          "item_id": "dragged",
+          "item_id": "a0",
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -4.9,
-            6.3
+            0.3,
+            0.2
           ],
           "hidden": false
         }
       ],
       "expected": [
-        -3.6,
-        6.4
+        0.0,
+        1.6
       ]
     },
     {
       "name": "boundary_item_at_exact_radius",
-      "why": "The occupancy predicate is STRICTLY `<`, so an item AT the radius leaves the slot free. The item sits on the nearest float32-representable point at-or-outside the radius -- slot_at(0,0).x + 1468007 * 2**-21 = -4.299999713897705078125, one float32 step past occupancy_radius -- and NOT on -4.3, because -5.0 + 0.7 is not on the grid the launcher stores positions on: here both widths measure 0.7000002861022949 and agree, while at -4.3 float64 measures 0.7000000000000002 and leaves the slot free and float32 measures 0.6999998092651367 and takes it -- one case, two answers. This pins occupancy_radius to within one float32 ulp. It cannot pin the STRICTNESS of the comparison: no float32 pair in this lattice measures a distance EQUAL to the float64 radius, so `<` and `<=` are the same function there. See README.md.",
+      "why": "The ONE case whose verdict turns on the occupancy comparison. The x offset is 1468007 * 2**-21 = 0.700000286102294921875 — the nearest float32-representable point at or outside occupancy_radius. Spelled the obvious way (slot + 0.7) the two repos DISAGREE even at the world origin: the launcher stores 0.7 into a float32 Vector2 as 0.69999998807907104 and compares it against a float64 occupancyRadius of 0.7, so the item blocks there and stays free on hermes. Only Vector2 STORAGE is 32-bit; the constant is not. Measured 2026-08-27.",
       "kind": "agent",
       "folder": "Agents",
       "lane_offset": [
@@ -352,24 +378,24 @@
       ],
       "items": [
         {
-          "item_id": "boundary",
+          "item_id": "a0",
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -4.299999713897705,
-            6.4
+            0.7000002861022949,
+            0.0
           ],
           "hidden": false
         }
       ],
       "expected": [
-        -5.0,
-        6.4
+        0.0,
+        0.0
       ]
     },
     {
       "name": "pigeonhole_200_occupied",
-      "why": "Twenty-five FULL rows \u2014 200 blockers. The scan is bounded at (occupied + 1) rows, so it terminates, and by pigeonhole a free slot exists inside that bound: row 25, column 0. A policy that stopped scanning at a fixed row count would answer an occupied slot here.",
+      "why": "The termination bound, exercised: 25 full columns are taken, so the scan must return the first slot of column 25 rather than a knowingly-occupied point.",
       "kind": "agent",
       "folder": "Agents",
       "lane_offset": [
@@ -382,8 +408,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -5.0,
-            6.4
+            0.0,
+            0.0
           ],
           "hidden": false
         },
@@ -392,8 +418,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -3.6,
-            6.4
+            0.0,
+            1.6
           ],
           "hidden": false
         },
@@ -402,8 +428,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -2.2,
-            6.4
+            0.0,
+            3.2
           ],
           "hidden": false
         },
@@ -412,8 +438,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -0.8,
-            6.4
+            0.0,
+            4.800000000000001
           ],
           "hidden": false
         },
@@ -422,7 +448,7 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            0.6,
+            0.0,
             6.4
           ],
           "hidden": false
@@ -432,8 +458,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            2.0,
-            6.4
+            0.0,
+            8.0
           ],
           "hidden": false
         },
@@ -442,8 +468,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            3.4,
-            6.4
+            0.0,
+            9.600000000000001
           ],
           "hidden": false
         },
@@ -452,8 +478,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            4.8,
-            6.4
+            0.0,
+            11.200000000000001
           ],
           "hidden": false
         },
@@ -462,8 +488,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -5.0,
-            4.8
+            1.4,
+            0.0
           ],
           "hidden": false
         },
@@ -472,8 +498,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -3.6,
-            4.8
+            1.4,
+            1.6
           ],
           "hidden": false
         },
@@ -482,8 +508,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -2.2,
-            4.8
+            1.4,
+            3.2
           ],
           "hidden": false
         },
@@ -492,8 +518,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -0.8,
-            4.8
+            1.4,
+            4.800000000000001
           ],
           "hidden": false
         },
@@ -502,8 +528,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            0.6,
-            4.8
+            1.4,
+            6.4
           ],
           "hidden": false
         },
@@ -512,8 +538,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            2.0,
-            4.8
+            1.4,
+            8.0
           ],
           "hidden": false
         },
@@ -522,8 +548,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            3.4,
-            4.8
+            1.4,
+            9.600000000000001
           ],
           "hidden": false
         },
@@ -532,8 +558,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            4.8,
-            4.8
+            1.4,
+            11.200000000000001
           ],
           "hidden": false
         },
@@ -542,8 +568,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -5.0,
-            3.2
+            2.8,
+            0.0
           ],
           "hidden": false
         },
@@ -552,8 +578,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -3.6,
-            3.2
+            2.8,
+            1.6
           ],
           "hidden": false
         },
@@ -562,7 +588,7 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -2.2,
+            2.8,
             3.2
           ],
           "hidden": false
@@ -572,8 +598,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -0.8,
-            3.2
+            2.8,
+            4.800000000000001
           ],
           "hidden": false
         },
@@ -582,8 +608,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            0.6,
-            3.2
+            2.8,
+            6.4
           ],
           "hidden": false
         },
@@ -592,8 +618,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            2.0,
-            3.2
+            2.8,
+            8.0
           ],
           "hidden": false
         },
@@ -602,8 +628,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            3.4,
-            3.2
+            2.8,
+            9.600000000000001
           ],
           "hidden": false
         },
@@ -612,8 +638,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            4.8,
-            3.2
+            2.8,
+            11.200000000000001
           ],
           "hidden": false
         },
@@ -622,8 +648,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -5.0,
-            1.6
+            4.199999999999999,
+            0.0
           ],
           "hidden": false
         },
@@ -632,7 +658,7 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -3.6,
+            4.199999999999999,
             1.6
           ],
           "hidden": false
@@ -642,8 +668,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -2.2,
-            1.6
+            4.199999999999999,
+            3.2
           ],
           "hidden": false
         },
@@ -652,8 +678,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -0.8,
-            1.6
+            4.199999999999999,
+            4.800000000000001
           ],
           "hidden": false
         },
@@ -662,8 +688,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            0.6,
-            1.6
+            4.199999999999999,
+            6.4
           ],
           "hidden": false
         },
@@ -672,8 +698,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            2.0,
-            1.6
+            4.199999999999999,
+            8.0
           ],
           "hidden": false
         },
@@ -682,8 +708,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            3.4,
-            1.6
+            4.199999999999999,
+            9.600000000000001
           ],
           "hidden": false
         },
@@ -692,8 +718,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            4.8,
-            1.6
+            4.199999999999999,
+            11.200000000000001
           ],
           "hidden": false
         },
@@ -702,7 +728,7 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -5.0,
+            5.6,
             0.0
           ],
           "hidden": false
@@ -712,8 +738,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -3.6,
-            0.0
+            5.6,
+            1.6
           ],
           "hidden": false
         },
@@ -722,8 +748,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -2.2,
-            0.0
+            5.6,
+            3.2
           ],
           "hidden": false
         },
@@ -732,8 +758,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -0.8,
-            0.0
+            5.6,
+            4.800000000000001
           ],
           "hidden": false
         },
@@ -742,8 +768,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            0.6,
-            0.0
+            5.6,
+            6.4
           ],
           "hidden": false
         },
@@ -752,8 +778,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            2.0,
-            0.0
+            5.6,
+            8.0
           ],
           "hidden": false
         },
@@ -762,8 +788,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            3.4,
-            0.0
+            5.6,
+            9.600000000000001
           ],
           "hidden": false
         },
@@ -772,8 +798,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            4.8,
-            0.0
+            5.6,
+            11.200000000000001
           ],
           "hidden": false
         },
@@ -782,8 +808,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -5.0,
-            -1.6
+            7.0,
+            0.0
           ],
           "hidden": false
         },
@@ -792,8 +818,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -3.6,
-            -1.6
+            7.0,
+            1.6
           ],
           "hidden": false
         },
@@ -802,8 +828,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -2.2,
-            -1.6
+            7.0,
+            3.2
           ],
           "hidden": false
         },
@@ -812,8 +838,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -0.8,
-            -1.6
+            7.0,
+            4.800000000000001
           ],
           "hidden": false
         },
@@ -822,8 +848,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            0.6,
-            -1.6
+            7.0,
+            6.4
           ],
           "hidden": false
         },
@@ -832,8 +858,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            2.0,
-            -1.6
+            7.0,
+            8.0
           ],
           "hidden": false
         },
@@ -842,8 +868,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            3.4,
-            -1.6
+            7.0,
+            9.600000000000001
           ],
           "hidden": false
         },
@@ -852,8 +878,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            4.8,
-            -1.6
+            7.0,
+            11.200000000000001
           ],
           "hidden": false
         },
@@ -862,8 +888,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -5.0,
-            -3.2
+            8.399999999999999,
+            0.0
           ],
           "hidden": false
         },
@@ -872,8 +898,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -3.6,
-            -3.2
+            8.399999999999999,
+            1.6
           ],
           "hidden": false
         },
@@ -882,8 +908,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -2.2,
-            -3.2
+            8.399999999999999,
+            3.2
           ],
           "hidden": false
         },
@@ -892,8 +918,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -0.8,
-            -3.2
+            8.399999999999999,
+            4.800000000000001
           ],
           "hidden": false
         },
@@ -902,8 +928,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            0.6,
-            -3.2
+            8.399999999999999,
+            6.4
           ],
           "hidden": false
         },
@@ -912,8 +938,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            2.0,
-            -3.2
+            8.399999999999999,
+            8.0
           ],
           "hidden": false
         },
@@ -922,8 +948,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            3.4,
-            -3.2
+            8.399999999999999,
+            9.600000000000001
           ],
           "hidden": false
         },
@@ -932,8 +958,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            4.8,
-            -3.2
+            8.399999999999999,
+            11.200000000000001
           ],
           "hidden": false
         },
@@ -942,8 +968,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -5.0,
-            -4.8
+            9.799999999999999,
+            0.0
           ],
           "hidden": false
         },
@@ -952,8 +978,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -3.6,
-            -4.8
+            9.799999999999999,
+            1.6
           ],
           "hidden": false
         },
@@ -962,8 +988,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -2.2,
-            -4.8
+            9.799999999999999,
+            3.2
           ],
           "hidden": false
         },
@@ -972,8 +998,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -0.8,
-            -4.8
+            9.799999999999999,
+            4.800000000000001
           ],
           "hidden": false
         },
@@ -982,8 +1008,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            0.6,
-            -4.8
+            9.799999999999999,
+            6.4
           ],
           "hidden": false
         },
@@ -992,8 +1018,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            2.0,
-            -4.8
+            9.799999999999999,
+            8.0
           ],
           "hidden": false
         },
@@ -1002,8 +1028,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            3.4,
-            -4.8
+            9.799999999999999,
+            9.600000000000001
           ],
           "hidden": false
         },
@@ -1012,8 +1038,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            4.8,
-            -4.8
+            9.799999999999999,
+            11.200000000000001
           ],
           "hidden": false
         },
@@ -1022,8 +1048,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -5.0,
-            -6.4
+            11.2,
+            0.0
           ],
           "hidden": false
         },
@@ -1032,8 +1058,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -3.6,
-            -6.4
+            11.2,
+            1.6
           ],
           "hidden": false
         },
@@ -1042,8 +1068,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -2.2,
-            -6.4
+            11.2,
+            3.2
           ],
           "hidden": false
         },
@@ -1052,8 +1078,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -0.8,
-            -6.4
+            11.2,
+            4.800000000000001
           ],
           "hidden": false
         },
@@ -1062,8 +1088,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            0.6,
-            -6.4
+            11.2,
+            6.4
           ],
           "hidden": false
         },
@@ -1072,8 +1098,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            2.0,
-            -6.4
+            11.2,
+            8.0
           ],
           "hidden": false
         },
@@ -1082,8 +1108,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            3.4,
-            -6.4
+            11.2,
+            9.600000000000001
           ],
           "hidden": false
         },
@@ -1092,8 +1118,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            4.8,
-            -6.4
+            11.2,
+            11.200000000000001
           ],
           "hidden": false
         },
@@ -1102,8 +1128,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -5.0,
-            -8.0
+            12.6,
+            0.0
           ],
           "hidden": false
         },
@@ -1112,8 +1138,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -3.6,
-            -8.0
+            12.6,
+            1.6
           ],
           "hidden": false
         },
@@ -1122,8 +1148,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -2.2,
-            -8.0
+            12.6,
+            3.2
           ],
           "hidden": false
         },
@@ -1132,8 +1158,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -0.8,
-            -8.0
+            12.6,
+            4.800000000000001
           ],
           "hidden": false
         },
@@ -1142,8 +1168,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            0.6,
-            -8.0
+            12.6,
+            6.4
           ],
           "hidden": false
         },
@@ -1152,8 +1178,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            2.0,
-            -8.0
+            12.6,
+            8.0
           ],
           "hidden": false
         },
@@ -1162,8 +1188,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            3.4,
-            -8.0
+            12.6,
+            9.600000000000001
           ],
           "hidden": false
         },
@@ -1172,8 +1198,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            4.8,
-            -8.0
+            12.6,
+            11.200000000000001
           ],
           "hidden": false
         },
@@ -1182,8 +1208,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -5.0,
-            -9.6
+            14.0,
+            0.0
           ],
           "hidden": false
         },
@@ -1192,8 +1218,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -3.6,
-            -9.6
+            14.0,
+            1.6
           ],
           "hidden": false
         },
@@ -1202,8 +1228,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -2.2,
-            -9.6
+            14.0,
+            3.2
           ],
           "hidden": false
         },
@@ -1212,8 +1238,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -0.8,
-            -9.6
+            14.0,
+            4.800000000000001
           ],
           "hidden": false
         },
@@ -1222,8 +1248,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            0.6,
-            -9.6
+            14.0,
+            6.4
           ],
           "hidden": false
         },
@@ -1232,8 +1258,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            2.0,
-            -9.6
+            14.0,
+            8.0
           ],
           "hidden": false
         },
@@ -1242,8 +1268,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            3.4,
-            -9.6
+            14.0,
+            9.600000000000001
           ],
           "hidden": false
         },
@@ -1252,8 +1278,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            4.8,
-            -9.6
+            14.0,
+            11.200000000000001
           ],
           "hidden": false
         },
@@ -1262,8 +1288,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -5.0,
-            -11.2
+            15.399999999999999,
+            0.0
           ],
           "hidden": false
         },
@@ -1272,8 +1298,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -3.6,
-            -11.2
+            15.399999999999999,
+            1.6
           ],
           "hidden": false
         },
@@ -1282,8 +1308,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -2.2,
-            -11.2
+            15.399999999999999,
+            3.2
           ],
           "hidden": false
         },
@@ -1292,8 +1318,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -0.8,
-            -11.2
+            15.399999999999999,
+            4.800000000000001
           ],
           "hidden": false
         },
@@ -1302,8 +1328,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            0.6,
-            -11.2
+            15.399999999999999,
+            6.4
           ],
           "hidden": false
         },
@@ -1312,8 +1338,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            2.0,
-            -11.2
+            15.399999999999999,
+            8.0
           ],
           "hidden": false
         },
@@ -1322,8 +1348,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            3.4,
-            -11.2
+            15.399999999999999,
+            9.600000000000001
           ],
           "hidden": false
         },
@@ -1332,8 +1358,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            4.8,
-            -11.2
+            15.399999999999999,
+            11.200000000000001
           ],
           "hidden": false
         },
@@ -1342,8 +1368,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -5.0,
-            -12.8
+            16.799999999999997,
+            0.0
           ],
           "hidden": false
         },
@@ -1352,8 +1378,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -3.6,
-            -12.8
+            16.799999999999997,
+            1.6
           ],
           "hidden": false
         },
@@ -1362,8 +1388,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -2.2,
-            -12.8
+            16.799999999999997,
+            3.2
           ],
           "hidden": false
         },
@@ -1372,8 +1398,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -0.8,
-            -12.8
+            16.799999999999997,
+            4.800000000000001
           ],
           "hidden": false
         },
@@ -1382,8 +1408,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            0.6,
-            -12.8
+            16.799999999999997,
+            6.4
           ],
           "hidden": false
         },
@@ -1392,8 +1418,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            2.0,
-            -12.8
+            16.799999999999997,
+            8.0
           ],
           "hidden": false
         },
@@ -1402,8 +1428,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            3.4,
-            -12.8
+            16.799999999999997,
+            9.600000000000001
           ],
           "hidden": false
         },
@@ -1412,8 +1438,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            4.8,
-            -12.8
+            16.799999999999997,
+            11.200000000000001
           ],
           "hidden": false
         },
@@ -1422,8 +1448,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -5.0,
-            -14.4
+            18.2,
+            0.0
           ],
           "hidden": false
         },
@@ -1432,8 +1458,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -3.6,
-            -14.4
+            18.2,
+            1.6
           ],
           "hidden": false
         },
@@ -1442,8 +1468,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -2.2,
-            -14.4
+            18.2,
+            3.2
           ],
           "hidden": false
         },
@@ -1452,8 +1478,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -0.8,
-            -14.4
+            18.2,
+            4.800000000000001
           ],
           "hidden": false
         },
@@ -1462,8 +1488,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            0.6,
-            -14.4
+            18.2,
+            6.4
           ],
           "hidden": false
         },
@@ -1472,8 +1498,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            2.0,
-            -14.4
+            18.2,
+            8.0
           ],
           "hidden": false
         },
@@ -1482,8 +1508,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            3.4,
-            -14.4
+            18.2,
+            9.600000000000001
           ],
           "hidden": false
         },
@@ -1492,8 +1518,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            4.8,
-            -14.4
+            18.2,
+            11.200000000000001
           ],
           "hidden": false
         },
@@ -1502,8 +1528,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -5.0,
-            -16.0
+            19.599999999999998,
+            0.0
           ],
           "hidden": false
         },
@@ -1512,8 +1538,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -3.6,
-            -16.0
+            19.599999999999998,
+            1.6
           ],
           "hidden": false
         },
@@ -1522,8 +1548,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -2.2,
-            -16.0
+            19.599999999999998,
+            3.2
           ],
           "hidden": false
         },
@@ -1532,8 +1558,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -0.8,
-            -16.0
+            19.599999999999998,
+            4.800000000000001
           ],
           "hidden": false
         },
@@ -1542,8 +1568,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            0.6,
-            -16.0
+            19.599999999999998,
+            6.4
           ],
           "hidden": false
         },
@@ -1552,8 +1578,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            2.0,
-            -16.0
+            19.599999999999998,
+            8.0
           ],
           "hidden": false
         },
@@ -1562,8 +1588,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            3.4,
-            -16.0
+            19.599999999999998,
+            9.600000000000001
           ],
           "hidden": false
         },
@@ -1572,8 +1598,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            4.8,
-            -16.0
+            19.599999999999998,
+            11.200000000000001
           ],
           "hidden": false
         },
@@ -1582,8 +1608,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -5.0,
-            -17.6
+            21.0,
+            0.0
           ],
           "hidden": false
         },
@@ -1592,8 +1618,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -3.6,
-            -17.6
+            21.0,
+            1.6
           ],
           "hidden": false
         },
@@ -1602,8 +1628,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -2.2,
-            -17.6
+            21.0,
+            3.2
           ],
           "hidden": false
         },
@@ -1612,8 +1638,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -0.8,
-            -17.6
+            21.0,
+            4.800000000000001
           ],
           "hidden": false
         },
@@ -1622,8 +1648,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            0.6,
-            -17.6
+            21.0,
+            6.4
           ],
           "hidden": false
         },
@@ -1632,8 +1658,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            2.0,
-            -17.6
+            21.0,
+            8.0
           ],
           "hidden": false
         },
@@ -1642,8 +1668,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            3.4,
-            -17.6
+            21.0,
+            9.600000000000001
           ],
           "hidden": false
         },
@@ -1652,8 +1678,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            4.8,
-            -17.6
+            21.0,
+            11.200000000000001
           ],
           "hidden": false
         },
@@ -1662,8 +1688,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -5.0,
-            -19.2
+            22.4,
+            0.0
           ],
           "hidden": false
         },
@@ -1672,8 +1698,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -3.6,
-            -19.2
+            22.4,
+            1.6
           ],
           "hidden": false
         },
@@ -1682,8 +1708,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -2.2,
-            -19.2
+            22.4,
+            3.2
           ],
           "hidden": false
         },
@@ -1692,8 +1718,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -0.8,
-            -19.2
+            22.4,
+            4.800000000000001
           ],
           "hidden": false
         },
@@ -1702,8 +1728,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            0.6,
-            -19.2
+            22.4,
+            6.4
           ],
           "hidden": false
         },
@@ -1712,8 +1738,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            2.0,
-            -19.2
+            22.4,
+            8.0
           ],
           "hidden": false
         },
@@ -1722,8 +1748,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            3.4,
-            -19.2
+            22.4,
+            9.600000000000001
           ],
           "hidden": false
         },
@@ -1732,8 +1758,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            4.8,
-            -19.2
+            22.4,
+            11.200000000000001
           ],
           "hidden": false
         },
@@ -1742,8 +1768,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -5.0,
-            -20.8
+            23.799999999999997,
+            0.0
           ],
           "hidden": false
         },
@@ -1752,8 +1778,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -3.6,
-            -20.8
+            23.799999999999997,
+            1.6
           ],
           "hidden": false
         },
@@ -1762,8 +1788,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -2.2,
-            -20.8
+            23.799999999999997,
+            3.2
           ],
           "hidden": false
         },
@@ -1772,8 +1798,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -0.8,
-            -20.8
+            23.799999999999997,
+            4.800000000000001
           ],
           "hidden": false
         },
@@ -1782,8 +1808,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            0.6,
-            -20.8
+            23.799999999999997,
+            6.4
           ],
           "hidden": false
         },
@@ -1792,8 +1818,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            2.0,
-            -20.8
+            23.799999999999997,
+            8.0
           ],
           "hidden": false
         },
@@ -1802,8 +1828,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            3.4,
-            -20.8
+            23.799999999999997,
+            9.600000000000001
           ],
           "hidden": false
         },
@@ -1812,8 +1838,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            4.8,
-            -20.8
+            23.799999999999997,
+            11.200000000000001
           ],
           "hidden": false
         },
@@ -1822,8 +1848,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -5.0,
-            -22.4
+            25.2,
+            0.0
           ],
           "hidden": false
         },
@@ -1832,8 +1858,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -3.6,
-            -22.4
+            25.2,
+            1.6
           ],
           "hidden": false
         },
@@ -1842,8 +1868,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -2.2,
-            -22.4
+            25.2,
+            3.2
           ],
           "hidden": false
         },
@@ -1852,8 +1878,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -0.8,
-            -22.4
+            25.2,
+            4.800000000000001
           ],
           "hidden": false
         },
@@ -1862,8 +1888,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            0.6,
-            -22.4
+            25.2,
+            6.4
           ],
           "hidden": false
         },
@@ -1872,8 +1898,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            2.0,
-            -22.4
+            25.2,
+            8.0
           ],
           "hidden": false
         },
@@ -1882,8 +1908,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            3.4,
-            -22.4
+            25.2,
+            9.600000000000001
           ],
           "hidden": false
         },
@@ -1892,8 +1918,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            4.8,
-            -22.4
+            25.2,
+            11.200000000000001
           ],
           "hidden": false
         },
@@ -1902,8 +1928,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -5.0,
-            -24.0
+            26.599999999999998,
+            0.0
           ],
           "hidden": false
         },
@@ -1912,8 +1938,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -3.6,
-            -24.0
+            26.599999999999998,
+            1.6
           ],
           "hidden": false
         },
@@ -1922,8 +1948,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -2.2,
-            -24.0
+            26.599999999999998,
+            3.2
           ],
           "hidden": false
         },
@@ -1932,8 +1958,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -0.8,
-            -24.0
+            26.599999999999998,
+            4.800000000000001
           ],
           "hidden": false
         },
@@ -1942,8 +1968,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            0.6,
-            -24.0
+            26.599999999999998,
+            6.4
           ],
           "hidden": false
         },
@@ -1952,8 +1978,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            2.0,
-            -24.0
+            26.599999999999998,
+            8.0
           ],
           "hidden": false
         },
@@ -1962,8 +1988,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            3.4,
-            -24.0
+            26.599999999999998,
+            9.600000000000001
           ],
           "hidden": false
         },
@@ -1972,8 +1998,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            4.8,
-            -24.0
+            26.599999999999998,
+            11.200000000000001
           ],
           "hidden": false
         },
@@ -1982,8 +2008,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -5.0,
-            -25.6
+            28.0,
+            0.0
           ],
           "hidden": false
         },
@@ -1992,8 +2018,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -3.6,
-            -25.6
+            28.0,
+            1.6
           ],
           "hidden": false
         },
@@ -2002,8 +2028,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -2.2,
-            -25.6
+            28.0,
+            3.2
           ],
           "hidden": false
         },
@@ -2012,8 +2038,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -0.8,
-            -25.6
+            28.0,
+            4.800000000000001
           ],
           "hidden": false
         },
@@ -2022,8 +2048,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            0.6,
-            -25.6
+            28.0,
+            6.4
           ],
           "hidden": false
         },
@@ -2032,8 +2058,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            2.0,
-            -25.6
+            28.0,
+            8.0
           ],
           "hidden": false
         },
@@ -2042,8 +2068,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            3.4,
-            -25.6
+            28.0,
+            9.600000000000001
           ],
           "hidden": false
         },
@@ -2052,8 +2078,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            4.8,
-            -25.6
+            28.0,
+            11.200000000000001
           ],
           "hidden": false
         },
@@ -2062,8 +2088,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -5.0,
-            -27.2
+            29.4,
+            0.0
           ],
           "hidden": false
         },
@@ -2072,8 +2098,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -3.6,
-            -27.2
+            29.4,
+            1.6
           ],
           "hidden": false
         },
@@ -2082,8 +2108,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -2.2,
-            -27.2
+            29.4,
+            3.2
           ],
           "hidden": false
         },
@@ -2092,8 +2118,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -0.8,
-            -27.2
+            29.4,
+            4.800000000000001
           ],
           "hidden": false
         },
@@ -2102,8 +2128,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            0.6,
-            -27.2
+            29.4,
+            6.4
           ],
           "hidden": false
         },
@@ -2112,8 +2138,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            2.0,
-            -27.2
+            29.4,
+            8.0
           ],
           "hidden": false
         },
@@ -2122,8 +2148,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            3.4,
-            -27.2
+            29.4,
+            9.600000000000001
           ],
           "hidden": false
         },
@@ -2132,8 +2158,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            4.8,
-            -27.2
+            29.4,
+            11.200000000000001
           ],
           "hidden": false
         },
@@ -2142,8 +2168,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -5.0,
-            -28.8
+            30.799999999999997,
+            0.0
           ],
           "hidden": false
         },
@@ -2152,8 +2178,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -3.6,
-            -28.8
+            30.799999999999997,
+            1.6
           ],
           "hidden": false
         },
@@ -2162,8 +2188,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -2.2,
-            -28.8
+            30.799999999999997,
+            3.2
           ],
           "hidden": false
         },
@@ -2172,8 +2198,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -0.8,
-            -28.8
+            30.799999999999997,
+            4.800000000000001
           ],
           "hidden": false
         },
@@ -2182,8 +2208,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            0.6,
-            -28.8
+            30.799999999999997,
+            6.4
           ],
           "hidden": false
         },
@@ -2192,8 +2218,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            2.0,
-            -28.8
+            30.799999999999997,
+            8.0
           ],
           "hidden": false
         },
@@ -2202,8 +2228,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            3.4,
-            -28.8
+            30.799999999999997,
+            9.600000000000001
           ],
           "hidden": false
         },
@@ -2212,8 +2238,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            4.8,
-            -28.8
+            30.799999999999997,
+            11.200000000000001
           ],
           "hidden": false
         },
@@ -2222,8 +2248,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -5.0,
-            -30.4
+            32.199999999999996,
+            0.0
           ],
           "hidden": false
         },
@@ -2232,8 +2258,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -3.6,
-            -30.4
+            32.199999999999996,
+            1.6
           ],
           "hidden": false
         },
@@ -2242,8 +2268,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -2.2,
-            -30.4
+            32.199999999999996,
+            3.2
           ],
           "hidden": false
         },
@@ -2252,8 +2278,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -0.8,
-            -30.4
+            32.199999999999996,
+            4.800000000000001
           ],
           "hidden": false
         },
@@ -2262,8 +2288,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            0.6,
-            -30.4
+            32.199999999999996,
+            6.4
           ],
           "hidden": false
         },
@@ -2272,8 +2298,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            2.0,
-            -30.4
+            32.199999999999996,
+            8.0
           ],
           "hidden": false
         },
@@ -2282,8 +2308,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            3.4,
-            -30.4
+            32.199999999999996,
+            9.600000000000001
           ],
           "hidden": false
         },
@@ -2292,8 +2318,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            4.8,
-            -30.4
+            32.199999999999996,
+            11.200000000000001
           ],
           "hidden": false
         },
@@ -2302,8 +2328,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -5.0,
-            -32.0
+            33.599999999999994,
+            0.0
           ],
           "hidden": false
         },
@@ -2312,8 +2338,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -3.6,
-            -32.0
+            33.599999999999994,
+            1.6
           ],
           "hidden": false
         },
@@ -2322,8 +2348,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -2.2,
-            -32.0
+            33.599999999999994,
+            3.2
           ],
           "hidden": false
         },
@@ -2332,8 +2358,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            -0.8,
-            -32.0
+            33.599999999999994,
+            4.800000000000001
           ],
           "hidden": false
         },
@@ -2342,8 +2368,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            0.6,
-            -32.0
+            33.599999999999994,
+            6.4
           ],
           "hidden": false
         },
@@ -2352,8 +2378,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            2.0,
-            -32.0
+            33.599999999999994,
+            8.0
           ],
           "hidden": false
         },
@@ -2362,8 +2388,8 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            3.4,
-            -32.0
+            33.599999999999994,
+            9.600000000000001
           ],
           "hidden": false
         },
@@ -2372,15 +2398,15 @@
           "kind": "agent",
           "folder": "Agents",
           "position": [
-            4.8,
-            -32.0
+            33.599999999999994,
+            11.200000000000001
           ],
           "hidden": false
         }
       ],
       "expected": [
-        -5.0,
-        -33.6
+        35.0,
+        0.0
       ]
     }
   ]

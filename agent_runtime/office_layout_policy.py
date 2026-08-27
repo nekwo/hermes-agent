@@ -9,7 +9,8 @@ wrong: a fixed point stacks every placement onto the last one until the floor
 is an unreadable pile, and a random point is not reproducible, so the same
 gesture lands somewhere different each time and nothing can be tested.
 
-So: a deterministic lattice scan returning the FIRST unoccupied slot. Pure —
+So: a deterministic lattice scan returning the FIRST unoccupied slot, starting
+at the world origin and climbing. Pure —
 no store, no I/O, no clock — so the decision table is unit-testable directly
 and the caller decides which actor set to feed it.
 
@@ -42,12 +43,15 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Sequence
 
-#: First lattice column's world X. Matches the office's own unaimed-drop row so
-#: browser and CLI placements land in the band the canvas already uses.
-ORIGIN_X = -5.0
+#: First lattice column's world X. **World origin, by operator ruling
+#: 2026-08-27**: an unaimed placement lands at ``(0, 0)`` and the operator looks
+#: there for it. This used to be ``-5.0`` to match the office's own unaimed-drop
+#: row; that band is a canvas convention, and the ruling is that the world origin
+#: is the more predictable answer for a placement nobody aimed.
+ORIGIN_X = 0.0
 
-#: First lattice row's world Y.
-ORIGIN_Y = 6.4
+#: First lattice row's world Y. World origin, same ruling.
+ORIGIN_Y = 0.0
 
 #: Horizontal gap between lattice columns. Mirrors the office scene adapter's
 #: agent fan-out spacing, so a placed row reads as a row rather than a clump.
@@ -58,8 +62,12 @@ COLUMN_SPACING = 1.4
 #: spacing reads as overlapping even when the anchor points do not.
 ROW_SPACING = 1.6
 
-#: Slots per lattice row before wrapping to the next one.
-COLUMNS_PER_ROW = 8
+#: Slots per lattice COLUMN before wrapping to the next one.
+#:
+#: The scan fills a column upward before it moves sideways (operator ruling
+#: 2026-08-27: "if something is there it should move it up a bit higher so you
+#: can still see it"), so the wrap bound is per column, not per row.
+ROWS_PER_COLUMN = 8
 
 #: How close an existing item has to be for a slot to count as taken.
 #:
@@ -122,7 +130,10 @@ def slot_at(row: int, column: int, *, lane_offset: Point | None = None) -> Point
     lane = _lane(lane_offset)
     return (
         ORIGIN_X + column * COLUMN_SPACING + lane[0],
-        ORIGIN_Y - row * ROW_SPACING + lane[1],
+        # PLUS, not minus: rows climb. A second unaimed placement stands a full
+        # grid step ABOVE the first rather than beside it, so the stack stays
+        # visible instead of marching off the side of the canvas.
+        ORIGIN_Y + row * ROW_SPACING + lane[1],
     )
 
 
@@ -192,7 +203,7 @@ def next_free_slot(
     Deterministic — the same occupancy always yields the same slot, so the same
     operator gesture is reproducible and testable. Guaranteed to terminate and
     to return a genuinely free slot: the scan covers ``(occupied + 1) *
-    COLUMNS_PER_ROW`` candidates while at most ``occupied`` of them can be
+    ROWS_PER_COLUMN`` candidates while at most ``occupied`` of them can be
     blocked, so by pigeonhole a free one always exists inside the scan.
 
     ``lane_offset`` is applied INSIDE the scan, never to the result: shifting
@@ -202,18 +213,22 @@ def next_free_slot(
 
     lane = _lane(lane_offset)
     taken = list(occupied or ())
-    # +1 row so an empty floor still scans a full row, and so the pigeonhole
-    # bound holds for any number of blockers.
-    rows = len(taken) + 1
-    for row in range(rows):
-        for column in range(COLUMNS_PER_ROW):
+    # +1 column so an empty floor still scans a full column, and so the
+    # pigeonhole bound holds for any number of blockers.
+    columns = len(taken) + 1
+    # COLUMN-MAJOR: the row is the inner loop, so the scan climbs a column
+    # before it steps sideways. That is the whole of the 2026-08-27 ruling —
+    # a blocked origin sends the next placement UP one full grid step, not
+    # across one.
+    for column in range(columns):
+        for row in range(ROWS_PER_COLUMN):
             candidate = slot_at(row, column, lane_offset=lane)
             if not _is_blocked(candidate, taken):
                 return candidate
     # Unreachable by the pigeonhole argument above; falling through to a slot
-    # past every scanned row is still deterministic and still free, which is
+    # past every scanned column is still deterministic and still free, which is
     # better than returning a knowingly-occupied point.
-    return slot_at(rows, 0, lane_offset=lane)
+    return slot_at(0, columns, lane_offset=lane)
 
 
 def next_free_slot_for_kind(actors: Iterable[Any], kind: Any) -> Point:

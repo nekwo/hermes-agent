@@ -609,8 +609,9 @@ def test_a_create_with_a_position_still_lands_there_verbatim(
     """The other half of the same fence, and the reason it is a separate test.
 
     KILLING MUTATION (plan §C): make the service substitute the policy's slot
-    when a position IS given and this reds — the policy's first slot is
-    ``(-5.0, 6.4)`` and nothing about ``(3.5, -1.25)`` is near it.
+    when a position IS given and this reds — the policy's first slot is the world
+    origin ``(0.0, 0.0)`` (operator ruling 2026-08-27; it was ``(-5.0, 6.4)``
+    until then) and nothing about ``(3.5, -1.25)`` is near either.
     """
 
     _seed_workspace()
@@ -663,6 +664,11 @@ def test_the_policy_scans_the_requests_folder_and_skips_the_occupied_slot(
     That is the whole reason the policy reads the store rather than returning a
     constant, and it is the property a "just use the origin" implementation
     satisfies for exactly one agent.
+
+    This is also the END-TO-END proof of the 2026-08-27 ruling, through the real
+    service rather than the policy alone: the first unaimed create lands on the
+    world origin and the second stands one full grid step ABOVE it, not beside
+    it. Before that ruling the second answer was ``slot(0, 1)``.
     """
 
     _seed_workspace()
@@ -678,7 +684,7 @@ def test_the_policy_scans_the_requests_folder_and_skips_the_occupied_slot(
     assert first.refusal is None and second.refusal is None
     actors = _actors()
     assert [float(v) for v in actors[first.result["actor_key"]].items[0].position] == _policy_slot(0, 0)
-    assert [float(v) for v in actors[second.result["actor_key"]].items[0].position] == _policy_slot(0, 1)
+    assert [float(v) for v in actors[second.result["actor_key"]].items[0].position] == _policy_slot(1, 0)
 
 
 def test_a_different_folder_is_a_different_scan(qa_persona, isolate_agent_runtime_root):

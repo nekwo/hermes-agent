@@ -184,7 +184,14 @@ its ack returns what was written.
 **Absent means "I did not aim", and hermes answers it.** With no `position`, the
 service resolves the slot through `agent_runtime/office_layout_policy.py` — a
 deterministic lattice scan over the workspace's live actors in the request's
-folder, returning the first free slot. With a `position`, it is written
+folder, returning the first free slot. **That scan starts at the WORLD ORIGIN
+and climbs** (operator ruling 2026-08-27, D10(iii)): the first unaimed placement
+lands on `(0, 0)`, and a blocked slot sends the next one one full grid step UP
+(`ROW_SPACING`), not one step across. It wraps sideways to the next column only
+after `ROWS_PER_COLUMN` (8) are stacked. The old lattice began at `(-5.0, 6.4)`
+— the canvas's own unaimed-drop band — and filled left to right, which walked a
+run of placements off the side of the floor instead of keeping them where the
+operator was looking. With a `position`, it is written
 verbatim, exactly as it always was; a malformed one (a one-element list, a
 string, a bool pair, an infinity) still refuses `position_invalid`, because a
 transport that mangled an aim is not the same thing as an operator who had none.
@@ -758,9 +765,19 @@ omit it — the office's revision guard lives on the RPC lane only.
     artifacts, artifacts are standalone, and the fence should then key on neither
     persona nor instance. See the fence section above for why re-keying now would
     be the wrong move.
-  - **Owner decisions still standing on their defaults**, none blocking: D10(ii) no
-    persona-template (`persona.skills`) operator verb (out of scope, recorded);
-    D10(iii) un-aimed adds omit `position` (shipped OMIT). D10(iv) `console`
+  - **D10(iii) — RULED and SHIPPED 2026-08-27.** Un-aimed adds still omit
+    `position` (the server decides), and the server's answer is now the world
+    origin with a full-grid-step climb on collision. Both repos and the
+    byte-pinned `cases.json` moved together; see the placement section above.
+  - **D10(ii) — REOPENED 2026-08-27, and it is a real gap, not a scope call.**
+    The operator's expectation is that skills set on the context panel apply to
+    the next agent placed from that persona. They do not: the panel writes
+    `--skill` to the INSTANCE (`persona.instance.update_profile` →
+    `skill_overrides`), while a new placement inherits `persona.skills` — the
+    template — read LIVE. Nothing writes `persona.skills`: it comes from config
+    (`personas.py` / `config.py` overrides) and there is no operator verb and no
+    launcher capability for it. "Out of scope" was the wrong call.
+  - **Owner decisions still standing on their defaults**, none blocking: D10(iv) `console`
     scope for both methods is no longer prose — it is declared on `rpc.tiers`
     and evaluated at the front door (A1/A3 above); WHICH tiers exist beyond
     `read`/`console` is still the gateway's R11.

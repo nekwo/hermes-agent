@@ -74,7 +74,7 @@ def test_the_fixture_pins_every_constant_this_module_spends():
         "origin_y": policy.ORIGIN_Y,
         "column_spacing": policy.COLUMN_SPACING,
         "row_spacing": policy.ROW_SPACING,
-        "columns_per_row": policy.COLUMNS_PER_ROW,
+        "rows_per_column": policy.ROWS_PER_COLUMN,
         "occupancy_radius": policy.OCCUPANCY_RADIUS,
         "desk_lane_offset": policy.DESK_LANE_OFFSET,
     }
@@ -93,7 +93,8 @@ def test_the_case_list_is_not_empty_and_names_the_shapes_S1_requires():
     assert len(names) == len(set(names)), names
     assert {
         "empty_floor",
-        "full_first_row_wraps",
+        "occupied_origin_steps_up_one_full_row",
+        "full_first_column_wraps",
         "hidden_item_blocks",
         "desk_lane_offset",
         "off_lattice_item_blocks_its_nearest_slot",
@@ -160,8 +161,8 @@ def test_the_scan_is_deterministic():
 
 
 def test_the_scan_fills_the_gap_rather_than_appending():
-    occupied = [policy.slot_at(0, 0), policy.slot_at(0, 2)]
-    assert policy.next_free_slot(occupied) == policy.slot_at(0, 1)
+    occupied = [policy.slot_at(0, 0), policy.slot_at(2, 0)]
+    assert policy.next_free_slot(occupied) == policy.slot_at(1, 0)
 
 
 def test_forty_sequential_placements_never_collide():
@@ -190,18 +191,18 @@ def test_the_lane_offset_is_applied_inside_the_scan_not_to_the_result():
     lane = policy.lane_offset_for_kind("desk")
     occupied = [policy.slot_at(0, 0, lane_offset=lane)]
     assert policy.next_free_slot(occupied, lane_offset=lane) == policy.slot_at(
-        0, 1, lane_offset=lane
+        1, 0, lane_offset=lane
     )
 
 
-def test_a_blocked_first_row_still_terminates_and_returns_something_free():
-    """Every lattice slot of row 0 blocked by off-lattice drags — the scan must
-    still return, and return a genuinely free point.
+def test_a_blocked_first_column_still_terminates_and_returns_something_free():
+    """Every lattice slot of column 0 blocked by off-lattice drags — the scan
+    must still return, and return a genuinely free point.
     """
 
     occupied = [
-        (policy.slot_at(0, c)[0] + 0.05, policy.slot_at(0, c)[1] + 0.05)
-        for c in range(policy.COLUMNS_PER_ROW)
+        (policy.slot_at(r, 0)[0] + 0.05, policy.slot_at(r, 0)[1] + 0.05)
+        for r in range(policy.ROWS_PER_COLUMN)
     ]
     x, y = policy.next_free_slot(occupied)
     for ox, oy in occupied:
@@ -275,7 +276,13 @@ def test_an_off_axis_lattice_probe_can_measure_the_radius_exactly():
     """
 
     candidate = policy.slot_at(0, 0)
-    item = (-4.300000000000001, 6.400000029802323)
+    # RE-DERIVED 2026-08-27 when the lattice moved to the world origin. The old
+    # witness was spelled against ORIGIN (-5.0, 6.4), where the subtraction
+    # itself rounded; at the origin the differences are exact, so the witness
+    # had to be searched for again. It still lands on the SAME squared value,
+    # which is the point: this is a property of the radius, not of where the
+    # lattice happens to sit.
+    item = (0.6999999999999998, 1e-08)
     dx = candidate[0] - item[0]
     dy = candidate[1] - item[1]
     squared = dx * dx + dy * dy
@@ -291,11 +298,23 @@ def test_an_off_axis_lattice_probe_can_measure_the_radius_exactly():
     assert policy._is_blocked(candidate, [item]) is False
     assert policy.next_free_slot([item]) == candidate
 
-    # The one-axis spelling, for contrast: OUTSIDE, where `<` and `<=` agree.
+    # The one-axis spelling — and moving the lattice to the world origin
+    # CHANGED what it demonstrates, which is worth stating rather than quietly
+    # re-asserting. Against ORIGIN (-5.0, 6.4) this distance came out as
+    # 0.7000000000000002: a rounding artifact of subtracting two numbers of that
+    # magnitude, which landed the point just OUTSIDE the radius, where `<` and
+    # `<=` agree and the strictness did not matter.
+    #
+    # At the origin the subtraction is exact, so the obvious spelling is now
+    # EXACTLY ON the radius. `<` frees the slot and `<=` would block it, so the
+    # strictness of that comparison is now load-bearing on the plainest spelling
+    # anyone would write — where before it only mattered off-axis. That is the
+    # sharper reason `cases.json` pins a boundary case at all.
     on_axis = (candidate[0] + policy.OCCUPANCY_RADIUS, candidate[1])
     on_axis_distance = abs(candidate[0] - on_axis[0])
-    assert on_axis_distance == 0.7000000000000002
-    assert on_axis_distance > policy.OCCUPANCY_RADIUS
+    assert on_axis_distance == 0.7
+    assert on_axis_distance == policy.OCCUPANCY_RADIUS
+    assert not on_axis_distance < policy.OCCUPANCY_RADIUS
     assert policy._is_blocked(candidate, [on_axis]) is False
 
 
@@ -329,25 +348,28 @@ def test_occupied_positions_flattens_actors_the_way_the_store_hands_them_over():
                     item_id="personainst_qa",
                     persona_id="qa",
                     kind="agent",
-                    position=[-5.0, 6.4],
+                    position=[0.0, 0.0],
                     folder="Agents",
                 ),
                 OfficeItem(
                     item_id="desk-personainst_qa",
                     persona_id="qa",
                     kind="desk",
-                    position=[-4.3, 7.1],
+                    position=[0.7, 0.7],
                     folder="Desks",
                 ),
             ],
         )
     ]
 
-    assert policy.occupied_positions(actors, folder="Agents") == [(-5.0, 6.4)]
-    assert policy.occupied_positions(actors, folder="Desks") == [(-4.3, 7.1)]
-    assert policy.next_free_slot_for_kind(actors, "agent") == policy.slot_at(0, 1)
+    desk_lane = policy.lane_offset_for_kind("desk")
+    assert policy.occupied_positions(actors, folder="Agents") == [policy.slot_at(0, 0)]
+    assert policy.occupied_positions(actors, folder="Desks") == [
+        policy.slot_at(0, 0, lane_offset=desk_lane)
+    ]
+    assert policy.next_free_slot_for_kind(actors, "agent") == policy.slot_at(1, 0)
     assert policy.next_free_slot_for_kind(actors, "desk") == policy.slot_at(
-        0, 1, lane_offset=policy.lane_offset_for_kind("desk")
+        1, 0, lane_offset=desk_lane
     )
 
 
@@ -370,14 +392,14 @@ def test_a_stored_blank_folder_is_scanned_as_its_kinds_default():
                     item_id="legacy",
                     persona_id="qa",
                     kind="agent",
-                    position=[-5.0, 6.4],
+                    position=[0.0, 0.0],
                     folder="",
                 )
             ],
         )
     ]
 
-    assert policy.occupied_positions(actors, folder="Agents") == [(-5.0, 6.4)]
+    assert policy.occupied_positions(actors, folder="Agents") == [policy.slot_at(0, 0)]
     assert policy.occupied_positions(actors, folder="Desks") == []
 
 
