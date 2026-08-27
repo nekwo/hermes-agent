@@ -21,8 +21,7 @@ STORE, never by trusting the command's own reply:
 2. **Inheritance is LIVE, not a copy.** ``apply_instance_model_overrides`` falls
    back to ``list(persona.skills)`` at EVERY resolution for an instance whose
    ``skill_overrides`` is ``None``, so a template write moves existing
-   non-overridden instances too — and must leave overridden ones alone. This
-   slice pins the WRITE; the end-to-end placement proof lands beside it next.
+   non-overridden instances too — and must leave overridden ones alone.
 
 Every test drives the REAL argparse tree through ``args.func``. A handler poked
 directly would not prove that the flag's ``default=None`` and the handler's
@@ -387,3 +386,162 @@ def test_the_skills_clock_is_independent_of_the_model_clock(capsys):
     row = _row_on_disk()
     assert row["skills"] == ["alpha"]
     assert row["model"] == "model-late", "the skills write must not disturb the model lane"
+
+
+# --- S2: the inheritance proof, end to end -----------------------------------
+
+
+@pytest.fixture
+def placement_surface():
+    """A workspace + office surface so ``harness agent create`` can place."""
+
+    from agent_runtime.office_store import OfficeStore
+    from agent_runtime.store import WorkspaceStore
+
+    WorkspaceStore().create(name="Probe", workspace_id="ws_pts")
+    OfficeStore().ensure_surface("ws_pts", created_by="test")
+    return "ws_pts"
+
+
+def _create_agent(persona_id: str, placement_id: str, *flags: str) -> dict:
+    import io
+    from contextlib import redirect_stdout
+
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        code = _dispatch([
+            "harness", "agent", "create",
+            "--persona", persona_id,
+            "--workspace", "ws_pts",
+            "--display-name", placement_id,
+            "--placement-id", placement_id,
+            *flags,
+            "--json",
+        ])
+    payload = json.loads(buffer.getvalue())
+    assert code == 0, payload
+    return payload
+
+
+def _resolved_skills(instance_id: str, persona_id: str = "qa") -> list[str]:
+    """What the runtime will actually run this instance with.
+
+    Read through ``apply_instance_model_overrides`` — the ONE overlay both the
+    chat lane and the run lane resolve through — and against the persona record
+    re-read from the store, which is what a fresh process would see.
+    """
+
+    from agent_runtime.models import apply_instance_model_overrides
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+    from agent_runtime.store import AgentStore
+
+    persona = AgentStore().get(persona_id)
+    instance = PersonaInstanceStore().get(instance_id)
+    return list(apply_instance_model_overrides(persona, instance).skills)
+
+
+def test_a_new_placement_with_no_skill_flag_carries_the_new_template_set(
+    placement_surface, capsys
+):
+    """The operator's sentence, executed: set-skills, then place, then look.
+
+    The create ack answers ``inherited: True`` with ``assigned: []`` — that is
+    the D11 shape and it is deliberately NOT the skill list — so the carried set
+    is read where the runtime reads it, through the overlay.
+    """
+
+    _seed_persona(skills=["seeded-skill"])
+    assert _dispatch(_set_skills("qa", "--skill", "alpha", "--skill", "beta")) == 0
+    capsys.readouterr()
+
+    created = _create_agent("qa", "pl_fresh")
+    capsys.readouterr()
+
+    assert created["skills"]["inherited"] is True
+    assert created["skills"]["assigned"] == []
+
+    instance_id = created["persona_instance_id"]
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    assert PersonaInstanceStore().get(instance_id).skill_overrides is None, (
+        "an absent --skill must leave the instance INHERITING, not pin a copy"
+    )
+    assert _resolved_skills(instance_id) == ["alpha", "beta"]
+
+
+def test_a_pre_existing_non_overridden_instance_follows_the_template_live(
+    placement_surface, capsys
+):
+    """Inheritance is a live read, not a create-time copy.
+
+    This is also the test that would catch a persona record cached across the
+    store write: the instance is placed BEFORE the template write and is asked
+    again afterwards.
+    """
+
+    _seed_persona(skills=["seeded-skill"])
+    created = _create_agent("qa", "pl_early")
+    capsys.readouterr()
+    instance_id = created["persona_instance_id"]
+    assert _resolved_skills(instance_id) == ["seeded-skill"]
+
+    assert _dispatch(_set_skills("qa", "--skill", "alpha", "--skill", "beta")) == 0
+    capsys.readouterr()
+
+    assert _resolved_skills(instance_id) == ["alpha", "beta"]
+
+
+def test_an_instance_with_its_own_overrides_is_untouched_by_the_template_write(
+    placement_surface, capsys
+):
+    """The other half of the ack's promise, and the reason the copy is honest.
+
+    The override is written through the INSTANCE-tier verb the launcher's skills
+    panel actually submits (``persona instance update-profile --skill``), not by
+    poking the dataclass, so the two tiers are exercised against each other
+    through their real doors. ``apply_instance_model_overrides`` substitutes the
+    instance list WHOLESALE, so the template write must move this agent not at
+    all.
+    """
+
+    _seed_persona(skills=["seeded-skill"])
+    created = _create_agent("qa", "pl_over")
+    capsys.readouterr()
+    instance_id = created["persona_instance_id"]
+    assert created["skills"]["inherited"] is True
+
+    assert _dispatch([
+        "harness", "persona", "instance", "update-profile", instance_id,
+        "--skill", "seeded-skill", "--json",
+    ]) == 0
+    capsys.readouterr()
+
+    assert _dispatch(_set_skills("qa", "--skill", "alpha", "--skill", "beta")) == 0
+    capsys.readouterr()
+
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    assert PersonaInstanceStore().get(instance_id).skill_overrides == ["seeded-skill"]
+    assert _resolved_skills(instance_id) == ["seeded-skill"]
+
+
+def test_the_placement_lane_and_the_roster_row_both_see_the_write(capsys):
+    """Zero read-side changes were needed, and this is why.
+
+    ``ensure_persisted_personas`` is what the placement lane resolves personas
+    through, and ``_agent_summary`` is what the snapshot's roster row projects
+    from — both read the same store record the verb just wrote, so the write is
+    visible to the next placement and the next frame without touching either.
+    """
+
+    from agent_runtime.config import ensure_persisted_personas
+    from agent_runtime.snapshot import _agent_summary
+    from agent_runtime.store import AgentStore
+
+    _seed_persona(skills=["seeded-skill"])
+    assert _dispatch(_set_skills("qa", "--skill", "alpha", "--skill", "beta")) == 0
+    capsys.readouterr()
+
+    resolved = {persona.id: persona for persona in ensure_persisted_personas()}
+    assert resolved["qa"].skills == ["alpha", "beta"]
+    assert _agent_summary(AgentStore().get("qa"))["skills"] == ["alpha", "beta"]

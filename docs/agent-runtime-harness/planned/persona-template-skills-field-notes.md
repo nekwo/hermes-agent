@@ -230,3 +230,77 @@ runtime reads (`ensure_persisted_personas` store-wins is pinned by
 inheritance arm is in `models.py`, not `agent_create.py`. `set-model` answered
 every shape question the verb had — the handler is its twin, field for field.
 Nothing in §1–§5 was found wrong.
+
+---
+
+# Build pass — S2 (hermes: the inheritance proof, end to end)
+
+Four tests appended to `tests/hermes_cli/test_persona_set_skills.py` (14 → 18).
+No production line changed, so the changed-line mutation runner selects nothing
+— `python scripts/changed_line_mutation_check.py --base HEAD --list` prints
+`mutation candidates: 0 (cap 12)`, which is the designed behaviour and is the
+reason S2 carries no claims. The integration tests ARE the evidence.
+
+Every case drives the real CLI: `harness agent create` through the same
+argparse tree, into `perform_agent_create` — the same function
+`runtime.agent.create` answers with — against a workspace + office surface
+seeded in the per-test isolated root.
+
+## The three cases, and what each one actually catches
+
+- `test_a_new_placement_with_no_skill_flag_carries_the_new_template_set` — the
+  operator's sentence executed. `set-skills`, then `agent create` with `--skill`
+  ABSENT. The ack answers `inherited: True` with `assigned: []`, which is the
+  D11 shape and deliberately NOT the skill list, so the carried set is read
+  where the runtime reads it: `apply_instance_model_overrides(persona,
+  instance).skills == ["alpha", "beta"]`. The test also asserts
+  `skill_overrides is None` on the new row — an absent flag must leave the
+  instance INHERITING, not pin a copy.
+- `test_a_pre_existing_non_overridden_instance_follows_the_template_live` — the
+  instance is placed BEFORE the write and asked again after. This is the case
+  the plan's §7 ASSUMED ("that serve caches no persona record across a store
+  write"); it now passes, so the assumption holds for the offline lane. It is
+  still only proof for a fresh CLI process, not for a long-lived `harness serve`
+  — see "Not verified" below.
+- `test_an_instance_with_its_own_overrides_is_untouched_by_the_template_write` —
+  the other half of the ack's promise.
+
+Plus a fourth, `test_the_placement_lane_and_the_roster_row_both_see_the_write`,
+which pins why S1 needed zero read-side changes: `ensure_persisted_personas()`
+returns the written skills (store wins over catalog) and
+`snapshot._agent_summary(...)["skills"]` projects them. The plan asked for the
+roster-row observation "if cheap" — it was, and the answer is yes, read live.
+
+## What changed shape from the plan while writing it
+
+`agent create --skill <id>` HARD-GATES on resolution (`skill does not resolve:
+seeded-skill (missing)`), so the overridden-instance case could not be built by
+placing with an unresolvable `--skill`. Rewritten to place with no `--skill` and
+then write the override through `persona instance update-profile --skill` —
+which is the door the launcher's skills sheet actually submits. The test is
+better for it: it now exercises both tiers through their real doors instead of
+one, and the two write verbs are proven against each other rather than against a
+poked dataclass.
+
+This is worth carrying into S4: the launcher's instance-tier and template-tier
+writes have DIFFERENT id-validation strictness (create hard-gates; both update
+doors do token-safety only, and the template tier warns via `unresolved`). The
+plan already names that as an adjacent gap (§9, second bullet) and it stays
+un-unified here.
+
+## Not verified
+
+- No `harness serve` was started. Every S2 case runs in a fresh CLI process, so
+  "an existing instance follows the template live" is proven for the placement
+  and resolution lanes, not for a serve-resident actor cache. The turn-context
+  cache keys on `PERSONA_IDENTITY_FIELDS`, which includes `skills` — so a
+  template write DOES rotate `persona_revision` and should force a rebuild —
+  but that is a read of `mission_chat_turn_context.py`, not a measurement.
+- A judgment call worth an operator's eye: `skills_override_issued_at` was NOT
+  added to `PERSONA_IDENTITY_FIELDS`, even though `model_override_issued_at` is
+  in it. Reasoning — the clock only ever advances on a write that also changed
+  `skills`, and `skills` IS in the tuple, so listing the clock would rotate no
+  key that `skills` does not already rotate. Listing it costs nothing either;
+  if the house rule is "every supersede clock is in the ledger", it is a
+  one-line follow-up.
+- No launcher work was touched; S3–S5 are somebody else's slices.
