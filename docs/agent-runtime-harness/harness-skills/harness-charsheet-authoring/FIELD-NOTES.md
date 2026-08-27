@@ -1328,6 +1328,72 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   for free as soon as the shape is added to its parametrize list. Add the shape, not a
   new assertion about spelling.
 
+### AF — the rewrite itself (2026-08-27, the last slice)
+
+- **[READ] `SKILL.md` claimed a backticked `MEDIA:` line renders nothing, and the launcher
+  had already stopped agreeing.** `local_document_reference.dart::parseDeclaredMediaLine`
+  runs `_unwrapWholeLineCodeSpan` FIRST: a line that is EXACTLY one inline-code span —
+  `` `MEDIA:...` `` and nothing else — is unwrapped and still renders, on the stated
+  reasoning that the backticks are formatting habit rather than content. What genuinely
+  un-declares a path is a FENCE (fenced lines never reach the parser at all), a backtick
+  span inside a sentence, or two spans on one line. It also tolerates a trailing `.`, `,`
+  or `;`, requires the payload to be exactly one path, and renders `png jpg jpeg gif webp`
+  as images while routing anything else to the document lane — the skill said "`.png` and
+  `.webp`".
+  *Consequence:* the served copy was scaring an agent off a shape that works and was silent
+  about the three that do not. Corrected in the rewrite. This is the class the "For AF"
+  entry above names — a false line in `SKILL.md` reaches every turn and the strike reaches
+  nobody — except that here the falsification arrived from the OTHER repo, which is the
+  half that file's rule does not cover.
+
+- **[READ] The launcher's QA card cites a `SKILL.md` section by NAME, and until this commit
+  the name was wrong.** `mission_sheet_qa_row.dart`'s `kMissionSheetQaPrefix` doc comment
+  reads *"The skill emits the upper-case form (`harness-charsheet-authoring/SKILL.md`,
+  'Rendering contract')"*. There was no section called that — the lines lived under
+  "Talking to the operator". Nothing on either side of the seam could notice: the hermes
+  gate pins STRINGS inside the skill, never headings, and a Dart doc comment is prose.
+  *Consequence:* the rewrite names the section "Rendering contract" so the citation is
+  true. A cross-repo reference to a HEADING is a pin nothing holds; if that section is ever
+  renamed again, the launcher comment goes stale silently.
+
+- **[READ] The card DISPATCHES, so a draft can move between your turns.**
+  `MissionSheetQaScope` hands every card a dispatcher bound to the console's own intent
+  chokepoint, and `resolveMissionSheetQaCapability` lowers five sealed arms onto
+  `characters.approve-direction`, `.reroll-direction`, `.reroll-row`, `.reopen` and
+  `.compose`. No agent turn is involved. Two consequences the skill now teaches: re-read
+  `status --json` at the start of a turn rather than trusting your memory of the stage
+  (a reroll auto-approves, so the approved pointer can move without you), and the card's
+  Compose carries **no** `--accept-handedness` — overriding a refusal is the one thing only
+  the agent can do.
+
+- **[MEASURED] The rewrite took the package from 26,042 B to 44,478 B, and nothing measures
+  that.** This is a `required_preload` skill: `mission_chat_turn_context` puts `SKILL.md`'s
+  whole body into every turn of every persona that lists it, so the file's size is a
+  per-turn context cost paid forever. The pre-push install gate compares HASHES, the policy
+  test asserts strings, and neither has an opinion about length — a 70% growth landed with
+  nothing reporting it.
+  *Consequence:* when you add to this file, delete something. Filed on the launcher's
+  Mission Control queue as the missing measurement it is.
+
+- **[READ] Risk D.5's cross-repo pin still has only its hermes half.**
+  `tests/fixtures/charsheet_qa_line.json` says in its own `note` that the twin at
+  `EterniaLauncher/test/fixtures/charsheet/charsheet_qa_line.json` is B2's to add. B2 has
+  landed (the QA card, the lift, the refusal parser) and that file does not exist —
+  `test/fixtures/charsheet/` holds `handedness_refusal.txt`, `list.json`, `sprite.json`,
+  `status.json` and `thumb.json`, and nothing else. So the `CHARSHEET-QA:` key set is
+  pinned on the PRODUCER side only: change what the skill promises and the hermes fixture
+  moves with it, while the launcher's parser goes on accepting a shape nobody emits.
+  *Consequence:* the line's contract is one-sided today. Filed launcher-side.
+
+- **[NOT VERIFIED — say this out loud] Nothing in this program has been watched working.**
+  AF is a documentation slice and it did not change that. The skill's gate ran (25 tests,
+  including the live-argparse verb-table pin, round-tripped over a planted `add-states`),
+  the install hash matched, and **no live authoring turn was driven and no Stage C capture
+  was taken**. Every sentence in `SKILL.md` about what the operator SEES is read off
+  launcher source, not off a screen. An agent that reads this file should treat the
+  console-side claims as code-derived, and an agent that gets to run the loop should append
+  what actually happened here.
+
 <!-- A2, A3, R1 and any slice standing in the HERMES repo: append your entries above this
      line, under the matching heading, or add a heading if none fits. Then say in your
      slice report that you did.
