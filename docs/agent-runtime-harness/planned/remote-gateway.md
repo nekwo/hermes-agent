@@ -35,7 +35,9 @@ ceremony both have upstream reuse material in `gateway/` (`platform_registry.py`
   `gateway.listen` (False) / `gateway.port` (0) are declared in
   `config_defaults.py` and **read by nothing** — no network behaviour changed and
   `serve_socket.SOCKET_HOST` is still `127.0.0.1`. Neither contract integer
-  moved. See the Stage 0 notes below.
+  moved. **Stage 0b (the CLI half) followed the same day** — hermes
+  `29ba464d9c`, launcher `bf107a882`: `harness gateway id` and `harness gateway
+  rename <name>`, so Stage 0 is complete. See the Stage 0 notes below.
 - **Stage 1 — device pairing + LAN bind:** `serve_gateway_auth.py` (hashed per-device
   tokens, scopes R11, revocation; `gateway/pairing.py` discipline), pairing verbs with
   QR payload `{host, port, install_id, cert_fingerprint, code}`, second listener bound
@@ -131,19 +133,80 @@ about the store marker dirs. The mint path is covered hermes-side in
 Receipt: `generate.py --check` went red on exactly one frame (`ready.json`) with
 the change in place and green twice consecutively after the refresh.
 
-### Stage 0b — the CLI verbs, filed separately
+### Stage 0b — the CLI verbs: SHIPPED 2026-08-27
 
-`harness gateway id` / `--set-name` did **not** land with Stage 0a. Deferred for
-SCOPE, not entanglement (both trees were clean by the time this was staged): the
-verbs change hermes' argparse tree, which the launcher pins in
-`test/features/mission_control/fixtures/hermes_cli_contract.json` and drives
-through its argv conformance suite — a second cross-repo fixture landing stacked
-on the serve-frame refresh Stage 0a already paid for. Filed as a row in the
-launcher queue's gateway section (`Launcher_Brain/20 — Active Initiatives/mission-control-queue.md`).
-Until it lands, renaming an install means editing `install.json` by hand and the
-default name is the machine hostname. `set_display_name()` and `read_install_identity()` already exist in
-`gateway_identity.py` as the verb's service half and are tested, so the remainder
-is parser registration in `hermes_cli/harness.py` plus a dump refresh.
+~~`harness gateway id` / `--set-name` did **not** land with Stage 0a.~~ Landed
+hermes `29ba464d9c`, launcher `bf107a882`. It had been deferred for SCOPE,
+not entanglement: the verbs change hermes' argparse tree, which the launcher
+pins in `test/features/mission_control/fixtures/hermes_cli_contract.json` — a
+second cross-repo fixture landing stacked on the serve-frame refresh Stage 0a
+already paid for.
+
+**What shipped is two subverbs, where this note wrote one verb and a flag:**
+`harness gateway id` (read) and `harness gateway rename <name>` (write). The
+reason is mechanical rather than taste. `_add_stage42_global_args` is where every
+stage42 verb gets its flags, and the writer's set and the reader's set differ — a
+mutation opts into `--dry-run` (`roots set`, `workspace rename`, 29 call sites), a
+read does not — so one parser cannot carry both truthfully, and that helper's own
+docstring is built on the rule that an advertised flag which does nothing is "a
+WRONG ANSWER believed, not an error seen". `rename` rather than `set-name`
+because `workspace rename` is the house word for this operation and
+`set_display_name`'s own first line is "Rename this install".
+
+**No authorization gate, written down rather than left absent.** The A4 mirror
+(`persona_commands._console_denial`) exists so two doors onto ONE service
+function cannot answer differently. Stage 0b adds no RPC method, so there is one
+door and nothing to disagree with; `CLI_CONSOLE` here would gate against a
+predicate that allows every caller that exists, with no wire twin to keep it
+honest, and the record is neither a level nor a secret. When a paired DEVICE may
+rename an install, the door is a `gateway.*` method with a tier declaration
+(Stage 1 / A5) and the gate goes there — where the caller is something the
+transport proved rather than the machine owner's own shell. The argument sits in
+the handler block in `hermes_cli/harness.py`, on A4's own reasoning that a
+grandfather clause should be greppable.
+
+**The read never mints.** `gateway id` routes at `read_install_identity`, never
+`ensure_install_identity`, and its test probes the FILESYSTEM rather than the
+ack — the kill-mutation returns a perfectly plausible exit-0 ack having created
+an identity on a root the operator only asked about. Stage 4's install picker
+runs this against roots it does not own.
+
+**Typed states became exit families**, and the typed reason travels verbatim in
+the message so a greeting frame's `install` block and the verb read as one
+spelling: `error:absent` → 3 (`not_found`), `malformed_record` /
+`record_without_id` → 1 (`store_corrupt`, and deliberately never a re-mint — per
+`_decode`'s documented asymmetry those bytes may hold the id a paired device
+names), `empty_display_name` → 2, every other I/O reason → 7. Both handlers stamp
+the root-observability block: the identity is per store root, so a `gateway id`
+against the wrong root returns a well-formed identity for a runtime the operator
+did not mean.
+
+**One Stage 0a wart, found by shipping the verb and fixed.**
+`set_display_name` returned a constant `loaded`, so a rename against a fresh root
+— which MINTS by its own documented contract — reported the opposite of what it
+did, on the module whose whole contract is "state it, never infer it from
+absence". It now propagates the load-or-mint outcome it already held. Nothing
+pinned the old constant; a new test pins both directions.
+`gateway_identity.clean_display_name` also became public, because `--dry-run` has
+to print the string that WOULD land and the only way to get it without a second
+copy of the rule is to ask the rule.
+
+**Receipts.** `C:\Python312\python.exe -m pytest` (the venv still has no pytest):
+`tests/hermes_cli/test_gateway_verbs.py` + `tests/agent_runtime/test_gateway_identity.py`
+30 passed; the neighbouring CLI suites (root-observability gate, harness CLI,
+argparse flag propagation, completion, agent create/retire verbs) 113 passed / 1
+skipped. Launcher: `dump_hermes_cli_contract.dart` regenerated (+214 lines,
+**zero removals** — a new verb, no button lost), `--check` green after;
+`harness_capability_argv_test.dart` + `harness_argv_template_test.dart` 268
+passed, no oracle vector moved (no launcher capability lowers to these verbs
+yet). `tool/hermes_serve_frames/generate.py --check` green — a CLI verb touches
+no greeting frame, proven rather than assumed.
+
+**Honest gap, not caused here:**
+`tests/agent_runtime/test_serve_stream_lane_parity.py::test_the_advertisement_grew_and_no_contract_integer_moved`
+is RED at HEAD and was red before this stage (confirmed on a stashed tree). A1
+grew `serve_rpc.manifest()` by a `tiers` key and this parity pin still asserts
+`{"contract", "methods"}`. It belongs to the chokepoint wave, not to Stage 0b.
 
 ## Drift addendum — audited 2026-08-27
 
