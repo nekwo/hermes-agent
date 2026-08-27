@@ -88,8 +88,12 @@ passes both: the class-key fence guards only class-keyed payloads (an
 instance-keyed write "IS the migration's shape"), and this one counts distinct
 ids. That is the migration's transient made permanent if nobody finishes the
 migration, and the launcher's render-time `duplicate_desk` warning is what sees
-it. Closing it needs the roster↔office census (`placement_census`, planned D8),
-not a third fence.
+it. Nothing reads it today. `placement_census` (shipped in `bfdaf735c3`, D8) is not
+that reader: it joins the two stores on `persona_instance_id` and never opens
+`actor.items`, so two live actors holding one desk id are both counted as
+`placed` and the section reports `ok`. Closing it needs either an items-aware
+census row or a third predicate; until one exists the launcher's render-time
+`duplicate_desk` warning is the only detector.
 
 It has **no override on either lane**, which is the deliberate asymmetry with
 `--allow-class-key`: that flag exists because an operator can legitimately want
