@@ -1115,6 +1115,285 @@ def test_a_retry_that_is_still_wrong_refuses_again_and_still_keeps_the_agent(
     assert _reservation_state(key) == "placed"
 
 
+def test_a_resumed_placed_create_reports_the_actor_as_it_is(
+    qa_persona, isolated_shared_skills
+):
+    """The ``placed`` resume re-reads the actor, exactly as the ``done`` arm does.
+
+    RED-FIRST against the arm this replaces. The resume built its reply with
+    ``result = dict(record.result)`` — the ack the FIRST attempt rendered,
+    frozen at the moment the placement landed — and then stamped it
+    ``idempotent_replay: false`` because this attempt genuinely did work. So the
+    one reply in the whole verb that ADVERTISES itself as fresh was the one
+    carrying the stalest actor: ``actor_fresh: true`` copied out of the receipt,
+    beside a ``position`` and a ``revision`` from before the drag.
+
+    WHY IT MATTERS RATHER THAN BEING TIDY. The S7 precondition tells the
+    launcher it may adopt an ack whose ``idempotent_replay`` is false OR whose
+    ``actor_fresh`` is not false. This arm answers false to the first and true
+    to the second, so it is adopted on both counts — the client takes a stale
+    ``revision`` into its ``expect_revision`` bookkeeping (its next guarded
+    write then refuses ``stale_revision``) and a stale ``position`` that snaps
+    the agent back to where it used to be. And the resume is not an exotic
+    path: it is what an operator who mistyped a skill id does, and looking that
+    id up is exactly when someone drags the agent.
+
+    KILLING MUTATION: restore ``result = dict(record.result)`` in the
+    ``STATE_PLACED`` arm and the ``moved`` assertions red.
+
+    ANTI-VACUITY. The move goes through the REAL store write, so the revision
+    genuinely advances and the position genuinely differs from the recorded one
+    — a resume that happened to recompute the same slot cannot pass by
+    coincidence. The recorded values are read off the RECEIPT FILE and asserted
+    to differ, so "the reply equals the receipt" is measured rather than
+    assumed. And the placement is asserted not to have been re-written (the
+    store's own revision is the operator's, not a third on top), so a mutant
+    that got a fresh actor by re-placing the agent fails too.
+    """
+
+    from agent_runtime.office_store import OfficeStore
+
+    _seed_workspace()
+    key = "resume-actor-moved"
+    refused = perform_agent_create(
+        _params(
+            idempotency_key=key,
+            placement_id="qa_resume_moved",
+            skills=["not-a-skill-anyone-has"],
+        ),
+        persona=qa_persona,
+    )
+    assert refused.refusal is not None
+    assert _reservation_state(key) == "placed"
+
+    recorded = _reservation_record(key)["result"]
+    actor_key = recorded["actor_key"]
+    assert recorded["actor_fresh"] is True
+
+    # The operator goes to look up the id they mistyped, and drags the agent on
+    # the way past. A real store write, through the door an operator drag uses.
+    stored = OfficeStore().get_actor(WORKSPACE, actor_key)
+    moved_actor = OfficeStore().upsert_actor(
+        WORKSPACE,
+        {
+            "actor_key": actor_key,
+            "persona_id": stored.persona_id,
+            "persona_instance_id": stored.persona_instance_id,
+            "items": [
+                {
+                    "item_id": item.item_id,
+                    "kind": item.kind,
+                    "position": [41.0, -17.0],
+                    "folder": item.folder,
+                    "display_name": item.display_name,
+                }
+                for item in stored.items
+            ],
+        },
+        updated_by="operator",
+    )
+    assert moved_actor.revision > stored.revision
+
+    resumed = perform_agent_create(
+        _params(
+            idempotency_key=key,
+            placement_id="qa_resume_moved",
+            skills=["harness-qa-verdict"],
+        ),
+        persona=qa_persona,
+    )
+
+    assert resumed.refusal is None
+    # This attempt DID work, so it is not a replay — and that is precisely why
+    # the actor it reports has to be the live one.
+    assert resumed.result["idempotent_replay"] is False
+    assert resumed.result["skills"]["assigned"] == ["harness-qa-verdict"]
+
+    # The three keys a client adopts, all as the row is NOW, and all different
+    # from what the receipt froze.
+    assert resumed.result["position"] == [41.0, -17.0]
+    assert resumed.result["position"] != recorded["position"]
+    assert resumed.result["revision"] == moved_actor.revision
+    assert resumed.result["revision"] != recorded["revision"]
+    assert resumed.result["actor"]["revision"] == moved_actor.revision
+    assert resumed.result["actor"] != recorded["actor"]
+    assert resumed.result["actor_fresh"] is True
+
+    # IDENTITY is the recorded decision and is NOT re-derived.
+    assert resumed.result["persona_instance_id"] == recorded["persona_instance_id"]
+    assert resumed.result["placement_id"] == recorded["placement_id"]
+    assert (
+        resumed.result["default_chat_session_id"]
+        == recorded["default_chat_session_id"]
+    )
+
+    # The resume re-placed nothing: the store still carries the operator's
+    # write and not a third revision on top of it.
+    assert (
+        OfficeStore().get_actor(WORKSPACE, actor_key).revision == moved_actor.revision
+    )
+    assert _reservation_state(key) == "done"
+
+
+def test_a_resumed_create_whose_actor_is_gone_says_so_instead_of_inventing_one(
+    qa_persona, isolated_shared_skills
+):
+    """The other half of the resume's re-read, and the half that keeps it honest.
+
+    An actor archived between the refusal and the retry cannot be re-read. The
+    reply degrades to "here is what was recorded, and it may be stale" — the
+    recorded row returned UNCHANGED with ``actor_fresh: false`` — rather than
+    fabricating a row or raising at a caller who only wanted their skills phase
+    to finish.
+
+    RED-FIRST against the arm this replaces: the frozen ``dict(record.result)``
+    copied ``actor_fresh: true`` out of the receipt, so a resume whose agent had
+    been taken off the level answered that its actor was fresh. That is the
+    worst of the three stale answers, because it is the one the client is told
+    it may trust.
+
+    ANTI-VACUITY. ``actor_fresh`` is asserted alongside the recorded row coming
+    back INTACT, so an implementation that reported ``false`` by blanking the
+    actor fails, and one that kept the actor by reporting ``true`` fails.
+    """
+
+    from agent_runtime.office_store import OfficeStore
+
+    _seed_workspace()
+    key = "resume-actor-gone"
+    refused = perform_agent_create(
+        _params(
+            idempotency_key=key,
+            placement_id="qa_resume_gone",
+            skills=["not-a-skill-anyone-has"],
+        ),
+        persona=qa_persona,
+    )
+    assert refused.refusal is not None
+    recorded = _reservation_record(key)["result"]
+    OfficeStore().remove_actor(WORKSPACE, recorded["actor_key"], updated_by="operator")
+
+    resumed = perform_agent_create(
+        _params(
+            idempotency_key=key,
+            placement_id="qa_resume_gone",
+            skills=["harness-qa-verdict"],
+        ),
+        persona=qa_persona,
+    )
+
+    assert resumed.refusal is None
+    assert resumed.result["actor_fresh"] is False
+    # Unchanged, not invented.
+    assert resumed.result["actor"] == recorded["actor"]
+    assert resumed.result["position"] == recorded["position"]
+    assert resumed.result["revision"] == recorded["revision"]
+    # The phase this retry existed to run still ran.
+    assert resumed.result["skills"]["assigned"] == ["harness-qa-verdict"]
+
+
+def test_the_skills_block_says_whether_the_agent_inherits_or_was_overridden(
+    qa_persona, isolated_shared_skills
+):
+    """``inherited`` (D11) — the key that separates two agents ``assigned: []``
+    cannot.
+
+    A create that sent no ``skills`` leaves ``skill_overrides = None`` and the
+    agent inherits its persona's skills, live. A create that sent ``skills: []``
+    writes an EXPLICIT empty override: an agent with no skills at all. Both
+    render ``assigned: []``, so before this key a client reading the ack could
+    not tell them apart — and the launcher renders them differently.
+
+    RED-FIRST: the key does not exist on HEAD, so every ``inherited`` assertion
+    below fails there.
+
+    KILLING MUTATION: stamp ``"inherited": True`` on ``run_skills_phase``'s
+    return and the two overridden arms red; stamp ``False`` in
+    ``_inherited_skills_ack`` and the absent arm reds.
+
+    ANTI-VACUITY. Each arm is asserted against the STORE's ``skill_overrides``
+    in the same breath, so the flag is pinned to the thing it claims to describe
+    rather than to a constant that happens to match on one path. The
+    explicit-empty arm is why: it is the only case where the flag and
+    ``assigned`` disagree, and a mutant deriving ``inherited`` from
+    ``not assigned`` passes both other arms and fails only that one.
+    """
+
+    _seed_workspace()
+
+    absent = perform_agent_create(
+        _params(idempotency_key="inh-absent", placement_id="qa_inh_absent"),
+        persona=qa_persona,
+    )
+    assert absent.refusal is None
+    assert _overrides("personainst_qa_inh_absent") is None
+    assert absent.result["skills"] == {
+        "assigned": [],
+        "installed": [],
+        "inherited": True,
+    }
+
+    explicit_empty = perform_agent_create(
+        _params(idempotency_key="inh-empty", placement_id="qa_inh_empty", skills=[]),
+        persona=qa_persona,
+    )
+    assert explicit_empty.refusal is None
+    assert _overrides("personainst_qa_inh_empty") == []
+    # The same ``assigned`` as the arm above, and the opposite meaning.
+    assert explicit_empty.result["skills"]["assigned"] == []
+    assert explicit_empty.result["skills"]["inherited"] is False
+
+    overridden = perform_agent_create(
+        _params(
+            idempotency_key="inh-set",
+            placement_id="qa_inh_set",
+            skills=["harness-qa-verdict"],
+        ),
+        persona=qa_persona,
+    )
+    assert overridden.refusal is None
+    assert _overrides("personainst_qa_inh_set") == ["harness-qa-verdict"]
+    assert overridden.result["skills"]["inherited"] is False
+
+
+def test_a_resume_that_sends_no_skills_renders_the_same_block(
+    qa_persona, isolated_shared_skills
+):
+    """The resume arm renders the same block as the fresh one.
+
+    Two sites build the absent-request ack — the fresh path and the ``placed``
+    re-entry — and a client cannot see which one answered it. The pin is here
+    because the two were separately written and the second is the one no fresh
+    create ever exercises.
+    """
+
+    _seed_workspace()
+    key = "inh-resume"
+    refused = perform_agent_create(
+        _params(
+            idempotency_key=key,
+            placement_id="qa_inh_resume",
+            skills=["not-a-skill-anyone-has"],
+        ),
+        persona=qa_persona,
+    )
+    assert refused.refusal is not None
+
+    resumed = perform_agent_create(
+        _params(idempotency_key=key, placement_id="qa_inh_resume"),
+        persona=qa_persona,
+    )
+
+    assert resumed.refusal is None
+    assert resumed.result["skills"] == {
+        "assigned": [],
+        "installed": [],
+        "inherited": True,
+    }
+    # The phase never ran, so nothing was written and the agent still inherits.
+    assert _overrides("personainst_qa_inh_resume") is None
+
+
 def test_an_absent_skills_key_leaves_the_override_inheriting(
     qa_persona, isolated_shared_skills
 ):
@@ -1137,7 +1416,12 @@ def test_an_absent_skills_key_leaves_the_override_inheriting(
     assert outcome.refusal is None
     assert _overrides("personainst_qa_skills_absent") is None
     # The ack block is still PRESENT and empty: one shape whatever was asked.
-    assert outcome.result["skills"] == {"assigned": [], "installed": []}
+    assert outcome.result["skills"] == {
+        "assigned": [],
+        "installed": [],
+        # S4b/D11: what makes this ack different from an explicit ``skills: []``.
+        "inherited": True,
+    }
     assert "skills_ms" in outcome.result["phases"]
 
 

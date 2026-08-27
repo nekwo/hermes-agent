@@ -24,9 +24,10 @@ stranding:
     asked for skills that have not been assigned yet. A replay skips both
     writes and re-enters at the SKILLS phase alone. Added by plan S4.
 ``done``
-    Both landed. A replay returns the recorded reply verbatim and writes
-    nothing — the revision the actor carries is the witness that it wrote
-    nothing.
+    Both landed. A replay writes nothing and returns the recorded reply with
+    its actor RE-READ off the live row (``agent_create.replayed_result``) — the
+    receipt FILE is the witness that nothing was written, not the reply's
+    revision, which is one of the fields the re-read deliberately refreshes.
 ``rolled_back``
     The placement was refused and the instance was compensated away. A replay
     returns the recorded refusal rather than re-attempting, which is decision
@@ -164,9 +165,19 @@ class AgentCreateReservation:
         ``instance_minted`` resume that has always existed.
 
         ``result`` is the full placement ack, recorded here rather than
-        recomputed on resume — a resumed create must hand back the actor key,
-        revision and position the FIRST attempt wrote, not a second read of a
-        row anything could have moved since.
+        recomputed on resume, because it is where the create's DECISIONS live:
+        the instance id it minted, the placement id it was given, the chat
+        session it rooted. Those are re-read by nobody.
+
+        What it is NOT is the reply. The office actor is mutable by drag, by
+        realm pull and by ``resolve_conflict``, so the recorded ``actor``,
+        ``position`` and ``revision`` are observations that expire; the resume
+        arm hands them to :func:`agent_create.replayed_result` and answers with
+        the row as it IS, exactly as the ``done`` arm does. This docstring used
+        to argue the opposite — "not a second read of a row anything could have
+        moved since" — which is the argument for freezing precisely the three
+        fields plan S7 has the launcher ADOPT into its scene and its
+        ``expect_revision`` bookkeeping. Fixed in S4b.
         """
 
         self.record = replace(

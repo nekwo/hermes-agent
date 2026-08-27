@@ -2,8 +2,12 @@
 
 `python scripts/changed_line_mutation_check.py --base <merge-base>` selects
 only explicit claims whose exact production source overlaps the diff, baselines
-their focused commands once, applies at most 12 mutations, and requires each
-focused test to fail. The original bytes are restored in `finally` after every
+their focused commands once, applies at most 16 mutations, and requires each
+focused test to fail. 16, not the script's own `--max-candidates` default of
+12: CI's `mutation-claims` job passes `--max-candidates 16` explicitly and the
+comment beside that call site carries the reason for the raise. The number a
+run enforces is the one on the command line, so read it there — this paragraph
+said 12 while the gate ran 16. The original bytes are restored in `finally` after every
 candidate.
 
 Claims live in `tests/mutation_claims.json`. Defect/ruling tests should add a

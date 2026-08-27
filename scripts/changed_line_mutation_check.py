@@ -79,11 +79,26 @@ def _claim_span(text: str, needle: str) -> tuple[int, set[int]]:
     return offset, set(range(start, start + count))
 
 
-def _selected_claims(base: str, claims_path: Path) -> list[dict[str, Any]]:
+def _partition_claims(
+    base: str, claims_path: Path
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Every claim, split into the ones this diff selects and the ones it does not.
+
+    The unselected half is RETURNED rather than dropped on the floor. A claim
+    whose ``find`` still resolves but whose line the diff never touched is not
+    an error and must not be run — but it is also not nothing: it is a
+    registered guarantee that this run did not exercise, and a reader who sees
+    only the selected list cannot tell it apart from a claim that was never
+    written. Measured on the S4 landing, where
+    ``s4-a-pre-plan-done-receipt-re-enters-the-skills-phase`` anchors a line the
+    slice did not change and therefore never appeared in any output at all.
+    """
+
     rows = _load_json(claims_path).get("claims", [])
     if not isinstance(rows, list):
         raise RuntimeError(f"{claims_path}: claims must be a list")
     selected: list[dict[str, Any]] = []
+    unselected: list[dict[str, Any]] = []
     for claim in rows:
         if not isinstance(claim, dict):
             raise RuntimeError(f"{claims_path}: claim rows must be objects")
@@ -97,7 +112,9 @@ def _selected_claims(base: str, claims_path: Path) -> list[dict[str, Any]]:
         _, span = _claim_span(text, str(claim["find"]))
         if span & _changed_lines(base, str(claim["path"])):
             selected.append(claim)
-    return selected
+        else:
+            unselected.append(claim)
+    return selected, unselected
 
 
 def _command(claim: dict[str, Any]) -> list[str]:
@@ -116,10 +133,21 @@ def _run_command(command: list[str]) -> int:
 
 def run(base: str, claims_path: Path, exemptions_path: Path, max_candidates: int, list_only: bool) -> int:
     _validate_exemptions(exemptions_path)
-    claims = _selected_claims(base, claims_path)
+    claims, unselected = _partition_claims(base, claims_path)
     print(f"mutation candidates: {len(claims)} (cap {max_candidates})")
     for claim in claims:
         print(f"  {claim['id']}: {claim['path']}::{claim['symbol']} [{claim['operator']}]")
+    if list_only:
+        # Only under ``--list``, which is the inventory lane. A real run prints
+        # what it is about to mutate and nothing else; this is for the reader
+        # asking "and what did this diff NOT put on the hook".
+        #
+        # AFTER the candidate line and never instead of it: CI branches on
+        # ``^mutation candidates: 0 `` to decide whether to install the test
+        # environment at all, so these rows are additive and that line keeps
+        # its meaning.
+        for claim in unselected:
+            print(f"UNSELECTED (0 changed lines): {claim['id']}")
     if len(claims) > max_candidates:
         print("candidate cap exceeded; split the diff or raise the cap visibly", file=sys.stderr)
         return 2

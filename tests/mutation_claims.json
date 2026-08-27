@@ -479,6 +479,66 @@
         "-q",
         "tests/agent_runtime/test_office_layout_policy.py::test_an_item_exactly_at_the_occupancy_radius_does_not_block"
       ]
+    },
+    {
+      "id": "s4b-a-resumed-placed-create-freezes-the-receipts-actor",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "perform_agent_create",
+      "operator": "freeze-resume-actor",
+      "find": "                result = replayed_result(record.result)",
+      "replace": "                result = dict(record.result)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_a_resumed_placed_create_reports_the_actor_as_it_is"
+      ]
+    },
+    {
+      "id": "s4b-an-overridden-agent-reports-itself-as-inheriting",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "run_skills_phase",
+      "operator": "flip-inherited",
+      "find": "        \"inherited\": False,",
+      "replace": "        \"inherited\": True,",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_the_skills_block_says_whether_the_agent_inherits_or_was_overridden"
+      ]
+    },
+    {
+      "id": "s4b-an-inheriting-agent-reports-itself-as-overridden",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "_inherited_skills_ack",
+      "operator": "flip-inherited",
+      "find": "    return {\"assigned\": [], \"installed\": [], \"inherited\": True}",
+      "replace": "    return {\"assigned\": [], \"installed\": [], \"inherited\": False}",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_the_skills_block_says_whether_the_agent_inherits_or_was_overridden"
+      ]
+    },
+    {
+      "id": "s4b-the-inventory-drops-the-claims-it-did-not-select",
+      "path": "scripts/changed_line_mutation_check.py",
+      "symbol": "run",
+      "operator": "empty-the-unselected-report",
+      "find": "        for claim in unselected:",
+      "replace": "        for claim in []:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/scripts/test_changed_line_mutation_check.py::test_a_resolving_claim_the_diff_never_touched_is_listed_as_unselected"
+      ]
     }
   ]
 }

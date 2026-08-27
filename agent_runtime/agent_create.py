@@ -1010,7 +1010,42 @@ def run_skills_phase(
         # a guarantee instead of a claim.
         "assigned": list(updated.skill_overrides or []),
         "installed": installed,
+        # This phase RAN, so the instance now carries its own overrides —
+        # whatever the list turned out to be, including an explicitly empty one.
+        # ``inherited`` is what separates that empty list from the absent
+        # request that leaves the persona's skills in force (D11): both render
+        # ``assigned: []``, and a client that has only ``assigned`` cannot tell
+        # "this agent was overridden with nothing" from "this agent inherits
+        # everything its persona has".
+        "inherited": False,
     }
+
+
+def _inherited_skills_ack() -> dict[str, Any]:
+    """The ``skills`` block for a create that sent no ``skills`` at all.
+
+    ONE shape on every reply (D11): the block is present whether or not the
+    phase ran, so a client never has to read an absent key as an answer. What
+    the absent request means is carried by ``inherited: True`` — the new
+    instance's ``skill_overrides`` stays ``None`` and it therefore inherits its
+    persona's skills, LIVE, rather than being pinned to a copy of them.
+
+    Without this flag ``assigned: []`` is two different agents wearing one
+    reply: the inheriting one, and the one an operator deliberately overrode
+    with ``skills: []`` (an agent with no skills at all). The launcher renders
+    those differently and could not previously tell them apart.
+
+    One window where the flag is a statement about the REQUEST rather than a
+    re-read of the row: a create that crashed between ``update_profile`` and
+    ``mark_done``, resumed under the same key with no ``skills``, leaves the
+    overrides the crashed attempt wrote and still answers ``inherited: True``.
+    Re-reading the row here would make the ack a second authority for what this
+    key decided (the same argument that keeps ``persona_instance_id`` out of
+    :func:`replayed_result`'s re-read), so the flag stays a statement of the
+    request and this paragraph is the accounting for it.
+    """
+
+    return {"assigned": [], "installed": [], "inherited": True}
 
 
 def replayed_result(record_result: dict[str, Any]) -> dict[str, Any]:
@@ -1361,9 +1396,17 @@ def perform_agent_create(
                 # Both writes landed under this key; only the skills phase is
                 # owed. Re-enter THERE and nowhere else — re-minting or
                 # re-placing would be the duplicate-agent bug the ledger exists
-                # to prevent, and the recorded ack is what the first attempt
-                # actually wrote (actor key, revision, position), which a second
-                # read of the store could no longer promise.
+                # to prevent.
+                #
+                # The recorded ack is NOT the reply, though. It is the ack the
+                # FIRST attempt rendered, and the office actor has been mutable
+                # ever since — an operator drags the agent while they go and
+                # look up the skill id they mistyped, and the retry that fixes
+                # the typo would otherwise answer with the coordinates and the
+                # revision the row had before the drag. Same argument, same
+                # cure and the same re-read as the ``done`` arm above
+                # (:func:`replayed_result`), because it is the same defect:
+                # S7's launcher ADOPTS this actor.
                 instance_id = record.persona_instance_id or ""
                 if not instance_id or not record.result:
                     # A shape this code never writes: ``mark_placed`` always
@@ -1378,7 +1421,7 @@ def perform_agent_create(
                         {"reason": "reservation_corrupt", "rolled_back": False},
                     )
                 skills_started = time.monotonic()
-                result = dict(record.result)
+                result = replayed_result(record.result)
                 # The CURRENT request's list, not the receipt's. The whole
                 # point of the resume is that an operator who mistyped a skill
                 # id fixes it and retries under the same key; answering with the
@@ -1386,7 +1429,7 @@ def perform_agent_create(
                 # typo, forever.
                 requested = request.skills
                 if requested is None:
-                    skills_ack: dict[str, Any] = {"assigned": [], "installed": []}
+                    skills_ack: dict[str, Any] = _inherited_skills_ack()
                 else:
                     if list(requested) != list(record.skills or []):
                         reservation.mark_placed(result, skills=list(requested))
@@ -1784,7 +1827,7 @@ def perform_agent_create(
                 # empty list, which would be a different agent (D5, F13's
                 # ``is not None`` contract). The ack block is still present and
                 # empty, so a client reads one shape whatever was asked.
-                skills_ack = {"assigned": [], "installed": []}
+                skills_ack = _inherited_skills_ack()
             else:
                 reservation.mark_placed(result, skills=list(request.skills))
                 try:

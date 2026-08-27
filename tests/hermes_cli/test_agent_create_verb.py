@@ -826,8 +826,16 @@ def test_the_skill_flag_and_the_rpc_param_render_the_same_request(
     assert cli["skills"]["assigned"] == rpc["skills"]["assigned"]
     assert _overrides("personainst_qa_sk_cli") == ["harness-qa-verdict"]
     assert _overrides("personainst_qa_sk_rpc") == ["harness-qa-verdict"]
-    # The shape too, not just the assignment: one ack, two printers.
-    assert set(cli["skills"]) == set(rpc["skills"]) == {"assigned", "installed"}
+    # The shape too, not just the assignment: one ack, two printers. By
+    # EQUALITY on the key set, so a new key is a deliberate edit here rather
+    # than a silent wire change — which is what caught S4b adding inherited.
+    assert (
+        set(cli["skills"])
+        == set(rpc["skills"])
+        == {"assigned", "installed", "inherited"}
+    )
+    # Both doors agree it was an OVERRIDE, not an inherit (S4b/D11).
+    assert cli["skills"]["inherited"] is rpc["skills"]["inherited"] is False
     assert set(cli["phases"]) == set(rpc["phases"])
     assert "skills_ms" in cli["phases"]
 
@@ -877,7 +885,13 @@ def test_an_omitted_skill_flag_leaves_the_instance_inheriting(
     )
 
     assert code == 0
-    assert data["skills"] == {"assigned": [], "installed": []}
+    assert data["skills"] == {
+        "assigned": [],
+        "installed": [],
+        # S4b/D11: the flag that says this agent INHERITS rather than
+        # having been overridden with nothing.
+        "inherited": True,
+    }
     assert _overrides("personainst_qa_sk_none") is None
 
 

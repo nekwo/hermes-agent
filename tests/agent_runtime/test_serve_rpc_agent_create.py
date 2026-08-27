@@ -175,8 +175,14 @@ def test_create_returns_both_rows_and_a_phase_envelope(qa_persona):
         "skills_ms",
         "total_ms",
     }
-    # This create sent no ``skills``, and the ack still carries the block.
-    assert result["skills"] == {"assigned": [], "installed": []}
+    # This create sent no ``skills``, and the ack still carries the block —
+    # with ``inherited: true``, which is what distinguishes it from the
+    # explicit ``skills: []`` that renders the same ``assigned`` (S4b/D11).
+    assert result["skills"] == {
+        "assigned": [],
+        "installed": [],
+        "inherited": True,
+    }
 
     # BOTH rows, read back off disk rather than off the reply.
     instances = _instances()
