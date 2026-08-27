@@ -72,6 +72,35 @@ Ordering is load-bearing (register first, then prune) and so is the classifier:
 the boot caller passes no widened classification set, so ``unknown`` and
 ``stale_recycled_pid`` survive a boot exactly as they survive everything else.
 
+``hermes_home``: which home, answered from OUTSIDE the process
+--------------------------------------------------------------
+
+``store_root`` answers *which runtime root*, and that is a different axis from
+*which profile home*. A serve child spawned with ``HERMES_HOME`` pointed at
+``profiles/base`` writes the same ``store_root`` as one that resolved
+``profiles/alice``, so until this field existed nothing outside a running serve
+could say which home it was on — ``harness status --json`` answers it live, but
+only for the process you can already talk to, which is the wrong end of the
+question when you are looking at a directory of records.
+
+The field is *the home this process resolved AT REGISTRATION*. It is
+deliberately not per-turn truth: the runtime may rebind a home for a single
+turn and this key will not have moved. Reading it as anything stronger than a
+boot-time observation is a misuse.
+
+Three states, three spellings, and a reader must keep them apart: a path says
+*this home*; ``null`` says *this serve could not resolve one*; an ABSENT key
+says *this entry predates the field*. That third state is real — the records
+written before this landed have no such key — so **nothing classifies on it**.
+It is reported, never branched on, and ``schema_version`` stays 1 for exactly
+that reason: an additive nullable key that no reader requires is not a new
+schema (the ``port`` / ``socket_started_at`` precedent).
+
+Resolution is the CALLER's job. This module imports no ``hermes_constants``;
+``hermes_cli.harness_parts.serve`` passes ``str(get_hermes_home())`` and
+degrades to ``None`` if that raises, because a registry entry is bookkeeping
+and bookkeeping must not be able to fail a boot.
+
 Fingerprint exclusion (load-bearing)
 ------------------------------------
 
@@ -199,6 +228,7 @@ def register_serve_instance(
     probe: ProcessProbe | None = None,
     port: int | None = None,
     socket_started_at: str | None = None,
+    hermes_home: str | None = None,
 ) -> ServeInstanceRegistration:
     """Announce this serve under *store_root*. Best effort, always reported.
 
@@ -210,6 +240,14 @@ def register_serve_instance(
     socket ownership lock, so discovery reads the port off the entry whose
     liveness this module has already classified rather than out of a second file
     with its own staleness story.
+
+    ``hermes_home`` follows the same additive-null rule and is likewise ALWAYS
+    written — see the module docstring for what it does and does not mean. The
+    value is COMPUTED BY THE CALLER and passed in: this module resolves nothing
+    and imports no ``hermes_constants``, so the field stays unit-testable
+    against an injected string and the registry keeps its one job. A caller
+    whose resolution failed passes ``None``, which is written as ``null`` and
+    never as an empty string — an empty string reads like a path.
     """
 
     resolved_pid = int(pid if pid is not None else os.getpid())
@@ -224,6 +262,11 @@ def register_serve_instance(
         "port": None if port is None else int(port),
         "socket_started_at": socket_started_at,
         "store_root": str(store_root),
+        # The home THIS process resolved AT BOOT — an observability fact, not
+        # per-turn authority: the runtime may rebind a home for a turn, and
+        # this key will not have moved. Null says "resolution failed"; an
+        # ABSENT key says "this entry predates the field".
+        "hermes_home": None if hermes_home is None else str(hermes_home),
         "started_at": _now_iso(),
         # The identity baseline the recycled-pid check compares against. None
         # when the OS would not say — recorded as null so the reader knows the

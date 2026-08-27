@@ -1664,6 +1664,20 @@ def serve_loop(
             try:
                 from agent_runtime.serve_registry import register_serve_instance
 
+                # WHICH HOME this child resolved (D-3). store_root answers a
+                # DIFFERENT question — one root is shared by serves on
+                # different profile homes — so from outside the process
+                # nothing could say which home a running serve was on.
+                # Resolved HERE, not in the registry: that module stays free
+                # of hermes_constants and unit-testable against a string.
+                # A resolution failure degrades to None (written as null);
+                # bookkeeping must never be the thing that fails a boot.
+                try:
+                    from hermes_constants import get_hermes_home
+
+                    resolved_home: str | None = str(get_hermes_home())
+                except Exception:
+                    resolved_home = None
                 instance_block = register_serve_instance(
                     store_root_path,
                     transport=socket_transport,
@@ -1673,6 +1687,7 @@ def serve_loop(
                     socket_started_at=(
                         socket_server.started_at if socket_server is not None else None
                     ),
+                    hermes_home=resolved_home,
                 ).payload()
             except Exception as exc:
                 instance_block = {"outcome": f"error:{type(exc).__name__}"}
