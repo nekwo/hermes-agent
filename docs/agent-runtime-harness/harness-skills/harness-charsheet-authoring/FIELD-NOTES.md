@@ -1634,6 +1634,61 @@ which is exactly the shape that caused the 2026-08-26/27 cross-session incident.
   is the weaker of the two, and a future strip quoting a bare `pytest` gate should say so.
   The runner needs `HERMES_PYTHON` set in a fresh worktree, which has no `.venv`.
 
+### W3 — the skill catches up with the launcher's new meaning (2026-08-27, gap-closure wave)
+
+- **[READ, at launcher `origin/main`] The launcher field this skill described for three
+  sections stopped meaning what the skill said.** `CharaDraftBinding.home` was documented as
+  *the home the authoring turn resolved* — a fact nothing in that launcher has ever known,
+  which is why it had no production writer and every real row short-circuited. Owner
+  decision §13.24 redefined it as **a home the launcher OBSERVED the draft readable in**,
+  renamed the sealed family `CharaAuthoringHome` → `CharaDraftHome` (arm names and every
+  wire key — `home`, `state: observed|unknown`, `path` — unchanged, so bundles on disk
+  decode identically), and gave it exactly one production writer: `_DraftList._adopt` in
+  `adopt_character_dialog.dart`, which stamps `CharaHomeObserved(path)` only from a
+  `HermesLaneHomeResolved` and keeps unknown on every other arm. §13.25 then flipped
+  `mergeCharaDraftBinding`'s home arm to `seen.home is CharaHomeObserved ? seen.home :
+  stored.home` — freshest sighting wins, unknown never clobbers observed.
+  **Consequence for an authoring agent:** the only home the launcher can ever hold is a
+  *sighting by the launcher*, never the home your turn authored from, and it is written by
+  an operator's click rather than by anything you emit. Your prose is still the sole
+  carrier of the authored home. §13.22 is untouched — the `CHARSHEET-QA:` line still
+  carries no home and is not to grow one, and §13.24 says so explicitly.
+
+- **[READ] The resume seed's home line is a two-repo contract, and it is quoted verbatim in
+  both.** `MissionCharacterResumeSeed.message` composes
+  `last observed home: <path>`, or `last observed home: never observed by the launcher`
+  when there is no sighting, and closes with *"Echo the home you resolve; do not assume
+  it."* Its own doc comment says the spelling "is a contract across two repos rather than
+  launcher copy". **Consequence:** a resume turn is handed a possibly-stale sighting and a
+  standing instruction not to trust it. Re-run the preflight probes, echo
+  `.runtime_health.hermes_home`, and if the draft is not in your list say which home you
+  are in and which home the seed named — never author a second copy over a home
+  disagreement. The launcher fills nothing in when it has no sighting; `never observed by
+  the launcher` is a value, not a bug.
+
+- **[TRAP FOR THE NEXT SLICE — it will poison a red-first if you let it]
+  `verify_harness_skill_install.py --check` hashes the PACKAGE DIRECTORY, and FIELD-NOTES.md
+  lives in it.** So an append to *this file alone* reports
+  `harness-charsheet-authoring: … DIVERGED` while the two `SKILL.md` copies are byte-identical
+  — I proved it in isolation before touching SKILL.md (`diff -q` said identical; the gate
+  said DIVERGED). The gate's own report line is what makes this confusing: it prints
+  `repo 44478 B … | installed 44478 B …` with two different hashes, because the SIZE column is
+  `source.stat().st_size` (SKILL.md alone) while the hash is
+  `skill_package_content_hash(source.parent, source)` over the whole directory. Equal sizes
+  beside unequal hashes is the signature of a sibling-file change, not a SKILL.md change.
+  **Consequence:** never read a DIVERGED as evidence about `SKILL.md`, and never make this
+  gate a strip's red-first — plan §W3 names it as one and it cannot serve. Own the red in
+  this repo instead: pin the sentences in
+  `tests/agent_runtime/test_persona_skill_policy.py`, where the failure names the phrase.
+  The divergence self-heals anyway — `.githooks/pre-push` runs the script in repair mode,
+  so it installs from the repo and re-verifies on every push.
+
+- **[TRAP, cost me one red] A cross-repo quoted string must not be markdown-wrapped.**
+  My pin on `never observed by the launcher` reded against a SKILL.md that contained the
+  phrase — with a newline and two spaces of indent inside it. A quoted contract is a
+  contiguous string or it is not the contract; reflow the sentence around it rather than
+  through it.
+
 <!-- A2, A3, R1 and any slice standing in the HERMES repo: append your entries above this
      line, under the matching heading, or add a heading if none fits. Then say in your
      slice report that you did.
