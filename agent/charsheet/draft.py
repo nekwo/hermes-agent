@@ -62,11 +62,14 @@ logger = logging.getLogger(__name__)
 
 # One number, three documents: `draft.json`, the `status --json` payload, and
 # the INSTALLED `character.json` manifest the launcher parses. That is why
-# `authored_by` did not bump it — an optional, draft-only provenance field that
-# a schema-1 reader already tolerates (it is absent when unset, and unknown keys
-# were always ignored) is not worth relabelling an installed sheet's manifest
-# for. A field that a consumer must read to be correct is a different case and
-# would bump all three, which is the argument for splitting them first.
+# neither `authored_by` NOR `hermes_home` bumped it — an optional, draft-only
+# provenance field that a schema-1 reader already tolerates (it is absent when
+# unset, and unknown keys were always ignored) is not worth relabelling an
+# installed sheet's manifest for. Both fields clear that bar the same way:
+# neither is copied into the manifest, and no consumer branches on either to be
+# correct — a reader that ignores them renders exactly what it renders today. A
+# field that a consumer must read to be correct is a different case and would
+# bump all three, which is the argument for splitting them first.
 SCHEMA = 1
 
 # turnaround → rows → composed. Order is the tuple order; nothing branches on a
@@ -330,6 +333,15 @@ class CharacterDraft:
         into the payload, where a consumer can no longer tell a draft with no
         author recorded from one authored by ``""`` and a backfill can no longer
         select the drafts that need filling in.
+
+        ``hermes_home`` is the OTHER provenance field, and it is written every
+        time because nobody has to supply it: it is ``str(get_hermes_home())``,
+        the home this run resolved and created the draft under. It answers
+        "where was this authored", which no consumer could previously get from
+        anywhere — a launcher can observe which homes it can currently READ a
+        draft in, but that is a different fact and a per-moment one. See
+        :attr:`hermes_home` for what the value means once it is stale, and
+        :meth:`record_home` for the drafts that predate the field.
         """
         concept = str(concept or "").strip()
         if not concept:
@@ -361,6 +373,13 @@ class CharacterDraft:
         author = str(authored_by or "").strip()
         if author:
             data["authored_by"] = author
+        # Written UNCONDITIONALLY, unlike `authored_by`: there is no caller to
+        # withhold it and nothing to guess. `drafts_dir()` resolved
+        # `get_hermes_home()` two statements above, and `directory` was just
+        # created under it — the draft IS sitting where this key says it is, so
+        # recording it is hermes stating a fact about its own filesystem rather
+        # than a consumer deriving one from a path it happened to be handed.
+        data["hermes_home"] = str(get_hermes_home())
         draft = cls(directory, data)
         draft._save()
         if base_image is not None:
@@ -437,6 +456,28 @@ class CharacterDraft:
         return author or None
 
     @property
+    def hermes_home(self) -> str | None:
+        """The ``HERMES_HOME`` this draft was created under, or ``None``.
+
+        ``None`` and not ``""``, for exactly the reason ``authored_by`` gives
+        above: the drafts written before this key existed have to stay
+        selectable by the backfill, and a consumer has to be able to READ that
+        no home was ever recorded rather than receive a value that renders as a
+        blank path.
+
+        **What it means when it disagrees with where the file is now.** This is
+        provenance about a PAST fact — the home hermes recorded when the draft
+        was created (or, for a backfilled draft, the home it sat under when the
+        backfill ran). A draft that was copied or backed up into another home
+        still names the first one, and that is the field being honest, not a
+        defect to repair: "where hermes recorded it" is not "where it sits
+        today", and a consumer that wants the second question answered has to
+        observe it, not read this. Nothing rewrites a value once it is here.
+        """
+        home = str(self._data.get("hermes_home", "") or "").strip()
+        return home or None
+
+    @property
     def spec(self) -> SheetSpec:
         return spec_from_dict(self._data.get("spec") or {})
 
@@ -451,6 +492,37 @@ class CharacterDraft:
     @property
     def store(self) -> ImageRevisionStore:
         return ImageRevisionStore(self.directory / REVISIONS_DIRNAME)
+
+    # --------------------------------------------------------- provenance
+
+    def record_home(self) -> bool:
+        """Fill in a missing ``hermes_home``; return whether anything was written.
+
+        The backfill writer for drafts that predate the field, and the second
+        and last site that writes it (``create`` is the first). Two rules, and
+        both are load-bearing:
+
+        **It never rewrites.** A draft that already states a home keeps it, even
+        when that home is not the one resolving now — see :attr:`hermes_home`.
+        Stamping unconditionally would overwrite the history the field exists to
+        keep, silently, on every run, and it is the copied and backed-up drafts
+        — the ones whose recorded home is most interesting — that it would
+        destroy first. A present-but-blank value counts as absent, because the
+        accessor already rules that ``""`` is not a home.
+
+        **It does not go through :meth:`_save`.** ``_save`` stamps ``updated``
+        with "now", and the drafts this exists for are dormant exhibits whose
+        timeline is evidence: a backfill that bumped every one of them to the
+        moment an operator ran it would falsify exactly what those drafts are
+        kept to show. This writes the file directly, so every other byte —
+        ``updated`` and ``authored_by`` included — is left as it was found.
+        """
+        if self.hermes_home is not None:
+            return False
+        self._data["hermes_home"] = str(get_hermes_home())
+        _write_json_atomic(self.directory / DRAFT_FILENAME, self._data)
+        logger.info("charsheet draft %s: recorded home %s", self.id, self._data["hermes_home"])
+        return True
 
     # ------------------------------------------------------------- internals
 
@@ -1167,6 +1239,10 @@ class CharacterDraft:
             "concept": self.concept,
             "style": self.style,
             "authoredBy": self.authored_by,
+            # The two provenance fields travel together, and both spell absence
+            # `null`. `hermesHome` is a PATH field, so it is also bound by the
+            # rule this docstring states: a `str` or JSON `null`, never `""`.
+            "hermesHome": self.hermes_home,
             "stage": self.stage,
             "stages": list(STAGES),
             "created": str(self._data.get("created", "")),

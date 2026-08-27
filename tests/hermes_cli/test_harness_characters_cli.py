@@ -24,6 +24,7 @@ from agent.charsheet.draft import drafts_dir
 from agent.charsheet.revisions import STATE_FILENAME
 from agent.charsheet.spec import FOUR_WAY, SheetSpec, StateSpec
 from hermes_cli.harness import build_parser
+from hermes_constants import get_hermes_home
 
 pytest.importorskip("PIL")
 
@@ -218,6 +219,7 @@ def start_draft(capsys, *extra):
         (["reopen", "--draft", "d"], "reopen"),
         (["add-state", "--draft", "d", "--state", "jump:3"], "add-state"),
         (["sprite", "arrow-knight"], "sprite"),
+        (["backfill-home"], "backfill-home"),
     ],
 )
 def test_the_parser_exposes_every_characters_verb_with_json(argv, verb):
@@ -724,6 +726,181 @@ def test_start_shapes_the_sheet_from_the_states_and_directions_flags(fake, capsy
     # single spelling. The test PINNED the defect, which is why a review found
     # it and the suite did not.
     assert summary["baseImage"] is None
+
+
+def _forget_recorded_home(draft_id: str) -> Path:
+    """Make a draft look like the dormant exhibits: no `hermes_home` key at all.
+
+    The population the backfill exists for cannot be created by any verb — every
+    draft written after this wave carries the key — so the fixture for it is a
+    draft with the key removed off disk, which is byte-for-byte what those
+    drafts are.
+    """
+    path = drafts_dir() / draft_id / "draft.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data.pop("hermes_home", None)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    return path
+
+
+def test_start_records_the_home_hermes_resolved_in_every_payload(fake, capsys):
+    """The fact a consumer could not previously get, from the only authority for it.
+
+    `hermesHome` rides beside `authoredBy` in all three payloads a launcher
+    reads — the `start` summary, `status --json`, and the `list` row — because a
+    consumer that has to remember which of the three carries provenance is a
+    consumer that will read the wrong one.
+    """
+    code, started = run(
+        [
+            "harness", "characters", "start",
+            "--concept", "an arrow knight",
+            "--slug", "arrow-knight",
+            "--states", STATES_FLAG,
+            "--directions", DIRECTIONS_FLAG,
+            "--json",
+        ],
+        capsys,
+    )
+    draft_id = started["draft"]
+    expected = str(get_hermes_home())
+
+    _, status = run(["harness", "characters", "status", "--draft", draft_id, "--json"], capsys)
+    _, listed = run(["harness", "characters", "list", "--json"], capsys)
+
+    assert (code, started["ok"]) == (0, True)
+    assert started["summary"]["hermesHome"] == expected
+    assert status["status"]["hermesHome"] == expected
+    assert listed["drafts"][0]["hermesHome"] == expected
+
+
+def test_a_draft_written_before_the_field_reports_a_null_home_in_every_payload(
+    fake, capsys
+):
+    """`null`, never `""` — the path-field lesson, on the newest path field.
+
+    A launcher handed `""` cannot tell "hermes recorded no home for this draft"
+    from "hermes recorded the empty string", and the degraded row it renders for
+    the operator's live "then where IS it?" question is wrong in the one case it
+    exists to answer. Read off raw stdout, because the coercion this pins would
+    happen on the way out.
+    """
+    draft_id = start_draft(capsys)
+    _forget_recorded_home(draft_id)
+
+    args = parser().parse_args(
+        ["harness", "characters", "status", "--draft", draft_id, "--json"]
+    )
+    assert args.func(args) == 0
+    status_text = capsys.readouterr().out
+    args = parser().parse_args(["harness", "characters", "list", "--json"])
+    assert args.func(args) == 0
+    list_text = capsys.readouterr().out
+
+    assert one_json_object(status_text)["status"]["hermesHome"] is None
+    assert one_json_object(list_text)["drafts"][0]["hermesHome"] is None
+    assert '"hermesHome": null' in status_text
+    assert '"hermesHome": null' in list_text
+
+
+def test_backfill_stamps_the_drafts_that_carry_no_home_and_skips_the_rest(fake, capsys):
+    """The receipt IS the evidence: what it wrote, what it left, and where."""
+    legacy_id = start_draft(capsys)
+    fresh_id = start_draft(capsys)
+    legacy_path = _forget_recorded_home(legacy_id)
+    fresh_path = drafts_dir() / fresh_id / "draft.json"
+    fresh_before = fresh_path.read_bytes()
+
+    code, receipt = run(["harness", "characters", "backfill-home", "--json"], capsys)
+    home = str(get_hermes_home())
+
+    assert (code, receipt["ok"]) == (0, True)
+    assert receipt["home"] == home
+    assert [row["id"] for row in receipt["stamped"]] == [legacy_id]
+    assert [row["id"] for row in receipt["skipped"]] == [fresh_id]
+    # The receipt names DIRECTORIES beside ids: two drafts can carry the SAME id
+    # (a copied draft keeps the id inside its `draft.json`), and an id-only
+    # receipt cannot say which of the two directories it just wrote.
+    assert [row["directory"] for row in receipt["stamped"]] == [str(legacy_path.parent)]
+    assert json.loads(legacy_path.read_text(encoding="utf-8"))["hermes_home"] == home
+    # A skipped draft is not rewritten, re-serialised, or touched at all.
+    assert fresh_path.read_bytes() == fresh_before
+
+
+def test_backfill_leaves_a_dormant_drafts_history_exactly_as_it_found_it(fake, capsys):
+    """The exhibits' `updated` and `authored_by` are the whole reason they are kept.
+
+    A backfill routed through `_save()` would stamp every dormant draft with the
+    moment the operator ran it and destroy the timeline those drafts prove. The
+    dedicated writer is load-bearing, and this is the assertion that says so.
+    """
+    draft_id = start_draft(capsys, "--authored-by", "chara_a2")
+    path = _forget_recorded_home(draft_id)
+    before = json.loads(path.read_text(encoding="utf-8"))
+
+    code, _receipt = run(["harness", "characters", "backfill-home", "--json"], capsys)
+    after = json.loads(path.read_text(encoding="utf-8"))
+
+    assert code == 0
+    assert after.pop("hermes_home") == str(get_hermes_home())
+    assert after == before
+    # Named separately from the dict comparison above: these two are the keys the
+    # not-through-`_save` ruling exists for, and a future red should say which.
+    assert after["updated"] == before["updated"]
+    assert after["authored_by"] == "chara_a2"
+
+
+def test_backfill_never_rewrites_a_home_a_draft_already_states(fake, capsys):
+    """The control on stamp-always: a copied draft keeps the home it was made in.
+
+    A run that wrote the current home over every draft would look the same in its
+    first receipt and would then silently rewrite provenance on every run after,
+    which is the one thing a provenance field must never do to itself.
+    """
+    draft_id = start_draft(capsys)
+    path = drafts_dir() / draft_id / "draft.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["hermes_home"] = "/somewhere/else/profiles/original"
+    path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+
+    code, receipt = run(["harness", "characters", "backfill-home", "--json"], capsys)
+    after = json.loads(path.read_text(encoding="utf-8"))
+
+    assert code == 0
+    assert receipt["stamped"] == []
+    assert [row["id"] for row in receipt["skipped"]] == [draft_id]
+    assert after["hermes_home"] == "/somewhere/else/profiles/original"
+    assert after["hermes_home"] != str(get_hermes_home())
+
+
+def test_running_the_backfill_twice_stamps_nothing_the_second_time(fake, capsys):
+    """Idempotent by construction: the second run has nothing left to select."""
+    draft_id = start_draft(capsys)
+    path = _forget_recorded_home(draft_id)
+
+    _code, first = run(["harness", "characters", "backfill-home", "--json"], capsys)
+    stamped_once = path.read_bytes()
+    code, second = run(["harness", "characters", "backfill-home", "--json"], capsys)
+
+    assert code == 0
+    assert [row["id"] for row in first["stamped"]] == [draft_id]
+    assert second["stamped"] == []
+    assert [row["id"] for row in second["skipped"]] == [draft_id]
+    assert path.read_bytes() == stamped_once
+
+
+def test_backfill_without_json_still_says_what_it_did(fake, capsys):
+    """An operator runs this by hand, so the receipt has to read as a sentence."""
+    draft_id = start_draft(capsys)
+    _forget_recorded_home(draft_id)
+
+    args = parser().parse_args(["harness", "characters", "backfill-home"])
+    assert args.func(args) == 0
+    line = capsys.readouterr().out
+
+    assert str(get_hermes_home()) in line
+    assert draft_id in line
+    assert "stamped" in line
 
 
 # ────────────────────────────── the error shape ──────────────────────────────
