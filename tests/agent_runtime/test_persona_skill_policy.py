@@ -219,7 +219,7 @@ def test_charsheet_skill_states_the_launcher_bindings_home_in_its_landed_meaning
     skill's entire preflight exists to prevent.
 
     The seed spelling is pinned at BOTH ends on purpose. The launcher pins it in
-    ``test/features/mission_control/agent_chat/mission_character_resume_seed_test.dart``
+    ``test/features/mission_control/state/mission_character_resume_seed_test.dart``
     and ``MissionCharacterResumeSeed.message``'s own doc comment says the
     spelling is "a contract across two repos rather than launcher copy". This is
     the other end of that contract: if the launcher re-words the line, this test
