@@ -475,3 +475,106 @@ else can reproduce. Same commit, clean tree, reproducible bytes — and
 first three are the ones that matter: no second machine, no phone, and the
 Windows firewall behaviour documented in canon from platform knowledge rather
 than from an observation made here.
+
+---
+
+## Stage 3 — the write path (2026-08-27, hermes half)
+
+**The premise of the stage was wrong, and finding that out was the stage.** The
+plan says mission-chat send has no server-side dedupe, "re-verified 2026-08-27:
+no `turn_request_id` anywhere". Both halves are literally true and the
+conclusion is not. Mission chat has carried exactly-once since the 2026-08-24
+incident under the name **`client_message_id`** plus the per-session **turn
+journal**: `persona_commands._mission_chat_busy_outcome` already answers a
+repeated id with `idempotent_replay: True` and the committed reply once the turn
+settles, `chat_turn_duplicate_in_flight` while it is still running, and
+`chat_turn_outcome_unknown` when the provider outcome cannot be proven. It is
+richer than anything this stage would have built.
+
+The lesson generalises past this row: **a grep for the NAME a plan chose is not
+a survey of the CAPABILITY.** The re-verification was run twice, months apart,
+and both times it asked "is the word here" rather than "does a second send of
+one message run twice". The second question takes one test and cannot be
+answered wrong.
+
+So `turn_request_id` is not a second key. It is passed to
+`--client-message-id` **unchanged** — no hash, no prefix, no re-mint — and the
+receipt this stage adds covers only the window the journal provably cannot: the
+journal's first write happens inside the chat-root lease, i.e. after a worker is
+already running, and the RPC lane has to answer before that. Two layers, one
+authority.
+
+**The design collision, and why the union had a hole nobody could see.** Stage
+3's sketch said "RPC where methods exist, op/argv lane otherwise — same union".
+`mission.chat.*` has no methods; it lowers to argv; and Stage 1 refused the argv
+lane to devices *correctly*. So the union's fallback arm was closed for exactly
+the caller the gateway exists for, and the gateway shipped a device that could
+place an agent and could not talk to it. Neither stage was wrong on its own —
+the hole is in the SEAM, which is the kind of defect a per-stage review cannot
+find and a cross-stage read can.
+
+**The door lands one step lower than the precedent, and that is the stronger
+form.** `runtime.agent.retire`'s door calls `perform_agent_retire`, the same
+function the CLI calls. Mission chat has no such function — its service IS the
+argparse handler, and its one existing second door (`dispatch_delivery`) reaches
+it by building a namespace. This door builds ARGV, dispatched through the same
+argparse tree a local send uses. A parallel Python call site would be two
+implementations that agree today; this is one execution. The safety property
+that makes argv-building acceptable is asserted rather than assumed
+(`test_a_client_cannot_smuggle_a_flag_through_a_value`): the argv is a LIST,
+flags are literals, and a value is always the element after its flag.
+
+**The tier is `console`, and the mechanical reason is the one that would have
+bitten.** The taste argument (a chat turn runs an agent with tools, so a softer
+tier is a door around `console`) is the right one, but the decisive fact is that
+`call_authorization.authorize_call`'s device arm is an **equality** against the
+stored word, not an ordering. A new `chat` tier would have refused every
+already-paired `console` device the very thing R11 says it may do, on the first
+frame. Any future third tier has to make that arm an ordering FIRST; it is a
+decision, not a constant.
+
+**Written by a test, not reasoned to: where the settle goes.** The worker
+records its exit onto the accept receipt in `_run`'s `finally`. The first draft
+put that between the inflight pop and the exit frame, on the argument that a
+client reading the exit must not then observe a receipt still saying `accepted`.
+The drain monitor polls the pending set, so that placement opens a window in
+which a request is out of `inflight`, has not emitted, and the drain can
+complete and close the lane **under its own exit frame**. Reproduced as a lost
+exit inside ten minutes. It goes FIRST in the `finally`, before the pop, where
+the monitor still counts the request — both properties held, and the ordering
+had a reason neither draft's comment had guessed.
+
+**The drain refusal is an addition to the method lane's own rule.** `serve.py`
+deliberately keeps answering methods during a drain, with a good argument: an
+inline handler "cannot be cut off half-done". A chat turn is the counter-example
+that argument itself names — it is the work the drain exists to protect — so the
+spawn seam refuses, and it refuses by RAISING rather than by the seam being
+absent, because "this transport has no worker lane" and "this transport is
+shutting down" are different facts and a client retries only one of them. The
+refusal is counted on the terminal frame exactly as an argv refusal is.
+
+**Honest gaps, hermes side.**
+1. **No real provider turn ran over the method lane.** Every serve test injects
+   `dispatch`, which is the seam every other serve-loop test uses — what is
+   under test is the lane (accept, dedupe, hand off, account, settle), and the
+   argv it builds is pinned literally against the real verb. But "a remote
+   device got a model reply" is unproven here and is the launcher acceptance's
+   job against a sandbox root.
+2. **`correlation_id` is accepted, fenced and echoed — and rides no further.**
+   `harness mission-chat message` has no `--correlation-id` flag, so unlike the
+   six office/agent writes there is nowhere for the token to join the turn's
+   events. Closing it means an argv flag on the chat verb, i.e. a change to the
+   LOCAL lane, which this stage's contract forbids. Filed against
+   `planned/correlation-id-coverage.md`, not fixed here.
+3. **The accept receipt over-claims on one crash.** A crash between
+   `mark_accepted` and the submit leaves a receipt for a turn that never ran, so
+   the retry is answered `idempotent_replay` for work that did not happen. That
+   is the deliberate direction: the other ordering duplicates an operator's
+   message, which a client cannot undo. A hung turn is visible (no journal
+   record) and `turn-resolve` exists for the unprovable case.
+4. **Steer rides the worker lane even though a steer is cheap.** Uniformity,
+   argued rather than incidental: `_CHAT_TURN_COMMANDS` counts both verbs, and a
+   steer that skipped the pool would be a chat turn the recycle protection could
+   not see.
+5. **No second machine, still.** Everything binds loopback — Stage 1's gap,
+   unchanged and not this stage's to close.
