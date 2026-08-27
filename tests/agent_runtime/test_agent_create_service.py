@@ -408,7 +408,18 @@ def _invalid_reasons_declared_in_the_module() -> set[str]:
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        if not (isinstance(func, ast.Name) and func.id == "AgentCreateInvalid"):
+        # BOTH spellings. Matching only the bare ``ast.Name`` made this walk a
+        # question about how the raise happens to be WRITTEN: a refusal
+        # re-spelled ``agent_create.AgentCreateInvalid(...)`` — the ordinary
+        # shape the moment this module is imported rather than star-imported —
+        # would vanish from ``declared`` AND from ``covered`` at once, and the
+        # parametrisation would keep passing while the arm shipped unstamped.
+        # That is the same class of hole the typed-list version had.
+        named = isinstance(func, ast.Name) and func.id == "AgentCreateInvalid"
+        qualified = (
+            isinstance(func, ast.Attribute) and func.attr == "AgentCreateInvalid"
+        )
+        if not (named or qualified):
             continue
         assert node.args, "AgentCreateInvalid is constructed reason-first"
         first = node.args[0]
@@ -420,6 +431,11 @@ def _invalid_reasons_declared_in_the_module() -> set[str]:
             reasons.add(getattr(agent_create, first.id))
         else:  # pragma: no cover - a shape nobody has written
             raise AssertionError(f"unrecognised reason expression: {ast.dump(first)}")
+    # A FLOOR, not a roster. Its job is to fail a walk that stopped matching —
+    # a renamed exception, an ``ast`` change, a raise moved behind a helper —
+    # because a walk that finds nothing satisfies every ``for`` below it. Eight
+    # is what §0.1 F3 enumerates; a ninth arm raises this number on purpose.
+    assert len(reasons) >= 8, sorted(reasons)
     return reasons
 
 
@@ -524,3 +540,282 @@ def test_the_argv_lanes_roster_refusal_renders_the_same_block(qa_persona):
 
     assert outcome.refusal is not None
     assert outcome.refusal.data["rolled_back"] is True
+# ── S2 / D2: the position is optional, and the ack says what was written ─────
+
+
+def _no_position(**overrides) -> dict:
+    """``_params`` with the key REMOVED, not set to ``None``.
+
+    Both spellings mean absence to the service and there is a test below for
+    the ``null`` one; this helper is the omitted-key shape, which is what every
+    door without a canvas actually sends.
+    """
+
+    params = _params(**overrides)
+    params.pop("position")
+    return params
+
+
+def _policy_slot(row: int, column: int):
+    from agent_runtime.office_layout_policy import slot_at
+
+    return list(slot_at(row, column))
+
+
+def test_a_create_with_no_position_lands_on_the_policys_slot(
+    qa_persona, isolate_agent_runtime_root
+):
+    """ANTI-VACUITY. The probe is the position READ BACK OUT OF THE STORE, not
+    the one on the ack: an implementation that reported a slot and wrote (0, 0)
+    — which is what a payload builder falling back to its default would do —
+    passes an ack-only assertion and fails this one.
+
+    KILLING MUTATION (plan §C): make ``normalize_agent_create`` refuse an absent
+    position again and this reds on ``position_invalid``.
+    """
+
+    _seed_workspace()
+    outcome = perform_agent_create(_no_position(placement_id="qa_unaimed"), persona=qa_persona)
+
+    assert outcome.refusal is None, outcome.refusal
+    stored = _actors()[outcome.result["actor_key"]]
+    assert [float(v) for v in stored.items[0].position] == _policy_slot(0, 0)
+
+
+def test_a_create_with_a_position_still_lands_there_verbatim(
+    qa_persona, isolate_agent_runtime_root
+):
+    """The other half of the same fence, and the reason it is a separate test.
+
+    KILLING MUTATION (plan §C): make the service substitute the policy's slot
+    when a position IS given and this reds — the policy's first slot is
+    ``(-5.0, 6.4)`` and nothing about ``(3.5, -1.25)`` is near it.
+    """
+
+    _seed_workspace()
+    outcome = perform_agent_create(_params(placement_id="qa_aimed"), persona=qa_persona)
+
+    assert outcome.refusal is None, outcome.refusal
+    stored = _actors()[outcome.result["actor_key"]]
+    assert [float(v) for v in stored.items[0].position] == [3.5, -1.25]
+    assert stored.items[0].position != _policy_slot(0, 0)
+
+
+def test_an_explicit_null_position_is_absence_not_a_malformed_aim(
+    qa_persona, isolate_agent_runtime_root
+):
+    """A JSON client spelling "no opinion" as ``null`` means what one omitting
+    the key means. Refusing one while accepting the other would make the wire's
+    meaning depend on a serializer's omit-none setting.
+    """
+
+    _seed_workspace()
+    outcome = perform_agent_create(
+        _params(position=None, placement_id="qa_null"), persona=qa_persona
+    )
+
+    assert outcome.refusal is None, outcome.refusal
+    assert _actors()[outcome.result["actor_key"]].items[0].position == _policy_slot(0, 0)
+
+
+def test_a_malformed_position_still_refuses(qa_persona, isolate_agent_runtime_root):
+    """Absence became legal; a MANGLED aim did not. A transport that lost half a
+    coordinate is not an operator who had no opinion, and the two must not
+    collapse into one silently-placed agent.
+    """
+
+    _seed_workspace()
+    for bad in ([1.0], "3,4", [float("inf"), 0.0], [True, False]):
+        outcome = perform_agent_create(
+            _params(position=bad, placement_id="qa_bad"), persona=qa_persona
+        )
+        assert outcome.refusal is not None, bad
+        assert outcome.refusal.data["reason"] == "position_invalid", bad
+    assert _actors() == {}
+
+
+def test_the_policy_scans_the_requests_folder_and_skips_the_occupied_slot(
+    qa_persona, isolate_agent_runtime_root
+):
+    """Two placements, no aim: the second must not land on the first.
+
+    That is the whole reason the policy reads the store rather than returning a
+    constant, and it is the property a "just use the origin" implementation
+    satisfies for exactly one agent.
+    """
+
+    _seed_workspace()
+    first = perform_agent_create(
+        _no_position(idempotency_key="unaimed-1", placement_id="qa_one"),
+        persona=qa_persona,
+    )
+    second = perform_agent_create(
+        _no_position(idempotency_key="unaimed-2", placement_id="qa_two"),
+        persona=qa_persona,
+    )
+
+    assert first.refusal is None and second.refusal is None
+    actors = _actors()
+    assert [float(v) for v in actors[first.result["actor_key"]].items[0].position] == _policy_slot(0, 0)
+    assert [float(v) for v in actors[second.result["actor_key"]].items[0].position] == _policy_slot(0, 1)
+
+
+def test_a_different_folder_is_a_different_scan(qa_persona, isolate_agent_runtime_root):
+    """The scan is FOLDER-scoped, so an agent filed under a custom folder starts
+    that folder's lattice at column 0 rather than queueing behind ``Agents``.
+
+    KILLING MUTATION: scan every item regardless of folder and the second
+    assertion reds at column 1.
+    """
+
+    _seed_workspace()
+    perform_agent_create(
+        _no_position(idempotency_key="folder-1", placement_id="qa_agents"),
+        persona=qa_persona,
+    )
+    other = perform_agent_create(
+        _no_position(idempotency_key="folder-2", placement_id="qa_ops", folder="Ops"),
+        persona=qa_persona,
+    )
+
+    assert other.refusal is None, other.refusal
+    placed = _actors()[other.result["actor_key"]].items[0]
+    assert placed.folder == "Ops"
+    assert [float(v) for v in placed.position] == _policy_slot(0, 0)
+
+
+def test_the_policy_excludes_the_actor_it_is_about_to_write(
+    qa_persona, isolate_agent_runtime_root
+):
+    """A resumed attempt whose placement already landed must recompute the SAME
+    slot, not step one along.
+
+    Proved at the pure seam (``resolve_placement_position``) rather than by
+    arranging a crashed reservation, because the property is about which actor
+    set the scan sees and that is exactly what this function decides. Without
+    the exclusion an idempotent replay WALKS: every retry reads its own item as
+    a blocker and moves the agent one column.
+    """
+
+    from agent_runtime.agent_create import (
+        normalize_agent_create,
+        resolve_placement_position,
+    )
+    from agent_runtime.office_store import OfficeStore
+
+    store = _seed_workspace()
+    request = normalize_agent_create(
+        _no_position(placement_id="qa_resume"), persona=qa_persona
+    )
+    store.upsert_actor(
+        WORKSPACE,
+        {
+            "persona_id": "qa",
+            "persona_instance_id": request.persona_instance_id,
+            "items": [
+                {
+                    "item_id": request.persona_instance_id,
+                    "persona_id": "qa",
+                    "kind": "agent",
+                    "position": _policy_slot(0, 0),
+                    "folder": request.folder,
+                }
+            ],
+        },
+    )
+
+    assert list(resolve_placement_position(OfficeStore(), request)) == _policy_slot(0, 0)
+
+
+def test_the_ack_carries_the_position_that_was_written(
+    qa_persona, isolate_agent_runtime_root
+):
+    """Both arms, because a result that echoed the REQUEST would be right for
+    the aimed one and silent for the unaimed one — which is the arm that needs
+    it, since an unaimed caller has no other way to learn where its agent went.
+    """
+
+    _seed_workspace()
+    aimed = perform_agent_create(_params(placement_id="qa_ack_a"), persona=qa_persona)
+    unaimed = perform_agent_create(
+        _no_position(idempotency_key="ack-2", placement_id="qa_ack_b"),
+        persona=qa_persona,
+    )
+
+    assert aimed.result["position"] == [3.5, -1.25]
+    # Slot 0, not slot 1: the aimed placement is off in the corner at
+    # (3.5, -1.25), nowhere near the lattice, so it blocks nothing. That is the
+    # policy working — occupancy is a DISTANCE question, never "how many agents
+    # are on this floor".
+    assert unaimed.result["position"] == _policy_slot(0, 0)
+    for outcome in (aimed, unaimed):
+        stored = _actors()[outcome.result["actor_key"]].items[0]
+        assert outcome.result["position"] == [float(v) for v in stored.position]
+
+
+def test_the_acks_actor_is_the_row_the_store_returned(
+    qa_persona, isolate_agent_runtime_root
+):
+    """KILLING MUTATION (plan §C): build the ack's ``actor`` from the request
+    payload instead of the store's return value and this reds on ``revision``
+    — the payload has none, and the store's is 1 on a fresh create and 2 after
+    a second write to the same key.
+
+    So the second create here is not decoration: it is the assertion that the
+    number came from the store.
+    """
+
+    from agent_runtime.office_models import office_actor_wire_row
+    from agent_runtime.office_store import OfficeStore
+
+    _seed_workspace()
+    first = perform_agent_create(_params(placement_id="qa_row"), persona=qa_persona)
+    actor_key = first.result["actor_key"]
+
+    assert first.result["actor"] == office_actor_wire_row(
+        OfficeStore().get_actor(WORKSPACE, actor_key)
+    )
+    assert first.result["actor"]["revision"] == 1
+    assert first.result["actor"]["items"][0]["position"] == [3.5, -1.25]
+    assert first.result["actor"]["persona_instance_id"] == first.result["persona_instance_id"]
+
+    # A move on the same key: the ack's revision has to follow the store's.
+    OfficeStore().upsert_actor(
+        WORKSPACE,
+        {
+            "persona_id": "qa",
+            "persona_instance_id": first.result["persona_instance_id"],
+            "items": [
+                {
+                    "item_id": first.result["persona_instance_id"],
+                    "persona_id": "qa",
+                    "kind": "agent",
+                    "position": [9.0, 9.0],
+                }
+            ],
+        },
+    )
+    assert OfficeStore().get_actor(WORKSPACE, actor_key).revision == 2
+
+
+def test_an_idempotent_replay_returns_the_recorded_position_and_actor(
+    qa_persona, isolate_agent_runtime_root
+):
+    """The replay is the RECORDED reply, so the two new keys have to be in the
+    receipt — not recomputed on the way out, which would re-run the policy and
+    could answer a different slot than the one on disk.
+    """
+
+    _seed_workspace()
+    first = perform_agent_create(
+        _no_position(idempotency_key="replay-1", placement_id="qa_replay"),
+        persona=qa_persona,
+    )
+    again = perform_agent_create(
+        _no_position(idempotency_key="replay-1", placement_id="qa_replay"),
+        persona=qa_persona,
+    )
+
+    assert again.result["idempotent_replay"] is True
+    assert again.result["position"] == first.result["position"]
+    assert again.result["actor"] == first.result["actor"]

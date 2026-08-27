@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 
-from .models import OfficeActor, OfficeSurface
+from .models import OfficeActor, OfficeItem, OfficeSurface
 from .serde import to_jsonable
 
 ITEM_KINDS = ("agent", "desk")
@@ -180,3 +180,63 @@ def actor_file_token(actor_key: str) -> str:
         return token
     digest = hashlib.sha1(str(actor_key).encode("utf-8")).hexdigest()[:8]
     return f"{token[:64]}-h{digest}"
+
+
+def office_item_wire_row(actor: OfficeActor, item: OfficeItem) -> dict:
+    """ONE scene item in the shape every reader on the wire already decodes.
+
+    THE shape ``runtime.office.get`` renders (``serve_rpc._office_projection``
+    flattens its items through this function), and therefore the shape the
+    create's ack carries inside ``result.actor`` (plan D11). Lives here, in the
+    pure module, because ``agent_create`` cannot import ``serve_rpc`` — that
+    import is inverted by design, and the comment above ``ERR_INVALID_PARAMS``
+    in ``agent_create`` says so. A second copy of these ten keys is the
+    silent-disagreement shape this repo has already paid for once, in the
+    ``get``-vs-``subscribe`` split that ``_office_projection`` was extracted to
+    end; one function is the answer, not one function plus a test that they
+    match.
+
+    ``persona_instance_id`` and ``revision`` are the ACTOR's, repeated onto each
+    of its items because the wire shape is flat: an actor file is the binding
+    unit, and ``revision`` is the token ``runtime.office.upsert``'s
+    ``expect_revision`` is checked against — never the SURFACE's, which does not
+    move when an actor moves.
+    """
+
+    return {
+        "item_id": item.item_id,
+        "kind": item.kind,
+        "persona_id": item.persona_id,
+        "persona_instance_id": actor.persona_instance_id,
+        "revision": actor.revision,
+        "folder": item.folder,
+        "position": [float(item.position[0]), float(item.position[1])],
+        "scale": float(item.scale),
+        "display_name": item.display_name,
+        "pet_slug": item.pet_slug,
+    }
+
+
+def office_actor_wire_row(actor: OfficeActor) -> dict:
+    """The actor as ``runtime.agent.create``'s ack carries it (plan D11).
+
+    Actor-level identity plus its items in :func:`office_item_wire_row`'s shape,
+    so a client that already decodes ``runtime.office.get`` needs no second
+    decoder to adopt the row the server just wrote — which is the point of
+    returning it at all: the launcher stops trusting its own predicted key,
+    position and revision and adopts the server's.
+
+    Deliberately NOT carried, matching ``_office_projection``'s own exclusions:
+    ``updated_by`` / ``created_at`` / ``updated_at`` / ``backing_profile`` (none
+    of it renderable, the first three provenance for a different surface) and
+    ``state``, which a create can only ever answer ``"active"``.
+    """
+
+    return {
+        "actor_key": actor.actor_key,
+        "workspace_id": actor.workspace_id,
+        "persona_id": actor.persona_id,
+        "persona_instance_id": actor.persona_instance_id,
+        "revision": actor.revision,
+        "items": [office_item_wire_row(actor, item) for item in actor.items],
+    }

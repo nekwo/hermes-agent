@@ -1351,7 +1351,11 @@ def build_parser(parent_subparsers) -> None:
     )
     agent_create.add_argument("--persona", dest="persona_id", required=True, help="Roster persona id (or profile:<token>); an unknown id is refused before any write")
     agent_create.add_argument("--workspace", "--workspace-id", dest="workspace_id", required=True, help="Mission Control workspace the placement lands in; must already exist")
-    agent_create.add_argument("--pos", dest="pos", nargs=2, metavar=("X", "Y"), required=True, help="Canvas position for the placement")
+    # OPTIONAL since plan S2. Omitted, the service resolves the slot through
+    # `agent_runtime.office_layout_policy` — the same lattice the launcher
+    # predicts with — so a door with no canvas (this one, a cron, a remote
+    # connector over `call`) has an answer instead of a required guess.
+    agent_create.add_argument("--pos", dest="pos", nargs=2, metavar=("X", "Y"), default=None, help="Canvas position for the placement; omitted, the layout policy picks the first free slot in the folder")
     agent_create.add_argument("--display-name", default=None, help="Authoritative name; omitted falls back to the persona's configured display name")
     agent_create.add_argument("--placement-id", default=None, help="Scene itemId to predict the actor key from; omitted mints one server-side")
     agent_create.add_argument("--realm-id", dest="realm_id", default=None)

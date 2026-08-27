@@ -167,7 +167,11 @@ def _required_extras(path: str) -> list[str]:
     """
 
     return {
-        "harness agent create": ["--persona", "qa", "--pos", "0", "0"],
+        # ``--pos`` was here until S2 made it optional. Removed rather than
+        # left harmless: this table's docstring says "required arguments", and
+        # a table carrying a non-required flag is a second description of
+        # requiredness that is free to disagree with argparse's.
+        "harness agent create": ["--persona", "qa"],
         "harness office actor-upsert": ["--actor-json", "{}"],
         "harness office actor-remove": ["--actor", "personainst_qa"],
         "harness office actor-restore": ["--actor", "personainst_qa"],
@@ -213,20 +217,73 @@ def test_the_discriminator_is_the_dest_not_the_spelling():
     assert "harness realm agents set" not in _workspace_options()
 
 
+def d12_violated(*, retire_exists: bool, pos_required: bool) -> bool:
+    """THE D12 rule, as a predicate: ``agent retire`` may not exist while
+    ``--pos`` is still required.
+
+    A ONE-directional implication, and the direction is the whole content. The
+    launcher decides whether to omit ``position`` from a create by looking for
+    ``runtime.agent.retire`` in the serve manifest — a per-method capability
+    marker standing in for "this serve accepts an absent position". So:
+
+    * **retire WITHOUT an optional position is the forbidden pair.** The serve
+      advertises the marker and then refuses every create the launcher sends
+      under it. That is the ordering that strands a client, and it is the only
+      one.
+    * **an optional position WITHOUT retire is SAFE**, and is the state S2
+      lands in. The launcher keeps sending its predicted slot explicitly until
+      the marker appears; a serve that would also accept an absent one is
+      strictly more permissive than the client is.
+
+    Extracted from the live-parser test below because that test can only ever
+    exercise the arm the tree is currently in — and the arm that matters is the
+    one that must never be reached. Written as a function so the rule itself is
+    pinned over all four combinations, rather than asserted once in whichever
+    state HEAD happens to be in.
+    """
+
+    return retire_exists and pos_required
+
+
+@pytest.mark.parametrize(
+    ("retire_exists", "pos_required", "violated"),
+    [
+        # The forbidden pair — the only one.
+        (True, True, True),
+        # S5 landed on top of S2: the marker means what the launcher reads it
+        # to mean.
+        (True, False, False),
+        # Where S2 leaves the tree: more permissive than any client asks for.
+        (False, False, False),
+        # Before either slice. Also fine — nothing advertises the marker.
+        (False, True, False),
+    ],
+)
+def test_the_d12_rule_is_one_directional(retire_exists, pos_required, violated):
+    """KILLING MUTATION: widen ``d12_violated`` to ``or`` (or to ``!=``) and the
+    ``(False, True)`` row reds — that is the row that says an optional position
+    without the retire verb is NOT a defect, which is exactly the reading S2
+    needed and the previous ``assert pos.required is True`` got backwards.
+    """
+
+    assert (
+        d12_violated(retire_exists=retire_exists, pos_required=pos_required)
+        is violated
+    )
+
+
 def test_pos_is_optional_whenever_agent_retire_exists():
-    """The D12 rollout gate, guarded from the parser side.
+    """The D12 rollout gate, applied to the REAL parser tree.
 
-    The launcher decides whether to omit ``position`` from a create by looking
-    for ``runtime.agent.retire`` in the serve manifest — a per-method capability
-    marker standing in for "this serve accepts an absent position". That proxy
-    holds only while the two land together. A serve carrying S5 (the retire
-    verb) without S2 (the optional position) would advertise the marker and then
-    refuse every create the launcher sent under it.
+    The rule is :func:`d12_violated` and its four combinations are pinned
+    above; this is the measurement. It reds the moment ``agent retire`` is added
+    while ``--pos`` is still required.
 
-    Today NEITHER holds — there is no ``agent retire`` and ``--pos`` is
-    required — so this passes vacuously ON PURPOSE, and says so. It reds the
-    moment ``agent retire`` is added while ``--pos`` is still required, which is
-    the only ordering that can strand a client.
+    State at S2 (2026-08-26), recorded rather than left to be inferred:
+    ``--pos`` is OPTIONAL and ``agent retire`` does not exist yet. That is the
+    safe half of the implication, not a vacuous pass — the assertion below is
+    live on every combination, because it asks the predicate rather than
+    branching on which one we are in.
     """
 
     agent = dict(_walk(_root_parser(), ()))
@@ -238,16 +295,13 @@ def test_pos_is_optional_whenever_agent_retire_exists():
     pos = next(
         action for action in create._actions if "--pos" in action.option_strings
     )
-    if retire_exists:
-        assert pos.required is False, (
-            "`agent retire` is the launcher's D12 marker for an OPTIONAL "
-            "position; shipping it while --pos is still required strands every "
-            "client that trusted the marker"
-        )
-    else:
-        # Stated, not skipped: a passing test whose subject does not exist yet
-        # must say which half is missing, or the next reader trusts it.
-        assert pos.required is True
+    assert not d12_violated(
+        retire_exists=retire_exists, pos_required=pos.required
+    ), (
+        "`agent retire` is the launcher's D12 marker for an OPTIONAL position; "
+        "shipping it while --pos is still required strands every client that "
+        "trusted the marker"
+    )
 
 
 @pytest.mark.parametrize(
@@ -262,12 +316,20 @@ def test_pos_is_optional_whenever_agent_retire_exists():
 def test_the_previously_refused_spelling_now_parses(argv):
     """The operator-facing half, one verb per old convention.
 
-    ``--pos`` is appended for the create so the parse reaches the workspace at
-    all; every other verb here parses as written.
+    Every verb here parses exactly as written. ``agent create`` used to need
+    ``--pos`` appended for the parse to reach the workspace at all; since S2 it
+    does not, so the append is gone and this now also exercises the shortest
+    real create an operator can type.
     """
 
     parser = _root_parser()
-    if argv[1:3] == ["agent", "create"]:
-        argv = [*argv, "--pos", "0", "0"]
     args = parser.parse_args(argv)
-    assert getattr(args, "workspace_id", None) or getattr(args, "workspace", None) == "ws"
+    # BOTH operands compared. Written as `A or B == "ws"` this parsed as
+    # `A or (B == "ws")`, so any truthy `workspace_id` — including one the alias
+    # had written to the WRONG dest — satisfied it without ever reaching the
+    # comparison. The bug and its fix are one line apart and the difference is
+    # a pair of parentheses argparse would never have told anyone about.
+    assert "ws" in {
+        getattr(args, "workspace_id", None),
+        getattr(args, "workspace", None),
+    }, vars(args)

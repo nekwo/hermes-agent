@@ -439,7 +439,9 @@ def _cmd_agent_create(args) -> int:
     The unified door the operator asked for: it calls
     ``agent_create.perform_agent_create``, which is the SAME function
     ``runtime.agent.create`` answers with, so every RESULT field a script reads
-    here is the field it would read off the wire. That is the point — a lane
+    here is the field it would read off the wire — ``position`` and ``actor``
+    (plan D2/D11) included, which is what lets a script place an agent WITHOUT
+    ``--pos`` and still learn exactly where it went and what row was written. That is the point — a lane
     switch must not be a behaviour change. Two keys are envelope-only and have
     no wire counterpart: ``ok`` (the exit status) and ``resolution`` (the
     root-observability block every ``--json`` harness verb stamps).
@@ -468,8 +470,9 @@ def _cmd_agent_create(args) -> int:
         print(emit_json(data) if args.json else data["error"])
         return 2
 
-    position = list(getattr(args, "pos", None) or [])
-    if len(position) == 2:
+    raw_position = getattr(args, "pos", None)
+    position = list(raw_position) if raw_position is not None else None
+    if position is not None and len(position) == 2:
         # argparse hands these over as strings; the service refuses anything
         # non-finite, so a bad value stays ONE refusal rather than an
         # argparse traceback here and a typed error there.
@@ -481,12 +484,19 @@ def _cmd_agent_create(args) -> int:
     params = {
         "persona_id": persona_id,
         "workspace_id": getattr(args, "workspace_id", None),
-        "position": position,
         "idempotency_key": (
             safe_assignment_text(getattr(args, "idempotency_key", None), limit=240)
             or f"cli-{uuid.uuid4().hex}"
         ),
     }
+    # OMITTED, not an explicit ``None`` (plan S2/D2). ``--pos`` is optional now,
+    # and the service reads an ABSENT position as "the operator did not aim, let
+    # the layout policy choose". Sending ``position: []`` — which this lane did
+    # when the flag was required-but-empty — is a malformed aim and refuses
+    # ``position_invalid``, so the omission has to reach the service as an
+    # omission.
+    if position is not None:
+        params["position"] = position
     for key, value in (
         ("display_name", getattr(args, "display_name", None)),
         ("placement_id", getattr(args, "placement_id", None)),

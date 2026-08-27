@@ -92,7 +92,11 @@ class AgentCreateRequest:
 
     persona_id: str
     workspace_id: str
-    position: tuple[float, float]
+    #: ``None`` means the client did not aim — the layout policy chooses (D2).
+    #: It is NOT a missing value to be defaulted somewhere later: the ONE site
+    #: that resolves it is :func:`resolve_placement_position`, and it runs where
+    #: the actor set it reads is the set the write lands beside.
+    position: tuple[float, float] | None
     idempotency_key: str
     placement_id: str
     display_name: str | None
@@ -339,7 +343,27 @@ def mint_placement_id(persona_id: str) -> str:
     return f"{token}_{uuid.uuid4().hex[:8]}"
 
 
-def _position(value: Any) -> tuple[float, float]:
+def _position(value: Any) -> tuple[float, float] | None:
+    """The operator's aim, or ``None`` when there was none (plan D2).
+
+    ``None`` — an omitted key or an explicit JSON ``null`` — is ABSENCE, and
+    absence is a legal request answered by the layout policy. It used to refuse
+    ``position_invalid``, which is why ``--pos`` was required and why every door
+    without a canvas had nothing to send.
+
+    Treating explicit ``null`` as absence rather than as a malformed value is
+    the deliberate half of that: a JSON client that spells "no opinion" as
+    ``null`` means the same thing as one that omits the key, and refusing one
+    while accepting the other would make the wire's meaning depend on a
+    serializer's `omit-none` setting.
+
+    Everything else refuses exactly as before — a one-element list, a string, a
+    bool pair, an infinity — because those are an aim that did not survive
+    transport, not the absence of one.
+    """
+
+    if value is None:
+        return None
     if not isinstance(value, (list, tuple)) or len(value) < 2:
         raise AgentCreateInvalid(
             "position_invalid", "invalid params: position must be [x, y]"
@@ -489,9 +513,18 @@ def normalize_agent_create(
 
 
 def placement_actor_payload(
-    request: AgentCreateRequest, *, display_name: str
+    request: AgentCreateRequest,
+    *,
+    display_name: str,
+    position: tuple[float, float] | None = None,
 ) -> dict[str, Any]:
     """The actor payload for a freshly minted placement.
+
+    ``position`` is the RESOLVED one — the operator's aim when they had one, the
+    layout policy's slot when they did not (D2). It is a parameter rather than a
+    read of ``request.position`` because by the time this is called the policy
+    may already have answered, and a payload builder that re-derived the
+    position would be a second place the answer could come from.
 
     Deliberately the SAME shape ``harness office actor-upsert`` takes on
     ``--actor-json`` and the launcher's ``officeActorPayloadsFromLayout``
@@ -501,7 +534,17 @@ def placement_actor_payload(
     collision the office fence exists to refuse unreachable from this method.
     """
 
-    x, y = request.position
+    resolved = position if position is not None else request.position
+    if resolved is None:
+        # Not reachable from ``perform_agent_create`` (it resolves first), and
+        # loud rather than silent for anyone who calls this directly: a payload
+        # with a made-up origin would place an agent at (0, 0) and read as a
+        # deliberate placement forever.
+        raise ValueError(
+            "placement_actor_payload: no position — resolve one with "
+            "resolve_placement_position() before building the payload"
+        )
+    x, y = resolved
     return {
         "persona_id": request.persona_id,
         "persona_instance_id": request.persona_instance_id,
@@ -516,6 +559,65 @@ def placement_actor_payload(
             }
         ],
     }
+
+
+def resolve_placement_position(
+    store: Any, request: AgentCreateRequest
+) -> tuple[float, float]:
+    """The slot an UNAIMED create lands on (plan D2). The only caller of the
+    layout policy on this lane.
+
+    Scans the workspace's live actors in the REQUEST's folder and returns the
+    first free lattice slot. The lane is the AGENT lane whatever the folder is
+    called, because this verb writes exactly one ``kind: "agent"`` item and
+    nothing else (D6) — the desk lane's diagonal nudge exists to keep unaimed
+    desks off the agent lattice, and there are no unaimed desks on this lane.
+
+    The actor this create is about to write is excluded from the scan. A resumed
+    attempt (``instance_minted`` receipt, placement already landed, ``mark_done``
+    never reached) would otherwise read its OWN previous item as a blocker and
+    move the agent one slot along on every retry — an idempotent replay that
+    walks.
+
+    WHERE THIS READ SITS RELATIVE TO ``office_lock``, AND WHY
+    --------------------------------------------------------
+    OUTSIDE it, immediately before ``OfficeStore.upsert_actor``, which takes
+    ``office_lock(workspace_id)`` itself.
+
+    That is forced, not preferred. ``locks._file_lock`` is a real file lock —
+    ``msvcrt.locking`` on Windows, ``flock`` elsewhere — held through a fresh
+    ``open()`` per acquisition, so it is NOT reentrant: a second acquisition
+    from this same process would block against the first and time out
+    ``HarnessLockUnavailable`` after the configured 15 s. Wrapping the read and
+    the write in one ``office_lock`` therefore deadlocks the write it is meant
+    to protect. Moving the policy INTO ``upsert_actor`` would close the window
+    honestly, and that is a store change this slice's strip does not carry.
+
+    The window it leaves, stated rather than implied: two creates that both
+    omit a position and race between this read and their writes can compute the
+    same free slot, and the second lands on top of the first. Bounded — one
+    slot, visible on the canvas, fixed by a drag — and no worse than the
+    prediction the launcher has always sent, which reads a snapshot that is
+    already a round trip stale. It is filed as a queue row rather than left for
+    the next reader to discover.
+    """
+
+    from .office_layout_policy import (
+        lane_offset_for_kind,
+        next_free_slot,
+        occupied_positions,
+    )
+
+    mine = request.persona_instance_id
+    actors = [
+        actor
+        for actor in store.list_actors(request.workspace_id)
+        if getattr(actor, "persona_instance_id", None) != mine
+    ]
+    return next_free_slot(
+        occupied_positions(actors, folder=request.folder),
+        lane_offset=lane_offset_for_kind("agent"),
+    )
 
 
 # ── the shared create sequence (UC-H1) ───────────────────────────────────────
@@ -704,15 +806,26 @@ def perform_agent_create(
 ) -> AgentCreateOutcome:
     """ONE call places an agent: roster row, chat root and placement together.
 
-    Params: ``persona_id``, ``workspace_id``, ``position: [x, y]`` and
-    ``idempotency_key`` (all required); ``display_name``, ``placement_id``,
-    ``realm_id``, ``folder``, ``correlation_id`` (all optional).
+    Params: ``persona_id``, ``workspace_id`` and ``idempotency_key`` (required);
+    ``position: [x, y]``, ``display_name``, ``placement_id``, ``realm_id``,
+    ``folder``, ``correlation_id`` (all optional).
+
+    ``position`` ABSENT means the client did not aim, and the layout policy
+    chooses the slot (D2 — :func:`resolve_placement_position`, which documents
+    where that read sits relative to ``office_lock``). Present, it is taken
+    verbatim, exactly as it always was.
 
     Result::
 
         {persona_instance_id, persona_id, placement_id, display_name,
          default_chat_session_id, actor_key, revision, workspace_id,
+         position: [x, y], actor: {...},
          phases: {instance_ms, placement_ms, total_ms}, idempotent_replay}
+
+    ``position`` is what was WRITTEN and ``actor`` is the row as STORED, in the
+    same shape ``runtime.office.get`` renders. Both are additive: an old client
+    ignores them, and neither moves ``RPC_CONTRACT_VERSION`` or the manifest's
+    method list.
 
     ``persona`` is the CLI's richer pre-resolved persona object, threaded to
     :func:`normalize_agent_create` so the argv lane's naming behaviour is
@@ -769,6 +882,7 @@ def perform_agent_create(
     )
     from .errors import StaleRevision, SyncConflict
     from .office_class_key_guard import ClassKeyedPlacementRefused
+    from .office_models import office_actor_wire_row
     from .office_store import OfficeStore
     from .persona_assignments import (
         PersonaInstanceStore,
@@ -1077,8 +1191,18 @@ def perform_agent_create(
                 )
 
             placement_started = time.monotonic()
+            # D2: the aim if there was one, the policy's slot if there was not.
+            # Read here — after the mint, immediately before the write — so the
+            # actor set the policy sees is as close as this lane can get to the
+            # set the write lands beside. See ``resolve_placement_position`` for
+            # why "as close as it can get" and not "the same set".
+            position = (
+                request.position
+                if request.position is not None
+                else resolve_placement_position(store, request)
+            )
             payload = placement_actor_payload(
-                request, display_name=instance.display_name
+                request, display_name=instance.display_name, position=position
             )
             try:
                 # CI-4's FREE half (EG-2.3): this method already reserved
@@ -1167,6 +1291,19 @@ def perform_agent_create(
                 "actor_key": actor.actor_key,
                 "revision": actor.revision,
                 "workspace_id": request.workspace_id,
+                # D2/D11, both additive. ``position`` is what was WRITTEN —
+                # policy or verbatim — so a client that sent none learns where
+                # its agent went without a second read, and one that sent a
+                # position can see it was taken verbatim.
+                #
+                # ``actor`` is the row as STORED, in ``runtime.office.get``'s
+                # own item shape (``office_models.office_actor_wire_row``), and
+                # it is taken off the store's return value rather than rebuilt
+                # from the request — the whole point is that the client stops
+                # trusting its predicted key/position/revision and adopts the
+                # server's.
+                "position": [position[0], position[1]],
+                "actor": office_actor_wire_row(actor),
                 "phases": {
                     "instance_ms": instance_ms,
                     "placement_ms": placement_ms,

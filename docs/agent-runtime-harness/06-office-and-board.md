@@ -136,6 +136,70 @@ call whose reply never lands is still nameable. That token exists because on
 280–368 ms — the launcher's flush receipt lags the RPC by 250–650 ms — and a
 wrong prioritisation followed from it.
 
+### The placement verb — where an unaimed create lands, and what it hands back
+
+`runtime.agent.create` and `harness agent create` are two doors onto
+`agent_create.perform_agent_create`, the one function that writes the roster row,
+the durable chat root and the office actor together. Since plan S2 its
+`position` is **optional on both doors** (`--pos` is no longer `required`), and
+its ack returns what was written.
+
+**Absent means "I did not aim", and hermes answers it.** With no `position`, the
+service resolves the slot through `agent_runtime/office_layout_policy.py` — a
+deterministic lattice scan over the workspace's live actors in the request's
+folder, returning the first free slot. With a `position`, it is written
+verbatim, exactly as it always was; a malformed one (a one-element list, a
+string, a bool pair, an infinity) still refuses `position_invalid`, because a
+transport that mangled an aim is not the same thing as an operator who had none.
+An explicit JSON `null` is read as ABSENT, deliberately: a client spelling "no
+opinion" as `null` means what one omitting the key means, and refusing one while
+accepting the other would make the wire's meaning depend on a serializer's
+omit-none setting.
+
+**The policy is hermes', and the launcher's copy is a prediction.** The launcher
+needs a world position for the pending chip and the staged scene node before the
+ack lands, so `MissionOfficePlacementPolicy` stays — with the same seven
+constants and the same scan order. Two policies that can disagree are the defect
+D2 exists for, so the agreement is pinned by a case file committed
+byte-identical in both repos (`tests/fixtures/office_layout/cases.json` and the
+launcher's `test/fixtures/harness_office_layout/cases.json`, each under a
+`MANIFEST.sha256` its own side hashes). Read that directory's README before
+touching any constant: it lands in both repos or in neither. Two cases exist
+only because the repos are asymmetric — `hidden` is launcher-only view state
+this store has never had, and a blank `folder` is hermes-only (`_normalize_item`
+persists `""` where the launcher's decoder substitutes the kind's default), so
+the policy resolves that fallback when it scans.
+
+**The verb authors no desk**, so the lane it scans is always the AGENT lattice
+whatever the folder is called; the desk lane's diagonal nudge exists to keep
+unaimed desks off the agent lattice and there are no unaimed desks on this lane.
+
+**Where the policy READ sits, and the window that leaves.** Outside
+`office_lock`, immediately before `OfficeStore.upsert_actor`, which takes that
+lock itself. That is forced rather than preferred: `locks._file_lock` is a real
+file lock (`msvcrt.locking` / `flock`) acquired through a fresh handle, so it is
+**not reentrant** — wrapping the read and the write in one `office_lock` would
+deadlock the write it is meant to protect, and moving the policy INSIDE
+`upsert_actor` is the honest close and a store change S2 does not carry. The
+window: two creates that both omit a position and race between the read and
+their writes can compute the same slot, and the second lands on top of the
+first. Bounded to one slot, visible on the canvas, fixed by a drag — and no
+worse than the prediction the launcher has always sent, which reads a snapshot
+already a round trip stale. `resolve_placement_position`'s docstring is the
+long form; the row is filed in the launcher's Mission Control queue.
+
+**The ack gains `position` and `actor`, both additive.** `position` is what was
+written — policy or verbatim — so a client that sent none learns where its agent
+went without a second read. `actor` is the row **as stored**, in the same item
+shape `runtime.office.get` renders: `office_models.office_actor_wire_row`, which
+that method's own projection now flattens through, so the two cannot drift into
+disagreement. It is taken off the store's return value and never rebuilt from
+the request, which is the whole point — the client stops trusting its predicted
+key, position and revision and adopts the server's.
+`RPC_CONTRACT_VERSION` does not move and no name joins the manifest's `methods`
+list; an old client ignores both keys, and an old serve still works for a client
+that always sends a position.
+
 ## The fold model — what a fold is, and who promotes a batch
 
 > The generic patch-frame contract and the office push lane's re-envelope live in
@@ -429,11 +493,11 @@ omit it — the office's revision guard lives on the RPC lane only.
 
 ## Open rows
 
-- The placement verb: `harness agent create` gains server-side layout, a
-  skills phase with an install gate, an RPC-first inverse, and a live proof
-  that a second-process create reaches the fold. **Its S3 slice — the
-  store-level desk fence — has SHIPPED and is described above; the rest is
-  still planned.** →
+- The placement verb: `harness agent create` gains a skills phase with an
+  install gate and an RPC-first inverse. **Its S3 slice (the store-level desk
+  fence) and its S1/S2 slices (the shared layout policy, the optional
+  `position`, the `position`/`actor` ack) have SHIPPED and are described above;
+  S4, S5 and the launcher-side S7–S9 are still planned.** →
   [planned/agent-placement-verb.md](planned/agent-placement-verb.md)
   (both repos; its §0 corrects four premises of the 2026-08-24 brief)
 - Gesture prediction's two remaining stages (an unpinned create-refusal

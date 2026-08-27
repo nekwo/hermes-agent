@@ -101,6 +101,18 @@ that is not arbitrary: a placement written first would be a half-state naming
 an instance the runtime never minted, and the launcher's codec refuses to
 derive a binding for an actor that has none (`:726-732`).
 
+**And it chooses WHERE, when the caller did not.** `position` is optional on
+both doors (plan S2): absent, the slot comes from
+`agent_runtime/office_layout_policy.py` — the same deterministic lattice the
+launcher predicts with, pinned across the two repos by a byte-identical case
+fixture; present, it is written verbatim. The ack returns `position` (what was
+written) and `actor` (the row as stored, in `runtime.office.get`'s own item
+shape), so a caller with no canvas — the CLI, a cron, a remote connector over
+`call` — needs neither a guess going in nor a second read coming out. Where that
+policy read sits relative to `office_lock`, and the one-slot race it leaves, is
+stated at `resolve_placement_position` and in
+[06 — The office surface](06-office-and-board.md#the-placement-verb--where-an-unaimed-create-lands-and-what-it-hands-back).
+
 **"Placed" is the JOIN, and neither store is folded into the other** (placement
 plan D1). Entity 2 answers *does this agent exist* — `persona instance create
 --add-instance` is the roster-only recovery door and mints rows with no

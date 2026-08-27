@@ -653,3 +653,104 @@ def test_the_verbs_rolled_back_sentence_is_answerable_both_ways(
     # from here while printing the orphan sentence over there.
     assert type(data["rolled_back"]) is bool
     assert "rolled_back: false" in data["next_expected"]
+# ── S2 / D2: --pos is optional, and --json says where the agent went ─────────
+
+
+def _create_unaimed(capsys, *extra: str, persona: str = "qa", workspace: str = WORKSPACE):
+    """``_create`` with NO ``--pos`` at all — the door this slice opened."""
+
+    argv = [
+        "harness", "agent", "create",
+        "--persona", persona,
+        "--workspace", workspace,
+        "--json",
+        *extra,
+    ]
+    code = _dispatch(argv)
+    return code, json.loads(capsys.readouterr().out)
+
+
+def test_the_verb_places_without_pos_and_the_agent_is_on_the_policys_slot(
+    qa_persona, seeded_workspace, capsys
+):
+    """ANTI-VACUITY, twice over. The exit code alone would pass under a verb
+    that parsed the flags and wrote nothing, so the probe is the ACTOR read back
+    out of ``OfficeStore``; and the ack's own ``position`` would pass under a
+    verb that reported a slot and wrote the origin, so the probe is the STORED
+    position.
+
+    KILLING MUTATION: restore ``required=True`` on ``--pos`` and this reds at
+    argparse; send the omitted flag through as ``position: []`` (what this lane
+    did while the flag was required) and it reds ``position_invalid``.
+    """
+
+    from agent_runtime.office_layout_policy import slot_at
+
+    code, data = _create_unaimed(
+        capsys, "--idempotency-key", "verb-unaimed", "--placement-id", "qa_cli_unaimed"
+    )
+
+    assert code == 0, data
+    assert data["ok"] is True
+    assert data["position"] == list(slot_at(0, 0))
+    placed = _actors()[data["actor_key"]]
+    assert [float(v) for v in placed.items[0].position] == list(slot_at(0, 0))
+
+
+def test_the_verb_still_honours_pos_when_it_is_given(
+    qa_persona, seeded_workspace, capsys
+):
+    code, data = _create(
+        capsys, "--idempotency-key", "verb-aimed", "--placement-id", "qa_cli_aimed"
+    )
+
+    assert code == 0, data
+    assert data["position"] == [3.5, -1.25]
+    assert [float(v) for v in _actors()[data["actor_key"]].items[0].position] == [3.5, -1.25]
+
+
+def test_the_json_ack_carries_the_actor_row_the_store_holds(
+    qa_persona, seeded_workspace, capsys
+):
+    """The argv door renders the same two keys the wire does — UC-H3's rule that
+    a lane switch is not a behaviour change, now including what the ack says was
+    written.
+    """
+
+    from agent_runtime.office_models import office_actor_wire_row
+    from agent_runtime.office_store import OfficeStore
+
+    code, data = _create_unaimed(
+        capsys, "--idempotency-key", "verb-row", "--placement-id", "qa_cli_row"
+    )
+
+    assert code == 0, data
+    assert data["actor"] == json.loads(
+        json.dumps(office_actor_wire_row(OfficeStore().get_actor(WORKSPACE, data["actor_key"])))
+    )
+
+
+def test_a_bad_pos_is_still_one_typed_refusal_not_an_argparse_traceback(
+    qa_persona, seeded_workspace, capsys
+):
+    """``--pos left up`` parses (argparse takes two strings) and the SERVICE
+    refuses it. Optional does not mean lenient: the flag being present is an
+    aim, and an aim that will not tokenise is a refusal, not a silent policy
+    placement.
+    """
+
+    argv = [
+        "harness", "agent", "create",
+        "--persona", "qa",
+        "--workspace", WORKSPACE,
+        "--pos", "left", "up",
+        "--idempotency-key", "verb-badpos",
+        "--json",
+    ]
+    code = _dispatch(argv)
+    data = json.loads(capsys.readouterr().out)
+
+    assert code != 0
+    assert data["ok"] is False
+    assert data["reason"] == "position_invalid"
+    assert _actors() == {}

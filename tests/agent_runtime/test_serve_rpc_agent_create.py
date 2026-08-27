@@ -1432,3 +1432,122 @@ def test_each_refusal_names_the_half_it_failed_in(
 
     assert data["reason"] == arm
     assert data.get("phase") == expected_phase
+# ── S2 / D2: the wire's optional position and its two new ack keys ───────────
+
+
+def _office_items(workspace_id: str = WORKSPACE) -> list[dict]:
+    """``runtime.office.get``'s items, off the real method.
+
+    Read through ``handle_request`` rather than through the store so the
+    comparison below is against what a CLIENT would decode, which is the
+    agreement D11 asks for — not against a second projection written here.
+    """
+
+    reply = serve_rpc.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": "get",
+            "method": "runtime.office.get",
+            "params": {"workspace_id": workspace_id},
+        }
+    )
+    return reply["result"]["items"]
+
+
+def test_the_wire_accepts_an_absent_position_and_reports_the_policys_slot(
+    qa_persona, isolate_agent_runtime_root
+):
+    """ANTI-VACUITY: the store read is the probe, not the ack. An ack that
+    reported a slot over a (0, 0) write would pass an ack-only assertion.
+    """
+
+    from agent_runtime.office_layout_policy import slot_at
+
+    _seed_workspace()
+    params = _params(placement_id="qa_wire_unaimed")
+    params.pop("position")
+    reply = _call(params)
+
+    assert "error" not in reply, reply
+    result = reply["result"]
+    assert result["position"] == list(slot_at(0, 0))
+    placed = _actors()[result["actor_key"]]
+    assert [float(v) for v in placed.items[0].position] == list(slot_at(0, 0))
+
+
+def test_the_wire_still_takes_a_sent_position_verbatim(
+    qa_persona, isolate_agent_runtime_root
+):
+    _seed_workspace()
+    reply = _call(_params(placement_id="qa_wire_aimed"))
+
+    assert "error" not in reply, reply
+    assert reply["result"]["position"] == [3.5, -1.25]
+    assert [
+        float(v) for v in _actors()[reply["result"]["actor_key"]].items[0].position
+    ] == [3.5, -1.25]
+
+
+def test_ack_actor_matches_store(qa_persona, isolate_agent_runtime_root):
+    """THE join, and the reason ``office_actor_wire_row`` is one function.
+
+    The ack's ``actor.items`` are compared against the items ``runtime.office
+    .get`` renders for the same key — JSON-round-tripped, so this is byte
+    agreement on the wire and not object equality in Python.
+
+    KILLING MUTATION (plan §C): build the ack from the request payload instead
+    of the store's return and this reds on ``revision``; give the ack its own
+    copy of the item shape and it reds the day either copy moves.
+    """
+
+    _seed_workspace()
+    reply = _call(_params(placement_id="qa_wire_row"))
+    assert "error" not in reply, reply
+
+    result = reply["result"]
+    actor = result["actor"]
+    assert actor["actor_key"] == result["actor_key"]
+    assert actor["revision"] == result["revision"]
+
+    mine = [
+        item
+        for item in _office_items()
+        if item["persona_instance_id"] == result["persona_instance_id"]
+    ]
+    assert mine, "runtime.office.get returned nothing for the actor just created"
+    assert json.loads(json.dumps(actor["items"])) == json.loads(json.dumps(mine))
+
+
+def test_the_two_new_ack_keys_move_neither_the_contract_nor_the_method_list(
+    qa_persona, isolate_agent_runtime_root
+):
+    """D11's additive claim, asserted rather than asserted-in-prose.
+
+    ``runtime.agent.retire`` is named on purpose: D12 makes its PRESENCE the
+    launcher's marker for "this serve accepts an absent position", so a serve
+    advertising it before S5 lands would strand every client that trusted the
+    marker. It is not here yet, and this says so.
+    """
+
+    manifest = serve_rpc.manifest()
+    assert serve_rpc.RPC_CONTRACT_VERSION == 1
+    assert manifest["contract"] == 1
+    assert "runtime.agent.create" in manifest["methods"]
+    assert "runtime.agent.retire" not in manifest["methods"]
+
+
+def test_a_malformed_position_on_the_wire_still_refuses_and_writes_nothing(
+    qa_persona, isolate_agent_runtime_root
+):
+    """Absence became legal on the wire; a mangled aim did not — and the refusal
+    still leaves both stores empty, which is the property every refusal test in
+    this file exists to keep.
+    """
+
+    _seed_workspace()
+    for bad in ([1.0], "3,4", [float("inf"), 0.0], [True, False]):
+        reply = _call(_params(position=bad, placement_id="qa_wire_bad"))
+        assert "error" in reply, bad
+        assert reply["error"]["data"]["reason"] == "position_invalid", bad
+    assert _actors() == {}
+    assert _instances() == {}

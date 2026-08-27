@@ -525,6 +525,7 @@ def _office_projection(workspace_id: str) -> dict | None:
     """
 
     from agent_runtime import paths  # noqa: F401 - store_root side of the read
+    from agent_runtime.office_models import office_item_wire_row
     from agent_runtime.office_store import OfficeStore
     from agent_runtime.serde import to_jsonable
     from agent_runtime.snapshot import MAX_OFFICE_ACTORS_PROJECTED
@@ -542,29 +543,14 @@ def _office_projection(workspace_id: str) -> dict | None:
     actors = scan.actors
     projected = actors[:MAX_OFFICE_ACTORS_PROJECTED]
 
+    # The item shape lives in ``office_models`` and NOT here (plan S2). It is the
+    # shape ``runtime.agent.create``'s ack now returns inside ``result.actor``,
+    # and ``agent_create`` cannot import this module — that dependency is
+    # inverted on purpose. Two copies of these ten keys is the
+    # silent-disagreement shape ``_office_projection`` itself was extracted to
+    # end, one level down.
     items = [
-        {
-            "item_id": item.item_id,
-            "kind": item.kind,
-            "persona_id": item.persona_id,
-            # The actor's binding, repeated onto each of its items because the
-            # wire shape is flat. Explicit ``None`` for a class-keyed actor —
-            # NEVER an omitted key, the same rule desks already follow for
-            # ``display_name`` / ``pet_slug``: a client decoding into a typed
-            # struct must not have to special-case which keys exist.
-            "persona_instance_id": actor.persona_instance_id,
-            # The ACTOR's revision, likewise repeated onto each of its items:
-            # the concurrency token ``runtime.office.upsert``'s
-            # ``expect_revision`` is checked against. NOT the ``revision``
-            # beside ``folders`` above — that one is the SURFACE's and does not
-            # move when an actor moves.
-            "revision": actor.revision,
-            "folder": item.folder,
-            "position": [float(item.position[0]), float(item.position[1])],
-            "scale": float(item.scale),
-            "display_name": item.display_name,
-            "pet_slug": item.pet_slug,
-        }
+        office_item_wire_row(actor, item)
         for actor in projected
         for item in actor.items
     ]
@@ -2009,19 +1995,33 @@ def _runtime_agent_create(
 ) -> dict:
     """ONE call places an agent: roster row, chat root and placement together.
 
-    Params: ``persona_id``, ``workspace_id``, ``position: [x, y]`` and
-    ``idempotency_key`` (all required); ``display_name``, ``placement_id``,
-    ``realm_id``, ``folder``, ``correlation_id`` (all optional).
+    Params: ``persona_id``, ``workspace_id`` and ``idempotency_key`` (required);
+    ``position: [x, y]``, ``display_name``, ``placement_id``, ``realm_id``,
+    ``folder``, ``correlation_id`` (all optional).
+
+    ``position`` ABSENT (omitted or ``null``) means the client did not aim, and
+    the service resolves the slot through ``agent_runtime.office_layout_policy``
+    — the same lattice the launcher predicts with, pinned across the two repos
+    by ``tests/fixtures/office_layout/cases.json`` (plan D2). Present, it is
+    taken verbatim, exactly as before.
 
     Result::
 
         {persona_instance_id, persona_id, placement_id, display_name,
          default_chat_session_id, actor_key, revision, workspace_id,
+         position: [x, y], actor: {...},
          phases: {instance_ms, placement_ms, total_ms}, idempotent_replay}
 
     ``actor_key``/``revision`` mirror ``runtime.office.upsert``'s light ack on
     purpose, so the launcher's existing prediction and ``expect_revision``
     bookkeeping keeps working with no new decoder.
+
+    ``position`` is what was WRITTEN — policy or verbatim — and ``actor`` is the
+    row as STORED, in the SAME item shape ``runtime.office.get`` renders
+    (``office_models.office_actor_wire_row``, which that method's projection now
+    also flattens through). Both keys are ADDITIVE: an old client ignores them,
+    ``RPC_CONTRACT_VERSION`` does not move, and no name joins the manifest's
+    ``methods`` list.
 
     UC-H1 — this is a TRANSLATION SHIM and nothing else
     ---------------------------------------------------
