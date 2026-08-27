@@ -44,13 +44,89 @@ cancelled, releasing its pool worker (`is_runtime_stream`, `:835`, used `:2952`)
 serve per root owns a localhost socket, decided by an OS-held exclusive lock
 (`agent_runtime/serve_socket.py`); the loser runs stdio-only and says so on
 `ready`. The handshake is challenge-response and the SERVER speaks first —
-`server_hello` carries a 64-hex nonce, the client answers
-`HMAC-SHA256(key=<per-root token>, msg=<nonce>)`. **The token never travels**: it
-is the HMAC key, never a field, so a captured transcript is unreplayable
-(`serve.py:150-171`). Only authentication failures (`bad_proof`,
-`hello_required`, `hello_malformed`) charge the rate limiter; server-state
-reasons never do, because charging them made a blocked window extend itself
-forever.
+`server_hello` carries a 64-hex nonce and `hello_contract: 3`, and the client
+answers `HMAC-SHA256(key=<per-root token>, msg="v3|<the port it DIALLED>|<nonce>")`.
+**The token never travels**: it is the HMAC key, never a field, so a captured
+transcript is unreplayable. **The proof is bound to the port**, which is what
+makes it un-RELAYABLE — a fresh nonce stops replay but not a live relay, and the
+port is the one value each end takes from its own socket rather than from
+anything the other one claims. `serve_socket.hello_proof` is the authority;
+prose that disagrees with it has been wrong before (this file and two module
+docstrings all said `msg=<nonce>` and contract 2 until 2026-08-27 — which costs a
+client author an afternoon, because a proof over the wrong message is refused
+`bad_proof`, byte-identical to holding a bad credential).
+Only authentication failures (`bad_proof`, `hello_required`, `hello_malformed`)
+charge the rate limiter; server-state reasons never do, because charging them
+made a blocked window extend itself forever.
+
+### 1.1 The gateway listener — the same lane, bound beyond loopback
+
+Since the remote gateway's Stage 1 a serve can open a SECOND listener. It is the
+same `ServeSocketServer` class with three constructor arguments filled in, not a
+second implementation, because the hardened parts of that class are exactly the
+parts a copy would get wrong (the accept loop that announces its own death, the
+pre-auth bound that counts peers who have proven nothing, the two limiters and
+the rule that server-state refusals never charge the auth one). Config:
+`remote_gateway.listen` (a HOST STRING; `false` is off, and boolean `true` is
+REFUSED — an operator opening a LAN port has to say which interface) and
+`remote_gateway.port` (0 = ephemeral; usually pinned, because a firewall rule
+and a paired phone both need a number that survives a restart). **Off by
+default, forever.**
+
+| | loopback lane | gateway lane |
+|---|---|---|
+| host / port | `127.0.0.1`, ephemeral | operator-chosen, usually fixed |
+| link | plaintext | TLS, self-signed per-install cert, client PINS the fingerprint (R1) |
+| credential | the per-root `serve_auth` token | a per-DEVICE token, `gateway/devices.json` |
+| `connection.transport` | `socket` | `gateway` |
+| caller kind | `local_console` | `device`, carrying its stored tier |
+| ops | every op minus `shutdown` | that, minus `drain` |
+| argv lane | yes | **no** |
+
+The device hello names `device_id` and proves
+`HMAC-SHA256(key=sha256(device token), msg="gwv1|<port>|<device_id>|<nonce>")`
+(`serve_gateway_auth.device_proof`). A hello naming `pairing_code` instead
+redeems a short-TTL code minted by `harness gateway pair`, and is admitted as
+the device it just created with the token riding that one `hello_ok` and never
+again. Every credential failure on this lane — no id, unknown id, revoked row,
+wrong proof, wrong code — collapses into ONE `bad_proof` rejection, so a peer
+that has proven nothing cannot enumerate device ids by watching the reason
+change.
+
+**Neither door accepts the other's credential**, in both directions: the root
+token is refused on the gateway lane, a pairing code is refused on loopback.
+
+**The argv lane is unreachable from a device**, and that refusal is what makes
+the tier gate real rather than decorative: `authorize_call` gates the METHOD
+lane, while `{"argv": ["harness", …]}` reaches the CLI dispatcher where no tier
+declaration exists. Without it a `read`-tier device refused
+`runtime.agent.retire` sends the same verb as argv and is obeyed. It is a
+REFUSAL rather than a second gate because gating argv means deciding a tier for
+every CLI verb in this repo and keeping that map correct forever — the
+duplicated-authority shape this stack keeps retiring.
+
+**The loopback lane is byte-identical whether or not the gateway lane is up**,
+and that is asserted directly rather than inferred: two steady-state boots
+compared field by field on `ready` and on a loopback client's `hello_ok`
+(`tests/agent_runtime/test_serve_gateway_lane.py`).
+
+A `gateway` block rides `ready` / `hello_ok` / `version` on the same "states its
+own outcome" rule as `socket`: `disabled`, or `listening` with `host` / `port` /
+`cert_fingerprint`, or `error:<reason>`. Never absent.
+
+**Operational note — the Windows firewall.** The port is operator-chosen, and on
+Windows the first bind beyond loopback raises the Defender Firewall prompt
+naming the PYTHON interpreter (not `hermes`), because the listener is a socket
+in that process. Allowing it on Private networks is what a LAN pairing needs;
+Public is the wrong answer and is what the dialog defaults to on some networks.
+An operator who dismisses the prompt gets a listener that binds successfully and
+is unreachable from every other machine — `ready` will say `listening` and be
+telling the truth, which is why the firewall is named here rather than inferred
+from a connection failure. A pinned `remote_gateway.port` is what makes a
+`netsh advfirewall` rule writable in advance; an ephemeral port cannot have one.
+**Undriven by any test in this repo**, and by nothing else either — see the
+Stage 1 honest gaps in
+[planned/remote-gateway.md](planned/remote-gateway.md).
 
 ## 2. Capability advertisement — `rpc` and `ops`
 
@@ -60,6 +136,14 @@ thing I am attached to carry" must be answerable at any time. Two manifests ride
 `"rpc"` from `serve_rpc.manifest()` (`agent_runtime/serve_rpc.py`) and `"ops"`
 from `ops_manifest(transport=…)` (`serve.py::ops_manifest`),
 `{"contract", "transport", "ops", "subscribe_lanes"}`.
+
+`ops` answers PER TRANSPORT because the answer genuinely differs, and there are
+now three answers rather than two: `shutdown` is stdio-only (it is the verb of
+the process that owns the pipe), and `drain` is additionally absent from the
+`gateway` answer — it ends the runtime for every other attached client, which a
+paired device does not get to decide even at `console` tier. A device learns
+what it may ask by MEMBERSHIP; the manifest and the dispatcher cannot disagree,
+because both read one tuple (`OPS_EVERY_TRANSPORT` minus `OPS_GATEWAY_DENIED`).
 
 **The `rpc` roster is TEN methods, and each is named by its handler** — every
 one registered by a `@method("…")` decorator in `serve_rpc.py`, which is the
@@ -97,6 +181,19 @@ below permits. The launcher reads it (`MissionRuntimeRpcManifest.tiers`) and
 branches on nothing — a manifest says what a call WANTS, never what a connection
 HOLDS. The enforcement is `serve_rpc.handle_request`'s gate; see
 [06 §authorization](06-office-and-board.md).
+
+**The tier is now a refusal, and what it refuses is a paired device** (Stage A5,
+landed with the gateway's Stage 1). `authorize_call` compares the tier a
+device's record HOLDS — read off `gateway/devices.json` by the transport, fixed
+at a pairing ceremony only an operator at this install's own machine can run —
+against the tier the verb DECLARES, and answers a `read`-tier device asking for
+a `console` verb with the typed `data.reason: "scope_denied"` the launcher's
+decoders already branch on. Nothing local moved: `local_console` and
+`stdio_owner` are grandfathered exactly as A3 left them, because a device's
+authority was added BESIDE that set rather than folded into it — two callers
+whose authority comes from different kinds of fact should not share one
+membership test. Reads stay open to `unknown`, deliberately and not by
+omission: nothing on the read side mutates a level.
 
 This table used to be a list of ten LINE NUMBERS. Two of them (`2055`, `2115`)
 had already rotted by 2026-08-27 — a slice landing above them moved both — while
@@ -435,6 +532,16 @@ authority, so in-process tool relay, CLI and serve transport get the same depth
    single-flight, torn down at run end.
 8. **`agent_runtime/` is fork-only.** Any edit outside
    `agent/ | agent_runtime/ | hermes_cli/harness*` needs a boundary-ledger row.
+9. **A listener beyond loopback is opt-in per install, forever**; it is TLS-only
+   (a certificate that cannot be minted means the lane does not open — never
+   that it opens in the clear); and it accepts only per-device credentials. The
+   loopback lane's host is not a knob and does not become one: widening exposure
+   is a different listener with a different credential story, not a different
+   value in `SOCKET_HOST`.
+10. **A credential appears in exactly one frame, once** — the `hello_ok` that
+    redeemed the pairing code that minted it. It is absent from
+    `SocketConnection.payload()`, from every log line, and from `DeviceRecord`,
+    which has no field for it by construction.
 
 ## Open rows
 

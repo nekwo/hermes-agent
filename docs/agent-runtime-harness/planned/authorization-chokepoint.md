@@ -1,9 +1,9 @@
 # Planned — the authorization chokepoint
 
-**Status: A1–A4 BUILT AND LANDED 2026-08-27.** A5 belongs to the gateway plan's
-Stage 1 and is not built here; A6 is not built and is not reachable — it was
-conditional on Ruling A picking (a) or (c), and the operator picked (b).
-Surveyed 2026-08-27, built the same day.
+**Status: A1–A5 BUILT AND LANDED 2026-08-27.** A5 was built with the gateway
+plan's Stage 1 rather than here, as this file said it would be; A6 is not built
+and is not reachable — it was conditional on Ruling A picking (a) or (c), and the
+operator picked (b). Surveyed 2026-08-27, built the same day.
 
 | Stage | Status | Receipt |
 |---|---|---|
@@ -11,7 +11,7 @@ Surveyed 2026-08-27, built the same day.
 | A2 — carry a caller identity | LANDED | hermes `4d60060dc3` |
 | A3 — the gate, allowing everything | LANDED | hermes `dba7ed19b6` |
 | A4 — reconcile the CLI gate | LANDED | hermes `290f6f461b` |
-| A5 — device scopes become policy | NOT HERE | gateway plan Stage 1 / R11 |
+| A5 — device scopes become policy | LANDED | hermes `cc6ece232d` (with gateway Stage 1) |
 | A6 — service-layer backstop | NOT BUILT | conditional on Ruling A = (a)/(c); ruled (b) |
 
 **What actually changed, in one paragraph.** `@method(name, tier=…)` now
@@ -440,10 +440,39 @@ describe:
 
 ### Stage A5 — (gateway Stage 1's half) device scopes become a real policy
 
-Only after the gateway plan's device credential exists. `caller.kind` gains
-`device`, carrying the `device_id` and the `scope` read from
-`gateway/devices.json`; the Stage A3 predicate stops returning allow for it. No
-work here belongs to this file — it is named so the seam is visible.
+**LANDED — hermes `cc6ece232d`, with the gateway plan's Stage 1.** Built as
+designed, with one addition and one deliberate non-change.
+
+The design as written: `caller.kind` gains `device` carrying the `device_id` and
+the tier read from `gateway/devices.json`, and the A3 predicate stops returning
+allow for it. That is what shipped, and A3's promise held exactly — it was an
+edit to `authorize_call`, not an architecture change: `handle_request` untouched,
+`method()` untouched, no suite rewritten.
+
+**The addition is a structural guard.** A gateway connection with no usable
+device stamp resolves to `unknown`, never `local_console`. That arm is
+unreachable today (the handshake refuses a hello it cannot place), but the
+fall-through it replaces would have handed a REMOTE peer the machine owner's
+authority the moment any future change let a gateway connection through with an
+empty stamp — and the grandfather clause is about the machine owner, not about
+whoever reached a listener. The condition is `transport != "gateway"`, a
+property of the LISTENER rather than of anything the peer said.
+
+**The non-change: `_CONSOLE_KINDS` was not widened.** The device arm sits BESIDE
+it. A local console's authority is its KIND (there is one machine owner, and
+holding the root token is being it); a device's is a stored tier (there are N
+devices and they differ). Two callers whose authority comes from different kinds
+of fact should not share one membership test — folding them together is how a
+set someone widens for one reason silently widens for the other.
+
+A5 also inherited a duty this file did not anticipate, and it is the load-bearing
+half: **the tier gate covers the METHOD lane only**, so the argv lane
+(`{"argv": ["harness", …]}`, which reaches the CLI dispatcher where no tier
+declaration exists) is REFUSED outright to a device. Without that, a `read`
+device refused `runtime.agent.retire` on the method lane sends the same verb as
+argv and is obeyed — the gate would be real and bypassable in one frame. §4's
+"whether the argv lane should exist" is still not this file's question; whether a
+DEVICE reaches it turned out to be.
 
 ### Optional Stage A6 — the service-layer backstop
 

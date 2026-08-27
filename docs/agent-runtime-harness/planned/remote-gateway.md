@@ -42,12 +42,14 @@ ceremony both have upstream reuse material in `gateway/` (`platform_registry.py`
   moved. **Stage 0b (the CLI half) followed the same day** — hermes
   `29ba464d9c`, launcher `bf107a882`: `harness gateway id` and `harness gateway
   rename <name>`, so Stage 0 is complete. See the Stage 0 notes below.
-- **Stage 1 — device pairing + LAN bind:** `serve_gateway_auth.py` (hashed per-device
-  tokens, scopes R11, revocation; `gateway/pairing.py` discipline), pairing verbs with
-  QR payload `{host, port, install_id, cert_fingerprint, code}`, second listener bound
-  per config accepting ONLY device/peer hellos — loopback lane byte-identical. TLS
-  posture is ruling R1 (recommended: self-signed per-install cert, fingerprint pinned
-  via pairing payload).
+- **Stage 1 — device pairing + LAN bind: SHIPPED 2026-08-27.** hermes
+  `add7edd584` (S1a, the device credential store), `9e266d7871` (S1b, R1's
+  certificate), `cc6ece232d` (A5, the tier becomes a refusal), `b37cb8331f`
+  (S1c, the second listener + the config-key defect), `3f0c29592d` (S1d, the
+  pairing ceremony's second half), `28ec9e3180` (S1e, the operator verbs),
+  `afd0667df7` (the handshake prose truth-up); launcher `8891351ed` (fixtures
+  only). Canon: [03 §1.1](../03-transport-and-wire.md). Full notes, deviations
+  and honest gaps in "Stage 1 notes" below.
 - **Stage 3 (shared) — send idempotency:** mission-chat send needs a server-side
   turn-request-id dedupe hook for the remote write path (still absent there — no
   `turn_request_id` anywhere, re-verified 2026-08-27 — but the precedent now ships on
@@ -211,6 +213,129 @@ no greeting frame, proven rather than assumed.
 is RED at HEAD and was red before this stage (confirmed on a stashed tree). A1
 grew `serve_rpc.manifest()` by a `tiers` key and this parity pin still asserts
 `{"contract", "methods"}`. It belongs to the chokepoint wave, not to Stage 0b.
+
+
+## Stage 1 notes — landed 2026-08-27
+
+### What shipped, in the order it landed
+
+| sha | what |
+|---|---|
+| `add7edd584` | `agent_runtime/serve_gateway_auth.py` — per-device tokens (stored as `sha256`), pairing codes with `gateway/pairing.py`'s discipline, revocation. 29 tests. |
+| `9e266d7871` | `agent_runtime/gateway_tls.py` — the self-signed per-install EC P-256 certificate R1 ruled for, and the fingerprint a client pins. 10 passed / 1 skipped. |
+| `cc6ece232d` | A5 — `RpcCaller` grows a `device` kind carrying a tier; `authorize_call` refuses on it. 43 + 100 passed. |
+| `b37cb8331f` | The second listener: three default-off seams on `ServeSocketServer`, the lane in `serve_loop`, the `gateway` greeting block, the argv/`drain` refusals. 17 + 16 + 2 passed, loopback 59 unchanged. |
+| `3f0c29592d` | The pairing ceremony's second half — a `pairing_code` hello redeems and is admitted, token riding one `hello_ok`. 23 passed. |
+| `28ec9e3180` | `harness gateway pair` / `devices list` / `devices revoke`. 15 passed. |
+| `afd0667df7` | Prose: the handshake was documented as contract 2 over `msg=<nonce>` in three places. |
+
+### The finding that mattered most: Stage 0a's config keys never existed
+
+Stage 0a's receipts say `gateway.listen` / `gateway.port` were "declared, read by
+nothing". The first half was false, and the second half is exactly what hid it.
+`"gateway"` is ALREADY a top-level key in `config_defaults.py`'s single
+~3000-line dict literal (the messaging gateway's), and a duplicate key in a
+Python dict literal does not merge and does not warn — the later entry wins and
+the earlier one is discarded at parse time. So the keys were not merely unread;
+they were not there. **A key nobody reads and a key that is not there are
+indistinguishable from every angle except a reader's**, which is why becoming
+the first reader is the only thing that could have found it.
+
+They are `remote_gateway.*` now. That is also the honest spelling rather than a
+workaround: Stage 0a's own comment said the word `gateway` is overloaded in this
+codebase and that the two lanes must not be conflated — and two lanes cannot
+share one key and stay unconflated. `tests/hermes_cli/test_config_defaults_no_duplicate_keys.py`
+walks the module's AST, because the loaded dict cannot show the defect (by then
+the evidence is gone), and it was checked non-vacuous against the exact shape
+that shipped.
+
+### Deviations from the plan, and the argument for each
+
+- **`listen` is a HOST STRING, and boolean `true` is refused.** §4 wrote
+  "bound per `gateway.listen` (e.g. `0.0.0.0` or an explicit interface)", which
+  is what shipped — but the refusal of `true` is an addition. An operator
+  opening a port onto a LAN should have to say which interface; "guessed one for
+  you" is not a sentence a runtime that executes agents with tools should be
+  able to say about a listener.
+- **The pairing ceremony's SECOND half was built, and the brief scoped the
+  listener to "ONLY device-tier hellos".** A hello naming `pairing_code` is a
+  second, narrower hello. The argument for exceeding the letter: without it
+  `redeem_pairing_code` has no caller but a test, `harness gateway pair`'s output
+  is decoration, and Stage 1 ships a device tier no device can ever enter — a
+  bigger defect than the extra surface, and one that would have to be fixed
+  before any Stage 5 phone could be built.
+- **The argv lane is REFUSED to devices rather than gated.** Not in the brief,
+  and load-bearing: `authorize_call` gates the method lane, and
+  `{"argv": ["harness", …]}` reaches the CLI dispatcher where no tier
+  declaration exists — so a `read` device refused `runtime.agent.retire` on the
+  method lane could send the same verb as argv and be obeyed. Gating argv
+  instead would mean deciding a tier for every CLI verb in this repo and keeping
+  that map correct forever, which is the duplicated-authority shape this stack
+  keeps retiring.
+- **`drain` is refused to a device even at `console` tier**, because `drain` is
+  not a level mutation the tier speaks about: it ends the process and
+  disconnects every other attached client.
+- **Two exit codes were added** to `harness_support.ERROR_EXIT_CODES`
+  (`pairing_codes_pending`, `pairing_locked_out`, both family 6), documented in
+  the table the way `duplicate_desk` and `cancel_unsupported` document theirs.
+- **The R1 survey's bullet 3 was honoured, not overridden.** It argues TLS and
+  AUTHENTICATION are separate lifts and that mutual proof-of-key should ship
+  first. What shipped keeps them separate — a device is authenticated by the HMAC
+  proof and TLS is confidentiality only, so a peer that completes a TLS
+  handshake has proven nothing — while still shipping both, because R1 was
+  ruled `encrypt` and the certificate turned out to cost one module with
+  `cryptography` already pinned in `pyproject.toml` (48.0.1, no dependency work
+  at all). The survey's bullet 4 (one key, two encodings) is the upgrade path if
+  the ES256 device key ever becomes the TLS identity; nothing here forecloses it.
+
+### The honest limit of hashing the device token
+
+`devices.json` stores `sha256(token)` and the proof is an HMAC keyed by that
+digest, so **the stored verifier is HMAC-key-equivalent**: anyone who can read
+the file can impersonate every device in it, exactly as anyone who can read
+`serve_auth_token` can impersonate the machine owner. Digesting buys one real
+thing and not two — the bytes a phone holds are not the bytes on this disk, so a
+store read cannot recover an ISSUED credential. Store-read resistance needs an
+asymmetric scheme (the R1 survey's bullet 2), and that changes only
+`device_proof` and one module, never the wire, which says "proof" and nothing
+about how it was computed. Written into `serve_gateway_auth.py`'s docstring
+rather than left implied.
+
+`serve_auth.py` recorded the Windows-ACL gap and declined to fix it, on the
+grounds that the real control belongs with the transport slice that introduces
+the exposure. **This is that slice**, so an `icacls` narrowing is attempted on
+the device store and the private key, and its outcome is returned rather than
+assumed — a permission posture this runtime cannot enforce is still never
+claimed as enforced.
+
+### Honest gaps
+
+1. **No second machine.** Every integration test binds loopback. That is a
+   config VALUE and not different code — the same `bind()` on the same class
+   with a host string the operator chose — but "a phone on the LAN reached this
+   install" is unproven, and Stage 5 is where it gets proven.
+2. **No phone, and no QR was ever scanned.** `harness gateway pair` emits the
+   payload R3 specifies and a test asserts the scanned bytes equal the printed
+   fields; whether a phone camera reads them is untested by construction.
+3. **Windows firewall behaviour is undriven.** The prompt, its Private/Public
+   default, and what an operator sees when they dismiss it are documented in
+   canon 03 §1.1 from knowledge of the platform, not from an observation made
+   here. Nobody bound a non-loopback interface on this machine during this work.
+4. **No live serve was driven by hand.** Every proof is a test — though the
+   socket ones run the real `serve_loop`, over real sockets, with a real TLS
+   handshake, a real certificate pin and a real HMAC.
+5. **`icacls` narrowing is reported but not asserted.** No test checks that the
+   resulting DACL is what was asked for; the function returns its outcome and
+   nothing reads it yet.
+6. **The primary plan (launcher `docs/mission_control/planned/universal-remote-gateway.md`)
+   still describes Stage 1 as unbuilt.** Its §4 block and §5's R1/R3/R11 records
+   are owed a receipt. Not written here: a sibling session was landing Stage 2
+   receipts into that same file, and this lane's launcher writes were scoped to
+   fixture regenerations.
+7. **The device store's cross-process lock falls THROUGH on a filesystem that
+   will not lock**, rather than refusing. The writes are atomic-replace either
+   way, so the loss is a lost update and not a corrupt store — but a pairing
+   minted during that window can be dropped.
 
 ## Drift addendum — audited 2026-08-27
 

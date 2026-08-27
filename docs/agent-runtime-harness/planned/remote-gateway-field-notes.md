@@ -345,3 +345,133 @@ and that was proven rather than assumed with a `generate.py --check` at the end.
 
 **Run, not inferred.** Receipts and honest gaps are in the Stage 0b block of
 `remote-gateway.md`.
+
+## 2026-08-27 — Stage 1, the device tier and the second door
+
+**Brief.** Build the largest hermes stage: the device credential store, pairing
+verbs, the second listener, R1's TLS, A5's enforcement, docs. All rulings
+settled; cite, do not re-litigate.
+
+**What contradicted the brief, in the order it was found.**
+
+1. **Stage 0a's config keys did not exist.** The brief says
+   "`hermes_cli/config_defaults.py` (`gateway.listen`/`gateway.port`, declared
+   Stage 0, read by nothing — you are their first reader)". Being the first
+   reader is what found it: `"gateway"` is already a top-level key in that file's
+   one ~3000-line dict literal (the messaging gateway's), and a duplicate key in
+   a Python dict literal is not an error, not a warning, and not visible from the
+   loaded object — the later entry wins and the earlier is discarded at parse
+   time. Stage 0a's keys were never merely unread. **"Read by nothing" is the
+   exact condition under which nobody could tell**, and that generalises well
+   past this file: a declaration with no consumer has no observable difference
+   from a declaration that failed to load. Renamed to `remote_gateway.*` (which
+   Stage 0a's own comment argues for — it says the two lanes must not be
+   conflated, and they cannot share a key and stay unconflated), and guarded by
+   an AST walk over the module source, since the loaded dict cannot show the
+   defect. The detector was checked against the exact shape that shipped rather
+   than assumed to work.
+
+2. **The pairing ceremony had no second half.** The brief scopes the listener to
+   "ONLY device-tier hellos", which is correct as far as it goes and leaves
+   `redeem_pairing_code` with no caller but a test — i.e. a device tier no device
+   can enter and a `harness gateway pair` whose output is decoration. Built the
+   redemption hello anyway and said so in the commit rather than quietly. The
+   judgement: a half-ceremony is a bigger defect than the extra surface, and it
+   would have to be fixed before any Stage 5 phone existed.
+
+3. **The tier gate covers one of the two doors a device can reach.** A5 as
+   designed (and as the chokepoint plan wrote it) gates the METHOD lane. The
+   argv lane — `{"argv": ["harness", …]}` — reaches the CLI dispatcher, where no
+   tier declaration exists and every verb is the local operator's. So a `read`
+   device refused `runtime.agent.retire` on the method lane could have sent the
+   same verb as argv and been obeyed: the gate would have been real and
+   bypassable in one frame. Refused the lane outright rather than gating it,
+   because gating means deciding a tier for every CLI verb in this repo and
+   keeping that map correct forever. This is the single change in the whole
+   stage most likely to be wrong if it is wrong, and it is the one to review
+   first.
+
+4. **The handshake prose was wrong in three places, and the client author found
+   it.** `serve_socket.py`'s docstring, `serve.py`'s wire summary and canon 03 §1
+   all described the proof as `hello_contract` 2 over `msg=<nonce>`;
+   `HELLO_CONTRACT_VERSION` has been 3 and `hello_proof` has bound the dialled
+   PORT since the relay defence landed. Wrong in both halves at once. It surfaced
+   because the sibling session built the launcher's socket client against it
+   (launcher `527940a0e`) — which is the only way this kind of drift ever
+   surfaces, and the reason it is worth recording: a stale comment normally costs
+   a reader a minute, and this one costs a client author an afternoon pointed at
+   the wrong subsystem, because a proof over the wrong message is refused
+   `bad_proof`, byte-identical to holding a bad credential. Discharges the
+   primary plan's §7 bound, which named exactly this and deferred it to "Stage 2
+   client authoring".
+
+**Design calls worth re-reading before extending this.**
+
+- **The stored verifier is HMAC-key-equivalent, and the docstring says so.** The
+  brief says "hashed per-device 256-bit tokens (never store or log the
+  plaintext; hash like serve_auth treats its token)" — and `serve_auth` stores
+  its token in PLAINTEXT, so the instruction is about DISCIPLINE (never in a
+  frame, log, or event) rather than about a digest. Both were done, but the
+  digest buys exactly one thing: the bytes a phone holds are not the bytes on
+  disk, so a store read cannot recover an ISSUED credential. It does not make
+  the store less sensitive than `serve_auth_token`. Claiming otherwise would be
+  a security note that overclaims, which is worse than none. The upgrade for
+  store-read resistance is asymmetric (the R1 survey's bullet 2) and changes one
+  function.
+- **Revocation is checked AFTER the proof.** Checking it first lets an
+  unauthenticated peer probe which device ids are revoked, and by difference
+  which are live, holding no credential at all.
+- **The R1 survey's bullet 3 was honoured rather than overridden.** It argues
+  TLS and AUTHENTICATION are different lifts and that proof-of-key should ship
+  first. Both shipped, but SEPARATE: authentication is the HMAC, TLS is
+  confidentiality only, and a peer that completes a TLS handshake has proven
+  nothing. The survey expected the certificate to be the expensive half; it was
+  one module, because `cryptography` is already pinned in `pyproject.toml`
+  (48.0.1, capped below 49 by msal) and installed. **No dependency work at all**
+  — the brief's contingency ("if that's heavier than expected, propose the
+  split") did not arise.
+- **One implementation, three constructor arguments.** The second listener is
+  `ServeSocketServer` with `port`/`ssl_context`/`authenticator` filled in, not a
+  subclass and not a copy. The hardened parts of that class are precisely the
+  parts a copy would get wrong, and every one of them is invisible until it
+  matters (an accept loop that dies quietly, a pre-auth bound nobody counts, a
+  limiter that charges the server's own state).
+- **TLS is negotiated BEFORE the admission checks**, deliberately paying a
+  handshake for peers about to be refused: every refusal answers with a typed
+  frame, and a frame written to a socket the peer never negotiated is bytes it
+  cannot read. Refusing first would turn every capacity and throttle refusal
+  into an unexplained disconnect.
+
+**Where a test had to be corrected rather than the code.** The
+byte-identical-loopback assertion failed first on `auth.token_file`
+minted-vs-present and `install.state` minted-vs-loaded — boot ORDER, not the
+gateway lane. Warming the root and discarding that boot is the fix, and the test
+says why: a comparison between a first boot and a second proves nothing about
+the thing it names. Volatile fields are dropped by NAME rather than by a
+heuristic, so a field that starts varying for a real reason breaks it instead of
+slipping through.
+
+**Repo hygiene, twice.** (1) Something in this checkout ran `git reset` plus a
+clean twice during the session and destroyed untracked work — most likely a
+sibling session's fixture generator, which requires a clean hermes tree. Recovered
+from a scratchpad copy the second time and switched to write-to-scratchpad-then-
+commit-atomically for the rest. Worth knowing: an untracked file in this repo is
+not safe while another session is regenerating fixtures against it. (2) A
+concurrent session held uncommitted work in `hermes_cli/harness.py` for the whole
+of the verb commit. Only this lane's hunks were staged, by building a patch
+against HEAD and `git apply --cached`-ing it — `git add <file>` would have taken
+their work with it.
+
+**Cross-repo, and how the dirty tree was worked around.** `ready.json` moved
+(the additive `gateway` block) and the argparse dump grew three verbs with ZERO
+removals. Both were regenerated from a clean detached WORKTREE of hermes at the
+exact commit, because the working checkout carried the concurrent session's
+changes and the generator's own warning is that a `+dirty` stamp is one nobody
+else can reproduce. Same commit, clean tree, reproducible bytes — and
+`generate.py --check` green twice consecutively after the refresh.
+
+**Run, not inferred.** Receipts are in the Stage 1 notes in
+[remote-gateway.md](remote-gateway.md); the honest gaps are there too and the
+first three are the ones that matter: no second machine, no phone, and the
+Windows firewall behaviour documented in canon from platform knowledge rather
+than from an observation made here.
