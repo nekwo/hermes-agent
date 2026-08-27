@@ -800,3 +800,66 @@ different roots. Neither install can perform the other's half.
 8. **The store lock still falls THROUGH rather than refusing** when the
    filesystem will not lock. Stage 1's gap, inherited, and now covering two
    stores.
+
+## 2026-08-27 — Stage 7, cross-install `agent_chat_send` (running record)
+
+**Brief.** Build Stage 7 from the primary plan's §4: the `@install/target`
+grammar (R4), a `peer.agent_chat.execute` method on the receiving install, a
+remote-execution leg in the dispatch supervisor, R8's retry posture, and a
+two-roots acceptance.
+
+**Read, in this order.** Primary plan §4 Stage 6 receipts + Stage 7 spec
+(`universal-remote-gateway.md:740-895`) and R4/R5/R8 (`:1034-1080`);
+`call_authorization.py` whole; `gateway_peers.py` (`PeerRecord`, `dial_peer`,
+`redeem_peer_code`, `record_peer`); `tests/agent_runtime/test_gateway_peer_two_roots_e2e.py`
+whole; `dispatch_delivery.py:1-200`; `dispatch_store.py:1-600`;
+`tools/agent_chat_tool.py` (`_looks_like_instance_handle`, `agent_chat_send`,
+`_dispatch_detached`); `tools/agent_chat_dispatch.py` (`_run_dispatch_guarded`);
+`agent_runtime/chat_turn.py` whole; `serve_rpc.py` (`method`, `handle_request`,
+`peer.ping`, `runtime.chat.message`); `hermes_cli/harness_parts/serve.py:1177-1270`
+(`_LineFrameProxy`), `:1900-2005` (the worker's frames + exit), `:3830-3930`
+(`_spawn_chat_turn`); `serve_socket.py` `ServeSocketClient`.
+
+**What contradicted the brief, and what it changed.**
+
+1. **"The drain … performs the target's turn" names the wrong owner, and the
+   plan's own vocabulary says so two sentences later.** The drain
+   (`dispatch_delivery`) owns exactly one thing — *tell the sender* — and the
+   supervisor (`tools/agent_chat_dispatch`) owns *perform the turn*. The remote
+   leg is a substitution for the CHILD PROCESS, not for the delivery forge, so
+   it lands in `_run_dispatch_guarded` beside the spawn it replaces. Putting it
+   in the drain would have given one dispatch two owners and put a
+   minutes-long network turn on the 5s loop that also forges deliveries.
+
+2. **R8's "converges to `dropped`" cannot be taken literally without lying to
+   the sender.** `dropped` is a DELIVERY state and it means *the sender was
+   never told*. An unreachable peer is precisely the fact the sender most needs
+   told — and a `dropped` row is indistinguishable, in the Activity panel, from
+   a dispatch that vanished. So the cap converges to a terminal `error`
+   completion that IS delivered, carrying `peer_unreachable` as its reason.
+   R8's cap half is honoured exactly (`MAX_DELIVERY_ATTEMPTS`, one constant,
+   no second number) and its naming half is honoured on the row, in the
+   completion event and in the message the sender reads. Argued in
+   `dispatch_store.REMOTE_UNREACHABLE_REASON` and in the S7c commit.
+
+3. **`normalize_chat_message` hardcodes `--requested-by gateway_device`**, with
+   a comment saying that field "is not a param, cannot be a param". Correct, and
+   it is why `peer.agent_chat.execute` needed its own normaliser rather than an
+   allowlist entry on `runtime.chat.message`: a peer's provenance must read
+   `peer:<install_id>` and that id must come off the authenticated connection.
+
+4. **The ack is an ACCEPT, so the dialling side has to read frames.** Stage 3
+   established that a chat turn cannot be answered inline (`serve.py` answers
+   the method lane on the reader loop). So install A does what the launcher
+   does: reads `{"id": request_id, "event": "stdout", "line": …}` frames until
+   the `exit` frame and parses the `--json` payload out of them —
+   `parse_child_payload`, the same function the local child's stdout goes
+   through, which is what makes a remote turn and a local turn one shape.
+
+5. **Display names are not unique and Stage 6's own field note #4 says so.**
+   `resolve_install_target` therefore resolves ids first and REFUSES an
+   ambiguous name with both candidate ids rather than picking one. Pinned by
+   `test_two_installs_with_one_name_refuse_with_both_ids`.
+
+**S7a receipts.** `agent_runtime/gateway_targets.py` +
+`tests/agent_runtime/test_gateway_targets.py` — 24 tests, all green.
