@@ -168,6 +168,13 @@ _METHODS: dict[str, Callable[[Any, dict, "RpcContext"], dict]] = {}
 #: spends CPU, but spending CPU is a rate-limiting question and rate limiting is
 #: not a tier — a viewer device that may not place an agent may certainly warm
 #: the cache that makes its own reads fast.
+#:
+#: The gateway's two chat verbs (Stage 3) are the row that stretches the one-line
+#: rule, and they are ``console``: a chat turn is not itself a level mutation,
+#: but it RUNS AN AGENT WITH TOOLS, which can place, retire, write and dispatch.
+#: A tier below ``console`` for them would be a door around ``console``. The full
+#: argument, including why a new ``chat`` word would have refused every
+#: already-paired console device, is on ``_runtime_chat_message``.
 _METHOD_TIERS: dict[str, str] = {}
 
 
@@ -248,12 +255,24 @@ class RpcContext:
     (``call_authorization.caller_for_connection``, called from ``serve.py``'s
     dispatcher) and is never assembled from ``params``: a request that could
     name its own caller would be a request that authorizes itself.
+
+    ``spawn_chat_turn`` (gateway Stage 3) is the third, and the first that is
+    about work rather than about who or where. Every method before it finished
+    on this thread; a chat turn runs for seconds to minutes, and the method lane
+    is answered INLINE on the reader loop (see ``serve.py``'s method-lane
+    comment, which names chat turns as the reason the pool exists). So the chat
+    methods do not run their turn — they hand it to the transport's worker lane
+    through this seam and ack. ``None`` means the caller has no worker lane,
+    which is the honest state for a test-built context, and the chat methods
+    REFUSE on it rather than falling back to running the turn inline: an inline
+    chat turn would stall every other client on this serve for its whole length.
     """
 
     connection_key: str | None = None
     transport: str = "stdio"
     emit: Callable[[dict], None] | None = None
     caller: RpcCaller = STDIO_OWNER
+    spawn_chat_turn: Callable[[str, list[str], str], None] | None = None
 
     def push(self, method_name: str, params: dict) -> bool:
         """Send one notification to THIS caller. False when there is no channel.
@@ -2315,6 +2334,142 @@ def _runtime_persona_prewarm(
     from agent_runtime.persona_prewarm import request_persona_prewarm
 
     outcome = request_persona_prewarm(params)
+    if outcome.refusal is not None:
+        refusal = outcome.refusal
+        return err(rid, refusal.code, refusal.message, refusal.data)
+    return ok(rid, outcome.result)
+
+
+# ── runtime.chat.message / runtime.chat.steer ────────────────────────────────
+#
+# Gateway Stage 3. The plan's Stage 3 sketch said "RPC where methods exist,
+# op/argv lane otherwise — same union", and that union has a hole a device falls
+# through: ``mission.chat.*`` has no methods, it lowers to argv, and Stage 1
+# REFUSES the argv lane to devices outright (``serve.py``'s ``_is_device``
+# branch — the refusal that stops a ``read`` device from sending as argv what it
+# was refused on the method lane). A remote device therefore could not send a
+# chat turn at all, and chat is what this gateway is for.
+#
+# So the two chat-turn verbs are ported to the method lane, which is the
+# direction ``planned/runtime-rpc-call-half.md`` already had, and the scope is
+# deliberately those two and not the argv surface. The local stdio lane keeps
+# its argv path byte-for-byte: nothing here changes how the launcher's local
+# session sends a turn today.
+
+
+@method("runtime.chat.message", tier=TIER_CONSOLE)
+def _runtime_chat_message(
+    rid: Any, params: dict, context: RpcContext | None = None
+) -> dict:
+    """Send ONE Mission Control chat turn. Accepts and hands off; never blocks.
+
+    Params: ``turn_request_id``, ``persona_id``, ``message`` (required);
+    ``session_id``, ``persona_instance_id``, ``workspace_id``, ``title``,
+    ``new_session``, ``stream``, ``max_seconds``, ``correlation_id`` (optional).
+
+    Result::
+
+        {turn_request_id, request_id, accepted: true, state: "accepted",
+         verb, idempotent_replay, settled, exit_code?, correlation_id?}
+
+    **The ack is an ACCEPT, not a reply**, and that is forced by the lane rather
+    than chosen: this dispatcher answers INLINE on the reader loop (see the
+    method-lane comment in ``serve.py``, which names chat turns as the reason
+    the worker pool exists), so a method that ran a turn would stall every other
+    client attached to this serve for its whole length. The turn's frames —
+    deltas when ``stream`` is asked for, the final ``--json`` payload always —
+    ride the existing per-request frame lane under the returned ``request_id``,
+    which is the same lane the local launcher already reads. No second streaming
+    transport is invented; the socket lane has carried per-request frames since
+    it existed.
+
+    **Tier: ``console``, and honestly rather than conveniently.** The tempting
+    read is that a chat turn is not a level mutation, so it should be something
+    softer — and R11's own sentence ("a paired console device may chat") can be
+    satisfied by a new ``chat`` word. It should not be, for two reasons. The
+    first is what the verb DOES: a chat turn runs an agent with tools. It can
+    write files, spawn dispatches, install skills and place agents, so a tier
+    below ``console`` would be a door around ``console`` — the ``read`` device
+    refused ``runtime.agent.retire`` could ask an agent to retire one. The
+    second is mechanical and would have bitten immediately:
+    ``call_authorization.authorize_call``'s device arm is an EQUALITY against
+    the stored word, not an ordering, so a new ``chat`` tier would have refused
+    every already-paired ``console`` device the very thing R11 says it may do.
+    Declaring chat at ``console`` satisfies R11 exactly, keeps the vocabulary at
+    two words, and changes no predicate. If an ``admin``/``chat`` vocabulary is
+    ever wanted it is still R11's question, and the honest first move there is
+    to make the device arm an ordering — which is a decision, not a constant.
+
+    **Exactly-once, and the correction it rests on.** The plan records that
+    mission-chat send has no server-side dedupe ("no ``turn_request_id``
+    anywhere", re-verified 2026-08-27). The grep was right and the conclusion
+    was wrong: mission chat has carried exactly-once under the name
+    ``client_message_id`` plus the per-session turn journal since the 2026-08-24
+    incident, replying ``idempotent_replay: True`` with the committed reply,
+    ``chat_turn_duplicate_in_flight`` while the turn runs, and
+    ``chat_turn_outcome_unknown`` when the provider outcome cannot be proven.
+    ``turn_request_id`` is therefore not a second key — it is passed to
+    ``--client-message-id`` unchanged, so the journal that already owns this
+    keys on exactly what the device sent. What the reservation
+    (``chat_turn_reservations``) adds is only the ACCEPT window the journal
+    cannot cover, because the journal's first write happens inside the chat-root
+    lease, after a worker is already running. See that module's docstring.
+
+    A TRANSLATION SHIM, exactly like ``_runtime_agent_create`` — with the shim
+    landing one step lower. Mission chat's service is an argparse handler, not a
+    ``perform_*`` function, and its one existing second door
+    (``dispatch_delivery.deliver_via_mission_chat``) reaches it by building a
+    namespace. This door builds ARGV, which the worker dispatches through the
+    same argparse tree a local send uses, so a remote turn and a local turn are
+    the same execution rather than two implementations that agree today.
+    """
+
+    from agent_runtime.chat_turn import CHAT_MESSAGE_METHOD, perform_chat_turn
+
+    outcome = perform_chat_turn(
+        params,
+        verb=CHAT_MESSAGE_METHOD,
+        spawn=None if context is None else context.spawn_chat_turn,
+    )
+    if outcome.refusal is not None:
+        refusal = outcome.refusal
+        return err(rid, refusal.code, refusal.message, refusal.data)
+    return ok(rid, outcome.result)
+
+
+@method("runtime.chat.steer", tier=TIER_CONSOLE)
+def _runtime_chat_steer(
+    rid: Any, params: dict, context: RpcContext | None = None
+) -> dict:
+    """Steer the chat turn currently running on a root. Accepts and hands off.
+
+    Params: ``turn_request_id``, ``session_id``, ``message`` (required);
+    ``persona_id``, ``persona_instance_id``, ``correlation_id`` (optional).
+
+    Result: ``runtime.chat.message``'s, with ``verb`` naming this method.
+
+    Everything in that method's docstring applies here — the accept-not-reply
+    contract, the ``console`` tier, and the ``turn_request_id`` →
+    ``client_message_id`` identity — and one thing is specific to steer:
+    ``harness mission-chat steer`` already REQUIRES ``--client-message-id``,
+    where the send merely accepts it. So the remote steer is the verb whose
+    exactly-once key was never optional, and the reservation over it is the
+    accept-window cover rather than the key itself.
+
+    It rides the worker lane rather than answering inline even though a steer is
+    cheap, and that is a deliberate uniformity: ``_CHAT_TURN_COMMANDS`` in
+    ``serve.py`` counts BOTH ``mission-chat message`` and ``mission-chat steer``
+    as in-flight chat turns for the drain ledger, and a steer that skipped the
+    worker would be a chat turn the recycle protection could not see.
+    """
+
+    from agent_runtime.chat_turn import CHAT_STEER_METHOD, perform_chat_turn
+
+    outcome = perform_chat_turn(
+        params,
+        verb=CHAT_STEER_METHOD,
+        spawn=None if context is None else context.spawn_chat_turn,
+    )
     if outcome.refusal is not None:
         refusal = outcome.refusal
         return err(rid, refusal.code, refusal.message, refusal.data)

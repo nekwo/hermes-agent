@@ -1149,6 +1149,7 @@ class _ArgvRequest:
         "key",
         "owner",
         "sink",
+        "turn_request_id",
     )
 
     def __init__(
@@ -1158,6 +1159,7 @@ class _ArgvRequest:
         *,
         owner: str = "stdio",
         sink: Any = None,
+        turn_request_id: str | None = None,
     ):
         self.rid = rid
         self.argv = argv
@@ -1177,6 +1179,12 @@ class _ArgvRequest:
         self.key = rid if owner == "stdio" else f"{owner}:{rid}"
         #: Where this request's frames go. None means stdout.
         self.sink = sink
+        #: Set only for a turn started by the METHOD lane (gateway Stage 3): the
+        #: ``turn_request_id`` whose accept receipt this worker settles when it
+        #: exits. ``None`` for every argv request, including the argv chat turns
+        #: a local launcher sends — the receipt exists to close the RPC lane's
+        #: accept window and a local send never opens one.
+        self.turn_request_id = turn_request_id
 
 
 class _DrainState:
@@ -1828,6 +1836,21 @@ def serve_loop(
             if served_from_cache:
                 exit_frame["served_from_cache"] = True
                 exit_frame["cache_age_ms"] = cache_age_ms
+            if request.turn_request_id:
+                # Gateway Stage 3. The accept receipt learns its worker ended,
+                # and the code goes on it. Best-effort by contract
+                # (``settle_chat_turn`` never raises): the ack this settles is
+                # already on the wire, the receipt's REPLAY answer does not
+                # depend on the exit code, and a bookkeeping failure must never
+                # take the place of a turn's real exit frame. It is stamped
+                # BEFORE the frame is emitted so a client that reads the exit
+                # and immediately retries the same ``turn_request_id`` cannot
+                # observe a receipt that is still ``accepted``.
+                from agent_runtime.chat_turn_reservations import settle_chat_turn
+
+                settle_chat_turn(
+                    turn_request_id=request.turn_request_id, exit_code=code
+                )
             sink.emit(exit_frame)
 
     original_stdout, original_stderr = sys.stdout, sys.stderr
@@ -3672,6 +3695,60 @@ def serve_loop(
             # own ``authenticated`` flag, which is set only after
             # ``verify_hello_proof``, so the socket lane's identity is proven
             # here rather than assumed, and stdio's is the process owner's.
+            #
+            # ``spawn_chat_turn`` is the ONE exception to "answered inline", and
+            # it proves the rule rather than breaking it: the chat methods do not
+            # run their turn on this loop, they put it on the pool through this
+            # seam and ack. Everything the argv lane does for a chat turn happens
+            # here too — the same ``_ArgvRequest``, so ``is_chat_turn`` is
+            # derived from the same ``_CHAT_TURN_COMMANDS`` shapes and the drain
+            # ledger counts an RPC turn exactly as it counts a local one; the
+            # same inflight table, so ``connections`` and cancel see it; the same
+            # ``_run``, so the frames, the exit code and the completion
+            # accounting are one implementation. A serve that recycled mid-turn
+            # because the turn arrived on the other lane is the exact defect
+            # ``held_by_chat_turns`` exists to prevent.
+            def _spawn_chat_turn(
+                request_id: str, argv: list[str], turn_request_id: str
+            ) -> None:
+                from agent_runtime.chat_turn import ChatTurnSpawnRefused
+
+                if drain_state is not None:
+                    # And ACCOUNTED, exactly as an argv refusal is: a drain that
+                    # turned a remote turn away is a number on the terminal
+                    # frame rather than an inference. The method lane keeps
+                    # answering during a drain for handlers that cannot be cut
+                    # off half-done; a chat turn is the work that CAN be, which
+                    # is what the drain is for.
+                    drain_state.note_refused()
+                    raise ChatTurnSpawnRefused(
+                        "draining",
+                        "serve is draining and is not accepting new chat turns; "
+                        "reconnect to the replacement runtime and retry with the "
+                        "same turn_request_id",
+                    )
+                chat_request = _ArgvRequest(
+                    request_id,
+                    [str(item) for item in argv],
+                    owner=_owner_of(connection),
+                    sink=None if connection is None else sink,
+                    turn_request_id=turn_request_id,
+                )
+                with inflight_lock:
+                    # The id is server-minted and random, so a collision here is
+                    # not a client behaviour — it is a bug, and it refuses
+                    # rather than silently replacing a live request's entry.
+                    if chat_request.key in inflight:
+                        raise ChatTurnSpawnRefused(
+                            "request_id_collision",
+                            "a request with this server-minted id is already in flight",
+                        )
+                    inflight[chat_request.key] = chat_request
+                chat_future = pool.submit(_run, chat_request)
+                with inflight_lock:
+                    if chat_request.key in inflight:
+                        inflight_futures[chat_request.key] = chat_future
+
             if serve_rpc.is_rpc_frame(message):
                 sink.emit(
                     serve_rpc.handle_request(
@@ -3681,6 +3758,7 @@ def serve_loop(
                             transport=getattr(connection, "transport", "stdio"),
                             emit=sink.emit,
                             caller=caller_for_connection(connection),
+                            spawn_chat_turn=_spawn_chat_turn,
                         ),
                     )
                 )

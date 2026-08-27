@@ -66,6 +66,26 @@ def agent_create_reservation_path(key_digest: str) -> Path:
     return agent_create_reservations_dir() / f"{safe_path_token(key_digest)}.json"
 
 
+def chat_turn_reservations_dir() -> Path:
+    """ACCEPT receipts for ``runtime.chat.message`` / ``runtime.chat.steer``.
+
+    A sibling of ``agent_create_reservations`` for its reason and NOT for the
+    obvious one: these receipts do not record a turn's progress. The mission
+    chat turn journal already owns that, keyed on the same ``client_message_id``
+    these receipts key on (see ``chat_turn_reservations`` module docstring), and
+    a second progress ledger over one fact is the duplicate-authority shape this
+    lane keeps retiring. What lives here is strictly the SPAWN decision — "this
+    runtime already handed this id to a worker" — which the journal provably
+    cannot answer because the journal's first write happens inside the chat-root
+    lease, after the worker is already running.
+    """
+    return store_root() / "chat_turn_reservations"
+
+
+def chat_turn_reservation_path(key_digest: str) -> Path:
+    return chat_turn_reservations_dir() / f"{safe_path_token(key_digest)}.json"
+
+
 def runtime_instances_dir() -> Path:
     return store_root() / "runtime_instances"
 

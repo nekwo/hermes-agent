@@ -122,6 +122,25 @@ def agent_create_lock(key_digest: str) -> Iterator[None]:
 
 
 @contextlib.contextmanager
+def chat_turn_reservation_lock(key_digest: str) -> Iterator[None]:
+    """Serialize one ``turn_request_id``'s ACCEPT decision across processes.
+
+    Held for microseconds and around no other lock. The chat-root lease — the
+    one a turn actually contends on — is taken later, on the WORKER, long after
+    this has been released, so this cannot participate in a lock order at all.
+    That is deliberate: an accept that waited on the chat lease would turn the
+    reader loop's fast ack into a blocking call for the exact duration of the
+    turn already running, which is the property the RPC lane exists to avoid.
+    """
+    with _file_lock(
+        paths.lock_dir()
+        / "chat_turns"
+        / f"{paths.safe_path_token(key_digest)}.lock"
+    ):
+        yield
+
+
+@contextlib.contextmanager
 def archive_lock() -> Iterator[None]:
     with _file_lock(paths.lock_dir() / "archive.lock"):
         yield
