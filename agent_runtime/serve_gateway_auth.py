@@ -116,29 +116,36 @@ that owes the operator an exit code rather than a stack trace.
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import hmac
-import json
-import os
 import secrets
-import tempfile
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from .call_authorization import TIER_CONSOLE, TIER_READ, TIERS
 from .gateway_identity import gateway_dir
-from .store_file_io import narrow_windows_acl as _narrow_windows_acl
+from .gateway_pairing_codes import (
+    CODE_ALPHABET,
+    CODE_LENGTH,
+    CODE_TTL_SECONDS,
+    KIND_DEVICE,
+    LOCKOUT_SECONDS,
+    MAX_FAILED_REDEEMS,
+    MAX_PENDING_CODES,
+    expire_pending,
+    lockout_remaining,
+    match_pending,
+    mint_into,
+    note_failed_redeem,
+    pending_codes,
+)
+from .store_file_io import iso_stamp as _iso
 from .store_file_io import os_error_reason as _os_reason
-
-if os.name == "nt":  # pragma: no cover - platform split
-    import errno as _errno
-    import msvcrt
-else:  # pragma: no cover - platform split
-    import fcntl
+from .store_file_io import read_json_object as _read_json
+from .store_file_io import store_lock as _file_lock
+from .store_file_io import write_secure_json as _write_secure
 
 __all__ = [
     "CODE_ALPHABET",
@@ -189,21 +196,11 @@ PAIRING_STORE_FILENAME = "pairing.json"
 #: manifest uses; this one is a file, so nothing negotiates on it.
 DEVICE_STORE_CONTRACT = 1
 
-#: ``gateway/pairing.py``'s alphabet, verbatim: excludes ``0``/``O`` and
-#: ``1``/``I`` so a code read off a screen and typed into a phone cannot be
-#: mistyped into a DIFFERENT valid code.
-CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-CODE_LENGTH = 8
-#: Ten minutes, not ``pairing.py``'s hour — see the module docstring. The code
-#: is on the operator's own screen and is meant to be used now.
-CODE_TTL_SECONDS = 600
-#: Three unredeemed codes at once is a mistake, not a workflow.
-MAX_PENDING_CODES = 3
-#: 32^8 is ~1.1e12, so this is not what makes guessing infeasible — it is what
-#: stops a peer spending the runtime's threads trying, and what makes a burst of
-#: failures visible to an operator who looks.
-MAX_FAILED_REDEEMS = 5
-LOCKOUT_SECONDS = 3600
+#: The code discipline — alphabet, length, TTL, caps, lockout — is
+#: ``gateway_pairing_codes``' and is RE-EXPORTED here rather than restated,
+#: because Stage 6's peer ceremony obeys the same numbers over the same pending
+#: map. The names stay importable from this module: they were this module's API
+#: for the whole of Stage 1 and several tests read them here.
 
 #: 256 bits, hex-encoded. Not configurable, for ``serve_auth``'s reason: a knob
 #: here can only ever be turned down.
@@ -575,39 +572,33 @@ def mint_pairing_code(
     try:
         with _store_lock(store_root):
             state = _read_pairing(store_root)
-            _expire_pending(state, now=stamp)
-            locked_until = float(state.get("locked_until") or 0.0)
-            if locked_until > stamp:
+            expire_pending(state, now=stamp)
+            locked = lockout_remaining(state, now=stamp)
+            if locked:
                 return StoreRefusal(
                     "locked_out",
-                    f"too many failed pairing attempts; retry in "
-                    f"{int(locked_until - stamp)}s",
+                    f"too many failed pairing attempts; retry in {locked}s",
                 )
-            pending = state.setdefault("pending", {})
+            pending = pending_codes(state)
             if len(pending) >= MAX_PENDING_CODES:
                 return StoreRefusal(
                     "too_many_pending",
                     f"{len(pending)} pairing codes are already outstanding "
                     f"(max {MAX_PENDING_CODES}); redeem or wait for them to expire",
                 )
-            code = "".join(secrets.choice(CODE_ALPHABET) for _ in range(CODE_LENGTH))
-            salt = os.urandom(16)
-            request_id = secrets.token_hex(8)
-            pending[request_id] = {
-                "salt": salt.hex(),
-                "hash": _hash_code(code, salt),
-                "tier": tier,
-                "name": _clean_name(name) or None,
-                "created_at": stamp,
-                "expires_at": stamp + CODE_TTL_SECONDS,
-            }
+            code, request_id, expires_at = mint_into(
+                state,
+                kind=KIND_DEVICE,
+                extra={"tier": tier, "name": _clean_name(name) or None},
+                now=stamp,
+            )
             _write_pairing(store_root, state)
             return PairingCode(
                 code=code,
                 request_id=request_id,
                 tier=tier,
                 name=_clean_name(name) or None,
-                expires_at=stamp + CODE_TTL_SECONDS,
+                expires_at=expires_at,
             )
     except OSError as exc:
         return StoreRefusal(_os_reason(exc), str(exc))
@@ -640,40 +631,24 @@ def redeem_pairing_code(
     try:
         with _store_lock(store_root):
             state = _read_pairing(store_root)
-            _expire_pending(state, now=stamp)
-            locked_until = float(state.get("locked_until") or 0.0)
-            if locked_until > stamp:
+            expire_pending(state, now=stamp)
+            locked = lockout_remaining(state, now=stamp)
+            if locked:
                 _write_pairing(store_root, state)
                 return StoreRefusal(
                     "locked_out",
-                    f"too many failed pairing attempts; retry in "
-                    f"{int(locked_until - stamp)}s",
+                    f"too many failed pairing attempts; retry in {locked}s",
                 )
-            pending = state.setdefault("pending", {})
-            matched_id: str | None = None
-            matched: dict[str, Any] | None = None
-            for request_id, entry in pending.items():
-                if not isinstance(entry, dict):
-                    continue
-                raw_salt = entry.get("salt")
-                stored = entry.get("hash")
-                if not isinstance(raw_salt, str) or not isinstance(stored, str):
-                    continue
-                try:
-                    salt = bytes.fromhex(raw_salt)
-                except ValueError:
-                    continue
-                if secrets.compare_digest(_hash_code(candidate, salt), stored):
-                    matched_id, matched = request_id, entry
-                    break
-            if matched_id is None or matched is None:
-                _note_failed_redeem(state, now=stamp)
+            found = match_pending(state, candidate, kind=KIND_DEVICE)
+            if found is None:
+                note_failed_redeem(state, now=stamp)
                 _write_pairing(store_root, state)
                 return StoreRefusal(
                     "invalid_code", "no pending pairing code matches (or it expired)"
                 )
+            matched_id, matched = found
 
-            del pending[matched_id]
+            del pending_codes(state)[matched_id]
             state["failed_redeems"] = 0
             state["locked_until"] = 0.0
             _write_pairing(store_root, state)
@@ -709,10 +684,6 @@ def redeem_pairing_code(
 # ── internals ────────────────────────────────────────────────────────────────
 
 
-def _hash_code(code: str, salt: bytes) -> str:
-    return hashlib.sha256(salt + str(code).upper().encode("utf-8")).hexdigest()
-
-
 def _clean_name(value: Any) -> str:
     """Printable, single-line, bounded — the rule ``gateway_identity`` states.
 
@@ -726,34 +697,6 @@ def _clean_name(value: Any) -> str:
         return ""
     text = "".join(ch for ch in text if ch.isprintable())
     return " ".join(text.split())[:64].strip()
-
-
-def _iso(now: float | None) -> str:
-    when = datetime.now(timezone.utc) if now is None else datetime.fromtimestamp(
-        float(now), tz=timezone.utc
-    )
-    return when.isoformat()
-
-
-def _expire_pending(state: dict[str, Any], *, now: float) -> None:
-    pending = state.setdefault("pending", {})
-    for request_id in [
-        request_id
-        for request_id, entry in pending.items()
-        if not isinstance(entry, dict)
-        or float(entry.get("expires_at") or 0.0) <= now
-    ]:
-        del pending[request_id]
-    if float(state.get("locked_until") or 0.0) <= now and state.get("locked_until"):
-        state["locked_until"] = 0.0
-        state["failed_redeems"] = 0
-
-
-def _note_failed_redeem(state: dict[str, Any], *, now: float) -> None:
-    count = int(state.get("failed_redeems") or 0) + 1
-    state["failed_redeems"] = count
-    if count >= MAX_FAILED_REDEEMS:
-        state["locked_until"] = now + LOCKOUT_SECONDS
 
 
 def _decode_device(row: Any) -> DeviceRecord | None:
@@ -777,31 +720,6 @@ def _decode_device(row: Any) -> DeviceRecord | None:
         revoked=bool(row.get("revoked")),
         revoked_at=(str(row["revoked_at"]) if row.get("revoked_at") else None),
     )
-
-
-def _read_json(path: Path) -> dict[str, Any]:
-    """The file as a dict, ``{}`` when absent/empty/undecodable. Never raises.
-
-    A corrupt store reads as EMPTY rather than as an exception, and that is the
-    fail-closed direction: an empty device store authenticates nobody, while a
-    raised OSError on the handshake path is a peer that learns nothing and a
-    traceback on a stream ``serve_loop`` has redirected onto the NDJSON protocol.
-    """
-
-    try:
-        if not path.is_file():
-            return {}
-        # read_bytes + decode, never read_text: the repo's standing EOL rule.
-        raw = path.read_bytes().decode("utf-8", errors="replace").strip()
-    except OSError:
-        return {}
-    if not raw:
-        return {}
-    try:
-        value = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
-        return {}
-    return value if isinstance(value, dict) else {}
 
 
 def _read_devices(store_root: Path | str) -> dict[str, Any]:
@@ -830,115 +748,27 @@ def _write_pairing(store_root: Path | str, state: dict[str, Any]) -> None:
     _write_secure(pairing_store_path(store_root), state)
 
 
-def _write_secure(path: Path, payload: dict[str, Any]) -> None:
-    """Temp file + atomic replace, ``0600`` where that is meaningful.
+# The bodies live in ``store_file_io`` (one authority) — the JSON read, the
+# atomic 0600 write, the cross-process lock, the UTC stamp and the ACL
+# narrowing, including the "this IS the transport slice that introduces the
+# exposure" rationale that used to sit on the ACL helper here. Stage 6's
+# ``gateway_peers`` is the second importer and is why the last four moved: two
+# credential stores in one directory that each restated the same write is the
+# exact group ``test_duplicate_helper_bodies`` would have named next. The
+# conventional private names stay so call sites and tests read unchanged.
 
-    Atomic because a reader on the handshake path must see either the whole old
-    store or the whole new one — a half-written ``devices.json`` reads as ``{}``
-    (see :func:`_read_json`), which fails every device closed until the write
-    finishes. Correct, but a paired device that intermittently cannot connect is
-    the worst kind of bug to chase.
+
+def _store_lock(store_root: Path | str, *, timeout_seconds: float = 10.0):
+    """This root's gateway-directory lock. ONE lock file, both ceremonies.
+
+    ``devices.lock`` is shared with ``gateway_peers`` rather than split per
+    store, and deliberately: both ceremonies read-modify-write the SAME
+    ``pairing.json`` (one pending map, one lockout, one cap — see
+    ``gateway_pairing_codes``), so two lock files would be two names for a
+    mutual exclusion that has to be one. The filename is historical; the scope
+    it protects is the directory.
     """
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(payload, ensure_ascii=False, default=str, indent=2) + "\n"
-    handle = tempfile.NamedTemporaryFile(
-        "wb", dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp", delete=False
+    return _file_lock(
+        gateway_dir(store_root) / "devices.lock", timeout_seconds=timeout_seconds
     )
-    try:
-        with handle:
-            handle.write(text.encode("utf-8"))
-            handle.flush()
-            os.fsync(handle.fileno())
-        if os.name != "nt":
-            # Meaningful here and NOT on Windows, where it only toggles the
-            # read-only attribute while reporting success — ``serve_auth.py``'s
-            # note, unchanged. The Windows narrowing is ``_narrow_windows_acl``.
-            try:
-                os.chmod(handle.name, 0o600)
-            except OSError:
-                pass
-        os.replace(handle.name, path)
-    except BaseException:
-        try:
-            os.unlink(handle.name)
-        except OSError:
-            pass
-        raise
-    if os.name == "nt":
-        _narrow_windows_acl(path)
-
-
-# The bodies live in ``store_file_io`` (one authority) — including the
-# "this IS the transport slice that introduces the exposure" rationale that
-# used to sit on the ACL helper here; the conventional private names stay so
-# call sites and tests read unchanged.
-
-
-@contextlib.contextmanager
-def _store_lock(store_root: Path | str, *, timeout_seconds: float = 10.0) -> Iterator[None]:
-    """Serialise read-modify-write across PROCESSES, on this root's gateway dir.
-
-    A real concurrency, not a theoretical one: ``harness gateway pair`` runs in
-    the operator's shell while the serve process redeems and stamps ``last_seen``
-    from its own. ``agent_runtime/locks.py`` holds the same OS primitive but
-    resolves its directory through ``paths.lock_dir()`` — i.e. it re-derives a
-    root — which is exactly what every module in this lane is forbidden to do,
-    so the primitive is restated here over a path the caller supplied.
-
-    Falls through WITHOUT the lock rather than raising if it cannot be taken:
-    the alternative is a pairing verb that fails because a lock file is on a
-    filesystem that will not lock, and the writes below are atomic-replace
-    either way, so the loss is a lost update and not a corrupt store.
-    """
-
-    path = gateway_dir(store_root) / "devices.lock"
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        handle = open(path, "a+b")
-    except OSError:
-        yield
-        return
-    try:
-        deadline = time.monotonic() + float(timeout_seconds)
-        locked = False
-        if os.name == "nt":  # pragma: no cover - platform split
-            handle.seek(0, os.SEEK_END)
-            if handle.tell() == 0:
-                handle.write(b"0")
-                handle.flush()
-            handle.seek(0)
-            while True:
-                try:
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-                    locked = True
-                    break
-                except OSError as exc:
-                    if exc.errno not in {_errno.EACCES, _errno.EDEADLK, 13, 36}:
-                        break
-                    if time.monotonic() >= deadline:
-                        break
-                    time.sleep(0.02)
-        else:  # pragma: no cover - platform split
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-                locked = True
-            except OSError:
-                locked = False
-        try:
-            yield
-        finally:
-            if locked:
-                try:
-                    if os.name == "nt":  # pragma: no cover - platform split
-                        handle.seek(0)
-                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-                    else:  # pragma: no cover - platform split
-                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-                except OSError:
-                    pass
-    finally:
-        try:
-            handle.close()
-        except OSError:
-            pass
