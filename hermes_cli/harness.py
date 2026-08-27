@@ -331,6 +331,49 @@ def build_parser(parent_subparsers) -> None:
     _add_stage42_global_args(gateway_rename, controls=frozenset({"dry_run"}))
     gateway_rename.set_defaults(func=_cmd_gateway_rename)
 
+    # Stage 1's three. `pair` is a WRITE (it mints a credential channel) and
+    # still takes the reader's flag set rather than `dry_run`, which is the one
+    # deviation from `rename`'s reasoning and has its own: a dry run of `pair`
+    # would have to print a code it did not mint, and a preview that shows an
+    # operator eight characters nothing will accept is worse than no preview.
+    # `devices revoke` DOES take `dry_run`, because there the preview is a real
+    # row an operator can recognise before they cut a device off.
+    gateway_pair = gateway_subs.add_parser(
+        "pair",
+        help="Mint a short-TTL pairing code plus the QR payload a device scans to reach this install",
+    )
+    gateway_pair.add_argument("--name", help="What to call the device that redeems this code, e.g. \"the phone\"")
+    gateway_pair.add_argument(
+        "--tier",
+        choices=["console", "read"],
+        default="console",
+        help="What the paired device may do. console: run console verbs (create/retire agents). read: view only.",
+    )
+    _add_stage42_global_args(gateway_pair)
+    gateway_pair.set_defaults(func=_cmd_gateway_pair)
+    gateway_devices = gateway_subs.add_parser(
+        "devices",
+        help="Devices paired with this install's gateway — list them, or revoke one",
+    )
+    gateway_devices_subs = gateway_devices.add_subparsers(
+        dest="gateway_devices_command", required=True
+    )
+    gateway_devices_list = gateway_devices_subs.add_parser(
+        "list",
+        help="Every paired device, revoked ones included (never the credential — there is no field for it)",
+    )
+    _add_stage42_global_args(gateway_devices_list, controls=frozenset({"sort"}))
+    gateway_devices_list.set_defaults(func=_cmd_gateway_devices_list)
+    gateway_devices_revoke = gateway_devices_subs.add_parser(
+        "revoke",
+        help="Refuse a paired device from its next handshake on (the row is kept, so an audit can tell it from never-paired)",
+    )
+    gateway_devices_revoke.add_argument(
+        "device_id", help="The device id from `harness gateway devices list`"
+    )
+    _add_stage42_global_args(gateway_devices_revoke, controls=frozenset({"dry_run"}))
+    gateway_devices_revoke.set_defaults(func=_cmd_gateway_devices_revoke)
+
     workspace = subs.add_parser("workspace", help="Manage Harness workspaces")
     workspace_subs = workspace.add_subparsers(dest="workspace_command", required=True)
     workspace_list = workspace_subs.add_parser("list", help="List workspaces")
@@ -1913,6 +1956,32 @@ def _cmd_gateway_rename(args) -> int:
         envelope["dry_run"] = True
     _print_stage42(envelope, args=args, default_output="json")
     return 0
+
+
+# Stage 1's three live in `harness_parts/gateway_commands.py` rather than here.
+# Not for length: the credential wiring is the part that must not be got wrong,
+# and it reads better next to a module docstring that can carry R3's ruling and
+# the no-authorization-gate argument than inline in a 5000-line parser file.
+# Imported lazily, the way `serve` already is, so building the parser does not
+# pull in the certificate and device-store modules on every `harness --help`.
+
+
+def _cmd_gateway_pair(args) -> int:
+    from hermes_cli.harness_parts.gateway_commands import cmd_gateway_pair
+
+    return cmd_gateway_pair(args)
+
+
+def _cmd_gateway_devices_list(args) -> int:
+    from hermes_cli.harness_parts.gateway_commands import cmd_gateway_devices_list
+
+    return cmd_gateway_devices_list(args)
+
+
+def _cmd_gateway_devices_revoke(args) -> int:
+    from hermes_cli.harness_parts.gateway_commands import cmd_gateway_devices_revoke
+
+    return cmd_gateway_devices_revoke(args)
 
 
 def _cmd_roots_migrate(args) -> int:

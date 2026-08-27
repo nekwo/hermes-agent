@@ -144,6 +144,15 @@ ERROR_EXIT_CODES = {
     # reachable from this process or refused the interrupt (an infra condition,
     # 7, retryable from the lane that owns the work).
     "cancel_unsupported": 6,
+    # `harness gateway pair` refusals (remote-gateway Stage 1). The operator's
+    # next MOVE is to WAIT: for one of three outstanding codes to be redeemed or
+    # to expire, or for a brute-force lockout to lapse. Family 6 because both are
+    # PRECONDITIONS on the pairing store's state rather than faults — nothing is
+    # broken, nothing needs repairing, and the identical command succeeds later
+    # unchanged. Two codes and one family, on the rule this table already
+    # follows: the family is the next move, the code is which precondition.
+    "pairing_codes_pending": 6,
+    "pairing_locked_out": 6,
     "confirmation_required": 8,
     # Runtime / infra (7)
     "runtime_unavailable": 7,

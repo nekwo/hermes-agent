@@ -2016,6 +2016,36 @@ def serve_loop(
                 log=_service_log,
                 frame_contract=SERVE_SCHEMA_VERSION,
             )
+            if gateway_server is not None and socket_lock is not None:
+                # RE-PUBLISH the ownership sidecar, now that the second door has
+                # a real port. The first publish happens before this block on
+                # purpose (the loopback port must be advertised as early as
+                # possible, and the gateway lane must not be able to delay it),
+                # so the gateway endpoint can only arrive in a second write.
+                #
+                # It has to arrive somewhere: `harness gateway pair` runs in the
+                # operator's shell, not in this process, and the pairing payload
+                # it prints has to name a port a phone can dial. With an
+                # ephemeral port that number exists nowhere else — the registry
+                # entry carries the LOOPBACK port, and the `ready` frame goes to
+                # a launcher rather than to a terminal.
+                socket_lock.publish_owner(
+                    {
+                        "pid": os.getpid(),
+                        "boot_id": boot_id,
+                        "host": SOCKET_HOST,
+                        "port": socket_server.port,
+                        "started_at": socket_server.started_at,
+                        "store_root": runtime_root,
+                        # Additive: a reader that predates this lane finds the
+                        # keys it knows, unchanged and in the same places.
+                        "gateway": {
+                            "host": gateway_block.get("host"),
+                            "port": gateway_block.get("port"),
+                            "cert_fingerprint": gateway_block.get("cert_fingerprint"),
+                        },
+                    }
+                )
         # 4. DISCOVERY. Multiple runtime roots legitimately coexist on this
         #    machine (QA lanes, isolated worktree roots), and until now
         #    "how many serves are running against this root, on what code"
