@@ -29,6 +29,7 @@ Hard invariants this store upholds:
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, NamedTuple
 
 from hermes_time import now
@@ -36,6 +37,7 @@ from utils import atomic_json_write
 
 from . import office_models, paths
 from .errors import (
+    ActorArchived,
     ActorsUnreadable,
     AgentRuntimeError,
     AlreadyExists,
@@ -752,6 +754,7 @@ class OfficeStore:
         updated_by: str = "operator",
         expect_revision: int | None = None,
         allow_class_key: bool = False,
+        resurrect: bool = False,
         correlation_id: str | None = None,
         dry_run: bool = False,
     ) -> OfficeActor:
@@ -767,6 +770,16 @@ class OfficeStore:
         actor-upsert --allow-class-key`` passes it; the wire lane deliberately
         has no equivalent (a parameter is not consent — see
         ``serve_rpc._runtime_office_upsert``).
+
+        ``resurrect`` is the same kind of parameter for the tombstone fence
+        (D1): without it, an upsert of a key that has an archive copy or a live
+        resurrection-guard ledger entry raises :class:`ActorArchived` instead of
+        re-adding it. It is ORTHOGONAL to ``allow_class_key`` and deliberately
+        not implied by it — one answers "may this write use a class key", the
+        other "may this write raise the dead", and an operator who consented to
+        the first was never asked the second. Only ``harness office
+        actor-upsert --resurrect`` passes it; the wire lane again has no
+        equivalent, for the reason spelled out there.
         """
 
         wsid = safe_id(workspace_id)
@@ -810,6 +823,30 @@ class OfficeStore:
             if self.actor_exists(wsid, actor_key):
                 existing = self.get_actor(wsid, actor_key)
             archived_path = paths.office_archived_actor_path(wsid, actor_key)
+            # THE tombstone fence (D1), before the archive is read rather than
+            # after. Without consent this write is refused whatever the archive
+            # decodes to, so decoding it first would only mean answering
+            # ``archive_unreadable`` — "ask again once the file is readable" —
+            # to a caller whose write can never be accepted no matter how
+            # readable the file becomes. ``ArchiveUnreadable`` stays reachable on
+            # the CONSENTED path below, which is the path that actually needs the
+            # revision token the archive carries.
+            #
+            # ``existing is None`` is load-bearing: a LIVE row whose key also
+            # sits in the ledger is a ledger the write should clean up, not a
+            # resurrection, and that half of the arm still runs untouched.
+            if existing is None:
+                self._guard_archived_actor(
+                    wsid,
+                    actor_key=actor_key,
+                    persona_instance_id=(
+                        _canonical_actor_key(persona_id, raw_instance)
+                        if raw_instance
+                        else None
+                    ),
+                    archived_path=archived_path,
+                    resurrect=resurrect,
+                )
             archived: OfficeActor | None = None
             if existing is None and archived_path.exists():
                 # REFUSED, not swallowed. This read is where the revision guard's
@@ -1422,6 +1459,57 @@ class OfficeStore:
     def _guard_no_conflict(self, workspace_id: str, actor_key: str) -> None:
         if paths.office_conflict_path(workspace_id, actor_key).exists():
             raise SyncConflict(f"actor_conflict:{actor_key}")
+
+    def _guard_archived_actor(
+        self,
+        workspace_id: str,
+        *,
+        actor_key: str,
+        persona_instance_id: str | None,
+        archived_path: Path,
+        resurrect: bool,
+    ) -> None:
+        """THE tombstone fence for ``upsert_actor`` (D1).
+
+        Called only when there is NO live row, because a live row cannot be a
+        resurrection whatever the ledger says about it.
+
+        TWO pieces of evidence, either of which is enough. The archive COPY is
+        the primary one; the ledger entry is kept beside it because the two can
+        legitimately disagree — a realm-sync pull rewrites the surface without
+        the archive file, and an archive file can be moved away by hand — and a
+        fence that demanded both would be defeated by whichever half went
+        missing first. That asymmetry is the whole live incident: the re-add
+        cleared both, so by the time the retire replay looked, neither was left
+        to prove the delete had ever happened.
+
+        A method rather than an inline block for the reason the class-key fence
+        is one: a fence with a NAME can be pinned by the source tests, reported
+        on by the doctor, and — the case that forced it — neutralised on its own
+        by a test isolating a DIFFERENT fence's claim. An inline block silently
+        makes every such test measure two guards at once.
+        """
+
+        if resurrect:
+            return
+        archived_keys: list[str] = []
+        try:
+            archived_keys = list(self.get_surface(workspace_id).archived_actor_keys)
+        except Exception:  # noqa: BLE001 - no surface is no ledger to consult
+            archived_keys = []
+        if not archived_path.exists() and actor_key not in archived_keys:
+            return
+        raise ActorArchived(
+            f"actor_archived:{actor_key} was deleted on this server; drop the "
+            "local row and place a new agent instead of re-adding this key "
+            "(`harness office actor-restore`, or --resurrect, re-adds it "
+            "deliberately)",
+            safe_details={
+                "actor_key": actor_key,
+                "workspace_id": workspace_id,
+                "persona_instance_id": persona_instance_id,
+            },
+        )
 
     def _guard_duplicate_desk(self, workspace_id: str, *, actor_key: str, items: list[OfficeItem]) -> None:
         """THE one-desk-per-persona fence for ``upsert_actor`` (D6).

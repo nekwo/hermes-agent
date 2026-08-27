@@ -725,6 +725,81 @@
         "-q",
         "tests/hermes_cli/test_placement_id_discriminability.py::test_the_refusal_is_the_same_reason_on_all_three_doors"
       ]
+    },
+    {
+      "id": "d1-tombstone-fence-never-fires",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "_guard_archived_actor",
+      "operator": "remove-guard",
+      "find": "        if not archived_path.exists() and actor_key not in archived_keys:\n            return",
+      "replace": "        return",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_actor_tombstone_fence.py::test_a_mechanical_re_add_of_a_deleted_key_is_refused"
+      ]
+    },
+    {
+      "id": "d1-tombstone-fence-forgets-the-ledger-witness",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "_guard_archived_actor",
+      "operator": "drop-evidence-source",
+      "find": "        if not archived_path.exists() and actor_key not in archived_keys:",
+      "replace": "        if not archived_path.exists():",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_actor_tombstone_fence.py::test_a_ledger_entry_alone_is_enough_to_refuse"
+      ]
+    },
+    {
+      "id": "d1-tombstone-fence-refuses-live-rows-too",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "upsert_actor",
+      "operator": "widen-guard-condition",
+      "find": "            if existing is None:\n                self._guard_archived_actor(",
+      "replace": "            if True:\n                self._guard_archived_actor(",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_actor_tombstone_fence.py::test_a_live_row_whose_key_is_still_in_the_ledger_is_not_refused"
+      ]
+    },
+    {
+      "id": "d1-cli-resurrect-flag-is-ignored",
+      "path": "hermes_cli/harness_parts/office.py",
+      "symbol": "_cmd_office_actor_upsert",
+      "operator": "ignore-operator-consent",
+      "find": "    resurrect = bool(getattr(args, \"resurrect\", False))",
+      "replace": "    resurrect = False",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_actor_tombstone_fence.py::test_the_cli_refuses_without_the_flag_and_re_adds_with_it"
+      ]
+    },
+    {
+      "id": "d1-wire-refusal-loses-its-pinned-reason",
+      "path": "agent_runtime/serve_rpc.py",
+      "symbol": "_runtime_office_upsert",
+      "operator": "collapse-refusal-reason",
+      "find": "                \"reason\": \"actor_archived\",\n                \"workspace_id\": workspace_id,\n                \"actor_key\": details[\"actor_key\"],",
+      "replace": "                \"reason\": \"class_key_collision\",\n                \"workspace_id\": workspace_id,\n                \"actor_key\": details[\"actor_key\"],",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_actor_tombstone_fence.py::test_the_wire_refuses_with_the_pinned_code_and_reason"
+      ]
     }
   ]
 }

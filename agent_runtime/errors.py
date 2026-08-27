@@ -88,6 +88,36 @@ class ActorsUnreadable(ArchiveUnreadable):
     code = "actors_unreadable"
 
 
+class ActorArchived(AgentRuntimeError):
+    """Raised when an upsert would re-add an actor key that was DELETED.
+
+    ``upsert_actor`` used to read any upsert of an archived key as operator
+    intent to re-add, and acted on it: it cleared the resurrection-guard ledger
+    entry AND unlinked the archive copy. Measured live on 2026-08-27 — a retire
+    acked ``archived_actor_keys=[...]`` with no failures, and a launcher that
+    had booted nineteen seconds earlier re-pushed the same actors as
+    ``state: active, updated_by: operator``. Because the archive copy was then
+    gone, the retire REPLAY could no longer find anything to report and answered
+    ``already_retired: true, archived_actor_keys: []`` forever: a permanent
+    wedge that only ``harness office actor-remove`` cleared.
+
+    The intent reading was the defect. A blind re-push carries no intent at all,
+    and the two are indistinguishable at the store — which is why the door now
+    needs a key (``resurrect=True``) rather than being held open for whoever
+    walks through it.
+
+    NON-RETRYABLE. The cure is not "try again": the actor was deleted on the
+    authority, so the client must drop its local row. Re-placing is a NEW create
+    with a freshly minted id, never a resurrection of this key.
+    """
+
+    code = "actor_archived"
+
+    def __init__(self, message: str, *, safe_details: dict | None = None):
+        super().__init__(message)
+        self.safe_details = dict(safe_details or {})
+
+
 class CardsUnreadable(ArchiveUnreadable):
     """Raised when a board's order-key allocation cannot see the WHOLE column.
 

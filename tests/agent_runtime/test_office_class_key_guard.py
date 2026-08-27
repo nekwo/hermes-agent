@@ -324,7 +324,42 @@ def test_cli_persona_instance_id_flag_threads_the_binding_and_clears_the_refusal
 
 def test_cli_allow_class_key_forces_the_write_and_puts_the_override_on_the_record():
     """The escape hatch. It really writes — and it warns, so the double
-    placement is a recorded operator decision rather than an invisible one."""
+    placement is a recorded operator decision rather than an invisible one.
+
+    Since D1 it takes BOTH flags, because the migration archived ``backend_dev``
+    and so this write is two overrides at once: a class-keyed shape AND the
+    raising of a deleted key. Each puts its own warning on the record, which is
+    the property worth having — an operator reading the receipt can tell which
+    of the two they consented to.
+    """
+
+    workspace = _workspace("Migrated Office")
+    _seed_class_keyed(workspace, "backend_dev")
+    _migrate(workspace)
+
+    result = _run_harness(
+        "office", "actor-upsert", "--workspace", workspace,
+        "--actor-json", json.dumps(_payload("backend_dev", agent_item_id=INSTANCE)),
+        "--allow-class-key", "--resurrect", "--json",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    row = json.loads(result.stdout)
+    assert [w["code"] for w in row["warnings"]] == [
+        "office_actor_class_key_forced",
+        "office_actor_resurrect_forced",
+    ]
+    assert row["warnings"][0]["conflicting_actor_keys"] == [INSTANCE]
+    assert _keys(workspace) == {"backend_dev", INSTANCE}
+
+
+def test_cli_allow_class_key_alone_no_longer_raises_a_deleted_key():
+    """The two consents do not stand in for each other (D1).
+
+    ``--allow-class-key`` used to be enough to re-add an archived class key,
+    which meant an operator consenting to a KEY SHAPE also, silently, consented
+    to clearing a tombstone. Now the second override has to be typed, and the
+    refusal names it.
+    """
 
     workspace = _workspace("Migrated Office")
     _seed_class_keyed(workspace, "backend_dev")
@@ -335,11 +370,14 @@ def test_cli_allow_class_key_forces_the_write_and_puts_the_override_on_the_recor
         "--actor-json", json.dumps(_payload("backend_dev", agent_item_id=INSTANCE)),
         "--allow-class-key", "--json",
     )
-    assert result.returncode == 0, result.stdout + result.stderr
-    row = json.loads(result.stdout)
-    assert [w["code"] for w in row["warnings"]] == ["office_actor_class_key_forced"]
-    assert row["warnings"][0]["conflicting_actor_keys"] == [INSTANCE]
-    assert _keys(workspace) == {"backend_dev", INSTANCE}
+    assert result.returncode != 0, result.stdout + result.stderr
+    error = json.loads(result.stdout)["error"]
+    assert error["code"] == "actor_archived"
+    assert "--resurrect" in error["message"]
+    # Nothing was written, and the tombstone the operator did not consent to
+    # clearing is still there.
+    assert _keys(workspace) == {INSTANCE}
+    assert "backend_dev" in OfficeStore().get_surface(workspace).archived_actor_keys
 
 
 def test_cli_idempotent_resave_of_a_live_class_keyed_actor_is_not_refused():

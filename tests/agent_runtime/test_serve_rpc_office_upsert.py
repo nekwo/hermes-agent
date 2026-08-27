@@ -725,7 +725,7 @@ def test_an_unresolved_sync_conflict_is_a_different_reason_from_a_stale_revision
 
 
 def test_a_re_add_over_an_unreadable_archive_refuses_typed_and_acks_no_revision_1():
-    """EG-1.5 / RD-H4. The guard token cannot be re-minted from nothing.
+    """EG-1.5 / RD-H4, re-pointed by D1. The guard token cannot be re-minted.
 
     An archived key's revision is where the office's concurrency token LIVES
     between a remove and the re-add that follows it, and ``upsert_actor`` bases
@@ -736,10 +736,23 @@ def test_a_re_add_over_an_unreadable_archive_refuses_typed_and_acks_no_revision_
     it: a guard is worth nothing if the server can silently rewind the number it
     is guarding.
 
-    **Anti-vacuity.** Falling through to base 0 is the mutation. *Probed fields:*
-    the whole error frame (a mutant produces a RESULT and cannot carry
-    ``archive_unreadable`` at all) AND the absence of any actor file — the mutant
-    writes one at revision 1, which is the very ack this test's name refuses.
+    What D1 changed is WHICH refusal this lane hears, and the change is a
+    narrowing rather than a loss. The wire lane can no longer resurrect at all,
+    so the tombstone fence answers before the archive is ever decoded and
+    ``archive_unreadable`` is unreachable HERE. That is the honest answer: this
+    caller's write can never be accepted however readable the archive becomes,
+    so "ask again once the file is readable" would be advice that cannot work —
+    the same reasoning the class-key and desk arms already apply to their own
+    sentences. ``archive_unreadable`` keeps its own coverage on the path that
+    can still reach it, the consented store-level re-add
+    (``test_office_store.py::test_an_unreadable_archive_refuses_the_re_add_instead_of_minting_revision_1``).
+
+    **Anti-vacuity.** Falling through to base 0 is still the mutation, and both
+    probes still catch it: the whole error frame (a mutant produces a RESULT and
+    carries no refusal reason at all) AND the absence of any actor file — the
+    mutant writes one at revision 1, which is the very ack this test's name
+    refuses. The archive copy is asserted untouched because clearing it is the
+    live wedge D1 exists to prevent.
     """
 
     from agent_runtime import paths
@@ -754,20 +767,15 @@ def test_a_re_add_over_an_unreadable_archive_refuses_typed_and_acks_no_revision_
 
     reply = _upsert("readd", {"workspace_id": WORKSPACE, "actor": _actor_payload(5.0, 5.0)})
 
-    assert reply == {
-        "jsonrpc": "2.0",
-        "id": "readd",
-        "error": {
-            "code": -32600,
-            "message": f"archive_unreadable:{QA_INSTANCE} (JSONDecodeError)",
-            "data": {
-                "reason": "archive_unreadable",
-                "workspace_id": WORKSPACE,
-            },
-        },
+    assert reply["error"]["code"] == 4090, reply
+    assert reply["error"]["data"] == {
+        "reason": "actor_archived",
+        "workspace_id": WORKSPACE,
+        "actor_key": QA_INSTANCE,
+        "persona_instance_id": QA_INSTANCE,
     }
     # No ack, and no write behind the refusal: no revision-1 actor file, and the
-    # archive copy left as found for an operator to repair.
+    # archive copy left exactly as found — neither repaired nor unlinked.
     assert not paths.office_actor_path(WORKSPACE, QA_INSTANCE).exists()
     assert archived_path.read_text(encoding="utf-8") == "{truncated"
 

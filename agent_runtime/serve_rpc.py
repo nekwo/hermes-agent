@@ -30,7 +30,7 @@ day one. 4090 sits far above the live allocation and reads as HTTP 409, which
 is the one number every client developer already associates with this meaning.
 
 Codes are the coarse family — "a guard refused this write" — and
-``data.reason`` is the branch point (see :func:`err`). 4090 carries THREE
+``data.reason`` is the branch point (see :func:`err`). 4090 carries FOUR
 reasons, and conflating any two of them would be the whole bug, because each
 has a different cure:
 
@@ -38,12 +38,17 @@ has a different cure:
     The client's own prediction is behind. Refetch and rebase.
 ``sync_conflict``
     A realm-sync sidecar is unresolved. NO amount of refetch-and-retry clears
-    it — it needs an operator running ``harness office actor-resolve``. A
+    it — it needs an operator running ``harness office resolve-conflict``. A
     client that retried this one would spin forever.
 ``class_key_collision``
     The write is class-keyed and would undo the class→instance re-key
     migration (``office_class_key_guard``). Neither refetching nor retrying
     helps; the client must name WHICH instance it is placing.
+``actor_archived``
+    The key was DELETED on this server (D1). Terminal: the client drops its
+    local row. Refetching confirms the absence and retrying re-opens the wedge
+    this fence closed — re-placing the agent is a new create with a new id,
+    never a re-add of this key.
 
 Why this is a lane and not a replacement
 ----------------------------------------
@@ -1213,7 +1218,12 @@ def _runtime_office_upsert(
     untouched — ``harness office actor-restore``, and the CLI's own override.
     """
 
-    from agent_runtime.errors import ArchiveUnreadable, StaleRevision, SyncConflict
+    from agent_runtime.errors import (
+        ActorArchived,
+        ArchiveUnreadable,
+        StaleRevision,
+        SyncConflict,
+    )
     from agent_runtime.office_class_key_guard import ClassKeyedPlacementRefused
     from agent_runtime.office_store import DuplicateDeskRefused, OfficeStore
 
@@ -1360,6 +1370,38 @@ def _runtime_office_upsert(
                 "persona_id": collision["persona_id"],
                 "holding_actor_key": collision["holding_actor_key"],
                 "holding_item_id": collision["holding_item_id"],
+            },
+        )
+    except ActorArchived as exc:
+        # The tombstone fence (D1), translated. A 4090 because a guard refused
+        # this write, and a FOURTH reason on that code because the cure is a
+        # fourth thing again: not "refetch and rebase", not "name the instance",
+        # not "an operator must resolve a sidecar" — it is DROP THE LOCAL ROW.
+        # This is the live-incident lane. The launcher that re-pushed archived
+        # actors nineteen seconds after boot was not sending a malformed or
+        # stale payload; it was sending a well-formed write for a row that no
+        # longer exists on the authority, and every retryable reason would have
+        # spun it. A client must not re-place this key: re-placing is a NEW
+        # create with a freshly minted id.
+        #
+        # No ``resurrect`` parameter on this lane, for the reason spelled out
+        # above about ``allow_class_key``: a wire parameter is not consent. The
+        # deliberate re-add doors stay where they are — ``harness office
+        # actor-restore`` and the CLI's own ``--resurrect``.
+        details = exc.safe_details
+        return err(
+            rid,
+            ERR_CONFLICT,
+            (
+                f"actor {details['actor_key']!r} was deleted on this server. "
+                "Drop the local row; re-placing this agent is a new create with "
+                "a new id, not a re-add of this key."
+            ),
+            {
+                "reason": "actor_archived",
+                "workspace_id": workspace_id,
+                "actor_key": details["actor_key"],
+                "persona_instance_id": details["persona_instance_id"],
             },
         )
     except StaleRevision as exc:

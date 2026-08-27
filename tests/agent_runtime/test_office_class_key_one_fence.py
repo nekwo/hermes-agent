@@ -328,10 +328,21 @@ def test_deleting_the_stores_fence_unguards_every_lane_at_once(monkeypatch):
     appearing beside the instance-keyed one (the double placement, the defect this
     stage names), not a return value — a lane that answered ``ok`` without
     writing would not satisfy it.
+
+    The D1 tombstone fence is neutered ALONGSIDE it, and only here. The
+    migration archives the class key, so every write in this test is also a
+    re-add — meaning the second fence refuses all of them and the class-key
+    claim would read as proven no matter what ``_guard_class_keyed_write``
+    did. Isolating one fence's claim requires standing the other one down; that
+    the tombstone fence independently refuses this same write is a real
+    property, and it is asserted where it belongs, in the D1 suite.
     """
 
     monkeypatch.setattr(
         OfficeStore, "_guard_class_keyed_write", lambda self, *a, **k: None
+    )
+    monkeypatch.setattr(
+        OfficeStore, "_guard_archived_actor", lambda self, *a, **k: None
     )
 
     rpc_ws, _ = _migrated_workspace("Unfenced RPC Office")
@@ -751,7 +762,9 @@ def test_the_stores_override_parameter_is_what_lets_a_consenting_write_through()
         OfficeStore().upsert_actor(workspace, _colliding_payload())
     assert _keys(workspace) == {INSTANCE}
 
-    OfficeStore().upsert_actor(workspace, _colliding_payload(), allow_class_key=True)
+    OfficeStore().upsert_actor(
+        workspace, _colliding_payload(), allow_class_key=True, resurrect=True
+    )
     assert _keys(workspace) == {"backend_dev", INSTANCE}
 
 

@@ -471,6 +471,12 @@ def test_readd_of_an_archived_key_is_a_created_upsert(seeded_office, set_delta_p
     before, and that is the point: ``created`` asks whether the ROW is absent
     from the client's list, which is the only question insert-on-absent needs
     answered. ``remove_actor`` unlinked the live file, so it is.
+
+    ``resurrect=True`` since D1. The derivation under test is the one that runs
+    when a re-add is ALLOWED to happen; the fence that decides whether it may is
+    a different claim, pinned in ``test_office_actor_tombstone_fence.py``. What
+    this test must not become is a test of the fence, because then the ledger
+    delta the launcher mirrors would go unmeasured.
     """
 
     set_delta_patches(True)
@@ -478,7 +484,9 @@ def test_readd_of_an_archived_key_is_a_created_upsert(seeded_office, set_delta_p
     assert "personainst_qa_agent_0001" in seeded_office.get_surface(WORKSPACE).archived_actor_keys
 
     before = _log_end()
-    seeded_office.upsert_actor(WORKSPACE, _actor_payload("qa", x=4.0, y=4.0))
+    seeded_office.upsert_actor(
+        WORKSPACE, _actor_payload("qa", x=4.0, y=4.0), resurrect=True
+    )
     patch = [
         e.payload
         for _, e in EventLog().iter_from_offset(before)

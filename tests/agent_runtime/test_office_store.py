@@ -196,13 +196,19 @@ def test_upsert_after_archive_clears_ledger():
     ``restore_actor`` exists). The refusal WITHOUT it is pinned in
     ``test_office_class_key_one_fence.py``; what this test still owns is that
     consent really does clear the ledger and the archive copy.
+
+    D1 adds a SECOND consent to this write, and the two are not the same
+    question: ``allow_class_key`` says the key shape is deliberate, ``resurrect``
+    says raising a deleted key is. This write is both, so it spells both.
     """
 
     ws = _make_workspace()
     store = OfficeStore()
     store.upsert_actor(ws, _actor_payload("dev"))
     store.remove_actor(ws, "dev")
-    readded = store.upsert_actor(ws, _actor_payload("dev"), allow_class_key=True)
+    readded = store.upsert_actor(
+        ws, _actor_payload("dev"), allow_class_key=True, resurrect=True
+    )
     assert readded.state == "active"
     surface = store.get_surface(ws)
     assert "dev" not in surface.archived_actor_keys
@@ -287,11 +293,12 @@ def test_an_unreadable_archive_refuses_the_re_add_instead_of_minting_revision_1(
     writes it, and a store that merely raised something untyped could not satisfy
     the first probe.
 
-    ``allow_class_key=True`` on the re-add is not incidental: since EG-6.6 the
-    class-key fence runs FIRST inside ``upsert_actor``, so consent is what gets
-    this write as far as the archive read at all — and the point of the test is
-    that consenting to the resurrection does NOT also consent to inventing the
-    revision token. Two fences, two decisions.
+    The two consents on the re-add are not incidental: since EG-6.6 the
+    class-key fence runs FIRST inside ``upsert_actor``, and since D1 the
+    tombstone fence runs before the archive is read at all, so BOTH are what get
+    this write as far as the archive read — and the point of the test is that
+    consenting to the resurrection does NOT also consent to inventing the
+    revision token. Three fences, three decisions.
     """
 
     ws = _make_workspace()
@@ -306,7 +313,9 @@ def test_an_unreadable_archive_refuses_the_re_add_instead_of_minting_revision_1(
     archived_path.write_text("{truncated", encoding="utf-8")
 
     with pytest.raises(ArchiveUnreadable):
-        store.upsert_actor(ws, _actor_payload("dev"), allow_class_key=True)
+        store.upsert_actor(
+            ws, _actor_payload("dev"), allow_class_key=True, resurrect=True
+        )
 
     # Nothing was written on the refusal path: no revision-1 actor file, and the
     # archive copy is left exactly as found for an operator to repair.

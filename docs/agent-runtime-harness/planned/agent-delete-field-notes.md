@@ -145,4 +145,55 @@ pinned as a known hole in `test_office_class_key_one_fence.py`
 
 A second stale fact found in passing: `serve_rpc.py:41` advises running
 `harness office actor-resolve`, a verb that does not exist. The real one is
-`harness office resolve-conflict`.
+`harness office resolve-conflict`. Corrected in place while adding the fourth
+4090 reason to that same doc block.
+
+## F5 — D1: the plan's "thread resurrect through the designed gesture" resolves
+to a NEW flag, because the two consents are different questions
+
+The plan says to thread `resurrect=True` through the designed deliberate re-add
+if one exists. Per F3 the sanctioned gesture (`actor-restore`) was never on this
+arm, so nothing needed threading. But the audit surfaced a real hazard: the only
+caller reaching the arm with operator intent was the `--allow-class-key` consent
+replay (`office.py:297`), and leaving it un-threaded would make that flag a dead
+end for the commonest case in the program (the class→instance migration archives
+every class key, so "class-keyed AND archived" is ordinary, not a corner).
+
+Rejected making `allow_class_key` imply `resurrect`. They answer different
+questions — one is "may this write use a class key", the other "may this write
+raise the dead" — and an operator who consented to the first was never asked the
+second. Added `--resurrect` as its own flag instead. A write that is both now
+spells both and gets two warnings on the record, which is strictly more
+informative than the single silent override it replaced.
+
+Three consequences worth recording:
+
+* **The tombstone fence sits ABOVE the archive read.** Without consent the write
+  is refused whatever the archive decodes to, so decoding first would only mean
+  answering `archive_unreadable` ("ask again once the file is readable") to a
+  caller whose write can never be accepted. This re-points
+  `test_serve_rpc_office_upsert.py::test_a_re_add_over_an_unreadable_archive_...`
+  from `archive_unreadable` to `actor_archived` on the WIRE lane;
+  `archive_unreadable` keeps its coverage on the consented store-level path,
+  where the revision token it protects is actually read.
+* **The fence had to become a named method.** As an inline block it silently
+  broke `test_office_class_key_one_fence.py::test_deleting_the_stores_fence_
+  unguards_every_lane_at_once`, which isolates the class-key fence's claim by
+  monkeypatching it out — every write in that test is also a re-add, so the
+  second fence refused them all and the class-key claim read as proven no matter
+  what. Extracted to `OfficeStore._guard_archived_actor`, matching the store's
+  existing `_guard_*` idiom, so a test isolating one fence can stand the other
+  down.
+* **The refusal escapes through the except block.** The class-key fence runs
+  FIRST, so on the `--allow-class-key` path the tombstone fence is reached
+  inside the `except ClassKeyedPlacementRefused` handler — where the sibling
+  `except` arms cannot catch it. The first cut of this reported `internal_error`
+  for the commonest override run in the program. The arm is repeated inside that
+  handler, with a comment saying why.
+
+**Not fixed, and the coordinator should know:** `office_sync.apply_office_pull`
+(`office_sync.py:414`) writes actor files with `atomic_json_write`, bypassing
+`upsert_actor` and therefore this fence entirely. It is the blindest
+resurrection loop in the system. Out of D1's scope (the plan names the upsert
+arm), already pinned as a known hole in `test_office_class_key_one_fence.py`'s
+`CARVED_OUT_ACTOR_WRITERS`, and a candidate for its own stage.

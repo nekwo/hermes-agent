@@ -877,6 +877,10 @@ def build_parser(parent_subparsers) -> None:
     # the CONDITIONAL refusal in _cmd_office_actor_upsert, not a mandatory flag.
     office_actor_upsert.add_argument("--persona-instance-id", dest="persona_instance_id", default=None, help="Bind the placement to this persona instance (overrides --actor-json's persona_instance_id); the store still mints the key")
     office_actor_upsert.add_argument("--allow-class-key", dest="allow_class_key", action="store_true", help="Escape hatch: force a class-keyed write that would otherwise be refused for re-creating an archived or duplicated placement")
+    # Orthogonal to --allow-class-key and deliberately not implied by it: that
+    # flag consents to the KEY SHAPE, this one to raising a deleted key. The
+    # sanctioned un-archive verb remains `harness office actor-restore`.
+    office_actor_upsert.add_argument("--resurrect", dest="resurrect", action="store_true", help="Escape hatch: re-add an actor key that was deleted, clearing its tombstone (default: such a write is refused)")
     office_actor_upsert.add_argument("--expect-revision", dest="expect_revision", type=int, default=None)
     office_actor_upsert.add_argument("--updated-by", dest="updated_by", default=None)
     _add_stage42_global_args(
