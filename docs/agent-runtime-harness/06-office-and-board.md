@@ -80,6 +80,26 @@ it. Three consequences fall out of that one sentence rather than three branches
 refused, and a desk whose only holder is ARCHIVED is accepted, because
 `scan_actors` reads the live directory and an archive is not a holding. Desks
 are keyed on the ITEM's persona, not the actor's, matching the launcher's guard.
+
+**The persona keying is PROVISIONAL, and D6 was ruled against it 2026-08-27.**
+The operator's ruling is that duplicate desks are fine and only a duplicate on
+the SAME INSTANCE is not — "it's an instantiated system", so the persona is a
+template and keying a placement invariant to it is a category error. The ruling
+was NOT implemented, deliberately: the same conversation established that desks
+are a **placeholder for artifacts**, that they do not connect to agents yet, and
+that artifacts "should be stand-alone things" — which the launcher already
+half-records as an operator ruling of 2026-08-20 ("desks shouldn't be part of the
+agent — they are separate things", `mission_office_layout.dart`).
+
+Re-keying persona → instance would therefore harden a coupling the design is
+moving AWAY from. If artifacts are standalone scene objects, this fence should
+key on neither persona nor instance, and the duplicate-desk invariant stops
+existing rather than moving. **Do not "fix" this fence toward instance keying.**
+Revisit it when artifacts are actually built; until then the persona-keyed fence
+is scaffolding that refuses a shape nothing yet produces. The field both sides
+would need already exists (`OfficeItem.persona_instance_id`, the launcher's
+nullable `personaInstanceId`), so no migration is being deferred — only a
+decision that should not be taken before the feature it guards exists.
 Like the class-key fence it refuses rather than answering from a directory it
 could only partly read (`ActorsUnreadable`), and it fires on `--dry-run`.
 
@@ -707,8 +727,13 @@ omit it — the office's revision guard lives on the RPC lane only.
     patch. A real gap in the notification story and a realm-sync one, not a
     placement one — recorded here because this is where the notification model
     lives.
-  - **Owner decisions still standing on their defaults**, none blocking: D6
-    refuse-vs-warn on the duplicate desk (shipped REFUSE); D10(ii) no
+  - **D6 — RULED 2026-08-27, deliberately not implemented.** Duplicate desks are
+    allowed; only a duplicate on the same INSTANCE is not. Superseded in the same
+    breath by the direction it was ruled inside: desks are a placeholder for
+    artifacts, artifacts are standalone, and the fence should then key on neither
+    persona nor instance. See the fence section above for why re-keying now would
+    be the wrong move.
+  - **Owner decisions still standing on their defaults**, none blocking: D10(ii) no
     persona-template (`persona.skills`) operator verb (out of scope, recorded);
     D10(iii) un-aimed adds omit `position` (shipped OMIT); D10(iv) `console`
     scope for both methods (prose until the gateway's R11 — see above).
