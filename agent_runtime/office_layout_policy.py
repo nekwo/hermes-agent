@@ -244,13 +244,34 @@ def _is_blocked(candidate: Point, occupied: Sequence[Point]) -> bool:
     That strictness is pinned at THIS predicate rather than through
     :func:`next_free_slot` — see
     ``test_an_item_exactly_at_the_occupancy_radius_does_not_block`` — because
-    no lattice candidate can sit an exact radius from an item: a distance
-    measured from a :func:`slot_at` point is an exact multiple of ``2**-50``,
-    and ``float64(0.7)`` is a multiple of ``2**-53`` and of no coarser power.
-    At the launcher's 32-bit width the same comparison is an EQUIVALENT MUTANT
-    for the same reason, one grid coarser — the cross-repo
-    fixture's README states it with the numbers so nobody re-files it as a
-    coverage gap.
+    the predicate is the DIRECT seam for it, NOT because the lattice cannot
+    reach the boundary. On this side it can.
+
+    ONE-AXIS it cannot. A :func:`slot_at` point's coordinates (``-5.0``,
+    ``6.4``) have float64 neighbours ``2**-50`` apart, so a distance measured
+    along a single axis from one is an exact multiple of ``2**-50``, and
+    ``float64(0.7)`` is a multiple of ``2**-53`` and of no coarser power — the
+    obvious ``slot_at(0, 0) + (OCCUPANCY_RADIUS, 0)`` measures
+    ``0.7000000000000002``.
+
+    OFF-AXIS it can, and the old claim here that no lattice-shaped spelling
+    could reach the boundary was FALSE and is withdrawn (S9 review,
+    2026-08-27). The one-axis argument does not extend, because
+    ``dx*dx + dy*dy`` is not the exact ``(m*m + n*n) * 2**-100`` that both
+    squares would give: the sum is ROUNDED to float64, and the rounding can
+    land it on a square whose root rounds to exactly the radius. An item at
+    ``(-4.300000000000001, 6.400000029802323)`` — two ordinary float64s an
+    office store can hold — probed from ``slot_at(0, 0)`` sums to
+    ``0.4899999999999999``, BELOW both ``OCCUPANCY_RADIUS * OCCUPANCY_RADIUS``
+    (``0.48999999999999994``) and ``0.49``, and its root is EXACTLY
+    ``float64(0.7)``. So ``<`` frees that slot and ``<=`` takes it, on the real
+    scan. See ``test_an_off_axis_lattice_probe_can_measure_the_radius_exactly``.
+
+    The launcher's 32-bit width is a DIFFERENT question with a narrower answer:
+    an equivalent mutant AT THE LATTICE ORIGIN, which is where every cross-repo
+    fixture case sits. That fixture's README states the scope with the numbers
+    so nobody re-files it as a coverage gap, and so nobody reads it as an
+    impossibility.
     """
 
     for x, y in occupied:

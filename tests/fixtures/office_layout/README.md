@@ -97,16 +97,30 @@ so on the launcher both coordinate differences are integer multiples of
 `2**-21` (the float32 step at this lattice's magnitudes) and the squared
 distance is an exact multiple of `2**-42` — while the window of squared
 distances whose square root rounds to `float64(0.7)` is `0.0005` of one such
-step wide and falls `0.04` of a step from the nearest one. The same argument
-runs on hermes at `2**-50`: a distance from a slot is an exact multiple of
-`2**-50` there, and `float64(0.7)` is a multiple of `2**-53` and of no coarser
-power. `<` → `<=` is therefore an **equivalent mutant** in
-`MissionOfficePlacementPolicy._isBlocked` — measured on 2026-08-27, not
-assumed. hermes pins its own strictness one level down, at the predicate:
+step wide and falls `0.04` of a step from the nearest one. On hermes only the
+ONE-AXIS form of that argument holds: a distance measured along a single axis
+from a slot is an exact multiple of `2**-50` there, and `float64(0.7)` is a
+multiple of `2**-53` and of no coarser power — but it does NOT extend off-axis,
+and the sentence that used to stand here, claiming no lattice-shaped spelling
+could reach the boundary on hermes, was FALSE and is withdrawn (S9 review,
+2026-08-27). `dx*dx + dy*dy` is ROUNDED rather than the exact
+`(m*m + n*n) * 2**-100` the two squares would give, so an item at
+`(-4.300000000000001, 6.400000029802323)` probed from `slot_at(0, 0)` sums to
+`0.4899999999999999` — below both `0.48999999999999994` (`0.7*0.7`) and `0.49`
+— and its root is EXACTLY `float64(0.7)`. That point is not
+float32-representable, so it cannot live in this shared fixture; hermes pins it
+as a unit case (`test_an_off_axis_lattice_probe_can_measure_the_radius_exactly`).
+
+`<` → `<=` is therefore an **equivalent mutant** in
+`MissionOfficePlacementPolicy._isBlocked` **at the lattice origin, where every
+case in this file sits** — measured on 2026-08-27, not assumed, and scoped
+rather than universal: slots further down the lattice sit on finer float32
+grids where the argument above does not carry. hermes pins its own strictness
+one level down, at the predicate:
 `test_an_item_exactly_at_the_occupancy_radius_does_not_block` feeds
-`_is_blocked` a distance of exactly the radius, which the lattice cannot reach.
-The launcher has no equivalent, because `_isBlocked` is private to the library
-and every public door goes through the lattice.
+`_is_blocked` a distance of exactly the radius, which no case in this file can
+produce. The launcher has no equivalent, because `_isBlocked` is private to the
+library and every public door goes through the lattice.
 
 ## Update rule
 

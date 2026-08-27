@@ -221,16 +221,30 @@ def test_an_item_exactly_at_the_occupancy_radius_does_not_block():
     the same thing. It named a guarantee it could not fail on, and ``<`` →
     ``<=`` survived the whole file (measured 2026-08-27).
 
-    No lattice-shaped spelling fixes that. Every candidate the scan tests is a
+    No ONE-AXIS spelling fixes that. Every candidate the scan tests is a
     ``slot_at`` point, whose coordinates (``-5.0``, ``6.4``) have float64
-    neighbours ``2**-50`` apart, so every distance measured from one is an
-    exact multiple of ``2**-50``; ``OCCUPANCY_RADIUS`` is ``float64(0.7)``, a
-    multiple of ``2**-53`` and of no coarser power. The boundary is simply not
-    on the grid the scan can reach — and at the launcher's 32-bit width it is
-    further off it still, which is why the cross-repo fixture's
-    ``boundary_item_at_exact_radius`` pins the RADIUS (to one float32 ulp) and
-    says so rather than pretending to pin the comparison. See that fixture's
-    README.
+    neighbours ``2**-50`` apart, so a distance measured along a single axis
+    from one is an exact multiple of ``2**-50``; ``OCCUPANCY_RADIUS`` is
+    ``float64(0.7)``, a multiple of ``2**-53`` and of no coarser power.
+
+    An OFF-AXIS one does. This docstring used to say that no lattice-shaped
+    spelling could reach the boundary; that was FALSE and is withdrawn (S9
+    review, 2026-08-27). The one-axis argument does not extend, because
+    ``dx*dx + dy*dy`` is not the exact ``(m*m + n*n) * 2**-100`` the two
+    squares would give — the sum is ROUNDED. An item at
+    ``(-4.300000000000001, 6.400000029802323)`` probed from ``slot_at(0, 0)``
+    sums to ``0.4899999999999999``, below both ``OCCUPANCY_RADIUS ** 2``
+    (``0.48999999999999994``) and ``0.49``, and its root is EXACTLY
+    ``float64(0.7)`` — pinned in
+    ``test_an_off_axis_lattice_probe_can_measure_the_radius_exactly`` below.
+
+    Asking the PREDICATE is still the right seam, for the reason above the
+    paragraph rather than for the impossibility: it is the direct one, and it
+    does not make the guarantee hostage to an operator's floor happening to
+    hold such a point. The launcher's 32-bit width is a separate, narrower
+    question — an equivalent mutant AT THE LATTICE ORIGIN — which is why the
+    cross-repo fixture's ``boundary_item_at_exact_radius`` pins the RADIUS (to
+    one float32 ulp) rather than the comparison. See that fixture's README.
 
     KILLING MUTATION: ``<`` → ``<=`` in ``_is_blocked`` — registered as claim
     ``s9-occupancy-predicate-is-strict`` in ``tests/mutation_claims.json``.
@@ -243,6 +257,46 @@ def test_an_item_exactly_at_the_occupancy_radius_does_not_block():
     # assertion above is a boundary and not a predicate that never fires.
     inside = math.nextafter(radius, 0.0)
     assert policy._is_blocked((0.0, 0.0), [(inside, 0.0)]) is True
+
+
+def test_an_off_axis_lattice_probe_can_measure_the_radius_exactly():
+    """The lattice CAN reach the boundary on float64 — just not along one axis.
+
+    Withdraws the "no lattice-shaped spelling can reach it" claim that
+    ``_is_blocked``, the test above, and both copies of the cross-repo
+    fixture's README carried until the S9 review (2026-08-27). The sum of the
+    two squares is rounded, so it can land on a value whose root rounds to
+    exactly ``float64(0.7)`` even though neither square is exact and the sum is
+    strictly below ``OCCUPANCY_RADIUS ** 2``.
+
+    This case cannot live in ``cases.json``: the item's coordinates are not
+    float32-representable, and the launcher would parse them into a different
+    floor. It is hermes-only on purpose.
+    """
+
+    candidate = policy.slot_at(0, 0)
+    item = (-4.300000000000001, 6.400000029802323)
+    dx = candidate[0] - item[0]
+    dy = candidate[1] - item[1]
+    squared = dx * dx + dy * dy
+
+    # Strictly INSIDE the radius by the squares, and exactly ON it by the root.
+    assert squared == 0.4899999999999999
+    assert squared < policy.OCCUPANCY_RADIUS * policy.OCCUPANCY_RADIUS
+    assert policy.OCCUPANCY_RADIUS * policy.OCCUPANCY_RADIUS == 0.48999999999999994
+    assert squared < 0.49
+    assert squared**0.5 == 0.7 == policy.OCCUPANCY_RADIUS
+
+    # So the boundary is on the grid the SCAN reaches, and `<` frees the slot.
+    assert policy._is_blocked(candidate, [item]) is False
+    assert policy.next_free_slot([item]) == candidate
+
+    # The one-axis spelling, for contrast: OUTSIDE, where `<` and `<=` agree.
+    on_axis = (candidate[0] + policy.OCCUPANCY_RADIUS, candidate[1])
+    on_axis_distance = abs(candidate[0] - on_axis[0])
+    assert on_axis_distance == 0.7000000000000002
+    assert on_axis_distance > policy.OCCUPANCY_RADIUS
+    assert policy._is_blocked(candidate, [on_axis]) is False
 
 
 def test_rows_are_spaced_further_apart_than_columns():

@@ -13,3 +13,13 @@ docker/entrypoint.sh text eol=lf
 # line fails as "bad interpreter". The hooks carry no extension, so the *.sh
 # rule above does not reach them.
 .githooks/* text eol=lf
+
+# Byte-pinned cross-repo goldens: `tests/fixtures/office_layout/cases.json` is
+# committed byte-identical to the launcher's
+# `test/fixtures/harness_office_layout/cases.json`, and both repos'
+# `MANIFEST.sha256` carry the same digest so a copy edited on one side reds
+# that side's manifest rather than leaving the two placement policies silently
+# disagreeing. `-text` disables ALL end-of-line conversion in both directions,
+# so the bytes on disk are the bytes in the object store are the bytes the
+# other repo committed.
+tests/fixtures/office_layout/** -text
