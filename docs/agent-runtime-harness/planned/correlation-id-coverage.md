@@ -36,10 +36,22 @@ fold receipt (or a demote receipt naming the id among contributors).
 
 ### P2 — CI-4 second half: the argv capability lanes
 
-`--correlation-id` reaches exactly one argv verb today (`harness agent create`).
-The remaining capability lanes — persona open-chat, retire, steer and their
-siblings — carry no token, so a gesture that goes through them is
-uncorrelated while an office gesture in the same session is correlated.
+`--correlation-id` reaches THREE argv verbs as of 2026-08-27 — `harness agent
+create`, `harness agent retire` (S8b, `d107d132e0`) and `harness persona instance
+retire` (S8b-b) — which is the whole placement gesture, create half and delete
+half, on both of the retire's doors. The remaining capability lanes — persona
+open-chat, steer and their siblings — carry no token, so a gesture that goes
+through THOSE is uncorrelated while an office gesture in the same session is
+correlated. The window is narrower than this plan found it, not closed.
+
+**The retire is the worked example of why the last door matters.** S8b gave the
+flag to `agent retire` and withheld it from `persona instance retire`, reasoning
+that no gesture stood behind the second door. The launcher's argv fallback IS
+that door and always had a token, so the one retire that ran on a degraded
+transport was the one an operator could not join — the partial-coverage window
+biting hardest exactly where the diagnostic was needed most. Whoever takes the
+remaining lanes should check each door's real callers before deciding one has no
+gesture behind it.
 
 - The plan names this the **partial-coverage window** and sequences it LAST on
   purpose: argv surface changes fan wide.

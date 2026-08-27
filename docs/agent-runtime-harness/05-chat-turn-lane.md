@@ -435,8 +435,9 @@ the layer whose job is to translate absent into absent.
 **`correlation_id` rides the create and echoes on its ack** (`agent_create` reads
 `params["correlation_id"]`, threads it into the placement write and copies it onto the result), so
 one gesture's create is joinable with its patches. Since S8b (`d107d132e0`) the RETIRE reads and
-threads the SAME normalisation, so a gesture's create half and delete half finally share one
-correlation space — 06's inverse section has the thread. Nothing else on this lane mints or
+threads the SAME normalisation, and since S8b-b (2026-08-27) BOTH argv doors onto it publish the
+flag, so a gesture's create half and delete half share one correlation space on the degraded lane
+as well as the RPC one — 06's inverse section has the thread. Nothing else on this lane mints or
 rewrites the token: it is the caller's, end to end.
 
 **The create's cost is now attributed.** `agent_runtime/agent_create_phases.py` splits the single

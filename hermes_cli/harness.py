@@ -996,6 +996,17 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_retire.add_argument("persona_instance_id")
     persona_instance_retire.add_argument("--reason", default="placement removed")
     persona_instance_retire.add_argument("--requested-by", default="cli")
+    # S8b-b: the same flag `agent retire` took, on the OTHER door onto the same
+    # `perform_agent_retire`. S8b withheld it here on the stated grounds that
+    # "no gesture behind it is the truth for that door" — which was measured to
+    # be false: the launcher's `persona.instance.retire` capability IS this
+    # door, fired from `MissionOfficeLayoutController.retireAgent`'s
+    # `Unavailable` arm, and `retireAgent` takes `correlationId` as a REQUIRED
+    # parameter. So the arm the launcher falls back to when the RPC lane cannot
+    # carry the call was the ONE arm that dropped the token — on the lane where
+    # joining the two halves of a gesture matters most, because a degraded
+    # transport is exactly when an operator greps the event log.
+    persona_instance_retire.add_argument("--correlation-id", dest="correlation_id", default=None)
     _add_coordinator_permission_args(persona_instance_retire)
     persona_instance_retire.add_argument("--json", action="store_true")
     persona_instance_retire.set_defaults(func=_cmd_persona_instance_retire)

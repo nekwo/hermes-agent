@@ -313,8 +313,16 @@ remove row carry it — then echoed on the ack (present only when sent, so a cal
 without one is byte-identical to before the key existed). Until S8b this was the
 ONLY level-mutating verb with no token, which meant one operator gesture's
 create half and delete half lived in two correlation spaces that no single grep
-joined. `harness agent retire --correlation-id <token>` is the argv door;
-`harness persona instance retire` deliberately does not publish the flag.
+joined. **Both argv doors publish the flag**: `harness agent retire
+--correlation-id <token>` since S8b, and `harness persona instance retire
+--correlation-id <token>` since S8b-b (2026-08-27). S8b withheld it from the
+second on the reasoning that "no gesture behind it" was the truth for that door.
+It was not: the launcher's `persona.instance.retire` argv capability IS that
+door, fired from `MissionOfficeLayoutController.retireAgent`'s `Unavailable` arm,
+and that method takes `correlationId` as a REQUIRED parameter. So the token
+existed on every launcher retire and was dropped by exactly the arm that runs
+when the RPC lane is degraded — the lane on which a grep over the event log is
+the only join an operator has left.
 
 **Refusals are `PersonaInstanceRetireError`'s codes one-to-one**: `not_found` →
 `ERR_NOT_FOUND` (4001); `canonical_persona_channel` / `instance_active` /

@@ -586,11 +586,20 @@ def _agent_retire_outcome(args):
     always had, and in the coordinator gate, which is `persona instance`'s.
 
     ``correlation_id`` is read through ``getattr`` with the same ``None``
-    default as its siblings, which is what lets `persona instance retire` — a
-    parser that does NOT carry the flag — keep calling this unchanged: an absent
-    dest reads as "no gesture behind this call", which is the truth for it. Only
-    `agent retire` publishes `--correlation-id` (S8b), because only it is the
-    scripted inverse of `agent create --correlation-id`.
+    default as its siblings, so an operator who does not type the flag on either
+    door reaches the store with no token and gets the ack they always got.
+
+    BOTH doors publish ``--correlation-id``. S8b gave it to `agent retire` alone,
+    on the reasoning that only it is the scripted inverse of `agent create
+    --correlation-id` and that "no gesture behind it" was the truth for `persona
+    instance retire`. That was wrong about its own largest caller: the launcher's
+    `persona.instance.retire` argv capability IS this door, fired from
+    ``MissionOfficeLayoutController.retireAgent``'s ``Unavailable`` arm, and that
+    method takes ``correlationId`` as a REQUIRED parameter. The token therefore
+    existed on every launcher retire and was dropped by precisely the arm that
+    runs when the RPC lane is degraded — so the create half and the retire half
+    of one gesture landed in two correlation spaces on the lane where a single
+    grep over the event log is the only join an operator has (S8b-b).
     """
 
     from agent_runtime.agent_retire import perform_agent_retire

@@ -317,10 +317,10 @@ def test_a_retire_typed_without_the_flag_carries_no_token(
     """The additive half, at the operator surface: the flag defaults to ``None``
     and an operator who does not type it gets the ack they always got.
 
-    Also the fence for the OTHER door — ``harness persona instance retire`` has
-    no ``--correlation-id`` and reaches the same ``_agent_retire_outcome``
-    through ``getattr(..., None)``; if that default were anything else, this arm
-    would be the first thing to say so.
+    Also the fence for BOTH doors' ``getattr(..., None)`` default: an operator
+    who omits the flag must reach the store with no token, not with a fabricated
+    one. If that default were anything else, this arm would be the first thing
+    to say so.
     """
 
     placed = _place(capsys, placement_id="qa_verb_retire_no_corr")
@@ -329,3 +329,59 @@ def test_a_retire_typed_without_the_flag_carries_no_token(
 
     assert code == 0
     assert "correlation_id" not in data
+
+
+def test_the_persona_instance_door_carries_the_token_too(
+    qa_persona, seeded_workspace, capsys
+):
+    """S8b-b: the OTHER door onto ``perform_agent_retire`` publishes the flag.
+
+    S8b withheld ``--correlation-id`` from ``harness persona instance retire`` on
+    the stated grounds that "no gesture behind it is the truth for that door".
+    That was false about its largest caller. The launcher's
+    ``persona.instance.retire`` argv capability IS this door — fired from
+    ``MissionOfficeLayoutController.retireAgent``'s ``Unavailable`` arm, whose
+    ``correlationId`` parameter is REQUIRED — so a token existed on every
+    launcher retire and was dropped by exactly the arm that runs when the RPC
+    lane is degraded, which is when a grep over the event log is the only join
+    an operator has.
+
+    KILLING MUTATION (run, observed, reverted): delete the
+    ``persona_instance_retire.add_argument("--correlation-id", ...)`` line in
+    ``hermes_cli/harness.py``. Observed red::
+
+        SystemExit: 2
+        error: unrecognized arguments: --correlation-id g-office-...
+
+    The EVENT is read as well as the ack, for the same anti-vacuity reason the
+    sibling test gives: an ack that echoed the flag it was handed would satisfy
+    an ack-only assertion with nothing on the wire to grep.
+    """
+
+    from agent_runtime.state_patches import CORRELATION_ID_KEY
+
+    token = "g-office-1755400000999998-b2c3"
+    placed = _place(capsys, placement_id="qa_verb_retire_corr_other_door")
+
+    code = _dispatch(
+        [
+            "harness", "persona", "instance", "retire",
+            placed["persona_instance_id"],
+            "--correlation-id", token,
+            "--json",
+        ]
+    )
+    data = json.loads(capsys.readouterr().out)
+
+    assert code == 0, data
+    assert data["persona_instance_retired"]["correlation_id"] == token
+
+    from agent_runtime.events import EventLog
+
+    removed = [
+        event.payload
+        for _, event in EventLog().iter_from_offset(0)
+        if event.type == "office.actor.removed"
+    ]
+    assert [payload.get(CORRELATION_ID_KEY) for payload in removed] == [token]
+    assert [payload.get("actor_key") for payload in removed] == [placed["actor_key"]]

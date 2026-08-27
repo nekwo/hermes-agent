@@ -599,6 +599,21 @@
         "-q",
         "tests/hermes_cli/test_agent_retire_verb.py::test_the_correlation_flag_reaches_the_office_removal_and_the_ack"
       ]
+    },
+    {
+      "id": "s8b-b-persona-instance-retire-door-has-no-token",
+      "path": "hermes_cli/harness.py",
+      "symbol": "build_parser/persona_instance_retire",
+      "operator": "withhold-flag-from-second-door",
+      "find": "    persona_instance_retire.add_argument(\"--correlation-id\", dest=\"correlation_id\", default=None)\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_agent_retire_verb.py::test_the_persona_instance_door_carries_the_token_too"
+      ]
     }
   ]
 }
