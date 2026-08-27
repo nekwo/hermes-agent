@@ -51,6 +51,23 @@ def _actors(workspace_id: str = WORKSPACE) -> dict:
     return {actor.actor_key: actor for actor in OfficeStore().list_actors(workspace_id)}
 
 
+def _reservation_record(key: str) -> dict:
+    """The receipt FILE. The witness that a replay wrote nothing.
+
+    It used to be the ack's ``revision``, and that field is exactly what the
+    replay re-read stops freezing — so the witness moved to the artifact a reply
+    cannot fabricate.
+    """
+
+    import hashlib
+    import json
+
+    path = paths.agent_create_reservation_path(
+        hashlib.sha256(key.encode("utf-8")).hexdigest()
+    )
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 @pytest.fixture
 def qa_persona():
     """A persona whose configured display name differs from its title-cased id."""
@@ -449,6 +466,10 @@ _INVALID_ARM_PARAMS: dict[str, dict] = {
     "idempotency_key_required": {"idempotency_key": ""},
     "idempotency_key_invalid": {"idempotency_key": "k" * 241},
     "placement_id_invalid": {"placement_id": "!!!"},
+    # A bare string is the client mistake this arm exists for: iterating it
+    # would assign one skill per CHARACTER, so the container shape is refused
+    # before any write rather than normalised into nonsense.
+    "skills_invalid": {"skills": "harness-qa-verdict"},
 }
 
 
@@ -798,24 +819,446 @@ def test_the_acks_actor_is_the_row_the_store_returned(
     assert OfficeStore().get_actor(WORKSPACE, actor_key).revision == 2
 
 
-def test_an_idempotent_replay_returns_the_recorded_position_and_actor(
+def test_an_idempotent_replay_re_reads_the_actor_instead_of_echoing_the_receipt(
     qa_persona, isolate_agent_runtime_root
 ):
-    """The replay is the RECORDED reply, so the two new keys have to be in the
-    receipt — not recomputed on the way out, which would re-run the policy and
-    could answer a different slot than the one on disk.
+    """A replay reports where the agent IS, not where it was first put.
+
+    RED-FIRST against the arm this replaces. Until now the ``done`` arm returned
+    ``record.result`` verbatim, so this test's ``moved`` assertions FAIL on that
+    code: the receipt was written at the first create and the actor has been
+    dragged since.
+
+    WHY IT MATTERS RATHER THAN BEING TIDY. Plan S7 makes the launcher ADOPT the
+    ack's actor — key, position and revision — into its scene and its
+    ``expect_revision`` bookkeeping. A replay that hands back the revision the
+    row had at first write makes the client's very next guarded write refuse
+    ``stale_revision``, and hands back a position that snaps the agent to where
+    it used to be. The office actor is mutable by drag, by realm pull and by
+    conflict resolution, so "the receipt is current" is false the moment anyone
+    touches the level.
+
+    KILLING MUTATION: return ``record.result`` verbatim from the ``STATE_DONE``
+    arm and the three ``moved`` assertions red.
+
+    ANTI-VACUITY. The move is made through the REAL store write
+    (``upsert_actor``), so the revision genuinely advances and the position
+    genuinely differs from the recorded one — a replay that happened to
+    recompute the same slot cannot pass by coincidence. And "no second write
+    happened" is asserted on the RECEIPT FILE and on the store's own revision,
+    NOT on the reply's revision: that field is exactly what this change stops
+    freezing, so leaning on it would be asserting the bug.
     """
+
+    from agent_runtime.office_store import OfficeStore
 
     _seed_workspace()
     first = perform_agent_create(
         _no_position(idempotency_key="replay-1", placement_id="qa_replay"),
         persona=qa_persona,
     )
+    actor_key = first.result["actor_key"]
+    assert first.result["actor_fresh"] is True
+    receipt_before = _reservation_record("replay-1")
+
+    # The agent is dragged somewhere else, the way an operator moves one.
+    stored = OfficeStore().get_actor(WORKSPACE, actor_key)
+    payload = {
+        "actor_key": actor_key,
+        "persona_id": stored.persona_id,
+        "persona_instance_id": stored.persona_instance_id,
+        "items": [
+            {
+                "item_id": item.item_id,
+                "kind": item.kind,
+                "position": [41.0, -17.0],
+                "folder": item.folder,
+                "display_name": item.display_name,
+            }
+            for item in stored.items
+        ],
+    }
+    moved_actor = OfficeStore().upsert_actor(WORKSPACE, payload, updated_by="operator")
+    assert moved_actor.revision > stored.revision
+
     again = perform_agent_create(
         _no_position(idempotency_key="replay-1", placement_id="qa_replay"),
         persona=qa_persona,
     )
 
     assert again.result["idempotent_replay"] is True
-    assert again.result["position"] == first.result["position"]
+    # The three keys a client adopts, all as the row is NOW.
+    assert again.result["position"] == [41.0, -17.0]
+    assert again.result["position"] != first.result["position"]
+    assert again.result["revision"] == moved_actor.revision
+    assert again.result["actor"]["revision"] == moved_actor.revision
+    assert again.result["actor_fresh"] is True
+
+    # IDENTITY is the recorded decision and is NOT re-derived.
+    assert again.result["persona_instance_id"] == first.result["persona_instance_id"]
+    assert again.result["placement_id"] == first.result["placement_id"]
+    assert (
+        again.result["default_chat_session_id"]
+        == first.result["default_chat_session_id"]
+    )
+
+    # The witness that the replay wrote nothing — the receipt, and the store's
+    # own revision, neither of which the reply can fabricate.
+    assert _reservation_record("replay-1") == receipt_before
+    assert OfficeStore().get_actor(WORKSPACE, actor_key).revision == moved_actor.revision
+
+
+def test_a_replay_whose_actor_is_gone_says_so_instead_of_inventing_one(
+    qa_persona, isolate_agent_runtime_root
+):
+    """``actor_fresh: false``, and the recorded row returned UNCHANGED.
+
+    The other half of the re-read, and the half that keeps it honest: an actor
+    that has been archived since the create cannot be re-read, and the two wrong
+    answers are (a) fabricate a row and (b) raise, stranding a client that only
+    wanted its recorded ack back. The reply degrades to "here is what was
+    recorded, and it may be stale", which is a thing a client can act on.
+
+    KILLING MUTATION: stamp ``actor_fresh: True`` unconditionally and this reds.
+    """
+
+    from agent_runtime.office_store import OfficeStore
+
+    _seed_workspace()
+    first = perform_agent_create(
+        _no_position(idempotency_key="replay-gone", placement_id="qa_replay_gone"),
+        persona=qa_persona,
+    )
+    actor_key = first.result["actor_key"]
+    OfficeStore().remove_actor(WORKSPACE, actor_key, updated_by="operator")
+
+    again = perform_agent_create(
+        _no_position(idempotency_key="replay-gone", placement_id="qa_replay_gone"),
+        persona=qa_persona,
+    )
+
+    assert again.result["idempotent_replay"] is True
+    assert again.result["actor_fresh"] is False
+    # Unchanged, not invented.
     assert again.result["actor"] == first.result["actor"]
+    assert again.result["position"] == first.result["position"]
+    assert again.result["revision"] == first.result["revision"]
+
+
+# ── the skills phase (plan S4 / D4 / D5) ─────────────────────────────────────
+#
+# The phase that is deliberately NOT in the reservation's atomic join. Its
+# refusals leave a placed agent standing, and every test below reads that claim
+# off the STORES — the roster row file and the office actor — rather than off the
+# reply, because a reply is exactly what a mutant can fabricate.
+
+
+@pytest.fixture
+def isolated_shared_skills(tmp_path, monkeypatch):
+    """Point the shared skills root at this test's tmp dir.
+
+    The operator's real shared root is ``<hermes root>/shared/skills``, and
+    ``install_harness_skill`` writes into it with a staged ``copytree`` +
+    ``os.replace``. ``tests/conftest.py`` already blanks ``HERMES_SHARED_SKILLS``
+    and sandboxes ``HERMES_HOME``, so the default already resolves inside
+    ``tmp_path`` — this makes the pin EXPLICIT and asserts it, because "already"
+    is an assumption and the thing assumed is whether these tests rewrite the
+    packages the operator's live agents load.
+
+    The ENV var and not a monkeypatched attribute: ``skill_install`` and
+    ``agent.skill_utils.skill_source_kind`` both resolve the shared root
+    independently, and patching one would leave the resolver classifying the
+    installed copy as ``external`` — which is ``invalid_source`` for a canonical
+    id, i.e. a test failing for a reason that has nothing to do with its subject.
+    """
+
+    from hermes_constants import get_shared_skills_dir
+
+    shared = tmp_path / "shared-skills"
+    monkeypatch.setenv("HERMES_SHARED_SKILLS", str(shared))
+    assert get_shared_skills_dir() == shared
+    return shared
+
+
+def _overrides(instance_id: str):
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    return PersonaInstanceStore().get(instance_id).skill_overrides
+
+
+def _reservation_state(key: str) -> str:
+    return _reservation_record(key)["state"]
+
+
+def test_skill_refusal_keeps_placement_and_resumes(
+    qa_persona, isolated_shared_skills
+):
+    """THE D4 pin, both halves in one test because they are one claim.
+
+    KILLING MUTATION (plan §C): route the skills refusal through
+    ``compensate_failed_placement`` and the roster row is gone — the first block
+    reds.
+
+    ANTI-VACUITY. "The placement survived" is read as the instance FILE plus the
+    office actor, not as a field in the refusal; "the resume did not re-place" is
+    read as the actor's REVISION being unmoved, which a mutant that re-ran
+    ``upsert_actor`` cannot leave at 1; and "it did not re-mint" is the instance
+    id being the same one, from a store that would have minted a second row
+    under a second placement id.
+    """
+
+    _seed_workspace()
+    key = "skills-resume"
+    refused = perform_agent_create(
+        _params(
+            idempotency_key=key,
+            placement_id="qa_skills_resume",
+            skills=["not-a-skill-anyone-has"],
+        ),
+        persona=qa_persona,
+    )
+
+    assert refused.refusal is not None
+    data = refused.refusal.data
+    assert data["reason"] == "skill_unresolved"
+    assert data["skill"] == "not-a-skill-anyone-has"
+    assert data["status"] == "missing"
+    assert data["phase"] == "skills"
+    # The field the launcher branches on, and here it is the literal truth.
+    assert data["rolled_back"] is False
+    assert "SAME idempotency_key" in data["next_expected"]
+
+    # The agent is STANDING. Both stores, not the reply.
+    assert paths.persona_instance_path("personainst_qa_skills_resume").exists()
+    actors = _actors()
+    placed = [
+        actor
+        for actor in actors.values()
+        if actor.persona_instance_id == "personainst_qa_skills_resume"
+    ]
+    assert len(placed) == 1
+    assert placed[0].revision == 1
+    assert _overrides("personainst_qa_skills_resume") is None
+
+    # ...and the receipt says where to resume from.
+    assert _reservation_state(key) == "placed"
+
+    # The operator fixes the id and retries under the SAME key.
+    resumed = perform_agent_create(
+        _params(
+            idempotency_key=key,
+            placement_id="qa_skills_resume",
+            skills=["harness-qa-verdict"],
+        ),
+        persona=qa_persona,
+    )
+
+    assert resumed.refusal is None
+    assert resumed.result["persona_instance_id"] == "personainst_qa_skills_resume"
+    assert resumed.result["skills"]["assigned"] == ["harness-qa-verdict"]
+    assert _overrides("personainst_qa_skills_resume") == ["harness-qa-verdict"]
+    # No second roster row, and no second placement write.
+    assert len(_actors()) == len(actors)
+    assert _actors()[placed[0].actor_key].revision == 1
+    assert _reservation_state(key) == "done"
+
+
+def test_a_retry_that_is_still_wrong_refuses_again_and_still_keeps_the_agent(
+    qa_persona, isolated_shared_skills
+):
+    """The RESUME arm's refusal is the same refusal, and it compensates nothing.
+
+    The sibling above proves a resume that SUCCEEDS; this proves a resume that
+    fails again, which is a different branch — it is raised inside the
+    ``placed`` re-entry rather than inside the first attempt, and it was
+    genuinely uncovered until this test (found by a mutation that survived).
+    An operator who mistypes twice must be answered twice, not have their agent
+    archived on the second try.
+
+    KILLING MUTATION: compensate the placement in the ``STATE_PLACED`` resume
+    arm's ``except`` and this reds — the roster row is gone and the receipt
+    leaves ``placed``.
+    """
+
+    _seed_workspace()
+    key = "skills-retry-wrong"
+    first = perform_agent_create(
+        _params(
+            idempotency_key=key,
+            placement_id="qa_retry_wrong",
+            skills=["still-not-a-skill"],
+        ),
+        persona=qa_persona,
+    )
+    assert first.refusal is not None
+
+    again = perform_agent_create(
+        _params(
+            idempotency_key=key,
+            placement_id="qa_retry_wrong",
+            skills=["also-not-a-skill"],
+        ),
+        persona=qa_persona,
+    )
+
+    assert again.refusal is not None
+    # The SECOND id, so the resume read the current request and not the receipt.
+    assert again.refusal.data["skill"] == "also-not-a-skill"
+    assert again.refusal.data["phase"] == "skills"
+    assert again.refusal.data["rolled_back"] is False
+    # Still standing, still resumable.
+    assert paths.persona_instance_path("personainst_qa_retry_wrong").exists()
+    assert any(
+        actor.persona_instance_id == "personainst_qa_retry_wrong"
+        for actor in _actors().values()
+    )
+    assert _reservation_state(key) == "placed"
+
+
+def test_an_absent_skills_key_leaves_the_override_inheriting(
+    qa_persona, isolated_shared_skills
+):
+    """ABSENT is not ``[]``, and the difference is a different agent.
+
+    ``None`` on ``skill_overrides`` means "inherit the persona's skills, live"
+    (``models.apply_instance_model_overrides``); ``[]`` means "override with
+    nothing", i.e. an agent with no skills at all. A create that wrote ``[]`` for
+    every client that sent no opinion would silently strip every placed agent of
+    its persona's skills — the same collapse this slice fixes one door over, in
+    ``persona instance update-profile``.
+    """
+
+    _seed_workspace()
+    outcome = perform_agent_create(
+        _params(idempotency_key="skills-absent", placement_id="qa_skills_absent"),
+        persona=qa_persona,
+    )
+
+    assert outcome.refusal is None
+    assert _overrides("personainst_qa_skills_absent") is None
+    # The ack block is still PRESENT and empty: one shape whatever was asked.
+    assert outcome.result["skills"] == {"assigned": [], "installed": []}
+    assert "skills_ms" in outcome.result["phases"]
+
+
+def test_an_explicitly_empty_skills_list_is_an_explicit_override(
+    qa_persona, isolated_shared_skills
+):
+    """The other side of the same distinction, so neither can be "simplified"
+    into the other without a red test."""
+
+    _seed_workspace()
+    outcome = perform_agent_create(
+        _params(
+            idempotency_key="skills-empty",
+            placement_id="qa_skills_empty",
+            skills=[],
+        ),
+        persona=qa_persona,
+    )
+
+    assert outcome.refusal is None
+    assert _overrides("personainst_qa_skills_empty") == []
+
+
+def test_the_ack_reports_the_install_it_actually_did(
+    qa_persona, isolated_shared_skills
+):
+    """``skills.installed`` is a RECEIPT, not a restatement of the request.
+
+    ANTI-VACUITY. The second create is the probe: on a shared root that already
+    holds the hash-equal package the install performs no copy, and
+    ``changed: false`` is the only honest thing to say. A mutant that hard-coded
+    ``changed: true`` (or echoed the request) passes the first block and fails
+    the second, and the installed hash is asserted equal ACROSS the two creates
+    so "changed: false" cannot mean "it silently installed something else".
+    """
+
+    _seed_workspace()
+    first = perform_agent_create(
+        _params(
+            idempotency_key="skills-receipt-1",
+            placement_id="qa_receipt_1",
+            skills=["harness-qa-verdict"],
+        ),
+        persona=qa_persona,
+    )
+    assert first.refusal is None
+    installed = first.result["skills"]["installed"]
+    assert [row["skill"] for row in installed] == ["harness-qa-verdict"]
+    assert installed[0]["changed"] is True
+
+    second = perform_agent_create(
+        _params(
+            idempotency_key="skills-receipt-2",
+            placement_id="qa_receipt_2",
+            skills=["harness-qa-verdict"],
+        ),
+        persona=qa_persona,
+    )
+    assert second.refusal is None
+    again = second.result["skills"]["installed"][0]
+    assert again["changed"] is False
+    assert again["installed_hash"] == installed[0]["installed_hash"]
+
+
+def test_a_traversal_shaped_skill_id_never_reaches_the_filesystem(
+    qa_persona, isolated_shared_skills, monkeypatch
+):
+    """D5's "never path-joined from input", asserted as a NEGATIVE.
+
+    ANTI-VACUITY, and this is the only shape that works: the refusal alone
+    proves nothing, because a resolver walk that joined the path and found
+    nothing ALSO refuses ``missing``. So ``resolve_skills`` is replaced with a
+    function that raises, and the test asserts the refusal arrives anyway —
+    i.e. the id was rejected before any root was consulted.
+    """
+
+    from agent_runtime import agent_create
+
+    _seed_workspace()
+
+    def _never(*args, **kwargs):
+        raise AssertionError("a traversal-shaped id reached the skill resolver")
+
+    monkeypatch.setattr("agent.skill_utils.resolve_skills", _never)
+
+    outcome = perform_agent_create(
+        _params(
+            idempotency_key="skills-traversal",
+            placement_id="qa_traversal",
+            skills=["../../../etc/passwd"],
+        ),
+        persona=qa_persona,
+    )
+
+    assert outcome.refusal is not None
+    assert outcome.refusal.data["reason"] == "skill_unresolved"
+    assert outcome.refusal.data["status"] == "missing"
+    assert agent_create.PHASE_SKILLS == "skills"
+
+
+def test_the_skills_phase_is_billed_in_phases(qa_persona, isolated_shared_skills):
+    """``skills_ms`` exists so a cold machine's ``copytree`` is billed, not
+    hidden, and ``total_ms`` is re-stamped AFTER the phase so it is not short by
+    exactly that cost.
+
+    ANTI-VACUITY. ``total_ms >= skills_ms`` is the claim a stale ``total_ms``
+    (measured before the phase ran) can fail, and it is asserted on the create
+    that actually installs — the one where the phase costs real milliseconds.
+    """
+
+    _seed_workspace()
+    outcome = perform_agent_create(
+        _params(
+            idempotency_key="skills-phases",
+            placement_id="qa_phases",
+            skills=["harness-qa-verdict"],
+        ),
+        persona=qa_persona,
+    )
+
+    phases = outcome.result["phases"]
+    assert set(phases) == {"instance_ms", "placement_ms", "skills_ms", "total_ms"}
+    assert phases["total_ms"] >= phases["skills_ms"]
+

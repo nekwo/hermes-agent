@@ -451,6 +451,14 @@ def _cmd_agent_create(args) -> int:
     cross-process FILE lock, and the argv fallback lanes already write beside a
     live serve today.
 
+    `--skill` (repeatable) assigns skills to the NEW instance, and is the argv
+    twin of the RPC's `skills` param — the service installs and hash-verifies
+    every canonical id before it assigns, and refuses rather than handing an
+    agent a stale copy. Omitted, the instance inherits its persona's skills.
+    A skills refusal keeps the placement: the printed `rolled_back: false` is
+    the literal truth there, and re-running with the SAME `--idempotency-key`
+    resumes the skills phase alone instead of minting a second agent.
+
     Why this and not `persona instance create --add-instance`: that verb never
     writes a placement (R#37's shape — there is no office write anywhere in the
     handler), so it leaves a roster row with no desk. It stays as the
@@ -497,6 +505,14 @@ def _cmd_agent_create(args) -> int:
     # omission.
     if position is not None:
         params["position"] = position
+    # Same omission rule, one flag over (plan D5). `--skill` absent must reach
+    # the service as an ABSENT key: absent leaves `skill_overrides` at `None`
+    # (inherit the persona's, live) while `[]` writes an explicit "no skills"
+    # override. Sending `skills: []` for an operator who never typed the flag
+    # is the exact `None -> []` collapse this slice fixes one handler below.
+    requested_skills = getattr(args, "skills", None)
+    if requested_skills is not None:
+        params["skills"] = list(requested_skills)
     for key, value in (
         ("display_name", getattr(args, "display_name", None)),
         ("placement_id", getattr(args, "placement_id", None)),
@@ -5057,13 +5073,30 @@ def _cmd_persona_instance_update_profile(args) -> int:
             data = _coordinator_confirm_payload("persona.instance.update_profile", coordinator_id, auth)
             print(emit_json(data) if args.json else data["status"])
             return 2
+    requested_skills = getattr(args, "skills", None)
     try:
         updated = store.update_profile(
             persona_instance_id,
             display_name=getattr(args, "display_name", None),
             current_chat_goal=getattr(args, "current_chat_goal", None),
             goal_id=getattr(args, "goal_id", None),
-            skills=list(getattr(args, "skills", None) or []),
+            # `None` when the flag was not given, and NEVER `[]`.
+            #
+            # THE BUG THIS REPLACES. `list(... or [])` handed the store an empty
+            # LIST for every call that omitted `--skill`, and the store's own
+            # contract is `if skills is not None or clear_skills:` — correct, and
+            # correctly read as "the caller sent a list, write it". So
+            # `persona instance update-profile <id> --display-name X` CLEARED
+            # every skill override on that instance, silently, and the operator
+            # who renamed an agent lost the skills it was assigned. The store was
+            # never wrong; the collapse happened here, in the layer that is
+            # supposed to translate "absent" into "absent".
+            #
+            # The launcher already defends against it from the outside
+            # (`agent_chat/skills_context_controller.dart` refuses to write an
+            # unproven baseline), which is a client working around a server bug —
+            # not a fix, and not something a cron script or a remote `call` gets.
+            skills=list(requested_skills) if requested_skills is not None else None,
             clear_skills=bool(getattr(args, "clear_skills", False)),
         )
     except ValueError as exc:

@@ -1996,8 +1996,9 @@ def _runtime_agent_create(
     """ONE call places an agent: roster row, chat root and placement together.
 
     Params: ``persona_id``, ``workspace_id`` and ``idempotency_key`` (required);
-    ``position: [x, y]``, ``display_name``, ``placement_id``, ``realm_id``,
-    ``folder``, ``correlation_id`` (all optional).
+    ``position: [x, y]``, ``skills: [id, ...]``, ``display_name``,
+    ``placement_id``, ``realm_id``, ``folder``, ``correlation_id`` (all
+    optional).
 
     ``position`` ABSENT (omitted or ``null``) means the client did not aim, and
     the service resolves the slot through ``agent_runtime.office_layout_policy``
@@ -2005,12 +2006,34 @@ def _runtime_agent_create(
     by ``tests/fixtures/office_layout/cases.json`` (plan D2). Present, it is
     taken verbatim, exactly as before.
 
+    ``skills`` ABSENT leaves the new instance inheriting its persona's skills; a
+    list assigns ``skill_overrides`` at the instance tier after the placement,
+    installing and hash-verifying every canonical id first (plan D5). It rides
+    the RPC params rather than a CLI-only flag precisely so a remote connector,
+    which can never run the install's CLI, gets the whole verb over ``call``.
+    Two refusals are its own — ``skill_unresolved`` (-32602, with ``data.skill``
+    and ``data.status``) and ``skill_install_diverged`` (-32000, with both
+    hashes) — and both carry ``phase: "skills"`` with ``rolled_back: false``:
+    the agent is PLACED and kept, and the same ``idempotency_key`` resumes the
+    phase.
+
     Result::
 
         {persona_instance_id, persona_id, placement_id, display_name,
          default_chat_session_id, actor_key, revision, workspace_id,
          position: [x, y], actor: {...},
-         phases: {instance_ms, placement_ms, total_ms}, idempotent_replay}
+         skills: {assigned: [...], installed: [{skill, changed, installed_hash}]},
+         actor_fresh: bool,
+         phases: {instance_ms, placement_ms, skills_ms, total_ms},
+         idempotent_replay}
+
+    On an ``idempotent_replay`` the ``actor``/``revision``/``position`` are
+    RE-READ off the live row rather than echoed from the receipt — the recorded
+    ones can be arbitrarily old, and a client that adopts them would adopt a
+    stale ``revision`` into its ``expect_revision`` bookkeeping. ``actor_fresh``
+    is ``false`` exactly when that re-read could not be made (the actor was
+    archived, the surface is gone), and the recorded row is then returned
+    unchanged rather than invented.
 
     ``actor_key``/``revision`` mirror ``runtime.office.upsert``'s light ack on
     purpose, so the launcher's existing prediction and ``expect_revision``

@@ -380,6 +380,52 @@ cross-process file lock. An unknown persona is refused with `persona_not_found`
 (`agent_create.py:207-217`), kept a separate reason from `persona_roster_unavailable` because the
 two need opposite responses.
 
+**The create path has THREE phases, and only two of them are atomic** (plan S4).
+`instance` and `placement` are the pair the reservation joins — a failure in the
+second compensates the first away. `skills` is deliberately outside that join.
+It runs after both writes are durable, the receipt reads `placed`
+(`agent_create_reservations.py::STATE_PLACED`), and its refusals stamp
+`rolled_back: false` because the agent they refuse for is standing, correct and
+messageable: only its skill assignment is owed. A placed agent without its
+skills is what every launcher drop produces today; retiring it to satisfy
+atomicity would archive a working agent to undo a file copy.
+
+**What the phase does, in order** (`agent_create.py::run_skills_phase`). Every
+id must be identical under BOTH `serde.safe_id` and the store's own
+`safe_assignment_token` before any root is walked — that is what makes "never
+path-joined from input" true and what makes the ack's `assigned` the list the
+store HOLDS rather than one it quietly re-spelled. Then every canonical id
+(`hermes_constants.CANONICAL_SHARED_SKILL_IDS`) goes through
+`skill_install.install_and_verify_harness_skill`, which refuses unless the
+destination exists, the install receipt is `ok`, AND an independent
+`harness_skill_hash_mismatches` re-read is empty — three conditions because the
+mismatch detector alone `continue`s past a destination that does not exist, so
+a copy that never landed reads as a clean bill. Then `resolve_skills` must
+answer `resolved` for every id. Only then is `skill_overrides` written, at the
+INSTANCE tier through `PersonaInstanceStore.update_profile` — never
+`persona.skills`, which would reconfigure every other instance of that persona.
+
+**Install runs BEFORE resolve, which inverts the order D5 lists them in.** A
+canonical skill's resolvable copy IS the installed one, so resolving first would
+refuse `skill_unresolved: missing` on a fresh machine for a skill the next line
+would have installed.
+
+**This is the first place the repo↔installed hash is a GATE rather than a
+report.** `profile_readiness` files a mismatch as a severity-15 row and
+`prompt_observability` as a HUD flag; the launcher's sync control is a button.
+Nothing refused, which is how the 2026-08-24 incident handed a running agent a
+14457-byte copy of a 14906-byte skill. A verb that ASSIGNS a skill is the one
+place where "the copy is stale" has an answer that is not a warning.
+
+**The `None -> []` collapse in `persona instance update-profile` is fixed in the
+same slice.** `_cmd_persona_instance_update_profile` passed
+`skills=list(getattr(args, "skills", None) or [])`, so an omitted `--skill`
+reached the store as an empty LIST and the store's correct
+`if skills is not None or clear_skills:` contract then wrote
+`skill_overrides = []`: a `--display-name`-only call silently cleared every
+skill override on that instance. The store was never wrong — the collapse was in
+the layer whose job is to translate absent into absent.
+
 **The create's cost is now attributed.** `agent_runtime/agent_create_phases.py` splits the single
 `phases.instance_ms` into named spans as an INFO log receipt rather than new wire fields — `phases`
 rides the RPC result and a launcher parser reads it, so nothing there was touched (`:14-21`). It

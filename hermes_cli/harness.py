@@ -1356,6 +1356,13 @@ def build_parser(parent_subparsers) -> None:
     # predicts with — so a door with no canvas (this one, a cron, a remote
     # connector over `call`) has an answer instead of a required guess.
     agent_create.add_argument("--pos", dest="pos", nargs=2, metavar=("X", "Y"), default=None, help="Canvas position for the placement; omitted, the layout policy picks the first free slot in the folder")
+    # BYTE-PARALLEL with the RPC's `skills` param (UC-H3's rule, plan D5).
+    # `default=None` is load-bearing and is the same spelling `persona instance
+    # update-profile` uses: an OMITTED flag must reach the service as an ABSENT
+    # key, because absent means "inherit the persona's skills" while `[]` means
+    # "override with none" — two different agents. `append` is what makes
+    # `--skill a --skill b` one request rather than a last-one-wins.
+    agent_create.add_argument("--skill", dest="skills", action="append", default=None, help="Assign a skill to the new instance (repeatable); a canonical harness skill is installed and hash-verified first")
     agent_create.add_argument("--display-name", default=None, help="Authoritative name; omitted falls back to the persona's configured display name")
     agent_create.add_argument("--placement-id", default=None, help="Scene itemId to predict the actor key from; omitted mints one server-side")
     agent_create.add_argument("--realm-id", dest="realm_id", default=None)

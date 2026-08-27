@@ -164,7 +164,19 @@ def test_create_returns_both_rows_and_a_phase_envelope(qa_persona):
     assert result["default_chat_session_id"].startswith(
         "persona_chat_personainst_qa_agent_2_"
     )
-    assert set(result["phases"]) == {"instance_ms", "placement_ms", "total_ms"}
+    # ``skills_ms`` joined the block in plan S4 and is ALWAYS present, whether or
+    # not the create asked for skills — one shape per method, so a client parsing
+    # `phases` does not have to branch on what was requested. The set is compared
+    # by EQUALITY rather than containment on purpose: a new phase key is a wire
+    # change and has to be a deliberate edit here, not a silent addition.
+    assert set(result["phases"]) == {
+        "instance_ms",
+        "placement_ms",
+        "skills_ms",
+        "total_ms",
+    }
+    # This create sent no ``skills``, and the ack still carries the block.
+    assert result["skills"] == {"assigned": [], "installed": []}
 
     # BOTH rows, read back off disk rather than off the reply.
     instances = _instances()

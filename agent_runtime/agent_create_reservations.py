@@ -19,6 +19,10 @@ stranding:
 ``instance_minted``
     The roster row and chat root exist; the placement does not. A replay skips
     the mint and performs the placement.
+``placed``
+    The roster row, the chat root AND the office actor exist, and the create
+    asked for skills that have not been assigned yet. A replay skips both
+    writes and re-enters at the SKILLS phase alone. Added by plan S4.
 ``done``
     Both landed. A replay returns the recorded reply verbatim and writes
     nothing — the revision the actor carries is the witness that it wrote
@@ -37,6 +41,26 @@ stranding:
 If the compensation ITSELF fails the state stays ``instance_minted`` with
 ``rollback_error`` recorded — the §6 worst case, now bounded and named on disk
 instead of being an unlabelled orphan.
+
+The ``placed`` migration, exactly (plan D4)
+-------------------------------------------
+``placed`` is an ADDED state, not a renamed one, and the three rules that make
+it a migration rather than a rewrite are all here:
+
+* **A ``done`` receipt with no ``skills`` field is PRE-PLAN and is never
+  re-entered.** Every receipt written before S4 is exactly that, and a resume
+  that treated it as "done, but did the skills run?" would install a second
+  time and re-write ``skill_overrides`` for an agent an operator may have
+  edited since. ``skills=None`` on a ``done`` record means "this key predates
+  the phase", and :attr:`AgentCreateRecord.skills` is ``None`` for it because
+  the key is absent from the file, not because the list was empty — an empty
+  REQUEST is recorded as ``[]``, which is a different value on purpose.
+* **``placed`` carries ``skills``** — the normalised request list, possibly
+  empty — so the receipt says what the phase was asked for.
+* **An unknown state stays ``reservation_corrupt``.** The ``done`` literal is
+  deliberately not renamed: an OLD serve reading a NEW ``placed`` receipt fails
+  the ``_VALID_STATES`` check and refuses loudly rather than re-minting, which
+  is the safe direction for a downgrade.
 """
 
 from __future__ import annotations
@@ -56,10 +80,14 @@ from .locks import HarnessLockUnavailable, agent_create_lock
 _SCHEMA_VERSION = 1
 
 STATE_INSTANCE_MINTED = "instance_minted"
+#: Both writes landed; the skills phase has not run yet (plan S4/D4).
+STATE_PLACED = "placed"
 STATE_DONE = "done"
 STATE_ROLLED_BACK = "rolled_back"
 
-_VALID_STATES = frozenset({STATE_INSTANCE_MINTED, STATE_DONE, STATE_ROLLED_BACK})
+_VALID_STATES = frozenset(
+    {STATE_INSTANCE_MINTED, STATE_PLACED, STATE_DONE, STATE_ROLLED_BACK}
+)
 
 
 class AgentCreateReservationError(RuntimeError):
@@ -83,6 +111,11 @@ class AgentCreateRecord:
     result: dict[str, Any] = field(default_factory=dict)
     failure: dict[str, Any] = field(default_factory=dict)
     rollback_error: str | None = None
+    #: The normalised skills request, or ``None`` when the receipt carries NO
+    #: ``skills`` key at all. The distinction is load-bearing: ``None`` on a
+    #: ``done`` record identifies a PRE-PLAN receipt, which is never re-entered,
+    #: while ``[]`` is a create that explicitly asked for no skills.
+    skills: list[str] | None = None
 
     @property
     def is_new(self) -> bool:
@@ -120,11 +153,49 @@ class AgentCreateReservation:
         _write(self.record)
         return self.record
 
-    def mark_done(self, result: dict[str, Any]) -> AgentCreateRecord:
+    def mark_placed(
+        self, result: dict[str, Any], *, skills: list[str]
+    ) -> AgentCreateRecord:
+        """Durable BEFORE the skills phase is attempted.
+
+        Same ordering argument as :meth:`mark_instance_minted`, one phase down:
+        a crash after this line resumes at the skills phase with both writes
+        already accounted for, and a crash before it is answered by the
+        ``instance_minted`` resume that has always existed.
+
+        ``result`` is the full placement ack, recorded here rather than
+        recomputed on resume — a resumed create must hand back the actor key,
+        revision and position the FIRST attempt wrote, not a second read of a
+        row anything could have moved since.
+        """
+
+        self.record = replace(
+            self.record,
+            state=STATE_PLACED,
+            result=dict(result),
+            skills=list(skills),
+            updated_at=_timestamp(),
+        )
+        _write(self.record)
+        return self.record
+
+    def mark_done(
+        self, result: dict[str, Any], *, skills: list[str] | None = None
+    ) -> AgentCreateRecord:
+        """``skills`` defaults to whatever the record already carries.
+
+        A create that never entered the skills phase leaves it ``None``, which
+        is what makes a ``done`` receipt written by THIS code indistinguishable
+        from a pre-plan one — correctly, because neither has skills to re-run.
+        """
+
         self.record = replace(
             self.record,
             state=STATE_DONE,
             result=dict(result),
+            skills=(
+                list(skills) if skills is not None else self.record.skills
+            ),
             updated_at=_timestamp(),
         )
         _write(self.record)
@@ -244,6 +315,15 @@ def _read(path, *, digest: str) -> AgentCreateRecord:
             result=dict(raw.get("result") or {}),
             failure=dict(raw.get("failure") or {}),
             rollback_error=raw.get("rollback_error") or None,
+            # ABSENT stays ``None``; a present list is taken as written,
+            # including an empty one. ``raw.get("skills") or None`` would
+            # collapse ``[]`` to ``None`` and turn "asked for nothing" into
+            # "predates the phase" on every reload.
+            skills=(
+                [str(item) for item in raw["skills"]]
+                if isinstance(raw.get("skills"), list)
+                else None
+            ),
             created_at=str(raw["created_at"]),
             updated_at=str(raw["updated_at"]),
         )
@@ -274,6 +354,10 @@ def _write(record: AgentCreateRecord) -> None:
             "result": record.result,
             "failure": record.failure,
             "rollback_error": record.rollback_error,
+            # Omitted entirely when there is none, so a receipt this code writes
+            # for a skill-less create is byte-identical in shape to a pre-plan
+            # one and reads back the same way.
+            **({"skills": list(record.skills)} if record.skills is not None else {}),
             "created_at": record.created_at,
             "updated_at": record.updated_at,
         },

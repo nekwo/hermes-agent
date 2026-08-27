@@ -537,3 +537,305 @@ def test_harness_skill_cli_defaults_to_persona_profiles(monkeypatch, capsys):
 
     assert harness._cmd_install_harness_skills(SimpleNamespace(active_profile_only=True, json=True)) == 0
     assert calls == ["personas", "active"]
+
+
+# ── the create verb's install gate (plan S4 / D5) ────────────────────────────
+#
+# The first place in this codebase where the repo↔installed hash is a GATE and
+# not a report. ``profile_readiness`` files a mismatch at severity 15 and
+# ``prompt_observability`` raises a HUD flag; both are advisory, which is how a
+# running agent came to be reading a 14457-byte copy of a 14906-byte skill on
+# 2026-08-24. A verb that ASSIGNS a skill is where "the copy is stale" has an
+# answer that is not a warning.
+
+_SKILL_WORKSPACE = "ws_agent_create_skills"
+
+
+@pytest.fixture
+def skills_create_fixture(tmp_path, monkeypatch):
+    """An isolated shared skills root, a seeded office, and the ``qa`` persona.
+
+    ``HERMES_SHARED_SKILLS`` and not a monkeypatched attribute: ``skill_install``
+    and ``agent.skill_utils.skill_source_kind`` resolve the shared root
+    independently, and pinning only one leaves the resolver classifying the
+    installed copy as ``external`` — which is ``invalid_source`` for a canonical
+    id, i.e. a red that has nothing to do with the subject. The assertion below
+    is what turns a regression in that precedence into a loud failure instead of
+    a silent write into the OPERATOR's live packages.
+    """
+
+    from agent_runtime.office_store import OfficeStore
+    from hermes_constants import get_shared_skills_dir
+    from tests.agent_runtime.office_seed import seed_workspace_record
+
+    shared = tmp_path / "shared-skills"
+    monkeypatch.setenv("HERMES_SHARED_SKILLS", str(shared))
+    assert get_shared_skills_dir() == shared
+
+    seed_workspace_record(_SKILL_WORKSPACE)
+    OfficeStore().ensure_surface(_SKILL_WORKSPACE, created_by="seed")
+    return shared
+
+
+def _create_with_skills(*skills: str, placement: str, key: str):
+    from agent_runtime.agent_create import perform_agent_create
+
+    return perform_agent_create(
+        {
+            "persona_id": "qa",
+            "workspace_id": _SKILL_WORKSPACE,
+            "position": [0.0, 0.0],
+            "idempotency_key": key,
+            "placement_id": placement,
+            "skills": list(skills),
+        }
+    )
+
+
+def test_agent_create_installs_and_verifies_canonical_skill(skills_create_fixture):
+    """A DELIBERATELY STALE installed copy ends hash-equal to the repo package.
+
+    KILLING MUTATION (plan §C): skip ``install_harness_skill`` in the phase and
+    the installed hash stays the stale one — reds.
+
+    ANTI-VACUITY. The stale copy is seeded FIRST and its divergence is asserted
+    before the create runs, so "the hashes match at the end" cannot be satisfied
+    by a create that did nothing — at the moment the create starts, they do not
+    match. And the hash is read off the FILE through the same
+    ``harness_skill_hash_mismatches`` the rest of the runtime uses, not off the
+    ack, so a create that reported a good hash while leaving a stale file fails.
+    """
+
+    from agent_runtime.skill_install import (
+        harness_skill_destination,
+        harness_skill_hash_mismatches,
+        install_harness_skill,
+    )
+
+    skill = "harness-qa-verdict"
+    install_harness_skill(skill)
+    destination = harness_skill_destination(skill)
+    destination.write_text(
+        destination.read_text(encoding="utf-8") + "\n# a stale local edit\n",
+        encoding="utf-8",
+    )
+    assert harness_skill_hash_mismatches([skill]) == [skill]
+
+    outcome = _create_with_skills(skill, placement="qa_stale", key="skills-stale")
+
+    assert outcome.refusal is None
+    assert harness_skill_hash_mismatches([skill]) == []
+    assert outcome.result["skills"]["assigned"] == [skill]
+
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    assert PersonaInstanceStore().get(
+        outcome.result["persona_instance_id"]
+    ).skill_overrides == [skill]
+
+
+def test_agent_create_refuses_unresolved_skill(skills_create_fixture):
+    """An id nothing resolves refuses ``skill_unresolved`` NAMING its status.
+
+    KILLING MUTATION (plan §C): accept any string and the refusal is absent —
+    reds.
+
+    ANTI-VACUITY. The status is asserted, not just the reason: an implementation
+    that refused every unknown id with a hard-coded ``missing`` would pass this
+    and fail the ``invalid_source`` case below, which is why both are here.
+    """
+
+    outcome = _create_with_skills(
+        "definitely-not-a-skill", placement="qa_unres", key="skills-unresolved"
+    )
+
+    assert outcome.refusal is not None
+    assert outcome.refusal.data["reason"] == "skill_unresolved"
+    assert outcome.refusal.data["skill"] == "definitely-not-a-skill"
+    assert outcome.refusal.data["status"] == "missing"
+    assert outcome.refusal.data["phase"] == "skills"
+    assert outcome.refusal.data["rolled_back"] is False
+
+
+def test_the_status_is_the_resolvers_and_not_a_constant(
+    skills_create_fixture, monkeypatch
+):
+    """``invalid_source`` reaches the client unchanged.
+
+    ``_skill_resolution_status`` answers ``invalid_source`` for a CANONICAL id
+    whose only candidate is not the shared root — a repo checkout, a profile-local
+    copy — and that distinction is the operator's whole diagnosis: "you have this
+    skill, in the wrong place" is a different instruction from "you do not have
+    it". Reached honestly by planting the canonical id in the PROFILE-local root
+    and pointing the shared root somewhere that does not hold it, then patching
+    the install away so the gate cannot repair the shape the test is about.
+    """
+
+    from agent_runtime import skill_install
+    from hermes_constants import get_skills_dir
+
+    skill = "harness-qa-verdict"
+    local = get_skills_dir() / skill
+    local.mkdir(parents=True, exist_ok=True)
+    (local / "SKILL.md").write_text(
+        f"---\nname: {skill}\n---\nlocal copy\n", encoding="utf-8"
+    )
+    def _no_install(name):
+        # The install is what would move this id into the shared root and make
+        # it ``resolved``; stubbing it is what keeps the subject visible.
+        class _Receipt:
+            skill = name
+            changed = False
+            installed_hash = None
+
+        return _Receipt()
+
+    monkeypatch.setattr(
+        skill_install, "install_and_verify_harness_skill", _no_install
+    )
+    outcome = _create_with_skills(
+        skill, placement="qa_invsrc", key="skills-invalid-source"
+    )
+
+    assert outcome.refusal is not None
+    assert outcome.refusal.data["reason"] == "skill_unresolved"
+    assert outcome.refusal.data["status"] == "invalid_source"
+
+
+def test_a_copy_that_never_lands_is_a_divergence_and_not_a_clean_bill(
+    skills_create_fixture, monkeypatch
+):
+    """An INJECTED copy fault refuses ``skill_install_diverged``.
+
+    KILLING MUTATION (plan §C): drop the post-install verification and this
+    reds — the refusal is absent and the create completes, handing the agent a
+    skill whose package was never written.
+
+    ANTI-VACUITY, and this is the case the obvious gate misses.
+    ``harness_skill_hash_mismatches`` ``continue``s past a destination that does
+    not EXIST, so on a fresh root a failed copy produces an EMPTY mismatch list —
+    a false all-clear. That is why ``install_and_verify_harness_skill`` asks
+    three questions and not one, and why the fault injected here is a copy that
+    raises rather than a copy that writes the wrong bytes.
+    """
+
+    from agent_runtime import skill_install
+
+    def _explode(*args, **kwargs):
+        raise OSError("the disk said no")
+
+    monkeypatch.setattr(skill_install.shutil, "copytree", _explode)
+
+    outcome = _create_with_skills(
+        "harness-qa-verdict", placement="qa_copyfault", key="skills-copy-fault"
+    )
+
+    assert outcome.refusal is not None
+    data = outcome.refusal.data
+    assert data["reason"] == "skill_install_diverged"
+    assert data["skill"] == "harness-qa-verdict"
+    assert data["phase"] == "skills"
+    # Not rolled back, and the agent it refused for is standing.
+    assert data["rolled_back"] is False
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    assert PersonaInstanceStore().get("personainst_qa_copyfault").skill_overrides is None
+
+
+def test_an_install_that_REPORTS_success_is_still_re_read_before_it_is_trusted(
+    skills_create_fixture, monkeypatch
+):
+    """The install's own receipt is not the witness. The re-read is.
+
+    KILLING MUTATION: drop the ``harness_skill_hash_mismatches`` re-read from
+    ``install_and_verify_harness_skill`` and this reds — the create completes and
+    the agent is handed the stale package.
+
+    WHY THIS TEST EXISTS AND THE COPY-FAULT ONE DID NOT COVER IT. A copy that
+    RAISES is caught by the phase's ``except`` whether or not anything verifies
+    afterwards, so that test passes under the dropped-verification mutant — it
+    was measured surviving in ``tests/mutation_claims.json``'s gate. The
+    condition that has no other witness is this one: an install that reports
+    ``ok`` while the bytes on disk are not the repo's.
+
+    That is not a hypothetical shape. It is the 2026-08-24 incident exactly — a
+    running agent reading a 14457-byte copy of a 14906-byte skill while every
+    advisory reader reported the install fine — and it is why the helper asks an
+    INDEPENDENT question (re-read both packages) rather than trusting the value
+    the install computed on its way out.
+
+    ANTI-VACUITY. The destination is corrupted AFTER a real install, so the file
+    exists and ``resolve_skills`` answers ``resolved``: the mutant reaches the
+    assignment and returns NO refusal at all, rather than tripping some other
+    gate and looking killed for the wrong reason.
+    """
+
+    from agent_runtime import skill_install
+
+    skill = "harness-qa-verdict"
+    receipt = skill_install.install_harness_skill(skill)
+    destination = skill_install.harness_skill_destination(skill)
+    destination.write_text(
+        destination.read_text(encoding="utf-8") + "\n# not the repo's bytes\n",
+        encoding="utf-8",
+    )
+
+    def _lying_install(name, *, hermes_home=None):
+        # An install that no-ops and reports success — the shape a silently
+        # skipped copy, a wrong-root repair or a partially applied replace
+        # leaves behind.
+        return skill_install.SkillInstallResult(
+            skill=name,
+            source=receipt.source,
+            destination=receipt.destination,
+            source_hash=receipt.source_hash,
+            installed_hash=receipt.source_hash,
+            installed=True,
+            changed=False,
+            ok=True,
+        )
+
+    monkeypatch.setattr(skill_install, "install_harness_skill", _lying_install)
+
+    outcome = _create_with_skills(
+        skill, placement="qa_lying", key="skills-lying-install"
+    )
+
+    assert outcome.refusal is not None
+    assert outcome.refusal.data["reason"] == "skill_install_diverged"
+    assert outcome.refusal.data["skill"] == skill
+    assert outcome.refusal.data["phase"] == "skills"
+    assert outcome.refusal.data["rolled_back"] is False
+    # The agent it refused for is standing, and was handed nothing.
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    assert PersonaInstanceStore().get("personainst_qa_lying").skill_overrides is None
+
+
+def test_the_verb_writes_the_INSTANCE_tier_and_never_the_persona_template(
+    skills_create_fixture,
+):
+    """The persona record is untouched, and that is the load-bearing half.
+
+    F12/F13: ``persona.skills`` is the TEMPLATE every future instance of that
+    persona inherits, and no operator verb has ever written it. A create that
+    assigned there would silently reconfigure every other instance of the
+    persona — including ones an operator tuned by hand — which is why the phase
+    calls ``PersonaInstanceStore.update_profile`` and nothing else.
+    """
+
+    from agent_runtime.store import AgentStore
+
+    before = list(AgentStore().get("qa").skills or [])
+    outcome = _create_with_skills(
+        "harness-continuity", placement="qa_tier", key="skills-tier"
+    )
+
+    assert outcome.refusal is None
+    assert list(AgentStore().get("qa").skills or []) == before
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    assert PersonaInstanceStore().get("personainst_qa_tier").skill_overrides == [
+        "harness-continuity"
+    ]
+

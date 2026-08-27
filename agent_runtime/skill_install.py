@@ -171,6 +171,63 @@ def _archive_replaced_package(skill: str, package: Path, shared_root: Path) -> P
             return None
 
 
+class HarnessSkillInstallDiverged(RuntimeError):
+    """The installed package does not match the repo package AFTER an install.
+
+    ``skill``, ``source_hash`` and ``installed_hash`` are the branch points a
+    caller renders; the message is operator prose and is free to change.
+    """
+
+    def __init__(
+        self, skill: str, *, source_hash: str, installed_hash: str | None
+    ):
+        super().__init__(
+            f"installed skill package diverges from the repo package: {skill} "
+            f"(repo {source_hash}, installed {installed_hash})"
+        )
+        self.skill = str(skill)
+        self.source_hash = str(source_hash)
+        self.installed_hash = installed_hash
+
+
+def install_and_verify_harness_skill(skill: str) -> SkillInstallResult:
+    """Install one canonical skill and REFUSE unless the bytes then match.
+
+    The join the repo→installed pair has never had at a WRITE. Until plan S4
+    every reader of :func:`harness_skill_hash_mismatches` was advisory:
+    ``profile_readiness`` files it as a severity-15 row and ``prompt_observability``
+    as a HUD flag, and the launcher's sync button is a button. Nothing refused,
+    so the 2026-08-24 incident — an agent running against a 14457-byte copy of a
+    14906-byte skill — was reported and then handed the agent anyway. A verb that
+    ASSIGNS a skill is the one place where "the copy is stale" has an answer that
+    is not a warning, so this is where it is asked.
+
+    Why the three conditions and not just the mismatch list. Both of the
+    obvious probes are silent on the case that matters most:
+
+    * ``harness_skill_hash_mismatches`` ``continue``s past a destination that
+      does NOT EXIST, so a copy that never landed produces an EMPTY mismatch
+      list — a false all-clear, which is exactly the shape of an unrun gate.
+    * ``SkillInstallResult.ok`` is computed from the hash read at the end of the
+      install call, so it cannot see a copy displaced between that read and now.
+
+    So all three are asked: the destination exists, the install's own receipt is
+    ``ok``, and the mismatch detector — an INDEPENDENT re-read of both packages
+    — is empty. Raising :class:`HarnessSkillInstallDiverged` rather than
+    returning a flag is deliberate: a caller that forgets to read a flag ships
+    the stale copy, which is the defect.
+    """
+
+    result = install_harness_skill(skill)
+    if result.installed and result.ok and not harness_skill_hash_mismatches([skill]):
+        return result
+    raise HarnessSkillInstallDiverged(
+        skill,
+        source_hash=result.source_hash,
+        installed_hash=result.installed_hash,
+    )
+
+
 def harness_skill_hash_mismatches(skill_names: list[str], *, hermes_home: Path | None = None) -> list[str]:
     from agent.skill_utils import skill_package_content_hash
 

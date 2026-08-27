@@ -213,6 +213,60 @@ key, position and revision and adopts the server's.
 list; an old client ignores both keys, and an old serve still works for a client
 that always sends a position.
 
+**The verb assigns skills, and refuses to hand an agent a stale copy** (plan
+S4). `skills: [id, ...]` on the RPC and `--skill <id>` (repeatable) on the CLI
+are byte-parallel doors onto one phase that runs AFTER the placement. Absent,
+the new instance's `skill_overrides` stays `None` and it inherits its persona's
+skills live; a list — including an empty one, which is an explicit "override
+with nothing" — is written at the INSTANCE tier and never at the persona
+template. The mechanism, the gate order and why the hash check is a gate here
+and a report everywhere else are in
+[05 — chat turn lane §9](05-chat-turn-lane.md#9-the-agent-create-path); what
+belongs to the office is the consequence for the placement.
+
+**A skills refusal never costs the agent its desk.** The reservation vocabulary
+gains `placed` between `instance_minted` and `done`: both writes landed, the
+skills phase is owed. Every skills refusal carries `phase: "skills"` and
+`rolled_back: false` — the literal truth, not a hedge — plus the
+`persona_instance_id` of the agent that IS standing, and `next_expected` names
+the cure: retry with the **SAME** `idempotency_key`, which re-enters at the
+skills phase alone and neither re-mints the roster row nor bumps the actor's
+revision. A new key would mint a second agent beside the first. The retry takes
+the CURRENT request's skill list, not the receipt's, so an operator who mistyped
+an id fixes it and retries rather than being answered with the old typo forever.
+
+The migration is one added state and three rules: a `done` receipt with **no**
+`skills` field is pre-plan and is never re-entered (its skills cannot have been
+requested, so there is nothing to resume); a `placed` receipt carries the
+normalised request list; and an unknown state stays `reservation_corrupt`, so an
+OLD serve reading a NEW `placed` receipt refuses loudly rather than re-minting —
+the safe direction for a downgrade.
+
+**Two new refusal reasons ride the wire, and two more are shape refusals.**
+`skill_unresolved` (`ERR_INVALID_PARAMS`, with `data.skill` and `data.status` in
+`missing | collision | invalid_source`) and `skill_install_diverged`
+(`ERR_HANDLER_FAILED`, with `data.source_hash` and `data.installed_hash`, both
+explicitly null when a copy fault stopped the install before either could be
+established) are the phase's own. Beside them: `skills_invalid` refuses a
+malformed `skills` param before any write, stamped `rolled_back: true` like
+every other `AgentCreateInvalid` arm, and `skill_assign_failed`
+(`ERR_HANDLER_FAILED`, phase `skills`) is the store fault that would otherwise
+have escaped as an untyped `-32000` with no `data` at all. The plan named the
+first two; the second two are named here because an unnamed fault renders as a
+`handlerRaised` the operator cannot act on. **Launcher note for S7:** it reads
+`data.persona_instance_id` off any refusal with `rolled_back != true` and
+publishes it as `orphanInstanceId` — a skills-phase instance is NOT an orphan,
+so that decoder must branch on `phase == "skills"`. No live gesture reaches it
+today, because the launcher sends no `skills` yet.
+
+**The ack gains `skills` and `phases.skills_ms`,** both additive and both always
+present: `skills.assigned` is read back off the row (never echoed from the
+request) and `skills.installed` lists `{skill, changed, installed_hash}` per
+canonical id, so a create that installed nothing because the copy was already
+hash-equal says so. `skills_ms` is what makes the cold-machine `copytree` billed
+rather than hidden, and `total_ms` is re-stamped after the phase so it is not
+short by exactly that cost.
+
 ### The inverse — one call takes an agent off the level, and says what left
 
 `runtime.agent.retire` / `harness agent retire <persona_instance_id>` are two
@@ -554,11 +608,12 @@ omit it — the office's revision guard lives on the RPC lane only.
 
 ## Open rows
 
-- The placement verb: `harness agent create` gains a skills phase with an
-  install gate and an RPC-first inverse. **Its S3 slice (the store-level desk
-  fence) and its S1/S2 slices (the shared layout policy, the optional
-  `position`, the `position`/`actor` ack) have SHIPPED and are described above;
-  S4, S5 and the launcher-side S7–S9 are still planned.** →
+- The placement verb and its inverse. **S1/S2 (the shared layout policy, the
+  optional `position`, the `position`/`actor` ack), S3 (the store-level desk
+  fence), S4 (the skills phase, its install gate, and the `None -> []`
+  update-profile fix) and S5 (`runtime.agent.retire` and its two argv doors)
+  have all SHIPPED and are described above; the launcher-side S7–S9 are still
+  planned.** →
   [planned/agent-placement-verb.md](planned/agent-placement-verb.md)
   (both repos; its §0 corrects four premises of the 2026-08-24 brief)
 - Gesture prediction's two remaining stages (an unpinned create-refusal

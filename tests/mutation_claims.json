@@ -164,6 +164,231 @@
         "-q",
         "tests/agent_runtime/test_tool_visibility_import_deferral.py"
       ]
+    },
+    {
+      "id": "s4-skills-id-gate-lets-a-respelling-through",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "run_skills_phase",
+      "operator": "drop-id-sanitizer-gate",
+      "find": "        if (\n            safe_id(identifier) != identifier\n            or safe_assignment_token(identifier) != identifier\n        ):",
+      "replace": "        if False:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_a_traversal_shaped_skill_id_never_reaches_the_filesystem"
+      ]
+    },
+    {
+      "id": "s4-canonical-skill-is-assigned-without-being-installed",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "run_skills_phase",
+      "operator": "skip-install-gate",
+      "find": "        if identifier not in CANONICAL_SHARED_SKILL_IDS:",
+      "replace": "        if True or identifier not in CANONICAL_SHARED_SKILL_IDS:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_skill_policy.py::test_agent_create_installs_and_verifies_canonical_skill"
+      ]
+    },
+    {
+      "id": "s4-any-string-is-accepted-as-a-skill",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "run_skills_phase",
+      "operator": "skip-resolve-gate",
+      "find": "            if status != \"resolved\":",
+      "replace": "            if False and status != \"resolved\":",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_skill_policy.py::test_agent_create_refuses_unresolved_skill"
+      ]
+    },
+    {
+      "id": "s4-install-receipt-is-not-verified-after-the-copy",
+      "path": "agent_runtime/skill_install.py",
+      "symbol": "install_and_verify_harness_skill",
+      "operator": "drop-post-install-verification",
+      "find": "    result = install_harness_skill(skill)\n    if result.installed and result.ok and not harness_skill_hash_mismatches([skill]):\n        return result",
+      "replace": "    result = install_harness_skill(skill)\n    return result",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_skill_policy.py::test_an_install_that_REPORTS_success_is_still_re_read_before_it_is_trusted"
+      ]
+    },
+    {
+      "id": "s4-a-skills-refusal-compensates-the-placement-away",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "perform_agent_create",
+      "operator": "compensate-on-skills-refusal",
+      "find": "                except AgentCreateSkillsRefused as exc:\n                    return _skills_refusal(exc, instance_id=instance.id)",
+      "replace": "                except AgentCreateSkillsRefused as exc:\n                    compensate_failed_placement(\n                        reservation,\n                        instance_id=instance.id,\n                        failure={\"reason\": \"placement_failed\"},\n                    )\n                    return _skills_refusal(exc, instance_id=instance.id)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_skill_refusal_keeps_placement_and_resumes"
+      ]
+    },
+    {
+      "id": "s4-a-second-failed-retry-compensates-the-placement-away",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "perform_agent_create",
+      "operator": "compensate-on-resumed-skills-refusal",
+      "find": "                    except AgentCreateSkillsRefused as exc:\n                        return _skills_refusal(exc, instance_id=instance_id)",
+      "replace": "                    except AgentCreateSkillsRefused as exc:\n                        compensate_failed_placement(\n                            reservation,\n                            instance_id=instance_id,\n                            failure={\"reason\": \"placement_failed\"},\n                        )\n                        return _skills_refusal(exc, instance_id=instance_id)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_a_retry_that_is_still_wrong_refuses_again_and_still_keeps_the_agent"
+      ]
+    },
+    {
+      "id": "s4-a-pre-plan-done-receipt-re-enters-the-skills-phase",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "perform_agent_create",
+      "operator": "treat-legacy-done-as-resumable",
+      "find": "            if record.state == STATE_DONE:",
+      "replace": "            if record.state == STATE_DONE and record.skills is not None:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_reservations.py::test_legacy_done_receipt"
+      ]
+    },
+    {
+      "id": "s4-an-explicit-empty-skills-request-reads-back-as-absent",
+      "path": "agent_runtime/agent_create_reservations.py",
+      "symbol": "_read",
+      "operator": "collapse-empty-list-to-none",
+      "find": "            skills=(\n                [str(item) for item in raw[\"skills\"]]\n                if isinstance(raw.get(\"skills\"), list)\n                else None\n            ),",
+      "replace": "            skills=(raw.get(\"skills\") or None),",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_reservations.py::test_an_explicitly_empty_request_is_recorded_as_empty_not_absent"
+      ]
+    },
+    {
+      "id": "s4-an-absent-skills-param-becomes-an-explicit-empty-override",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "_skills",
+      "operator": "collapse-absence-to-empty-list",
+      "find": "    if value is None:\n        return None\n    if not isinstance(value, (list, tuple)):",
+      "replace": "    if value is None:\n        return ()\n    if not isinstance(value, (list, tuple)):",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_an_absent_skills_key_leaves_the_override_inheriting"
+      ]
+    },
+    {
+      "id": "s4-a-malformed-skills-container-is-normalised-instead-of-refused",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "_skills",
+      "operator": "accept-non-list-container",
+      "find": "    if not isinstance(value, (list, tuple)):\n        raise AgentCreateInvalid(\n            \"skills_invalid\", \"invalid params: skills must be a list of skill ids\"\n        )",
+      "replace": "    if False:\n        raise AgentCreateInvalid(\n            \"skills_invalid\", \"invalid params: skills must be a list of skill ids\"\n        )",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_invalid_arms_stamp_rolled_back"
+      ]
+    },
+    {
+      "id": "s4-an-omitted-skill-flag-clears-every-instance-override",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_cmd_persona_instance_update_profile",
+      "operator": "collapse-absent-flag-to-empty-list",
+      "find": "            skills=list(requested_skills) if requested_skills is not None else None,",
+      "replace": "            skills=list(requested_skills or []),",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_persona_instance_update_profile_skills.py::test_a_display_name_edit_leaves_both_skill_overrides_in_place"
+      ]
+    },
+    {
+      "id": "s4-the-cli-create-door-drops-its-skill-flag",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_cmd_agent_create",
+      "operator": "drop-argv-param-passthrough",
+      "find": "    requested_skills = getattr(args, \"skills\", None)\n    if requested_skills is not None:\n        params[\"skills\"] = list(requested_skills)",
+      "replace": "    requested_skills = getattr(args, \"skills\", None)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_agent_create_verb.py::test_the_skill_flag_and_the_rpc_param_render_the_same_request"
+      ]
+    },
+    {
+      "id": "s4-the-rpc-create-door-drops-its-skills-param",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "normalize_agent_create",
+      "operator": "drop-wire-param-read",
+      "find": "    skills = _skills(params.get(\"skills\"))",
+      "replace": "    skills = None",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_agent_create_verb.py::test_the_skill_flag_and_the_rpc_param_render_the_same_request"
+      ]
+    },
+    {
+      "id": "s4-a-replay-echoes-the-receipts-frozen-actor",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "perform_agent_create",
+      "operator": "freeze-replay-actor",
+      "find": "                return AgentCreateOutcome(\n                    result={\n                        **replayed_result(record.result),\n                        \"idempotent_replay\": True,\n                    }\n                )",
+      "replace": "                return AgentCreateOutcome(\n                    result={**record.result, \"idempotent_replay\": True}\n                )",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_an_idempotent_replay_re_reads_the_actor_instead_of_echoing_the_receipt"
+      ]
+    },
+    {
+      "id": "s4-an-unreadable-actor-is-reported-as-fresh",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "replayed_result",
+      "operator": "fabricate-freshness",
+      "find": "    except Exception:  # noqa: BLE001 - NotFound, a decode fault, a gone surface\n        result[\"actor_fresh\"] = False\n        return result",
+      "replace": "    except Exception:  # noqa: BLE001 - NotFound, a decode fault, a gone surface\n        result[\"actor_fresh\"] = True\n        return result",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_a_replay_whose_actor_is_gone_says_so_instead_of_inventing_one"
+      ]
     }
   ]
 }

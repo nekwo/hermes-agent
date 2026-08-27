@@ -97,6 +97,12 @@ class AgentCreateRequest:
     #: that resolves it is :func:`resolve_placement_position`, and it runs where
     #: the actor set it reads is the set the write lands beside.
     position: tuple[float, float] | None
+    #: ``None`` means the client sent no ``skills`` key at all, and the new
+    #: instance's ``skill_overrides`` stays ``None`` (inherit the persona's,
+    #: live). A LIST — including an empty one — is an explicit assignment, and
+    #: ``[]`` therefore means "override with nothing", which is a different
+    #: agent from one that inherits. See :func:`_skills` (D5).
+    skills: tuple[str, ...] | None
     idempotency_key: str
     placement_id: str
     display_name: str | None
@@ -388,6 +394,62 @@ def _position(value: Any) -> tuple[float, float] | None:
     return (x, y)
 
 
+#: The instance store's own override cap (``_safe_skill_overrides`` slices to
+#: 40), re-spelled as a REFUSAL rather than inherited as a silent truncation: a
+#: create whose 41st skill vanished on the way to the store would report
+#: ``assigned`` with 41 entries and hold 40.
+MAX_SKILLS = 40
+
+
+def _skills(value: Any) -> tuple[str, ...] | None:
+    """The requested skill ids, or ``None`` when the client sent no opinion.
+
+    SHAPE only. Whether an id RESOLVES — and whether its installed copy matches
+    the repo's — is the skills PHASE's question, asked after the placement, and
+    it must be: a refusal here refuses before any write, and D4 rules that a
+    skills fault never costs an agent its placement.
+
+    Absence and ``null`` both mean inherit, for the same reason
+    :func:`_position` reads them as one: a client spelling "no opinion" as
+    ``null`` means what one omitting the key means, and the wire's meaning must
+    not depend on a serializer's omit-none setting. An empty LIST is not
+    absence — it is an explicit "no skills", recorded as ``[]``.
+
+    Every member is stringified and stripped; blanks are dropped and duplicates
+    collapse to their first appearance, which is the store's own
+    ``_safe_skill_overrides`` behaviour re-spelled so the ack's ``assigned``
+    list is the list that was written rather than a superset of it.
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)):
+        raise AgentCreateInvalid(
+            "skills_invalid", "invalid params: skills must be a list of skill ids"
+        )
+    ids: list[str] = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, (str, int, float)):
+            # A dict/list/None member is a client that built the wrong payload,
+            # not a skill nobody has: refusing it here is honest, and letting it
+            # through as ``str(item)`` would place an agent and then refuse the
+            # skills phase on an id spelled ``{'id': 'x'}``.
+            raise AgentCreateInvalid(
+                "skills_invalid",
+                "invalid params: every skills entry must be a skill id string",
+            )
+        text = str(item).strip()
+        if not text or text in ids:
+            continue
+        ids.append(text)
+    if len(ids) > MAX_SKILLS:
+        raise AgentCreateInvalid(
+            "skills_invalid",
+            f"invalid params: skills must name {MAX_SKILLS} ids or fewer",
+        )
+    return tuple(ids)
+
+
 def normalize_agent_create(
     params: dict[str, Any], *, persona: Any | None = None
 ) -> AgentCreateRequest:
@@ -455,6 +517,7 @@ def normalize_agent_create(
         )
 
     position = _position(params.get("position"))
+    skills = _skills(params.get("skills"))
 
     key_raw = params.get("idempotency_key")
     idempotency_key = key_raw.strip() if isinstance(key_raw, str) else ""
@@ -502,6 +565,7 @@ def normalize_agent_create(
         persona_id=persona_id,
         workspace_id=workspace_id,
         position=position,
+        skills=skills,
         idempotency_key=idempotency_key,
         placement_id=placement_id,
         display_name=display_name,
@@ -655,6 +719,12 @@ ERR_CONFLICT = 4090
 # third false claim in a payload this lane is here to make honest.
 PHASE_INSTANCE = "instance"
 PHASE_PLACEMENT = "placement"
+#: The THIRD phase, added by plan S4. It is the one phase whose refusals leave
+#: durable state behind ON PURPOSE (D4): the agent is placed, messageable and
+#: correct, and only its skill assignment is missing. Every arm below therefore
+#: stamps ``rolled_back: false`` — not as a hedge, but as the literal truth,
+#: with ``next_expected`` naming the same-key retry that resumes it.
+PHASE_SKILLS = "skills"
 
 # ── ``data.rolled_back`` for the reservation faults, one code at a time ───────
 #
@@ -763,6 +833,266 @@ def roster_unavailable_outcome(cause: Any = None) -> AgentCreateOutcome:
     )
 
 
+# ── the skills phase (plan S4 / D5) ──────────────────────────────────────────
+
+
+class AgentCreateSkillsRefused(Exception):
+    """A skills-phase refusal, raised where it is decided and rendered once.
+
+    Carries only the arm-specific block; the fields every skills refusal shares
+    — ``phase``, ``rolled_back``, ``persona_instance_id``, ``next_expected`` —
+    are stamped at the ONE rendering site in :func:`perform_agent_create`, so a
+    new arm cannot ship without them.
+    """
+
+    def __init__(self, code: int, message: str, data: dict[str, Any]):
+        super().__init__(message)
+        self.code = code
+        self.data = dict(data)
+
+
+def run_skills_phase(
+    skills: Any,
+    *,
+    instance_id: str,
+    requested_by: str = "runtime.agent.create",
+) -> dict[str, Any]:
+    """Install, verify, resolve, then assign — in that order, each for a reason.
+
+    Returns the ack block ``{assigned, installed}``; raises
+    :class:`AgentCreateSkillsRefused` on every refusal.
+
+    **Every id must survive BOTH sanitizers unchanged before any root is
+    walked.** ``safe_id`` is D5's named gate; ``safe_assignment_token`` is the
+    one the persona-instance store applies on the way in
+    (``_safe_skill_overrides``), and it is the stricter of the two — it maps
+    ``:`` to ``_`` where ``safe_id`` keeps it. Requiring identity under both is
+    what makes the ack's ``assigned`` list the list the store actually HOLDS
+    rather than a request the store quietly re-spelled, and it is also what
+    makes "never path-joined from input" true: no separator, no drive letter and
+    no leading dot survives either function, so the name handed to
+    ``resolve_skills`` cannot address anything outside a skills root.
+
+    **Install BEFORE resolve, deliberately.** D5 lists the resolve gate first
+    and the install gate second, and the code runs them the other way round
+    because a canonical skill's resolvable copy IS the installed one: on a
+    machine where the shared root has never been written, resolving first would
+    refuse ``skill_unresolved: missing`` for a skill the very next line would
+    have installed. Resolving AFTER the install asks the question of the world
+    the assignment will actually run against.
+
+    **Assign LAST.** Nothing writes ``skill_overrides`` until every id has both
+    gates behind it, so a two-skill request cannot leave one assigned and the
+    other refused.
+
+    **What a refusal here does NOT do.** It does not compensate the placement.
+    That is D4 and it is not a convenience: a placed agent without its skills is
+    the state every launcher drop produces today — valid, visible, messageable —
+    and retiring it to satisfy atomicity would archive a working agent to undo a
+    file copy. The reservation is already at ``placed`` when this runs, so the
+    same idempotency key resumes here and nowhere else.
+    """
+
+    from hermes_constants import CANONICAL_SHARED_SKILL_IDS
+
+    from .persona_assignments import PersonaInstanceStore, safe_assignment_token
+    from .serde import safe_id
+
+    ids = [str(item) for item in (skills or ())]
+
+    # Gate 0 — the spelling, asked before any root is walked.
+    for identifier in ids:
+        if (
+            safe_id(identifier) != identifier
+            or safe_assignment_token(identifier) != identifier
+        ):
+            raise AgentCreateSkillsRefused(
+                ERR_INVALID_PARAMS,
+                f"skill id cannot be resolved: {identifier!r}",
+                {
+                    "reason": "skill_unresolved",
+                    "skill": identifier,
+                    # ``missing`` and not a fourth status: the resolver's own
+                    # vocabulary is {missing, collision, invalid_source} and a
+                    # name no skill root can hold is missing from all of them.
+                    "status": "missing",
+                },
+            )
+
+    # Gate 1 — the canonical ids are installed and PROVEN hash-equal.
+    installed: list[dict[str, Any]] = []
+    for identifier in ids:
+        if identifier not in CANONICAL_SHARED_SKILL_IDS:
+            # A non-canonical id has no repo package to compare against, so
+            # there is nothing to install and nothing to verify — it is answered
+            # by the resolver alone.
+            continue
+        from .skill_install import (
+            HarnessSkillInstallDiverged,
+            install_and_verify_harness_skill,
+        )
+
+        try:
+            receipt = install_and_verify_harness_skill(identifier)
+        except HarnessSkillInstallDiverged as exc:
+            raise AgentCreateSkillsRefused(
+                ERR_HANDLER_FAILED,
+                str(exc),
+                {
+                    "reason": "skill_install_diverged",
+                    "skill": exc.skill,
+                    "source_hash": exc.source_hash,
+                    "installed_hash": exc.installed_hash,
+                },
+            ) from exc
+        except Exception as exc:  # noqa: BLE001 - a copy fault IS a divergence
+            # The staged ``copytree``/``os.replace`` can fail for a dozen OS
+            # reasons, and every one of them ends the same way: the installed
+            # bytes are not known to match the repo's. Answering that with a
+            # traceback out of the RPC boundary would strand a placed agent
+            # behind a -32000 with no ``data`` at all, so it renders as the
+            # divergence it is, with the hashes it could not establish left
+            # explicitly null rather than guessed.
+            raise AgentCreateSkillsRefused(
+                ERR_HANDLER_FAILED,
+                f"skill install failed: {identifier}: {type(exc).__name__}: {exc}",
+                {
+                    "reason": "skill_install_diverged",
+                    "skill": identifier,
+                    "source_hash": None,
+                    "installed_hash": None,
+                },
+            ) from exc
+        installed.append(
+            {
+                "skill": receipt.skill,
+                "changed": bool(receipt.changed),
+                "installed_hash": receipt.installed_hash,
+            }
+        )
+
+    # Gate 2 — every id resolves, in the runtime this create is answering out of.
+    if ids:
+        from agent.skill_utils import resolve_skills
+
+        resolutions = resolve_skills(list(ids))
+        for identifier in ids:
+            resolution = resolutions.get(identifier)
+            status = getattr(resolution, "status", "missing")
+            if status != "resolved":
+                raise AgentCreateSkillsRefused(
+                    ERR_INVALID_PARAMS,
+                    f"skill does not resolve: {identifier} ({status})",
+                    {
+                        "reason": "skill_unresolved",
+                        "skill": identifier,
+                        "status": status,
+                    },
+                )
+
+    # The write. INSTANCE tier and never the persona template: a persona-tier
+    # write would silently reconfigure every other instance of that persona, and
+    # no operator verb has ever done that (D5, F12/F13).
+    try:
+        updated = PersonaInstanceStore().update_profile(
+            instance_id, skills=list(ids), requested_by=requested_by
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise AgentCreateSkillsRefused(
+            ERR_HANDLER_FAILED,
+            f"skill assignment failed: {type(exc).__name__}: {exc}",
+            {"reason": "skill_assign_failed", "skills": list(ids)},
+        ) from exc
+
+    return {
+        # Read BACK off the row rather than echoed from the request. Gate 0
+        # already guarantees the two agree; reading the store is what keeps that
+        # a guarantee instead of a claim.
+        "assigned": list(updated.skill_overrides or []),
+        "installed": installed,
+    }
+
+
+def replayed_result(record_result: dict[str, Any]) -> dict[str, Any]:
+    """The recorded ack, with its actor keys RE-READ off the live row.
+
+    A ``done`` receipt records the ack the FIRST attempt returned, and the
+    office actor has been mutable ever since: an operator drags the agent, a
+    realm pull moves it, ``resolve_conflict`` bumps it. Returning the recorded
+    ``position``/``actor``/``revision`` verbatim therefore hands a replaying
+    client the coordinates the agent had at 09:00 and calls them current.
+
+    That was harmless while ``actor`` was decoration. It stops being harmless in
+    plan S7, where the launcher ADOPTS the ack's actor — key, position and
+    revision — into its scene and its ``expect_revision`` bookkeeping. A stale
+    ``revision`` adopted from a replay makes the client's very next guarded
+    write refuse ``stale_revision``, and a stale ``position`` snaps the agent
+    back to where it used to be. So the re-read happens here, hermes-side,
+    BEFORE that adoption exists rather than after it has been debugged.
+
+    What is deliberately NOT re-read: ``persona_instance_id``, ``placement_id``,
+    ``default_chat_session_id`` and ``skills``. Those are IDENTITY and the
+    recorded decision, not observations — re-deriving them would be a second
+    authority for what this key created.
+
+    **The "no second write happened" witness moves.** It used to be the ack's
+    ``revision``, which is exactly the field this function stops freezing. The
+    witness is now the RECEIPT FILE: state ``done`` is written once and a replay
+    does not touch it, so a test that wants to prove nothing was written asserts
+    on the receipt (and on the actor's own revision read from the store), never
+    on the reply.
+
+    ``actor_fresh`` is the honesty valve. When the actor cannot be read — it was
+    archived, the workspace was deleted, the file will not decode — the recorded
+    row is returned UNCHANGED and the flag says so. It is never fabricated and
+    never omitted: a client that must know whether it may adopt gets an answer
+    on every reply rather than having to infer one from a missing key.
+    """
+
+    from .office_store import OfficeStore
+    from .office_models import office_actor_wire_row
+
+    result = dict(record_result)
+    workspace_id = result.get("workspace_id")
+    actor_key = result.get("actor_key")
+    if not workspace_id or not actor_key:
+        # A receipt from before ``workspace_id`` rode the ack, or a hand-edited
+        # one. Nothing to re-read against, and inventing a lookup key would be
+        # the fabrication this function exists to avoid.
+        result["actor_fresh"] = False
+        return result
+    try:
+        actor = OfficeStore().get_actor(str(workspace_id), str(actor_key))
+    except Exception:  # noqa: BLE001 - NotFound, a decode fault, a gone surface
+        result["actor_fresh"] = False
+        return result
+    # The AGENT item's position, because that is what the ack's ``position``
+    # named when it was written: this verb writes exactly one item and it is of
+    # kind ``agent`` (D6 — it authors no desk). The fallback to "the first item
+    # that has a position" is for a row something else has since added an item
+    # to, where answering ``None`` would be worse than answering the row's own
+    # first coordinate.
+    items = list(getattr(actor, "items", ()) or ())
+    position = None
+    for candidate in (
+        [item for item in items if getattr(item, "kind", None) == "agent"] + items
+    ):
+        raw = getattr(candidate, "position", None)
+        if isinstance(raw, (list, tuple)) and len(raw) >= 2:
+            position = [float(raw[0]), float(raw[1])]
+            break
+    result["actor"] = office_actor_wire_row(actor)
+    result["revision"] = actor.revision
+    if position is not None:
+        # Only when the row actually carries one. An actor whose items lost
+        # their coordinates is a store fault, and echoing the recorded position
+        # beside a freshly-read actor would be the half-fresh reply that is
+        # worse than either honest answer.
+        result["position"] = position
+    result["actor_fresh"] = True
+    return result
+
+
 def compensate_failed_placement(
     reservation, *, instance_id: str, failure: dict[str, Any]
 ) -> dict[str, Any]:
@@ -798,6 +1128,45 @@ def compensate_failed_placement(
     return {**failure, "rolled_back": True}
 
 
+#: What every skills refusal tells the operator to do. It names the SAME key on
+#: purpose: the reservation is at ``placed``, so a same-key retry re-enters at
+#: the skills phase alone and neither re-mints the roster row nor re-writes the
+#: actor. A NEW key would mint a SECOND agent beside the one already standing.
+_SKILLS_RETRY_SENTENCE = (
+    "the agent is placed and was kept; fix the named skill and retry with the "
+    "SAME idempotency_key to resume the skills phase alone"
+)
+
+
+def _skills_refusal(
+    exc: AgentCreateSkillsRefused, *, instance_id: str
+) -> AgentCreateOutcome:
+    """The ONE rendering site for a skills-phase refusal.
+
+    ``persona_instance_id`` is carried because an operator whose skill id was
+    wrong needs the id of the agent that IS standing — to message it, to retire
+    it, or to name it in the retry. **Cross-repo note for S7:** the launcher
+    reads that key off any refusal with ``rolled_back != true`` and publishes it
+    as ``orphanInstanceId`` (``mission_agent_create_rpc.dart``). A skills-phase
+    instance is NOT an orphan — it is a correctly placed agent — so S7 must
+    branch on ``phase == "skills"`` there. No live gesture reaches this today
+    (the launcher sends no ``skills``), which is why the useful field wins over
+    a decoder that is being changed in the same plan.
+    """
+
+    return _refused(
+        exc.code,
+        exc,
+        {
+            **exc.data,
+            "phase": PHASE_SKILLS,
+            "rolled_back": False,
+            "persona_instance_id": instance_id,
+            "next_expected": _SKILLS_RETRY_SENTENCE,
+        },
+    )
+
+
 def perform_agent_create(
     params: dict[str, Any],
     *,
@@ -807,25 +1176,42 @@ def perform_agent_create(
     """ONE call places an agent: roster row, chat root and placement together.
 
     Params: ``persona_id``, ``workspace_id`` and ``idempotency_key`` (required);
-    ``position: [x, y]``, ``display_name``, ``placement_id``, ``realm_id``,
-    ``folder``, ``correlation_id`` (all optional).
+    ``position: [x, y]``, ``skills: [id, ...]``, ``display_name``,
+    ``placement_id``, ``realm_id``, ``folder``, ``correlation_id`` (all
+    optional).
 
     ``position`` ABSENT means the client did not aim, and the layout policy
     chooses the slot (D2 — :func:`resolve_placement_position`, which documents
     where that read sits relative to ``office_lock``). Present, it is taken
     verbatim, exactly as it always was.
 
+    ``skills`` ABSENT leaves the new instance's ``skill_overrides`` at ``None``
+    (inherit the persona's, live). A list assigns it at the INSTANCE tier after
+    the placement, behind two gates: every canonical id is installed and proven
+    hash-equal to the repo package, and every id must resolve. See
+    :func:`run_skills_phase` — including why a refusal there keeps the agent.
+
     Result::
 
         {persona_instance_id, persona_id, placement_id, display_name,
          default_chat_session_id, actor_key, revision, workspace_id,
          position: [x, y], actor: {...},
-         phases: {instance_ms, placement_ms, total_ms}, idempotent_replay}
+         skills: {assigned: [...], installed: [{skill, changed, installed_hash}]},
+         actor_fresh: bool,
+         phases: {instance_ms, placement_ms, skills_ms, total_ms},
+         idempotent_replay}
 
     ``position`` is what was WRITTEN and ``actor`` is the row as STORED, in the
-    same shape ``runtime.office.get`` renders. Both are additive: an old client
-    ignores them, and neither moves ``RPC_CONTRACT_VERSION`` or the manifest's
-    method list.
+    same shape ``runtime.office.get`` renders. ``skills`` is what was assigned
+    and what the install actually did. All of them are additive: an old client
+    ignores them, and none of them moves ``RPC_CONTRACT_VERSION`` or the
+    manifest's method list.
+
+    On an ``idempotent_replay`` the actor is RE-READ rather than echoed from the
+    receipt, so a client adopting it adopts the row as it is now
+    (:func:`replayed_result`). ``actor_fresh`` is ``false`` when that re-read
+    could not be made — the actor was archived, the surface is gone — and the
+    recorded row is returned unchanged rather than fabricated.
 
     ``persona`` is the CLI's richer pre-resolved persona object, threaded to
     :func:`normalize_agent_create` so the argv lane's naming behaviour is
@@ -863,6 +1249,16 @@ def perform_agent_create(
 
     Every lock in the path is a cross-process FILE lock, so this is correct with
     or without a live ``harness serve`` beside it.
+
+    Three phases, and only two of them are atomic
+    ---------------------------------------------
+    ``instance`` and ``placement`` are the pair the reservation joins: a failure
+    in the second compensates the first away. ``skills`` is deliberately NOT in
+    that join (D4). It runs after both writes are durable and after the receipt
+    reads ``placed``, and its refusals stamp ``rolled_back: false`` because the
+    agent they refuse for is standing, correct and messageable — only its skill
+    assignment is owed. The cure is the SAME idempotency key, which re-enters at
+    the skills phase alone.
     """
 
     import time
@@ -876,6 +1272,7 @@ def perform_agent_create(
     from .agent_create_reservations import (
         STATE_DONE,
         STATE_INSTANCE_MINTED,
+        STATE_PLACED,
         STATE_ROLLED_BACK,
         AgentCreateReservationError,
         reserve_agent_create,
@@ -949,11 +1346,70 @@ def perform_agent_create(
             record = reservation.record
 
             if record.state == STATE_DONE:
-                # The same reply, and provably no second write: the actor's
-                # revision in the recorded result is the witness.
+                # The recorded reply, with the actor RE-READ so a client that
+                # adopts it adopts the row as it is NOW and not as it was when
+                # this key first completed (:func:`replayed_result`). Still no
+                # second write — the witness for that is the receipt file and
+                # the actor's own revision in the store, never this reply.
                 return AgentCreateOutcome(
-                    result={**record.result, "idempotent_replay": True}
+                    result={
+                        **replayed_result(record.result),
+                        "idempotent_replay": True,
+                    }
                 )
+            if record.state == STATE_PLACED:
+                # Both writes landed under this key; only the skills phase is
+                # owed. Re-enter THERE and nowhere else — re-minting or
+                # re-placing would be the duplicate-agent bug the ledger exists
+                # to prevent, and the recorded ack is what the first attempt
+                # actually wrote (actor key, revision, position), which a second
+                # read of the store could no longer promise.
+                instance_id = record.persona_instance_id or ""
+                if not instance_id or not record.result:
+                    # A shape this code never writes: ``mark_placed`` always
+                    # runs on a record that already carries both. Answered with
+                    # the reason the module already spends on an unusable
+                    # receipt rather than a new one, and NOT rolled back —
+                    # whatever this receipt names may well be standing.
+                    return _refused(
+                        ERR_HANDLER_FAILED,
+                        "agent-create reservation is at 'placed' but names no "
+                        "instance or no recorded result",
+                        {"reason": "reservation_corrupt", "rolled_back": False},
+                    )
+                skills_started = time.monotonic()
+                result = dict(record.result)
+                # The CURRENT request's list, not the receipt's. The whole
+                # point of the resume is that an operator who mistyped a skill
+                # id fixes it and retries under the same key; answering with the
+                # recorded list would refuse the corrected call for the old
+                # typo, forever.
+                requested = request.skills
+                if requested is None:
+                    skills_ack: dict[str, Any] = {"assigned": [], "installed": []}
+                else:
+                    if list(requested) != list(record.skills or []):
+                        reservation.mark_placed(result, skills=list(requested))
+                    try:
+                        skills_ack = run_skills_phase(
+                            requested, instance_id=instance_id
+                        )
+                    except AgentCreateSkillsRefused as exc:
+                        return _skills_refusal(exc, instance_id=instance_id)
+                result["skills"] = skills_ack
+                phases = dict(result.get("phases") or {})
+                phases["skills_ms"] = int((time.monotonic() - skills_started) * 1000)
+                phases["total_ms"] = int((time.monotonic() - started) * 1000)
+                result["phases"] = phases
+                reservation.mark_done(
+                    result,
+                    skills=list(requested) if requested is not None else None,
+                )
+                # ``False``: this attempt DID work — it ran the phase the first
+                # one could not finish. ``idempotent_replay`` means "nothing
+                # happened, here is the recorded answer", and that is the
+                # ``done`` arm above, not this one.
+                return AgentCreateOutcome(result={**result, "idempotent_replay": False})
             if record.state == STATE_ROLLED_BACK:
                 # D-A3: the placement id is burned by the retirement tombstone,
                 # so this key can never complete. Say so again rather than
@@ -1304,6 +1760,10 @@ def perform_agent_create(
                 # server's.
                 "position": [position[0], position[1]],
                 "actor": office_actor_wire_row(actor),
+                # ONE shape per method: present on every reply, so a client
+                # never has to read "the key is absent" as "yes, it is fresh".
+                # Trivially ``True`` here — this IS the row just written.
+                "actor_fresh": True,
                 "phases": {
                     "instance_ms": instance_ms,
                     "placement_ms": placement_ms,
@@ -1312,7 +1772,39 @@ def perform_agent_create(
             }
             if request.correlation_id:
                 result["correlation_id"] = request.correlation_id
-            reservation.mark_done(result)
+
+            # ── phase 3: skills (plan S4 / D5) ───────────────────────────────
+            # Durable BEFORE the phase runs, and the receipt carries the request
+            # — that is what makes a crash mid-install resumable at the skills
+            # phase instead of re-entering the two writes above.
+            skills_started = time.monotonic()
+            if request.skills is None:
+                # No opinion sent: ``skill_overrides`` stays ``None`` (inherit
+                # the persona's, live) and NOTHING is written — not even an
+                # empty list, which would be a different agent (D5, F13's
+                # ``is not None`` contract). The ack block is still present and
+                # empty, so a client reads one shape whatever was asked.
+                skills_ack = {"assigned": [], "installed": []}
+            else:
+                reservation.mark_placed(result, skills=list(request.skills))
+                try:
+                    skills_ack = run_skills_phase(
+                        request.skills, instance_id=instance.id
+                    )
+                except AgentCreateSkillsRefused as exc:
+                    return _skills_refusal(exc, instance_id=instance.id)
+            result["skills"] = skills_ack
+            result["phases"]["skills_ms"] = int(
+                (time.monotonic() - skills_started) * 1000
+            )
+            # Re-stamped: ``total_ms`` was measured before the phase existed and
+            # would under-report every create that installs a cold skill by
+            # exactly the cost this plan set out to make visible.
+            result["phases"]["total_ms"] = int((time.monotonic() - started) * 1000)
+            reservation.mark_done(
+                result,
+                skills=list(request.skills) if request.skills is not None else None,
+            )
             return AgentCreateOutcome(result={**result, "idempotent_replay": False})
     except AgentCreateReservationError as exc:
         # One ``except`` for three faults that do NOT agree about what survives

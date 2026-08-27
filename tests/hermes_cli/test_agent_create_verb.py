@@ -754,3 +754,166 @@ def test_a_bad_pos_is_still_one_typed_refusal_not_an_argparse_traceback(
     assert data["ok"] is False
     assert data["reason"] == "position_invalid"
     assert _actors() == {}
+
+
+# ── --skill, and its RPC twin (plan S4 / D5) ─────────────────────────────────
+
+
+@pytest.fixture
+def isolated_shared_skills(tmp_path, monkeypatch):
+    """Point the shared skills root at this test's tmp dir, and prove it landed.
+
+    ``install_harness_skill`` REPLACES a package directory under the shared
+    root. Left to the operator's real root that is a live rewrite of the
+    packages their running agents load, so the pin is explicit and asserted
+    rather than inherited from ``tests/conftest.py``'s blanking.
+    """
+
+    from hermes_constants import get_shared_skills_dir
+
+    shared = tmp_path / "shared-skills"
+    monkeypatch.setenv("HERMES_SHARED_SKILLS", str(shared))
+    assert get_shared_skills_dir() == shared
+    return shared
+
+
+def _overrides(instance_id: str):
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    return PersonaInstanceStore().get(instance_id).skill_overrides
+
+
+def test_the_skill_flag_and_the_rpc_param_render_the_same_request(
+    qa_persona, seeded_workspace, isolated_shared_skills, capsys
+):
+    """RPC/CLI skills parity (plan §C), driven through BOTH real doors.
+
+    KILLING MUTATION: drop ``skills`` from ``normalize_agent_create``'s read and
+    the RPC arm reds; drop the ``--skill`` pass-through in ``_cmd_agent_create``
+    and the CLI arm reds.
+
+    ANTI-VACUITY. The two ``assigned`` lists being equal is not enough on its own
+    — two doors that both ignored skills would also agree, on ``[]``. So the
+    non-emptiness is asserted, and the STORE row is read back for each, which is
+    the write the ack is a report of.
+    """
+
+    from agent_runtime import serve_rpc
+
+    _, cli = _create(
+        capsys,
+        "--idempotency-key", "verb-skills-cli",
+        "--placement-id", "qa_sk_cli",
+        "--skill", "harness-qa-verdict",
+    )
+    rpc = serve_rpc.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": "sk1",
+            "method": "runtime.agent.create",
+            "params": {
+                "persona_id": "qa",
+                "workspace_id": WORKSPACE,
+                "position": [3.5, -1.25],
+                "idempotency_key": "verb-skills-rpc",
+                "placement_id": "qa_sk_rpc",
+                "skills": ["harness-qa-verdict"],
+            },
+        }
+    )["result"]
+
+    assert cli["skills"]["assigned"] == ["harness-qa-verdict"]
+    assert cli["skills"]["assigned"] == rpc["skills"]["assigned"]
+    assert _overrides("personainst_qa_sk_cli") == ["harness-qa-verdict"]
+    assert _overrides("personainst_qa_sk_rpc") == ["harness-qa-verdict"]
+    # The shape too, not just the assignment: one ack, two printers.
+    assert set(cli["skills"]) == set(rpc["skills"]) == {"assigned", "installed"}
+    assert set(cli["phases"]) == set(rpc["phases"])
+    assert "skills_ms" in cli["phases"]
+
+
+def test_the_flag_is_repeatable_and_keeps_the_operators_order(
+    qa_persona, seeded_workspace, isolated_shared_skills, capsys
+):
+    """``append``, not last-one-wins, and the order is the operator's.
+
+    ANTI-VACUITY. Two ids and a reversed expectation would pass a set
+    comparison; the list is compared as a LIST because ``skill_overrides``
+    replaces wholesale and its order is what the turn-time preload reads.
+    """
+
+    _, data = _create(
+        capsys,
+        "--idempotency-key", "verb-skills-two",
+        "--placement-id", "qa_sk_two",
+        "--skill", "harness-continuity",
+        "--skill", "harness-qa-verdict",
+    )
+
+    assert data["ok"] is True
+    assert _overrides("personainst_qa_sk_two") == [
+        "harness-continuity",
+        "harness-qa-verdict",
+    ]
+
+
+def test_an_omitted_skill_flag_leaves_the_instance_inheriting(
+    qa_persona, seeded_workspace, isolated_shared_skills, capsys
+):
+    """The absence rule, at the door where the collapse actually happened.
+
+    ``argparse``'s ``default=None`` and the handler's reading of it have to
+    agree; the sibling verb ``persona instance update-profile`` is where they did
+    not, and that bug cleared every skill on any instance an operator renamed
+    (``tests/hermes_cli/test_persona_instance_update_profile_skills.py``). This
+    is the same claim asserted on the create door before it can grow the same
+    defect: no flag, no override, and the instance inherits its persona's skills.
+    """
+
+    code, data = _create(
+        capsys,
+        "--idempotency-key", "verb-skills-none",
+        "--placement-id", "qa_sk_none",
+    )
+
+    assert code == 0
+    assert data["skills"] == {"assigned": [], "installed": []}
+    assert _overrides("personainst_qa_sk_none") is None
+
+
+def test_an_unresolvable_skill_is_one_typed_refusal_and_the_agent_stays(
+    qa_persona, seeded_workspace, isolated_shared_skills, capsys
+):
+    """The exit code, the reason, and the agent that is still standing.
+
+    ANTI-VACUITY. Exit ``2`` is ``_AGENT_CREATE_EXIT_CODES[-32602]`` — the same
+    family every other invalid-params refusal on this verb spends — so a mutant
+    that answered the skills refusal with a generic ``1`` reds here rather than
+    on the reason string. And the roster row is read off the STORE, because
+    "rolled_back: false" printed by a lane that had in fact retired the agent
+    would be the exact lie this field exists to prevent.
+    """
+
+    code, data = _create(
+        capsys,
+        "--idempotency-key", "verb-skills-bad",
+        "--placement-id", "qa_sk_bad",
+        "--skill", "not-a-skill-at-all",
+    )
+
+    assert code == 2
+    assert data["ok"] is False
+    assert data["reason"] == "skill_unresolved"
+    assert data["skill"] == "not-a-skill-at-all"
+    assert data["status"] == "missing"
+    assert data["phase"] == "skills"
+    assert data["rolled_back"] is False
+    assert data["persona_instance_id"] == "personainst_qa_sk_bad"
+
+    # The claim, off the stores.
+    assert paths.persona_instance_path("personainst_qa_sk_bad").exists()
+    assert any(
+        actor.persona_instance_id == "personainst_qa_sk_bad"
+        for actor in _actors().values()
+    )
+
