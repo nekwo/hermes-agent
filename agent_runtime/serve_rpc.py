@@ -1031,6 +1031,19 @@ def _runtime_office_upsert(
     through this arm. A handler for it here would be a catch that can never fire,
     so there deliberately is none.
 
+    The desk fence, and why this lane has no override for it either
+    ---------------------------------------------------------------
+    ``OfficeStore._guard_duplicate_desk`` (D6) refuses a payload that would
+    leave one persona holding a second LIVE desk. Same division of labour as the
+    class-key fence: the predicate and the decision are the store's, and what
+    this handler keeps is the TRANSLATION — a 4090 whose ``data.reason`` is
+    ``duplicate_desk`` and whose ``data`` names the holding actor and item read
+    off ``safe_details``, never recomputed here. Unlike the class-key fence it
+    has no override on ANY lane, because the thing it refuses is not a shape an
+    operator can mean: the render layer draws the implicit desk only while a
+    persona has no authored one, so the second authored desk is a placement that
+    can never be reached.
+
     Concurrency is the store's, not a second scheme
     -----------------------------------------------
     ``expect_revision`` and the realm-sync conflict guard are passed straight
@@ -1068,7 +1081,7 @@ def _runtime_office_upsert(
 
     from agent_runtime.errors import ArchiveUnreadable, StaleRevision, SyncConflict
     from agent_runtime.office_class_key_guard import ClassKeyedPlacementRefused
-    from agent_runtime.office_store import OfficeStore
+    from agent_runtime.office_store import DuplicateDeskRefused, OfficeStore
 
     workspace_id = _workspace_id_param(params)
     if workspace_id is None:
@@ -1180,6 +1193,39 @@ def _runtime_office_upsert(
                 "class_actor_key": collision["class_actor_key"],
                 "reasons": collision["reasons"],
                 "conflicting_actor_keys": collision["conflicting_actor_keys"],
+            },
+        )
+    except DuplicateDeskRefused as exc:
+        # The desk fence, translated. A 4090 because something is already placed
+        # and the write lost to it — the same family as the class-key collision
+        # and ``stale_revision``, and a different ``reason`` because the cure is
+        # a third thing again: not "send the binding" and not "refetch and
+        # rebase", but "there is already a desk for this persona; move that one
+        # or remove it".
+        #
+        # ``str(exc)`` is deliberately NOT reused: it ends by naming `harness
+        # office actor-remove`, a CLI verb this lane does not have. Advice a
+        # caller cannot follow is worse than none — so the SENTENCE is this
+        # lane's and the FACTS are the store's, read off ``safe_details``.
+        # ``data`` names the holder because a refusal a client cannot act on is
+        # a refusal that becomes a retry loop.
+        collision = exc.safe_details
+        return err(
+            rid,
+            ERR_CONFLICT,
+            (
+                f"desk write for persona {collision['persona_id']!r} refused: "
+                f"{collision['holding_actor_key']!r} already holds desk "
+                f"{collision['holding_item_id']!r}. A persona has one desk on a "
+                "level; move that desk, or remove it with runtime.office.remove "
+                "before placing another."
+            ),
+            {
+                "reason": "duplicate_desk",
+                "workspace_id": workspace_id,
+                "persona_id": collision["persona_id"],
+                "holding_actor_key": collision["holding_actor_key"],
+                "holding_item_id": collision["holding_item_id"],
             },
         )
     except StaleRevision as exc:

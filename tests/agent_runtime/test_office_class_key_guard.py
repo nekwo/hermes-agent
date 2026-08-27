@@ -447,9 +447,50 @@ def test_guard_normalizes_incoming_item_ids_the_way_the_store_will():
 def test_cli_unbound_placement_sharing_a_persona_but_not_items_is_allowed():
     """The guard is narrowed to item-id overlap on purpose. A genuinely
     separate unbound placement of the same persona class is a legal canvas and
-    must stay writable — otherwise the fence outlaws a supported shape."""
+    must stay writable — otherwise the fence outlaws a supported shape.
+
+    The spare item is an AGENT, and that is load-bearing rather than incidental.
+    It used to be a second DESK, which the class-key guard correctly waved
+    through (different item id, no migration undone) and which the store's desk
+    fence now refuses under a different rule — one persona, one live desk
+    (``OfficeStore._guard_duplicate_desk``, D6). Two fences, two questions: this
+    test asks the class-key one, so its fixture must not also trip the other, or
+    a green here would stop meaning what the docstring says. The companion
+    assertion below pins the new boundary so the two rules are stated together
+    instead of one silently shadowing the other — and an agent item is also what
+    the launcher actually emits for an unbound group, since its drop authors no
+    desk at all.
+    """
 
     workspace = _workspace("Mixed Office")
+    OfficeStore().upsert_actor(workspace, _payload("backend_dev", instance=INSTANCE, agent_item_id=INSTANCE))
+
+    result = _run_harness(
+        "office", "actor-upsert", "--workspace", workspace,
+        "--actor-json", json.dumps(
+            {
+                "persona_id": "backend_dev",
+                "items": [{"item_id": "spare-agent-2", "kind": "agent", "position": [9.0, 9.0], "folder": "Agents"}],
+            }
+        ),
+        "--json",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _keys(workspace) == {"backend_dev", INSTANCE}
+
+
+def test_the_same_write_carrying_a_second_desk_is_refused_by_the_other_fence():
+    """The boundary between the two fences, stated once.
+
+    Byte-for-byte the write above with ``kind`` flipped to ``desk`` and an id to
+    match. The class-key guard still has nothing to say — no archived key, no
+    overlapping item id — so a pass here would mean the desk rule does not exist
+    on this lane. Exit 4 with ``duplicate_desk`` is what says it does, and
+    naming a DIFFERENT code from ``duplicate_conflict`` is what stops the two
+    rules from being read as one.
+    """
+
+    workspace = _workspace("Second Desk Office")
     OfficeStore().upsert_actor(workspace, _payload("backend_dev", instance=INSTANCE, agent_item_id=INSTANCE))
 
     result = _run_harness(
@@ -462,8 +503,12 @@ def test_cli_unbound_placement_sharing_a_persona_but_not_items_is_allowed():
         ),
         "--json",
     )
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert _keys(workspace) == {"backend_dev", INSTANCE}
+    assert result.returncode == 4, result.stdout + result.stderr
+    envelope = json.loads(result.stdout)
+    assert envelope["error"]["code"] == "duplicate_desk"
+    assert "already holds 'desk-backend_dev'" in envelope["error"]["message"]
+    # Refused before any write: the class-keyed actor never appeared.
+    assert _keys(workspace) == {INSTANCE}
 
 
 # -- writer 3: OfficeStore.resolve_conflict(take="remote") -----------------

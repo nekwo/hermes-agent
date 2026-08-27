@@ -109,6 +109,13 @@ ERROR_EXIT_CODES = {
     "invalid_payload": 2,
     "invalid_isolation": 2,
     "duplicate_conflict": 4,
+    # The office desk fence (D6): this persona already holds a live desk on this
+    # level. Family 4 beside ``duplicate_conflict`` because the operator's next
+    # MOVE is the same (something is already placed — move or remove it); its own
+    # CODE because WHICH thing differs, and because the word has to match the
+    # wire's ``data.reason`` and the launcher's render-time detector or one
+    # refusal ends up with three names.
+    "duplicate_desk": 4,
     "already_exists": 4,
     "stale_revision": 4,
     "agent_already_assigned": 4,
@@ -318,6 +325,11 @@ def _error_hint(code: str) -> str:
         # trees are distinct; this hint is where that distinction was lost.
         "archive_unreadable": "Repair or remove the undecodable archived actor copy under office/<workspace-id>/archive/ in the runtime store, then retry the same command.",
         "actors_unreadable": "Repair or remove the undecodable actor file named in the message, or pass --persona-instance-id to place the instance, then retry.",
+        # Its own hint rather than the default: the default sends the operator to
+        # ``safe_details``, and this refusal's facts ride the MESSAGE (
+        # ``emit_harness_error`` merges details for three named types and this is
+        # not one of them), so the default would point at an empty object.
+        "duplicate_desk": "Move the desk this persona already holds — named in the message — or remove it with `harness office actor-remove`, then retry.",
     }.get(code, "Inspect safe_details and retry after correcting the request.")
 
 

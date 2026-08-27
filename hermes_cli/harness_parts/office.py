@@ -200,6 +200,10 @@ def _cmd_office_actor_upsert(args) -> int:
         CLASS_KEY_REFUSAL_CODE,
         ClassKeyedPlacementRefused,
     )
+    from agent_runtime.office_store import (
+        DUPLICATE_DESK_REFUSAL_CODE,
+        DuplicateDeskRefused,
+    )
 
     store = _office_store()
     workspace = _office_workspace_for(args)
@@ -253,6 +257,22 @@ def _cmd_office_actor_upsert(args) -> int:
         # passing ``code=exc.code`` rather than letting the mapping infer it means
         # a divergence between the two would have to be written deliberately.
         return emit_harness_error(exc, args=args, code=exc.code, message=str(exc))
+    except DuplicateDeskRefused as exc:
+        # The desk fence (D6), translated into the stage-42 taxonomy and NOT
+        # given a consent flag. ``--allow-class-key`` exists because an operator
+        # can legitimately want the pre-migration shape back; there is no
+        # legitimate second desk, so there is no flag and this arm is terminal.
+        #
+        # ``message=str(exc)`` hands over the store's own sentence — which names
+        # the holding actor, the holding item and `harness office actor-remove`
+        # — rather than a reconstruction: ``emit_harness_error`` merges
+        # ``safe_details`` only for three exception types it lists, and this is
+        # not one of them, so the message is the only place the holder can ride.
+        # ``code=`` explicitly rather than through ``_error_code_for_exception``
+        # so a divergence between the two would have to be written on purpose.
+        return emit_harness_error(
+            exc, args=args, code=DUPLICATE_DESK_REFUSAL_CODE, message=str(exc)
+        )
     except ClassKeyedPlacementRefused as exc:
         collision = exc.safe_details
         if not bool(getattr(args, "allow_class_key", False)):

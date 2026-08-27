@@ -245,6 +245,49 @@ def test_the_rpc_handler_holds_no_second_copy_of_the_sequence():
     assert "err(" in source and "ok(" in source
 
 
+def test_verb_authors_no_desk(qa_persona):
+    """D6, proven at RUNTIME rather than by reading ``placement_actor_payload``.
+
+    Two independent witnesses, because either alone is walkable:
+
+    1. The actor the create WROTE, read back off the store, holds exactly one
+       item and it is ``kind: "agent"``. A source walk over
+       ``placement_actor_payload`` would answer a question about a SPELLING —
+       every legal respelling of a desk item walks through it.
+    2. The create succeeds into a workspace where another actor ALREADY holds a
+       desk for this persona. That is the strong form: the store's desk fence
+       (``_guard_duplicate_desk``) is armed and pointed straight at this write,
+       so a payload that authored a desk would be REFUSED here, not merely
+       different. ``duplicate_desk`` is unreachable from ``agent create`` and
+       this is what makes that a fact rather than a claim.
+
+    THE killing mutation is adding a desk item to ``placement_actor_payload``:
+    witness 1 reds on the item list and witness 2 reds on the refusal.
+    """
+
+    store = _seed_workspace()
+    # A desk for ``qa``, held by somebody else entirely.
+    store.upsert_actor(
+        WORKSPACE,
+        {
+            "persona_id": "qa",
+            "items": [
+                {"item_id": "qa_desk", "persona_id": "qa", "kind": "desk", "position": [0.0, 0.0]}
+            ],
+        },
+    )
+
+    outcome = perform_agent_create(_params(placement_id="qa_no_desk"))
+
+    assert outcome.refusal is None, outcome.refusal
+    placed = _actors()[outcome.result["actor_key"]]
+    assert [item.kind for item in placed.items] == ["agent"]
+    assert all(item.kind != "desk" for item in placed.items)
+    # And the pre-existing desk is untouched — the create did not "win" by
+    # replacing the holder.
+    assert [i.item_id for i in _actors()["qa"].items] == ["qa_desk"]
+
+
 def test_the_services_error_codes_are_serve_rpcs_error_codes():
     """The four constants are re-spelled in ``agent_create`` so a CLI process
     need not import the RPC registry. This is the fence that keeps the two

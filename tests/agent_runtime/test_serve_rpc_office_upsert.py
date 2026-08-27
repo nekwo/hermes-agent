@@ -187,6 +187,88 @@ def test_an_upsert_of_an_existing_actor_updates_it_and_never_forks_a_second_file
     assert [a.actor_key for a in _store().list_actors(WORKSPACE)] == [QA_INSTANCE]
 
 
+# ── the desk fence, on this lane (D6) ───────────────────────────────────────
+
+
+def _desk_payload(item_id: str, *, instance: str | None = None) -> dict:
+    """A desk-only actor for persona ``qa`` — the shape the 2026-08-24 incident
+    hand-assembled, minus the item ids that would trip the OLDER fence."""
+
+    payload: dict = {
+        "persona_id": "qa",
+        "items": [{"item_id": item_id, "kind": "desk", "position": [0.0, 0.0], "folder": "Desks"}],
+    }
+    if instance is not None:
+        payload["persona_instance_id"] = instance
+    return payload
+
+
+def test_a_second_desk_for_one_persona_is_refused_as_a_whole_frame():
+    """The store's fence, TRANSLATED — asserted as a whole frame.
+
+    The seed already places ``qa_desk`` under the instance-keyed actor, so this
+    write is the second desk for one persona. It is instance-keyed (a different
+    instance) with a distinct item id, so neither arm of the class-key fence can
+    be the thing refusing it — a test that let ``class_key_collision`` answer
+    here would pass against a runtime with no desk fence at all.
+
+    Whole-frame equality rather than ``data["reason"] == ...`` because the
+    ``data`` is the whole point: a client that cannot see WHICH actor holds the
+    desk has nothing to offer the operator but a retry, and a retry never clears
+    this. The message is this lane's own sentence — the store's ends by naming
+    ``harness office actor-remove``, a verb no wire caller has.
+    """
+
+    _seed()
+    reply = _upsert(
+        "desk-dup",
+        {
+            "workspace_id": WORKSPACE,
+            "actor": _desk_payload("qa_desk_second", instance="personainst_qa_agent_00000002"),
+        },
+    )
+
+    assert reply == {
+        "jsonrpc": "2.0",
+        "id": "desk-dup",
+        "error": {
+            "code": 4090,
+            "message": (
+                "desk write for persona 'qa' refused: "
+                f"{QA_INSTANCE!r} already holds desk 'qa_desk'. A persona has one "
+                "desk on a level; move that desk, or remove it with "
+                "runtime.office.remove before placing another."
+            ),
+            "data": {
+                "reason": "duplicate_desk",
+                "workspace_id": WORKSPACE,
+                "persona_id": "qa",
+                "holding_actor_key": QA_INSTANCE,
+                "holding_item_id": "qa_desk",
+            },
+        },
+    }
+    # A typed refusal in front of a store that took the write is the worst
+    # outcome: the client rolls its prediction back and the server keeps it.
+    assert [a.actor_key for a in _store().list_actors(WORKSPACE)] == [QA_INSTANCE]
+    assert _positions() == {QA_INSTANCE: [-8.0, -2.0], "qa_desk": [-8.0, -4.5]}
+
+
+def test_the_seeded_actor_may_still_move_its_own_desk_over_this_lane():
+    """The acceptance beside the refusal, on the SAME lane.
+
+    Without it the test above passes against a fence that refuses every desk
+    write, which would take the office canvas offline for every desk drag while
+    reporting a correct-looking refusal reason.
+    """
+
+    _seed()
+    reply = _upsert("desk-move", {"workspace_id": WORKSPACE, "actor": _actor_payload(2.0, 7.0)})
+
+    assert reply["result"] == {"actor_key": QA_INSTANCE, "revision": 2}
+    assert _positions() == {QA_INSTANCE: [2.0, 7.0], "qa_desk": [2.0, 4.5]}
+
+
 # ── the instance binding, which the write must not drop ─────────────────────
 
 

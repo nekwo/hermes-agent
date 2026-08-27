@@ -37,6 +37,81 @@ copy an encoding's accidents. The resolve echoes the STORE's key and a normalize
 `take`, because `take=remote` writes the key the peer's record carries and a
 sidecar's filename may disagree with its record.
 
+### The fences a placement write passes
+
+`runtime.office.upsert` and `harness office actor-upsert` are two doors onto one
+store method, and every guard lives in that method rather than in either door
+(`OfficeStore.upsert_actor`, all of it inside `office_lock`). In order:
+`_guard_class_keyed_write` (the class→instance re-key fence, hoisted out of four
+callers by EG-6.6), `_guard_no_conflict` (an unresolved realm-sync sidecar),
+`_guard_duplicate_desk`, then `_check_revision`. Each door keeps only a
+TRANSLATION of the typed refusal into its own taxonomy — never a copy of the
+predicate — so deleting a fence does not leave either door guarded.
+
+**`_guard_duplicate_desk` is the newest, and it is a store fence for a rule that
+used to be the launcher's alone.** One persona holds ONE live desk per level.
+The launcher has always guarded the authoring gesture
+(`MissionOfficeLayout.hasAuthoredDeskForPersona`) and warned at render time when
+it found two (`MissionOfficeRenderResolver._scanDeskInvariants`), but neither
+stands in front of `harness office actor-upsert` — which is exactly the door the
+2026-08-24 incident authored a second `qa` desk through. The predicate
+(`office_store._duplicate_desk_collision`) asks about the POST-WRITE state,
+because an upsert REPLACES the target actor's items: after the write a persona
+holds the desks in this payload plus the desks every OTHER live actor holds for
+it. Three consequences fall out of that one sentence rather than three branches
+— moving your own desk is accepted, a second actor desking the same persona is
+refused, and a desk whose only holder is ARCHIVED is accepted, because
+`scan_actors` reads the live directory and an archive is not a holding. Desks
+are keyed on the ITEM's persona, not the actor's, matching the launcher's guard.
+Like the class-key fence it refuses rather than answering from a directory it
+could only partly read (`ActorsUnreadable`), and it fires on `--dry-run`.
+
+**A desk's identity is its `item_id`, and the count is of DISTINCT ids** — the
+same narrowing `office_class_key_guard` records for its own predicate, and for
+the same reason. One desk claimed by two actor rows is a duplicate PLACEMENT
+(`duplicate_item_placement`), a different fault with a different cure, and it is
+a state the class→instance re-key migration deliberately passes through:
+`scripts/office_actor_rekey_to_instance.py::_apply` mints the instance-keyed
+actor with the class-keyed actor's items **copied verbatim** and only then
+archives the old key, so both rows briefly claim the same desk. Counting rows
+instead of ids would refuse the one operator script whose whole job is to move a
+placement, while catching nothing the fence is for — what it is for is a SECOND
+desk, a different id, which is what the incident authored and what the
+launcher's detector counts. Pinned both ways:
+`test_office_store.py::test_one_desk_claimed_by_two_rows_is_not_two_desks` and
+`::test_a_second_actor_desking_one_persona_is_refused_naming_the_holder` are a
+boundary, not one assertion twice.
+
+**Known residual, stated rather than implied.** Between the two fences, an
+INSTANCE-keyed write that claims a desk id another live actor already holds
+passes both: the class-key fence guards only class-keyed payloads (an
+instance-keyed write "IS the migration's shape"), and this one counts distinct
+ids. That is the migration's transient made permanent if nobody finishes the
+migration, and the launcher's render-time `duplicate_desk` warning is what sees
+it. Closing it needs the roster↔office census (`placement_census`, planned D8),
+not a third fence.
+
+It has **no override on either lane**, which is the deliberate asymmetry with
+`--allow-class-key`: that flag exists because an operator can legitimately want
+the pre-migration shape back, whereas the render layer draws the implicit desk
+only while a persona has no authored one — so a second authored desk is not a
+placement anyone can mean, it is two desks one of which is unreachable. The way
+past it is to move or remove the desk already there, and the refusal names it.
+
+Refusal wire: `ERR_CONFLICT` 4090, `data.reason = "duplicate_desk"`, with
+`data.persona_id`, `data.holding_actor_key`, `data.holding_item_id`; CLI exit
+code `duplicate_desk` (family 4, beside `duplicate_conflict`). **Realm pull is
+deliberately outside the fence** — `office_sync.apply_office_pull` writes actor
+files directly and never reaches `upsert_actor`, so a workspace pulled from a
+peer can still arrive holding two desks for one persona. That is the correct
+boundary (a pulled duplicate is a conflict-lane fact about what a peer
+published, not a local write), and it is why the launcher's render-time
+`duplicate_desk` warning stays: it is the only thing that can see data
+predating or bypassing this fence. The placement verb authors no desk at all
+(`agent_create.placement_actor_payload` writes one `kind: "agent"` item), so no
+`agent create` and no canvas drop pays for the fence's directory scan — pinned
+by `test_agent_create_service.py::test_verb_authors_no_desk`.
+
 Launcher side, all four are RPC-first through one writer
 (`office/mission_office_rpc_writer.dart`: `upsertActor:76`, `removeActor:167`,
 `updateSurface:257`, `resolveConflict:352`), each gated per-method on the serve
@@ -318,7 +393,11 @@ omit it — the office's revision guard lives on the RPC lane only.
     `mission_office_lane_reattach_test.dart`,
     `mission_office_mass_archive_incident_repro_test.dart` — an edit to any of
     them is a stage-stopping event, not a test update.
-12. **Dead-symbol claims are repo-scoped or they are nothing.** A file-scoped grep
+12. **One persona, one live desk per level, refused at the STORE.** The
+    launcher's gesture guard and render warning are the client's half; the
+    fence that a raw `actor-upsert` cannot walk around is
+    `OfficeStore._guard_duplicate_desk`. Realm pull is outside it by design.
+13. **Dead-symbol claims are repo-scoped or they are nothing.** A file-scoped grep
     answers "is it used here", not "is it dead"; and a `file:line` citation goes
     on reading as verified long after the code at it has moved.
 
@@ -347,8 +426,10 @@ omit it — the office's revision guard lives on the RPC lane only.
 ## Open rows
 
 - The placement verb: `harness agent create` gains server-side layout, a
-  skills phase with an install gate, a store-level desk fence, an RPC-first
-  inverse, and a live proof that a second-process create reaches the fold →
+  skills phase with an install gate, an RPC-first inverse, and a live proof
+  that a second-process create reaches the fold. **Its S3 slice — the
+  store-level desk fence — has SHIPPED and is described above; the rest is
+  still planned.** →
   [planned/agent-placement-verb.md](planned/agent-placement-verb.md)
   (both repos; its §0 corrects four premises of the 2026-08-24 brief)
 - Gesture prediction's two remaining stages (an unpinned create-refusal
