@@ -35,7 +35,9 @@ ceremony both have upstream reuse material in `gateway/` (`platform_registry.py`
   posture is ruling R1 (recommended: self-signed per-install cert, fingerprint pinned
   via pairing payload).
 - **Stage 3 (shared) — send idempotency:** mission-chat send needs a server-side
-  turn-request-id dedupe hook for the remote write path (survey found none).
+  turn-request-id dedupe hook for the remote write path (still absent there — no
+  `turn_request_id` anywhere, re-verified 2026-08-27 — but the precedent now ships on
+  a sibling verb; see the drift addendum).
 - **Stage 6 — peer pairing (install⇄install):** `gateway/peers.json` both sides,
   distinct peer hello, operator-approval gate (R5 — agents can never mint peers),
   `harness gateway peers` verbs, `peer.ping` RPC.
@@ -52,3 +54,56 @@ ceremony both have upstream reuse material in `gateway/` (`platform_registry.py`
 relay (2026-07-16/19, `gateway_state/v1` desktop→Django fan-out, no phone consumer ever
 built) — retirement is its own small plan. `mobile_core/` is orthogonal (on-device
 provider runtime, no agent loop by contract) and NOT superseded.
+
+## Drift addendum — audited 2026-08-27
+
+Architecture re-verified at HEAD (`1295212f2e`) after the S0–S10 placement wave: no
+design decision invalidated, the socket lane (`serve_socket.py`, `serve_auth.py`,
+`serve_registry.py`, `harness_parts/serve.py`) has ZERO commits since this plan
+landed, every stage is still unbuilt, and neither contract integer moved. But the
+wave built three of this plan's hard parts on the very lane it calls the contract —
+ride them, don't re-derive:
+
+- **Manifest membership is the proven rollout mechanism.** `serve_rpc.manifest()`
+  (`serve_rpc.py:246` — a set plus an integer, `RPC_CONTRACT_VERSION = 1`, methods
+  derived from the `@method` registration site) and `ops_manifest(transport=…)`
+  (`harness_parts/serve.py:307` — answers PER TRANSPORT, `shutdown` stdio-only) ride
+  `ready`/`hello_ok`/`version` — the exact frames Stage 0 extends with `install`. The
+  launcher's D12 gate keys its placement lane off `runtime.agent.retire`'s presence
+  in `manifest.rpc.methods`, test-pinned against a byte-pinned capture. Stages
+  0/1/6/8 advertise themselves the same way; connector tiers check membership, never
+  mint a version negotiation. The per-transport `ops` shape is what a device/peer
+  listener split reuses. Caution: the launcher's serve-frame fixture check
+  (`tool/hermes_serve_frames/generate.py --check`) is on no CI lane — that hole is on
+  Stage 0's critical path.
+- **Stage 3's dedupe hook has a shipped precedent.** `runtime.agent.create` carries
+  `idempotency_key` reservations replaying the ack as `idempotent_replay: true`
+  (`agent_create.py:522`, `agent_create_reservations.py:248`); `already_retired: true`
+  is the retire analogue. Copy this to mission-chat send.
+- **Stage 0 must not mint another install id.** `monitoring.install_id`
+  (`agent/monitoring/policy.py::ensure_install_id`, consumed as OTel
+  `service.instance.id`) and the telemetry `install_id`
+  (`hermes_cli/observability/shared_metrics.py:259`) already ship. Inventory and
+  reuse-or-distinguish, per `planned/duplicate-implementation-retirement.md`.
+- **Stage 1 is blocked on an authorization chokepoint that does not exist.** Canon 06
+  ("What a remote connector inherits" + its Open row): `authorize_coordinator_action`
+  is called from CLI handlers only — `runtime.agent.create`/`runtime.agent.retire`
+  are ungated on RPC, `console`-tier is a decision with no check. `serve_gateway_auth.py`
+  has nowhere to hook scopes (R11) until authorization moves to the chokepoint the
+  three doors share; rule that with R11 before any non-loopback bind.
+- **Correlation tokens are Stage 7's join primitive — and not an identity.** Six
+  write verbs carry optional `correlation_id` (charset + 64-cap, refused out loud at
+  the RPC boundary, `serve_rpc.py:379`); the launcher mints per-process-origin tokens
+  that already solve the N-clients collision this plan multiplies. Device attribution
+  must come from the connection identity the socket lane tracks, never from the
+  token. The cross-process one-grep acceptance (CI-3,
+  `planned/correlation-id-coverage.md`) is still unscripted; a remote lane raises its
+  price.
+- **The placement verb's compatibility table lives in canon now.** What a remote
+  connector may and may not assume from `runtime.agent.create`/`runtime.agent.retire`
+  — including that both are `console`-tier and belong on NO peer allowlist, and that
+  `placement_census` is a CLI/ops report, not a method — is
+  `06-office-and-board.md` § "What a remote connector inherits". Cite that, not the
+  deleted placement plan. The fold-set-intersection hazard (a narrow phone fold
+  demotes every subscriber's patches to full cores; fix = per-subscriber promotion at
+  the hub, owned by Stage 5) is filed in the primary plan's §5 R10.
