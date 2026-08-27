@@ -464,6 +464,21 @@
         "-q",
         "tests/agent_runtime/test_agent_retire_service.py::test_a_second_retire_replays_the_ack_rather_than_refusing"
       ]
+    },
+    {
+      "id": "s9-occupancy-predicate-is-strict",
+      "path": "agent_runtime/office_layout_policy.py",
+      "symbol": "_is_blocked",
+      "operator": "relax-strict-inequality",
+      "find": "        if (dx * dx + dy * dy) ** 0.5 < OCCUPANCY_RADIUS:",
+      "replace": "        if (dx * dx + dy * dy) ** 0.5 <= OCCUPANCY_RADIUS:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_layout_policy.py::test_an_item_exactly_at_the_occupancy_radius_does_not_block"
+      ]
     }
   ]
 }

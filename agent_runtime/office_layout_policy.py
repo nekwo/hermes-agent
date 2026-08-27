@@ -240,6 +240,17 @@ def _is_blocked(candidate: Point, occupied: Sequence[Point]) -> bool:
     STRICTLY within, matching the launcher's ``<``: an item at exactly the
     radius does not block, which is what keeps two placements at the minimum
     separation this policy produces from each declaring the other occupied.
+
+    That strictness is pinned at THIS predicate rather than through
+    :func:`next_free_slot` — see
+    ``test_an_item_exactly_at_the_occupancy_radius_does_not_block`` — because
+    no lattice candidate can sit an exact radius from an item: a distance
+    measured from a :func:`slot_at` point is an exact multiple of ``2**-50``,
+    and ``float64(0.7)`` is a multiple of ``2**-53`` and of no coarser power.
+    At the launcher's 32-bit width the same comparison is an EQUIVALENT MUTANT
+    for the same reason, one grid coarser — the cross-repo
+    fixture's README states it with the numbers so nobody re-files it as a
+    coverage gap.
     """
 
     for x, y in occupied:

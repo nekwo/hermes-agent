@@ -342,6 +342,32 @@
       ]
     },
     {
+      "name": "boundary_item_at_exact_radius",
+      "why": "The occupancy predicate is STRICTLY `<`, so an item AT the radius leaves the slot free. The item sits on the nearest float32-representable point at-or-outside the radius -- slot_at(0,0).x + 1468007 * 2**-21 = -4.299999713897705078125, one float32 step past occupancy_radius -- and NOT on -4.3, because -5.0 + 0.7 is not on the grid the launcher stores positions on: here both widths measure 0.7000002861022949 and agree, while at -4.3 float64 measures 0.7000000000000002 and leaves the slot free and float32 measures 0.6999998092651367 and takes it -- one case, two answers. This pins occupancy_radius to within one float32 ulp. It cannot pin the STRICTNESS of the comparison: no float32 pair in this lattice measures a distance EQUAL to the float64 radius, so `<` and `<=` are the same function there. See README.md.",
+      "kind": "agent",
+      "folder": "Agents",
+      "lane_offset": [
+        0.0,
+        0.0
+      ],
+      "items": [
+        {
+          "item_id": "boundary",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -4.299999713897705,
+            6.4
+          ],
+          "hidden": false
+        }
+      ],
+      "expected": [
+        -5.0,
+        6.4
+      ]
+    },
+    {
       "name": "pigeonhole_200_occupied",
       "why": "Twenty-five FULL rows \u2014 200 blockers. The scan is bounded at (occupied + 1) rows, so it terminates, and by pigeonhole a free slot exists inside that bound: row 25, column 0. A policy that stopped scanning at a fixed row count would answer an occupied slot here.",
       "kind": "agent",

@@ -67,8 +67,46 @@ kind→lane mapping produces for `kind`, and the scan over `items` returns
 The launcher's `Vector2` stores **32-bit** floats, so `6.4` round-trips as
 `6.400000095…` and a 25-row scan accumulates about `1e-6`. `1e-4` is four
 orders of magnitude above that and four below the smallest gap this lattice
-produces (`0.7`). No case is placed near the occupancy boundary, so float width
-can never flip a verdict. Never assert exact equality across the two sides.
+produces (`0.7`). Never assert exact equality across the two sides.
+
+Exactly ONE case is placed at the occupancy boundary, and it is placed by hand
+for the reason below; every other case sits far enough from it that float width
+cannot flip its verdict.
+
+## The one case ON the boundary, and the one thing it cannot pin
+
+`boundary_item_at_exact_radius` is the only case whose verdict turns on the
+occupancy comparison. `slot_at(0,0) + (occupancy_radius, 0)` spelled the
+obvious way is `-4.3`, and that spelling makes the two repos **disagree**:
+
+| Width | `dist((-5.0, 6.4), (-4.3, 6.4))` | Verdict under `<` |
+| --- | --- | --- |
+| float64 (hermes) | `0.7000000000000002` | free — the item does NOT block |
+| float32 (launcher `Vector2`) | `0.6999998092651367` | taken — the item DOES block |
+
+So the case sits on `-4.299999713897705078125` instead: `slot_at(0,0).x +
+1468007 * 2**-21`, the nearest float32-representable point at or outside the
+radius. Both widths measure `0.7000002861022949` there, both leave the origin
+slot free, and the case pins `occupancy_radius` to within one float32 ulp
+(`4.8e-7`) instead of to within the whole `0.7`.
+
+**What no case here can pin is the STRICTNESS of that comparison.** `<` and
+`<=` differ only where a measured distance is EXACTLY `occupancy_radius`, and
+no case can produce one. Every candidate the scan tests is a `slot_at` point,
+so on the launcher both coordinate differences are integer multiples of
+`2**-21` (the float32 step at this lattice's magnitudes) and the squared
+distance is an exact multiple of `2**-42` — while the window of squared
+distances whose square root rounds to `float64(0.7)` is `0.0005` of one such
+step wide and falls `0.04` of a step from the nearest one. The same argument
+runs on hermes at `2**-50`: a distance from a slot is an exact multiple of
+`2**-50` there, and `float64(0.7)` is a multiple of `2**-53` and of no coarser
+power. `<` → `<=` is therefore an **equivalent mutant** in
+`MissionOfficePlacementPolicy._isBlocked` — measured on 2026-08-27, not
+assumed. hermes pins its own strictness one level down, at the predicate:
+`test_an_item_exactly_at_the_occupancy_radius_does_not_block` feeds
+`_is_blocked` a distance of exactly the radius, which the lattice cannot reach.
+The launcher has no equivalent, because `_isBlocked` is private to the library
+and every public door goes through the lattice.
 
 ## Update rule
 

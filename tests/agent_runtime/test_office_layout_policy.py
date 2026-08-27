@@ -97,6 +97,7 @@ def test_the_case_list_is_not_empty_and_names_the_shapes_S1_requires():
         "hidden_item_blocks",
         "desk_lane_offset",
         "off_lattice_item_blocks_its_nearest_slot",
+        "boundary_item_at_exact_radius",
         "pigeonhole_200_occupied",
         "blank_folder_falls_back_to_kind",
     } <= set(names), names
@@ -211,11 +212,37 @@ def test_an_item_exactly_at_the_occupancy_radius_does_not_block():
     """STRICTLY within, matching the launcher's ``<``. If the boundary blocked,
     two placements at the minimum separation this policy produces would each
     declare the other occupied and the scan would drift forever.
+
+    Asked of the PREDICATE rather than through :func:`next_free_slot`, and that
+    is the whole repair. This test used to place the item at ``slot_at(0, 0) +
+    (0, OCCUPANCY_RADIUS)`` and believe it was on the boundary; ``6.4 + 0.7``
+    is ``7.1000000000000005``, so the distance it actually measured was
+    ``0.7000000000000002`` — OUTSIDE the radius, where ``<`` and ``<=`` answer
+    the same thing. It named a guarantee it could not fail on, and ``<`` →
+    ``<=`` survived the whole file (measured 2026-08-27).
+
+    No lattice-shaped spelling fixes that. Every candidate the scan tests is a
+    ``slot_at`` point, whose coordinates (``-5.0``, ``6.4``) have float64
+    neighbours ``2**-50`` apart, so every distance measured from one is an
+    exact multiple of ``2**-50``; ``OCCUPANCY_RADIUS`` is ``float64(0.7)``, a
+    multiple of ``2**-53`` and of no coarser power. The boundary is simply not
+    on the grid the scan can reach — and at the launcher's 32-bit width it is
+    further off it still, which is why the cross-repo fixture's
+    ``boundary_item_at_exact_radius`` pins the RADIUS (to one float32 ulp) and
+    says so rather than pretending to pin the comparison. See that fixture's
+    README.
+
+    KILLING MUTATION: ``<`` → ``<=`` in ``_is_blocked`` — registered as claim
+    ``s9-occupancy-predicate-is-strict`` in ``tests/mutation_claims.json``.
     """
 
-    origin = policy.slot_at(0, 0)
-    at_radius = (origin[0], origin[1] + policy.OCCUPANCY_RADIUS)
-    assert policy.next_free_slot([at_radius]) == origin
+    radius = policy.OCCUPANCY_RADIUS
+    assert policy._is_blocked((0.0, 0.0), [(radius, 0.0)]) is False
+
+    # Anti-vacuity: one float64 step INSIDE the radius does block, so the
+    # assertion above is a boundary and not a predicate that never fires.
+    inside = math.nextafter(radius, 0.0)
+    assert policy._is_blocked((0.0, 0.0), [(inside, 0.0)]) is True
 
 
 def test_rows_are_spaced_further_apart_than_columns():
