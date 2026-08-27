@@ -162,7 +162,12 @@ def _agent_create_into(workspace_id: str, monkeypatch) -> object:
     monkeypatch.setattr(
         agent_create,
         "placement_actor_payload",
-        lambda request, *, display_name: _colliding_payload(),
+        # ``position`` joined the real signature in S2 (the resolved slot is
+        # passed in rather than re-read off the request). Accepted and ignored:
+        # this injection is about the payload's BINDING, and swallowing the
+        # kwarg keeps the substitution a stand-in for the refactor rather than
+        # a TypeError one call earlier.
+        lambda request, *, display_name, position=None: _colliding_payload(),
     )
     return agent_create.perform_agent_create(
         {
