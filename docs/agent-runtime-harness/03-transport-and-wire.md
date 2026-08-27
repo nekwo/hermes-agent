@@ -79,6 +79,25 @@ and nothing else:
 | `runtime.agent.retire` | `_runtime_agent_retire` | the inverse of the above |
 | `runtime.persona.prewarm` | `_runtime_persona_prewarm` | warm a persona |
 
+**Each method also declares a TIER, and the map rides `rpc` beside `methods`**
+(`"tiers": {"runtime.office.get": "read", …}`, hermes `8d69f8858b`). The
+classification rule is one line: a level MUTATION is `console`, everything else
+is `read` — so the four office writes and both agent verbs are `console`, and
+`get` / `subscribe` / `unsubscribe` / `prewarm` are `read`. `prewarm` sits with
+the reads because its own contract is that it writes no store state, emits no
+event and mints no id; spending CPU is a rate-limiting question, and rate
+limiting is not a tier.
+
+The tier is REQUIRED at the registration — `@method(name, tier=…)` has no
+default, so a tierless method is unrepresentable rather than merely untested,
+and an unknown tier raises at import. Adding the block moved no contract
+integer: it is a key beside `methods`, not a shape change to any existing
+method's request or result, which is exactly what the set-plus-integer rule
+below permits. The launcher reads it (`MissionRuntimeRpcManifest.tiers`) and
+branches on nothing — a manifest says what a call WANTS, never what a connection
+HOLDS. The enforcement is `serve_rpc.handle_request`'s gate; see
+[06 §authorization](06-office-and-board.md).
+
 This table used to be a list of ten LINE NUMBERS. Two of them (`2055`, `2115`)
 had already rotted by 2026-08-27 — a slice landing above them moved both — while
 the sentence around them still read as verified. A method name is what a client

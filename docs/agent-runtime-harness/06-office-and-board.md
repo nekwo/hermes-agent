@@ -365,16 +365,35 @@ why a set-plus-integer manifest makes that legal, and the launcher's
 `EterniaLauncher/docs/mission_control/04-office-scene.md` for what it gates over
 there.
 
-**Authorization is a DECISION with no enforcement point, and saying otherwise
-would be the false all-clear.** `console` scope for both methods is the owner's
-default (recorded, not implemented), and neither service function checks a
-scope: `authorize_coordinator_action` is still called from CLI HANDLERS, not
-from the chokepoint the three doors share. So `harness persona instance retire`
-consults it and `harness agent retire` does not, on the same
-`perform_agent_retire` — an asymmetry the doors created when they collapsed onto
-one function and the gate stayed where it was. `runtime.agent.retire` and
-`runtime.agent.create` are likewise ungated. The fix is a scope parameter on the
-two service functions; it is an Open row, not a claim above.
+**Authorization has an enforcement point, and the policy behind it is empty on
+purpose.** Both methods declare `console` on the wire (`rpc.tiers`, see
+[03 §2](03-transport-and-wire.md#2-capability-advertisement--rpc-and-ops)) and
+`serve_rpc.handle_request` evaluates that declaration against what the TRANSPORT
+proved before any handler runs — the stdio owner, or a socket peer that passed
+the HMAC. Both are allowed every tier today, so nothing an existing caller
+observes moved; a caller kind nothing yet mints is refused with a typed
+`data.reason: "scope_denied"`. The CLI mirrors it with a `local_console`
+identity minted in `_agent_retire_outcome`, which is the one retire both CLI
+doors reach.
+
+**What that fixed, and what it deliberately did not.** The asymmetry this
+section used to record — `harness persona instance retire` consults a gate and
+`harness agent retire` does not, on the same `perform_agent_retire` — is gone,
+and the 2026-08-27 survey found it had been the smaller half of the problem:
+the consulted gate never ran on real traffic either, because
+`_coordinator_actor_id` recognises only `--requested-by coordinator[:id]` while
+the CLI defaults to `cli` and the launcher hardcodes `launcher`. The fix was not
+to give the second door that gate. `authorize_coordinator_action` was renamed
+`review_coordinator_budget` because it is a coordinator persona declaring its
+own budget so the runtime can ask a HUMAN to confirm — it escalates and never
+denies, and every input it reads is one the caller supplied. The service
+functions still take no scope parameter: this doc's earlier "the fix is a scope
+parameter on the two service functions" is superseded, and that parameter is the
+optional non-bypassable BACKSTOP (plan Stage A6), not the gate. Per-device
+scopes are the gateway's Stage 1 / R11, and they are now a policy edit to one
+predicate rather than an architecture change.
+Receipts: `8d69f8858b` (A1), `4d60060dc3` (A2), `dba7ed19b6` (A3),
+`290f6f461b` (A4); launcher `2cf887b47`.
 
 ### What a remote connector inherits (the gateway check, folded from plan §A.11)
 
@@ -391,7 +410,7 @@ built and nothing here describes it as if it were.
 | `call` — a remote device cannot run the install's CLI | `runtime.agent.create` and `runtime.agent.retire` are the whole wire; the two `harness agent …` verbs are argv twins of the same service functions, and `skills` rides the RPC params rather than being a CLI-only flag |
 | Additive-only wire (manifest = set + integer) | one new method name joined `methods`; new params are optional; new ack keys are additive; `RPC_CONTRACT_VERSION` never moved; observability is `phases.skills_ms` in the ack and log receipts, never a new key on the parity envelope |
 | Exactly-once over a lossy link | the create's idempotency-key reservation already replays its ack (`idempotent_replay: true`) and the retire answers `already_retired: true` — a per-install client outbox can carry both verbs with no runtime-side addition |
-| Per-device scopes | both are level mutations and belong in a `console` tier — **as a decision, not a check** (see above). If an `admin` tier ever carves out the skills INSTALL sub-phase, the phase boundary is where it sits, so it is one predicate |
+| Per-device scopes | both are level mutations and declare the `console` tier, **checked at the front door before the handler runs** (see above). What is still absent is a device whose credential carries a tier — that is gateway Stage 1 / A5, and it is a policy edit to one predicate. If an `admin` tier ever carves out the skills INSTALL sub-phase, the phase boundary is where it sits, so it is still one predicate |
 | Peer tier (an agent on install A addressing install B) | deliberately excluded: agents never mint or retire agents on another install; a remote OPERATOR does |
 | `subscribe` | a placement is noticed through the fold, not a poll — one `patch` batch carrying the `persona_instance` and `office_actor` creates, pinned by `patch_agent_create.json` in both repos |
 
@@ -717,17 +736,17 @@ omit it — the office's revision guard lives on the RPC lane only.
   `EterniaLauncher/Launcher_Brain/20 — Active Initiatives/agent-placement-verb-handoff.md`,
   and every escalation it raised is a row in that brain's
   `mission-control-queue.md`. What it left open here:
-  - **Authorization is not at the chokepoint.** `authorize_coordinator_action`
-    sits at CLI handlers, so `harness persona instance retire` is gated and
-    `harness agent retire` / `runtime.agent.retire` / `runtime.agent.create`
-    are not, on the same two service functions. The fix is a scope parameter
-    on `perform_agent_create` / `perform_agent_retire`. Designed and staged in
+  - **Authorization is at the chokepoint — CLOSED 2026-08-27.** Stages A1–A4 of
     [planned/authorization-chokepoint.md](planned/authorization-chokepoint.md)
-    (2026-08-27), which argues that parameter is the BACKSTOP and the gate
-    belongs at the RPC dispatch layer — its Ruling A is the gateway R11's
-    prerequisite, and it measures the gap wider than an asymmetry: the gated
-    door's gate is unreachable on the `--requested-by` spellings the CLI and
-    the launcher actually send.
+    landed the tier declaration, the proven caller, the front-door gate and the
+    CLI mirror (`8d69f8858b`, `4d60060dc3`, `dba7ed19b6`, `290f6f461b`;
+    launcher `2cf887b47`). The gate is at the RPC dispatch layer with a
+    `local_console` mirror at CLI entry, per Ruling A option (b) — the scope
+    parameter this row used to propose is the optional BACKSTOP (Stage A6, not
+    built, and only reachable under rulings (a)/(c) which were not taken). What
+    is still open belongs to the gateway, not here: Stage A5 — the policy the
+    gate evaluates stays "allow every caller that exists" until
+    `gateway/devices.json` mints a device credential with a tier.
   - **Realm pull writes actor files with no office event**
     (`office_sync.apply_office_pull`), so a `WRITE_REMOTE` never becomes a
     patch. A real gap in the notification story and a realm-sync one, not a
@@ -741,8 +760,10 @@ omit it — the office's revision guard lives on the RPC lane only.
     be the wrong move.
   - **Owner decisions still standing on their defaults**, none blocking: D10(ii) no
     persona-template (`persona.skills`) operator verb (out of scope, recorded);
-    D10(iii) un-aimed adds omit `position` (shipped OMIT); D10(iv) `console`
-    scope for both methods (prose until the gateway's R11 — see above).
+    D10(iii) un-aimed adds omit `position` (shipped OMIT). D10(iv) `console`
+    scope for both methods is no longer prose — it is declared on `rpc.tiers`
+    and evaluated at the front door (A1/A3 above); WHICH tiers exist beyond
+    `read`/`console` is still the gateway's R11.
   - **No Stage C visual proof** of a CLI placement appearing on a live level.
     No slice's done-when carried one; S0's frame receipt is the lane's evidence
     and it is a hand-recorded capture, not a gated harness.

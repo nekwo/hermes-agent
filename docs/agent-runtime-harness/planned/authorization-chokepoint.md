@@ -1,13 +1,42 @@
 # Planned — the authorization chokepoint
 
-**Status:** not built. Surveyed 2026-08-27. **Owner surface:**
-[06 — Office and board](../06-office-and-board.md) § "Authorization is a DECISION
-with no enforcement point" and its Open row.
+**Status: A1–A4 BUILT AND LANDED 2026-08-27.** A5 belongs to the gateway plan's
+Stage 1 and is not built here; A6 is not built and is not reachable — it was
+conditional on Ruling A picking (a) or (c), and the operator picked (b).
+Surveyed 2026-08-27, built the same day.
+
+| Stage | Status | Receipt |
+|---|---|---|
+| A1 — declare the tier, don't enforce | LANDED | hermes `8d69f8858b`, launcher `2cf887b47` |
+| A2 — carry a caller identity | LANDED | hermes `4d60060dc3` |
+| A3 — the gate, allowing everything | LANDED | hermes `dba7ed19b6` |
+| A4 — reconcile the CLI gate | LANDED | hermes `290f6f461b` |
+| A5 — device scopes become policy | NOT HERE | gateway plan Stage 1 / R11 |
+| A6 — service-layer backstop | NOT BUILT | conditional on Ruling A = (a)/(c); ruled (b) |
+
+**What actually changed, in one paragraph.** `@method(name, tier=…)` now
+requires a tier and publishes the map on `rpc.tiers`; `RpcContext` carries a
+`caller` the transport minted and `params` cannot reach;
+`serve_rpc.handle_request` evaluates `authorize_call(tier, caller)` before
+dispatch and refuses with a typed `data.reason: "scope_denied"`;
+`authorize_coordinator_action` is renamed `review_coordinator_budget` because it
+escalates to a human and never denies; and both CLI retire doors plus the CLI
+create door mint the same `CLI_CONSOLE` identity through one helper. The policy
+allows every caller that exists, so no current caller's observable outcome
+moved — asserted directly in `tests/agent_runtime/test_serve_rpc_authorization.py`
+rather than inferred from a green suite. Landing receipts and the honest gaps
+are in [remote-gateway-field-notes.md](remote-gateway-field-notes.md),
+2026-08-27.
+
+**Owner surface:**
+[06 — Office and board](../06-office-and-board.md) § "Authorization has an
+enforcement point" and its Open row.
 **Blocks:** [remote-gateway.md](remote-gateway.md) Stage 1, and through it the
 primary plan's R11 (launcher
 `docs/mission_control/planned/universal-remote-gateway.md` §5).
-**Everything below is a READ.** No test was run and no serve was started while
-this was written; see §5 for what that costs.
+**Everything below §1 was a READ when it was written.** No test was run and no
+serve was started during the survey; §5 records what that cost, and the
+per-stage LANDED blocks record which of those bounds the build discharged.
 
 The gateway plan's Stage 1 must not bind a non-loopback listener while the write
 verbs have no enforcement point, and R11's per-device scopes have nowhere to
@@ -280,6 +309,18 @@ Smallest first. Each lands and is testable on its own; none binds a listener.
 
 ### Stage A1 — name the tier on the methods, in the manifest, without enforcing
 
+**LANDED — hermes `8d69f8858b`, launcher `2cf887b47`.** Built as designed, with
+two departures worth recording. (1) `method()`'s tier argument is REQUIRED
+rather than defaulted: a default is what turns a registration into a hole, and
+requiring the word makes a tierless method unrepresentable instead of merely
+untested. (2) The registry-completeness test found three manifest pins that had
+been RED since S5 — `test_serve_rpc_office_upsert.py`'s two literals and
+`test_serve_rpc_office_subscribe.py`'s `method_names()` list never grew
+`runtime.agent.retire` — verified against a clean HEAD worktree and closed in
+passing. The cross-repo caution held exactly: `ready.json` was the one frame
+that moved, `--check` green twice, and the launcher gained a read-and-expose
+`tiers` reader on `MissionRuntimeRpcManifest`.
+
 Add a declared tier to the `@method` registration (`serve_rpc.py:234`) — a second
 registry `_METHOD_TIERS[name]`, defaulting to `console` for write verbs and
 `read` for reads — and surface it on `manifest()` (`:246`) as an ADDITIVE block
@@ -307,6 +348,16 @@ proved).
 
 ### Stage A2 — carry a caller identity into the handler
 
+**LANDED — hermes `4d60060dc3`.** One departure from the sketch: the default is
+`stdio_owner`, not `None`/unknown. An `RpcCaller` can only be constructed by
+code already inside this process, so a context built with no arguments describes
+an in-process caller — which is what the `transport = "stdio"` default beside it
+has always said. Defaulting to unknown would have refused every bare
+`handle_request(req)` in the tree (the argv lane's probes, every unit test) and
+broken the A3 promise one stage early. The end-to-end proof is a probe method
+registered onto the real registry over the lane suite's real loopback socket and
+real HMAC handshake, because nothing on the shipped surface echoes its caller.
+
 Add one field to `RpcContext` (`serve_rpc.py:186-215`): a `caller` describing
 what the transport PROVED — for the socket lane, `{kind: "local_console",
 connection_key, transport}`; for stdio, `{kind: "stdio_owner"}`. Built in
@@ -327,6 +378,15 @@ lane's probes) keeps compiling and gets the honest `None`/unknown value.
   handshake, asserting the caller a real authenticated connection produces.
 
 ### Stage A3 — the gate, allowing everything
+
+**LANDED — hermes `dba7ed19b6`.** Built in `handle_request` rather than as a
+wrapper `method()` composes. Same guarantee (it is the single point every frame
+on both transports passes, so a method cannot be registered around it), and it
+leaves the handlers callable directly — which every unit test in this repo does,
+so the gate rewrote no suite. Ordering is asserted: an unknown METHOD answers
+-32601 BEFORE the gate, so a refused caller cannot map the surface by watching
+the error code change. Reads are open to `unknown`, which is a line rather than
+an oversight: nothing on the read side mutates a level.
 
 Compose `requires_tier` into `method()` and evaluate it before dispatch: the
 predicate takes `(tier, context.caller)` and, at this stage, returns allow for
@@ -349,6 +409,15 @@ exercised only by a test that constructs a caller kind nothing yet mints.
   what the launcher's decoders branch on.
 
 ### Stage A4 — reconcile the CLI-handler gate with the chokepoint
+
+**LANDED — hermes `290f6f461b`.** All three sub-decisions, in one commit as the
+plan required. §5's honest bound is DISCHARGED: `re_route` (`:5013`),
+`update_profile` (`:5088`) and `set_model` (`:5258`) were read in full and all
+three follow the identical coordinator pattern, so A4 did not grow. The mirror
+is minted inside `_agent_retire_outcome` — the one retire the CLI performs —
+rather than in the two handlers, so the two doors cannot drift apart a second
+time. Scope held to the three CLI doors onto the two service functions; the
+four non-service coordinator sites keep the (renamed) review and nothing else.
 
 Land the CLI mirror and resolve §1.3/§1.4 out loud. Three sub-decisions, all
 inside one stage because separating them leaves the tree in a state nobody can
@@ -378,7 +447,7 @@ work here belongs to this file — it is named so the seam is visible.
 
 ### Optional Stage A6 — the service-layer backstop
 
-Only if Ruling A picks (a) or (c). Required permission argument on the two
+**NOT BUILT, and not a judgement call.** Only if Ruling A picks (a) or (c). Required permission argument on the two
 service functions, `LOCAL_CONSOLE` sentinel for every existing caller.
 **Test plan:** the churn is `test_agent_create_service.py` (46 tests),
 `test_agent_retire_service.py`, `test_agent_create_reservations.py`,

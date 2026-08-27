@@ -174,3 +174,102 @@ frame (`ready.json`) with the change in, green twice after the refresh. Note:
 the venv at `X:/Eternia/.hermes/venvs/hermes-agent` has no `pytest` installed —
 `C:\Python312\python.exe` is what runs the suite, while the serve-frame
 generator still needs `--python` pointed at the venv interpreter.
+
+---
+
+## 2026-08-27 — the authorization chokepoint, A1–A4
+
+Ruling A option (b) built end to end in one wave: hermes `8d69f8858b` (A1),
+`4d60060dc3` (A2), `dba7ed19b6` (A3), `290f6f461b` (A4); launcher `2cf887b47`
+(the A1 fixture + reader). A5 is the gateway's Stage 1. A6 was NOT built and
+that is not a judgement call — the plan makes it conditional on Ruling A picking
+(a) or (c), and the operator picked (b).
+
+**The survey's central finding held, and the fix is not the one canon 06
+proposed.** All three doors were unenforced on real traffic, including the one
+the canon called gated: `_coordinator_actor_id` recognises only
+`--requested-by coordinator[:id]`, and the two spellings anyone sends are `cli`
+(the CLI's own default) and `launcher` (hardcoded in the launcher's capability
+registry). So the asymmetry was the smaller half. Closing it by giving
+`agent retire` the coordinator gate would have propagated a self-declaration
+protocol to a second door. It was closed instead by minting ONE console identity
+inside `_agent_retire_outcome` — the function whose own docstring already said
+"the ONE retire the CLI performs, whichever verb the operator typed" — so the
+two doors are structurally incapable of drifting apart again.
+
+**The default value was the one real design fork, and the plan's sketch was
+wrong about it.** A2 as written wanted `RpcContext.caller` to default to
+"`None`/unknown", and Ruling A says an unrecognised credential is refused console
+verbs. Composed, those two would have refused every bare `handle_request(req)` in
+the tree — the argv lane's probes and every unit test in the repo — and broken
+A3's own no-behaviour-change promise one stage early. The resolution is that the
+honest default is `stdio_owner`, not unknown: an `RpcCaller` can only be
+constructed by code already inside this process, so a context built with no
+arguments genuinely describes an in-process caller. That is what the
+`transport = "stdio"` default beside it has always said. Refuse-by-default binds
+where credentials arrive from OUTSIDE — `caller_for_connection`, which mints
+`unknown` for any connection that has not passed `verify_hello_proof` — and that
+is the arm Stage A5 grows.
+
+**The gate went in `handle_request`, not in a wrapper `method()` composes.** The
+plan said "compose `requires_tier` into `method()`". Same guarantee either way
+(it is the single point both transports pass through, so no method can be
+registered around it), but a wrapper would also have gated DIRECT handler calls —
+which is what every unit test in this repo does — and landing the gate would then
+have meant rewriting the suites. The tier declaration still rides the decorator;
+only the evaluation moved.
+
+**`@method`'s tier argument is required, with no default.** A default is what
+turns a registration into a hole: default open and a forgotten verb ships
+unguarded, default closed and a forgotten read verb breaks a working client.
+Requiring the word makes a tierless method unrepresentable rather than merely
+untested, and an unknown tier raises at import so a typo is a boot failure with
+a name in it.
+
+**Three test pins had been RED since S5 and nobody noticed.**
+`test_serve_rpc_office_upsert.py`'s two manifest literals and
+`test_serve_rpc_office_subscribe.py`'s `method_names()` list never grew
+`runtime.agent.retire`. Found because A1 had to touch every manifest literal;
+confirmed against a clean HEAD worktree BEFORE claiming it, which also proved
+that the two literals in `test_serve_rpc_office.py` were green at HEAD and were
+moved by this wave alone. Standing lesson, already in the memory index and paid
+again: a hand-written literal beside a live registry rots silently, and the
+registry-driven test is what catches it.
+
+**`prewarm` is the one tier row worth arguing, and it is `read`.** Its own
+contract says it writes no store state, emits no event and mints no id — the same
+sentence that makes `runtime.office.get` a read. It does spend CPU, but spending
+CPU is a rate-limiting question and rate limiting is not a tier: a viewer device
+that may not place an agent may certainly warm the cache its own reads use.
+
+**Cross-repo.** `ready.json` was the one fixture that moved (`hello_ok` is not
+captured), `--check` green twice in a row after the refresh, hermes committed
+clean first so the capture records `hermes_dirty: false`. The launcher gained
+`MissionRuntimeRpcManifest.tiers` as read-and-expose only, and equality includes
+it — the manifest lives in a `ValueNotifier` re-read off every frame carrying an
+`rpc` key, so a runtime that re-declared a tier has to wake its listeners.
+Nothing branches on a tier client-side, deliberately: a manifest says what a call
+WANTS, never what a connection HOLDS, and a client that refused itself on a
+declaration would be inventing a policy the server never stated.
+
+**Run, not inferred.** `C:\Python312\python.exe -m pytest` (the venv still has no
+pytest): the ten serve/RPC suites 270 passed; `test_serve_rpc_authorization.py`
+16 passed; `test_serve_rpc_caller_identity.py` + notification lane 17 passed;
+tier/agent-verb suites 111 passed; the `tests/hermes_cli` keyword sweep
+(`persona or coordinator or agent or serve or retire or create`) 576 passed / 20
+skipped. Launcher: fixture gate + agent-create lane + install identity + greeting
+race + prewarm, 97 passed; `mission_office_rpc_test.dart` 43 passed;
+`flutter analyze` clean on both touched files.
+
+**Honest gaps.** (1) No live serve was driven by hand — every proof is a test,
+including the socket ones, which do run the real `serve_loop` on a real loopback
+socket with the real HMAC. (2) The CLI mirror's refusal arm is exercised only by
+patching `_console_denial`; the predicate cannot refuse `CLI_CONSOLE` by any
+input, which is the design, so there is no unpatched way to see that arm until a
+non-console CLI identity exists. (3) The mirror is on the three CLI doors onto
+the two service functions, not on `persona instance close` / `open_chat` /
+`re_route` / `update_profile` / `set_model` — those are not chokepoint doors and
+keep the renamed coordinator review alone. (4) `_coordinator_scope_from_args`
+still lets four argv flags widen a coordinator's self-declared budget. That is
+`coordinator_permissions`' MODEL, explicitly out of scope per plan §4, and it is
+now labelled rather than fixed.
