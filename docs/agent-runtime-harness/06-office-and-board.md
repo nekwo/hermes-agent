@@ -774,9 +774,20 @@ omit it — the office's revision guard lives on the RPC lane only.
     the next agent placed from that persona. They do not: the panel writes
     `--skill` to the INSTANCE (`persona.instance.update_profile` →
     `skill_overrides`), while a new placement inherits `persona.skills` — the
-    template — read LIVE. Nothing writes `persona.skills`: it comes from config
-    (`personas.py` / `config.py` overrides) and there is no operator verb and no
-    launcher capability for it. "Out of scope" was the wrong call.
+    template — read LIVE (`models.py::apply_instance_model_overrides`). **No
+    operator verb and no launcher capability writes `persona.skills`.**
+    "Out of scope" was the wrong call.
+    - CORRECTED 2026-08-27: an earlier spelling of this row said template skills
+      "come from config". They do not, for any persona in live use.
+      `config.ensure_persisted_personas` merges `{**catalog, **stored}` — the
+      STORE row wins wholesale — and every live persona is a store row with
+      populated `skills`, so the config `skills` / `skills_remove` merge is dead
+      for them. The write target is the store row, which is what
+      `harness persona set-model` already does for a different field.
+      Plan: [planned/persona-template-skills.md](planned/persona-template-skills.md). Staged
+    design (with two corrections to this row's storage claim — the live
+    personas are store rows, and the store shadows config):
+    [planned/persona-template-skills.md](planned/persona-template-skills.md).
   - **Owner decisions still standing on their defaults**, none blocking: D10(iv) `console`
     scope for both methods is no longer prose — it is declared on `rpc.tiers`
     and evaluated at the front door (A1/A3 above); WHICH tiers exist beyond
