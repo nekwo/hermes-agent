@@ -1203,42 +1203,113 @@ class OfficeStore:
 
     # --- prune lane (plan §4.3) --------------------------------------------
 
+    def _instance_bound_actor(self, actor, canonical: str) -> bool:
+        """Is *actor* the placement of the instance whose canonical id is given?
+
+        The ONE spelling of "bound to this instance", asked by both the prune
+        below and the archived-side read beside it. Persona-id-keyed actors
+        answer ``False`` by construction (they carry no ``persona_instance_id``)
+        and survive instance churn by design.
+        """
+
+        from .persona_assignments import canonical_persona_instance_id
+
+        bound = actor.persona_instance_id
+        if not bound:
+            return False
+        return (
+            canonical_persona_instance_id(bound, persona_id=actor.persona_id) or bound
+        ) == canonical
+
     def archive_actors_for_instance(self, persona_instance_id: str, *, reason: str = "instance_reaped") -> dict:
         """Hermes prune-lane hook: archive every active placement bound to a
         reaped persona instance so no phantom desk file re-materializes the
         agent (NEVER a launcher-side filter — the orphan-tombstone precedent).
         Persona-id-keyed placements survive instance churn by design.
 
-        Returns ``{"archived": N, "failed": M}`` rather than a bare int. The
-        per-actor swallow KEEPS the loop — a prune must not die on one bad file,
-        and the retirement it serves is authoritative with or without the office
-        projection — but a bare ``0`` meant two opposite things: nothing matched,
-        and three matches all failed. The dict is the same shape
-        ``archive_orphaned_surface`` beside it already returns.
+        Returns ``{"archived": N, "failed": M, "archived_actor_keys": [...],
+        "failures": [{actor_key, workspace_id, error}]}``.
+
+        The per-actor swallow KEEPS the loop — a prune must not die on one bad
+        file, and the retirement it serves is authoritative with or without the
+        office projection — but for a long time it swallowed the IDENTITIES too:
+        a bare ``0`` meant two opposite things (nothing matched, and three
+        matches all failed), and the counts that replaced it still could not
+        answer *which* desk is still on the canvas after a retire said it was
+        gone. Placement plan D7 makes that half VISIBLE at this ONE chokepoint,
+        because a caller that re-derived the list would be a second,
+        disagreeing answer to a question this loop already knows: the keys it
+        archived, and the failures it survived, leave WITH the counts.
+
+        The counts stay, and are the lists' lengths by construction; every
+        existing caller keeps reading exactly the two keys it read before.
         """
 
         target = str(persona_instance_id or "").strip()
         if not target:
-            return {"archived": 0, "failed": 0}
+            return {"archived": 0, "failed": 0, "archived_actor_keys": [], "failures": []}
         from .persona_assignments import canonical_persona_instance_id
 
         canonical = canonical_persona_instance_id(target) or target
-        archived = 0
-        failed = 0
+        archived_keys: list[str] = []
+        failures: list[dict] = []
         for wsid in self.list_workspaces():
             for actor in self.list_actors(wsid):
-                bound = actor.persona_instance_id
-                if not bound:
-                    continue
-                if (canonical_persona_instance_id(bound, persona_id=actor.persona_id) or bound) != canonical:
+                if not self._instance_bound_actor(actor, canonical):
                     continue
                 try:
                     self.remove_actor(wsid, actor.actor_key, reason=reason, updated_by="harness")
-                    archived += 1
-                except Exception:
-                    failed += 1
+                except Exception as exc:  # noqa: BLE001 — the loop survives one bad file
+                    failures.append(
+                        {
+                            "actor_key": actor.actor_key,
+                            "workspace_id": wsid,
+                            # Class + message, never the traceback: this string
+                            # rides an operator ack and a launcher decode.
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                    )
                     continue
-        return {"archived": archived, "failed": failed}
+                archived_keys.append(actor.actor_key)
+        return {
+            "archived": len(archived_keys),
+            "failed": len(failures),
+            "archived_actor_keys": archived_keys,
+            "failures": failures,
+        }
+
+    def archived_actor_keys_for_instance(self, persona_instance_id: str) -> list[str]:
+        """Which ARCHIVED actors are bound to this instance — the replay's evidence.
+
+        Read-only, and the reason it exists is idempotence: ``agent retire``
+        answers a second call for an already-archived instance with the same ack
+        rather than ``not_found`` (plan D11), and "the same ack" has to include
+        the actor keys the FIRST call archived. The prune above cannot supply
+        them a second time — it archived them, so they are no longer live for it
+        to find — and a caller that reconstructed the list from a scene snapshot
+        would be re-deriving a store fact from a render. This asks the archive.
+
+        Never raises for a storage fault: an unreadable archive dir is counted
+        and logged by ``_read_actor_dir`` and answers with the rows it COULD
+        read, which is the same posture the retirement tombstone probe takes.
+        """
+
+        target = str(persona_instance_id or "").strip()
+        if not target:
+            return []
+        from .persona_assignments import canonical_persona_instance_id
+
+        canonical = canonical_persona_instance_id(target) or target
+        keys: list[str] = []
+        for wsid in self.list_workspaces():
+            live = {actor.actor_key for actor in self.list_actors(wsid)}
+            for actor in self.list_actors(wsid, include_archived=True):
+                if actor.actor_key in live:
+                    continue
+                if not self._instance_bound_actor(actor, canonical):
+                    continue
+                keys.append(actor.actor_key)
+        return keys
 
     # --- internal helpers ---------------------------------------------------
 

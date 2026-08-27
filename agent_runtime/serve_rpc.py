@@ -2049,6 +2049,66 @@ def _runtime_agent_create(
     return ok(rid, outcome.result)
 
 
+# ── runtime.agent.retire ─────────────────────────────────────────────────────
+
+
+@method("runtime.agent.retire")
+def _runtime_agent_retire(
+    rid: Any, params: dict, context: RpcContext | None = None
+) -> dict:
+    """ONE call retires an agent: the roster row AND every actor bound to it.
+
+    Params: ``persona_instance_id`` (required); ``reason``, ``requested_by``
+    (optional).
+
+    Result::
+
+        {persona_instance_id, persona_id, display_name, mode, reason,
+         requested_by, archive_path, archive_dir, archived_actor_keys: [...],
+         office_archive_failures: [{actor_key, workspace_id, error}],
+         already_retired}
+
+    The INVERSE of ``runtime.agent.create``, and the join its absence left
+    unmade: the launcher removed a deliberate placement through two unjoined
+    lanes (a ``persona.instance.retire`` argv capability AND
+    ``runtime.office.remove``), so a half-state — actor archived with the row
+    still live, or the reverse — was representable and nothing detected it. One
+    call now archives both halves, and ``archived_actor_keys`` /
+    ``office_archive_failures`` make the office half — best-effort inside the
+    store, and until plan D7 also SILENT — visible on the ack.
+
+    Idempotent under retry: a second retire of an archived id answers the same
+    ack with ``already_retired: true`` rather than ``not_found``, because a
+    remote client that lost the first ack must be able to ask again.
+
+    Refusals are ``PersonaInstanceRetireError``'s codes one-to-one:
+    ``not_found`` → ``ERR_NOT_FOUND``; ``canonical_persona_channel`` /
+    ``instance_active`` / ``assignment_active`` / ``assignments_unknowable`` →
+    ``ERR_CONFLICT`` with ``data.reason`` carrying the code verbatim.
+
+    **Authorization scope (placement plan §A.11, owner decision D10-iv):
+    ``console``.** It mutates the level exactly as ``runtime.office.*`` does, and
+    it is deliberately NOT on any peer-tier allowlist — an agent on install A
+    never retires an agent on install B; a remote OPERATOR (device tier) does.
+
+    A TRANSLATION SHIM and nothing else, exactly like ``_runtime_agent_create``:
+    the sequence lives in ``agent_retire.perform_agent_retire``, which is the
+    same function ``harness agent retire`` and ``harness persona instance
+    retire`` call with no serve in the picture. Adding this name to the manifest
+    GROWS the set without moving ``RPC_CONTRACT_VERSION`` — a manifest is a set
+    plus an integer, and the integer moves only when an existing method's shape
+    changes incompatibly.
+    """
+
+    from agent_runtime.agent_retire import perform_agent_retire
+
+    outcome = perform_agent_retire(params)
+    if outcome.refusal is not None:
+        refusal = outcome.refusal
+        return err(rid, refusal.code, refusal.message, refusal.data)
+    return ok(rid, outcome.result)
+
+
 # ── runtime.persona.prewarm ──────────────────────────────────────────────────
 
 

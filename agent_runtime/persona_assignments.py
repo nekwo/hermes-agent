@@ -1481,19 +1481,51 @@ class PersonaInstanceStore:
                 return candidate
         return None
 
-    def _archive_office_placements(self, instance: PersonaInstance) -> None:
-        """Archive office actors when a live placement is retired."""
+    def _archive_office_placements(self, instance: PersonaInstance) -> dict[str, Any]:
+        """Archive office actors when a live placement is retired, and SAY what happened.
+
+        The office half stays best-effort — placement retirement is
+        authoritative with or without the office projection, and a retire that
+        raised because a desk file was locked would leave the operator unable to
+        retire at all — but "best-effort" used to also mean "unsaid": this method
+        returned ``None`` and swallowed every fault, so the two-lane removal the
+        launcher performs (retire the row, remove the actor) had no receipt
+        joining its halves and a half-state (row archived, desk still on the
+        canvas) was invisible to everyone including the caller that caused it.
+        Placement plan D7: the outcome LEAVES, and :meth:`retire` puts it on the
+        ack.
+
+        Shape is the store's own (``archived``, ``failed``, ``archived_actor_keys``,
+        ``failures``). A fault in the projection ITSELF — the import, the store
+        construction, the workspace listing — is not one actor's, so it is
+        reported with ``actor_key: None``: naming an actor there would be a
+        guess, and the whole point of this return value is that it stops
+        guessing.
+        """
+
         try:
             from .office_store import OfficeStore
 
-            OfficeStore(event_log=self.event_log).archive_actors_for_instance(
+            return OfficeStore(event_log=self.event_log).archive_actors_for_instance(
                 instance.id,
                 reason="instance_reaped",
             )
-        except Exception:
-            # Placement retirement remains authoritative even if the optional
-            # office projection is unavailable.
-            pass
+        except Exception as exc:  # noqa: BLE001 - the retire is authoritative regardless
+            logging.getLogger(__name__).warning(
+                "office placement archive failed for %s", instance.id, exc_info=True
+            )
+            return {
+                "archived": 0,
+                "failed": 1,
+                "archived_actor_keys": [],
+                "failures": [
+                    {
+                        "actor_key": None,
+                        "workspace_id": instance.workspace_id,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                ],
+            }
 
     def retire(
         self,
@@ -1514,6 +1546,16 @@ class PersonaInstanceStore:
         simply stops listing the row because ``list_all`` only globs the live
         dir, so every instance-fed surface (snapshot, roster, chat history,
         flow node dropdown) drops it on the next frame.
+
+        The returned dict carries the OFFICE half beside the row's own fields:
+        ``archived_actor_keys`` (every actor this retire took off the level) and
+        ``office_archive_failures`` (every one it could not, with its error).
+        Both are ADDITIVE and neither is authoritative over the row archive —
+        the office projection may be unavailable and the retirement still
+        stands — but they are no longer DISCARDED, which is what let a
+        half-state (row archived, desk still on the canvas) exist with nothing
+        able to detect it. ``agent_retire.perform_agent_retire`` is the service
+        that puts them on an operator ack (placement plan D7).
 
         Refuses with a typed :class:`PersonaInstanceRetireError` (never a silent
         no-op) when the row is the canonical persona/profile channel
@@ -1613,7 +1655,7 @@ class PersonaInstanceStore:
         # Prune-lane hook (mirrors close_for_task / the janitor): a retired
         # instance must not leave a phantom office desk. Best-effort; office
         # archival never fails the retire.
-        self._archive_office_placements(instance)
+        office = self._archive_office_placements(instance)
         return {
             "persona_instance_id": instance.id,
             "persona_id": instance.persona_id,
@@ -1623,6 +1665,13 @@ class PersonaInstanceStore:
             "requested_by": normalized_requested_by,
             "archive_path": str(archived_path),
             "archive_dir": str(archive_dir),
+            # The office half, ADDITIVE and never authoritative over the row
+            # archive above it: which actors this retire took off the canvas, and
+            # which it could not. Empty failures is the claim "every bound actor
+            # archived" — a claim this method could not make while the prune's
+            # outcome was discarded (plan D7).
+            "archived_actor_keys": list(office.get("archived_actor_keys") or []),
+            "office_archive_failures": list(office.get("failures") or []),
         }
 
     def _scan_active_assignments_for_instance(self, instance_id: str) -> ActiveAssignmentScan:

@@ -1525,15 +1525,17 @@ def test_the_two_new_ack_keys_move_neither_the_contract_nor_the_method_list(
 
     ``runtime.agent.retire`` is named on purpose: D12 makes its PRESENCE the
     launcher's marker for "this serve accepts an absent position", so a serve
-    advertising it before S5 lands would strand every client that trusted the
-    marker. It is not here yet, and this says so.
+    advertising it before the optional position lands would strand every client
+    that trusted the marker. S5 landed it on top of S2 — the safe order — so it
+    IS here now, and the assertion below is the ordering claim, not a roll call:
+    the marker may be present because the optional position already is.
     """
 
     manifest = serve_rpc.manifest()
     assert serve_rpc.RPC_CONTRACT_VERSION == 1
     assert manifest["contract"] == 1
     assert "runtime.agent.create" in manifest["methods"]
-    assert "runtime.agent.retire" not in manifest["methods"]
+    assert "runtime.agent.retire" in manifest["methods"]
 
 
 def test_a_malformed_position_on_the_wire_still_refuses_and_writes_nothing(

@@ -57,9 +57,9 @@ forever.
 A durable service outlives the install it was started from, so "what does the
 thing I am attached to carry" must be answerable at any time. Two manifests ride
 `ready` (stdio), `hello_ok` (socket), and the re-askable `version` reply:
-`"rpc"` from `serve_rpc.manifest()` (`agent_runtime/serve_rpc.py:255`) — nine
-methods registered via `@method` today (`:455, 592, 920, 981, 1268, 1483, 1661,
-1960, 2009`) — and `"ops"` from `ops_manifest(transport=…)` (`serve.py:298`),
+`"rpc"` from `serve_rpc.manifest()` (`agent_runtime/serve_rpc.py:255`) — ten
+methods registered via `@method` today (`:455, 578, 906, 967, 1300, 1515, 1693,
+1992, 2055, 2115`) — and `"ops"` from `ops_manifest(transport=…)` (`serve.py:298`),
 `{"contract", "transport", "ops", "subscribe_lanes"}`.
 
 Both follow one discipline: **a set plus an integer.** The set grows when a verb
@@ -373,7 +373,7 @@ authority, so in-process tool relay, CLI and serve transport get the same depth
   `runtime.agent.create` carry the token, the remaining argv capability lanes do
   not, and the one-grep acceptance was never scripted
   ([planned/correlation-id-coverage.md](planned/correlation-id-coverage.md)).
-- **`serve.py:105` says the RPC registry holds "currently eight" methods; nine
+- **`serve.py:105` says the RPC registry holds "currently eight" methods; ten
   are registered.** That same docstring warns "a docstring that copies a
   register starts lying the first time the register moves" — it has.
 - **Two module docstrings cite doc paths that moved into `archive/`** —

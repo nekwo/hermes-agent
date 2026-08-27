@@ -671,7 +671,14 @@ def test_archive_actors_for_instance_archives_only_instance_bound():
     store.upsert_actor(ws, _actor_payload("dev"))  # persona-keyed: survives
     store.upsert_actor(ws, _actor_payload("qa", persona_instance_id="personainst_goal9_qa"))
     result = store.archive_actors_for_instance("persona_personainst_goal9_qa")
-    assert result == {"archived": 1, "failed": 0}
+    # The IDENTITIES leave with the counts (plan D7): ``agent retire``'s ack
+    # names every actor it took off the level, and a count cannot be named.
+    assert result == {
+        "archived": 1,
+        "failed": 0,
+        "archived_actor_keys": ["personainst_goal9_qa"],
+        "failures": [],
+    }
     assert store.actor_exists(ws, "dev")
     assert not store.actor_exists(ws, "personainst_goal9_qa")
     surface = store.get_surface(ws)
@@ -705,7 +712,19 @@ def test_a_prune_that_could_not_archive_its_match_says_so_instead_of_zero(monkey
 
     result = store.archive_actors_for_instance("persona_personainst_goal9_qa")
 
-    assert result == {"archived": 0, "failed": 1}
+    assert result["archived"] == 0
+    assert result["failed"] == 1
+    assert result["archived_actor_keys"] == []
+    # And WHICH actor, and WHY — the half `agent retire` puts on its ack as
+    # ``office_archive_failures``. A count answers "something is still on the
+    # canvas"; only the key answers "that one is".
+    assert result["failures"] == [
+        {
+            "actor_key": "personainst_goal9_qa",
+            "workspace_id": ws,
+            "error": "OSError: share violation",
+        }
+    ]
     # The loop survived the failure rather than propagating it, so the placement
     # is still there for an operator to prune again.
     assert store.actor_exists(ws, "personainst_goal9_qa")

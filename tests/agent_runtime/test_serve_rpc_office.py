@@ -528,6 +528,7 @@ def test_the_envelope_itself_is_validated_with_upstreams_codes():
     # The refusal names what DOES exist — the manifest a client may have missed.
     assert unknown["error"]["data"]["methods"] == [
         "runtime.agent.create",
+        "runtime.agent.retire",
         "runtime.office.get",
         "runtime.office.remove",
         "runtime.office.resolve_conflict",
@@ -675,6 +676,9 @@ def test_stdio_learns_the_method_set_from_ready_and_can_re_ask_version():
         "contract": 1,
         "methods": [
             "runtime.agent.create",
+            # S5's inverse. It joined the SET; the integer beside it did not
+            # move, which is the whole discipline this frame advertises.
+            "runtime.agent.retire",
             "runtime.office.get",
             "runtime.office.remove",
             "runtime.office.resolve_conflict",
@@ -724,6 +728,7 @@ def test_the_method_surface_is_transport_agnostic_and_answers_on_the_socket():
                 "contract": 1,
                 "methods": [
                     "runtime.agent.create",
+                    "runtime.agent.retire",
                     "runtime.office.get",
                     "runtime.office.remove",
                     "runtime.office.resolve_conflict",

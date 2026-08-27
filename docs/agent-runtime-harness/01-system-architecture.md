@@ -113,6 +113,20 @@ policy read sits relative to `office_lock`, and the one-slot race it leaves, is
 stated at `resolve_placement_position` and in
 [06 — The office surface](06-office-and-board.md#the-placement-verb--where-an-unaimed-create-lands-and-what-it-hands-back).
 
+**And ONE call takes it all away again.** `perform_agent_retire`
+(`agent_runtime/agent_retire.py`) is the inverse, over the store method that
+always did both halves (`PersonaInstanceStore.retire` archives the row AND, through
+`OfficeStore.archive_actors_for_instance`, every actor bound to the instance).
+What it adds is a DOOR (`runtime.agent.retire`, `harness agent retire`, and
+`persona instance retire` delegating to the same function) and a RECEIPT: the ack
+NAMES every actor it archived (`archived_actor_keys`) beside every one it could
+not (`office_archive_failures`). The office half is still best-effort — the roster
+archive is authoritative with or without the office projection — but it is no
+longer SILENT, which is what let a half-state (row archived, desk still on the
+canvas) exist with nothing able to detect it. Retiring an already-archived id
+replays the same ack with `already_retired: true` rather than refusing, so a
+client that lost the ack can ask again.
+
 **"Placed" is the JOIN, and neither store is folded into the other** (placement
 plan D1). Entity 2 answers *does this agent exist* — `persona instance create
 --add-instance` is the roster-only recovery door and mints rows with no

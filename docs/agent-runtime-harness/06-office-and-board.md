@@ -12,17 +12,25 @@ and appears nowhere on this surface.
 
 ---
 
-## The write verbs — four gestures, one RPC lane
+## The write verbs — the level's mutations, one RPC lane
 
-Every office mutation is one of four verbs, and all four are registered JSON-RPC
-methods on the serve child today (`agent_runtime/serve_rpc.py`, `@method(...)`):
+Every office mutation is one of these verbs, and all of them are registered
+JSON-RPC methods on the serve child today (`agent_runtime/serve_rpc.py`,
+`@method(...)`):
 
 | Gesture | Method | Handler | Ack |
 |---|---|---|---|
-| place / move | `runtime.office.upsert` | `_runtime_office_upsert` (`serve_rpc.py:981`) | `{actor_key, revision}` |
-| delete | `runtime.office.remove` | `_runtime_office_remove` (`serve_rpc.py:1268`) | `{actor_key, revision, state}` |
-| folder taxonomy | `runtime.office.surface.update` | `_runtime_office_surface_update` (`serve_rpc.py:1483`) | `{workspace_id, folders, revision}` |
-| realm-sync resolve | `runtime.office.resolve_conflict` | `_runtime_office_resolve_conflict` (`serve_rpc.py:1661`) | `{actor_key, take, state, revision?}` |
+| place / move | `runtime.office.upsert` | `_runtime_office_upsert` (`serve_rpc.py:967`) | `{actor_key, revision}` |
+| delete | `runtime.office.remove` | `_runtime_office_remove` (`serve_rpc.py:1300`) | `{actor_key, revision, state}` |
+| folder taxonomy | `runtime.office.surface.update` | `_runtime_office_surface_update` (`serve_rpc.py:1515`) | `{workspace_id, folders, revision}` |
+| realm-sync resolve | `runtime.office.resolve_conflict` | `_runtime_office_resolve_conflict` (`serve_rpc.py:1693`) | `{actor_key, take, state, revision?}` |
+| place an AGENT (roster row + chat root + actor) | `runtime.agent.create` | `_runtime_agent_create` (`serve_rpc.py:1992`) | `{persona_instance_id, actor_key, revision, position, actor, phases, …}` |
+| retire an agent (row + every actor bound to it) | `runtime.agent.retire` | `_runtime_agent_retire` (`serve_rpc.py:2055`) | `{persona_instance_id, archive_path, archived_actor_keys, office_archive_failures, already_retired, …}` |
+
+The last two are the only ones whose write crosses BOTH stores — the roster and
+the office — and they are each other's inverse. The four above them are office-only
+and remain the verbs for what a placement verb cannot reach: an authored desk, a
+class-keyed actor, a folder taxonomy, a realm-sync sidecar.
 
 Three ack shapes are load-bearing and the handler docstrings say why. The remove
 returns the **post**-archive revision, because `_archive_actor_locked` bumps on
@@ -199,6 +207,54 @@ key, position and revision and adopts the server's.
 `RPC_CONTRACT_VERSION` does not move and no name joins the manifest's `methods`
 list; an old client ignores both keys, and an old serve still works for a client
 that always sends a position.
+
+### The inverse — one call takes an agent off the level, and says what left
+
+`runtime.agent.retire` / `harness agent retire <persona_instance_id>` are two
+doors onto `agent_retire.perform_agent_retire`, and `harness persona instance
+retire` is a third onto the SAME function (its own envelope preserved, its ack
+now identical). All of them wrap `PersonaInstanceStore.retire`, which has always
+archived both halves: the roster row into `persona_instances_archive/<ts>_retire/`,
+and every office actor bound to the instance through
+`OfficeStore.archive_actors_for_instance`.
+
+**What S5 added is not the archive — it is the door and the receipt.** Before it,
+the launcher removed a deliberate placement through two unjoined lanes (a
+`persona.instance.retire` argv capability AND a `runtime.office.remove`), so a
+half-state — actor archived with the row still live, or the reverse — was
+representable and nothing detected it. And the office half was best-effort AND
+silent: its outcome was discarded inside `_archive_office_placements`, so "the
+desk is still on the canvas after the retire said it was gone" was a fact no
+caller could be told.
+
+Now the store's prune returns per-actor outcomes and the ack carries them:
+`archived_actor_keys` names every actor that left, `office_archive_failures`
+names every one that did not (`{actor_key, workspace_id, error}`; a fault in the
+office projection ITSELF carries `actor_key: null`, because it is not one actor's).
+An EMPTY failures list is the positive claim that every bound actor is off the
+level. The roster archive stays authoritative either way — a locked desk file
+must never make a placement un-retirable — so a failure is a report, never a
+refusal.
+
+**Refusals are `PersonaInstanceRetireError`'s codes one-to-one**: `not_found` →
+`ERR_NOT_FOUND` (4001); `canonical_persona_channel` / `instance_active` /
+`assignment_active` / `assignments_unknowable` → `ERR_CONFLICT` (4090) with
+`data.reason` carrying the code verbatim, because the launcher decodes
+`data.reason` first and the numeric code second.
+
+**Retiring the same id twice is an ANSWER, not an error.** The second call
+replays the ack with `already_retired: true` — the same `archive_path`, and the
+same `archived_actor_keys`, re-read from the office archive rather than
+reconstructed — because a remote client that lost the first ack must be able to
+ask again. An id that never existed still refuses `not_found`: the replay reads a
+TOMBSTONE, and absence alone is not one.
+
+Authorization (placement plan §A.11): **`console` scope**, like `runtime.office.*`,
+and deliberately NOT on any peer-tier allowlist — an agent on one install never
+retires an agent on another; a remote OPERATOR does. Adding the name grew the
+manifest's method SET without moving `RPC_CONTRACT_VERSION`, and that presence is
+also the launcher's D12 rollout marker for "this serve accepts an absent
+`position`".
 
 ## The fold model — what a fold is, and who promotes a batch
 

@@ -553,6 +553,87 @@ def _cmd_agent_create(args) -> int:
     return 0
 
 
+#: Same family map ``agent create`` uses, over the codes ``agent_retire``
+#: answers in. Not re-derived at the call site: an exit code guessed beside a
+#: print statement is the second taxonomy this file already retired once.
+_AGENT_RETIRE_EXIT_CODES = {-32602: 2, 4001: 3, 4090: 4}
+
+
+def _agent_retire_outcome(args):
+    """The ONE retire the CLI performs, whichever verb the operator typed.
+
+    ``harness agent retire <id>`` and ``harness persona instance retire <id>``
+    are two doors onto ``agent_retire.perform_agent_retire`` — the same function
+    ``runtime.agent.retire`` answers with — so a lane switch is not a behaviour
+    change and the ack is IDENTICAL down to the key order. The two handlers
+    below differ only in their envelope, which is the operator surface each has
+    always had, and in the coordinator gate, which is `persona instance`'s.
+    """
+
+    from agent_runtime.agent_retire import perform_agent_retire
+
+    return perform_agent_retire(
+        {
+            "persona_instance_id": getattr(args, "persona_instance_id", None),
+            "reason": getattr(args, "reason", None),
+            "requested_by": getattr(args, "requested_by", None),
+        }
+    )
+
+
+def _cmd_agent_retire(args) -> int:
+    """`harness agent retire` — one call takes an agent off the level.
+
+    The inverse of `harness agent create`, and its exact twin in shape: it calls
+    ``agent_retire.perform_agent_retire``, which is the SAME function
+    ``runtime.agent.retire`` answers with, so every RESULT field a script reads
+    here is the field it would read off the wire — ``archived_actor_keys`` and
+    ``office_archive_failures`` included, which is what lets a script learn
+    whether the desk actually left the canvas instead of assuming it did.
+
+    Works with no ``harness serve`` running: every lock in the path is a
+    cross-process FILE lock.
+
+    A second retire of the same id is NOT an error — it answers the same ack
+    with ``already_retired: true``, so a script that lost its first ack (or a
+    cron that runs twice) is idempotent by construction.
+    """
+
+    outcome = _agent_retire_outcome(args)
+
+    if outcome.refusal is not None:
+        refusal = outcome.refusal
+        # Root-observability for the same reason the create carries it: a
+        # ``not_found`` answered out of the WRONG runtime root refuses just as
+        # plausibly as one answered out of the right one.
+        data = attach_root_observability({
+            "ok": False,
+            "error": refusal.message,
+            **refusal.data,
+            "next_expected": (
+                "a refused retire archived nothing; fix the named condition "
+                "(or retire the placement it names) and re-run"
+            ),
+        })
+        print(emit_json(data) if args.json else data["error"])
+        return _AGENT_RETIRE_EXIT_CODES.get(refusal.code, 1)
+
+    result = outcome.result
+    data = attach_root_observability({"ok": True, **result})
+    if args.json:
+        print(emit_json(data))
+    else:
+        keys = ", ".join(result["archived_actor_keys"]) or "no actors"
+        failures = result["office_archive_failures"]
+        suffix = f" ({len(failures)} office archive failure(s))" if failures else ""
+        replay = " (already retired)" if result.get("already_retired") else ""
+        print(
+            f"retired {result['persona_instance_id']} -> {result['archive_path']}; "
+            f"archived {keys}{suffix}{replay}"
+        )
+    return 0
+
+
 def _cmd_persona_instance_create(args) -> int:
     # Function-local: this file is exec'd into harness.py's globals, so a
     # module-level import here would need a matching harness.py import or it
@@ -4758,23 +4839,29 @@ def _cmd_persona_instance_retire(args) -> int:
             data = _coordinator_confirm_payload("persona.instance.retire", coordinator_id, auth)
             print(emit_json(data) if args.json else data["status"])
             return 2
-    try:
-        result = store.retire(
-            args.persona_instance_id,
-            reason=args.reason,
-            requested_by=args.requested_by,
-        )
-    except PersonaInstanceRetireError as exc:
+    # DELEGATES to the shared service (plan S5/D7) rather than calling the store
+    # itself: the ack this verb prints and the one `harness agent retire` and
+    # `runtime.agent.retire` print are now the same object built by the same
+    # function, so ``archived_actor_keys`` / ``office_archive_failures`` /
+    # ``already_retired`` arrive here too and a scripted operator does not have
+    # to know which door they typed. The ENVELOPE below is unchanged — this
+    # verb's `persona_instance_retired` key and its `code`-spelled refusal are
+    # its operator surface, and the refusal is rendered from the service's typed
+    # data rather than from a second `except` over the same store guard.
+    outcome = _agent_retire_outcome(args)
+    if outcome.refusal is not None:
+        refusal = outcome.refusal
+        reason = refusal.data.get("reason")
         data = {
             "ok": False,
-            "error": exc.code,
-            "code": exc.code,
-            "message": exc.message,
-            "persona_instance_id": exc.persona_instance_id,
-            **exc.detail,
+            "error": reason,
+            "code": reason,
+            "message": refusal.message,
+            **{k: v for k, v in refusal.data.items() if k != "reason"},
         }
-        print(emit_json(data) if args.json else f"{exc.code}: {exc.message}")
+        print(emit_json(data) if args.json else f"{reason}: {refusal.message}")
         return 2
+    result = outcome.result
     data = {"ok": True, "persona_instance_retired": result}
     if args.json:
         print(emit_json(data))

@@ -1368,6 +1368,21 @@ def build_parser(parent_subparsers) -> None:
     agent_create.add_argument("--json", action="store_true")
     agent_create.set_defaults(func=_cmd_agent_create)
 
+    # S5: the INVERSE of the create above, and the door that never existed. The
+    # store method has always archived BOTH halves (roster row + every office
+    # actor bound to the instance); what was missing was a verb over it and an
+    # ack that NAMES what it archived. `persona instance retire` stays and calls
+    # the very same service function, so the two doors cannot drift.
+    agent_retire = agent_subs.add_parser(
+        "retire",
+        help="Retire a placed agent: archive its roster row AND every office actor bound to it in ONE call",
+    )
+    agent_retire.add_argument("persona_instance_id", help="Persona-instance id of the placement to retire")
+    agent_retire.add_argument("--reason", default="placement removed")
+    agent_retire.add_argument("--requested-by", dest="requested_by", default="cli")
+    agent_retire.add_argument("--json", action="store_true")
+    agent_retire.set_defaults(func=_cmd_agent_retire)
+
     agent_set_profile = agent_subs.add_parser(
         "set-profile",
         help="Rebind an agent to a different Hermes profile (the ONE door; cascades every instance projection)",
