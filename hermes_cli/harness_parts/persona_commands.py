@@ -5656,19 +5656,24 @@ def _cmd_persona_set_skills(args) -> int:
     except ValueError:
         persona = None
     if persona is None:
-        data = {"ok": False, "error_code": "persona_not_found", "error": f"unknown persona: {safe_assignment_token(raw_id)}"}
+        # Root-observability on the REFUSAL, for the reason the create and retire
+        # verbs carry it: a `persona_not_found` answered out of the WRONG runtime
+        # root refuses exactly as plausibly as one out of the right one — and this
+        # verb writes the template every later placement inherits.
+        data = attach_root_observability({"ok": False, "error_code": "persona_not_found", "error": f"unknown persona: {safe_assignment_token(raw_id)}"})
         print(emit_json(data) if args.json else data["error"])
         return 2
     persona_id = str(getattr(persona, "id", "") or raw_id)
     try:
         request = _validated_set_skills_request(args)
     except _SetModelRequestError as exc:
-        data = _set_skills_error_payload(exc.error_code, str(exc), persona_id=persona_id)
+        data = attach_root_observability(_set_skills_error_payload(exc.error_code, str(exc), persona_id=persona_id))
         print(emit_json(data) if args.json else data["error"])
         return 2
     store = AgentStore()
     target, refusal = _template_write_store_target(store, persona_id, what="persona default skills")
     if target is None:
+        refusal = attach_root_observability(refusal)
         print(emit_json(refusal) if args.json else refusal["error"])
         return 2
     status = "applied"
@@ -5689,7 +5694,7 @@ def _cmd_persona_set_skills(args) -> int:
             target.skills_override_issued_at = issued_at or datetime.now(timezone.utc)
             store.save(target)
     stored_skills = list(target.skills or [])
-    data = {
+    data = attach_root_observability({
         "ok": True,
         "status": status,
         "applied": status == "applied",
@@ -5706,7 +5711,7 @@ def _cmd_persona_set_skills(args) -> int:
             if status == "superseded"
             else "refresh Harness snapshot; instances whose skill_overrides is null follow this set live on their next resolution, and instances carrying their own overrides keep them"
         ),
-    }
+    })
     print(emit_json(data) if args.json else f"{status}: {target.id} skills={','.join(stored_skills) or '(none)'}")
     return 0
 
