@@ -18,14 +18,23 @@ Every office mutation is one of these verbs, and all of them are registered
 JSON-RPC methods on the serve child today (`agent_runtime/serve_rpc.py`,
 `@method(...)`):
 
-| Gesture | Method | Handler | Ack |
+| Gesture | Method | Handler (all in `agent_runtime/serve_rpc.py`) | Ack |
 |---|---|---|---|
-| place / move | `runtime.office.upsert` | `_runtime_office_upsert` (`serve_rpc.py:967`) | `{actor_key, revision}` |
-| delete | `runtime.office.remove` | `_runtime_office_remove` (`serve_rpc.py:1300`) | `{actor_key, revision, state}` |
-| folder taxonomy | `runtime.office.surface.update` | `_runtime_office_surface_update` (`serve_rpc.py:1515`) | `{workspace_id, folders, revision}` |
-| realm-sync resolve | `runtime.office.resolve_conflict` | `_runtime_office_resolve_conflict` (`serve_rpc.py:1693`) | `{actor_key, take, state, revision?}` |
-| place an AGENT (roster row + chat root + actor) | `runtime.agent.create` | `_runtime_agent_create` (`serve_rpc.py:1992`) | `{persona_instance_id, actor_key, revision, position, actor, phases, …}` |
-| retire an agent (row + every actor bound to it) | `runtime.agent.retire` | `_runtime_agent_retire` (`serve_rpc.py`) | `{persona_instance_id, archive_path, archived_actor_keys, office_archive_failures, already_retired, correlation_id?, …}` |
+| place / move | `runtime.office.upsert` | `_runtime_office_upsert` | `{actor_key, revision}` |
+| delete | `runtime.office.remove` | `_runtime_office_remove` | `{actor_key, revision, state}` |
+| folder taxonomy | `runtime.office.surface.update` | `_runtime_office_surface_update` | `{workspace_id, folders, revision}` |
+| realm-sync resolve | `runtime.office.resolve_conflict` | `_runtime_office_resolve_conflict` | `{actor_key, take, state, revision?}` |
+| place an AGENT (roster row + chat root + actor) | `runtime.agent.create` | `_runtime_agent_create` | `{persona_instance_id, actor_key, revision, position, actor, actor_fresh, skills, phases, …}` |
+| retire an agent (row + every actor bound to it) | `runtime.agent.retire` | `_runtime_agent_retire` | `{persona_instance_id, archive_path, archived_actor_keys, office_archive_failures, already_retired, correlation_id?, …}` |
+
+**Handlers are named, never `file:line`, and the reason is this table's own
+history.** The retire row carried `serve_rpc.py:2055` from the day S5 landed it,
+and by the time S10 read it back the function was at `:2079` — four days, one
+intervening slice, and the citation went on reading as verified (invariant 13).
+S8b had already had to strip that one number by hand; this change strips the
+other five for the same reason rather than waiting for each to rot in turn.
+`@method(...)` is the only registration site, so a symbol is grep-findable and a
+line number is a guess about who edited above it.
 
 The last two are the only ones whose write crosses BOTH stores — the roster and
 the office — and they are each other's inverse. The four above them are office-only
@@ -320,12 +329,55 @@ reconstructed — because a remote client that lost the first ack must be able t
 ask again. An id that never existed still refuses `not_found`: the replay reads a
 TOMBSTONE, and absence alone is not one.
 
-Authorization (placement plan §A.11): **`console` scope**, like `runtime.office.*`,
-and deliberately NOT on any peer-tier allowlist — an agent on one install never
-retires an agent on another; a remote OPERATOR does. Adding the name grew the
-manifest's method SET without moving `RPC_CONTRACT_VERSION`, and that presence is
-also the launcher's D12 rollout marker for "this serve accepts an absent
-`position`".
+Adding the name grew the manifest's method SET without moving
+`RPC_CONTRACT_VERSION`, and that presence is also the launcher's D12 rollout
+marker for "this serve accepts an absent `position`" — see
+[03 §2](03-transport-and-wire.md#2-capability-advertisement--rpc-and-ops) for
+why a set-plus-integer manifest makes that legal, and the launcher's
+`EterniaLauncher/docs/mission_control/04-office-scene.md` for what it gates over
+there.
+
+**Authorization is a DECISION with no enforcement point, and saying otherwise
+would be the false all-clear.** `console` scope for both methods is the owner's
+default (recorded, not implemented), and neither service function checks a
+scope: `authorize_coordinator_action` is still called from CLI HANDLERS, not
+from the chokepoint the three doors share. So `harness persona instance retire`
+consults it and `harness agent retire` does not, on the same
+`perform_agent_retire` — an asymmetry the doors created when they collapsed onto
+one function and the gate stayed where it was. `runtime.agent.retire` and
+`runtime.agent.create` are likewise ungated. The fix is a scope parameter on the
+two service functions; it is an Open row, not a claim above.
+
+### What a remote connector inherits (the gateway check, folded from plan §A.11)
+
+The placement verb was designed against the unbuilt Hermes Gateway
+(`hermes-agent/docs/agent-runtime-harness/planned/remote-gateway.md`, launcher
+`EterniaLauncher/docs/mission_control/planned/universal-remote-gateway.md`) so that
+no part of
+it would have to be redesigned when a remote connector arrives. The obligations
+below are stated as what the SHIPPED verb already is; the gateway itself is not
+built and nothing here describes it as if it were.
+
+| Gateway surface | What the shipped verb gives it |
+|---|---|
+| `call` — a remote device cannot run the install's CLI | `runtime.agent.create` and `runtime.agent.retire` are the whole wire; the two `harness agent …` verbs are argv twins of the same service functions, and `skills` rides the RPC params rather than being a CLI-only flag |
+| Additive-only wire (manifest = set + integer) | one new method name joined `methods`; new params are optional; new ack keys are additive; `RPC_CONTRACT_VERSION` never moved; observability is `phases.skills_ms` in the ack and log receipts, never a new key on the parity envelope |
+| Exactly-once over a lossy link | the create's idempotency-key reservation already replays its ack (`idempotent_replay: true`) and the retire answers `already_retired: true` — a per-install client outbox can carry both verbs with no runtime-side addition |
+| Per-device scopes | both are level mutations and belong in a `console` tier — **as a decision, not a check** (see above). If an `admin` tier ever carves out the skills INSTALL sub-phase, the phase boundary is where it sits, so it is one predicate |
+| Peer tier (an agent on install A addressing install B) | deliberately excluded: agents never mint or retire agents on another install; a remote OPERATOR does |
+| `subscribe` | a placement is noticed through the fold, not a poll — one `patch` batch carrying the `persona_instance` and `office_actor` creates, pinned by `patch_agent_create.json` in both repos |
+
+**The one hazard, and it is not this verb's to fix.**
+`patch_coverage.accepted_fold_entities` is the INTERSECTION across every
+subscriber in the room (03 §4). A deliberately narrow mobile fold profile — the
+office canvas is out of scope on a phone — therefore drops
+`office_actor`/`office_actor_lifecycle` from the room's accepted set the moment
+one such client subscribes, and every placement demotes to a full core for the
+desktop too. Correctness holds; the drop-latency numbers below do not. The
+answer is per-subscriber promotion at the hub, which is a hub change owned by
+the gateway plan's R10, and the demote arm is already pinned here by the second
+golden `delta_agent_create_narrow_profile.json` so nobody discovers it on a
+phone.
 
 ## The fold model — what a fold is, and who promotes a batch
 
@@ -595,6 +647,16 @@ omit it — the office's revision guard lives on the RPC lane only.
 13. **Dead-symbol claims are repo-scoped or they are nothing.** A file-scoped grep
     answers "is it used here", not "is it dead"; and a `file:line` citation goes
     on reading as verified long after the code at it has moved.
+14. **One create writes both stores or neither — and the skills phase is
+    deliberately OUTSIDE that join.** The reservation compensates a failed
+    placement by retiring the row; it never retires a PLACED agent to undo a
+    file copy, so a skills refusal stamps `rolled_back: false` and names the
+    agent that is standing.
+15. **A placement is noticed through the fold, never through a counter.** The
+    office surface's `revision` does not move on an actor write and must not be
+    made to: bumping it would turn every placement into a `stale_revision`
+    hazard for a concurrent folder edit, which is the guard that counter exists
+    for. Do not re-propose it as "so clients notice".
 
 ## Unverified carry-forward
 
@@ -620,19 +682,38 @@ omit it — the office's revision guard lives on the RPC lane only.
 
 ## Open rows
 
-- The placement verb and its inverse. **S1/S2 (the shared layout policy, the
-  optional `position`, the `position`/`actor` ack), S3 (the store-level desk
-  fence), S4 (the skills phase, its install gate, and the `None -> []`
-  update-profile fix) and S5 (`runtime.agent.retire` and its two argv doors)
-  have all SHIPPED and are described above; the launcher-side S7–S9 are still
-  planned.** →
-  [planned/agent-placement-verb.md](planned/agent-placement-verb.md)
-  (both repos; its §0 corrects four premises of the 2026-08-24 brief)
-- Gesture prediction's two remaining stages (an unpinned create-refusal
-  retraction, and adoption still trusting the client's own content key) →
+- **The placement verb SHIPPED end to end** (S0–S9, both repos, 2026-08-26/27)
+  and its plan file was deleted by the commit that folded it into this doc,
+  01, 03, 05 and 07. Nothing about it is planned any more; the landing record —
+  slice, sha, review verdict — is the launcher's
+  `EterniaLauncher/Launcher_Brain/20 — Active Initiatives/agent-placement-verb-handoff.md`,
+  and every escalation it raised is a row in that brain's
+  `mission-control-queue.md`. What it left open here:
+  - **Authorization is not at the chokepoint.** `authorize_coordinator_action`
+    sits at CLI handlers, so `harness persona instance retire` is gated and
+    `harness agent retire` / `runtime.agent.retire` / `runtime.agent.create`
+    are not, on the same two service functions. The fix is a scope parameter
+    on `perform_agent_create` / `perform_agent_retire`.
+  - **Realm pull writes actor files with no office event**
+    (`office_sync.apply_office_pull`), so a `WRITE_REMOTE` never becomes a
+    patch. A real gap in the notification story and a realm-sync one, not a
+    placement one — recorded here because this is where the notification model
+    lives.
+  - **Owner decisions still standing on their defaults**, none blocking: D6
+    refuse-vs-warn on the duplicate desk (shipped REFUSE); D10(ii) no
+    persona-template (`persona.skills`) operator verb (out of scope, recorded);
+    D10(iii) un-aimed adds omit `position` (shipped OMIT); D10(iv) `console`
+    scope for both methods (prose until the gateway's R11 — see above).
+  - **No Stage C visual proof** of a CLI placement appearing on a live level.
+    No slice's done-when carried one; S0's frame receipt is the lane's evidence
+    and it is a hand-recorded capture, not a gated harness.
+- Gesture prediction's ONE remaining stage — an unpinned create-refusal
+  retraction. Its second row (adoption trusting the client's own content key)
+  was discharged 2026-08-27 by the placement verb's S7 →
   [planned/office-gesture-prediction-remainder.md](planned/office-gesture-prediction-remainder.md)
-- Collapsing the office write lane to one transport (guarded remove, argv-arm
-  deletion, the unbuilt restore verb) →
+- Collapsing the office write lane to one transport (argv-arm deletion, the
+  guarded remove over a population the placement verb shrank, the unbuilt
+  restore verb) →
   [planned/office-write-lane-collapse.md](planned/office-write-lane-collapse.md)
 - The page-open write storm and the `laneAbsent` window on cold open →
   [planned/office-page-open-write-storm.md](planned/office-page-open-write-storm.md)
@@ -644,6 +725,14 @@ omit it — the office's revision guard lives on the RPC lane only.
 
 ## Supersedes
 
+- `planned/agent-placement-verb.md` — **deleted 2026-08-27 by the S10 fold-in
+  commit** (`git log --diff-filter=D --oneline -- docs/agent-runtime-harness/planned/agent-placement-verb.md`
+  is how you get the sha and the file back). Its §0 verdict, §A decisions D1–D12
+  and §A.11's gateway table are the shipped truth stated above; the launcher
+  half is `EterniaLauncher/docs/mission_control/04-office-scene.md`; its §C
+  killing-mutation table lives on in `tests/mutation_claims.json` and the
+  launcher's group docstrings; its §B slice strip and §D risk list are history
+  in the commit and in the brain's handoff note.
 - [OFFICE_WRITE_VERBS_RPC_PLAN_2026-08-16.md](archive/2026-08-22-pre-consolidation/OFFICE_WRITE_VERBS_RPC_PLAN_2026-08-16.md) — all four verbs shipped; its remaining deferrals are in `planned/`.
 - [OFFICE_FOLD_FENCE_CONTENTION_PLAN_2026-08-16.md](archive/2026-08-22-pre-consolidation/OFFICE_FOLD_FENCE_CONTENTION_PLAN_2026-08-16.md) — FC-0/FC-H1/FC-L2 all shipped; the fence class is zero on live receipts.
 - [OFFICE_GESTURE_FOLD_PROMOTION_PLAN_2026-08-16.md](archive/2026-08-22-pre-consolidation/OFFICE_GESTURE_FOLD_PROMOTION_PLAN_2026-08-16.md) — the fold model and its `R#nn` register; the mechanism it designed is the one described above.

@@ -99,6 +99,7 @@ what the fixture mirror below enforces.
 | `API call #N: model=… provider=… in=… out=… total=… latency=…s[ cache=…][ ttfb=…s]` | `agent/conversation_loop.py:3473-3479` | provider-vs-hermes attribution; `tests/run_agent/test_api_call_ttfb.py` |
 | turn-record `phases` block (schema v3) | `agent_runtime/mission_chat_phases.py`; the key lands via `_safe_journal_metadata` (`mission_chat_turns.py:428`, `:487`) → `safe_turn_phases` (`:1230`) | `tool/mission_chat_latency_audit.dart` |
 | `[MissionChatTiming]` / `[MissionChatOutcome]` / `[MissionDropTiming]` | launcher — see the launcher section below | `tool/mission_chat_latency_audit.dart`; drop line read by eye |
+| `[MissionAgentCreate] lane=… gesture=… correlation=… …` and `[MissionOfficeWrite] <ws> retire lane: …` | launcher — see the launcher section below | the placement verb's two lanes, read by eye; the ADOPT line is also read by `mission_office_placement_instance_key_test.dart` |
 | `prompt_observability` rows + `trace_events` | `agent_runtime/prompt_observability.py:108`, persisted `:1198-1233` | `harness prompt-context show --context-id` (`hermes_cli/harness.py:1935`) and the slimmed `chat.final` echo |
 
 ### The snapshot build family
@@ -165,6 +166,17 @@ recorded (`NO_PHASES`, `:96`), so a parser never has to tell "no such key" from
 "nothing ran". Spans ride a `ContextVar`, so a concurrent snapshot build on
 another thread cannot land in a create's receipt (`:60-62`).
 
+**`phases.skills_ms` is an ACK field, not a log line, and that is deliberate.**
+The create's third phase (05 §9) bills itself into `result["phases"]["skills_ms"]`
+and then RE-STAMPS `total_ms`, because `total_ms` was measured before the phase
+existed and would otherwise under-report every create that installs a cold skill
+by exactly the cost the phase was built to make visible. Both keys are always
+present on both doors. Nothing new joined the parity envelope for it — the wire
+rule below holds: a new observability number rides the RPC result a launcher
+parser already reads, or it rides a log receipt, never a new key on the envelope.
+The `agent_create_phases` LOG line still bills only `instance_ms` and its ten
+sub-spans, so a reader wanting the skills cost reads the ack, not the log.
+
 `persona_prewarm done` is the completion half of an otherwise unfalsifiable
 claim — "a start with no finish measures nothing" (`persona_prewarm.py:118-123`).
 The clock starts AFTER the queue `get`, so an idle worker never reports a
@@ -223,9 +235,9 @@ constructed only after replay checks, native history load, turn-context build
 and the prompt-observability row build, so its clock cannot see the profile
 bootstrap before it. `phases` is a SUPERSET, not a replacement (`:41-46`).
 
-### The launcher's three lines
+### The launcher's five lines
 
-All three ride `Logger` into `<temp>/eternia_launcher_diag.log` — the EMITTERS
+All of them ride `Logger` into `<temp>/eternia_launcher_diag.log` — the EMITTERS
 run unconditionally, but since MCF-83 §2 (launcher `1a012e13d`, 2026-08-20) the
 disk tee installs only in debug or opt-in support builds
 (`kDebugMode || ETERNIA_VOICE_DIAGNOSTICS`); a release binary emits to a logger
@@ -250,6 +262,32 @@ relative to `lib/features/mission_control/`.
   `data/mission_drop_timeline.dart:351-368`, marker const `:376`. Closed and
   ordered; `roster_confirmed_ms` went in additively, disturbing no `key=value`
   reader.
+* `[MissionAgentCreate] …` — the placement verb's launcher lane, all arms
+  through `office/mission_office_drop_log.dart::missionOfficeDropReceipt`,
+  emitted from `mission_control_page.dart::_createPlacedAgentOverRpc` and
+  `::_adoptServerPlacement`. Five arms, and the set is the point: `lane=twoCall`
+  (with `reason=`, so a rollout degrade is SAID rather than silently taken),
+  `lane=rpc` on success (carrying `aim=aimed|unaimed`, `pos=sent|server` — the
+  D12 decision as it was actually taken for THIS call — `replay=` and the
+  server's `phases=`), `lane=rpc … REFUSED` (with `reason`, `phase`,
+  `rolled_back`, and `placed=`/`orphan=` split apart, because a skills-phase
+  instance is standing and an uncompensated one is not), `ADOPT` (which prints
+  the adopted CONTENT KEY IN FULL — the defect it retires was a client hashing
+  its own payload and comparing it with itself, which is indistinguishable from
+  the store agreeing unless the key is on the line), and `REFETCH` (the replay
+  arm that adopts nothing). `correlation=` is the GESTURE's token and is NOT
+  `[MissionDropTiming]`'s `drop-N`, which is a per-process instrument key two
+  launcher processes would mint identically — the two id spaces share a clause
+  name and nothing joins them, which is a filed row, not a fact this doc hides.
+* `[MissionOfficeWrite] <workspace> retire lane: rpc|cli instance=… archived=N
+  verdict=clean|failed|unknown` —
+  `office/mission_office_layout_controller.dart::_adoptRetireAck`, label const
+  `kMissionAgentRetireReceiptLabel`. Its own line rather than a column on the
+  flush's `write lane: N rpc, N cli`, because a retire is a per-GESTURE call
+  outside any flush and folding it in would corrupt that receipt's arithmetic —
+  with the consequence, recorded rather than implied, that a session whose every
+  delete spawned the CLI still reports `0 cli` on the write-lane pill. The
+  refusal and fallback arms print `retire REFUSED … lane=… reason=… code=…`.
 
 ### prompt_observability rows and trace_events
 
@@ -455,7 +493,12 @@ so `actors_truncated` computed 0 over it. It now returns a typed
 
 ## Supersedes
 
-All under `archive/2026-08-22-pre-consolidation/`:
+`planned/agent-placement-verb.md` — **deleted 2026-08-27 by the S10 fold-in
+commit** (`git log --diff-filter=D --oneline -- docs/agent-runtime-harness/planned/agent-placement-verb.md`
+recovers it). Its observability half is above: `phases.skills_ms` on the ack,
+the two launcher receipt families, and `placement_census` in the doctor roster.
+
+All others under `archive/2026-08-22-pre-consolidation/`:
 
 * `SCOUT_HERMES_SWALLOW_AUDIT_2026-08-17.md` — its four top findings and the
   `_read_actor_dir` swallow are fixed; retained as the pre-fix record.

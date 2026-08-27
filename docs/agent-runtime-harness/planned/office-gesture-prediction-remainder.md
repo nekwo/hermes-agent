@@ -1,9 +1,10 @@
-# Planned — office gesture prediction: the last two stages
+# Planned — office gesture prediction: the last stage
 
 **Status:** not built. **Owner surface:** [06 — Office and board](../06-office-and-board.md).
 **Origin:** `UNIFIED_GESTURE_PREDICTION_PLAN_2026-08-16.md` (archived).
 
-Four of that plan's six stages are discharged and must not be re-litigated:
+FIVE of that plan's six stages are discharged and must not be re-litigated
+(UP-5 joined them 2026-08-27 — see Row 2). ONE row is left, and it is Row 1:
 
 - **UP-0 (game-local echo) — SHIPPED** as the local-echo half of UP-2, exactly as
   the re-scope demanded. `MissionOfficeGame.echoDragTo` draws the dragged node at
@@ -42,14 +43,18 @@ nothing" regression class — must turn it red.
 
 ## Row 2 — UP-5: DISCHARGED 2026-08-27 by the placement verb's S7
 
-The ack now carries the actor as stored (`office_models.office_actor_wire_row`, plan D2/D11) and
-the launcher adopts THAT: `_adoptServerPlacement` computes the suppression key from the ack's
-payload through `officeActorPayloadFromRpcItems`, never from the payload it staged, and re-stages
-the scene onto the server's row when the two differ (launcher `f7160c3c7`). See
-[agent-placement-verb.md](agent-placement-verb.md) §A D2 and the launcher's
-`docs/mission_control/04-office-scene.md` "Drops end-to-end". One caveat this file should not
-lose: the adoption is keyed on the ack's CONTENT and the launcher additionally refuses to adopt a
-replay stamped `actor_fresh: false`. Row 1 (the refused-create retraction) is untouched and still
-open.
+The ack now carries the actor as stored (`office_models.office_actor_wire_row`) and the launcher
+adopts THAT: `_adoptServerPlacement` computes the suppression key from the ack's payload through
+`officeActorPayloadFromRpcItems`, never from the payload it staged, and re-stages the scene onto
+the server's row when the two differ (launcher `f7160c3c7`). One caveat this file should not lose:
+the adoption is keyed on the ack's CONTENT and the launcher additionally refuses to adopt a replay
+stamped `actor_fresh: false` (`missionAgentCreatePlacementAdoptionFor`).
+
+**Where the detail lives now.** The placement verb's plan file was deleted 2026-08-27 when it
+shipped; its truth is [06 — the placement verb](../06-office-and-board.md#the-placement-verb--where-an-unaimed-create-lands-and-what-it-hands-back)
+on this side and `EterniaLauncher/docs/mission_control/04-office-scene.md` "Drops end-to-end" on
+the launcher's. Do not re-cite `planned/agent-placement-verb.md`; it is history in one commit.
+
+Row 1 (the refused-create retraction) is untouched and still open.
 
 **Sequencing.** Row 1 is launcher-only and independent.

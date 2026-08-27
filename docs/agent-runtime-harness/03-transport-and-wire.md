@@ -57,10 +57,33 @@ forever.
 A durable service outlives the install it was started from, so "what does the
 thing I am attached to carry" must be answerable at any time. Two manifests ride
 `ready` (stdio), `hello_ok` (socket), and the re-askable `version` reply:
-`"rpc"` from `serve_rpc.manifest()` (`agent_runtime/serve_rpc.py:255`) — ten
-methods registered via `@method` today (`:455, 578, 906, 967, 1300, 1515, 1693,
-1992, 2055, 2115`) — and `"ops"` from `ops_manifest(transport=…)` (`serve.py:298`),
+`"rpc"` from `serve_rpc.manifest()` (`agent_runtime/serve_rpc.py`) and `"ops"`
+from `ops_manifest(transport=…)` (`serve.py::ops_manifest`),
 `{"contract", "transport", "ops", "subscribe_lanes"}`.
+
+**The `rpc` roster is TEN methods, and each is named by its handler** — every
+one registered by a `@method("…")` decorator in `serve_rpc.py`, which is the
+only registration site, so this list is `grep -n '@method(' agent_runtime/serve_rpc.py`
+and nothing else:
+
+| Method | Handler | Domain |
+|---|---|---|
+| `runtime.office.get` | `_runtime_office_get` | read the level |
+| `runtime.office.subscribe` | `_runtime_office_subscribe` | office push lane on |
+| `runtime.office.unsubscribe` | `_runtime_office_unsubscribe` | office push lane off |
+| `runtime.office.upsert` | `_runtime_office_upsert` | place / move |
+| `runtime.office.remove` | `_runtime_office_remove` | delete |
+| `runtime.office.surface.update` | `_runtime_office_surface_update` | folder taxonomy |
+| `runtime.office.resolve_conflict` | `_runtime_office_resolve_conflict` | realm-sync resolve |
+| `runtime.agent.create` | `_runtime_agent_create` | roster row + chat root + actor |
+| `runtime.agent.retire` | `_runtime_agent_retire` | the inverse of the above |
+| `runtime.persona.prewarm` | `_runtime_persona_prewarm` | warm a persona |
+
+This table used to be a list of ten LINE NUMBERS. Two of them (`2055`, `2115`)
+had already rotted by 2026-08-27 — a slice landing above them moved both — while
+the sentence around them still read as verified. A method name is what a client
+sends and a handler name is what `@method` binds it to; neither moves when
+somebody edits the function above.
 
 Both follow one discipline: **a set plus an integer.** The set grows when a verb
 is added — a client only ever sends a verb it FOUND — and the integer moves only
@@ -399,7 +422,21 @@ authority, so in-process tool relay, CLI and serve transport get the same depth
   `patch_coverage.py:347` and `stream.py:459-462` as 2026-07/08 measurements;
   not re-measured here, so a historical figure, not a benchmark.
 
-## Supersedes — all under `archive/2026-08-22-pre-consolidation/`
+## Supersedes
+
+`planned/agent-placement-verb.md` — **deleted 2026-08-27 by the S10 fold-in
+commit** (`git log --diff-filter=D --oneline -- docs/agent-runtime-harness/planned/agent-placement-verb.md`
+recovers it). Its wire half is above and in 06: `runtime.agent.create` gained an
+optional `position`, a `skills` param and four ack keys, and
+`runtime.agent.retire` joined the `rpc` roster — all of it additive, with
+`RPC_CONTRACT_VERSION` never moving, which is the set-plus-integer discipline
+§2 states and the reason a set of ten could become a set of ten with one name
+swapped in without a contract bump. Its D12 rollout gate — the launcher reading
+`runtime.agent.retire`'s PRESENCE as "this serve accepts an absent `position`" —
+is the only place in this canon where a method name is used as a capability
+proxy for a PARAMETER; it is recorded as a named risk, not as a pattern to copy.
+
+All others under `archive/2026-08-22-pre-consolidation/`:
 
 | Archived doc | Where it went |
 |---|---|

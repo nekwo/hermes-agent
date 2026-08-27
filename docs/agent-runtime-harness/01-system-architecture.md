@@ -94,12 +94,15 @@ for instance-bound actors, else the persona id (`office_store.py:113`
 `_canonical_actor_key`). Actor granularity, not item granularity, is the merge
 unit, so an agent and its coupled desk travel together.
 
-**One call creates all of it.** `perform_agent_create`
-(`agent_runtime/agent_create.py:692`) writes the roster row, the durable chat
-root and the placement inside one function. The order is instance-first and
-that is not arbitrary: a placement written first would be a half-state naming
-an instance the runtime never minted, and the launcher's codec refuses to
-derive a binding for an actor that has none (`:726-732`).
+**One call creates all of it.** `agent_create.perform_agent_create` writes the
+roster row, the durable chat root and the placement inside one function. The
+order is instance-first and that is not arbitrary: a placement written first
+would be a half-state naming an instance the runtime never minted, and the
+launcher's codec refuses on principle to derive a binding for an actor that has
+none — the function's own docstring is the long form. (This paragraph carried
+`agent_create.py:692` from consolidation until 2026-08-27, by which time the
+function was at `:1205` and the second citation, `:726-732`, landed inside an
+unrelated constant block. Symbols only here, for that reason.)
 
 **And it chooses WHERE, when the caller did not.** `position` is optional on
 both doors (plan S2): absent, the slot comes from
@@ -112,6 +115,21 @@ shape), so a caller with no canvas — the CLI, a cron, a remote connector over
 policy read sits relative to `office_lock`, and the one-slot race it leaves, is
 stated at `resolve_placement_position` and in
 [06 — The office surface](06-office-and-board.md#the-placement-verb--where-an-unaimed-create-lands-and-what-it-hands-back).
+
+**And it can hand the new agent its SKILLS — but that phase is outside the
+join.** `skills: [id, …]` on the RPC (`--skill`, repeatable, on the CLI) runs
+`agent_create.run_skills_phase` AFTER both writes are durable, writing
+`skill_overrides` at the INSTANCE tier through
+`PersonaInstanceStore.update_profile` and never `persona.skills`, which would
+reconfigure every other instance of that persona. Absent, `skill_overrides`
+stays `None` and the agent inherits its persona's skills live; the ack's
+`skills.inherited` says which of those two an empty `assigned` list means. The
+reservation gains `placed` between `instance_minted` and `done` so a skills
+refusal keeps the agent — standing, messageable, resumable under the SAME
+idempotency key — instead of retiring a working agent to undo a file copy. The
+mechanism and its two gates are [05 §9](05-chat-turn-lane.md#9-the-agent-create-path);
+the placement consequence is
+[06 — the placement verb](06-office-and-board.md#the-placement-verb--where-an-unaimed-create-lands-and-what-it-hands-back).
 
 **And ONE call takes it all away again.** `perform_agent_retire`
 (`agent_runtime/agent_retire.py`) is the inverse, over the store method that
@@ -457,7 +475,12 @@ Each links to a `planned/` file carrying its evidence and the gate to open it.
 
 ## Supersedes
 
-This document replaces, for current truth, the entity/architecture content of
+It also replaces `planned/agent-placement-verb.md`, **deleted 2026-08-27 by the
+S10 fold-in commit** (`git log --diff-filter=D --oneline -- docs/agent-runtime-harness/planned/agent-placement-verb.md`
+recovers it): the entity half of that plan — the create's three phases, the
+inverse, and "placed" as a JOIN rather than a merge — is the truth stated above.
+
+Beyond that it replaces, for current truth, the entity/architecture content of
 these files under `archive/2026-08-22-pre-consolidation/`:
 
 - [01-architecture.md](archive/2026-08-22-pre-consolidation/01-architecture.md)

@@ -14,8 +14,9 @@ manifest test instead of leaving both repos green while they disagree.
 
 ## Why two policies at all
 
-Plan D2 (`docs/agent-runtime-harness/planned/agent-placement-verb.md`) makes
-hermes the **authority**: `runtime.agent.create` / `harness agent create` with
+The placement verb's D2 (`docs/agent-runtime-harness/06-office-and-board.md`,
+"The placement verb" — the plan file that used to be cited here shipped and was
+deleted 2026-08-27) makes hermes the **authority**: `runtime.agent.create` / `harness agent create` with
 no position resolve one here, server-side, so every door shares one answer. The
 launcher keeps its copy as a **prediction** — a pending chip and a staged scene
 node need a world position before the ack comes back — and adopts the server's

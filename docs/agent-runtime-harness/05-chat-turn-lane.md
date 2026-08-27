@@ -370,15 +370,21 @@ persona-chat append uses — refs and a distillation, never the child transcript
 
 ## 9. The agent create path
 
-`runtime.agent.create` (`agent_runtime/serve_rpc.py:1960`) performs roster row + chat root + office
-placement in ONE handler with a recorded-progress reservation
+`runtime.agent.create` (`serve_rpc.py::_runtime_agent_create`) performs roster row + chat root +
+office placement in ONE handler with a recorded-progress reservation
 (`agent_runtime/agent_create_reservations.py`) and a compensating retire, replacing the launcher's
-two sequenced writes over two transports. `harness agent create` (`persona_commands.py:435-455`) is
-the same function behind an argv door — every result field a script reads is the field it would read
-off the wire — and it works with no `harness serve` running because every lock in the path is a
-cross-process file lock. An unknown persona is refused with `persona_not_found`
-(`agent_create.py:207-217`), kept a separate reason from `persona_roster_unavailable` because the
-two need opposite responses.
+two sequenced writes over two transports. `harness agent create`
+(`persona_commands.py::_cmd_agent_create`) is the same function behind an argv door — every result
+field a script reads is the field it would read off the wire — and it works with no `harness serve`
+running because every lock in the path is a cross-process file lock. `harness agent retire` and
+`runtime.agent.retire` are the same arrangement for the inverse
+(`agent_retire.perform_agent_retire`), and `harness persona instance retire` is a THIRD door onto
+it; see [06 — The inverse](06-office-and-board.md#the-inverse--one-call-takes-an-agent-off-the-level-and-says-what-left).
+An unknown persona is refused with `persona_not_found` (`agent_create.PERSONA_NOT_FOUND_REASON`,
+message built by `persona_not_found_message`), kept a separate reason from
+`persona_roster_unavailable` because the two need opposite responses. Anchors here are symbols
+rather than lines because this paragraph's `serve_rpc.py:1960` was pointing thirty lines short of
+its handler by 2026-08-27, and read as verified the whole time.
 
 **The create path has THREE phases, and only two of them are atomic** (plan S4).
 `instance` and `placement` are the pair the reservation joins — a failure in the
@@ -425,6 +431,13 @@ reached the store as an empty LIST and the store's correct
 `skill_overrides = []`: a `--display-name`-only call silently cleared every
 skill override on that instance. The store was never wrong — the collapse was in
 the layer whose job is to translate absent into absent.
+
+**`correlation_id` rides the create and echoes on its ack** (`agent_create` reads
+`params["correlation_id"]`, threads it into the placement write and copies it onto the result), so
+one gesture's create is joinable with its patches. Since S8b (`d107d132e0`) the RETIRE reads and
+threads the SAME normalisation, so a gesture's create half and delete half finally share one
+correlation space — 06's inverse section has the thread. Nothing else on this lane mints or
+rewrites the token: it is the caller's, end to end.
 
 **The create's cost is now attributed.** `agent_runtime/agent_create_phases.py` splits the single
 `phases.instance_ms` into named spans as an INFO log receipt rather than new wire fields — `phases`
@@ -553,7 +566,12 @@ Mechanism exists in code; the NUMBER or live condition was not re-measured here.
 
 ## Supersedes
 
-Archived under [`archive/2026-08-22-pre-consolidation/`](archive/2026-08-22-pre-consolidation/),
+`planned/agent-placement-verb.md` — **deleted 2026-08-27 by the S10 fold-in
+commit** (`git log --diff-filter=D --oneline -- docs/agent-runtime-harness/planned/agent-placement-verb.md`
+recovers it). Its chat-lane half is §9 above: the third phase, its two gates,
+the order they actually run in, and the `None -> []` `update-profile` fix.
+
+The rest are archived under [`archive/2026-08-22-pre-consolidation/`](archive/2026-08-22-pre-consolidation/),
 superseded for the chat-turn lane by this document.
 
 | archived doc | disposition |

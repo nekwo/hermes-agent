@@ -36,20 +36,40 @@ lowering going together.
 **Do not delete first and watch.** That is the delete-and-see this program has
 already been burned by.
 
-## Row 2 — the guarded remove (D-W1)
+## Row 2 — the guarded remove (D-W1) — RE-SHAPED 2026-08-27 by the placement verb's D7/S8
 
 **Evidence.** `sync.serverRevisions[key]` already holds an honest token whenever a
 read or an ack supplied one, and `runtime.office.remove` accepts `expect_revision`
-(`agent_runtime/serve_rpc.py:1268` docstring). The launcher's remove sends none, so
+(`_runtime_office_remove`'s docstring). The launcher's remove sends none, so
 **archives are unguarded today**, on both lanes.
 
 **Why it was held back.** It changes operator behaviour — a concurrent edit would
 refuse a delete — and the first cut of the RPC remove had to be behaviour-parity
 with the argv call it replaced.
 
-**Gate.** Decide with a receipt count of REVISION-MISS-on-archive from a live
-window, not from source reading. If misses are ~0, sending the guard is a
-one-argument change; if they are common, the refusal UX has to be designed first.
+**What D7 changed, and it changes this row's WORTH rather than its shape.** The
+gesture this row was written about — an operator deleting a placed agent — no
+longer reaches `runtime.office.remove` at all. Since S8 the launcher SPLITS the
+vacated set at its mutation chokepoint (`missionOfficeRemovalPlanFor`):
+placement-shaped keys go to `runtime.agent.retire`, and only the remainder — a
+class-keyed actor, an authored desk owning its own row — reaches the remove verb.
+So the population this guard would cover has shrunk to exactly the deletions no
+launcher gesture mints in bulk, and the frequent case took its own lane, which
+has NO revision guard either and is a different question (a retire is keyed on
+the instance and archives whatever is bound to it; there is no per-actor token to
+present). Two consequences, both stated so neither is discovered later:
+
+- the "REVISION-MISS-on-archive" count the gate below asks for will now be
+  measured over a much smaller and much rarer population, so a live window that
+  used to be days long is now weeks long — plan the evidence, do not shorten it;
+- if the guard is wanted for DELETION generally rather than for this verb, the
+  retire lane needs its own answer and this row is not it.
+
+**Gate.** Unchanged in kind: decide with a receipt count of
+REVISION-MISS-on-archive from a live window, not from source reading. If misses
+are ~0, sending the guard is a one-argument change; if they are common, the
+refusal UX has to be designed first. Re-scope the window to the post-S8
+population before counting.
 
 ## Row 3 — `runtime.office.restore` (D-W5) and the dead capability under it
 

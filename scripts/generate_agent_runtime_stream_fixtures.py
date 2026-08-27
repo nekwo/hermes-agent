@@ -81,8 +81,9 @@ GENERATED_FRAME_FILES = (
     # contract is a relation between the two frames, not a property of either.
     "hydrate_stale_first.json",
     "hydrate_authoritative_same_offset.json",
-    # S0 of the placement-verb plan (hermes
-    # ``docs/agent-runtime-harness/planned/agent-placement-verb.md`` §B). The
+    # S0 of the placement verb (hermes
+    # ``docs/agent-runtime-harness/06-office-and-board.md``; the plan file this
+    # comment used to cite shipped and was deleted 2026-08-27). The
     # SAME one-call ``perform_agent_create`` observed by two subscribers, so the
     # pair pins both arms of that plan's §A.11 hazard. Read them as a PAIR for
     # the same reason the convergence hydrates are a pair — see
