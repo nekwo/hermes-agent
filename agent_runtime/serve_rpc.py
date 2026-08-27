@@ -2565,3 +2565,91 @@ def _peer_ping(rid: Any, params: dict, context: RpcContext | None = None) -> dic
         # than any token this repo mints and less than anything worth smuggling.
         result["echo"] = echo.strip()[:128]
     return ok(rid, result)
+
+
+# ── peer.agent_chat.execute ──────────────────────────────────────────────────
+#
+# Gateway Stage 7. The second verb on the peer surface, and the first one that
+# DOES something: an agent on a paired install asks an agent on this one to take
+# a turn. The row that remembers the ask lives on the SENDER's install; what
+# lands here is one turn, executed and recorded in this install's own chat store
+# exactly as any inbound agent message is, so this operator sees it too.
+
+
+#: This install's ``data.reason`` for "you are not a peer". Its own value rather
+#: than ``scope_denied``, because the two are different facts: ``scope_denied``
+#: is the chokepoint saying a caller may not run a verb, this is the verb saying
+#: it has no provenance to run under. A console client that calls this by
+#: mistake should read the second, not the first.
+PEER_CHAT_NOT_A_PEER_REASON = "peer_identity_required"
+
+
+@method("peer.agent_chat.execute", tier=TIER_CONSOLE)
+def _peer_agent_chat_execute(
+    rid: Any, params: dict, context: RpcContext | None = None
+) -> dict:
+    """Run ONE chat turn on this install, asked for by a paired install.
+
+    Params: ``turn_request_id``, ``target``, ``message`` (required);
+    ``session_id``, ``title``, ``new_session``, ``max_seconds``,
+    ``correlation_id`` (optional).
+
+    Result: :func:`runtime.chat.message`'s ack, plus ``peer`` — the install id
+    THIS server proved about the caller, echoed for the same reason
+    ``peer.ping`` echoes it.
+
+    **Attribution comes off the CONNECTION, and this handler is where that is
+    enforced.** ``context.caller.peer_install_id`` is set by
+    ``call_authorization.caller_for_connection`` only for a connection whose
+    peer HMAC verified against a row in ``gateway/peers.json``; it is not
+    readable from, or writable by, anything in ``params``. A caller that reaches
+    here without one is REFUSED rather than defaulted — including a perfectly
+    legitimate local console client, which is the case that makes the refusal
+    worth spelling: a turn run under "some console asked" would be a turn whose
+    provenance nobody can audit, and the local console already has
+    ``runtime.chat.message`` for turns of its own.
+
+    **The tier says ``console`` and the tier is not what admits a peer.** It is
+    the honest answer to what the map asks — *what strength of credential does
+    this verb want* — and it is the same answer ``runtime.chat.message`` gives
+    for the same reason: a chat turn runs an agent with tools, so anything
+    softer would be a door around ``console``. What admits a peer is
+    ``call_authorization.PEER_METHOD_ALLOWLIST``, which now names two verbs and
+    still names neither ``runtime.agent.create`` nor ``runtime.agent.retire`` —
+    canon 06's exclusion, holding by construction rather than by anybody
+    remembering it.
+
+    **The ack is an ACCEPT.** Stage 3's constraint, unchanged and inherited: this
+    dispatcher answers inline on the reader loop, so the turn goes to the worker
+    pool and its frames ride the per-request lane under ``request_id``. The
+    dialling install reads those frames exactly as the local launcher does. That
+    is what makes a remote turn and a local turn one execution rather than two
+    implementations that agree today.
+    """
+
+    caller = None if context is None else context.caller
+    peer_install_id = None if caller is None else caller.peer_install_id
+    if not peer_install_id:
+        return err(
+            rid,
+            ERR_HANDLER_FAILED,
+            "peer.agent_chat.execute runs a turn on behalf of a PAIRED INSTALL, "
+            "and this connection proved none; a local client sends chat turns "
+            "with runtime.chat.message",
+            {"reason": PEER_CHAT_NOT_A_PEER_REASON},
+        )
+
+    from agent_runtime.chat_turn import PEER_CHAT_EXECUTE_METHOD, perform_chat_turn
+
+    outcome = perform_chat_turn(
+        params,
+        verb=PEER_CHAT_EXECUTE_METHOD,
+        spawn=None if context is None else context.spawn_chat_turn,
+        peer_install_id=peer_install_id,
+    )
+    if outcome.refusal is not None:
+        refusal = outcome.refusal
+        return err(rid, refusal.code, refusal.message, refusal.data)
+    result = dict(outcome.result or {})
+    result["peer"] = peer_install_id
+    return ok(rid, result)

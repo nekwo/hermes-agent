@@ -136,14 +136,21 @@ def test_a_peer_naming_no_method_is_refused_rather_than_defaulted():
     assert authorize_call(TIER_CONSOLE, PEER, method=None).ok is False
 
 
-def test_the_allowlist_is_exactly_peer_ping_and_the_method_exists():
+def test_the_allowlist_is_exactly_its_two_verbs_and_both_methods_exist():
     """A membership set naming a verb nobody registered would be an allowlist
-    that admits nothing — green, and describing a lane that does not work."""
+    that admits nothing — green, and describing a lane that does not work.
 
-    assert PEER_METHOD_ALLOWLIST == frozenset({"peer.ping"})
-    assert "peer.ping" in serve_rpc.method_names()
-    assert authorize_call(TIER_READ, PEER, method="peer.ping").ok is True
-    assert authorize_call(TIER_READ, PEER, method="peer.ping").reason == "peer_allowlisted"
+    Stage 7 widened it by ONE name, and the literal here is the counterweight
+    that makes the widening cost something: a set spelled out in a test is a set
+    nobody grows without editing this line and saying why."""
+
+    assert PEER_METHOD_ALLOWLIST == frozenset(
+        {"peer.ping", "peer.agent_chat.execute"}
+    )
+    for name in PEER_METHOD_ALLOWLIST:
+        assert name in serve_rpc.method_names()
+        assert authorize_call(TIER_READ, PEER, method=name).ok is True
+        assert authorize_call(TIER_READ, PEER, method=name).reason == "peer_allowlisted"
 
 
 def test_a_peer_cannot_widen_its_own_grant_by_naming_a_method_it_is_not_calling():

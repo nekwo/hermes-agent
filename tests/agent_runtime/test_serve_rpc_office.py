@@ -530,6 +530,7 @@ def test_the_envelope_itself_is_validated_with_upstreams_codes():
         # Gateway Stage 6, and the first name outside the ``runtime.*``
         # family: ``peer.*`` verbs are about the EDGE between two
         # installs and touch no level. Additive, so the integer holds.
+        "peer.agent_chat.execute",
         "peer.ping",
         "runtime.agent.create",
         "runtime.agent.retire",
@@ -682,6 +683,7 @@ def test_stdio_learns_the_method_set_from_ready_and_can_re_ask_version():
     expected = {
         "contract": 1,
         "methods": [
+            "peer.agent_chat.execute",
             "peer.ping",
             "runtime.agent.create",
             # S5's inverse. It joined the SET; the integer beside it did not
@@ -700,6 +702,7 @@ def test_stdio_learns_the_method_set_from_ready_and_can_re_ask_version():
             "runtime.persona.prewarm",
         ],
         "tiers": {
+            "peer.agent_chat.execute": "console",
             "peer.ping": "read",
             "runtime.agent.create": "console",
             "runtime.agent.retire": "console",
@@ -753,6 +756,7 @@ def test_the_method_surface_is_transport_agnostic_and_answers_on_the_socket():
             assert hello_ok["rpc"] == {
                 "contract": 1,
                 "methods": [
+                    "peer.agent_chat.execute",
                     "peer.ping",
                     "runtime.agent.create",
                     "runtime.agent.retire",
@@ -769,6 +773,7 @@ def test_the_method_surface_is_transport_agnostic_and_answers_on_the_socket():
                     "runtime.persona.prewarm",
                 ],
                 "tiers": {
+                    "peer.agent_chat.execute": "console",
                     "peer.ping": "read",
                     "runtime.agent.create": "console",
                     "runtime.agent.retire": "console",

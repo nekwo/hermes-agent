@@ -341,8 +341,21 @@ def test_the_push_lane_itself_contributes_no_method_and_no_version_bump():
     added: the transport machinery published no method of its own, no test
     fixture leaked into the registry, and the contract integer stayed put
     because nothing about an EXISTING method's shape changed.
+
+    **The prefix list is two families, and it became two in gateway Stage 6
+    rather than Stage 7 — this assertion was left red by that stage's manifest
+    sweep and stayed red until Stage 7 ran the file.** ``peer.*`` is a declared
+    family, not a leak: ``runtime.*`` verbs act on this install's level, ``peer.*``
+    verbs are about the EDGE between two installs and touch no level
+    (``serve_rpc``'s section comment). What this line is actually guarding is
+    that the PUSH lane contributed no name at all, and a family it does not know
+    about is exactly what it should still fail on — so the tuple is enumerated
+    rather than replaced with something permissive.
     """
 
-    assert all(name.startswith("runtime.") for name in serve_rpc.method_names())
+    assert all(
+        name.startswith(("runtime.", "peer."))
+        for name in serve_rpc.method_names()
+    )
     assert not any(name.startswith("test.") for name in serve_rpc.method_names())
     assert serve_rpc.RPC_CONTRACT_VERSION == 1

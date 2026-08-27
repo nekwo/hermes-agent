@@ -147,9 +147,20 @@ CALLER_PEER = "peer"
 #: connection that somehow reached the dispatcher without a device stamp.
 CALLER_UNKNOWN = "unknown"
 
-#: **Exactly what a paired install may call on this one.** One name today, and
-#: the shortness is the design: Stage 6 proves an edge exists and nothing else,
-#: so the only verb on it is the one that answers "are you there".
+#: **Exactly what a paired install may call on this one.** Two names, and the
+#: shortness is still the design: Stage 6 proved an edge exists (``peer.ping``,
+#: which answers "are you there" and touches nothing), Stage 7 lets that edge
+#: carry ONE thing (``peer.agent_chat.execute``, a chat turn).
+#:
+#: **The second entry is a deliberate widening and this comment is its reason.**
+#: Canon 06's remote-connector table draws the line in a sentence — *agents
+#: never mint or retire agents on another install; a remote OPERATOR does* — and
+#: a chat turn is on the permitted side of it: install B runs one of its own
+#: agents, in its own chat store, under its own admission rules, and the
+#: operator at B sees the turn like any other inbound agent message. What stays
+#: excluded is the whole of the level: no create, no retire, no office write, no
+#: subscribe. Widening this set is one line in a diff on purpose, and this is
+#: what that line is supposed to cost — a stated reason and a citation.
 #:
 #: An ALLOWLIST and not a tier, and the difference is what it does when the
 #: registry grows. A tier comparison admits every future verb that happens to
@@ -165,7 +176,9 @@ CALLER_UNKNOWN = "unknown"
 #: agents never mint or retire agents on another install; a test iterates the
 #: whole registry against this set rather than naming those two, because a rule
 #: pinned by two literals stops being pinned the moment a third verb arrives.
-PEER_METHOD_ALLOWLIST: frozenset[str] = frozenset({"peer.ping"})
+PEER_METHOD_ALLOWLIST: frozenset[str] = frozenset(
+    {"peer.ping", "peer.agent_chat.execute"}
+)
 
 #: The transport name the gateway listener tags its connections with. Named here
 #: rather than imported from ``serve_socket`` for the reason

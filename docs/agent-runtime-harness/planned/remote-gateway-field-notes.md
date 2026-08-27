@@ -863,3 +863,15 @@ whole; `dispatch_delivery.py:1-200`; `dispatch_store.py:1-600`;
 
 **S7a receipts.** `agent_runtime/gateway_targets.py` +
 `tests/agent_runtime/test_gateway_targets.py` — 24 tests, all green.
+
+**S7b found a Stage 6 red that Stage 6's manifest sweep missed.**
+`tests/agent_runtime/test_serve_rpc_notification_lane.py::test_the_push_lane_itself_contributes_no_method_and_no_version_bump`
+asserts `all(name.startswith("runtime."))` over the whole registry. `peer.ping`
+broke that in `6775911bbc` and nobody ran the file — re-measured on a clean tree
+(`git stash`) before touching it, and it reds at HEAD without any Stage 7 change.
+Corrected to the two declared families (`runtime.`, `peer.`) with the reason
+in place, rather than to something permissive: the line's actual subject is that
+the PUSH lane contributed no name, and a family it does not know about should
+still fail it. The S6b lesson ("every manifest pin, same commit") turns out to
+have a second half: *find them by RUNNING the suites, not by grepping for the
+verb you added* — this pin never spells a method name at all.

@@ -2105,6 +2105,7 @@ def test_the_reclaim_pair_joins_the_manifest_without_moving_the_contract_version
         # Gateway Stage 6, and the first name outside the ``runtime.*``
         # family: ``peer.*`` verbs are about the EDGE between two
         # installs and touch no level. Additive, so the integer holds.
+        "peer.agent_chat.execute",
         "peer.ping",
         "runtime.agent.create",
         # Added by S5 after this literal was written; the pin had been red ever

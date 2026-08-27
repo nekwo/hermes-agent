@@ -75,7 +75,15 @@ from .chat_turn_reservations import (
 #: the handlers cannot drift.
 CHAT_MESSAGE_METHOD = "runtime.chat.message"
 CHAT_STEER_METHOD = "runtime.chat.steer"
-CHAT_TURN_METHODS: tuple[str, ...] = (CHAT_MESSAGE_METHOD, CHAT_STEER_METHOD)
+#: Gateway Stage 7. The THIRD chat verb, and the only one whose provenance the
+#: server derives from the connection rather than reading off params — see
+#: :func:`normalize_peer_chat_execute`.
+PEER_CHAT_EXECUTE_METHOD = "peer.agent_chat.execute"
+CHAT_TURN_METHODS: tuple[str, ...] = (
+    CHAT_MESSAGE_METHOD,
+    CHAT_STEER_METHOD,
+    PEER_CHAT_EXECUTE_METHOD,
+)
 
 #: Ceiling on one remote message body. The chat handler has its own caps
 #: further in; this one exists at the BOUNDARY so an oversized frame is refused
@@ -310,6 +318,135 @@ def normalize_chat_message(params: dict) -> ChatTurnRequest:
     )
 
 
+#: The ``--requested-by`` prefix a peer-executed turn carries. Beside
+#: ``gateway_device`` (a device's, hardcoded in :func:`normalize_chat_message`)
+#: and ``agent:<session>`` (a local relay's, ``tools/agent_chat_tool``). The
+#: install id after the colon is the ONE variable part, and it is the reason
+#: this is a prefix rather than a constant: an operator on B reading their own
+#: chat has to be able to see WHICH paired install asked, and "a peer" would not
+#: tell them.
+PEER_REQUESTED_BY_PREFIX = "peer:"
+
+
+def normalize_peer_chat_execute(
+    params: dict, *, peer_install_id: str
+) -> ChatTurnRequest:
+    """``peer.agent_chat.execute`` params → the argv a local send would use.
+
+    Gateway Stage 7. The sibling of :func:`normalize_chat_message` and the
+    differences are all one difference: **who is asking is not in the params.**
+
+    ``peer_install_id`` is a keyword-only ARGUMENT rather than a param key, and
+    that is the whole security posture of this verb expressed as a signature.
+    The caller of this function is the RPC handler, which reads the id off
+    ``context.caller`` — a value ``call_authorization.caller_for_connection``
+    minted from an authenticated connection whose HMAC verified against a row in
+    ``gateway/peers.json``. There is no params key by which a peer can name a
+    different install, because the field a peer could type does not exist. A
+    ``correlation_id``, by contrast, is exactly the thing a caller MAY choose,
+    and it is carried here for the reason the plan's own drift addendum names:
+    *a token is correlation, NEVER identity.* The two facts arrive on this
+    function by two different routes precisely so they cannot be confused.
+
+    **One ``target``, split here rather than by the dialler.** A local send
+    splits a ``personainst_*`` handle out of the persona slot before it calls
+    the handler; this door does the same with the same rule, because the
+    conventions for naming an instance are B's own and A must not have to know
+    them. What A sends is the string its agent wrote after the ``/``.
+
+    **No sender field, and the omission is deliberate.** The obvious courtesy is
+    a ``sender_persona`` param so B's operator sees which agent on A asked. It
+    is not here, because B cannot verify it: it would render, in B's chat, an
+    unverified claim about an agent on another machine, styled exactly like a
+    verified one. Who asked belongs in the message body, where it reads as what
+    it is — something the sender wrote.
+    """
+
+    peer_install_id = str(peer_install_id or "").strip()
+    if not peer_install_id:
+        # Unreachable through the RPC door (its handler refuses a non-peer
+        # caller before it gets here) and refused anyway, because a normaliser
+        # that silently produced a turn with no provenance would be one edit
+        # away from being the door.
+        raise ChatTurnInvalid(
+            "peer_install_unknown",
+            "invalid params: a peer-executed chat turn needs an authenticated "
+            "peer install, and this connection proved none",
+        )
+
+    turn_request_id = _required_text(
+        params, "turn_request_id", limit=MAX_TURN_REQUEST_ID_LENGTH
+    )
+    target = _required_text(params, "target", limit=200)
+    message = _required_text(params, "message", limit=MAX_MESSAGE_LENGTH)
+    session_id = _text(params, "session_id", limit=200)
+    title = _text(params, "title", limit=200)
+    new_session = _flag(params, "new_session")
+    correlation_id = _correlation_id(params)
+
+    max_seconds_raw = params.get("max_seconds")
+    max_seconds: float | None = None
+    if max_seconds_raw is not None:
+        if isinstance(max_seconds_raw, bool) or not isinstance(
+            max_seconds_raw, (int, float)
+        ):
+            raise ChatTurnInvalid(
+                "max_seconds_invalid",
+                "invalid params: max_seconds must be a number when sent",
+            )
+        max_seconds = float(max_seconds_raw)
+        if not (max_seconds > 0):
+            raise ChatTurnInvalid(
+                "max_seconds_invalid",
+                "invalid params: max_seconds must be greater than zero",
+            )
+
+    from .persona_assignments import safe_assignment_token
+
+    instance_id = target if safe_assignment_token(target).startswith("personainst_") else ""
+
+    argv: list[str] = [
+        "harness",
+        "mission-chat",
+        "message",
+        "--persona",
+        target,
+        "--message",
+        message,
+        "--client-message-id",
+        turn_request_id,
+        # The one field of the send this server decides. See the docstring.
+        "--requested-by",
+        f"{PEER_REQUESTED_BY_PREFIX}{peer_install_id}",
+        "--json",
+    ]
+    if session_id:
+        argv += ["--session-id", session_id]
+    if instance_id:
+        argv += ["--persona-instance-id", instance_id]
+    if title:
+        argv += ["--title", title]
+    if new_session:
+        argv.append("--new-session")
+    if max_seconds is not None:
+        argv += ["--max-seconds", repr(max_seconds)]
+
+    return ChatTurnRequest(
+        verb=PEER_CHAT_EXECUTE_METHOD,
+        turn_request_id=turn_request_id,
+        # The peer install rides the replay SCOPE, which the two local verbs
+        # have no equivalent of and this one needs: ``turn_request_id`` is
+        # minted on the OTHER install, so two paired installs could legitimately
+        # present the same one, and a replay answered out of the wrong install's
+        # receipt would hand install C the ack for install B's turn. Scoping by
+        # the proven id makes that unrepresentable rather than unlikely.
+        session_scope=f"{PEER_REQUESTED_BY_PREFIX}{peer_install_id}/"
+        + (session_id or instance_id or f"persona:{target}"),
+        argv=argv,
+        correlation_id=correlation_id,
+    )
+
+
 def normalize_chat_steer(params: dict) -> ChatTurnRequest:
     """``runtime.chat.steer`` params → ``harness mission-chat steer`` argv."""
 
@@ -376,6 +513,7 @@ def perform_chat_turn(
     *,
     verb: str,
     spawn: Callable[[str, list[str], str], None] | None,
+    peer_install_id: str | None = None,
 ) -> ChatTurnOutcome:
     """Validate, dedupe, and hand ONE chat turn to a worker.
 
@@ -399,6 +537,13 @@ def perform_chat_turn(
             request = normalize_chat_message(params)
         elif verb == CHAT_STEER_METHOD:
             request = normalize_chat_steer(params)
+        elif verb == PEER_CHAT_EXECUTE_METHOD:
+            # ``peer_install_id or ""`` rather than a guard here: the normaliser
+            # refuses an empty one with its own typed reason, so there is one
+            # place that decides what "no proven peer" means.
+            request = normalize_peer_chat_execute(
+                params, peer_install_id=peer_install_id or ""
+            )
         else:  # pragma: no cover - the registry is the only caller
             raise ChatTurnInvalid("unknown_chat_verb", f"unknown chat verb: {verb}")
     except ChatTurnInvalid as exc:
