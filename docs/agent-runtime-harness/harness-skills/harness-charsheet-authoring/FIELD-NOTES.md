@@ -1394,6 +1394,166 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   console-side claims as code-derived, and an agent that gets to run the loop should append
   what actually happened here.
 
+### W5 — the correctly-attributed proof draft (2026-08-27, operational, no code)
+
+Strip §W5 of the launcher's `docs/spatial/CHARA_GAP_CLOSURE_WAVE_2026-08-27.md`: no
+worktree, no source change. This entry is the strip's only commit. The strip exists
+because every draft on disk failed an EARLIER gate than the one that wave is fixing, so
+`CharacterResumeThisLane` could not be proven on any of them.
+
+- **[VERIFIED] The bare-shell home trap is not an UNSET variable — it is a set one, and
+  that is why it is easy to miss.** This shell had `HERMES_HOME=X:\Eternia\.hermes` — the
+  runtime ROOT, not a profile — and `harness status --json` answered
+  `runtime_health.hermes_home = X:\Eternia\.hermes\profiles\alice`,
+  `hermes_profile = alice`. Nothing is missing and nothing warns; the resolver simply
+  falls through to the active profile. Re-run with
+  `HERMES_HOME=X:\Eternia\.hermes\profiles\base` and the same field answers
+  `X:\Eternia\.hermes\profiles\base` / `base`.
+  *Consequence:* "the variable is set" is not evidence you are in the launcher's home.
+  Echo `runtime_health.hermes_home` — the RESOLVED value — before and after any write.
+
+- **[VERIFIED] The launcher lane's home is `…\profiles\base` by the launcher's own
+  construction, not by convention.** `HermesProcessIdentity.hermesProfile` defaults to
+  `'base'` and `resolvedProfile` falls back to `'base'` on a blank setting;
+  `toProcessEnvironment()` builds `HERMES_HOME` as `<root>\profiles\<resolvedProfile>`.
+  So a launcher with no profile override reads exactly the home this draft was written to.
+
+- **[VERIFIED] `base` resolves — checked against the launcher's OWN definition of
+  "resolves", not against the file listing.** The refusal
+  `CharacterResumePersonaUnresolved` fires when
+  `resolver.resolveAgentTarget(personaId).consoleTargetId` is null, and that resolver is
+  built from the frame's ROSTER OF INSTANCES — not from `agent-runtime/agents/*.json`.
+  Two live reads, both under the base home: `harness agent list --json` carries
+  `{"id": "base", "name": "Base Agent", "state": "available", "role": "profile"}`, and
+  `harness snapshot --json` carries `persona_instances.personainst_base` with
+  `persona_id: "base"`, `state: idle`, `skills: [harness-runtime-model,
+  harness-charsheet-authoring]`. A persona-keyed id with at least one instance row
+  resolves through channel (3) of `resolveAgentTarget`, so `consoleTargetId` is non-null.
+  *Consequence:* the roster to verify against is the snapshot's `persona_instances`, and
+  the check is "does some row carry `persona_id: <what I am about to write>`". Reading
+  `agents/` answers a NEARBY question.
+
+- **[VERIFIED] `chara_a2` is a slug fragment of a REAL instance id, which is exactly why
+  it fails.** The snapshot holds `persona_instances.personainst_chara_a2_7b31d0e4`, whose
+  `persona_id` is **`base`** and whose `display_name` is "Chara A2 - Tier1 authoring". So
+  the agent that wrote `authored_by: "chara_a2"` was not inventing a name: it wrote the
+  middle of its own instance id (or a slug of its display name — the two coincide here),
+  dropping both the `personainst_` prefix and the `_7b31d0e4` suffix. `chara_a2` is
+  therefore not an instance id, not a persona id and not a role, and
+  `missionIdLooksLikeInstance` will not even keep it verbatim.
+  *Consequence:* the skill's rule ("copy what is inside the parenthesis") is right, and
+  the near-miss is the dangerous shape — a value that LOOKS like provenance because it is
+  built out of real characters from a real id. Both `chara_a2` drafts stay on disk,
+  untouched, as the teaching exhibit.
+
+- **[MEASURED] Receipt 1 — the home echo, taken immediately before the write.**
+  `harness status --json` →
+  `runtime_health.hermes_home = X:\Eternia\.hermes\profiles\base`,
+  `hermes_profile = base`, `runtime_root = X:\Eternia\.hermes\agent-runtime`.
+
+- **[MEASURED] Receipt 2 — the red-first analog: the list BEFORE.**
+  `harness characters list --json` in that home answered exactly two drafts,
+  `20260825-025720-b9f5ae` and `20260825-030335-2f653e`, both `"authoredBy": "chara_a2"`,
+  plus one installed character `cobalt-robot-courier`. Zero correctly-attributed drafts
+  existed anywhere the launcher lane reads. That is the state the delta below proves
+  against.
+
+- **[MEASURED] Receipt 3 — the start payload.**
+  `harness characters start --concept "A tall lantern-keeper in a long teal coat with
+  brass goggles pushed up on the forehead, carrying a glass storm lantern; readable at
+  small size." --display-name "Teal Lantern Keeper" --authored-by base --json` →
+  `{"draft": "20260827-150945-7ba0cb", "ok": true, "stage": "turnaround"}`, with
+  `summary.authoredBy = "base"`, `slug = "teal-lantern-keeper"`,
+  `directory = X:\Eternia\.hermes\profiles\base\characters\.drafts\20260827-150945-7ba0cb`,
+  `directions = 8`, `rows = 10`, `style = "auto"`, `baseImage = null`. No `--slug` was
+  passed; `teal-lantern-keeper` is the slugified display name, as documented.
+
+- **[MEASURED] Receipt 4 — the list AFTER.** The same verb now answers three drafts; the
+  new row, verbatim:
+  `{"authoredBy": "base", "authoredRows": 10, "baseImage": null, "concept": "A tall
+  lantern-keeper in a long teal coat with brass goggles pushed up on the forehead,
+  carrying a glass storm lantern; readable at small size.", "directions": 8,
+  "directory": "X:\Eternia\.hermes\profiles\base\characters\.drafts\20260827-150945-7ba0cb",
+  "displayName": "Teal Lantern Keeper", "id": "20260827-150945-7ba0cb", "rows": 10,
+  "slug": "teal-lantern-keeper", "stage": "turnaround", "style": "auto"}`.
+
+- **[VERIFIED] `start` really does generate nothing, and the disk says so.** The draft
+  directory holds ONE file — `draft.json`, 1,118 bytes — with `"authored_by": "base"`,
+  `"base_image": ""`, `"stage": "turnaround"` and the CHAR8 spec (authored
+  `s se e ne n`, mirrored `nw sw w`, states `idle:6` + `walk:8`). No provider was called
+  and no tokens were spent. A draft at any stage lists, so `turnaround` is enough for the
+  console to see it.
+
+- **[VERIFIED] Fact 4 of the wave plan re-taken, and it still holds.** The two live serve
+  children (pids 30248 stdio, 30740 stdio+socket:61629, both commit `1295212f2e`,
+  `dirty: false`) classified `live` before and after this strip — nothing here restarted,
+  killed or touched them. Their records' key set is
+  `argv_hint boot_id build port schema_version socket_started_at started_at
+  started_at_ticks store_root transport`: `store_root` present, **`hermes_home` absent**.
+  From outside, the home a running serve child resolved is still unknowable; §W4 is the
+  fix and it had not landed when this was taken.
+
+- **[READ] Both repos have moved past the wave plan's stated baselines.** The plan pins
+  hermes at `1295212f2e` and launcher at `2d7c7c8e0`; at the time of this strip hermes
+  HEAD was `194cb3d0ab` (S8b-b, placement) and launcher HEAD was `3a5fbacfb` (S8b-b), with
+  the wave's launcher FIELD-NOTES file already created by `6bb28eebc`. The hermes working
+  tree also carried two unrelated modified docs from another session
+  (`docs/agent-runtime-harness/03-transport-and-wire.md`,
+  `docs/agent-runtime-harness/planned/remote-gateway.md`) — left alone; this strip
+  commits only this file.
+  *Consequence:* a strip that re-takes a plan fact by HASH will mis-fire in this program's
+  shared checkouts. Re-take facts at the file, as the wave's own preamble instructs.
+
+- **[READ] A hazard W6 should expect: `--authored-by base` resolves, but it ELECTS among
+  two rows.** Both `personainst_base` (realm null) and `personainst_chara_a2_7b31d0e4`
+  (realm `realm_codex-test-realm_cad6d4`, which is the snapshot's ACTIVE realm) carry
+  `persona_id: "base"`, and neither matches `_deliberatePlacementSuffix`
+  (`_agent_(\d+|[0-9a-f]{8})$` — the `chara_a2` id ends `_7b31d0e4`, not
+  `_agent_7b31d0e4`), so both sit in the canonical partition and the tier table decides
+  between them. Both are idle chat rows, so the winner comes down to mode classification
+  and list order.
+  *Consequence:* Resume on this draft opens a real console either way — which is the
+  strip's goal — but the chat it lands in may be titled "Chara A2 - Tier1 authoring"
+  rather than "Base Agent". If a capture needs the row to name the Base Agent, pin the
+  exact instance id at authoring time instead of the persona id. Do not "fix" it by
+  renaming anything, and do not change this draft.
+
+- **[VERIFIED] The draft is home-SCOPED, and proving that turned up a second defect:
+  `characters list` can answer the SAME draft id twice.** From a bare shell (alice home)
+  the new draft is correctly invisible — `list --json` answers only the anime-girl draft.
+  It answers it **twice**, both rows `id: 20260824-140756-cd645a` with
+  `authoredBy: null`, because `.drafts/` holds both `20260824-140756-cd645a` and
+  `20260824-140756-cd645a.backup-2026-08-25-nefix`, and the walk reads any subdirectory's
+  `draft.json` without caring that the id inside it already appeared. A sibling backup
+  taken by copying the directory is enough to do it.
+  *Consequence:* `id` is not a key in the `drafts` array. The launcher's `laneDraftIds`
+  is a `Set`, so liveness is unaffected, but any consumer that RENDERS the array (the
+  adopt door's `_DraftList`, the review lane) will show one draft twice, with no way to
+  tell the rows apart. Not fixed here — filed as found, in the home the wave told this
+  strip not to touch.
+
+- **[VERIFIED] The install gate hashes the PACKAGE, so this very file reds it.**
+  `verify_harness_skill_install.py --check` calls
+  `skill_package_content_hash(source.parent, source)` — the package DIRECTORY, not just
+  `SKILL.md` — and `X:\Eternia\.hermes\shared\skills\harness-charsheet-authoring\`
+  carries an installed copy of `FIELD-NOTES.md` beside `SKILL.md`. After this append the
+  gate reports `harness-charsheet-authoring: repo 44478 B … | installed 44478 B … |
+  DIVERGED` while the two `SKILL.md` files are byte-identical (`cmp` clean, same sha256)
+  — the size in that line is `SKILL.md`'s, the hash is the package's, and the pair reads
+  like a contradiction until you know that.
+  *Consequence for §W3:* its red-first is "edit `SKILL.md`, watch the gate red". Appending
+  to these field notes reds it identically, so the red alone does not prove the SKILL.md
+  edit is the cause. The gate's own repair mode (a push, or the script without `--check`)
+  closes both. This strip did not push and did not run the installer, so the machine's
+  installed package is one field-notes entry behind this repo, on purpose.
+
+- **[NOT VERIFIED — say this out loud] This strip put nothing on a screen.** It proves a
+  correctly-attributed draft EXISTS in the home the launcher lane reads. Whether the
+  Resume row renders `Live in this lane` still depends on W1's observed-home writer, W2's
+  merge rule and a launcher relaunched from that build. W6 owes the capture; until then
+  nobody has watched `CharacterResumeThisLane` fire.
+
+
 <!-- A2, A3, R1 and any slice standing in the HERMES repo: append your entries above this
      line, under the matching heading, or add a heading if none fits. Then say in your
      slice report that you did.
