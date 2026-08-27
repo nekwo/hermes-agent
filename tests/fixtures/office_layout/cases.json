@@ -1,0 +1,2361 @@
+{
+  "schema_version": 1,
+  "purpose": "The cross-repo pin for the unaimed-placement lattice: hermes `agent_runtime/office_layout_policy.py` and the launcher's `MissionOfficePlacementPolicy` must resolve every case below to the same slot within 1e-4. Hand-maintained; see README.md for the update rule.",
+  "tolerance": 0.0001,
+  "constants": {
+    "origin_x": -5.0,
+    "origin_y": 6.4,
+    "column_spacing": 1.4,
+    "row_spacing": 1.6,
+    "columns_per_row": 8,
+    "occupancy_radius": 0.7,
+    "desk_lane_offset": 0.7
+  },
+  "cases": [
+    {
+      "name": "empty_floor",
+      "why": "Nothing placed yet: the first unaimed agent lands on the lattice origin, not on a viewport guess.",
+      "kind": "agent",
+      "folder": "Agents",
+      "lane_offset": [
+        0.0,
+        0.0
+      ],
+      "items": [],
+      "expected": [
+        -5.0,
+        6.4
+      ]
+    },
+    {
+      "name": "gap_is_filled_not_appended",
+      "why": "Columns 0 and 2 taken: the scan fills the HOLE at column 1 rather than appending past the end, which is what makes it deterministic under removal.",
+      "kind": "agent",
+      "folder": "Agents",
+      "lane_offset": [
+        0.0,
+        0.0
+      ],
+      "items": [
+        {
+          "item_id": "a0",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -5.0,
+            6.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a2",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -2.2,
+            6.4
+          ],
+          "hidden": false
+        }
+      ],
+      "expected": [
+        -3.6,
+        6.4
+      ]
+    },
+    {
+      "name": "full_first_row_wraps",
+      "why": "All eight columns of row 0 taken: the next slot wraps to row 1 column 0 instead of marching off the right edge of the floor.",
+      "kind": "agent",
+      "folder": "Agents",
+      "lane_offset": [
+        0.0,
+        0.0
+      ],
+      "items": [
+        {
+          "item_id": "a0",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -5.0,
+            6.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a1",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -3.6,
+            6.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a2",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -2.2,
+            6.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a3",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -0.8,
+            6.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a4",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            0.6,
+            6.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a5",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            2.0,
+            6.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a6",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            3.4,
+            6.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a7",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            4.8,
+            6.4
+          ],
+          "hidden": false
+        }
+      ],
+      "expected": [
+        -5.0,
+        4.8
+      ]
+    },
+    {
+      "name": "hidden_item_blocks",
+      "why": "A HIDDEN item still occupies its slot. Hiding is launcher-local view state \u2014 hermes has no `hidden` field at all and counts every item it reads \u2014 so both sides skip column 0 here, one by honouring the flag and one by never having had it. Un-hiding must never reveal two agents stacked on one point.",
+      "kind": "agent",
+      "folder": "Agents",
+      "lane_offset": [
+        0.0,
+        0.0
+      ],
+      "items": [
+        {
+          "item_id": "tucked-away",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -5.0,
+            6.4
+          ],
+          "hidden": true
+        }
+      ],
+      "expected": [
+        -3.6,
+        6.4
+      ]
+    },
+    {
+      "name": "other_folder_does_not_block",
+      "why": "A desk sitting on the agent lattice does not push an agent placement: the scan is folder-scoped, and agents sit AT desks.",
+      "kind": "agent",
+      "folder": "Agents",
+      "lane_offset": [
+        0.0,
+        0.0
+      ],
+      "items": [
+        {
+          "item_id": "d0",
+          "kind": "desk",
+          "folder": "Desks",
+          "position": [
+            -5.0,
+            6.4
+          ],
+          "hidden": false
+        }
+      ],
+      "expected": [
+        -5.0,
+        6.4
+      ]
+    },
+    {
+      "name": "blank_folder_falls_back_to_kind",
+      "why": "hermes STORES a blank folder (`office_store._safe_folder` returns \"\" for an absent one) while the launcher's decoder substitutes the kind's default at read time. An item filed under \"\" is therefore an AGENTS item on one side and would be an unfiled item on the other, so a policy that scanned the raw string would miss this blocker on exactly one of the two repos.",
+      "kind": "agent",
+      "folder": "Agents",
+      "lane_offset": [
+        0.0,
+        0.0
+      ],
+      "items": [
+        {
+          "item_id": "legacy",
+          "kind": "agent",
+          "folder": "",
+          "position": [
+            -5.0,
+            6.4
+          ],
+          "hidden": false
+        }
+      ],
+      "expected": [
+        -3.6,
+        6.4
+      ]
+    },
+    {
+      "name": "blank_folder_desk_falls_back_to_desks",
+      "why": "The same fallback, the other kind: a blank-foldered DESK belongs to Desks, so it blocks the desk lane and not the agent lattice.",
+      "kind": "desk",
+      "folder": "Desks",
+      "lane_offset": [
+        0.7,
+        0.7
+      ],
+      "items": [
+        {
+          "item_id": "legacy_desk",
+          "kind": "desk",
+          "folder": "",
+          "position": [
+            -4.3,
+            7.1
+          ],
+          "hidden": false
+        }
+      ],
+      "expected": [
+        -2.9,
+        7.1
+      ]
+    },
+    {
+      "name": "desk_lane_offset",
+      "why": "The desk lane is the agent lattice nudged diagonally by the desk lane offset. Both folders start empty here except for an agent on the agent origin, so without the nudge the first unaimed desk would land exactly under it \u2014 the cross-folder stack this policy exists to retire.",
+      "kind": "desk",
+      "folder": "Desks",
+      "lane_offset": [
+        0.7,
+        0.7
+      ],
+      "items": [
+        {
+          "item_id": "a0",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -5.0,
+            6.4
+          ],
+          "hidden": false
+        }
+      ],
+      "expected": [
+        -4.3,
+        7.1
+      ]
+    },
+    {
+      "name": "desk_lane_second_desk",
+      "why": "A desk already on the lane's origin pushes the next one along the LANE, never back onto the agent lattice.",
+      "kind": "desk",
+      "folder": "Desks",
+      "lane_offset": [
+        0.7,
+        0.7
+      ],
+      "items": [
+        {
+          "item_id": "d0",
+          "kind": "desk",
+          "folder": "Desks",
+          "position": [
+            -4.3,
+            7.1
+          ],
+          "hidden": false
+        }
+      ],
+      "expected": [
+        -2.9,
+        7.1
+      ]
+    },
+    {
+      "name": "off_lattice_item_blocks_its_nearest_slot",
+      "why": "A canvas drag lands anywhere. An item 0.14 away from the origin slot blocks it (inside the occupancy radius) and leaves column 1 free (1.30 away, outside it). Neither distance is near the 0.7 boundary, so float32 storage on the launcher side cannot flip the verdict.",
+      "kind": "agent",
+      "folder": "Agents",
+      "lane_offset": [
+        0.0,
+        0.0
+      ],
+      "items": [
+        {
+          "item_id": "dragged",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -4.9,
+            6.3
+          ],
+          "hidden": false
+        }
+      ],
+      "expected": [
+        -3.6,
+        6.4
+      ]
+    },
+    {
+      "name": "pigeonhole_200_occupied",
+      "why": "Twenty-five FULL rows \u2014 200 blockers. The scan is bounded at (occupied + 1) rows, so it terminates, and by pigeonhole a free slot exists inside that bound: row 25, column 0. A policy that stopped scanning at a fixed row count would answer an occupied slot here.",
+      "kind": "agent",
+      "folder": "Agents",
+      "lane_offset": [
+        0.0,
+        0.0
+      ],
+      "items": [
+        {
+          "item_id": "a0_0",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -5.0,
+            6.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a0_1",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -3.6,
+            6.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a0_2",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -2.2,
+            6.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a0_3",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -0.8,
+            6.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a0_4",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            0.6,
+            6.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a0_5",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            2.0,
+            6.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a0_6",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            3.4,
+            6.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a0_7",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            4.8,
+            6.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a1_0",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -5.0,
+            4.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a1_1",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -3.6,
+            4.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a1_2",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -2.2,
+            4.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a1_3",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -0.8,
+            4.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a1_4",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            0.6,
+            4.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a1_5",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            2.0,
+            4.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a1_6",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            3.4,
+            4.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a1_7",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            4.8,
+            4.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a2_0",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -5.0,
+            3.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a2_1",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -3.6,
+            3.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a2_2",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -2.2,
+            3.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a2_3",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -0.8,
+            3.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a2_4",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            0.6,
+            3.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a2_5",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            2.0,
+            3.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a2_6",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            3.4,
+            3.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a2_7",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            4.8,
+            3.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a3_0",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -5.0,
+            1.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a3_1",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -3.6,
+            1.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a3_2",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -2.2,
+            1.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a3_3",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -0.8,
+            1.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a3_4",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            0.6,
+            1.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a3_5",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            2.0,
+            1.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a3_6",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            3.4,
+            1.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a3_7",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            4.8,
+            1.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a4_0",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -5.0,
+            0.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a4_1",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -3.6,
+            0.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a4_2",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -2.2,
+            0.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a4_3",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -0.8,
+            0.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a4_4",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            0.6,
+            0.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a4_5",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            2.0,
+            0.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a4_6",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            3.4,
+            0.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a4_7",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            4.8,
+            0.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a5_0",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -5.0,
+            -1.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a5_1",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -3.6,
+            -1.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a5_2",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -2.2,
+            -1.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a5_3",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -0.8,
+            -1.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a5_4",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            0.6,
+            -1.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a5_5",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            2.0,
+            -1.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a5_6",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            3.4,
+            -1.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a5_7",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            4.8,
+            -1.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a6_0",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -5.0,
+            -3.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a6_1",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -3.6,
+            -3.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a6_2",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -2.2,
+            -3.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a6_3",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -0.8,
+            -3.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a6_4",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            0.6,
+            -3.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a6_5",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            2.0,
+            -3.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a6_6",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            3.4,
+            -3.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a6_7",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            4.8,
+            -3.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a7_0",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -5.0,
+            -4.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a7_1",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -3.6,
+            -4.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a7_2",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -2.2,
+            -4.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a7_3",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -0.8,
+            -4.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a7_4",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            0.6,
+            -4.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a7_5",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            2.0,
+            -4.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a7_6",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            3.4,
+            -4.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a7_7",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            4.8,
+            -4.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a8_0",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -5.0,
+            -6.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a8_1",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -3.6,
+            -6.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a8_2",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -2.2,
+            -6.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a8_3",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -0.8,
+            -6.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a8_4",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            0.6,
+            -6.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a8_5",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            2.0,
+            -6.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a8_6",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            3.4,
+            -6.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a8_7",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            4.8,
+            -6.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a9_0",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -5.0,
+            -8.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a9_1",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -3.6,
+            -8.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a9_2",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -2.2,
+            -8.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a9_3",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -0.8,
+            -8.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a9_4",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            0.6,
+            -8.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a9_5",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            2.0,
+            -8.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a9_6",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            3.4,
+            -8.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a9_7",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            4.8,
+            -8.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a10_0",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -5.0,
+            -9.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a10_1",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -3.6,
+            -9.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a10_2",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -2.2,
+            -9.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a10_3",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -0.8,
+            -9.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a10_4",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            0.6,
+            -9.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a10_5",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            2.0,
+            -9.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a10_6",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            3.4,
+            -9.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a10_7",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            4.8,
+            -9.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a11_0",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -5.0,
+            -11.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a11_1",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -3.6,
+            -11.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a11_2",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -2.2,
+            -11.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a11_3",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -0.8,
+            -11.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a11_4",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            0.6,
+            -11.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a11_5",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            2.0,
+            -11.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a11_6",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            3.4,
+            -11.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a11_7",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            4.8,
+            -11.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a12_0",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -5.0,
+            -12.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a12_1",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -3.6,
+            -12.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a12_2",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -2.2,
+            -12.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a12_3",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -0.8,
+            -12.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a12_4",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            0.6,
+            -12.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a12_5",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            2.0,
+            -12.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a12_6",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            3.4,
+            -12.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a12_7",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            4.8,
+            -12.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a13_0",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -5.0,
+            -14.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a13_1",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -3.6,
+            -14.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a13_2",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -2.2,
+            -14.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a13_3",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -0.8,
+            -14.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a13_4",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            0.6,
+            -14.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a13_5",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            2.0,
+            -14.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a13_6",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            3.4,
+            -14.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a13_7",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            4.8,
+            -14.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a14_0",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -5.0,
+            -16.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a14_1",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -3.6,
+            -16.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a14_2",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -2.2,
+            -16.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a14_3",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -0.8,
+            -16.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a14_4",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            0.6,
+            -16.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a14_5",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            2.0,
+            -16.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a14_6",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            3.4,
+            -16.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a14_7",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            4.8,
+            -16.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a15_0",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -5.0,
+            -17.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a15_1",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -3.6,
+            -17.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a15_2",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -2.2,
+            -17.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a15_3",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -0.8,
+            -17.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a15_4",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            0.6,
+            -17.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a15_5",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            2.0,
+            -17.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a15_6",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            3.4,
+            -17.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a15_7",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            4.8,
+            -17.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a16_0",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -5.0,
+            -19.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a16_1",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -3.6,
+            -19.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a16_2",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -2.2,
+            -19.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a16_3",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -0.8,
+            -19.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a16_4",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            0.6,
+            -19.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a16_5",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            2.0,
+            -19.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a16_6",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            3.4,
+            -19.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a16_7",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            4.8,
+            -19.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a17_0",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -5.0,
+            -20.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a17_1",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -3.6,
+            -20.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a17_2",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -2.2,
+            -20.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a17_3",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -0.8,
+            -20.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a17_4",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            0.6,
+            -20.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a17_5",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            2.0,
+            -20.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a17_6",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            3.4,
+            -20.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a17_7",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            4.8,
+            -20.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a18_0",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -5.0,
+            -22.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a18_1",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -3.6,
+            -22.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a18_2",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -2.2,
+            -22.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a18_3",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -0.8,
+            -22.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a18_4",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            0.6,
+            -22.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a18_5",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            2.0,
+            -22.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a18_6",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            3.4,
+            -22.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a18_7",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            4.8,
+            -22.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a19_0",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -5.0,
+            -24.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a19_1",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -3.6,
+            -24.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a19_2",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -2.2,
+            -24.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a19_3",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -0.8,
+            -24.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a19_4",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            0.6,
+            -24.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a19_5",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            2.0,
+            -24.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a19_6",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            3.4,
+            -24.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a19_7",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            4.8,
+            -24.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a20_0",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -5.0,
+            -25.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a20_1",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -3.6,
+            -25.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a20_2",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -2.2,
+            -25.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a20_3",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -0.8,
+            -25.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a20_4",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            0.6,
+            -25.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a20_5",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            2.0,
+            -25.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a20_6",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            3.4,
+            -25.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a20_7",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            4.8,
+            -25.6
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a21_0",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -5.0,
+            -27.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a21_1",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -3.6,
+            -27.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a21_2",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -2.2,
+            -27.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a21_3",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -0.8,
+            -27.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a21_4",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            0.6,
+            -27.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a21_5",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            2.0,
+            -27.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a21_6",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            3.4,
+            -27.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a21_7",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            4.8,
+            -27.2
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a22_0",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -5.0,
+            -28.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a22_1",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -3.6,
+            -28.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a22_2",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -2.2,
+            -28.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a22_3",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -0.8,
+            -28.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a22_4",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            0.6,
+            -28.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a22_5",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            2.0,
+            -28.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a22_6",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            3.4,
+            -28.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a22_7",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            4.8,
+            -28.8
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a23_0",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -5.0,
+            -30.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a23_1",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -3.6,
+            -30.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a23_2",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -2.2,
+            -30.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a23_3",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -0.8,
+            -30.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a23_4",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            0.6,
+            -30.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a23_5",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            2.0,
+            -30.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a23_6",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            3.4,
+            -30.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a23_7",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            4.8,
+            -30.4
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a24_0",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -5.0,
+            -32.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a24_1",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -3.6,
+            -32.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a24_2",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -2.2,
+            -32.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a24_3",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            -0.8,
+            -32.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a24_4",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            0.6,
+            -32.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a24_5",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            2.0,
+            -32.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a24_6",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            3.4,
+            -32.0
+          ],
+          "hidden": false
+        },
+        {
+          "item_id": "a24_7",
+          "kind": "agent",
+          "folder": "Agents",
+          "position": [
+            4.8,
+            -32.0
+          ],
+          "hidden": false
+        }
+      ],
+      "expected": [
+        -5.0,
+        -33.6
+      ]
+    }
+  ]
+}
