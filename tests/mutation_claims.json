@@ -35,8 +35,8 @@
       "path": "agent_runtime/agent_create.py",
       "symbol": "roster_unavailable_outcome",
       "operator": "collapse-refusal-reason",
-      "find": "        persona_roster_unavailable_message(cause),\n        {\"reason\": PERSONA_ROSTER_UNAVAILABLE_REASON},",
-      "replace": "        persona_not_found_message(cause),\n        {\"reason\": PERSONA_NOT_FOUND_REASON},",
+      "find": "        {\"reason\": PERSONA_ROSTER_UNAVAILABLE_REASON, \"rolled_back\": True},",
+      "replace": "        {\"reason\": PERSONA_NOT_FOUND_REASON, \"rolled_back\": True},",
       "test": [
         "{python}",
         "-m",
