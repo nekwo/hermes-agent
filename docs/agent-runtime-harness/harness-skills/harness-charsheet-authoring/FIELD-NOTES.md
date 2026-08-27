@@ -1944,11 +1944,18 @@ No code changed; this section is the receipt and what running it taught.
   holds `anime-girl` twice — `20260824-140756-cd645a` and its
   `...-cd645a.backup-2026-08-25-nefix` sibling — and both `draft.json` files carry the same
   `id`. The `--json` receipt's `{id, directory}` rows name both distinctly and both appear
-  in `stamped`; the HUMAN line does not, and prints two rows that read identically
-  (`skipped 20260824-140756-cd645a  already ...` twice). **Consequence:** the human line is
-  fine for "did it do anything"; take the `--json` receipt when the question is WHICH file
-  was written. This is the case the receipt shape was designed for, and it is live on disk
-  rather than hypothetical.
+  in `stamped`. **Corrected at the code by the D slice, 2026-08-27: it is one ARM of the
+  human line, not the whole line.** `_cmd_characters_backfill_home` prints
+  `f"  stamped {row['id']}  {row['directory']}"` — which disambiguates fine — and
+  `f"  skipped {row['id']}  already {row['hermesHome']}"`, which puts the home where the
+  directory would have gone and therefore cannot. That is why the receipts above show the
+  identical pair only on the third run (`skipped 20260824-140756-cd645a  already ...` twice):
+  the stamping run's human line was never captured, because it was taken with `--json`.
+  **Consequence:** the verb is idempotent, so every run after the first is ENTIRELY the
+  skipped arm — the arm that loses the directory is the one an operator sees most. Take the
+  `--json` receipt when the question is WHICH file was written, and if you are fixing this,
+  it is one f-string carrying both. Filed on the launcher's Mission Control queue under
+  "From D, the recorded-home wave's closure strip".
 
 - **[TRAP — it will make a byte comparison lie] `draft.json` is CRLF on Windows.**
   `_write_json_atomic` opens its temp file in text mode (`"w"`), so `json.dump`'s `\n`
@@ -1968,6 +1975,32 @@ No code changed; this section is the receipt and what running it taught.
   moment a "verbatim capture" stops being one. Capture the stdout and commit it. The
   launcher's `test/fixtures/charsheet/status.json` was carrying exactly those escapes; the
   2026-08-27 re-capture removed them by not re-serialising.
+
+## The wave closes (appended by the D slice, 2026-08-27)
+
+D is a LAUNCHER strip — owner decision §13.26, the wave doc's LANDED/OWED
+annotation, the queue rows and one correction to the launcher's doc 09 — and its
+running record is in
+`EterniaLauncher/docs/spatial/CHARA_CONSOLE_AUTHORING_FIELD_NOTES.md`. Only what
+it learned about a hermes verb or home is here, per the split rule at the bottom
+of this file. Two things, and the first is the correction to OP's own entry above.
+
+- **[READ] The `backfill-home` human line: the STAMPED arm names the directory, the
+  SKIPPED arm does not.** Corrected in place in the OP section above rather than
+  restated here.
+
+- **[READ] Nothing that lands on hermes `origin/main` reaches the RUNNING system until
+  the primary checkout fast-forwards.** OP recorded that the venv's editable install
+  points at `X:\Eternia\hermes-agent` and that a worktree must be run explicitly. The
+  half worth stating as a standing fact: the launcher's serve child is spawned from that
+  same install, so it runs the PRIMARY's code. Measured again 2026-08-27 after this wave
+  landed — the primary is **8 commits ahead of `origin/main` and 2 behind**, and the two
+  it lacks are exactly `c2ab3628b0` (H1) and `11e8894e0c` (OP): `hermes_home` is not in
+  its `agent/charsheet/draft.py` and `harness characters backfill-home` is an unknown
+  verb there. **Consequence:** "landed on `origin/main`" and "the running launcher can
+  see it" are two different claims, separated by one `git merge --ff-only` in a checkout
+  every session is told not to touch. Say which one you mean. Filed on the launcher's
+  Mission Control queue with the finder module's path table as evidence.
 
 <!-- A2, A3, R1 and any slice standing in the HERMES repo: append your entries above this
      line, under the matching heading, or add a heading if none fits. Then say in your
