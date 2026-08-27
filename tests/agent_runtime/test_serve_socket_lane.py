@@ -950,10 +950,26 @@ def _server_nonce(port: int) -> str:
     [
         (None, "the peer did not open with a server_hello challenge"),
         ({"event": "banner", "service": "something else"}, "did not open with"),
-        ({"event": "server_hello", "hello_contract": 2}, "no usable nonce"),
+        # The CONTRACT is checked before the nonce, and this row expected the
+        # reverse until gateway Stage 6 folded the four hellos onto one
+        # `_challenge`. The new order is the right one and the row moved to it
+        # rather than the code moving back: a `server_hello` at a contract this
+        # client does not speak is a frame it does not know how to READ, so
+        # complaining that a field is missing applies this contract's field
+        # rules to somebody else's frame — and would report "no usable nonce"
+        # for a frame carrying a perfectly good nonce under another name. The
+        # claim this test actually makes is unchanged and still asserted below:
+        # zero bytes sent, either way.
+        ({"event": "server_hello", "hello_contract": 2}, "unsupported hello_contract"),
         (
             {"event": "server_hello", "nonce": "c" * 64, "hello_contract": 1},
             "unsupported hello_contract",
+        ),
+        # …and with the contract RIGHT, the nonce check is what refuses — so the
+        # reordering did not delete a check, it sequenced two.
+        (
+            {"event": "server_hello", "nonce": "short", "hello_contract": 3},
+            "no usable nonce",
         ),
         (
             {"event": "hello_rejected", "reason": "rate_limited"},
