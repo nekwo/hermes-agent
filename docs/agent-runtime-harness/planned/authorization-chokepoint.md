@@ -474,8 +474,8 @@ rather than the gate.
 
 ## Three rulings for the operator
 
-Answer in one message. Nothing below is built; each ruling unblocks the stage
-named beside it.
+**ANSWERED 2026-08-27 — all three ruled in one message; the per-ruling records
+are inline below.** Stages A1–A4 are cleared to build.
 
 ### Ruling A — where the authorization check runs (R11's prerequisite)
 
@@ -502,6 +502,20 @@ the RPC lane is expected to need enforcement, which nothing today does.)
 **Unblocks.** Gateway Stage 1 (the non-loopback bind), R11, and Stages
 A1–A4 above.
 
+**RULED 2026-08-27: (b) — the check goes at the front door — and the operator
+reframed WHY, which fixes the policy this plan deliberately left open (§4):
+the tier is CLIENT SECURITY AUTH. A caller whose credential traces to account
+auth may create/retire agents; one whose credential does not, may not.**
+Recorded interpretation (correct it if wrong): hermes never sees an Eternia
+account directly, so the binding happens where credentials are minted — the
+local root token is the machine owner and stays `local_console` (the
+grandfathering §2 already names), and a device credential's tier is fixed at
+the pairing ceremony, which only an account-authed operator surface can run
+(gateway Stage 1 / Stage A5). The front-door gate then reads the tier off the
+authenticated connection, never off anything the caller asserts. Consequence
+for A3: the default tier for an unrecognised or tierless credential is
+refuse-console-verbs, not allow.
+
 ### Ruling B — R1, TLS posture on LAN (gateway Stage 1)
 
 **Question.** How is the LAN link protected? Restated from the primary plan
@@ -524,6 +538,17 @@ same guarantee by hand.
 
 **Unblocks.** Gateway Stage 1's listener. Independent of Ruling A — both are
 Stage 1 prerequisites and neither substitutes for the other.
+
+**RULED 2026-08-27: encrypt — (b) plaintext is rejected. Mechanism: (a)
+self-signed pinned cert as the baseline, with one instruction attached — before
+Stage 1 builds, survey the launcher's EXISTING auth machinery for reuse**
+(the operator's words: "the account auth might be better, I think we already
+have code for this in launcher" — the candidates are `DeviceKeyStore` /
+`SoftwareDeviceKeyStore` (ES256, SecureKv), `DeviceIdentityService`'s
+self-proving JWS, and the Keycloak-authed backend lane). If the existing
+device-identity code can carry the pinning or the link security, prefer reuse
+over minting a parallel scheme. Survey findings land in the primary plan's R1
+record.
 
 ### Ruling C — marking the W2 relay legacy
 
@@ -554,3 +579,12 @@ should be done instead.)
 **Unblocks.** Nothing in hermes — this is launcher/backend hygiene. It is here
 because the primary plan escalated it as an operator decision rather than a free
 doc edit, and it should be answered in the same message as A and B.
+
+**RULED 2026-08-27: neither (b) nor (c) — "thoroughly mark it legacy, then
+nuke it now."** The operator accepts the cost to the in-flight lane; the
+recommendation above is overruled. Scope as ruled: the launcher W2 surface
+(`lib/features/mission_control/gateway/` and its tests, canon and brain
+truth). NOT in scope: the backend `agent_gateway` Django app (stays as the
+primary plan's §8 broker-appendix skeleton until that appendix is decided) and
+the device-identity service / Account devices card (reused by the gateway
+plan's §1.8, orthogonal to the relay).

@@ -1,7 +1,12 @@
 # Planned — Remote Gateway (hermes half)
 
 **Status:** surveyed + staged 2026-08-24, **GATED on the operator rulings R1–R13 in the
-primary plan — no stage builds before its ruling.**
+primary plan — no stage builds before its ruling.** 2026-08-27: R1 RULED (encrypt;
+self-signed pinned baseline + launcher-reuse survey) and the authorization
+chokepoint RULED (front door; tier = account auth) — see
+[authorization-chokepoint.md](authorization-chokepoint.md) § the three rulings;
+Stage 1's two prerequisites are now decisions, and its remaining gates are R3/R11's
+vocabulary details.
 **Primary plan (full architecture, stages, rulings):** EterniaLauncher repo,
 `docs/mission_control/planned/universal-remote-gateway.md`. This pointer carries only
 the hermes-owned half so the harness canon names its own work.
