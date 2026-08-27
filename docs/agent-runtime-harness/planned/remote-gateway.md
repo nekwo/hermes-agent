@@ -90,7 +90,12 @@ ride them, don't re-derive:
   is called from CLI handlers only — `runtime.agent.create`/`runtime.agent.retire`
   are ungated on RPC, `console`-tier is a decision with no check. `serve_gateway_auth.py`
   has nowhere to hook scopes (R11) until authorization moves to the chokepoint the
-  three doors share; rule that with R11 before any non-loopback bind.
+  three doors share; rule that with R11 before any non-loopback bind. **The design
+  for that chokepoint — inventory, three placement options, staged — is
+  [authorization-chokepoint.md](authorization-chokepoint.md) (2026-08-27); its
+  Ruling A is R11's prerequisite, and it measured the gap to be wider than an
+  asymmetry: the "gated" door's gate is unreachable on the spellings the launcher
+  and the CLI actually send.**
 - **Correlation tokens are Stage 7's join primitive — and not an identity.** Six
   write verbs carry optional `correlation_id` (charset + 64-cap, refused out loud at
   the RPC boundary, `serve_rpc.py:379`); the launcher mints per-process-origin tokens

@@ -721,7 +721,13 @@ omit it — the office's revision guard lives on the RPC lane only.
     sits at CLI handlers, so `harness persona instance retire` is gated and
     `harness agent retire` / `runtime.agent.retire` / `runtime.agent.create`
     are not, on the same two service functions. The fix is a scope parameter
-    on `perform_agent_create` / `perform_agent_retire`.
+    on `perform_agent_create` / `perform_agent_retire`. Designed and staged in
+    [planned/authorization-chokepoint.md](planned/authorization-chokepoint.md)
+    (2026-08-27), which argues that parameter is the BACKSTOP and the gate
+    belongs at the RPC dispatch layer — its Ruling A is the gateway R11's
+    prerequisite, and it measures the gap wider than an asymmetry: the gated
+    door's gate is unreachable on the `--requested-by` spellings the CLI and
+    the launcher actually send.
   - **Realm pull writes actor files with no office event**
     (`office_sync.apply_office_pull`), so a `WRITE_REMOTE` never becomes a
     patch. A real gap in the notification story and a realm-sync one, not a
