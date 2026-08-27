@@ -44,11 +44,19 @@ the gateway plan's R11 question and is answered there, not by adding a constant
 here on the way past.
 
 Stage A1 landed the vocabulary and the declaration, A2 the caller model, A3 the
-predicate. The POLICY A3 ships is empty on purpose: every caller that exists
-today is allowed, and the value of the stage is that a NEW caller — a paired
-device — arrives at a place where a decision is made, instead of arriving at
-three doors that never asked. Turning a device's scope into a refusal (Stage A5)
-is then an edit to :func:`authorize_call`, not an architecture change.
+predicate with an EMPTY policy — every caller that existed was allowed, so
+nothing observable moved, and the value of the stage was that a NEW caller would
+arrive at a place where a decision is made instead of at three doors that never
+asked.
+
+**Stage A5 is that new caller, and the promise held: it is an edit to this file
+and not an architecture change.** A paired device (gateway plan Stage 1,
+``serve_gateway_auth.py``) arrives as :data:`CALLER_DEVICE` carrying the tier its
+record holds, and :func:`authorize_call` compares that stored word against the
+verb's declared tier. Everything A3 grandfathered is grandfathered still —
+``_CONSOLE_KINDS`` was not touched — because a device's authority was added
+BESIDE the machine owner's rather than folded into it. Two callers whose
+authority comes from different kinds of fact should not share a membership test.
 """
 
 from __future__ import annotations
@@ -62,7 +70,9 @@ __all__ = [
     "TIERS",
     "CALLER_STDIO_OWNER",
     "CALLER_LOCAL_CONSOLE",
+    "CALLER_DEVICE",
     "CALLER_UNKNOWN",
+    "TRANSPORT_GATEWAY",
     "RpcCaller",
     "LOCAL_CONSOLE",
     "STDIO_OWNER",
@@ -100,10 +110,24 @@ CALLER_STDIO_OWNER = "stdio_owner"
 #: granularity because there is one token; until Stage A5 mints per-device
 #: credentials, holding the install token IS being the machine owner.
 CALLER_LOCAL_CONSOLE = "local_console"
-#: A caller the transport could not place. Minted today only by tests and by the
-#: defensive arm of :func:`caller_for_connection`; from Stage A5 also by a device
-#: credential that is revoked, expired, or absent from ``gateway/devices.json``.
+#: A peer on the GATEWAY listener that presented a per-device credential
+#: (``gateway/devices.json``, minted by an operator-run pairing on this
+#: install's own machine). Proven the same way ``local_console`` is — the
+#: connection is only stamped after its HMAC proof verifies — but it proves
+#: something narrower and something MORE: not "holds the one install-wide
+#: secret" but "is this named device", which is why it is the first caller kind
+#: that carries a tier of its own instead of inheriting the machine owner's.
+CALLER_DEVICE = "device"
+#: A caller the transport could not place. Minted by tests, by the defensive arm
+#: of :func:`caller_for_connection`, and — the arm Stage A5 adds — by a gateway
+#: connection that somehow reached the dispatcher without a device stamp.
 CALLER_UNKNOWN = "unknown"
+
+#: The transport name the gateway listener tags its connections with. Named here
+#: rather than imported from ``serve_socket`` for the reason
+#: :func:`caller_for_connection` is duck-typed: this module must not import the
+#: transport to answer a question about an object it was handed.
+TRANSPORT_GATEWAY = "gateway"
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,19 +154,38 @@ class RpcCaller:
     kind: str = CALLER_STDIO_OWNER
     connection_key: str | None = None
     transport: str = "stdio"
+    #: Set only for :data:`CALLER_DEVICE`. The device's own id, so a refusal and
+    #: a log line can name WHICH paired device was turned away — the fact an
+    #: operator auditing a revoked phone needs and the one a bare
+    #: ``connection_key`` cannot supply, because that key is minted per
+    #: connection and means nothing across two of them.
+    device_id: str | None = None
+    #: The tier this caller HOLDS, read off its device record by the transport.
+    #: ``None`` for every non-device caller, whose authority is its kind. This
+    #: is the field Ruling A's "the tier is client security auth" becomes:
+    #: fixed at the pairing ceremony, read off the authenticated connection,
+    #: never off anything the request carries.
+    device_tier: str | None = None
 
     def describe(self) -> dict[str, Any]:
         """The caller as it appears on a log line or a refusal's ``data``.
 
-        No secrets by construction: a kind, a transport, and a connection key
-        the server already echoes back to that same peer on ``hello_ok``.
+        No secrets by construction: a kind, a transport, a connection key the
+        server already echoes back to that same peer on ``hello_ok``, and — for
+        a device — the id it named itself in the hello. The verifier that proved
+        it has no field here and no field on ``DeviceRecord`` either.
         """
 
-        return {
+        payload = {
             "kind": self.kind,
             "transport": self.transport,
             "connection_key": self.connection_key,
         }
+        if self.device_id is not None:
+            payload["device_id"] = self.device_id
+        if self.device_tier is not None:
+            payload["device_tier"] = self.device_tier
+        return payload
 
 
 #: The machine owner at its own console, over the socket. Spelled as a value so
@@ -177,6 +220,19 @@ def caller_for_connection(connection: Any) -> RpcCaller:
     guarantee it never made. Duck-typed on ``getattr`` for the same reason the
     two fields beside it are — this must not import the socket module to answer a
     question about an object it was handed.
+
+    **Stage A5's arm, and the structural guard under it.** A gateway connection
+    carries a ``device_id`` / ``device_tier`` pair the handshake stamped after
+    the device's proof verified, and it becomes a :data:`CALLER_DEVICE` with the
+    tier its record holds. The guard is the second half: a connection whose
+    transport says ``gateway`` and which carries NO usable device stamp is
+    ``unknown``, never ``local_console``. Without that line the default arm
+    below would hand a remote peer the machine owner's authority the moment any
+    future change let a gateway connection through with an empty stamp — and
+    "the wrong default is one refactor away" is exactly the shape this lane
+    keeps retiring. The grandfathered ``local_console`` therefore requires
+    ``transport != "gateway"``, which is a property of the LISTENER the peer
+    reached rather than of anything the peer said.
     """
 
     if connection is None:
@@ -185,6 +241,20 @@ def caller_for_connection(connection: Any) -> RpcCaller:
     key = getattr(connection, "key", None)
     key = key if isinstance(key, str) and key else None
     if not bool(getattr(connection, "authenticated", False)):
+        return RpcCaller(kind=CALLER_UNKNOWN, connection_key=key, transport=transport)
+    device_id = getattr(connection, "device_id", None)
+    device_id = device_id if isinstance(device_id, str) and device_id else None
+    device_tier = getattr(connection, "device_tier", None)
+    device_tier = device_tier if device_tier in TIERS else None
+    if device_id is not None and device_tier is not None:
+        return RpcCaller(
+            kind=CALLER_DEVICE,
+            connection_key=key,
+            transport=transport,
+            device_id=device_id,
+            device_tier=device_tier,
+        )
+    if transport == TRANSPORT_GATEWAY:
         return RpcCaller(kind=CALLER_UNKNOWN, connection_key=key, transport=transport)
     return RpcCaller(
         kind=CALLER_LOCAL_CONSOLE, connection_key=key, transport=transport
@@ -201,11 +271,12 @@ REASON_SCOPE_DENIED = "scope_denied"
 #: surfaced as a refusal rather than as an allow — see :func:`authorize_call`.
 REASON_UNKNOWN_TIER = "unknown_tier"
 
-#: Kinds that may run a ``console`` verb today. EVERY caller that exists is in
-#: it, which is A3's whole point: the enforcement POINT lands with an empty
-#: policy, so nothing observable moves for the local launcher, the CLI or the
-#: tests, and Stage A5 turns a device's scope into a refusal by editing this
-#: rather than by moving the check.
+#: Kinds whose authority IS their kind: the machine owner, at its own pipe or
+#: over its own loopback socket. A3 landed the enforcement point with this set
+#: covering every caller that existed, so nothing observable moved. Stage A5
+#: does not touch it — the local launcher, the CLI and every test are as
+#: grandfathered as they were — it adds a kind BESIDE it whose authority is a
+#: stored tier rather than a membership.
 _CONSOLE_KINDS = frozenset({CALLER_STDIO_OWNER, CALLER_LOCAL_CONSOLE})
 
 
@@ -238,11 +309,28 @@ def authorize_call(tier: str, caller: RpcCaller | None) -> CallAuthorization:
     and nobody meant it to be, and this arm is unreachable anyway because
     :func:`serve_rpc.method` rejects an unknown tier at import.
 
-    Read verbs are open to everyone including ``unknown``, and that is a
-    deliberate line rather than an oversight at this stage: a read tier is what a
-    caller who has proved nothing may still do, and Stage A5 gates reads (if it
-    gates them at all) on the device record, not on the absence of one. Nothing
-    on the read side mutates a level.
+    Read verbs are open to everyone including ``unknown``, and Stage A5 KEPT
+    that line rather than inheriting it by omission. The temptation once real
+    devices exist is to gate reads on the device record too, and the reason not
+    to is that a read tier is precisely what a caller who has proved nothing may
+    still do: nothing on the read side mutates a level, and a caller that got as
+    far as this function on the gateway lane has already passed an HMAC proof
+    against a paired credential — the ``unknown`` arm there means "authenticated
+    but unplaceable", which is a state the transport does not currently produce.
+    An ``admin`` tier, if the skills install sub-phase ever needs one, is still
+    R11's question and still not answered by adding a constant here on the way
+    past.
+
+    **The device arm is A5.** A device's authority is not its KIND but the
+    ``device_tier`` the transport read off ``gateway/devices.json``, which was
+    fixed at a pairing ceremony only an operator at this install's own machine
+    can run. So the check is an equality against a stored word, and a device
+    holding ``read`` is refused a console verb with the same typed
+    ``scope_denied`` the launcher's decoders already branch on. A revoked or
+    unpaired device never reaches this function as a device at all — the
+    handshake refuses it — and if one ever did it would arrive as ``unknown``
+    and be refused by the fall-through, which is the ruling's own words for "I
+    do not know who this is".
     """
 
     resolved = caller if caller is not None else UNKNOWN_CALLER
@@ -257,6 +345,25 @@ def authorize_call(tier: str, caller: RpcCaller | None) -> CallAuthorization:
     if normalized == TIER_READ:
         return CallAuthorization(
             ok=True, reason="read_tier", tier=normalized, caller_kind=resolved.kind
+        )
+    if resolved.kind == CALLER_DEVICE:
+        # ``in TIERS`` as well as the equality, because a tier this build does
+        # not know must refuse rather than compare-unequal-and-fall-through to
+        # some later arm. There is no later arm today; there is no reason to
+        # depend on that staying true.
+        held = resolved.device_tier
+        if held in TIERS and held == normalized:
+            return CallAuthorization(
+                ok=True,
+                reason="device_tier",
+                tier=normalized,
+                caller_kind=resolved.kind,
+            )
+        return CallAuthorization(
+            ok=False,
+            reason=REASON_SCOPE_DENIED,
+            tier=normalized,
+            caller_kind=resolved.kind,
         )
     if resolved.kind in _CONSOLE_KINDS:
         return CallAuthorization(
