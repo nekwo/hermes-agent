@@ -29,12 +29,23 @@ Auth is first, and the token never travels
 The SERVER speaks first. On accept it writes exactly one frame::
 
     {"event":"server_hello","nonce":"<64 hex chars>","boot_id":…,
-     "contract":<frame schema>,"hello_contract":2,"algorithm":"hmac-sha256"}
+     "contract":<frame schema>,"hello_contract":3,"algorithm":"hmac-sha256"}
 
 and the client answers::
 
     {"op":"hello","client":…,"client_build":…,
-     "proof":"<hex HMAC-SHA256(key=token, msg=nonce)>"}
+     "proof":"<hex HMAC-SHA256(key=token, msg="v3|<dialled port>|<nonce>")>"}
+
+**The message is not the bare nonce**, and the two spellings above were wrong in
+both halves until 2026-08-27: this block said ``hello_contract`` 2 and
+``msg=nonce`` while :data:`HELLO_CONTRACT_VERSION` has been 3 and
+:func:`hello_proof` has bound the PORT since the relay defence landed. A client
+written against the prose computes a proof over the wrong message and is refused
+with ``bad_proof``, which is the least debuggable possible failure — it looks
+exactly like a wrong credential. Found by the launcher's socket client actually
+being built against it (launcher `527940a0e`). :func:`hello_proof` is the
+authority; this paragraph is a description of it and must be re-read against it,
+never trusted over it.
 
 Before that proof is verified a connection can do exactly nothing: no ops, no
 subscription, no answers. A wrong or missing proof gets ONE typed

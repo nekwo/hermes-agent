@@ -148,14 +148,19 @@ because the socket lane is injected and OFF unless ``_cmd_serve`` turns it on.
   ``{"outcome":"listening","host":"127.0.0.1","port":…}`` and its registry
   entry records ``transport:"stdio+socket"`` plus the port.
 - hello:     CHALLENGE-RESPONSE, and the SERVER speaks first
-             (``hello_contract`` 2). On accept the service writes
+             (``hello_contract`` 3). On accept the service writes
              ``{"event":"server_hello","nonce":<64 hex>,"boot_id":…,
-             "contract":1,"hello_contract":2,"algorithm":"hmac-sha256"}`` and
+             "contract":1,"hello_contract":3,"algorithm":"hmac-sha256"}`` and
              the client answers
              ``{"op":"hello","client":…,"client_build":…,"proof":<hex>}`` where
-             the proof is ``HMAC-SHA256(key=<per-root token>, msg=<nonce>)``.
+             the proof is ``HMAC-SHA256(key=<per-root token>,
+             msg="v3|<the port the client DIALLED>|<nonce>")`` —
+             ``serve_socket.hello_proof`` is the authority, and this line said
+             ``2`` and ``msg=<nonce>`` until 2026-08-27, which is wrong twice
+             over: a client written against it is refused with ``bad_proof``,
+             indistinguishable from holding the wrong credential.
              Success → ``{"event":"hello_ok","build":{…},"boot_id":…,
-             "contract":1,"hello_contract":2,"build_mismatch":true|false|null}``;
+             "contract":1,"hello_contract":3,"build_mismatch":true|false|null}``;
              failure → ONE ``{"event":"hello_rejected","reason":…}`` and the
              connection is closed, with a rate limit against hammering. Before
              that proof is verified a connection can do NOTHING.
