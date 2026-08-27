@@ -39,6 +39,7 @@ from agent.charsheet.draft import (
 )
 from agent.charsheet.revisions import STATE_FILENAME, ImageRevisionStore
 from agent.charsheet.spec import CHAR8, EIGHT_WAY, FOUR_WAY, SheetSpec, StateSpec
+from hermes_constants import get_hermes_home
 from tests.agent.test_charsheet_pipeline import load_fixture_sheet
 
 pytest.importorskip("PIL")
@@ -1369,6 +1370,117 @@ def test_the_authored_by_key_is_absent_rather_than_empty_when_it_is_not_given(fa
 
     assert "authored_by" not in on_disk
     assert blank.authored_by is None
+
+
+def test_a_draft_records_the_home_the_run_resolved_it_under(fake, base):
+    """`hermes_home` is hermes stating a first-party fact about its own disk.
+
+    Nothing here is derived and nothing is guessed: `drafts_dir()` has already
+    resolved `get_hermes_home()` two statements before the data dict is written,
+    so a draft being created IS sitting under the home the key names. That is
+    what separates this from a consumer slicing a profile name out of a path —
+    the derivation ban binds READERS of a home, never the generation authority
+    recording where it put the file.
+    """
+    recorded = CharacterDraft.create(
+        concept=CONCEPT, slug=SLUG, spec=SPEC, base_image=base
+    )
+    home = str(get_hermes_home())
+    on_disk = json.loads((recorded.directory / "draft.json").read_text(encoding="utf-8"))
+
+    assert on_disk["hermes_home"] == home
+    assert recorded.hermes_home == home
+    assert CharacterDraft.load(recorded.id).hermes_home == home
+    assert recorded.status_payload()["hermesHome"] == home
+    # The fact and the filesystem agree. A recorded home that did not have to be
+    # true would be a comment, not provenance.
+    assert recorded.directory.parent == drafts_dir()
+    assert str(drafts_dir()).startswith(home)
+
+
+def test_a_draft_that_predates_the_home_field_reads_as_none_and_never_as_empty(draft):
+    """Absence is a fact — the rule `authored_by` fought for, one field later.
+
+    The dormant drafts on disk were written before this key existed. A
+    `.get(..., "")` that flattened them to `""` would make "no home recorded"
+    unreadable beside "recorded as the empty string", and the backfill could no
+    longer select exactly the drafts that need one.
+    """
+    path = draft.directory / "draft.json"
+    legacy = json.loads(path.read_text(encoding="utf-8"))
+    legacy.pop("hermes_home", None)
+    path.write_text(json.dumps(legacy, indent=2, sort_keys=True), encoding="utf-8")
+
+    stale = CharacterDraft.load(draft.id)
+
+    assert "hermes_home" not in legacy
+    assert stale.hermes_home is None
+    assert stale.status_payload()["hermesHome"] is None
+
+
+def test_a_blank_recorded_home_reads_as_absent_rather_than_as_a_value(draft):
+    """`"   "` is not a home, and the backfill has to be able to select it.
+
+    Same shape as `authored_by`: a present-but-empty key is a third spelling of
+    absence that reads as a value to every consumer downstream.
+    """
+    path = draft.directory / "draft.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["hermes_home"] = "   "
+    path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+
+    blank = CharacterDraft.load(draft.id)
+
+    assert blank.hermes_home is None
+    assert blank.status_payload()["hermesHome"] is None
+
+
+def test_recording_a_home_on_a_legacy_draft_changes_nothing_else_on_disk(draft):
+    """The backfill writer adds ONE key and leaves the file otherwise equal.
+
+    The drafts this fills in are dormant exhibits: their `updated` timestamp and
+    their (mis-attributed) `authored_by` ARE the evidence. A write routed through
+    `_save()` would stamp `updated` with the moment the backfill ran and falsify
+    every one of them, which is why `record_home` writes the file itself. This
+    assertion is what makes that dedicated writer load-bearing rather than
+    stylistic.
+    """
+    path = draft.directory / "draft.json"
+    before = json.loads(path.read_text(encoding="utf-8"))
+    before.pop("hermes_home", None)
+    path.write_text(json.dumps(before, indent=2, sort_keys=True), encoding="utf-8")
+
+    stamped = CharacterDraft.load(draft.id).record_home()
+    after = json.loads(path.read_text(encoding="utf-8"))
+
+    assert stamped is True
+    assert after.pop("hermes_home") == str(get_hermes_home())
+    # `updated` is inside this comparison, and it is the key the whole
+    # not-through-`_save` ruling exists for; it is named again below so a reader
+    # of a future red does not have to diff two dicts to see what broke.
+    assert after == before
+    assert after["updated"] == before["updated"]
+
+
+def test_a_home_already_recorded_is_never_rewritten(draft):
+    """Provenance is about a PAST fact: a copied draft carries the ORIGINAL home.
+
+    A draft created in one home and later copied into another is telling the
+    truth when it still names the first — "where hermes recorded it", not "where
+    it sits now". A writer that stamped unconditionally would overwrite exactly
+    the history the field exists to keep, and would do it silently on every run.
+    """
+    path = draft.directory / "draft.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["hermes_home"] = "/somewhere/else/profiles/original"
+    path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+
+    stamped = CharacterDraft.load(draft.id).record_home()
+    after = json.loads(path.read_text(encoding="utf-8"))
+
+    assert stamped is False
+    assert after["hermes_home"] == "/somewhere/else/profiles/original"
+    assert after["hermes_home"] != str(get_hermes_home())
 
 
 def test_setting_a_base_image_that_does_not_exist_is_refused(draft, tmp_path):

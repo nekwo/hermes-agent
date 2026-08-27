@@ -1689,6 +1689,79 @@ which is exactly the shape that caused the 2026-08-26/27 cross-session incident.
   contiguous string or it is not the contract; reflow the sentence around it rather than
   through it.
 
+## The recorded home (appended by the H1 slice, 2026-08-27)
+
+- **[READ] `characters start` now records the home it ran in, and you do not have to say
+  it.** `CharacterDraft.create` writes `hermes_home = str(get_hermes_home())` into
+  `draft.json` unconditionally, beside `authored_by` — unconditional because there is no
+  caller to withhold it and nothing to guess. It is legitimate for the same reason
+  `drafts_dir()` is: `get_hermes_home()` was already resolved two statements earlier and
+  the directory was just created under it, so the draft IS sitting where the key says. This
+  is hermes stating a fact about its own filesystem, not a consumer slicing a profile name
+  out of a path it was handed — the derivation ban binds READERS of a home, never the
+  authority recording where it put the file. **Consequence:** the home is now on the draft
+  itself, so a later reader (or a launcher that has never listed that home) can learn where
+  a draft was authored without anyone having typed it into a QA line.
+
+- **[READ] It is a WRITE, not an announcement — `characters start` still emits no event.**
+  Nothing is pushed anywhere; the draft became self-describing and that is all.
+  **Consequence:** a launcher learns the value at its next sighting of the draft and not
+  before, so do not tell an operator that starting a draft "notified" anything.
+
+- **[READ] The payload key is `hermesHome`, in all three payloads that carry `authoredBy`:
+  the `start --json` summary, `status --json`, and every `list --json` draft row.** It is a
+  `str` or JSON `null`, **never `""`** — the same path-field rule `baseImage` and
+  `history[].path` were fixed to follow. It is deliberately NOT copied into the installed
+  `character.json` manifest and NOT on the `CHARSHEET-QA:` line, and `SCHEMA` stays 1:
+  nothing must read it to be correct, so a schema-1 reader that ignores it renders exactly
+  what it rendered before. **Consequence:** read `hermesHome` from any of the three and get
+  the same answer; if you get `null`, the draft predates the field — that is a readable
+  fact, which is the whole reason absence is not `""`.
+
+- **[READ] A recorded home may be honestly stale, and that is not a defect to fix.** The
+  value means *the home hermes recorded when the draft was created* (or, for a backfilled
+  draft, the home it sat under when the backfill ran). A copied or backed-up draft carries
+  its ORIGINAL home, and nothing ever rewrites a value that is already there.
+  **Consequence:** never "correct" a `hermes_home` that disagrees with where the file is
+  now — it is answering "where was this authored", not "where does it live today". The
+  second question is the launcher's own observation and a different field entirely; do not
+  substitute one for the other in a resume decision.
+
+- **[READ] Drafts that predate the field are filled in by ONE explicit verb:
+  `harness characters backfill-home [--json]`.** It walks the drafts under the currently
+  resolved home, stamps only the ones whose home is absent (a blank counts as absent), and
+  skips the rest; the receipt is `{ok, home, stamped, skipped}` where each row is
+  `{id, directory}` — directories are named because two drafts really can carry the same
+  `id` (a copied draft keeps the id inside its own `draft.json`) and an id-only receipt
+  could not say which directory was written. It is idempotent: a second run stamps nothing.
+  **Consequence:** run the verb, take the receipt as the evidence, and never hand-edit a
+  `draft.json` to add the key.
+
+- **[READ — and it corrects the plan that sent me] adding a `characters` VERB is always a
+  `SKILL.md` edit, whatever a plan says.**
+  `tests/agent_runtime/test_persona_skill_policy.py::test_charsheet_skill_documents_exactly_the_characters_verbs_hermes_has`
+  builds the live argparse tree and asserts the skill's verb table equals it **as a set, in
+  both directions** — so a verb hermes grows and a verb the skill invents fail identically.
+  The H1 plan ruled the hermes skill UNTOUCHED and "no `SKILL.md` edit → no install-hash
+  cycle owed", reasoning correctly about the new draft FIELD (which really does need no
+  teaching, since `start` writes it automatically) and not at all about the new VERB in the
+  same strip. The verb landed the table row; the ruling was half-right about a strip that
+  did two things. **Consequence:** whenever a strip adds, renames or removes a
+  `harness characters` subparser, the skill's verb table moves in the same commit and the
+  install-hash cycle is owed — the pin exists precisely so that cannot be deferred. Reading
+  the field half of such a ruling as covering the verb half is the mistake to avoid.
+
+- **[TRAP — it would silently falsify every dormant exhibit] `_save()` stamps `updated`
+  with "now", so a backfill must not go through it.** `CharacterDraft.record_home()`
+  writes via `_write_json_atomic` directly for exactly this reason, and the two pins that
+  say so red under a `_save`-routed implementation (proved by planting it). The drafts this
+  verb reaches are the dormant ones whose timeline — and whose mis-attributed
+  `authored_by` — is the evidence we keep them for; a backfill that bumped them all to the
+  moment an operator ran it would destroy what it was auditing. **Consequence:** any future
+  provenance stamp on an existing draft takes the same route. If you find yourself adding a
+  field to a draft that already exists, ask what `updated` is being used to prove before
+  you call `_save`.
+
 <!-- A2, A3, R1 and any slice standing in the HERMES repo: append your entries above this
      line, under the matching heading, or add a heading if none fits. Then say in your
      slice report that you did.

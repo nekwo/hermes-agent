@@ -1603,6 +1603,9 @@ def build_parser(parent_subparsers) -> None:
     characters_list = characters_subs.add_parser("list", help="List character drafts and installed characters")
     characters_list.add_argument("--json", action="store_true")
     characters_list.set_defaults(func=_cmd_characters_list)
+    characters_backfill_home = characters_subs.add_parser("backfill-home", help="Record `hermes_home` on drafts under THIS home that predate the field, and on no others. Explicit and receipted on purpose: a draft that already states a home keeps it (a copied draft's original home is the field being honest), and the write leaves `updated` and every other key exactly as it found them, because the drafts this reaches are dormant exhibits whose timeline is evidence. Idempotent — a second run stamps nothing")
+    characters_backfill_home.add_argument("--json", action="store_true")
+    characters_backfill_home.set_defaults(func=_cmd_characters_backfill_home)
     characters_status = characters_subs.add_parser("status", help="Full draft state: stage, spec, per-item QA history")
     characters_status.add_argument("--draft", required=True, help="Draft id from `harness characters list`")
     characters_status.add_argument("--json", action="store_true")
@@ -3395,6 +3398,11 @@ def _characters_draft_summary(draft) -> dict:
         "concept": draft.concept,
         "style": draft.style,
         "authoredBy": draft.authored_by,
+        # Beside `authoredBy` in all three payloads that carry provenance —
+        # this row, `status --json`, and the `start --json` summary (which is
+        # this helper) — so a consumer never has to remember which of the three
+        # answers the question. `str` or JSON `null`, never `""`.
+        "hermesHome": draft.hermes_home,
         "stage": draft.stage,
         "rows": len(spec.rows()),
         "authoredRows": len(spec.authored_rows()),
@@ -3506,6 +3514,46 @@ def _cmd_characters_list(args) -> int:
         )
         for row in installed
     ]
+    return _characters_emit(args, data, "\n".join(lines))
+
+
+def _cmd_characters_backfill_home(args) -> int:
+    """Stamp `hermes_home` on the drafts under this home that lack it.
+
+    **Why a verb, and not a hook.** Doing it on LOAD turns every read into a
+    disk writer — `characters list` is the launcher's cached polling read, and a
+    read-that-writes races any concurrent mutation of the same draft for the
+    rest of time. Doing it on the next MUTATION never reaches the dormant drafts
+    that are the entire backfill population, and hides a provenance write inside
+    every unrelated receipt. An explicit verb is bounded to the moment an
+    operator chose, and its receipt is the evidence that it was.
+
+    **The receipt names directories beside ids.** Two drafts can carry the same
+    `id` — a copied draft keeps the id inside its `draft.json` — so an id-only
+    receipt cannot say which of the two directories was written, which is the
+    one thing an operator reading it afterwards needs to know.
+    """
+    from agent.charsheet.draft import CharacterDraft
+    from hermes_constants import get_hermes_home
+
+    home = str(get_hermes_home())
+    try:
+        stamped: list[dict] = []
+        skipped: list[dict] = []
+        # `list_drafts` already skips the unreadable ones, with a warning — a
+        # draft this cannot parse is not a draft this may rewrite.
+        for draft in CharacterDraft.list_drafts():
+            row = {"id": draft.id, "directory": str(draft.directory)}
+            if draft.record_home():
+                stamped.append(row)
+            else:
+                skipped.append({**row, "hermesHome": draft.hermes_home})
+    except _CHARACTERS_EXPECTED as exc:
+        return _characters_error(args, exc)
+    data = {"ok": True, "home": home, "stamped": stamped, "skipped": skipped}
+    lines = [f"{len(stamped)} draft(s) stamped with {home}; {len(skipped)} already recorded"]
+    lines += [f"  stamped {row['id']}  {row['directory']}" for row in stamped]
+    lines += [f"  skipped {row['id']}  already {row['hermesHome']}" for row in skipped]
     return _characters_emit(args, data, "\n".join(lines))
 
 

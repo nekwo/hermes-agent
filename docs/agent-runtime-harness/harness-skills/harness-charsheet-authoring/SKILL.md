@@ -135,6 +135,7 @@ not the slug** (`20260824-140756-cd645a` vs `anime-girl`).
 |---|---|---|
 | `start --concept … [--slug] [--display-name] [--style] [--states] [--directions] [--base-image] [--authored-by]` | Creates the draft. Generates nothing. | — |
 | `list` | Drafts + installed characters, with their directories. | — |
+| `backfill-home` | Records `hermes_home` on drafts under THIS home that predate the field, and on no others. An already-recorded home is never rewritten; `updated` is left untouched. Idempotent, receipted. **Operator-run — do not fire it as part of an authoring flow.** | — |
 | `status --draft <id>` | Stage, spec, per-item QA history with every attempt's `path`. | any |
 | `base --draft <id> --image <path>` | Sets/replaces the identity anchor. | any |
 | `turnaround --draft <id>` | One generation per **authored** direction (`s se e ne n` for the 8-way scheme). | `turnaround` |
