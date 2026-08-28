@@ -73,12 +73,17 @@ ceremony both have upstream reuse material in `gateway/` (`platform_registry.py`
   honoured by a ceremony neither install can complete alone, `harness gateway
   peers pair | join | list | revoke`, and `peer.ping` as the whole peer
   surface. Full notes, deviations and honest gaps in "Stage 6 notes" below.
-- **Stage 7 — cross-install `agent_chat_send`:** install-qualified target grammar
-  (R4, recommended `@install_name/target`; unqualified = local forever), dispatch row
-  stays on the SENDER install with a remote-execution leg (`peer.agent_chat.execute`
-  over the peer tier); claim/refund/attempt-cap semantics unchanged — peer-unreachable
-  refunds like busy with a bounded dial timeout, deterministic remote refusals fail
-  fast (R8 governs cap vs TTL). Target install records the turn in its own chat store.
+- **Stage 7 — cross-install `agent_chat_send`: SHIPPED 2026-08-27.** hermes
+  `3d0a17922d` (S7a, `agent_runtime/gateway_targets.py` — the `@install/target`
+  grammar, 24 tests), `8e2a97bf29` (S7b, `peer.agent_chat.execute`, the
+  allowlist's second name, ten manifest pins in the same commit), `8e1dd74c91`
+  (S7c, the supervisor's remote leg + `remote_install_id` + R8's convergence),
+  `a8b7c6fe90` (S7d, the two-roots acceptance); launcher `614edc546` (fixtures
+  only). R4 and R8 both consumed and cited in the primary plan's §5. The
+  dispatch row stays on the SENDER install and the remote leg substitutes for
+  the CHILD PROCESS, not for the delivery forge; the target install records the
+  turn in its own chat store. Full notes, deviations and honest gaps in
+  "Stage 7 notes" below.
 - **Stage 8 — media fetch:** content-addressed `runtime.media.get` (size-bounded,
   scope-checked) so remote clients stop needing install-local paths.
 
@@ -605,6 +610,138 @@ follows but the only mechanism available to it.
 7. **`icacls` narrowing reported not asserted**, and **the store lock still
    falls through** on a filesystem that will not lock. Stage 1's gaps, now
    covering two stores.
+
+
+## Stage 7 notes — landed 2026-08-27
+
+### What shipped, in the order it landed
+
+| sha | what |
+|---|---|
+| `3d0a17922d` | `agent_runtime/gateway_targets.py` — parse `@install/target`, resolve it against `peers.json`, refuse deterministically. 24 tests. |
+| `8e2a97bf29` | `chat_turn.normalize_peer_chat_execute` + the `peer.agent_chat.execute` method + `PEER_METHOD_ALLOWLIST`'s second name + **ten** manifest pins. 38 + 99 passed. |
+| `8e1dd74c91` | The supervisor's remote leg, `dispatch_store`'s `remote_install_id` column and `REMOTE_UNREACHABLE_REASON`, `peer_store_root()`, `ServeSocketClient.set_timeout`. 20 + 336 passed. |
+| `a8b7c6fe90` | Two isolated roots, a turn between them, R8's convergence against a genuinely stopped install. 3 passed. |
+
+### Deviations from the plan, and the argument for each
+
+- **The leg lands in the SUPERVISOR, not the drain.** §4 says "the
+  drain/executor … performs the target's turn". `dispatch_delivery` owns exactly
+  one thing — *tell the sender* — and `tools/agent_chat_dispatch` owns *perform
+  the turn*; the remote leg substitutes for the child PROCESS, so it belongs
+  beside the spawn it replaces. In the drain it would have given one dispatch two
+  owners and put a minutes-long network turn on the 5s loop that also forges
+  deliveries.
+- **R8 converges to a delivered `error`, not to `dropped`.** `dropped` means
+  *the sender was never told*, and "the other machine is not answering" is the
+  one fact the sender most needs. The cap is R8's, read from
+  `MAX_DELIVERY_ATTEMPTS` rather than given a second number; `peer_unreachable`
+  lands on the row, in `dispatch.completed` and in the sentence the sender
+  reads. Argued in full on `dispatch_store.REMOTE_UNREACHABLE_REASON`.
+- **The attempts are spent inside ONE supervised run**, not by re-queueing on
+  the drain's cadence. That holds a pool slot for as long as the retries take,
+  which is the honest cost and a small one — a local dispatch holds its slot for
+  a whole thirty-minute turn. The alternative wanted a durable copy of the spec,
+  a second claim protocol and a second attempt counter on a row that already has
+  one, to buy surviving a serve restart mid-dial, which the local lane does not
+  have either.
+- **A cross-install send is the DETACHED lane only.** `wait: true` on an
+  `@install/…` target is a typed `remote_requires_detached` refusal. The
+  synchronous relay's safety story is made of facts about one process (the
+  workdir lock, the shared chain deadline) and none of them cross a machine.
+- **`peer.agent_chat.execute` is a new method rather than
+  `runtime.chat.message` added to the allowlist.** That verb hardcodes
+  `--requested-by gateway_device` with a comment saying the field "is not a
+  param, cannot be a param" — correct, and exactly why a peer needs its own
+  normaliser: its provenance is `peer:<install_id>` and the id must come off the
+  authenticated connection. The peer install id is a keyword-only ARGUMENT, not
+  a params key, which is the security posture expressed as a signature.
+- **The reservation scope carries the peer install id.** `turn_request_id` is
+  minted on the OTHER install, so two paired installs can legitimately present
+  the same one; without the scope a replay could hand install C the ack for
+  install A's turn.
+- **A non-peer caller gets `peer_identity_required`, not `scope_denied`.** The
+  chokepoint DID admit a console caller (it holds the console tier); it is the
+  verb that has no provenance to run under, and a console client already has
+  `runtime.chat.message`.
+- **`peer_store_root()` is not `paths.store_root()`.** The runtime root resolves
+  through `HERMES_HOME`'s config when the env var is unset, and
+  `persona_profile_context` flips that process-globally for the length of every
+  persona turn — which is exactly when a cross-install send is made and where the
+  supervisor thread runs. A peer edge belongs to the INSTALL, so it reads under
+  the head home, the precedence `get_hermes_background_work_home` already owns.
+
+### The acceptance found two bugs, and one of them is a lesson about fakes
+
+1. **The serve stdout event is `line`, not `stdout`** — `serve.py:1784` builds
+   `_LineFrameProxy(frames, "line")` for OUT and `…, "stderr")` for ERR, so only
+   the error stream is named after itself. The frame reader guessed, collected
+   nothing, and reported every remote turn as "no reply payload". **The unit test
+   was green**, because its fake emitted `"stdout"` too: *a fake that spells the
+   wire itself can be wrong in the same direction as the code it tests.* Fixed
+   with a named constant that the fake now reads, plus a grep fence against the
+   one line in `serve.py` that decides it.
+2. **A replayed accept carries no frames, and waiting for them is a hang.** B's
+   per-request frames go to the sink of the connection that ASKED, so when the
+   retry posture WORKS — the same `turn_request_id` stops B running the agent
+   twice — the retrying socket gets an ack and then silence. The success path of
+   the property was the thing that hung, for the full CLI timeout. The leg now
+   settles a `settled` replay from the receipt (saying plainly that the answer is
+   in the thread on the other install) and retries an unsettled one.
+
+Also found and corrected in passing: `test_serve_rpc_notification_lane.py`'s
+`all(name.startswith("runtime."))` assertion had been RED since Stage 6's
+`peer.ping` and nobody ran the file. Re-measured on a stashed tree before
+touching it. **The S6b lesson has a second half: find the manifest pins by
+RUNNING the suites, not by grepping for the verb you added** — this one never
+spells a method name at all.
+
+### Honest gaps
+
+1. **No second machine.** Every listener binds loopback. Stage 1's gap,
+   inherited unchanged through Stages 6 and 7.
+2. **No model turn on B in the acceptance.** Both roots are fresh and the suite
+   has no provider, so what is proven is that the turn reached B's real
+   mission-chat handler and was answered by B's own admission
+   (`unsupported_persona`, exit code 2) — not that an agent composed a reply.
+   The forge back into A's chat is the unit lane's proof and the delivery lane's
+   own suites', not this file's.
+3. **The relay chain does not cross an install boundary**, so **A→B→A across two
+   installs is not detected as a cycle** by either side's guard. Forwarding it
+   would be forwarding an assertion the far side cannot check, and a chain a
+   sender can understate is a guard that can be talked past; a cross-install
+   dispatch is therefore a fresh chain root on B, which is what a detached
+   dispatch already is locally. Named rather than hidden; it is the next thing
+   this lane owes.
+4. **A retry that lands after B accepted loses the reply TEXT.** The frames went
+   to a connection that no longer exists, so the row settles from the receipt and
+   points at the thread on the other install rather than carrying the answer.
+   Rare (it needs the socket to die between accept and exit) and honest, but the
+   sender gets a pointer instead of a reply.
+5. **The remote leg's retries hold a dispatch-pool slot** for up to
+   `MAX_DELIVERY_ATTEMPTS × PEER_RETRY_BACKOFF_SECONDS` (~40s) while converging.
+   Inside what the cap already admits for local turns, and stated because it is a
+   real occupancy cost that did not exist before.
+6. **Nothing on the operator surface names a cross-install dispatch yet beyond
+   `remote_install_id` on the row and in `agent_chat_dispatches`.** The Activity
+   HUD renders `target_persona`, which now reads `@workstation/dev` — legible,
+   but not a designed surface.
+7. **The CLI contract fixture in the launcher is red for an unrelated reason.**
+   `harness characters backfill-home` (the charsheet lane) has never been
+   captured. Stage 7 adds no CLI verb, so that refresh was deliberately left out
+   of the gateway commit and recorded in the launcher's field notes instead.
+
+### Receipts
+
+`C:\Python312\python.exe -m pytest` (the venv still has no pytest):
+`test_gateway_targets.py` 24; `test_peer_chat_execute.py` + `test_peer_authorization.py`
+38; the chat-turn / peer-lane / stream-parity / notification / snapshot-contract
+group 99+13; `test_remote_dispatch_leg.py` 20; the dispatch + agent-chat + event
+group 336; `test_gateway_peer_cross_install_chat_e2e.py` **3 passed in 48s**.
+Launcher-side: `ready.json` grew `peer.agent_chat.execute` and its `console`
+tier row with zero removals and `contract` still 1;
+`generate.py --check` green twice consecutively;
+`flutter test test/features/mission_control/` **5291 passed, 1 skipped**.
 
 
 ## Drift addendum — audited 2026-08-27

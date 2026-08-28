@@ -166,7 +166,8 @@ the peer field, a peer credential on the device field, and each code in the
 other ceremony's verb.
 
 **A peer holds an ALLOWLIST, not a tier** (`call_authorization.PEER_METHOD_ALLOWLIST`
-= `{peer.ping}`), and the arm runs BEFORE the read-tier arm — which is open to
+= `{peer.ping, peer.agent_chat.execute}` since gateway Stage 7), and the arm
+runs BEFORE the read-tier arm — which is open to
 every caller, so a peer evaluated after it would inherit the whole read surface.
 This is where canon 06's exclusion ("agents never mint or retire agents on
 another install") stops being a sentence: `runtime.agent.create` and
@@ -187,9 +188,49 @@ into another's credential store.
 **Peer dialling reads endpoints from the PAIRING RECORD and never from a
 registry file** (`gateway_peers.dial_peer`): the serve registry names ports on
 the local machine, so a cross-machine read of it is not stale but impossible.
-Staleness is R8's retry posture. Acceptance:
+Staleness is R8's retry posture, built in Stage 7. Acceptance:
 `tests/agent_runtime/test_gateway_peer_two_roots_e2e.py` — two real serve
 children, two isolated roots, both CLI verbs, `peer.ping` A→B.
+
+### 1.3 What an edge CARRIES — cross-install chat (gateway Stage 7)
+
+An agent on install A addresses an agent on install B by qualifying the target
+it already knows how to write: `@install_name/persona_or_instance`
+(`agent_runtime/gateway_targets.py`, ruling R4). **Unqualified is local,
+forever**, and that is a property of the parser rather than a default — a value
+with no `/` never reaches the peer resolver at all. Ids outrank display names
+and an ambiguous name is refused with both candidate ids, because names default
+to the hostname and two roots on one machine really do collide.
+
+**The dispatch row lives on the SENDER install.** `agent_chat_send(wait=false)`
+records it exactly as it does for a local target, and the supervisor
+(`tools/agent_chat_dispatch`) substitutes a peer-tier call for the child
+PROCESS it would otherwise spawn — `peer.agent_chat.execute`, whose ack is an
+ACCEPT and whose turn's frames ride the per-request lane the local launcher
+already reads. B records the executed turn in its own chat store like any
+inbound agent message. There is no distributed row and no two-phase state.
+Cross-install sends are the DETACHED lane only: `wait: true` on a qualified
+target is refused `remote_requires_detached`.
+
+**Who asked comes off the CONNECTION.** B derives the calling install from
+`context.caller.peer_install_id` — set only for a connection whose peer HMAC
+verified — and lowers it to `--requested-by peer:<install_id>`. There is no
+params key by which a peer names a different install; a correlation token
+arrives by the other route precisely because a token is correlation and never
+identity.
+
+**Transport retries, an answer settles** (R8). A failed dial costs one of
+`MAX_DELIVERY_ATTEMPTS` with a bounded per-attempt dial timeout; an install that
+ANSWERED with a refusal settles the row immediately. The cap converges to a
+terminal `error` completion carrying `peer_unreachable` — delivered, not
+`dropped`, because "the other machine is not answering" is the fact the sender
+most needs. Retrying is safe because `turn_request_id` is derived from the
+dispatch id: B's reservation replays rather than running the agent twice.
+Acceptance: `tests/agent_runtime/test_gateway_peer_cross_install_chat_e2e.py`.
+
+**Known gap:** the relay chain does not cross an install boundary (it would be
+an assertion the far side cannot check), so a cross-install dispatch is a fresh
+chain root on B and **A→B→A across two installs is not detected as a cycle**.
 
 ## 2. Capability advertisement — `rpc` and `ops`
 
@@ -228,11 +269,13 @@ the only registration site, so this list is
 | `runtime.chat.message` | `_runtime_chat_message` | send one mission-chat turn |
 | `runtime.chat.steer` | `_runtime_chat_steer` | steer the running turn |
 | `peer.ping` | `_peer_ping` | is the install⇄install edge alive |
+| `peer.agent_chat.execute` | `_peer_agent_chat_execute` | run one chat turn for a paired install |
 
 **Row count corrected 2026-08-27 (gateway Stage 6).** This table said TEN and
 listed ten while the runtime had twelve: Stage 3's `runtime.chat.*` pair landed
 in the manifest and in four literal pins but not here. The two rows above are
 that correction, made while adding the thirteenth rather than filed for later.
+**Fourteen since gateway Stage 7** added `peer.agent_chat.execute` (§1.3).
 
 `peer.ping` is the first name outside the `runtime.*` family, and the prefix is
 a declaration: `runtime.*` verbs act on this install's level — read it, mutate
@@ -274,7 +317,9 @@ membership test. Reads stay open to `unknown`, deliberately and not by
 omission: nothing on the read side mutates a level.
 
 **A PEER is refused by an allowlist rather than by a tier** (Stage 6, §1.2).
-`PEER_METHOD_ALLOWLIST` is `{peer.ping}` and the arm runs before the read-tier
+`PEER_METHOD_ALLOWLIST` is `{peer.ping, peer.agent_chat.execute}` (Stage 7
+widened it by one, §1.3, with the reason in a comment beside the set) and the
+arm runs before the read-tier
 arm — which is open to every caller, so a peer evaluated after it would hold
 this runtime's entire read surface including verbs nobody has written yet. The
 choice of an allowlist over a third tier word is about what happens as the
@@ -292,6 +337,13 @@ verb that reads no store, writes nothing and mints no id belongs with
 NARROWS the peer lane and does not widen this row. A third tier word only one
 caller kind could hold would put a value in the map every existing reader must
 be taught to ignore.
+
+`peer.agent_chat.execute` declares `console` by the same rule read the other
+way: a chat turn runs an agent with tools, so anything softer would be a door
+around `console` — the same answer `runtime.chat.message` gives. The tier is
+still not what admits a peer, and the verb refuses a non-peer caller with its
+own `peer_identity_required` rather than `scope_denied`: the chokepoint DID
+admit a console caller, and it is the VERB that has no provenance to run under.
 
 This table used to be a list of ten LINE NUMBERS. Two of them (`2055`, `2115`)
 had already rotted by 2026-08-27 — a slice landing above them moved both — while
