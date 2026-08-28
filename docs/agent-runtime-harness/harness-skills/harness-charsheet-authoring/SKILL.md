@@ -1,6 +1,6 @@
 ---
 name: harness-charsheet-authoring
-description: Author, QA and repair an 8-way character sheet from a chat turn — the staged `harness characters` verbs, the crop-and-compare looking procedure, the handedness gate and how to read its refusal, reroll-note craft, and the MEDIA / CHARSHEET-QA lines the operator's console renders into a live card. Use whenever a turn is asked to make, fix, add a state to, resume or inspect a character sheet.
+description: Author, QA and repair an 8-way character sheet from a chat turn — the staged `harness characters` verbs, the crop-and-compare looking procedure, the handedness gate and how to read its refusal, reroll-note craft, and the operator-observability report contract (the MEDIA / CHARSHEET-QA lines the console renders into live cards — a turn that advanced a draft MUST end with them; prose-only reports are a failed turn). Use whenever a turn is asked to make, fix, add a state to, resume or inspect a character sheet.
 metadata:
   hermes:
     surfaces: [mission_chat]
@@ -600,6 +600,35 @@ Three notes proven live — start from these:
   picture."* Six generations for three rows. **"Ignore the reference" leaves the
   image there doing its work; "mirror it" gives the model an operation** — and
   anchor the side on a named body part, never on the direction token.
+
+## The reply is the operator's only window
+
+The console shows the operator your tool rows while you work — commands, waits,
+pass/fail chips — and nothing else. Every generated image, every stage change,
+every QA verdict is invisible until your reply lands, and your reply is the ONLY
+thing that carries them. Measured live 2026-08-28: a one-message full run
+(base → install, ~18 minutes) that ended in a prose-only reply read as *frozen*
+to the operator mid-turn and as *finished with nothing to show* at the end — the
+pipeline had succeeded and the report still failed. So the report shape is not
+optional polish; it is the deliverable:
+
+- **A turn that advanced a draft ends with the visual story of every stage it
+  completed.** One `CHARSHEET-QA:` line per stage change (the shape below) AND
+  `MEDIA:` lines for what each stage produced: the base image; each approved
+  turnaround direction; each row's first-frame thumb (`thumbs/` path off
+  `status --json` — never a rebuilt path); and, when you composed, the installed
+  `sheet.webp` as the LAST media line, so the finished character is the card the
+  operator sees first. Ten row thumbs is not too many cards; zero is a bug.
+- **A QA finding travels with its picture.** A handedness warning — blocking or
+  not — names the row, attaches the flagged item's thumb or crop as `MEDIA:`,
+  and states the operator's next verbs (`approve`, reroll with a note). "One
+  non-blocking warning on walk-e, recorded for review" with no image gives the
+  operator nothing to review.
+- **Long runs: prefer a stage per turn when the operator is present.** Each
+  stage boundary then renders its cards immediately and the operator can
+  redirect before the next stage builds on it. Drive stages back-to-back in one
+  turn only when asked for a one-shot run — and then the closing reply must
+  reconstruct ALL of it, per the two rules above.
 
 ## Rendering contract
 
