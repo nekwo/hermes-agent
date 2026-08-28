@@ -2002,6 +2002,36 @@ of this file. Two things, and the first is the correction to OP's own entry abov
   every session is told not to touch. Say which one you mean. Filed on the launcher's
   Mission Control queue with the finder module's path table as evidence.
 
+- **[READ] The serve answers `characters` reads with whatever `HERMES_HOME` process-global
+  `os.environ` holds AT THAT INSTANT — which during a persona prewarm is another persona's
+  home.** Measured 2026-08-27 during the W6 Stage C walk: the launcher respawned its serve
+  onto `alice` at 20:55; the serve's boot prewarm bound every placed persona in turn
+  (`persona_chat_actor_prewarm`, four instances bound to `launcher-qa`, the first held for
+  11.25 s), and each bind writes the persona's `HERMES_HOME`/`HOME`/`HERMES_AUTH_HOME` into
+  `os.environ` (`persona_profile_context`, `export_env=True` — the mirror is process-global
+  by design). A concurrent `characters status --draft` argv request resolved
+  `profiles\launcher-qa` and reported a `base`-authored draft as nonexistent, path and all,
+  on the operator's screen. The context-local machinery already exists
+  (`persona_profile_scope`, the ContextVar home override); either prewarm binds scope-locally
+  or the charsheet paths resolve through the ContextVar, never bare `os.environ`.
+  **Consequence:** any argv read through the serve is only as home-stable as the quietest
+  moment of the persona lanes sharing its process.
+
+- **[READ] `harness characters list --json` through the serve socket can go silent
+  indefinitely while `harness status --json` streams on the same serve.** Measured
+  2026-08-27: one authenticated socket connection sent the argv and read ZERO frames for
+  >120 s; a fresh connection minutes later got the identical argv complete (three drafts,
+  exit 0) in ~6 s. Same serve pid, same home, no restart between. Not transport — `status`
+  answered instantly throughout. Unreproduced-on-demand; recorded so the next silent
+  `characters` read is recognized as this and not as "no drafts".
+
+- **[READ] The QA persona's `launcher_qa` MCP admission alternated 3/0/3/0 servers across
+  four consecutive `mission-chat message` turns to the SAME session** (2026-08-27,
+  `personainst_qa_agent_c1a70d19`). The Stage C skill's retry-once rule happens to mask a
+  strict alternation perfectly — which is exactly why it went unmeasured until four turns
+  ran back to back. Whatever flips (a lease, a keepalive, a per-turn registry rebuild)
+  flips per-turn, not per-session.
+
 <!-- A2, A3, R1 and any slice standing in the HERMES repo: append your entries above this
      line, under the matching heading, or add a heading if none fits. Then say in your
      slice report that you did.
