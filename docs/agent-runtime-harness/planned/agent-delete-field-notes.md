@@ -282,6 +282,65 @@ placements. Three rounds of stragglers, each invisible to the previous scan:
 
 Total across the three rounds: 271 literals in 21 files.
 
+## F10 — R1 reached PRODUCTION code, and a truncated grep hid it
+
+A fourth round, and the one that mattered most: `scripts/generate_agent_runtime_stream_fixtures.py`
+— the generator that produces the committed stream goldens — creates its agent
+with `FIXTURE_CREATE_PLACEMENT_ID = "qa_fixture"`. R1 refuses that id, so the
+generator asserted out and three `test_stream_contract_fixture.py` tests went
+red. This is the only PRODUCTION (non-test) caller R1 broke.
+
+Two scanning mistakes let it through, both worth naming:
+
+* I checked "does production hardcode a placement id?" with a grep piped through
+  `head -20`, and the output was exactly 20 lines — truncated precisely where
+  this file would have appeared. A truncated grep answered a completeness
+  question, which it can never do.
+* The re-run without `head` still missed it, because the constant is spelled
+  `FIXTURE_CREATE_PLACEMENT_ID` in UPPERCASE and the pattern was
+  case-sensitive `placement_id\s*[:=]`.
+
+Fixed by giving the generator a discriminable id
+(`qa_fixture_agent_2`), regenerating the two golden frames plus
+`MANIFEST.sha256`, and updating the four pinned ids in
+`test_stream_contract_fixture.py`. All 20 tests in that file pass.
+
+## F11 — accounting for the full-tree run's 48 failures
+
+The whole-tree sweep (`tests/agent_runtime tests/hermes_cli`, 11 030 passed,
+98 skipped, 48 failed) is the only run that found F10, so it earned its cost.
+The 48 break down as:
+
+* **3 were mine** — the `test_stream_contract_fixture.py` trio above. Fixed.
+* **2 are pre-existing at `01b6ad1813`, proven by inspection.**
+  `test_serve_rpc_notification_lane.py::test_the_push_lane_itself_contributes_no_method_and_no_version_bump`
+  asserts every RPC method name starts with `runtime.`; the offender is
+  `peer.ping`, minted by the gateway Stage 6 commits that are already in the
+  base. My diff adds zero `@method(`.
+  `test_error_exit_code_producers.py::test_the_kept_unspendable_baseline_still_describes_the_code`
+  reports that `runtime_unavailable` gained a producer; my diff never mentions
+  that string.
+* **43 are not mine, shown by A/B.** With my nine production files reverted to
+  `01b6ad1813` and restored again, a representative set
+  (`web_server_boot_handshake`, `doctor`/Honcho, `env_custom_keys`,
+  `xai_provider_labels`, `relay_shared_metrics`) gives the IDENTICAL result in
+  both states: six pass, `test_xai_provider_labels` fails. So that one is
+  pre-existing, and the others — which pass in isolation at both base and HEAD —
+  fail only inside the full run. That run performs real work on the machine
+  (it executed `hermes gateway install` and started a Windows gateway, PID
+  3336) and drives npm builds, so those are order/environment failures, not
+  diff failures.
+
+Two operational notes for anyone repeating this:
+
+* `--timeout=30` (the repo default) plus `--timeout-method=thread` KILLS the
+  whole session on a single slow test, with no summary printed. Two full-tree
+  attempts died that way on subprocess-heavy tests that pass standalone in
+  10 s. `--timeout=180` got a complete run.
+* `grep -E "FAILED"` over verbose pytest output is a false-positive machine —
+  parametrised ids like `test_execution_state_wire_spelling[FAILED-failed]
+  PASSED` match it. `FAILED +\[` is the pattern that means a real failure.
+
 ## F7 — D4 (hermes half): an alias, and the dump the plan expects does not exist here
 
 `persona instance delete` is `add_parser("retire", aliases=["delete"])` — ONE
