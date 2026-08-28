@@ -24,12 +24,14 @@ import pytest
 from agent.charsheet import pipeline
 from agent.charsheet.draft import (
     DEFAULT_THUMB_SCALE,
+    DRAFTS_DIRNAME,
     MANIFEST_FILENAME,
     SHEET_FILENAME,
     STAGES,
     CharacterDraft,
     characters_dir,
     drafts_dir,
+    migrate_characters_home,
     row_item,
     slugify,
     spec_from_dict,
@@ -1561,6 +1563,273 @@ def test_a_home_already_recorded_is_never_rewritten(draft):
     assert stamped is False
     assert after["hermes_home"] == "/somewhere/else/profiles/original"
     assert after["hermes_home"] != str(get_hermes_home())
+
+
+# ────────────────────── migrating a legacy home into the library ──────────────────────
+
+
+def _legacy_store(root: Path, profile: str) -> Path:
+    """A populated pre-library `<home>/characters` tree, built by hand.
+
+    By hand on purpose: no verb can create this shape any more — `characters_dir()`
+    answers the library — so the migration's whole population has to be written
+    the way the drafts on the live disk were, not produced by the code under test.
+    """
+    home = root / "profiles" / profile
+    store = home / "characters" / DRAFTS_DIRNAME
+    store.mkdir(parents=True)
+    return home
+
+
+def _plant_draft(store: Path, draft_id: str, **extra) -> Path:
+    directory = store / draft_id
+    directory.mkdir(parents=True)
+    data = {
+        "schema": 1,
+        "id": draft_id,
+        "slug": "legacy-knight",
+        "display_name": "Legacy Knight",
+        "concept": "a legacy knight",
+        "style": "auto",
+        "stage": "turnaround",
+        "created": "2026-08-24T14:07:56+00:00",
+        "updated": "2026-08-24T14:07:56+00:00",
+        "spec": spec_to_dict(SPEC),
+        "base_image": "",
+    }
+    data.update(extra)
+    (directory / "draft.json").write_text(
+        json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return directory
+
+
+def test_a_legacy_draft_arrives_in_the_library_stamped_with_the_home_it_left(
+    tmp_path, monkeypatch
+):
+    """Stamp BEFORE the move, with the SOURCE home, and touch nothing else.
+
+    After the move the directory no longer witnesses where the draft lived, so
+    the stamp is the last chance to record it first-party — and the value has to
+    be the source home, not the home the migration run happens to resolve. The
+    byte pin is the one that matters: a stamp routed through `_save()` rewrites
+    `updated` and falsifies exactly the dormant exhibits this verb exists to
+    carry. Compared textually with the added line dropped, not as parsed dicts,
+    because a dict comparison cannot see a re-serialisation.
+    """
+    root = tmp_path / "root"
+    home = _legacy_store(root, "base")
+    source = home / "characters"
+    directory = _plant_draft(source / DRAFTS_DIRNAME, "20260824-140756-cd645a")
+    before = (directory / "draft.json").read_text(encoding="utf-8")
+    destination = root / "shared" / "characters"
+
+    receipt = migrate_characters_home(source, destination, source_home=str(home))
+
+    landed = destination / DRAFTS_DIRNAME / "20260824-140756-cd645a" / "draft.json"
+    after = landed.read_text(encoding="utf-8")
+    assert receipt["ok"] is True
+    assert json.loads(after)["hermes_home"] == str(home)
+    assert [row["id"] for row in receipt["stamped"]] == ["20260824-140756-cd645a"]
+    # Drop-the-line-and-compare: every other byte, `updated` included, is as found.
+    dropped = "\n".join(
+        line for line in after.splitlines() if '"hermes_home"' not in line
+    )
+    assert dropped + "\n" == before
+    assert json.loads(after)["updated"] == json.loads(before)["updated"]
+    assert not directory.exists()
+
+
+def test_a_draft_that_already_states_a_home_is_moved_but_never_restamped(
+    tmp_path, monkeypatch
+):
+    """The control on stamp-always, on the one path that could plausibly excuse it.
+
+    A draft carrying a home was authored somewhere and says so; the migration is
+    a relocation, not a re-attribution. Stamping unconditionally would rewrite
+    provenance on exactly the drafts whose provenance is most interesting.
+    """
+    root = tmp_path / "root"
+    home = _legacy_store(root, "base")
+    source = home / "characters"
+    _plant_draft(
+        source / DRAFTS_DIRNAME,
+        "20260825-025720-b9f5ae",
+        hermes_home="/somewhere/else/profiles/original",
+        authored_by="chara_a2",
+    )
+    destination = root / "shared" / "characters"
+
+    receipt = migrate_characters_home(source, destination, source_home=str(home))
+
+    landed = json.loads(
+        (destination / DRAFTS_DIRNAME / "20260825-025720-b9f5ae" / "draft.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert receipt["stamped"] == []
+    assert [row["id"] for row in receipt["moved"]] == ["20260825-025720-b9f5ae"]
+    assert landed["hermes_home"] == "/somewhere/else/profiles/original"
+    assert landed["authored_by"] == "chara_a2"
+
+
+def test_a_destination_collision_is_refused_per_entry_and_leaves_the_source_intact(
+    tmp_path,
+):
+    """Never a merge, never an overwrite — a refusal an operator can read.
+
+    Archive-never-delete makes this the only available answer: the entry stays
+    where it is, the receipt says why, and nothing on either side is destroyed.
+    A verb that overwrote would look identical in its own receipt and would have
+    eaten a character.
+    """
+    root = tmp_path / "root"
+    home = _legacy_store(root, "base")
+    source = home / "characters"
+    _plant_draft(source / DRAFTS_DIRNAME, "20260824-140756-cd645a", concept="the source one")
+    destination = root / "shared" / "characters"
+    occupied = destination / DRAFTS_DIRNAME / "20260824-140756-cd645a"
+    occupied.mkdir(parents=True)
+    (occupied / "draft.json").write_text('{"id": "already here"}', encoding="utf-8")
+
+    receipt = migrate_characters_home(source, destination, source_home=str(home))
+
+    assert receipt["moved"] == []
+    assert [row["id"] for row in receipt["skipped"]] == ["20260824-140756-cd645a"]
+    assert "exists" in receipt["skipped"][0]["reason"]
+    assert (source / DRAFTS_DIRNAME / "20260824-140756-cd645a" / "draft.json").is_file()
+    assert json.loads((occupied / "draft.json").read_text(encoding="utf-8"))["id"] == "already here"
+
+
+def test_the_id_collision_pair_moves_as_two_entries_under_one_id(tmp_path):
+    """The live shape, from the alice home: `<id>` and `<id>.backup-…` side by side.
+
+    Two directories, one id inside both `draft.json` files. The move is per
+    DIRECTORY, so both travel and both keep listing under the same id — which is
+    why the receipt names directories beside ids, the same reason the backfill's
+    does.
+    """
+    root = tmp_path / "root"
+    home = _legacy_store(root, "alice")
+    source = home / "characters"
+    drafts = source / DRAFTS_DIRNAME
+    _plant_draft(drafts, "20260824-140756-cd645a")
+    # The backup sibling carries the ORIGINAL id inside its `draft.json` — that
+    # is what makes it a collision pair rather than two drafts.
+    _plant_draft(
+        drafts,
+        "20260824-140756-cd645a.backup-2026-08-25-nefix",
+        id="20260824-140756-cd645a",
+    )
+    destination = root / "shared" / "characters"
+
+    receipt = migrate_characters_home(source, destination, source_home=str(home))
+
+    assert [row["id"] for row in receipt["moved"]] == [
+        "20260824-140756-cd645a",
+        "20260824-140756-cd645a",
+    ]
+    assert [Path(row["to"]).name for row in receipt["moved"]] == [
+        "20260824-140756-cd645a",
+        "20260824-140756-cd645a.backup-2026-08-25-nefix",
+    ]
+    assert (destination / DRAFTS_DIRNAME / "20260824-140756-cd645a" / "draft.json").is_file()
+    assert (
+        destination
+        / DRAFTS_DIRNAME
+        / "20260824-140756-cd645a.backup-2026-08-25-nefix"
+        / "draft.json"
+    ).is_file()
+
+
+def test_an_installed_character_travels_with_its_slug_and_its_sheet(tmp_path):
+    """The install half — the artifact the launcher actually renders.
+
+    Both live homes hold one. A migration that moved only `.drafts/` would leave
+    the installed sheets invisible to a library-wide `list` and nothing would go
+    red about it.
+    """
+    root = tmp_path / "root"
+    home = _legacy_store(root, "base")
+    source = home / "characters"
+    installed = source / "cobalt-robot-courier"
+    installed.mkdir(parents=True)
+    (installed / MANIFEST_FILENAME).write_text('{"slug": "cobalt-robot-courier"}', encoding="utf-8")
+    (installed / SHEET_FILENAME).write_bytes(b"not really a webp")
+    destination = root / "shared" / "characters"
+
+    receipt = migrate_characters_home(source, destination, source_home=str(home))
+
+    assert [row["slug"] for row in receipt["moved"]] == ["cobalt-robot-courier"]
+    assert [row["kind"] for row in receipt["moved"]] == ["installed"]
+    assert (destination / "cobalt-robot-courier" / MANIFEST_FILENAME).is_file()
+    assert (destination / "cobalt-robot-courier" / SHEET_FILENAME).read_bytes() == b"not really a webp"
+    assert not installed.exists()
+
+
+def test_a_second_run_finds_nothing_and_the_emptied_source_stays_as_its_tombstone(
+    tmp_path,
+):
+    """Idempotent, and the empty tree is left standing on purpose.
+
+    Archive-never-delete: the source `characters/` directory is the only thing
+    left saying a per-home store was ever there, and a verb that tidied it away
+    would delete the evidence that its own receipt refers to.
+    """
+    root = tmp_path / "root"
+    home = _legacy_store(root, "base")
+    source = home / "characters"
+    _plant_draft(source / DRAFTS_DIRNAME, "20260827-150945-7ba0cb")
+    destination = root / "shared" / "characters"
+
+    first = migrate_characters_home(source, destination, source_home=str(home))
+    second = migrate_characters_home(source, destination, source_home=str(home))
+
+    assert [row["id"] for row in first["moved"]] == ["20260827-150945-7ba0cb"]
+    assert second["moved"] == []
+    assert second["stamped"] == []
+    assert second["skipped"] == []
+    assert source.is_dir()
+    assert (source / DRAFTS_DIRNAME).is_dir()
+
+
+def test_a_home_with_no_legacy_store_is_a_clean_no_op(tmp_path):
+    """Nine of the eleven profiles are this case; the sweep must be cheap and quiet."""
+    root = tmp_path / "root"
+    home = root / "profiles" / "neko"
+    home.mkdir(parents=True)
+
+    receipt = migrate_characters_home(
+        home / "characters", root / "shared" / "characters", source_home=str(home)
+    )
+
+    assert receipt == {
+        "ok": True,
+        "from": str(home / "characters"),
+        "to": str(root / "shared" / "characters"),
+        "moved": [],
+        "stamped": [],
+        "skipped": [],
+    }
+    assert not (home / "characters").exists()
+
+
+def test_migrating_a_store_onto_itself_moves_nothing(tmp_path, monkeypatch):
+    """The guard on the one call that would eat the library.
+
+    If a caller ever resolves the source through `characters_dir()` — which after
+    the head-home answers the DESTINATION — the verb would be asked to move the
+    library into itself. It refuses to try.
+    """
+    root = tmp_path / "root"
+    library = root / "shared" / "characters"
+    (library / DRAFTS_DIRNAME).mkdir(parents=True)
+    _plant_draft(library / DRAFTS_DIRNAME, "20260827-150945-7ba0cb")
+
+    receipt = migrate_characters_home(library, library, source_home=str(root / "profiles" / "base"))
+
+    assert receipt["moved"] == []
+    assert (library / DRAFTS_DIRNAME / "20260827-150945-7ba0cb" / "draft.json").is_file()
 
 
 def test_setting_a_base_image_that_does_not_exist_is_refused(draft, tmp_path):

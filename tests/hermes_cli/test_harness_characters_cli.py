@@ -24,7 +24,7 @@ from agent.charsheet.draft import drafts_dir
 from agent.charsheet.revisions import STATE_FILENAME
 from agent.charsheet.spec import FOUR_WAY, SheetSpec, StateSpec
 from hermes_cli.harness import build_parser
-from hermes_constants import get_hermes_home
+from hermes_constants import get_hermes_home, get_shared_characters_dir
 
 pytest.importorskip("PIL")
 
@@ -220,6 +220,7 @@ def start_draft(capsys, *extra):
         (["add-state", "--draft", "d", "--state", "jump:3"], "add-state"),
         (["sprite", "arrow-knight"], "sprite"),
         (["backfill-home"], "backfill-home"),
+        (["migrate-home"], "migrate-home"),
     ],
 )
 def test_the_parser_exposes_every_characters_verb_with_json(argv, verb):
@@ -900,6 +901,113 @@ def test_backfill_without_json_still_says_what_it_did(fake, capsys):
 
     assert str(get_hermes_home()) in line
     assert draft_id in line
+    assert "stamped" in line
+
+
+def _legacy_store(capsys) -> Path:
+    """Plant a populated pre-library store beside the live home, by hand.
+
+    No verb can create this shape any more, so the migration's whole population
+    has to be written the way the drafts on the live disk were. The draft is
+    made by the real `start` verb first — so it is a real draft, spec and all —
+    and then MOVED to the legacy address, which is exactly the history the live
+    ones have.
+    """
+    draft_id = start_draft(capsys)
+    # A pre-library draft predates the recorded-home field too, so the fixture
+    # drops the key the same way the backfill's does — which is also what makes
+    # the migration's stamp observable here.
+    _forget_recorded_home(draft_id)
+    legacy = get_hermes_home() / "characters" / ".drafts"
+    legacy.mkdir(parents=True, exist_ok=True)
+    (drafts_dir() / draft_id).rename(legacy / draft_id)
+    return legacy / draft_id
+
+
+def test_migrate_home_receipts_what_it_moved_and_where_it_moved_it(fake, capsys):
+    """The receipt IS the evidence, and the OP strip pastes it into field notes.
+
+    Both addresses on every row: an operator reading this afterwards is checking
+    that a specific draft left a specific home and landed in the library, and a
+    row that named only the id could not tell them either half.
+    """
+    directory = _legacy_store(capsys)
+    draft_id = directory.name
+    home = str(get_hermes_home())
+
+    code, receipt = run(["harness", "characters", "migrate-home", "--json"], capsys)
+
+    assert (code, receipt["ok"]) == (0, True)
+    assert receipt["from"] == str(get_hermes_home() / "characters")
+    assert receipt["to"] == str(get_shared_characters_dir())
+    assert [row["id"] for row in receipt["moved"]] == [draft_id]
+    assert [row["kind"] for row in receipt["moved"]] == ["draft"]
+    assert receipt["moved"][0]["from"] == str(directory)
+    assert receipt["moved"][0]["to"] == str(drafts_dir() / draft_id)
+    # Stamped with the SOURCE home, and only because the legacy draft had none.
+    assert [row["id"] for row in receipt["stamped"]] == [draft_id]
+    landed = json.loads((drafts_dir() / draft_id / "draft.json").read_text(encoding="utf-8"))
+    assert landed["hermes_home"] == home
+    # And the migrated draft is a draft again: the library lists it.
+    _code, listing = run(["harness", "characters", "list", "--json"], capsys)
+    assert [row["id"] for row in listing["drafts"]] == [draft_id]
+
+
+def test_migrate_home_refuses_per_entry_when_the_library_already_holds_the_leaf(
+    fake, capsys
+):
+    """A collision is a refusal with a reason, and the source survives it.
+
+    The one shape where an overwrite would be invisible: both directories carry
+    the same id, so a `list` afterwards looks identical either way. What differs
+    is that one of them has been eaten. Archive-never-delete says which.
+    """
+    directory = _legacy_store(capsys)
+    draft_id = directory.name
+    occupied = drafts_dir() / draft_id
+    occupied.mkdir(parents=True, exist_ok=True)
+    (occupied / "draft.json").write_text('{"id": "already here"}', encoding="utf-8")
+
+    code, receipt = run(["harness", "characters", "migrate-home", "--json"], capsys)
+
+    assert code == 0
+    assert receipt["moved"] == []
+    assert [row["id"] for row in receipt["skipped"]] == [draft_id]
+    assert str(occupied) in receipt["skipped"][0]["reason"]
+    assert (directory / "draft.json").is_file()
+    assert json.loads((occupied / "draft.json").read_text(encoding="utf-8"))["id"] == "already here"
+
+
+def test_running_migrate_home_twice_moves_nothing_the_second_time(fake, capsys):
+    """Idempotent by construction — the second run has no source left to select."""
+    directory = _legacy_store(capsys)
+    draft_id = directory.name
+
+    _code, first = run(["harness", "characters", "migrate-home", "--json"], capsys)
+    landed = (drafts_dir() / draft_id / "draft.json").read_bytes()
+    code, second = run(["harness", "characters", "migrate-home", "--json"], capsys)
+
+    assert code == 0
+    assert [row["id"] for row in first["moved"]] == [draft_id]
+    assert (second["moved"], second["stamped"], second["skipped"]) == ([], [], [])
+    assert (drafts_dir() / draft_id / "draft.json").read_bytes() == landed
+    # The emptied source tree is still there. It is the tombstone, and the
+    # receipt's `from` points at it.
+    assert (get_hermes_home() / "characters" / ".drafts").is_dir()
+
+
+def test_migrate_home_without_json_names_both_addresses_on_every_row(fake, capsys):
+    """An operator runs this by hand and pastes the output into the field notes."""
+    directory = _legacy_store(capsys)
+    draft_id = directory.name
+
+    args = parser().parse_args(["harness", "characters", "migrate-home"])
+    assert args.func(args) == 0
+    line = capsys.readouterr().out
+
+    assert draft_id in line
+    assert str(directory) in line
+    assert str(drafts_dir() / draft_id) in line
     assert "stamped" in line
 
 

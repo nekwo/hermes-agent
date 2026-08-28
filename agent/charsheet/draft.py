@@ -146,6 +146,161 @@ def drafts_dir() -> Path:
     return path
 
 
+def stamp_recorded_home(directory: Path, home: str) -> bool:
+    """Write ``hermes_home`` onto a draft that carries none. Return what happened.
+
+    The value is an ARGUMENT, which is the difference between this and
+    :meth:`CharacterDraft.record_home`: the backfill stamps the home the run
+    resolved, and a migration stamps the home the draft is LEAVING — a fact the
+    directory itself is about to stop witnessing. Same two rules otherwise, and
+    both are load-bearing:
+
+    * **It never rewrites.** A draft that already states a home keeps it. A
+      relocation is not a re-attribution, and the drafts whose provenance is
+      most interesting are exactly the ones an unconditional stamp destroys.
+    * **It does not go through** :meth:`CharacterDraft._save`. ``_save`` stamps
+      ``updated`` with "now", and the drafts this reaches are dormant exhibits
+      whose timeline is the evidence they are kept for. This writes the file
+      directly, so every other byte is left as it was found.
+    """
+    path = Path(directory) / DRAFT_FILENAME
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    if str(data.get("hermes_home", "") or "").strip():
+        return False
+    data["hermes_home"] = str(home)
+    _write_json_atomic(path, data)
+    return True
+
+
+def _migration_entry_id(directory: Path) -> str:
+    """The id a draft directory lists under — from the FILE, not the leaf name.
+
+    They differ in the case the live disk actually holds: an id-collision pair
+    (``<id>/`` beside ``<id>.backup-…/``) whose two ``draft.json`` files carry
+    the SAME id. The receipt names directories beside ids for that reason, the
+    same reason the backfill's does.
+    """
+    try:
+        data = json.loads((Path(directory) / DRAFT_FILENAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return Path(directory).name
+    if not isinstance(data, dict):
+        return Path(directory).name
+    return str(data.get("id", "") or Path(directory).name)
+
+
+def migrate_characters_home(source: Path, destination: Path, *, source_home: str) -> dict:
+    """Move a legacy per-home character store into the install-wide library.
+
+    Explicit source and destination :class:`~pathlib.Path`\ s, so the rules below
+    are unit-testable without env games and so the CALLER owns the decision of
+    which home is being migrated. That matters more than it looks: after the
+    library head-homed, ``characters_dir()`` answers the DESTINATION, so a verb
+    that resolved its source through it would be asking to move the library onto
+    itself. The handler spells the legacy location literally and this function
+    refuses the degenerate case anyway.
+
+    Four rules:
+
+    * **Stamp before move.** A draft with no ``hermes_home`` is stamped with the
+      SOURCE home (:func:`stamp_recorded_home`) before it is relocated — after
+      the move the directory no longer witnesses where the draft lived, and this
+      is the last chance to record it first-party. A present key is never
+      rewritten.
+    * **Move, never copy-and-delete.** One :func:`os.replace` per entry. Draft
+      directories keep their leaf names (so a stored binding's ``draftId`` and
+      ``load()`` both keep resolving) and installed characters keep their slugs.
+    * **A collision is a per-entry refusal.** A destination that already holds
+      the leaf or the slug lands in ``skipped`` with a reason and its source is
+      left untouched — never a merge, never an overwrite. Archive-never-delete
+      makes that the only available answer: a move that lands intact destroys
+      nothing, and a move that cannot land must destroy nothing either.
+    * **Nothing is deleted, the emptied tree included.** The source
+      ``characters/`` directory is left standing as its own tombstone — it is
+      the only thing left saying a per-home store was ever there, and it is what
+      the receipt's ``from`` refers to.
+
+    Idempotent: a second run finds no sources and moves nothing.
+    """
+    source = Path(source)
+    destination = Path(destination)
+    moved: list[dict] = []
+    stamped: list[dict] = []
+    skipped: list[dict] = []
+    receipt = {
+        "ok": True,
+        "from": str(source),
+        "to": str(destination),
+        "moved": moved,
+        "stamped": stamped,
+        "skipped": skipped,
+    }
+    if not source.is_dir() or source.resolve() == destination.resolve():
+        return receipt
+
+    def _relocate(child: Path, target: Path, row: dict) -> None:
+        if target.exists():
+            skipped.append({**row, "reason": f"destination already exists: {target}"})
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.replace(child, target)
+        except OSError as exc:
+            # A cross-volume rename, a lock, a permission — the entry stays where
+            # it is and the receipt says why. Reported rather than raised so one
+            # stuck entry cannot strand the rest of the store half-migrated.
+            skipped.append({**row, "reason": f"could not move: {exc}"})
+            return
+        moved.append({**row, "from": str(child), "to": str(target)})
+
+    src_drafts = source / DRAFTS_DIRNAME
+    for child in sorted(src_drafts.iterdir()) if src_drafts.is_dir() else []:
+        if not child.is_dir() or not (child / DRAFT_FILENAME).is_file():
+            continue
+        draft_id = _migration_entry_id(child)
+        if stamp_recorded_home(child, source_home):
+            stamped.append({"id": draft_id, "directory": str(child)})
+        _relocate(
+            child,
+            destination / DRAFTS_DIRNAME / child.name,
+            {"kind": "draft", "id": draft_id},
+        )
+
+    for child in sorted(source.iterdir()):
+        if child.name == DRAFTS_DIRNAME or not child.is_dir():
+            continue
+        manifest_path = child / MANIFEST_FILENAME
+        if not manifest_path.is_file():
+            # The same definition of "an installed character" the CLI's
+            # installed rows use. A directory that is not one is left where it
+            # is rather than swept along — an unrecognised tree under a
+            # characters store is exactly the thing a move should not guess at.
+            skipped.append(
+                {
+                    "kind": "installed",
+                    "slug": child.name,
+                    "directory": str(child),
+                    "reason": f"no {MANIFEST_FILENAME}: not an installed character",
+                }
+            )
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            manifest = {}
+        if not isinstance(manifest, dict):
+            manifest = {}
+        slug = str(manifest.get("slug", "") or child.name)
+        _relocate(child, destination / child.name, {"kind": "installed", "slug": slug})
+
+    return receipt
+
+
 def slugify(name: str) -> str:
     """Lowercase, hyphenate and strip *name* into one filesystem path segment."""
     slug = _SLUG_RE.sub("-", (name or "").strip().lower()).strip("-")

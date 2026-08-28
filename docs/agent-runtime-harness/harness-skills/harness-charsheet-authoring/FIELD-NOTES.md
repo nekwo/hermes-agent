@@ -2161,6 +2161,64 @@ first two correct the plan I was handed rather than confirming it.
   are what close it — §C's second row says the same, and it is why H1→OP wants to be
   same-day.
 
+### H2 — `migrate-home`, and the three defects worth planting
+
+- **[MEASURED] Stamping through `_save()` is the defect the byte pin exists for, and it is
+  invisible to a dict comparison.** Built wrong first, the red is exactly the key the ruling
+  is about:
+
+      assert dropped + "\n" == before
+      E  - "2026-08-24T14:07:56+00:00"
+      E  + "2026-08-28T02:55:08.776734+00:00"
+
+  That is `updated` on a dormant exhibit, rewritten to the moment the migration ran. The
+  assertion is textual — read the landed file, drop the `"hermes_home"` line, compare to the
+  bytes the source held — because a parsed-dict comparison passes through a re-serialisation
+  without noticing and would have let this land. Same lesson as the recorded-home wave's
+  §E.8, one verb later, and it earned its second outing.
+
+- **[MEASURED] The other two planted defects red on exactly one pin each and nothing else.**
+  Stamp-always: `assert receipt["stamped"] == []` against a draft that already named
+  `/somewhere/else/profiles/original` — a relocation is not a re-attribution, and the drafts
+  whose provenance is most interesting are the ones an unconditional stamp destroys first.
+  Overwrite-on-collision: `assert receipt["moved"] == []` while the source directory was
+  gone and the destination held the migration's copy. That second one is the shape worth
+  naming, because both directories carry the same id: a `list` afterwards looks IDENTICAL
+  whether the verb refused or ate a character. The receipt and the surviving source
+  directory are the only two things that can tell them apart.
+
+- **[READ] The source is spelled literally in the handler, and the helper refuses the
+  degenerate case anyway.** After H1, `characters_dir()` answers the DESTINATION — so a verb
+  that resolved its source through the ordinary authority would be asking to move the library
+  onto itself. The handler writes `get_hermes_home() / "characters"` out and says why in a
+  comment; `migrate_characters_home` compares resolved source and destination and returns an
+  empty receipt if they match, with a test standing on that. Belt and braces on purpose: the
+  handler's comment is the thing a future reader deletes, and the guard is the thing that
+  survives them doing it.
+
+- **[READ] A non-character directory under a legacy store is SKIPPED, not swept along.**
+  "Installed character" means "a directory carrying `character.json`" — the same definition
+  the CLI's installed rows already use — and anything else lands in `skipped` with a reason.
+  It is left where it is rather than guessed at, which is the archive-never-delete instinct
+  applied to a thing the verb does not recognise. A cross-volume rename, a lock or a
+  permission error is reported the same way, per entry, so one stuck directory cannot strand
+  the rest of the store half-migrated.
+
+- **[MEASURED] The verb-table pin does the §E.5 job without being asked twice.** Adding the
+  subparser reds `test_charsheet_skill_documents_exactly_the_characters_verbs_hermes_has`
+  with `Extra items in the right set: 'migrate-home'` — the live parser tree against the
+  skill's table. The `SKILL.md` row therefore rides this commit, not a later one. **Small
+  correction while there:** the table's header said "Fourteen, flat" and the table held
+  fifteen rows before this strip — a drift `backfill-home` introduced and nothing pins,
+  because the test counts the ROWS and not the sentence. It says sixteen now.
+
+- **[READ] What I did NOT do.** (i) The verb migrates ONE home per invocation and never
+  enumerates profiles — the operator runs it per home, which is what keeps the receipt
+  attributable. (ii) Nothing is deleted, the emptied `characters/` tree included; it is the
+  tombstone the receipt's `from` refers to, and a test stands on it still being there after
+  two runs. (iii) I did not run the migration on the live install — that is the OP strip's
+  operator-visible step, and this branch is not merged.
+
 <!-- A2, A3, R1 and any slice standing in the HERMES repo: append your entries above this
      line, under the matching heading, or add a heading if none fits. Then say in your
      slice report that you did.

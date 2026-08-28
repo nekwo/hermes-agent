@@ -127,7 +127,7 @@ flag is not neutral: it strands the draft.
 
 ## The verbs
 
-Fourteen, flat, all with `--json`. Every draft verb takes `--draft <id>` as a
+Sixteen, flat, all with `--json`. Every draft verb takes `--draft <id>` as a
 **required flag**; only `sprite` takes a positional `<slug>`. **The draft id is
 not the slug** (`20260824-140756-cd645a` vs `anime-girl`).
 
@@ -136,6 +136,7 @@ not the slug** (`20260824-140756-cd645a` vs `anime-girl`).
 | `start --concept … [--slug] [--display-name] [--style] [--states] [--directions] [--base-image] [--authored-by]` | Creates the draft. Generates nothing. | — |
 | `list` | Drafts + installed characters, with their directories. | — |
 | `backfill-home` | Records `hermes_home` on drafts under THIS home that predate the field, and on no others. An already-recorded home is never rewritten; `updated` is left untouched. Idempotent, receipted. **Operator-run — do not fire it as part of an authoring flow.** | — |
+| `migrate-home` | Moves THIS home's legacy `<HERMES_HOME>/characters` store into the install-wide library. Drafts keep their directory leaf names and installed characters keep their slugs; a draft carrying no `hermes_home` is stamped with the SOURCE home before it moves. A destination collision is a per-entry refusal, never an overwrite, and nothing is deleted. Idempotent, receipted. **Operator-run — do not fire it as part of an authoring flow.** | — |
 | `status --draft <id>` | Stage, spec, per-item QA history with every attempt's `path`. | any |
 | `base --draft <id> --image <path>` | Sets/replaces the identity anchor. | any |
 | `turnaround --draft <id>` | One generation per **authored** direction (`s se e ne n` for the 8-way scheme). | `turnaround` |
