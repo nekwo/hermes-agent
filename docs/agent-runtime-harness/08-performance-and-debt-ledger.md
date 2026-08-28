@@ -302,6 +302,28 @@ Executed history stays archived.
   `harness contracts dump` (the only reader of `contract_manifest`), R11 as written, and
   H-CLI-5's store follow-ons.
 
+**From the 2026-08-28 realm skill-delete build (field notes retired with the
+plan at the canon fold; lane shipped as `45abf82803` + `32f41be19f` +
+`dfc18b882f`, canon in 01 §Skills):**
+
+- **A second member's FIRST `sync pull --ff-only` dies on `.gitattributes`.**
+  `_ensure_sync_repo` → `_ensure_repo_gitattributes` writes the managed file
+  into the clone *before* the pull runs; once any member's publish has
+  committed it, every clone predating that publish holds it untracked and git
+  refuses the merge even though the bytes are identical. Pre-existing, hit on
+  the first two-HOME round-trip.
+- **A pull INSTALLS the `CANONICAL_SHARED_SKILL_IDS` into the puller's shared
+  root, and that member's next publish exports them** even if the member never
+  adopted a harness skill (`install_harness_skills` on every pull ×
+  `_skill_artifacts`). Pre-existing; reproduced in both the S1/S2 round-trip
+  and the S3 smoke, and precisely why ruling R-B refuses tombstones on
+  canonical ids.
+- **Three pre-existing reds in the full `tests/hermes_cli` floor**, verified
+  failing identically at `32f41be19f` with the S3 change stashed:
+  `test_error_exit_code_producers` (`runtime_unavailable` gained a producer —
+  deleting the spelling is a cross-stack call the launcher owns),
+  `test_completion::test_valid_bash_syntax`, and `test_xai_provider_labels`.
+
 **From [`REFACTOR_DEBT_AUDIT_2026-08-17.md`](archive/2026-08-22-pre-consolidation/REFACTOR_DEBT_AUDIT_2026-08-17.md):**
 
 - Two of its six defect classes were re-checked and are **LANDED, so they are dropped

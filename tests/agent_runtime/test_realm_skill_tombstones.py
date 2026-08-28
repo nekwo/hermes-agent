@@ -1,7 +1,9 @@
 """S1 tests for the realm skill-delete ledger and its store chokepoints.
 
-The model half of the skill-delete lane (``docs/agent-runtime-harness/planned/
-realm-skill-delete.md`` §2.1-§2.3): the ``SkillTombstone`` record, the bounded
+The model half of the skill-delete lane (canon:
+``docs/agent-runtime-harness/01-system-architecture.md`` §Skills, third lane;
+the plan file was retired at the 2026-08-28 canon fold): the
+``SkillTombstone`` record, the bounded
 ``Realm.skill_tombstones`` ledger, the two write chokepoints
 (``RealmStore.tombstone_skill`` / ``restore_skill``) and the ONE match rule
 (``store.skill_tombstoned``) every enforcement point asks through.

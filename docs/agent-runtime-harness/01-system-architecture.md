@@ -235,7 +235,11 @@ the honest "standalone" answer (`runtime_hud.py:721-725`).
 (`models.py:33`) is the scene and roster boundary. A realm holds
 `workspace_ids` plus a `deleted_workspace_ids` resurrection-guard ledger that
 travels with it, so a member holding a stale local copy neither republishes nor
-re-adopts a deleted workspace. Realms own what publishes: `skill_publish_mode`
+re-adopts a deleted workspace. Since 2026-08-28 the same idea guards skill
+packages: `skill_tombstones` (`SkillTombstone`, `models.py:104`), a per-realm
+ledger capped at `SKILL_TOMBSTONE_LEDGER_CAP = 200` (`store.py:33`), serialized
+additively at the existing schema version — the delete lane it powers is
+documented under [Skills](#skills). Realms own what publishes: `skill_publish_mode`
 (`all` | `selected`) and `agent_publish_mode` (`workspace` | `selected`), with
 personas required by a roster or an Office placement pinned regardless, so a
 pulled workspace can never point at an absent persona definition. Stores:
@@ -333,13 +337,48 @@ passively as the `skill_hash_mismatch` readiness code
 (`agent_runtime/profile_readiness.py`), which is where to look when a persona
 is behaving like an older version of its own skill.
 
-Two adjacent lanes are live. `skill_promotion.py` is the one guarded door
+Three adjacent lanes are live. `skill_promotion.py` is the one guarded door
 through which downloaded or authored packages become canonical: downloads land
 in a per-realm inbox the resolver never sees, displaced packages are archived
 not deleted, promotion is an atomic `os.replace`, and provenance lives outside
 skill dirs so it cannot change a package's content hash.
 `external_skill_links.py` links the shared root into other harnesses on the
 machine (Claude Code, Codex), idempotently and non-destructively.
+
+**The third lane (2026-08-28) makes removal travel.** `hermes harness skills
+delete <slug> [--realm …] [--dry-run]` (`hermes_cli/harness.py:2626`) archives
+the local package — never deletes, `.archive/<timestamp>/` beside the shared
+root — writes a `{slug, deleted_at, deleted_hash}` tombstone into every realm
+that currently publishes the name (the R-E default: a mode-`all` realm
+qualifies only through a covered local package, a mode-`selected` realm by
+naming the slug even with no local copy), prunes the slug from
+`skill_selection` (R-F), and unlinks the per-realm inbox mirror (a cache the
+next pull rebuilds). The match rule is single and one-to-many: a bare `foo`
+tombstone covers top-level `foo` AND categorized `<cat>/foo`
+(`store.skill_tombstone_matches`, `store.py:451`) — which is why the delete
+receipt's `archived` array is the truth and its scalar fields are only the
+single-package convenience. Enforcement is entirely client-side, because a
+GitHub-App push has no pre-receive hook, and it closes at three points in
+`realm_sync.py`: pull applies the ledger (`_apply_skill_tombstones`, `:613`,
+archive-never-delete), pull's auto-adopt skips tombstoned slugs, and publish
+filters them out of the artifact set (`_skill_artifacts`, `:898`). Canonical
+ids refuse with `skill_installer_owned` — every pull reinstalls the canonical
+set, so a tombstone would fight the installer forever (the R-B ruling); a
+malformed slug refuses with `skill_slug_invalid`; both are exit-code family 2.
+An unknown slug is a warning (`skill_unknown`, exit 0), as is
+`skill_no_local_package` ("nothing archived" and "nothing written at all" are
+different answers). The only resurrection door is the explicit
+`skills restore <slug> --realm <id>` (R-C), which removes the ledger entry and
+hands back the archive path plus the promote command — it does NOT re-add the
+slug to `skill_selection`. The launcher seam reads identical
+`{slug, deleted_at, deleted_hash}` rows in three places: the sidecar,
+`realm_sync_status`, and the additive `tombstones` array on
+`realm skills show`. Both verbs route their success envelopes through
+`attach_root_observability` — a delete aimed at the wrong shared root would
+otherwise report a well-formed `skill_unknown` and read as "already gone."
+Conflict posture is last-writer-wins v1 (R-D): two members publishing
+concurrently can drop a ledger entry; the union merge is designed and gated →
+[planned/realm-skill-tombstone-merge.md](planned/realm-skill-tombstone-merge.md).
 
 ## Persona identity
 
@@ -467,6 +506,10 @@ Each links to a `planned/` file carrying its evidence and the gate to open it.
   no `characters add-state`, so adding a strip to an installed sheet means
   re-authoring the character →
   [planned/charsheet-add-state.md](planned/charsheet-add-state.md)
+- 2026-08-28 — **the skill-tombstone ledger merges last-writer-wins**: two
+  members publishing concurrently can silently drop a tombstone entry (R-D
+  ruled LWW acceptable for v1; nothing fences the loss window) →
+  [planned/realm-skill-tombstone-merge.md](planned/realm-skill-tombstone-merge.md)
 
 ## Unverified carry-forward
 

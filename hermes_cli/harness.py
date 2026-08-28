@@ -2461,7 +2461,7 @@ def _cmd_skills_promote(args) -> int:
     return 2 if result.action == "refused" else 0
 
 
-# ── skills delete / restore (the realm skill-delete lane, plan §4) ──────────
+# ── skills delete / restore (canon: docs/agent-runtime-harness/01-system-architecture.md §Skills) ──
 
 
 def _canonical_packages_covered(slug: str) -> list[tuple[str, Path]]:

@@ -1,8 +1,9 @@
 """S3 tests for ``hermes harness skills delete`` / ``restore`` and the additive
 ``tombstones`` array on ``realm skills show``.
 
-The operator half of the realm skill-delete lane
-(``docs/agent-runtime-harness/planned/realm-skill-delete.md`` §4). S1 owns the
+The operator half of the realm skill-delete lane (canon:
+``docs/agent-runtime-harness/01-system-architecture.md`` §Skills, third lane;
+the plan file was retired at the 2026-08-28 canon fold). S1 owns the
 ledger and its store chokepoints; S2 owns pull/publish enforcement; what is
 asserted here is the VERBS: which realms a bare ``delete`` resolves (R-E), that
 the local canonical package is archived rather than deleted (R-A), that the
