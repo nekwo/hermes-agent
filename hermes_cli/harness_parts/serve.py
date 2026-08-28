@@ -35,9 +35,22 @@ Protocol (NDJSON, one frame per line):
              adds ``"served_from_cache": true, "cache_age_ms": N`` to its exit
              frame — additive; see _PollResponseCache below)
 - stderr:    ``{"id":<request id or null>,"event":"stderr","line":…}``
+- progress:  ``{"id":"req-7","event":"request_progress","state":"queued"|
+             "running","waited_ms":N,"running_ms":N,"pending":M,
+             "pool_size":P}`` — UNSOLICITED, on the lane that asked, for a
+             request that has produced nothing for
+             ``_REQUEST_SILENCE_SECONDS``. A request's first frame is written
+             by its HANDLER, so before the fix "queued behind a full pool",
+             "slow handler" and "wedged" were one silence; ``state`` separates
+             the first from the other two, and it is the field that says
+             whether a retry is free. Additive and never emitted on the normal
+             path — a client that does not know the event ignores it and
+             still reads its ``line``/``exit`` frames unchanged.
 - ping:      ``{"op":"ping"}`` → ``{"event":"busy","chat_turns":N,"pending":M}``
              (the Launcher supervisor must NEVER recycle serve while
-             ``chat_turns`` > 0 — recording safety)
+             ``chat_turns`` > 0 — recording safety). The SAME frame is pushed
+             unsolicited by the liveness pump while work is in flight, to
+             stdout AND to every attached socket/gateway client.
 - shutdown:  ``{"op":"shutdown"}`` → drain in-flight requests, exit 0
 - version:   ``{"op":"version"}`` → ``{"event":"version","build":{…},
              "runtime_root":…,"boot_id":…,"transport":"stdio","auth":{…}}``
@@ -825,6 +838,24 @@ _DRAIN_EXIT_DEADLINE_SECONDS = 15.0
 #: is normally one poll interval away; past this bound the drain is declared
 #: abandoned IN A FRAME rather than exiting silently.
 _DRAIN_ABANDON_GRACE_SECONDS = 5.0
+#: How long ONE request may produce nothing before the loop describes it, on
+#: the lane that asked, as ``{"id":…,"event":"request_progress","state":…}``.
+#:
+#: An argv request's first frame is written by its HANDLER, so until then a
+#: request queued behind a full pool, one whose handler is merely slow, and one
+#: whose handler has wedged are the same silence on the wire. Measured
+#: 2026-08-27: a ``characters list --json`` on an authenticated socket read ZERO
+#: frames for >120s while the same serve answered a later connection's identical
+#: argv in ~6s — and the client could not tell which of the three it had.
+#:
+#: The budget is deliberately longer than any healthy read (``status`` and
+#: ``snapshot`` are the launcher's cadence polls and a warm ``snapshot`` is
+#: ~7s), so the normal path pays no extra frames at all and only a request that
+#: has genuinely gone quiet is described.
+#:
+#: Read from the module at call time on purpose — a test lowers it, the same
+#: seam ``_DRAIN_EXIT_DEADLINE_SECONDS`` uses.
+_REQUEST_SILENCE_SECONDS = 15.0
 
 # Chat turns must survive supervisor recycles (recording safety): these argv
 # shapes mark a request as an in-flight chat turn for the busy/ping frame.
@@ -1288,6 +1319,9 @@ class _ArgvRequest:
         "owner",
         "sink",
         "turn_request_id",
+        "submitted_monotonic",
+        "started_monotonic",
+        "progress_monotonic",
     )
 
     def __init__(
@@ -1323,6 +1357,20 @@ class _ArgvRequest:
         #: a local launcher sends — the receipt exists to close the RPC lane's
         #: accept window and a local send never opens one.
         self.turn_request_id = turn_request_id
+        #: When the dispatcher took it. Set HERE rather than in ``_run``,
+        #: because the gap between the two is the whole point: it is the time
+        #: the request spent in the pool's queue, and that time is invisible to
+        #: the worker that eventually runs it.
+        self.submitted_monotonic = time.monotonic()
+        #: When a pool worker entered ``_run``, or ``None`` while still queued.
+        #: This single field is the difference between "the pool is full and
+        #: your request has not started" and "your request is running and its
+        #: side effects may already have landed" — which used to be the same
+        #: silence on the wire.
+        self.started_monotonic: float | None = None
+        #: When the liveness pump last described this request, so a long turn
+        #: is reported on a cadence rather than on every pump tick.
+        self.progress_monotonic: float | None = None
 
 
 class _DrainState:
@@ -1886,6 +1934,60 @@ def serve_loop(
             chat_turns = sum(1 for item in inflight.values() if item.is_chat_turn)
         return {"event": "busy", "chat_turns": chat_turns, "pending": pending}
 
+    def _report_quiet_requests(pending: list[_ArgvRequest]) -> None:
+        """Describe every request that has gone quiet, to the lane that asked.
+
+        ``busy`` says the SERVICE is alive and carries a count. It cannot
+        answer the question a waiting client actually has, which is about ONE
+        request: has mine started, or is it behind the pool? This does, by id,
+        on that request's own sink — so the answer arrives on the connection
+        that is waiting for it rather than on stdout, where a socket client
+        cannot see it.
+
+        The budget is read from the module on every lap, so a test lowers it.
+
+        ``harness stream`` is deliberately excluded: it is the infinite
+        subscription, it is silent between events BY DESIGN, and it has the
+        stream lane's own liveness. Everything else that produces nothing for
+        this long is a fact an operator wants.
+        """
+
+        budget = max(0.0, float(_REQUEST_SILENCE_SECONDS))
+        now = time.monotonic()
+        depth = len(pending)
+        for request in pending:
+            if request.is_runtime_stream:
+                continue
+            waited = now - request.submitted_monotonic
+            if waited < budget:
+                continue
+            last = request.progress_monotonic
+            if last is not None and (now - last) < budget:
+                continue
+            request.progress_monotonic = now
+            started = request.started_monotonic
+            frame = {
+                "id": request.rid,
+                "event": "request_progress",
+                # The one field that matters. "queued" means no handler code
+                # has run, so nothing has been mutated and a retry is free;
+                # "running" means side effects may already have landed.
+                "state": "running" if started is not None else "queued",
+                "waited_ms": int(waited * 1000),
+                "running_ms": (
+                    0 if started is None else int((now - started) * 1000)
+                ),
+                "pending": depth,
+                "pool_size": pool_size,
+            }
+            target = request.sink if request.sink is not None else frames
+            try:
+                target.emit(frame)
+            except Exception:
+                # Same contract as the pump that calls this: telemetry must
+                # never take down the loop it describes.
+                pass
+
     def _service_log(payload: dict[str, Any]) -> None:
         """One structured line per transport event, on the serve's own stderr.
 
@@ -1906,6 +2008,12 @@ def serve_loop(
         from agent_runtime.profile_context import process_home_scope
         from agent_runtime.request_control import request_cancel_scope
 
+        # FIRST act of the worker, before any import or any handler code: from
+        # here on the request is RUNNING, and the liveness pump says so instead
+        # of reporting it as queued. A stamp taken later would describe a
+        # request that is inside its handler as still waiting for a worker,
+        # which is the exact confusion this field exists to end.
+        request.started_monotonic = time.monotonic()
         token = _request_id.set(request.rid)
         # Answers go back to whoever asked. ``request.sink`` is None on stdio,
         # which leaves the contextvar unset and the proxy on stdout — the
@@ -2195,7 +2303,7 @@ def serve_loop(
                         # reason the hello stopped carrying the token at all.
                         token_provider=lambda: _read_serve_token(store_root_path),
                         frame_contract=SERVE_SCHEMA_VERSION,
-                        on_disconnect=lambda connection: _release_subscription(
+                        on_disconnect=lambda connection: _on_connection_closed(
                             connection
                         ),
                         log=_service_log,
@@ -2256,7 +2364,7 @@ def serve_loop(
                 hello_payload=lambda message, connection: _hello_ok_frame(
                     message, connection
                 ),
-                on_disconnect=lambda connection: _release_subscription(connection),
+                on_disconnect=lambda connection: _on_connection_closed(connection),
                 log=_service_log,
                 frame_contract=SERVE_SCHEMA_VERSION,
             )
@@ -2577,14 +2685,37 @@ def serve_loop(
         def _liveness_pump() -> None:
             while not liveness_stop.wait(liveness_pump_interval_seconds):
                 with inflight_lock:
-                    busy = bool(inflight)
-                if not busy:
+                    pending = list(inflight.values())
+                if not pending:
                     continue
                 try:
-                    frames.emit(_busy_frame())
+                    busy_frame = _busy_frame()
+                    frames.emit(busy_frame)
                 except Exception:
                     # Writer gone — the main loop is on its way down too.
                     return
+                # And to every SOCKET client, for the identical reason the
+                # comment above gives for stdout. This lane was left behind
+                # when the drain path learned the same lesson: "the socket
+                # client IS such a watchdog: it reads with a finite timeout and
+                # reports `transport_failed` on silence" (see the drain's
+                # `_broadcast_lanes(progress)`). Measured 2026-08-27: an
+                # authenticated socket connection waiting on a `characters
+                # list` read ZERO frames for >120s while this pump was emitting
+                # `busy` the whole time — to stdout, where that client could
+                # not see it.
+                #
+                # Best-effort and never fatal: `_broadcast_lanes` is a later
+                # local of this loop, so an early tick can find it unbound, and
+                # a broadcast failing must not stop the liveness the launcher
+                # keys on.
+                try:
+                    _broadcast_lanes(busy_frame)
+                except Exception:
+                    pass
+                # The per-request half: `busy` is a count, and a client waiting
+                # on ONE id needs to know whether that id has started.
+                _report_quiet_requests(pending)
 
         threading.Thread(
             target=_liveness_pump,
@@ -2955,6 +3086,70 @@ def serve_loop(
                 connection.subscribed = False
                 with connection_sinks_lock:
                     connection_sinks.pop(connection.key, None)
+
+        def _reclaim_abandoned_streams(connection: Any) -> int:
+            """Cancel the departed connection's infinite ``harness stream``.
+
+            THE POOL IS FOUR WORKERS WIDE and ``harness stream`` is an argv
+            request that never returns, so every abandoned one is a worker
+            permanently gone. The ``cancel`` op's own comment says what that
+            costs — "otherwise four watchdog cycles exhaust the entire serve
+            pool with abandoned streams" — and until now the ONLY thing that
+            set the event was that op, sent by a launcher that came BACK. A
+            client that simply died, or a socket session that closed, left its
+            stream running forever, and the next argv request queued behind a
+            pool with no free worker and emitted nothing at all. That is the
+            measured 2026-08-27 shape: >120s of zero frames for a ``characters
+            list``, the identical argv answered in ~6s on a later connection.
+            ``agent_runtime.request_control`` already states this as the
+            contract — the stream handler "must release its worker when its
+            consumer disconnects" — and nothing implemented the disconnect half.
+
+            Deliberately narrower than ``_release_subscription``'s "do NOTHING
+            else", and not a softening of it: that rule is about BACKEND state
+            surviving its clients, which is the whole durable-service premise.
+            This touches no backend state. It reclaims a worker that is
+            producing frames for a socket nobody is reading, and it reclaims it
+            for exactly the one request shape the cancel path already calls the
+            sole safe cooperative exception — read-only, infinite, with a
+            polled seam. Chat turns and every mutation are untouched: they stay
+            uninterruptible, because a half-applied mutation is worse than a
+            held worker and a killed turn is lost recording.
+            """
+
+            if connection is None:
+                return 0
+            owner = _owner_of(connection)
+            with inflight_lock:
+                abandoned = [
+                    request
+                    for request in inflight.values()
+                    if request.is_runtime_stream and request.owner == owner
+                ]
+            for request in abandoned:
+                request.cancel_event.set()
+            if abandoned:
+                _service_log(
+                    {
+                        "event": "serve_stream_worker_reclaimed",
+                        "boot_id": boot_id,
+                        "connection": owner,
+                        "client": getattr(connection, "client", None),
+                        "request_ids": sorted(item.rid for item in abandoned),
+                    }
+                )
+            return len(abandoned)
+
+        def _on_connection_closed(connection: Any) -> None:
+            """The ONE disconnect path: unsubscribe, then reclaim the worker.
+
+            Both doors call this rather than ``_release_subscription`` on its
+            own, so a lane added later cannot get one half and not the other —
+            the same reasoning ``_broadcast_lanes`` is written down with.
+            """
+
+            _release_subscription(connection)
+            _reclaim_abandoned_streams(connection)
 
         def _broadcast_lanes(frame: dict[str, Any]) -> None:
             """Tell every attached client, on whichever door it came through.
