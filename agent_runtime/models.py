@@ -101,6 +101,28 @@ class Workspace:
 
 
 @dataclass(slots=True)
+class SkillTombstone:
+    """One "this shared skill is deleted realm-wide" record.
+
+    A RECORD rather than a bare id — the one place the ``deleted_workspace_ids``
+    lift cannot be verbatim. Workspace ids are freshly minted, so a bare-id set
+    can never block a legitimate re-creation; skill slugs are re-creatable
+    NAMES, so the ledger must carry when the delete happened and be lifted by an
+    explicit verb rather than out-aged by a same-name author.
+
+    ``deleted_hash`` is the package content hash at delete time when a local
+    copy existed to hash. It is receipts and forensics ("the thing you are
+    restoring is/isn't the bytes you deleted") and is NEVER consulted to admit a
+    package: an auto-supersede would let any member authoring a same-name skill
+    silently override a realm-wide delete.
+    """
+
+    slug: str
+    deleted_at: datetime
+    deleted_hash: str | None = None
+
+
+@dataclass(slots=True)
 class Realm:
     id: str
     slug: str
@@ -120,6 +142,15 @@ class Realm:
     # pull (the Board.archived_card_ids / OfficeSurface.archived_actor_keys
     # idiom, lifted to workspace granularity).
     deleted_workspace_ids: list[str] = field(default_factory=list)
+    # The same resurrection guard for shared SKILLS, at record granularity (see
+    # SkillTombstone). Travels in the realm JSON like the ledger above so a
+    # member holding a live canonical copy of a deleted skill neither
+    # republishes it nor re-adopts it on pull. ADDITIVE at schema_version 1 —
+    # a bump would refuse every older member's realm load (serde.upgrade), so
+    # the compat cost is instead an old member's save stripping the field.
+    # Written only at RealmStore.tombstone_skill / restore_skill; matched only
+    # through store.skill_tombstoned, never by open-coded slug comparison.
+    skill_tombstones: list[SkillTombstone] = field(default_factory=list)
     # Which shared skills publish to this realm. Mode "all" (default,
     # back-compat) publishes every skill in the shared catalog including
     # future ones; "selected" publishes exactly skill_selection (empty list =

@@ -12,9 +12,9 @@ from hermes_time import now
 from utils import atomic_json_write
 
 from . import paths
-from .errors import AlreadyExists, NotFound, WorkspaceDeleteBlocked
+from .errors import AlreadyExists, NotFound, SkillTombstoneRefused, WorkspaceDeleteBlocked
 from .events import EventLog
-from .models import AgentPersona, AgentRun, Event, Incident, Realm, Workspace
+from .models import AgentPersona, AgentRun, Event, Incident, Realm, SkillTombstone, Workspace
 from .serde import from_jsonable, safe_id, to_jsonable
 from .states import RunState
 
@@ -26,6 +26,11 @@ ACTIVE_RUN_STATES = frozenset({RunState.QUEUED, RunState.STARTING, RunState.RUNN
 # pulled the tombstone (the bounded-ledger idiom shared with the board/office
 # archived ledgers).
 DELETED_WORKSPACE_LEDGER_CAP = 500
+# Bound on Realm.skill_tombstones — the same guard for shared skills. Smaller
+# than the workspace cap because the shared catalog is small; the eviction
+# argument is identical (by the time an entry falls off, every member has long
+# since pulled it).
+SKILL_TOMBSTONE_LEDGER_CAP = 200
 
 
 def _safe_display_name(value) -> str:
@@ -443,6 +448,40 @@ def _normalize_skill_selection(selection: list[str] | None) -> list[str]:
     return sorted(cleaned)
 
 
+def _tombstone_blocks(entry_slug: str, slug: str) -> bool:
+    """Does ledger entry ``entry_slug`` block the package published as ``slug``?
+
+    Mirrors ``realm_sync._skill_slug_selected`` exactly: the slug itself, or —
+    for a categorized ``<cat>/<child>`` slug — its bare child name. The
+    selection and the tombstone MUST agree about what a name means, or a slug
+    could be simultaneously "selected" and "not the thing that was deleted".
+    """
+
+    if entry_slug == slug:
+        return True
+    if "/" in slug:
+        return entry_slug == slug.split("/", 1)[1]
+    return False
+
+
+def skill_tombstoned(realm: Realm, slug: str) -> SkillTombstone | None:
+    """The ONE spelling of "is this skill deleted in this realm".
+
+    Every enforcement point (the pull's inbox mirror and canonical archive, the
+    publish artifact filter, the operator surfaces) asks through here, so a
+    second, drifting copy of the match rule cannot exist. Returns the blocking
+    entry (evidence for the refusal message) or ``None``.
+    """
+
+    clean = str(slug or "").strip()
+    if not clean:
+        return None
+    for entry in getattr(realm, "skill_tombstones", None) or []:
+        if _tombstone_blocks(entry.slug, clean):
+            return entry
+    return None
+
+
 def _normalize_agent_selection(selection: list[str] | None) -> list[str]:
     """Validate, dedupe, and sort Realm persona-definition ids.
 
@@ -589,6 +628,124 @@ class RealmStore:
             change="skill_selection",
             mode=mode,
             selection_count=len(item.skill_selection),
+        )
+        return item
+
+    def tombstone_skill(
+        self,
+        realm_id: str,
+        slug: str,
+        *,
+        deleted_hash: str | None = None,
+        dry_run: bool = False,
+    ) -> Realm:
+        """Single write chokepoint for a realm's shared-skill delete ledger.
+
+        Records realm-wide intent: "this skill is deleted, not merely
+        unpublished here". Without the distinction, narrowing
+        ``skill_selection`` would be indistinguishable from a delete and would
+        destroy members' local copies that were never meant to die.
+
+        Refusals are typed (:class:`~.errors.SkillTombstoneRefused`) and raised
+        BEFORE any mutation:
+
+        - ``skill_slug_invalid`` — shape refusal from the promotion door's own
+          validator, so a delete and a promotion share one alphabet.
+        - ``skill_installer_owned`` — ``CANONICAL_SHARED_SKILL_IDS`` are
+          reinstalled from repo source on every pull; a ledger entry for one
+          would lose that argument forever, so the door names the real delete
+          lane instead of minting a tombstone that does nothing.
+
+        Re-tombstoning an already-listed slug REFRESHES ``deleted_at`` (one
+        entry per slug). The slug is also pruned from ``skill_selection`` at the
+        same write — a selection naming a tombstoned slug is a standing
+        contradiction — using the ``skill_tombstoned`` match rule, so a
+        categorized ``<cat>/<child>`` selection entry blocked by a bare-name
+        tombstone goes too. ``restore_skill`` does NOT re-add it: selection is a
+        separate, deliberate act (``realm skills set``).
+
+        ``dry_run`` runs the full validation and returns the WOULD-BE realm
+        (in-memory only) without saving and without emitting the store event.
+        """
+        from hermes_constants import CANONICAL_SHARED_SKILL_IDS
+
+        from .skill_promotion import validate_skill_slug
+
+        clean = str(slug or "").strip()
+        reason = validate_skill_slug(clean)
+        if reason is not None:
+            raise SkillTombstoneRefused(
+                "skill_slug_invalid",
+                f"{clean!r} is not a valid skill slug: {reason}",
+                safe_details={"slug": clean},
+            )
+        if clean in CANONICAL_SHARED_SKILL_IDS:
+            raise SkillTombstoneRefused(
+                "skill_installer_owned",
+                (
+                    f"{clean!r} is a hermes-installed harness skill: every realm pull "
+                    "reinstalls it from repo source, so a realm tombstone can never "
+                    "hold. Delete it from hermes_constants.CANONICAL_SHARED_SKILL_IDS "
+                    "and docs/agent-runtime-harness/harness-skills/ instead."
+                ),
+                safe_details={"slug": clean},
+            )
+
+        item = self.get(realm_id)
+        ledger = [
+            entry for entry in (item.skill_tombstones or []) if entry.slug != clean
+        ]
+        ledger.append(SkillTombstone(slug=clean, deleted_at=now(), deleted_hash=deleted_hash))
+        item.skill_tombstones = ledger[-SKILL_TOMBSTONE_LEDGER_CAP:]
+        item.skill_selection = [
+            value
+            for value in (item.skill_selection or [])
+            if not _tombstone_blocks(clean, value)
+        ]
+        if dry_run:
+            return item
+        item = self.save(item, emit_event=False)
+        _append_store_event(
+            self.event_log,
+            "realm.updated",
+            realm_id=item.id,
+            change="skill_tombstoned",
+            slug=clean,
+        )
+        return item
+
+    def restore_skill(self, realm_id: str, slug: str, *, dry_run: bool = False) -> Realm:
+        """Lift ONE ledger entry — the explicit door out of a skill tombstone.
+
+        Names a LEDGER ENTRY, not a package: the entry whose ``slug`` matches
+        exactly is removed, which is what ``realm skills show`` lists. (A
+        categorized package blocked by a bare-name tombstone is restored by
+        naming that bare name.) Restoring content is the separate, existing
+        lane — ``skills promote --from-path shared/skills/.archive/<ts>/<slug>``,
+        or a fresh publish from a member who still holds it.
+
+        Idempotent: an absent entry is not an error and writes nothing (a
+        no-op mutation must not emit an event either — the watermark advances
+        only for real writes). Callers report ``restored`` by asking
+        :func:`skill_tombstoned` first.
+        """
+        clean = str(slug or "").strip()
+        item = self.get(realm_id)
+        remaining = [
+            entry for entry in (item.skill_tombstones or []) if entry.slug != clean
+        ]
+        if len(remaining) == len(item.skill_tombstones or []):
+            return item
+        item.skill_tombstones = remaining
+        if dry_run:
+            return item
+        item = self.save(item, emit_event=False)
+        _append_store_event(
+            self.event_log,
+            "realm.updated",
+            realm_id=item.id,
+            change="skill_tombstone_restored",
+            slug=clean,
         )
         return item
 

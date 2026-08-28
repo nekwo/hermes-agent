@@ -188,6 +188,31 @@ class WorkspaceDeleteBlocked(AgentRuntimeError):
         self.safe_details = dict(safe_details or {})
 
 
+class SkillTombstoneRefused(AgentRuntimeError):
+    """Raised when a shared-skill tombstone write is refused at the door.
+
+    ``code`` is the typed machine reason and rides the CLI/RPC error envelope
+    verbatim; ``safe_details`` carries the slug and operator-safe hints only.
+    Same shape as :class:`WorkspaceDeleteBlocked` on purpose — one exception
+    vocabulary for "a delete chokepoint refused", not two.
+
+    - ``skill_installer_owned`` — the slug is one of
+      ``hermes_constants.CANONICAL_SHARED_SKILL_IDS``, which every pull
+      REINSTALLS from repo source (``realm_sync``'s ``install_harness_skills``).
+      A ledger entry for such a slug is a fight the installer wins on every
+      pull, so the door refuses instead of minting a tombstone that silently
+      does nothing; the delete lane for those ids is the constant plus
+      ``docs/agent-runtime-harness/harness-skills/``.
+    - ``skill_slug_invalid`` — the slug is not a safe canonical slug shape
+      (``skill_promotion.validate_skill_slug``'s reason travels in the message).
+    """
+
+    def __init__(self, code: str, message: str, *, safe_details: dict | None = None):
+        super().__init__(message)
+        self.code = code
+        self.safe_details = dict(safe_details or {})
+
+
 class WorkspaceUnresolved(AgentRuntimeError):
     """Raised when an office write would AUTHOR a surface for an unresolvable id.
 

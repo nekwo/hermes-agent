@@ -176,7 +176,7 @@ def _archive_root() -> Path:
 # ── Slug validation ────────────────────────────────────────────────────────
 
 
-def _validate_slug(skill: str) -> str | None:
+def validate_skill_slug(skill: str) -> str | None:
     """Return an error reason string when ``skill`` is not a safe canonical slug.
 
     Accepts at most one ``/`` (category form). Every component must match
@@ -213,6 +213,14 @@ def _validate_slug(skill: str) -> str | None:
         if is_windows_reserved_component(part):
             return f"reserved device name in skill slug component {part!r}"
     return None
+
+
+# Historical private name, kept for this module's own call sites (the alias
+# idiom ``iter_skill_packages`` / ``_iter_packages`` already uses below). The
+# PUBLIC name is what the realm skill-tombstone chokepoint
+# (``RealmStore.tombstone_skill``) validates through: a delete and a promotion
+# must agree on what a legal slug is, so there is exactly one alphabet.
+_validate_slug = validate_skill_slug
 
 
 def _canonical_dir_for(skill: str) -> Path:
