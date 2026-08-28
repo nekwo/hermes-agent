@@ -677,7 +677,7 @@ def test_agent_create_installs_and_verifies_canonical_skill(skills_create_fixtur
     )
     assert harness_skill_hash_mismatches([skill]) == [skill]
 
-    outcome = _create_with_skills(skill, placement="qa_stale", key="skills-stale")
+    outcome = _create_with_skills(skill, placement="qa_stale_agent_2", key="skills-stale")
 
     assert outcome.refusal is None
     assert harness_skill_hash_mismatches([skill]) == []
@@ -702,7 +702,7 @@ def test_agent_create_refuses_unresolved_skill(skills_create_fixture):
     """
 
     outcome = _create_with_skills(
-        "definitely-not-a-skill", placement="qa_unres", key="skills-unresolved"
+        "definitely-not-a-skill", placement="qa_unres_agent_2", key="skills-unresolved"
     )
 
     assert outcome.refusal is not None
@@ -750,7 +750,7 @@ def test_the_status_is_the_resolvers_and_not_a_constant(
         skill_install, "install_and_verify_harness_skill", _no_install
     )
     outcome = _create_with_skills(
-        skill, placement="qa_invsrc", key="skills-invalid-source"
+        skill, placement="qa_invsrc_agent_2", key="skills-invalid-source"
     )
 
     assert outcome.refusal is not None
@@ -783,7 +783,7 @@ def test_a_copy_that_never_lands_is_a_divergence_and_not_a_clean_bill(
     monkeypatch.setattr(skill_install.shutil, "copytree", _explode)
 
     outcome = _create_with_skills(
-        "harness-qa-verdict", placement="qa_copyfault", key="skills-copy-fault"
+        "harness-qa-verdict", placement="qa_copyfault_agent_2", key="skills-copy-fault"
     )
 
     assert outcome.refusal is not None
@@ -795,7 +795,7 @@ def test_a_copy_that_never_lands_is_a_divergence_and_not_a_clean_bill(
     assert data["rolled_back"] is False
     from agent_runtime.persona_assignments import PersonaInstanceStore
 
-    assert PersonaInstanceStore().get("personainst_qa_copyfault").skill_overrides is None
+    assert PersonaInstanceStore().get("personainst_qa_copyfault_agent_2").skill_overrides is None
 
 
 def test_an_install_that_REPORTS_success_is_still_re_read_before_it_is_trusted(
@@ -854,7 +854,7 @@ def test_an_install_that_REPORTS_success_is_still_re_read_before_it_is_trusted(
     monkeypatch.setattr(skill_install, "install_harness_skill", _lying_install)
 
     outcome = _create_with_skills(
-        skill, placement="qa_lying", key="skills-lying-install"
+        skill, placement="qa_lying_agent_2", key="skills-lying-install"
     )
 
     assert outcome.refusal is not None
@@ -865,7 +865,7 @@ def test_an_install_that_REPORTS_success_is_still_re_read_before_it_is_trusted(
     # The agent it refused for is standing, and was handed nothing.
     from agent_runtime.persona_assignments import PersonaInstanceStore
 
-    assert PersonaInstanceStore().get("personainst_qa_lying").skill_overrides is None
+    assert PersonaInstanceStore().get("personainst_qa_lying_agent_2").skill_overrides is None
 
 
 def test_the_verb_writes_the_INSTANCE_tier_and_never_the_persona_template(
@@ -884,14 +884,14 @@ def test_the_verb_writes_the_INSTANCE_tier_and_never_the_persona_template(
 
     before = list(AgentStore().get("qa").skills or [])
     outcome = _create_with_skills(
-        "harness-continuity", placement="qa_tier", key="skills-tier"
+        "harness-continuity", placement="qa_tier_agent_2", key="skills-tier"
     )
 
     assert outcome.refusal is None
     assert list(AgentStore().get("qa").skills or []) == before
     from agent_runtime.persona_assignments import PersonaInstanceStore
 
-    assert PersonaInstanceStore().get("personainst_qa_tier").skill_overrides == [
+    assert PersonaInstanceStore().get("personainst_qa_tier_agent_2").skill_overrides == [
         "harness-continuity"
     ]
 

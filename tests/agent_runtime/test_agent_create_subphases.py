@@ -180,7 +180,7 @@ def test_a_completed_mint_emits_one_receipt_naming_its_persona_and_its_spans(
     persona_factory("subphase_receipt")
 
     with caplog.at_level(logging.INFO, logger=agent_create_phases.__name__):
-        result = _create("subphase_receipt", "subphase_receipt_1")
+        result = _create("subphase_receipt", "subphase_receipt_1_agent_2")
 
     line = next(
         record.getMessage()
@@ -371,7 +371,7 @@ def test_an_unwarmed_mint_bills_its_probe_rounds_to_the_chat_lane_scope_read(
 
     before = _probe_rounds()
     with caplog.at_level(logging.INFO, logger=agent_create_phases.__name__):
-        _create("subphase_cold", "subphase_cold_1")
+        _create("subphase_cold", "subphase_cold_1_agent_2")
     rounds = _probe_rounds() - before
     spans = _spans_of_the_only_receipt(caplog)
 
@@ -427,7 +427,7 @@ def test_a_warmed_mint_probes_nothing_so_the_warm_fills_the_key_the_create_reads
 
     before = _probe_rounds()
     with caplog.at_level(logging.INFO, logger=agent_create_phases.__name__):
-        _create("subphase_warm", "subphase_warm_1")
+        _create("subphase_warm", "subphase_warm_1_agent_2")
     rounds = _probe_rounds() - before
     spans = _spans_of_the_only_receipt(caplog)
 

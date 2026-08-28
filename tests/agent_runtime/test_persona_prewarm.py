@@ -185,11 +185,11 @@ def test_a_cold_create_pays_probe_rounds_and_the_next_one_pays_none(
 
     evict_one_check_fn()
     before = _probe_rounds()
-    _create("prewarm_cost_a", "prewarm_cost_a_1")
+    _create("prewarm_cost_a", "prewarm_cost_a_1_agent_2")
     cold_rounds = _probe_rounds() - before
 
     before = _probe_rounds()
-    _create("prewarm_cost_b", "prewarm_cost_b_1")
+    _create("prewarm_cost_b", "prewarm_cost_b_1_agent_2")
     warm_rounds = _probe_rounds() - before
 
     assert cold_rounds > 0, (
@@ -227,7 +227,7 @@ def test_after_a_prewarm_the_create_pays_no_probe_rounds(
     _drained()
 
     before = _probe_rounds()
-    created = _create("prewarm_gate_warm", "prewarm_gate_warm_1")
+    created = _create("prewarm_gate_warm", "prewarm_gate_warm_1_agent_2")
     delta = _probe_rounds() - before
 
     assert "error" not in created, created
@@ -250,7 +250,7 @@ def test_without_the_prewarm_the_same_create_pays_the_rounds_again(
     evict_one_check_fn()
 
     before = _probe_rounds()
-    created = _create("prewarm_gate_cold", "prewarm_gate_cold_1")
+    created = _create("prewarm_gate_cold", "prewarm_gate_cold_1_agent_2")
     delta = _probe_rounds() - before
 
     assert "error" not in created, created
@@ -297,7 +297,7 @@ def test_the_prewarm_fills_the_PERSONA_keyed_readiness_memo_the_create_reads(
     )
     stamped_at = memo[keys[0]]["at"]
 
-    _create("prewarm_memo_key", "prewarm_memo_key_1")
+    _create("prewarm_memo_key", "prewarm_memo_key_1_agent_2")
 
     assert [key for key in memo if key[0] == "prewarm_memo_key"] == keys, (
         "the create resolved readiness under a DIFFERENT key than the warm "

@@ -377,17 +377,17 @@ def test_placement_census(isolate_agent_runtime_root):
     _qa_persona_saved()
     store = _seed_office(workspace)
 
-    placed = _create(workspace, "qa_placed")
+    placed = _create(workspace, "qa_placed_agent_2")
 
     # An orphan actor: the ROW goes, the actor survives. This is the field shape
     # the plan names — a retire whose best-effort office half was swallowed, or
     # a compensation that archived the row and not the desk.
-    orphan = _create(workspace, "qa_orphan")
+    orphan = _create(workspace, "qa_orphan_agent_2")
     paths.persona_instance_path(orphan["persona_instance_id"]).unlink()
 
     # An unplaced row: the ACTOR goes (archived, as removals always are) and the
     # row stays live. Legal, and what the roster-only recovery door mints.
-    unplaced = _create(workspace, "qa_unplaced")
+    unplaced = _create(workspace, "qa_unplaced_agent_2")
     store.remove_actor(workspace, unplaced["actor_key"], reason="census fixture")
 
     report, census = _census()
@@ -431,7 +431,7 @@ def test_the_census_repairs_nothing(isolate_agent_runtime_root):
     workspace = "ws_census_readonly"
     _qa_persona_saved()
     _seed_office(workspace)
-    orphan = _create(workspace, "qa_readonly")
+    orphan = _create(workspace, "qa_readonly_agent_2")
     paths.persona_instance_path(orphan["persona_instance_id"]).unlink()
     actor_path = paths.office_actor_path(workspace, orphan["actor_key"])
     before = actor_path.read_bytes()
@@ -528,7 +528,7 @@ def test_a_short_world_is_unknown_rather_than_a_fabricated_orphan(
     workspace = "ws_census_short"
     _qa_persona_saved()
     _seed_office(workspace)
-    row = _create(workspace, "qa_short")
+    row = _create(workspace, "qa_short_agent_2")
     paths.persona_instance_path(row["persona_instance_id"]).write_text(
         "{ this is not json", encoding="utf-8"
     )
