@@ -147,7 +147,11 @@ print(json.dumps({
     "exit_code": exit_code,
     "payload": parse_child_payload("\n".join(lines)),
     "stdout_lines": lines[-40:],
-
+    # Every frame the turn produced, event names included. Carried so a failure
+    # here can say WHY the payload is missing rather than only that it is —
+    # which is the difference between "the reader collected nothing" and "the
+    # turn printed nothing", and is how the `line`-vs-`stdout` defect was found.
+    "turn_frames": turn_frames[-40:],
 }))
 """
 
