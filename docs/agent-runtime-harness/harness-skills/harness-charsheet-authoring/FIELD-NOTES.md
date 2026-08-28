@@ -2097,6 +2097,70 @@ first two correct the plan I was handed rather than confirming it.
   entry above, the primary checkout has to fast-forward before the running serve has this
   code at all.
 
+## The one library (appended by the shared-library slice, 2026-08-27)
+
+### H1 — the resolver, and the fifteen verbs that followed it for free
+
+- **[READ] Fact 1 of the plan held exactly, and it is the reason this strip was small.** Two
+  files spell the characters location in the whole of hermes — `agent/charsheet/draft.py`
+  and `hermes_cli/harness.py`, and the second only by importing `characters_dir` from the
+  first. So head-homing the library was one function body plus the authority it delegates
+  to, and every one of the fifteen `harness characters` verbs moved without being touched.
+  A grep for `"characters"` as a path segment across `agent/`, `agent_runtime/`,
+  `hermes_cli/` and `hermes_constants.py` still returns one site after the change. That is
+  worth saying out loud because the same claim was false for `hermes_home` two waves ago,
+  and the difference was that this location had already been consolidated by someone else.
+
+- **[MEASURED] The planted defect is the only test in the file that can tell the two
+  implementations apart, and it does.** `get_shared_characters_dir()` computes the same
+  `<root>/profiles/<name>` → `<root>` mapping `get_default_hermes_root()` already
+  implements, so an implementation that reuses it passes three of the four resolver pins.
+  Built that way on purpose first, the ContextVar control reds and nothing else does:
+
+      assert foreign_root == other_root / "shared" / "characters"
+      E  AssertionError: assert WindowsPath('.../process/shared/characters')
+                             == WindowsPath('.../other/shared/characters')
+
+  With `HERMES_HOME` at `<process>/profiles/base` and a `set_hermes_home_override()` naming
+  `<other>/profiles/neko`, the bare-env derivation answers the PROCESS root — the
+  cross-persona bleed the serve lane retired last week, re-imported one directory later.
+  Riding `get_hermes_home()` answers `<other>`. **Consequence:** if a future reader is
+  tempted to collapse the two resolvers into one, that test is the argument, not the
+  docstring.
+
+- **[MEASURED] The env-bleed regression test lost its observable to this change, and the
+  retarget is itself the reversal's headline claim.**
+  `tests/agent_runtime/test_serve_request_home_isolation.py` reproduced the incident by
+  resolving `drafts_dir()` inside a bled window and asserting it named the serve's home.
+  After the head-home that assertion cannot fail for the reason it was written: `alice` and
+  `launcher-qa` sit under one root and now compute one library. It went red as
+  `.../profiles/alice/characters/.drafts` != the new library path — a red that means "the
+  probe stopped being sensitive", not "the fix regressed". The probe now resolves
+  `get_hermes_home()` itself (still bleed-sensitive, and what every other profile-scoped
+  reader on that lane rides) and asserts the library's invariance beside it. **Consequence:**
+  the W6 finding "a serve resolving a home nobody selected broke a characters read" is now
+  a statement about the LANE and no longer about characters at all — which is §A-1's
+  argument 1, mechanised.
+
+- **[READ] The `create()` comment fact 8 flagged was worse than "going false" — it was the
+  whole justification.** It read "the draft IS sitting where this key says it is, so
+  recording it is hermes stating a fact about its own filesystem rather than a consumer
+  deriving one from a path". The first clause is now false and the second is still true,
+  and they were welded into one sentence. Re-derived per §A-3 rather than deleted: hermes
+  asks its own resolver which home this turn answered, the draft does not sit under it, and
+  that divergence IS the field's meaning. The `hermes_home` property docstring gained an
+  explicit "it is not an address, and asking it for one gets the wrong answer by
+  construction" so the next reader does not have to reconstruct the reversal from a diff.
+
+- **[READ] What I did NOT do.** (i) No `SCHEMA` bump and no wire change — the plan's fact 9
+  is right that this wave adds no key, and the launcher fixtures stay contract-valid.
+  (ii) `backfill-home` STAYS (§A-5), with its help text re-derived; its population after
+  the OP run is empty but it is still the stamp path for a draft that arrives without the
+  key. (iii) Nothing migrates anything: after this strip a populated legacy
+  `<home>/characters` tree is simply invisible to the verbs. That window is real and H2/OP
+  are what close it — §C's second row says the same, and it is why H1→OP wants to be
+  same-day.
+
 <!-- A2, A3, R1 and any slice standing in the HERMES repo: append your entries above this
      line, under the matching heading, or add a heading if none fits. Then say in your
      slice report that you did.

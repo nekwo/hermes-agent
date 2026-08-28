@@ -1,11 +1,15 @@
 """Staged character drafts — the QA state machine, the install, the payload.
 
-A draft is a directory under ``$HERMES_HOME/characters/.drafts/<id>/`` holding
-``draft.json`` (schema 1), the base identity image, an
+A draft is a directory under ``<hermes_root>/shared/characters/.drafts/<id>/``
+holding ``draft.json`` (schema 1), the base identity image, an
 :class:`~agent.charsheet.revisions.ImageRevisionStore` of every attempt, and the
 accepted row strips. Installing writes
-``$HERMES_HOME/characters/<slug>/{character.json, sheet.webp}`` — profile-scoped
-and plain-hermes compatible, the same convention as ``agent.pet.store``.
+``<hermes_root>/shared/characters/<slug>/{character.json, sheet.webp}``.
+
+**The library is install-wide, not profile-scoped.** Every persona profile under
+one hermes root resolves the SAME directory (see :func:`characters_dir`), so a
+draft id names a draft for the whole install and a turn that resolved a home
+nobody selected still reads the library the operator meant.
 
 **The stage machine is the operator's QA order, and it is enforced.**
 ``turnaround`` → ``rows`` → ``composed``: the cardinal directions are approved
@@ -56,7 +60,7 @@ from agent.charsheet.spec import (
     parse_states,
 )
 from agent.pet.constants import DEFAULT_SCALE, LOOP_MS
-from hermes_constants import get_hermes_home
+from hermes_constants import get_hermes_home, get_shared_characters_dir
 
 logger = logging.getLogger(__name__)
 
@@ -115,8 +119,22 @@ _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 
 def characters_dir() -> Path:
-    """The profile-scoped characters directory (created on demand)."""
-    path = get_hermes_home() / "characters"
+    """The ONE install-wide character library (created on demand).
+
+    Delegates to :func:`hermes_constants.get_shared_characters_dir` and adds
+    nothing but the mkdir. This is the single site in hermes that spells the
+    characters location: ``drafts_dir``, ``create``, ``load``, ``list_drafts``,
+    the install writer and the CLI's installed-character rows all resolve
+    through it, which is why head-homing the library was this one delegation and
+    not a per-verb edit across fifteen verbs.
+
+    It is deliberately NOT ``get_hermes_home() / "characters"`` any more: a
+    per-profile library made "can this lane see that draft" a home comparison,
+    and every wrong answer to it — a bare shell resolving the sticky profile, a
+    serve prewarm mirroring another persona home mid-read — became a characters
+    incident. One directory per root has no such question to get wrong.
+    """
+    path = get_shared_characters_dir()
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -317,10 +335,10 @@ class CharacterDraft:
         decision 6, which is the single statement of the home rule — this
         docstring points at it and does not restate it): it records which persona
         drove the authoring run so a later reader can ask "whose draft is this".
-        It does not scope where the draft lives — that is
-        ``$HERMES_HOME/characters/`` for whatever home the RUNNING TURN resolved,
-        which follows the persona's ``hermes_profile`` binding, not the process —
-        it is not an owner, and no verb checks it. What it does make possible is
+        It does not scope where the draft lives — nothing does any more: the
+        library is install-wide (:func:`characters_dir`), one directory per
+        hermes root, whatever persona or profile runs the authoring turn. It is
+        not an owner, and no verb checks it. What it does make possible is
         checking: a consumer resuming a draft can ask whether the persona it is
         about to open is bound to the profile that authored it, instead of
         discovering the mismatch as an empty ``status``. Nothing infers it: a
@@ -336,12 +354,14 @@ class CharacterDraft:
 
         ``hermes_home`` is the OTHER provenance field, and it is written every
         time because nobody has to supply it: it is ``str(get_hermes_home())``,
-        the home this run resolved and created the draft under. It answers
-        "where was this authored", which no consumer could previously get from
-        anywhere — a launcher can observe which homes it can currently READ a
-        draft in, but that is a different fact and a per-moment one. See
-        :attr:`hermes_home` for what the value means once it is stale, and
-        :meth:`record_home` for the drafts that predate the field.
+        the home this run RESOLVED. It is provenance of the run and not a
+        locator — the draft sits in the install-wide library, which is not under
+        the home this key names, and the library address is a constant every
+        reader already knows. What no other record carries is which profile turn
+        authored the draft: ``authored_by`` names the persona, this names the
+        profile side of the same turn. See :attr:`hermes_home` for what the
+        value means once it is stale, and :meth:`record_home` for the drafts
+        that arrive without it.
         """
         concept = str(concept or "").strip()
         if not concept:
@@ -374,11 +394,13 @@ class CharacterDraft:
         if author:
             data["authored_by"] = author
         # Written UNCONDITIONALLY, unlike `authored_by`: there is no caller to
-        # withhold it and nothing to guess. `drafts_dir()` resolved
-        # `get_hermes_home()` two statements above, and `directory` was just
-        # created under it — the draft IS sitting where this key says it is, so
-        # recording it is hermes stating a fact about its own filesystem rather
-        # than a consumer deriving one from a path it happened to be handed.
+        # withhold it and nothing to guess — hermes asks its own resolver which
+        # home this turn answered and records that. The draft does NOT sit under
+        # it (the library is install-wide, `directory` is under
+        # `<root>/shared/characters`), and that divergence is the field's
+        # re-derived meaning rather than a defect: provenance of the RUN, not a
+        # locator. It is still a first-party fact hermes states about itself,
+        # never a path a consumer sliced a profile name out of.
         data["hermes_home"] = str(get_hermes_home())
         draft = cls(directory, data)
         draft._save()
@@ -457,7 +479,7 @@ class CharacterDraft:
 
     @property
     def hermes_home(self) -> str | None:
-        """The ``HERMES_HOME`` this draft was created under, or ``None``.
+        """The home the authoring RUN resolved, or ``None``.
 
         ``None`` and not ``""``, for exactly the reason ``authored_by`` gives
         above: the drafts written before this key existed have to stay
@@ -465,14 +487,18 @@ class CharacterDraft:
         no home was ever recorded rather than receive a value that renders as a
         blank path.
 
-        **What it means when it disagrees with where the file is now.** This is
+        **It is not an address, and asking it for one gets the wrong answer by
+        construction.** The draft lives in the install-wide library
+        (:func:`characters_dir`) whatever home created it, so this key answers
+        "which profile turn authored this" — the profile-side complement of
+        ``authored_by``'s persona. Where the file is, is ``directory``.
+
+        **What it means when it disagrees with the home resolving now.** It is
         provenance about a PAST fact — the home hermes recorded when the draft
-        was created (or, for a backfilled draft, the home it sat under when the
-        backfill ran). A draft that was copied or backed up into another home
-        still names the first one, and that is the field being honest, not a
-        defect to repair: "where hermes recorded it" is not "where it sits
-        today", and a consumer that wants the second question answered has to
-        observe it, not read this. Nothing rewrites a value once it is here.
+        was created, or the source home a ``migrate-home`` run stamped it with
+        on the way into the library. A draft authored under one profile still
+        names that profile when read from every other one, and that is the field
+        being honest. Nothing rewrites a value once it is here.
         """
         home = str(self._data.get("hermes_home", "") or "").strip()
         return home or None
@@ -498,9 +524,10 @@ class CharacterDraft:
     def record_home(self) -> bool:
         """Fill in a missing ``hermes_home``; return whether anything was written.
 
-        The backfill writer for drafts that predate the field, and the second
-        and last site that writes it (``create`` is the first). Two rules, and
-        both are load-bearing:
+        The stamp path for a draft that arrives in the library without the key
+        — one restored from quarantine, one hand-copied in — and the second site
+        that writes it (``create`` is the first). Two rules, and both are
+        load-bearing:
 
         **It never rewrites.** A draft that already states a home keeps it, even
         when that home is not the one resolving now — see :attr:`hermes_home`.

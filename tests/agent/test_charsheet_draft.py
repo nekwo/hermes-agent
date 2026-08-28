@@ -1375,12 +1375,11 @@ def test_the_authored_by_key_is_absent_rather_than_empty_when_it_is_not_given(fa
 def test_a_draft_records_the_home_the_run_resolved_it_under(fake, base):
     """`hermes_home` is hermes stating a first-party fact about its own disk.
 
-    Nothing here is derived and nothing is guessed: `drafts_dir()` has already
-    resolved `get_hermes_home()` two statements before the data dict is written,
-    so a draft being created IS sitting under the home the key names. That is
-    what separates this from a consumer slicing a profile name out of a path —
-    the derivation ban binds READERS of a home, never the generation authority
-    recording where it put the file.
+    Nothing here is derived and nothing is guessed: the value is the home the
+    creating run resolved, read from the resolver rather than sliced out of a
+    path. That is what separates it from a consumer deriving a profile name —
+    the derivation ban binds READERS of a home, never the authority recording
+    which home its own turn answered.
     """
     recorded = CharacterDraft.create(
         concept=CONCEPT, slug=SLUG, spec=SPEC, base_image=base
@@ -1392,10 +1391,91 @@ def test_a_draft_records_the_home_the_run_resolved_it_under(fake, base):
     assert recorded.hermes_home == home
     assert CharacterDraft.load(recorded.id).hermes_home == home
     assert recorded.status_payload()["hermesHome"] == home
-    # The fact and the filesystem agree. A recorded home that did not have to be
-    # true would be a comment, not provenance.
+    # The draft sits in the ONE library, which is not under the home it names —
+    # see the provenance-split test below. What is still first-party here is the
+    # value: hermes recorded the home its own run resolved, not a path a consumer
+    # sliced a profile name out of.
     assert recorded.directory.parent == drafts_dir()
-    assert str(drafts_dir()).startswith(home)
+
+
+def test_two_profile_homes_under_one_root_author_into_one_library(tmp_path, monkeypatch):
+    """The reversal, as one assertion: the library is install-wide.
+
+    Two personas, two profile homes, one root — and ONE `.drafts/` directory.
+    Either home lists both drafts, because there is nothing per-home left to
+    list. This is the wall the W6 Stage C walk photographed (under `base` the
+    adopt door could not see alice's draft) asserted as impossible.
+    """
+    root = tmp_path / "root"
+    (root / "profiles" / "alice").mkdir(parents=True)
+    (root / "profiles" / "base").mkdir(parents=True)
+
+    monkeypatch.setenv("HERMES_HOME", str(root / "profiles" / "alice"))
+    from_alice = CharacterDraft.create(concept="an alice knight", spec=SPEC)
+    alice_drafts_dir = drafts_dir()
+    monkeypatch.setenv("HERMES_HOME", str(root / "profiles" / "base"))
+    from_base = CharacterDraft.create(concept="a base knight", spec=SPEC)
+
+    assert drafts_dir() == alice_drafts_dir
+    assert drafts_dir() == root / "shared" / "characters" / ".drafts"
+    assert from_alice.directory.parent == from_base.directory.parent
+    seen_from_base = {draft.id for draft in CharacterDraft.list_drafts()}
+    monkeypatch.setenv("HERMES_HOME", str(root / "profiles" / "alice"))
+    seen_from_alice = {draft.id for draft in CharacterDraft.list_drafts()}
+
+    assert seen_from_base == {from_alice.id, from_base.id}
+    assert seen_from_alice == seen_from_base
+
+
+def test_an_installed_character_is_readable_from_a_home_that_did_not_install_it(
+    tmp_path, monkeypatch
+):
+    """The install half of the same claim — `characters_dir()` is the authority.
+
+    The draft lane and the installed lane both resolve through one function, so
+    head-homing it moves both. A test that only pinned `.drafts/` would leave
+    the installed sheet — the artifact the launcher actually renders — free to
+    stay per-profile without anything going red.
+    """
+    root = tmp_path / "root"
+    (root / "profiles" / "alice").mkdir(parents=True)
+    (root / "profiles" / "neko").mkdir(parents=True)
+
+    monkeypatch.setenv("HERMES_HOME", str(root / "profiles" / "alice"))
+    installed_by_alice = characters_dir() / "arrow-knight"
+    installed_by_alice.mkdir(parents=True)
+    (installed_by_alice / MANIFEST_FILENAME).write_text("{}", encoding="utf-8")
+
+    monkeypatch.setenv("HERMES_HOME", str(root / "profiles" / "neko"))
+
+    assert characters_dir() == root / "shared" / "characters"
+    assert (characters_dir() / "arrow-knight" / MANIFEST_FILENAME).is_file()
+
+
+def test_the_recorded_home_is_the_runs_provenance_and_not_the_drafts_address(
+    tmp_path, monkeypatch
+):
+    """§A-3: the two facts diverge on purpose, and both stay true.
+
+    Before the library was head-homed these were one fact — `drafts_dir()` had
+    just resolved `get_hermes_home()`, so "the home this run resolved" and
+    "where the draft sits" were the same sentence. They are not any more, and
+    the field keeps the half no other record carries: WHICH profile's turn
+    authored this. Where it sits is a constant every reader already knows.
+    """
+    root = tmp_path / "root"
+    home = root / "profiles" / "alice"
+    home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    recorded = CharacterDraft.create(concept="a provenance knight", spec=SPEC)
+    on_disk = json.loads((recorded.directory / "draft.json").read_text(encoding="utf-8"))
+
+    assert on_disk["hermes_home"] == str(home)
+    assert recorded.status_payload()["hermesHome"] == str(home)
+    # The divergence, stated: the draft does NOT sit under the home it names.
+    assert recorded.directory.parent == root / "shared" / "characters" / ".drafts"
+    assert home not in recorded.directory.parents
 
 
 def test_a_draft_that_predates_the_home_field_reads_as_none_and_never_as_empty(draft):

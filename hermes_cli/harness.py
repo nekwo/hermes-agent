@@ -1740,13 +1740,13 @@ def build_parser(parent_subparsers) -> None:
     characters_start.add_argument("--states", default="", help="Animation states as 'idle:6,walk:8[,cheer:5:fixed]'; default = the CHAR8 states")
     characters_start.add_argument("--directions", default="8", help="Direction scheme: 8 (five authored, three mirrored) or 4")
     characters_start.add_argument("--base-image", dest="base_image", default="", help="Identity-anchor image; copied into the draft")
-    characters_start.add_argument("--authored-by", dest="authored_by", default="", help="Persona driving this authoring run, recorded as provenance; it never scopes where the draft lives (that is the HERMES_HOME this turn resolved) but it is what lets a later reader check a resume is opening under the profile that authored it")
+    characters_start.add_argument("--authored-by", dest="authored_by", default="", help="Persona driving this authoring run, recorded as provenance; nothing scopes where the draft lives — the character library is install-wide at <hermes_root>/shared/characters, one directory for every persona and profile — but it is what lets a later reader check a resume is opening under the profile that authored it")
     characters_start.add_argument("--json", action="store_true")
     characters_start.set_defaults(func=_cmd_characters_start)
     characters_list = characters_subs.add_parser("list", help="List character drafts and installed characters")
     characters_list.add_argument("--json", action="store_true")
     characters_list.set_defaults(func=_cmd_characters_list)
-    characters_backfill_home = characters_subs.add_parser("backfill-home", help="Record `hermes_home` on drafts under THIS home that predate the field, and on no others. Explicit and receipted on purpose: a draft that already states a home keeps it (a copied draft's original home is the field being honest), and the write leaves `updated` and every other key exactly as it found them, because the drafts this reaches are dormant exhibits whose timeline is evidence. Idempotent — a second run stamps nothing")
+    characters_backfill_home = characters_subs.add_parser("backfill-home", help="Record `hermes_home` on library drafts that carry no home, and on no others. The field is provenance of the authoring RUN, not an address — the library is install-wide, so this stamps the home THIS run resolved onto a draft that arrived without one (restored from quarantine, hand-copied in); `migrate-home` stamps the legacy source home instead, which is the case that had a better answer available. Explicit and receipted on purpose: a draft that already states a home keeps it, and the write leaves `updated` and every other key exactly as it found them, because the drafts this reaches are dormant exhibits whose timeline is evidence. Idempotent — a second run stamps nothing")
     characters_backfill_home.add_argument("--json", action="store_true")
     characters_backfill_home.set_defaults(func=_cmd_characters_backfill_home)
     characters_status = characters_subs.add_parser("status", help="Full draft state: stage, spec, per-item QA history")
@@ -3711,7 +3711,7 @@ def _cmd_characters_list(args) -> int:
 
 
 def _cmd_characters_backfill_home(args) -> int:
-    """Stamp `hermes_home` on the drafts under this home that lack it.
+    """Stamp `hermes_home` on the library drafts that lack it, with THIS run's home.
 
     **Why a verb, and not a hook.** Doing it on LOAD turns every read into a
     disk writer — `characters list` is the launcher's cached polling read, and a
