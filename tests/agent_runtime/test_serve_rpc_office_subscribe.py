@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -122,10 +123,24 @@ class _FakeHub:
         #: What each `subscribe` was ASKED for, so a test can separate the
         #: request from what the hub did with it.
         self.restart_requests: list[bool] = []
+        #: What each `subscribe` DECLARED it can fold — the value the real hub
+        #: resolves a per-subscriber `fold_variants` envelope against. Recorded
+        #: rather than dropped, because this lane's declaration is the one that
+        #: must NOT default to the historical stream set.
+        self.declarations: list[Any] = []
 
-    def subscribe(self, key, *, sink, on_drop=None, restart_producer: bool = True) -> bool:
+    def subscribe(
+        self,
+        key,
+        *,
+        sink,
+        on_drop=None,
+        restart_producer: bool = True,
+        declared=None,
+    ) -> bool:
         self.subscribe_calls.append(key)
         self.restart_requests.append(restart_producer)
+        self.declarations.append(declared)
         if self.draining or key in self.sinks:
             return False
         self.sinks[key] = sink

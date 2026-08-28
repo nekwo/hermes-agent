@@ -589,3 +589,101 @@ def batch_is_patch_coverable(
     return all(
         event_is_patch_coverable(event, fold_entities=declared) for event in materialized
     )
+
+
+def event_required_fold_tokens(event: Any) -> frozenset[str] | None:
+    """The tokens a declaration must CONTAIN for this event to be coverable.
+
+    ``None`` means no declaration can cover it — the event is structurally
+    uncovered (a chokepoint-less write, a ``refresh`` op, a malformed payload),
+    so its batch demotes for everybody regardless of what anyone declared.
+
+    This is :func:`event_is_patch_coverable` re-expressed as the SET it tests
+    rather than the boolean it returns, and the two are held equivalent by
+    construction: every declaration-dependent branch in that function is a
+    membership test against ``declared``, and every branch that is not is a flat
+    refusal. The property
+    ``event_is_patch_coverable(e, decl) == (req is not None and req <= decl)``
+    is pinned by a test over the real event vocabulary rather than asserted
+    here, because an equivalence maintained in two places by hand is an
+    equivalence that drifts.
+
+    **Why the set and not the boolean.** A SHARED producer feeding subscribers
+    with different declarations has to answer "who can fold this batch", not
+    "can the room fold this batch". Asking the boolean once per subscriber would
+    work and would re-walk the batch N times on the hot fan-out path; the set is
+    derived once and answered by containment, which is what makes per-subscriber
+    promotion affordable at the hub (see
+    :func:`~agent_runtime.stream.fold_variants_frame`).
+    """
+
+    event_type = getattr(event, "type", None)
+    if event_type == STATE_PATCHED_EVENT_TYPE:
+        payload = getattr(event, "payload", None)
+        if not state_patch_is_foldable(payload):
+            return None
+        entity = state_patch_entity(payload)
+        if entity is None:
+            # ``None`` is never a member of a declared set, so the boolean form
+            # refuses this for everyone. Said as "no declaration covers it"
+            # rather than as a set containing an unmatched sentinel.
+            return None
+        required = {entity}
+        if state_patch_is_office_lifecycle(payload):
+            required.add(OFFICE_ACTOR_LIFECYCLE_CAPABILITY)
+        if state_patch_is_persona_instance_create(payload):
+            required.add(PERSONA_INSTANCE_CREATE_CAPABILITY)
+        if entity == OFFICE_SURFACE_ENTITY:
+            required.add(OFFICE_SURFACE_FOLD_CAPABILITY)
+        return frozenset(required)
+    if event_type in COVERED_DOMAIN_EVENT_TYPES:
+        token = TOKEN_GATED_DOMAIN_EVENT_TYPES.get(event_type)
+        return frozenset() if token is None else frozenset({token})
+    return None
+
+
+def batch_required_fold_tokens(events: Iterable[Any]) -> frozenset[str] | None:
+    """The union of every event's required tokens, or ``None`` if any is uncovered.
+
+    ``None`` — for an empty batch too, which :func:`batch_is_patch_coverable`
+    also refuses (nothing to ship) — means the batch demotes to a full core for
+    every subscriber in the room, which is exactly today's behaviour and is what
+    keeps the uncovered path free of the split lane.
+    """
+
+    materialized = list(events)
+    if not materialized:
+        return None
+    required: set[str] = set()
+    for event in materialized:
+        tokens = event_required_fold_tokens(event)
+        if tokens is None:
+            return None
+        required |= tokens
+    return frozenset(required)
+
+
+def union_fold_entities(declarations: Iterable[Iterable[str] | None]) -> frozenset[str]:
+    """What SOME subscriber in the room can fold — the counterpart to
+    :func:`accepted_fold_entities`'s intersection.
+
+    The intersection answers "what may be promoted for EVERYONE", which is the
+    only safe answer while one frame is the only thing a fan-out can deliver.
+    Once a frame can carry a patch and its demoted core together and the hub can
+    hand each subscriber the half it declared for
+    (:func:`~agent_runtime.stream.fold_variants_frame`), the question changes:
+    the producer should PROMOTE whenever anybody can fold it, and the demotion
+    becomes per-subscriber rather than per-room. That is the union.
+
+    An empty room yields :data:`HISTORICAL_FOLD_ENTITIES`, identical to the
+    intersection's answer for an empty room, so a producer built before its
+    first subscriber is unchanged. **With ONE declaration the union and the
+    intersection are the same set**, which is the whole of the single-subscriber
+    no-change guarantee: the split branch is unreachable when they agree.
+    """
+
+    accumulated: frozenset[str] | None = None
+    for declared in declarations:
+        normalized = normalize_fold_entities(declared)
+        accumulated = normalized if accumulated is None else (accumulated | normalized)
+    return HISTORICAL_FOLD_ENTITIES if accumulated is None else accumulated

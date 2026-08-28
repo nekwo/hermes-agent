@@ -2666,6 +2666,19 @@ def serve_loop(
             """
 
             from agent_runtime.patch_coverage import accepted_fold_entities
+
+            return accepted_fold_entities(_room_fold_declarations())
+
+        def _room_fold_declarations() -> list[Any]:
+            """Every attached subscriber's declaration, both lanes, once.
+
+            Was inline in ``_accepted_fold_entities``; lifted out when a SECOND
+            operator over the same room arrived (``_promoted_fold_entities``'s
+            union). Two readers assembling the same list from the same two tables
+            is how one of them quietly stops reading the office registry, which is
+            the bug the intersection already shipped once.
+            """
+
             from agent_runtime.serve_office_subscriptions import OFFICE_SUBSCRIPTIONS
 
             with lane_lock:
@@ -2673,7 +2686,37 @@ def serve_loop(
             # Taken OUTSIDE ``lane_lock``: the registry holds a lock of its own,
             # and the two are never nested in the opposite order anywhere.
             declarations.extend(OFFICE_SUBSCRIPTIONS.declarations())
-            return accepted_fold_entities(declarations)
+            return declarations
+
+        def _promoted_fold_entities() -> Any:
+            """What the shared producer may promote for SOMEBODY: the UNION.
+
+            R10's assigned consequence, closed here. The intersection above is
+            the only safe rule while a fan-out can deliver exactly one shape of a
+            frame, and it has a cost the drop-latency tables did not price: a
+            Stage 5 phone declaring a narrow chat-first fold DEMOTES the desktop
+            beside it to a full ~1 MB core on every office write. Correct, and
+            paid by the client that did nothing.
+
+            Now a batch can go out as a ``fold_variants`` envelope — the promoted
+            patch and the demoted core together — and each subscriber's pump
+            resolves it against its own declaration
+            (:func:`agent_runtime.stream.resolve_fold_variant`). So the producer
+            promotes whenever ANYBODY can fold, and the demotion is per
+            subscriber. The intersection is still derived and still shipped, as
+            the ROOM'S FLOOR on the hydrate's echo — a value true for every
+            recipient of a frame that is fanned to all of them.
+
+            **With one subscriber these two functions return the same set**, the
+            envelope is never built, and the wire does not move by a byte. That
+            is not a convention: ``_batch_frames_with_liveness`` takes the
+            promoted branch only when the floor REFUSED a batch the union
+            accepts, which an equal pair cannot produce.
+            """
+
+            from agent_runtime.patch_coverage import union_fold_entities
+
+            return union_fold_entities(_room_fold_declarations())
 
         def _room_wants_stale_first() -> bool:
             """Does anybody attached to the shared producer PAINT a whole core?
@@ -2761,6 +2804,12 @@ def serve_loop(
             """
 
             fold_entities = _accepted_fold_entities()
+            # The union, derived beside the floor and with the same lifetime, so
+            # a join that widens the room re-derives both together. An INJECTED
+            # factory is deliberately not handed it: its arity contract is the
+            # one-set one negotiated above, and a test fake that wanted the split
+            # lane would be testing the hub rather than itself.
+            promote_entities = _promoted_fold_entities()
             # Derived HERE, beside the fold set, for the same reason and with the
             # same lifetime: ``StreamHub.subscribe`` restarts the producer, so
             # every join re-derives it. That restart is what makes the boot work
@@ -2797,6 +2846,7 @@ def serve_loop(
                     # pays.
                     for frame in stream_frames(
                         fold_entities=fold_entities,
+                        promote_fold_entities=promote_entities,
                         caller="hub",
                         wants_stale_first=wants_stale_first,
                     ):
@@ -3457,7 +3507,21 @@ def serve_loop(
                 # would not reach the very producer its own subscribe created.
                 with lane_lock:
                     stream_fold_entities[key] = declared_fold_entities
-                accepted_entities = sorted(_accepted_fold_entities())
+                # THIS subscriber's own answer, not the room's. Per-subscriber
+                # promotion made the room's intersection the wrong thing to echo
+                # on a PER-CONNECTION ack: what this client will actually be
+                # handed a patch for is its own declaration, because the fan-out
+                # resolves each envelope against it. The room's floor is still
+                # echoed — on the hydrate, which is one frame fanned to everyone
+                # and can only honestly carry a value true for all of them.
+                #
+                # For a single subscriber the two are the same set, which is why
+                # the byte-pinned `subscribed.json` capture does not move.
+                from agent_runtime.patch_coverage import normalize_fold_entities
+
+                accepted_entities = sorted(
+                    normalize_fold_entities(declared_fold_entities)
+                )
                 raw_sink = connection.emit if connection is not None else frames.emit
 
                 def _on_drop(reason: str, stats: dict[str, Any]) -> None:
@@ -3531,15 +3595,27 @@ def serve_loop(
                         "lane": "stream",
                         "connection": key,
                         "buffer_limit": hub.stats().get("buffer_limit"),
-                        # What the shared producer will actually promote — which
-                        # can be LESS than this client asked for, because another
-                        # subscriber folds less. Echoed on the ack (and again on
-                        # the hydrate) so a client can see the answer instead of
-                        # assuming its request was the answer.
+                        # What the producer will actually promote FOR THIS
+                        # CLIENT. It used to be able to come back narrower than
+                        # asked because another subscriber folded less; per
+                        # subscriber promotion retired that — a room that
+                        # disagrees now ships both halves and each pump takes
+                        # its own. So this is the client's own declaration,
+                        # normalized (an absent one resolving to the historical
+                        # set, which is the answer it always got).
                         "fold_entities": accepted_entities,
                     }
                 )
-                if not hub.subscribe(key, sink=raw_sink, on_drop=_on_drop):
+                if not hub.subscribe(
+                    key,
+                    sink=raw_sink,
+                    on_drop=_on_drop,
+                    # What this pump resolves a split frame against. Passing the
+                    # RAW declaration rather than the normalized one keeps
+                    # "said nothing" distinguishable all the way down, exactly
+                    # as `parse_fold_entities_option` argues at the other end.
+                    declared=declared_fold_entities,
+                ):
                     # Lost a race with another subscribe for the same key. Say
                     # so rather than leave a client believing it is attached.
                     if connection is not None:

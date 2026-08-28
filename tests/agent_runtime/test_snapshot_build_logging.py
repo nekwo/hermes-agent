@@ -580,7 +580,9 @@ def test_the_office_subscribe_logs_its_attachment(build_log):
             self.generation = 0
             self.producer_running = False
 
-        def subscribe(self, key, *, sink, on_drop=None, restart_producer=True):
+        def subscribe(
+            self, key, *, sink, on_drop=None, restart_producer=True, declared=None
+        ):
             self.generation += 1
             self.producer_running = True
             return True

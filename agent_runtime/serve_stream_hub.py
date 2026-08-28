@@ -93,7 +93,13 @@ import json
 import queue
 import threading
 import time
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterable, Iterator
+
+# The ONE thing this module knows about frame CONTENT, and it is deliberately a
+# resolver rather than a shape: the hub still never inspects a frame it fans out,
+# it asks one function whether the frame it is holding is addressed to more than
+# one kind of reader. Everything else here stays content-agnostic.
+from .stream import resolve_fold_variant
 
 __all__ = [
     "BOUND_BYTES",
@@ -167,6 +173,7 @@ class StreamSubscription:
 
     __slots__ = (
         "key",
+        "declared",
         "_sink",
         "_on_drop",
         "_queue",
@@ -192,8 +199,14 @@ class StreamSubscription:
         on_drop: Callable[[str, dict[str, Any]], None] | None,
         buffer_limit: int,
         byte_limit: int = DEFAULT_BYTE_LIMIT,
+        declared: Iterable[str] | None = None,
     ) -> None:
         self.key = key
+        #: What THIS subscriber said it can fold. Read only to resolve a
+        #: ``fold_variants`` envelope (see ``_pump``); ``None`` means it declared
+        #: nothing, which the resolver reads as the historical set exactly as the
+        #: coverage gate does — never as the empty set.
+        self.declared = None if declared is None else frozenset(declared)
         self._sink = sink
         self._on_drop = on_drop
         self._buffer_limit = max(1, int(buffer_limit))
@@ -333,7 +346,16 @@ class StreamSubscription:
             with self._lock:
                 self._buffered_bytes = max(0, self._buffered_bytes - size)
             try:
-                self._sink(frame)
+                # Resolved HERE — on the consumer thread, per subscriber, at the
+                # last moment before the sink — because this is the only point in
+                # the fan-out that knows both the frame and WHO is about to
+                # receive it. Doing it in ``offer`` would put a per-subscriber
+                # decision on the producer thread, which is the thread the whole
+                # class exists to keep free of per-subscriber work.
+                #
+                # A frame that is not an envelope comes back unchanged, so the
+                # homogeneous lane pays one dict lookup and nothing else.
+                self._sink(resolve_fold_variant(frame, self.declared))
             except Exception as exc:
                 # A sink that raised is a connection that is gone or wedged.
                 # Its drop is recorded with the exception TYPE, never the
@@ -523,6 +545,7 @@ class StreamHub:
         sink: Callable[[dict[str, Any]], None],
         on_drop: Callable[[str, dict[str, Any]], None] | None = None,
         restart_producer: bool = True,
+        declared: Iterable[str] | None = None,
     ) -> bool:
         """Add *key*. False when it is already subscribed (idempotent, typed).
 
@@ -547,6 +570,26 @@ class StreamHub:
         if no producer is actually running for the current generation, one is
         started regardless, because a subscriber attached to nothing receives
         nothing.
+
+        ``declared`` is what THIS subscriber can fold, and it is the whole of
+        per-subscriber promotion: a producer serving a room that disagrees emits
+        a ``fold_variants`` envelope carrying both the promoted patch and the
+        demoted core, and each pump resolves it against its own declaration on
+        the way to its own sink. Passing nothing means this subscriber DECLARED
+        nothing, which the resolver reads as the historical set exactly as the
+        coverage gate does — so a lane that never learned to declare keeps
+        folding what it always folded and takes the core for everything else.
+        Either way an envelope is never what reaches a sink: the resolver
+        returns one of the two ordinary frames inside it, or the core when it
+        cannot tell.
+
+        **The byte bound over-counts an envelope, deliberately.** ``_frame_bytes``
+        measures once on the producer thread, before anyone knows which half each
+        subscriber will take, so a split frame is charged at patch+core to every
+        subscriber. Measuring per subscriber would move the serialization cost
+        onto the fan-out — the exact cost this class is built to avoid — and the
+        error is in the safe direction: a stalled reader is dropped slightly
+        sooner than its real backlog, never later.
         """
 
         with self._lock:
@@ -560,6 +603,7 @@ class StreamHub:
                 on_drop=on_drop,
                 buffer_limit=self._buffer_limit,
                 byte_limit=self._byte_limit,
+                declared=declared,
             )
             if not restart_producer and self._current_producer_alive_locked():
                 # Attach to the running generation. The generation counter does

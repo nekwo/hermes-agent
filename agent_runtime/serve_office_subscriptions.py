@@ -865,7 +865,20 @@ class OfficeSubscriptions:
         except Exception:
             generation_before = -1
         if not hub.subscribe(
-            key, sink=sink, on_drop=_on_drop, restart_producer=restart_producer
+            key,
+            sink=sink,
+            on_drop=_on_drop,
+            restart_producer=restart_producer,
+            # What this pump resolves a per-subscriber ``fold_variants`` envelope
+            # against. It must be the SAME value :meth:`declarations` contributes
+            # to the room — an office subscriber that declared nothing folds
+            # :data:`OFFICE_FOLD_ENTITIES`, not the historical stream set — or a
+            # split frame would hand this sink a core for the very rows the push
+            # lane exists to patch, and the negotiation would be worse than it
+            # was before the split existed.
+            declared=(
+                fold_entities if fold_entities is not None else OFFICE_FOLD_ENTITIES
+            ),
         ):
             # ONE cause remains now that a duplicate key is impossible here: the
             # hub is stopping (``StreamHub.subscribe`` refuses once its stop

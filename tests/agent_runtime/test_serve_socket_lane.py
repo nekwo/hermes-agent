@@ -1368,12 +1368,24 @@ def test_an_unsupported_lane_is_refused_by_name():
 def test_a_subscriber_declares_what_it_can_fold_and_the_ack_says_what_was_accepted():
     """Patch-lane capability negotiation, over the subscribe op.
 
-    The producer here is SHARED — one generator, N subscribers — so a client's
-    declaration is a REQUEST, not a setting: what the lane may actually promote
-    is the INTERSECTION over everybody attached, because every frame is fanned
-    out to all of them. A client that assumed its own request was the answer
-    would fold against a lane narrower than it believes, so the accepted set is
-    stated back on the ack.
+    **This test recorded the OPPOSITE assertion until 2026-08-27, and the change
+    is the fix rather than a relaxation.** The producer is SHARED — one
+    generator, N subscribers — and while a fan-out could deliver exactly one
+    shape of a frame, the only safe promotion rule was the INTERSECTION over
+    everybody attached: a legacy client joining a room DEMOTED the fold-aware
+    client beside it, and this ack was where that narrowing was reported. Read as
+    a product sentence, it says a phone can cost a desktop its patch lane, which
+    is gateway R10's recorded consequence.
+
+    Per-subscriber promotion retired the narrowing: a batch the room disagrees
+    about now ships as one ``fold_variants`` envelope carrying the promoted patch
+    AND the demoted core, and each subscriber's pump resolves it against its own
+    declaration. So the honest content of a PER-CONNECTION ack is that
+    connection's own accepted set, and a joiner cannot move it.
+
+    What has NOT changed and is asserted below: the ack still answers with a
+    normalized set rather than an echo, so a client that declared nothing is told
+    the historical set it is actually getting.
     """
 
     gate = threading.Event()
@@ -1391,16 +1403,29 @@ def test_a_subscriber_declares_what_it_can_fold_and_the_ack_says_what_was_accept
                     }
                 )
                 alone = _read_until(first, "subscribed")
-                # Anti-vacuity: alone in the room, its declaration IS the answer,
-                # so the narrowing below can only come from the second client.
                 assert alone["fold_entities"] == ["office_actor", "persona_instance"]
 
-                # A client that says nothing declares the historical set, and it
-                # NARROWS the shared lane: the new entity stops being promotable
-                # for anyone, because this one would re-hydrate on it.
+                # A client that says nothing declares the historical set — and is
+                # told exactly that, not an echo of the empty request it sent.
                 second.send({"op": "subscribe"})
                 joined = _read_until(second, "subscribed")
-                assert joined["fold_entities"] == ["persona_instance"]
+                assert joined["fold_entities"] == ["incident", "persona_instance"]
+
+                # And the join did not reach back and narrow the first client's
+                # answer. THIS is the row R10 assigned to gateway Stage 5: the
+                # desktop keeps what it declared while the narrow client sits
+                # beside it.
+                first.send({"op": "unsubscribe"})
+                _read_until(first, "unsubscribed")
+                first.send(
+                    {
+                        "op": "subscribe",
+                        "lane": "stream",
+                        "fold_entities": ["persona_instance", "office_actor"],
+                    }
+                )
+                rejoined = _read_until(first, "subscribed")
+                assert rejoined["fold_entities"] == ["office_actor", "persona_instance"]
     finally:
         gate.set()
 

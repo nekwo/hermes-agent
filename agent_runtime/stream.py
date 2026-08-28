@@ -14,7 +14,7 @@ from . import core_cache, demote_core_reuse, paths
 from .events import EventLog
 from .models import Event
 from .parity import core_event_offset, events_watermark
-from .patch_coverage import batch_is_patch_coverable, normalize_fold_entities
+from .patch_coverage import batch_required_fold_tokens, normalize_fold_entities
 from .redaction import ENV_SECRET_ASSIGNMENT_RE
 from .request_control import request_cancelled
 from .serde import optional_text, section_rows, to_jsonable
@@ -510,10 +510,93 @@ def patch_batch_frame(
     }
 
 
+#: The envelope type that carries ONE batch in TWO shapes at once — the promoted
+#: patch and the demoted core — so a shared producer can serve a room whose
+#: subscribers declared different fold sets without demoting all of them to the
+#: narrowest.
+#:
+#: **This type never reaches a wire.** It is an INTERNAL fan-out shape: the hub
+#: resolves it per subscriber (:func:`resolve_fold_variant`) and the sink is
+#: handed one of the two ordinary frames inside it. A consumer that has not been
+#: taught about it is resolved to the CORE — the safe half, which every client
+#: since v1 folds — so no path can leak an envelope to a socket, and adding a
+#: subscriber lane later cannot accidentally opt into a shape it does not
+#: understand.
+FOLD_VARIANTS_FRAME_TYPE = "fold_variants"
+
 #: Upper bound on events carried by one batched delta frame. Bounds both the
 #: frame's `events` list and the drain's in-memory buffer; a longer backlog
 #: emits multiple batch frames, each with its own (single) core.
 _DELTA_BATCH_CAP = 256
+
+
+def fold_variants_frame(
+    *,
+    patch: dict[str, Any],
+    core: dict[str, Any],
+    required_tokens: Iterable[str],
+) -> dict[str, Any]:
+    """Pair one batch's promoted patch with its demoted core for a MIXED room.
+
+    ``required_tokens`` is what a subscriber's declaration must contain to be
+    handed the ``patch`` half (:func:`~agent_runtime.patch_coverage
+    .batch_required_fold_tokens`). Everyone else gets ``core``, which is the
+    identical frame the intersection rule would have sent them anyway — the
+    demotion moves from the ROOM to the SUBSCRIBER and nothing else about it
+    changes.
+
+    **The build is not paid twice.** The core in here was going to be built
+    regardless: under the old intersection rule a batch that any subscriber
+    could not fold demoted the whole room, so the snapshot build happened then
+    too. What changes is who receives the megabyte, not how many megabytes are
+    made. A batch nobody can fold never reaches this function (the caller emits
+    the bare core), and a batch everybody can fold never reaches it either (the
+    caller emits the bare patch and builds no core at all) — so the envelope
+    exists exactly on the batches where the room genuinely disagrees.
+    """
+
+    return {
+        "type": FOLD_VARIANTS_FRAME_TYPE,
+        "required_fold_tokens": sorted(required_tokens),
+        "patch": patch,
+        "core": core,
+    }
+
+
+def resolve_fold_variant(
+    frame: dict[str, Any], declared: Iterable[str] | None
+) -> dict[str, Any]:
+    """The frame ONE subscriber should be handed, given what it declared.
+
+    Any frame that is not a :data:`FOLD_VARIANTS_FRAME_TYPE` envelope is returned
+    unchanged — which is every frame on a homogeneous lane, so the resolver costs
+    one dict lookup on the overwhelmingly common path.
+
+    ``declared`` is that subscriber's own declaration, normalized by the same
+    :func:`~agent_runtime.patch_coverage.normalize_fold_entities` the coverage
+    gate uses (so ``None`` means the historical set here exactly as it does
+    there, and never the empty set).
+
+    **The default direction is the core**, and it is the reason this resolver
+    takes a declaration rather than a boolean: a caller that passes nothing
+    coherent, or a subscriber lane added later that never learned to declare,
+    receives the demoted core — correct, merely un-promoted. The failure mode of
+    the opposite default is a client handed a patch it answers with a
+    re-hydrate, which is the exact regression this negotiation exists to
+    prevent, and it would be silent.
+    """
+
+    if frame.get("type") != FOLD_VARIANTS_FRAME_TYPE:
+        return frame
+    required = frozenset(
+        str(token) for token in (frame.get("required_fold_tokens") or ())
+    )
+    if required <= normalize_fold_entities(declared):
+        patch = frame.get("patch")
+        if isinstance(patch, dict):
+            return patch
+    core = frame.get("core")
+    return core if isinstance(core, dict) else frame
 
 _SNAPSHOT_CANCEL_POLL_SECONDS = 0.1
 
@@ -800,24 +883,64 @@ def _batch_frames_with_liveness(
     resync: bool,
     heartbeat_interval_seconds: float,
     fold_entities: Iterable[str] | None = None,
+    promote_fold_entities: Iterable[str] | None = None,
     caller: str = DEFAULT_STREAM_CALLER,
 ) -> Iterator[dict[str, Any]]:
-    if (
-        delta_patches
-        and not resync
-        and batch_is_patch_coverable(
-            (event for _, event in batch), fold_entities=fold_entities
-        )
-        # Coverable is not the same as EXPRESSIBLE. A covered domain event with
-        # no paired `state.patched` in the batch is coverable on its own and
-        # would ship an empty `patches` list — a watermark the client advances
-        # having folded nothing. The honest answer for that batch is the core:
-        # state moved and this lane has no patch to say what. See
-        # `batch_carries_patch_rows` for the five producer paths that reach here.
-        and batch_carries_patch_rows(batch)
-    ):
-        yield patch_batch_frame(batch, base_offset=base_offset)
-        return
+    accepted = normalize_fold_entities(fold_entities)
+    #: What SOME subscriber can fold, when the room disagrees. ``None`` — every
+    #: caller but the serve hub, and the hub itself whenever its room is
+    #: homogeneous — collapses this to ``accepted``, and then the split branch
+    #: below is unreachable by construction: ``required <= accepted`` and
+    #: ``required <= promote`` become the same test, so the first one takes every
+    #: batch the second could have. That is the whole single-subscriber
+    #: no-change guarantee, and it is a property of these two lines rather than
+    #: a promise kept elsewhere.
+    promote = (
+        accepted
+        if promote_fold_entities is None
+        else normalize_fold_entities(promote_fold_entities)
+    )
+    # Coverable is not the same as EXPRESSIBLE. A covered domain event with no
+    # paired `state.patched` in the batch is coverable on its own and would ship
+    # an empty `patches` list — a watermark the client advances having folded
+    # nothing. The honest answer for that batch is the core: state moved and this
+    # lane has no patch to say what. See `batch_carries_patch_rows` for the five
+    # producer paths that reach here.
+    if delta_patches and not resync and batch_carries_patch_rows(batch):
+        # The SET a declaration must contain, derived once, rather than the
+        # boolean asked once per candidate declaration. `batch_required_fold_
+        # tokens` returning None is `batch_is_patch_coverable` returning False
+        # for every declaration there is — the structurally uncovered batch —
+        # and the equivalence is pinned by test rather than restated here.
+        required = batch_required_fold_tokens(event for _, event in batch)
+        if required is not None and required <= accepted:
+            yield patch_batch_frame(batch, base_offset=base_offset)
+            return
+        if required is not None and required <= promote:
+            # The room DISAGREES about this batch: somebody can fold it and
+            # somebody cannot. Build both halves once and let the fan-out hand
+            # each subscriber the one it declared for. The core here is the
+            # frame the intersection rule would have sent EVERYONE, so this
+            # costs the same build and saves the wire for whoever declared.
+            promoted = patch_batch_frame(batch, base_offset=base_offset)
+            for frame in _full_core_batch_frames(
+                batch,
+                base_offset=base_offset,
+                heartbeat_interval_seconds=heartbeat_interval_seconds,
+                reason=BATCH_REASON_DEMOTE,
+                caller=caller,
+            ):
+                # Liveness passes through UNPAIRED and unchanged: a heartbeat
+                # says the producer is alive while a core builds, which is the
+                # same true sentence for every subscriber in the room and
+                # carries no state either half could disagree about.
+                if frame.get("type") == "heartbeat":
+                    yield frame
+                    continue
+                yield fold_variants_frame(
+                    patch=promoted, core=frame, required_tokens=required
+                )
+            return
     # Classified HERE because this is the only place that holds all three
     # facts. `resync` is a re-baseline the client asked for; with the lane off
     # every batch is a full core by design (not a demotion); otherwise either the
@@ -847,6 +970,7 @@ def stream_frames(
     max_frames: int | None = None,
     resync: bool = False,
     fold_entities: Iterable[str] | None = None,
+    promote_fold_entities: Iterable[str] | None = None,
     caller: str = DEFAULT_STREAM_CALLER,
     wants_stale_first: bool = False,
 ) -> Iterator[dict[str, Any]]:
@@ -879,6 +1003,20 @@ def stream_frames(
     wire it gets now. Resolved ONCE, here: what "absent" means must not be
     re-decided per batch on a hot path, and the hydrate must echo the same answer
     the promotion decision uses.
+
+    ``promote_fold_entities`` is what SOME subscriber can fold when the room
+    disagrees — the UNION where ``fold_entities`` is the intersection. It exists
+    for one caller, the serve hub, whose fan-out can hand each subscriber a
+    different half of a :func:`fold_variants_frame` envelope; every other caller
+    leaves it ``None``, which collapses it onto ``fold_entities`` and makes the
+    split branch in ``_batch_frames_with_liveness`` unreachable. The hydrate
+    keeps echoing ``fold_entities`` — the ROOM'S FLOOR — because one hydrate is
+    fanned to N subscribers and the floor is the only value true for every
+    recipient; a subscriber may then be handed patches ABOVE that floor, which
+    it can fold by definition (the fan-out only routes a patch to a declaration
+    that covers it), so the echo is a guarantee and never a ceiling. With one
+    subscriber the floor IS its own declaration and the echoed bytes do not
+    move.
 
     **An unknown resume position is not byte 0.** ``or 0`` folded BOTH a missing
     watermark key and an explicitly unknown one (``events_watermark`` returns
@@ -916,6 +1054,14 @@ def stream_frames(
     log = event_log or EventLog()
     delta_patches = delta_patches_enabled()
     declared_entities = normalize_fold_entities(fold_entities)
+    # Resolved ONCE beside the floor and for the same reason. ``None`` collapses
+    # to the floor, so every caller but the hub produces exactly the frames it
+    # produced before this parameter existed.
+    promote_entities = (
+        declared_entities
+        if promote_fold_entities is None
+        else normalize_fold_entities(promote_fold_entities)
+    )
     resync_pending = bool(resync)
     emitted = 0
     # EG-3.1's mismatch half. A persisted core whose fingerprint does NOT match
@@ -1107,6 +1253,7 @@ def stream_frames(
                     resync=resync_pending,
                     heartbeat_interval_seconds=heartbeat_interval_seconds,
                     fold_entities=declared_entities,
+                    promote_fold_entities=promote_entities,
                     caller=caller,
                 ):
                     yield frame
@@ -1136,6 +1283,7 @@ def stream_frames(
                         resync=resync_pending,
                         heartbeat_interval_seconds=heartbeat_interval_seconds,
                         fold_entities=declared_entities,
+                        promote_fold_entities=promote_entities,
                         caller=caller,
                     ):
                         yield frame
@@ -1156,6 +1304,7 @@ def stream_frames(
                 resync=resync_pending,
                 heartbeat_interval_seconds=heartbeat_interval_seconds,
                 fold_entities=declared_entities,
+                promote_fold_entities=promote_entities,
                 caller=caller,
             ):
                 yield frame
