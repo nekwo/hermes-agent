@@ -2484,6 +2484,108 @@ Worktree `X:/wt/servediag` off `4ab953df89`; nothing pushed, primary untouched.
   — operator-ruled, verified answering, and recorded here because a model binding that changed
   under a wave is the kind of fact a later reader will otherwise attribute to the wave.
 
+## 2026-08-28 — the walk-se seam split, and what actually cut the pose (slicer slice)
+
+Standing in the hermes repo, worktree off `b20fa8daf9`. Sent to fix a real row failure:
+`row 'walk-se' produced no sliceable strip in 3 attempts; last failure: frame 3 contains
+multiple separated subjects`. Two cached artifacts reproduced it exactly
+(`…_135943_81776461.png` frame 3, `…_135855_76c03b99.png` frame 6). The fix I was handed
+was right about the repair and wrong about the wound.
+
+- **[READ] Nothing drew a seam, and the chroma key did not cut anything.** The brief said
+  the provider drew faint horizontal lines that `remove_background` keyed out. Measured, the
+  keyed strip has exactly **8 connected components** — one per pose, each whole. The severing
+  happens later and entirely inside our own code: the gutter path crops each pose into a
+  narrow ~221px column, and `_isolate_slot_subject` runs `_erase_long_axis_lines` on that
+  column. That helper deletes thin rows spanning ≥85% of the image as drawn floors/dividers —
+  a sound rule against a 1774px strip, a destructive one against a 221px slot where the
+  character's own body spans the width. On frame 3 it deleted rows 426 and 450-451 (the only
+  wide-row groups ≤4 rows tall) and cut one pose into three slabs, y 303-426 / 427-450 /
+  452-581, gaps of 1px and 2px. **Consequence:** the artifact is not evidence of a bad roll.
+  Do not re-roll a row on this error, and do not go looking for seam lines in the PNG.
+
+- **[READ] The guard was catching the worst frames, not the defect.** Every frame in both
+  artifacts was severed — 2 slabs in most, 3 in two of them. `_validate_extracted_frames`
+  only raises at ≥3 subjects, so six frames per strip were sailing through as half-poses and
+  would have composed into the sheet as such. The row that failed loudly was the lucky one.
+  **Consequence:** any charsheet built from a strip that took the gutter path before today is
+  suspect even if it never raised.
+
+- **[FIXED] `_merge_related_boxes` is now symmetric.** It had one rule — overlap vertically,
+  hairline gap horizontally — for capes and held props, and no mirror, so stacked slabs with
+  near-total x-overlap and a 1px y-gap stayed three subjects forever. It now also merges on
+  `h_overlap >= min_w * 0.45 and y_gap <= max(14, min_h * 0.22)`. Both artifacts now yield 8
+  frames, each a single subject at full pose height (278-283px and 295-306px, spread ≤11px),
+  where before the accepted frames were slabs.
+
+- **[FIXED] `auto` finally means what both call sites always said it meant.**
+  `_validate_extracted_frames` ran unconditionally, so `method="auto"` — documented in
+  `pipeline.generate_row_strip` and `orchestrate` as the lenient last attempt that never
+  raises — raised anyway, which is what promoted one flaky roll to a dead row. It now takes
+  `strict=`, and `extract_strip_frames` passes `strict=(method == "components")`. Only the two
+  judgement-call checks downgrade to a logged warning; **wrong frame count and empty frame
+  still raise under both methods**, because best-effort must never mean installing blank
+  cells. This also closes a second door nobody had hit yet: `compose_draft_frames` re-slices
+  already-APPROVED strips with `method="auto"`, so a soft check could fail a sheet build long
+  after every row passed its gate.
+
+- **[READ] What I did NOT do.** (i) `_erase_long_axis_lines` is untouched. The real cure is to
+  stop applying a strip-scale heuristic to a single-pose slot — either skip it below some
+  width, or require the erased row to span the STRIP rather than the crop. I repaired the
+  damage instead of preventing it, because the merge is also the right answer for a genuine
+  keyed seam, but the next slice into this file should consider fixing it at the source.
+  (ii) The regression tests live in `tests/agent/test_pet_generate.py`, which is skipped
+  unless `HERMES_RUN_SLOW_PET_TESTS=1` — so this bug's guard does NOT run in a default suite.
+  That is where atlas coverage already lives and I did not restructure the gate, but it means
+  a re-break will be silent. (iii) No ruff: it is not installed in any interpreter on this
+  machine (not the runtime venv, not `C:\Python312`, not on PATH), so the changed files are
+  test-verified only. (iv) Not proven end-to-end through a live `characters` generation — the
+  proof is the two cached artifacts plus synthetic strips, not a fresh provider roll.
+
+### Appendix, same day — the root got fixed, and the fixture lied twice
+
+The entry above closed with "the next slice should consider fixing it at the source". The
+coordinator promoted that, so it is done. Four things worth keeping, two of them about how
+hard it was to write an HONEST test for this.
+
+- **[FIXED] Line erasure is hoisted to strip scale; the slot crop never repeats it.**
+  `_isolate_slot_subject` no longer calls `_erase_long_axis_lines`. `extract_strip_frames`
+  calls it once, on the whole strip, at the moment it falls off the clean path — lazily,
+  because it is a full per-pixel pass and the happy path should not pay for it. Both
+  slot-cutting routes (`_slot_crops` and the gutter path) now consume that already-cleaned
+  strip. Chose caller-hoisting over the two alternatives I was offered: an explicit
+  `erase_lines=` flag would have been dead weight (both callers of `_isolate_slot_subject`
+  are slot-scale, so every call site would pass `False` forever), and an aspect/width
+  threshold would have been a magic number guessing at the very thing the caller already
+  knows for certain. The caller does decide — it just decides once, at the top, where the
+  strip still exists.
+
+- **[MEASURED] The real repair, on the two cached artifacts.** Interior transparent rows
+  inside each pose's own bbox, before → after: `…_81776461.png` **12 rows across 5 of 8
+  frames → 0**, `…_76c03b99.png` **15 rows across 4 of 8 frames → 0**. Frame 3 of the first
+  file listed rows `426, 450, 451` — the exact rows named in the entry above, which is the
+  cleanest confirmation available that the mechanism was identified correctly.
+
+- **[READ] The defect was not only scanlines; it silently beheaded poses.** Building the
+  synthetic case I found a frame with NO scanline that was 23px shorter than its neighbours
+  (256 vs 279). When the erased row falls near one end of a pose, the smaller slab is left
+  below `_isolate_slot_subject`'s keep threshold and is dropped as noise, so the pose loses
+  its head and the frame closes up around the loss. A hole is detectable; this is not. The
+  test asserts uniform pose height as well as absence of scanlines, because the
+  scanline-only assertion passed on a frame that had lost its head.
+
+- **[READ] What actually discriminates a floor from a body row is ALIGNMENT, not width.**
+  My first two fixtures were wrong and both were wrong in the instructive direction. Eight
+  identical poses each carrying a wide bar at the SAME height really do span the strip —
+  that is a floor by any definition available to us, and the eraser removing it is correct
+  behaviour, not a bug. Drawing the poses narrower to dodge that just routed the strip down
+  the uniform-slot path, where the slot width IS the strip width over eight and the two
+  scales cannot disagree, so the test passed for no reason. The fixture only became honest
+  once poses varied frame to frame, which is what real art does and precisely why the live
+  strip had nothing erased at strip scale while its slots were being cut to ribbons.
+  **Consequence:** if a provider ever draws the same wide feature at the same height in all
+  eight poses, we will erase it and we will be right to. Do not "fix" that later.
+
 <!-- A2, A3, R1 and any slice standing in the HERMES repo: append your entries above this
      line, under the matching heading, or add a heading if none fits. Then say in your
      slice report that you did.

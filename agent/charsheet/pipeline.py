@@ -545,8 +545,9 @@ def generate_row_strip(
     The gate is mechanical and runs before the strip is accepted: the frames must
     segment with clean per-pose gutters (``method="components"``, which raises
     when poses touch). Up to :data:`_ROW_GEN_ATTEMPTS` rolls, the last one lenient
-    (``method="auto"``, never raises) so a stubborn row still yields something the
-    operator can look at and re-roll. Returns the path of the ACCEPTED strip.
+    (``method="auto"``, which raises only on a wrong frame count or an empty
+    frame) so a stubborn row still yields something the operator can look at and
+    re-roll. Returns the path of the ACCEPTED strip.
     """
     direction = row.direction or NON_DIRECTIONAL_VIEW
     ref = Path(direction_ref)

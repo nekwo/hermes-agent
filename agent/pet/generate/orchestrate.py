@@ -259,8 +259,9 @@ def hatch_pet(
                 )
                 # ``components`` requires clean per-pose gutters (raises otherwise),
                 # so a touching roll is rejected and regenerated; the last attempt
-                # uses ``auto`` (equal-slot fallback, never raises). Raw (fit=False)
-                # so normalize_cells registers the whole pet at once.
+                # uses ``auto`` (equal-slot fallback, raising only on a wrong frame
+                # count or an empty frame). Raw (fit=False) so normalize_cells
+                # registers the whole pet at once.
                 method = "components" if strict else "auto"
                 frames = atlas.extract_strip_frames(strips[0], count, method=method, fit=False)
                 logger.info(

@@ -387,12 +387,20 @@ def _drop_side_bleed(image):
 
 
 def _erase_long_axis_lines(image):
-    """Remove thin slot-spanning guide/floor/divider lines.
+    """Remove thin STRIP-spanning guide/floor/divider lines.
 
     Gemini will sometimes satisfy "baseline" / "cell" language by drawing
     literal horizontal floors or vertical panel dividers. They survive chroma
     keying and connect otherwise clean poses. Drop only *thin* rows/columns that
-    span nearly the whole slot; thick sprite body rows are left alone.
+    span nearly the whole image; thick sprite body rows are left alone.
+
+    Scale is load-bearing and this must only ever run on a WHOLE strip. "Spans
+    85% of the image" identifies a drawn floor across a ~1700px row; across a
+    ~220px single-pose crop it identifies the character's own shoulders, belt or
+    outstretched arms, and erasing those cuts the pose into slabs and punches
+    transparent scanlines through the saved frame. That is exactly what happened
+    to the live walk-se row, so the callers hoist this to strip scale rather than
+    letting :func:`_isolate_slot_subject` repeat it per slot.
     """
     from PIL import Image
 
@@ -486,10 +494,17 @@ def _component_boxes(image) -> list[tuple[tuple[int, int, int, int], int]]:
 
 
 def _isolate_slot_subject(image):
-    """Keep the slot's real subject; drop detached effects/noise."""
+    """Keep the slot's real subject; drop detached effects/noise.
+
+    Deliberately does NOT erase long-axis lines. This runs on a single-pose
+    crop, where that test cannot tell a drawn floor from the character's own
+    widest row — see :func:`_erase_long_axis_lines`. Callers that want lines
+    gone hand in a strip that has already had them erased, at the scale where
+    the question is answerable.
+    """
     from PIL import Image
 
-    rgba = _erase_long_axis_lines(image)
+    rgba = image.convert("RGBA")
     comps = _component_boxes(rgba)
     if not comps:
         return rgba
@@ -563,10 +578,18 @@ def _group_component_rows(boxes: list[tuple[int, int, int, int]]) -> list[list[t
 def _merge_related_boxes(boxes: list[tuple[int, int, int, int]]) -> list[tuple[int, int, int, int]]:
     """Merge disconnected parts that clearly belong to one subject.
 
-    Capes, tails, horns, and held props sometimes key as separate components.
-    Merge components on the same visual row when their vertical spans overlap and
-    the horizontal gap is tiny compared with the component size. Do not bridge the
-    much larger gaps between separate poses.
+    Two symmetric rules, both "overlap on one axis, hairline gap on the other":
+
+    * Side by side — capes, tails, horns, and held props key as separate
+      components beside the body.
+    * Stacked — one subject severed into horizontal slabs. A thin row of the
+      character's own art that spans its narrow slot is indistinguishable from a
+      drawn floor line, so :func:`_erase_long_axis_lines` deletes it and cuts the
+      pose in two; a faint seam the chroma key catches does the same. Live, that
+      turned one pose into three slabs 1-2px apart and failed the whole row.
+
+    Neither rule bridges the much larger gaps between separate poses, which is
+    what keeps a 2D grid's rows and columns apart.
     """
     boxes = list(boxes)
     changed = True
@@ -585,9 +608,13 @@ def _merge_related_boxes(boxes: list[tuple[int, int, int, int]]) -> list[tuple[i
                 bl, bt, br, bb = boxes[j]
                 v_overlap = max(0, min(ab, bb) - max(at, bt))
                 min_h = max(1, min(ab - at, bb - bt))
-                gap = max(0, max(al, bl) - min(ar, br))
+                x_gap = max(0, max(al, bl) - min(ar, br))
+                h_overlap = max(0, min(ar, br) - max(al, bl))
                 min_w = max(1, min(ar - al, br - bl))
-                if v_overlap >= min_h * 0.45 and gap <= max(14, min_w * 0.22):
+                y_gap = max(0, max(at, bt) - min(ab, bb))
+                side_by_side = v_overlap >= min_h * 0.45 and x_gap <= max(14, min_w * 0.22)
+                stacked = h_overlap >= min_w * 0.45 and y_gap <= max(14, min_h * 0.22)
+                if side_by_side or stacked:
                     al, at, ar, ab = min(al, bl), min(at, bt), max(ar, br), max(ab, bb)
                     used[j] = True
                     changed = True
@@ -769,16 +796,30 @@ def _significant_subject_boxes(image) -> list[tuple[int, int, int, int]]:
     return _merge_related_boxes([box for box, mass in comps if mass >= max(32, max_mass * 0.12)])
 
 
-def _validate_extracted_frames(frames: list, frame_count: int) -> None:
+def _validate_extracted_frames(frames: list, frame_count: int, *, strict: bool = True) -> None:
     """Reject rows where one "frame" is really multiple poses.
 
     A bad provider roll can collapse a strip into tiny repeated poses. If we let
     that through, normalization sees a huge motion envelope and shrinks the
     entire pet to postage-stamp size. Catch the row here so hatch can regenerate
     it instead of saving a technically non-empty but visually broken atlas.
+
+    Two tiers, because the callers' last attempt is documented as lenient:
+
+    * **Hard** — wrong frame count, or a frame that keyed to nothing. These raise
+      under both methods: installing blank cells is never better than failing.
+    * **Soft** — the "this looks like several poses" heuristics. They are
+      judgement calls about art, so under ``strict=False``
+      (:func:`extract_strip_frames` with ``method="auto"``) they log and let the
+      frames through, giving the operator something to look at and re-roll.
     """
     if len(frames) != frame_count:
         raise ValueError(f"expected {frame_count} frames, got {len(frames)}")
+
+    def soft(reason: str) -> None:
+        if strict:
+            raise ValueError(reason)
+        logger.warning("lenient strip extraction accepted a suspect row: %s", reason)
 
     boxes = []
     for i, frame in enumerate(frames):
@@ -787,7 +828,7 @@ def _validate_extracted_frames(frames: list, frame_count: int) -> None:
             raise ValueError(f"frame {i} is empty")
         subjects = _significant_subject_boxes(frame)
         if len(subjects) >= 3:
-            raise ValueError(f"frame {i} contains multiple separated subjects")
+            soft(f"frame {i} contains multiple separated subjects")
         boxes.append(bbox)
 
     if frame_count <= 1:
@@ -804,7 +845,7 @@ def _validate_extracted_frames(frames: list, frame_count: int) -> None:
         # several times wider while not proportionally taller is usually multiple
         # mini-poses packed into one accepted frame.
         if width > max(med_w * 3.0, med_w + 96) and height <= med_h * 1.6:
-            raise ValueError(f"frame {i} is a multi-pose width outlier")
+            soft(f"frame {i} is a multi-pose width outlier")
 
 
 def extract_strip_frames(
@@ -827,6 +868,13 @@ def extract_strip_frames(
     pose does not have required space around it, ``components`` raises and
     ``auto`` falls back to best-effort slicing.
 
+    The two methods differ in what a *finished* set of frames is allowed to look
+    like. ``components`` is the generation-time gate: every check raises, so a
+    doubtful row is re-rolled. ``auto`` is the last-attempt salvage its callers
+    promise, so the "looks like several poses" checks only warn — but a strip
+    with the wrong frame count, or one that keyed to nothing, still raises under
+    both. Best-effort must never mean installing blank cells.
+
     *fit* (default) fits+centers each frame into a 192x208 cell — the standalone
     contract for callers that don't normalize. Hatching passes ``fit=False`` to
     keep raw, coordinate-aligned columns for :func:`normalize_cells`, which lays
@@ -846,8 +894,16 @@ def extract_strip_frames(
     # the intended one-row strip and model-cheated 2D grids without ever stacking
     # two visual rows into one frame.
     frames = _component_crops(strip, frame_count, require_padding=True)
+    destriped = None
     if frames is None:
-        frames = _slot_crops(strip, frame_count, require_padding=True)
+        # Off the clean path. Every route below cuts the strip into single-pose
+        # columns, and a drawn floor/divider must be gone BEFORE that cut: it is
+        # a strip-scale fact (one line crossing every pose), and once we are
+        # inside a ~220px column it is indistinguishable from the character's own
+        # widest row. Erase once, here; the slot crops never repeat the test.
+        # Computed lazily because it is a full per-pixel pass over the strip.
+        destriped = _erase_long_axis_lines(strip)
+        frames = _slot_crops(destriped, frame_count, require_padding=True)
     if frames is None:
         if method == "components":
             raise ValueError(f"could not segment {frame_count} padded sprites from strip")
@@ -858,10 +914,13 @@ def extract_strip_frames(
         # cached/borderline model rolls can be inspected without stacking a 2D grid.
         frames = _component_crops(strip, frame_count, require_padding=False)
     if frames is None:
-        source = strip
+        # Only reachable once the block above ran, so `destriped` is bound; the
+        # fallback keeps that from being a trap if this order ever changes.
+        source = destriped if destriped is not None else _erase_long_axis_lines(strip)
+        base = source
         ranges = _frame_x_ranges(source, frame_count)
         if ranges is None:
-            source = _sever_expected_gutters(strip, frame_count)
+            source = _sever_expected_gutters(base, frame_count)
             ranges = _frame_x_ranges(source, frame_count)
 
         if ranges is None:
@@ -873,7 +932,7 @@ def extract_strip_frames(
                 _drop_side_bleed(_isolate_slot_subject(source.crop((max(0, left - pad), 0, min(source.width, right + pad), h))))
                 for left, right in ranges
             ]
-    _validate_extracted_frames(frames, frame_count)
+    _validate_extracted_frames(frames, frame_count, strict=method == "components")
     return [_fit_to_cell(f) for f in frames] if fit else frames
 
 
