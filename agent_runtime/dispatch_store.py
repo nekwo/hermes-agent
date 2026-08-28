@@ -75,6 +75,7 @@ __all__ = [
     "DROP_REASON_ATTEMPT_CAP",
     "DROP_REASON_FORGE_REJECTED",
     "MAX_DELIVERY_ATTEMPTS",
+    "REMOTE_UNREACHABLE_REASON",
     "REARM_ALREADY_DELIVERED",
     "REARM_NOT_DROPPED",
     "REARM_NOT_FOUND",
@@ -131,6 +132,25 @@ MAX_DELIVERY_ATTEMPTS = 8
 #: the row and the operator reads the projection, so a reason that lives only in
 #: the event log renders as the useless "undelivered".
 DROP_REASON_ATTEMPT_CAP = "attempt_cap"
+
+#: Gateway Stage 7 (R8). Why a cross-install dispatch gave up: every attempt to
+#: reach the paired install was a TRANSPORT failure, so the target never
+#: answered and never refused.
+#:
+#: **This is the one place Stage 7 knowingly departs from R8's wording, and the
+#: departure is what makes the ruling keep its own promise.** R8 says an offline
+#: target "converges to ``dropped``". ``dropped`` is a DELIVERY state and it
+#: means *the sender was never told* — which is exactly backwards for this case,
+#: because "the other machine is not answering" is the single most useful thing
+#: the sending agent could be told, and a ``dropped`` row is indistinguishable
+#: in the Activity panel from a dispatch that evaporated. So the attempts CAP is
+#: R8's, unchanged and spelled from the same
+#: :data:`MAX_DELIVERY_ATTEMPTS` constant rather than a second number, and what
+#: it converges to is a terminal ``error`` completion carrying this reason —
+#: which then travels the ordinary delivery lane and lands in the sender's chat.
+#: R8's naming half is honoured on the row, in the ``dispatch.completed`` event
+#: and in the sentence the sender reads.
+REMOTE_UNREACHABLE_REASON = "peer_unreachable"
 
 #: Prefix for the OTHER terminal give-up: the forge refused this row for a
 #: DETERMINISTIC reason (a guard verdict — foreign root, unknown persona,
@@ -233,7 +253,8 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
             owner_pid INTEGER,
             owner_started_at INTEGER,
             relay_chain_json TEXT,
-            delivery_error TEXT
+            delivery_error TEXT,
+            remote_install_id TEXT NOT NULL DEFAULT ''
         )"""
     )
     # CREATE TABLE IF NOT EXISTS does nothing to a store that already exists, so
@@ -242,6 +263,14 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
     # below raise there while a fresh install stays green. That is the worst
     # possible place to discover a schema change.
     _add_missing_column(conn, "delivery_error", "TEXT")
+    # Gateway Stage 7. A column and not a key inside ``result_json``, because
+    # this fact is true from the moment the row is WRITTEN and the result blob
+    # is not written until the turn ends: an operator watching Activity has to
+    # be able to see that a dispatch left this machine while it is still
+    # running, which is precisely the window in which they would otherwise
+    # wonder why nothing is happening. Empty string means local, which is what
+    # every row that predates this line already means.
+    _add_missing_column(conn, "remote_install_id", "TEXT NOT NULL DEFAULT ''")
 
 
 def _add_missing_column(conn: sqlite3.Connection, name: str, decl: str) -> None:
@@ -366,6 +395,7 @@ def _row_to_dict(row: tuple) -> dict[str, Any]:
         owner_started_at,
         relay_chain_json,
         delivery_error,
+        remote_install_id,
     ) = row
     try:
         result = json.loads(result_json) if result_json else None
@@ -397,6 +427,10 @@ def _row_to_dict(row: tuple) -> dict[str, Any]:
         "owner_started_at": int(owner_started_at) if owner_started_at else None,
         "relay_chain": relay_chain if isinstance(relay_chain, list) else [],
         "delivery_error": delivery_error or "",
+        # Empty string, never None: "this dispatch is local" is a fact every row
+        # carries, and a consumer that had to tell absent from empty would be
+        # deciding what a row written before Stage 7 meant.
+        "remote_install_id": remote_install_id or "",
     }
 
 
@@ -404,7 +438,8 @@ _SELECT = f"""SELECT dispatch_id, sender_session_id, sender_persona_id, target_p
                      target_instance_id, target_session_id, title, ask, state,
                      notify_operator, dispatched_at, completed_at, updated_at,
                      result_json, delivery_state, delivery_attempts, delivered_at,
-                     owner_pid, owner_started_at, relay_chain_json, delivery_error
+                     owner_pid, owner_started_at, relay_chain_json, delivery_error,
+                     remote_install_id
               FROM {_TABLE}"""
 
 
@@ -425,6 +460,7 @@ def record_dispatch(
     notify_operator: bool = False,
     relay_chain: Any = None,
     dispatched_at: float | None = None,
+    remote_install_id: str = "",
 ) -> dict[str, Any]:
     """Persist a dispatch BEFORE its target turn starts.
 
@@ -446,6 +482,7 @@ def record_dispatch(
         "ask": _text(ask, ASK_LIMIT),
         "notify_operator": bool(notify_operator),
         "dispatched_at": now_epoch,
+        "remote_install_id": _text(remote_install_id, 128),
     }
     with _DB_LOCK, _transaction() as conn:
         conn.execute(
@@ -453,8 +490,9 @@ def record_dispatch(
                 (dispatch_id, sender_session_id, sender_persona_id, target_persona,
                  target_instance_id, target_session_id, title, ask, state,
                  notify_operator, dispatched_at, updated_at, delivery_state,
-                 delivery_attempts, owner_pid, owner_started_at, relay_chain_json)
-                VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)""",
+                 delivery_attempts, owner_pid, owner_started_at, relay_chain_json,
+                 remote_install_id)
+                VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)""",
             (
                 row["dispatch_id"],
                 row["sender_session_id"],
@@ -471,6 +509,7 @@ def record_dispatch(
                 pid,
                 started,
                 json.dumps(list(relay_chain or [])),
+                row["remote_install_id"],
             ),
         )
     _emit(
@@ -480,6 +519,9 @@ def record_dispatch(
         sender_session_id=row["sender_session_id"],
         notify_operator=row["notify_operator"],
         title=row["title"][:120] or None,
+        # Optional on the contract and present only when true, so a local
+        # dispatch's event stays byte-identical to what it has always been.
+        remote_install_id=row["remote_install_id"] or None,
     )
     return row
 
@@ -493,6 +535,7 @@ def record_completion(
     target_session_id: str = "",
     total_tokens: Any = None,
     visibility: dict[str, Any] | None = None,
+    remote: dict[str, Any] | None = None,
     only_if_running: bool = False,
 ) -> bool:
     """Record the target turn's outcome and arm the row for delivery.
@@ -517,6 +560,14 @@ def record_completion(
     older process simply carries no block, and the delivery formatter falls back
     to the generic wording. Without it, "they answered with nothing" and "their
     answer never reached us" are the same empty string to the sender.
+
+    ``remote`` (Stage 7) rides the same blob for the same reason, and carries
+    ``{install_id, attempts, reason?}`` — how many dial attempts the
+    cross-install leg spent and, when it gave up,
+    :data:`REMOTE_UNREACHABLE_REASON`. It is on the RESULT rather than in a
+    column because it is only knowable once the leg is finished, which is the
+    line ``visibility`` already drew: the column beside it
+    (``remote_install_id``) carries the half that is true at dispatch time.
     """
 
     settled = str(state or STATE_UNKNOWN)
@@ -532,6 +583,8 @@ def record_completion(
     }
     if isinstance(visibility, dict) and visibility:
         result["visibility"] = dict(visibility)
+    if isinstance(remote, dict) and remote:
+        result["remote"] = dict(remote)
     guard = " AND state=?" if only_if_running else ""
     params: list[Any] = [
         settled,
@@ -597,6 +650,10 @@ def record_completion(
             reply_chars=len(result["reply"]),
             error=result["error"][:200] or None,
             target_session_id=result["target_session_id"] or None,
+            # Both optional and both absent on a local dispatch, so its event
+            # stays exactly the bytes it has always been.
+            remote_install_id=(remote or {}).get("install_id") or None,
+            remote_reason=(remote or {}).get("reason") or None,
         )
     _prune()
     return updated

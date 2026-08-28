@@ -47,6 +47,7 @@ fails fast on: no attempt is burned for an answer that cannot change.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -66,6 +67,7 @@ __all__ = [
     "format_install_target",
     "is_install_qualified",
     "parse_install_target",
+    "peer_store_root",
     "resolve_install_target",
 ]
 
@@ -143,6 +145,36 @@ class TargetRefusal:
     @property
     def ok(self) -> bool:
         return False
+
+
+def peer_store_root() -> Path:
+    """The runtime root whose ``gateway/peers.json`` this install's edges live in.
+
+    NOT ``paths.store_root()``, and the difference is the same one
+    ``hermes_constants.get_hermes_background_work_home`` exists to name.
+    ``resolve_runtime`` consults ``HERMES_HOME``'s ``config.yaml`` whenever
+    ``HERMES_AGENT_RUNTIME_ROOT`` is unset, and ``persona_profile_context``
+    flips ``HERMES_HOME`` PROCESS-GLOBALLY for the length of every persona turn
+    — which is exactly when a cross-install send is made and exactly where the
+    supervisor thread that later dials the peer is running. The ambient answer
+    would therefore depend on which unrelated persona happened to be mid-turn,
+    and on the launcher's own layout (``HERMES_HOME=profiles/<profile>`` with
+    ``HERMES_HEAD_HOME=profiles/base``) those are different directories.
+
+    A peer edge belongs to the INSTALL, not to a persona's profile, so the home
+    that answers is the head one — the same precedence the background-work
+    stores already use, reached through the same resolver rather than a second
+    one. Both the send (which resolves the name) and the supervisor (which
+    dials) call this, so they cannot read two different stores.
+    """
+
+    from hermes_constants import get_hermes_background_work_home
+
+    from .resolution import resolve_runtime
+
+    env = dict(os.environ)
+    env["HERMES_HOME"] = str(get_hermes_background_work_home())
+    return resolve_runtime(env).store_root
 
 
 def format_install_target(install_ref: str, target: str) -> str:

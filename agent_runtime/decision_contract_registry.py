@@ -375,8 +375,8 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     # append-time refusal, and the reply itself already lives in the target's
     # chat thread that ``target_session_id`` names. ``reply_chars`` carries the
     # size so a consumer can see that a large answer arrived without carrying it.
-    "dispatch.recorded": EventContract("dispatch.recorded", "Detached dispatch recorded", ("dispatch_id", "target_persona"), ("sender_session_id", "notify_operator", "title")),
-    "dispatch.completed": EventContract("dispatch.completed", "Detached dispatch completed", ("dispatch_id", "status"), ("reply_chars", "error", "target_session_id")),
+    "dispatch.recorded": EventContract("dispatch.recorded", "Detached dispatch recorded", ("dispatch_id", "target_persona"), ("sender_session_id", "notify_operator", "title", "remote_install_id")),
+    "dispatch.completed": EventContract("dispatch.completed", "Detached dispatch completed", ("dispatch_id", "status"), ("reply_chars", "error", "target_session_id", "remote_install_id", "remote_reason")),
     "dispatch.delivered": EventContract("dispatch.delivered", "Detached dispatch delivered to its sender", ("dispatch_id",), ()),
     "dispatch.dropped": EventContract("dispatch.dropped", "Detached dispatch delivery abandoned", ("dispatch_id", "reason"), ("attempts",)),
     "dispatch.delivery_backlog": EventContract("dispatch.delivery_backlog", "Undelivered dispatch completions exceed the retention cap", ("pending", "cap"), ()),

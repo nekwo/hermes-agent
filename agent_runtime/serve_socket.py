@@ -2072,6 +2072,28 @@ class ServeSocketClient:
         payload = json.dumps(message, ensure_ascii=False, default=str) + "\n"
         self._sock.sendall(payload.encode("utf-8"))
 
+    def set_timeout(self, seconds: float) -> None:
+        """Re-arm the socket timeout after the handshake.
+
+        Gateway Stage 7 needs the DIAL and the READ to be bounded differently,
+        and they are different questions. R8's "bounded per-attempt dial
+        timeout" is about how long to wait for an install that may simply be
+        off — seconds, because an unreachable peer should converge rather than
+        hang. Waiting for a chat TURN to finish on that install is a wall
+        budget the sender chose, measured in minutes, and reusing the dial's
+        number for it would kill every remote turn that took longer than a
+        handshake.
+
+        Deliberately a method rather than a second constructor argument: the
+        value that matters changes at a moment (the ack), not at construction,
+        and a client with two timeouts baked in would still have to be told
+        when to switch.
+        """
+
+        self._timeout = float(seconds)
+        if self._sock is not None:
+            self._sock.settimeout(self._timeout)
+
     def read_frame(self) -> dict[str, Any] | None:
         if self._reader is None:
             raise RuntimeError("connect() first")

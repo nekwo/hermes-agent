@@ -87,7 +87,10 @@ AGENT_CHAT_SEND_SCHEMA = {
                 "description": (
                     "Target persona id, e.g. 'neko_supervisor' (reaches the canonical primary "
                     "instance). A personainst_* handle is also accepted and targets THAT specific "
-                    "instance — use it to reach a non-primary instance when a persona runs several."
+                    "instance — use it to reach a non-primary instance when a persona runs several. "
+                    "To reach an agent on a PAIRED INSTALL on another machine, qualify the target "
+                    "with that install: '@workstation/dev'. Cross-install sends need wait=false. "
+                    "Anything without an @install/ prefix is on this install."
                 ),
             },
             "message": {
@@ -270,6 +273,28 @@ def agent_chat_send(
             error_kind="contradictory_thread_target",
         )
 
+    # Gateway Stage 7 (R4). SYNTAX first, and before anything else looks at the
+    # target: an `@install/target` that will not parse must refuse rather than
+    # fall through to the local lane, because falling through would silently
+    # address somebody on THIS machine with a briefing written for another one.
+    # `None` here is the ordinary case and means "unqualified, i.e. local" —
+    # which is a property of the parser rather than a default (see
+    # `agent_runtime.gateway_targets`).
+    from agent_runtime.gateway_targets import (
+        TargetRefusal,
+        parse_install_target,
+        peer_store_root,
+        resolve_install_target,
+    )
+
+    install_qualifier = parse_install_target(persona_id)
+    if isinstance(install_qualifier, TargetRefusal):
+        return _refusal(
+            install_qualifier.message,
+            error_kind=install_qualifier.reason,
+            target_persona=persona_id,
+        )
+
     # Envelope provenance: the chain/deadline for the CURRENT turn, seeded by
     # the mission-chat handler. Depth/cycle policy is decided downstream at
     # the canonical chokepoint; here we only clamp this hop's wall budget to
@@ -284,6 +309,44 @@ def agent_chat_send(
     detached = coerce_optional_flag(wait) is False
     notify = coerce_optional_flag(notify_operator) is True
     sender_session = str(requested_by_session or "").strip()
+
+    remote_target = None
+    if install_qualifier is not None:
+        if not detached:
+            # **A cross-install send is the DETACHED lane only, and this is a
+            # scope statement rather than a limitation discovered late.** The
+            # synchronous relay runs the target's turn inside the sender's own
+            # turn, under the sender's process lock and the shared chain
+            # deadline — a safety story made entirely of facts about THIS
+            # process. None of it holds across a machine boundary: the far
+            # install's turn obeys its own concurrency cap, its own budget and
+            # its own drain, so a sender blocked on it would be blocked on a
+            # clock nobody here owns. The durable row is what replaces that,
+            # and the durable row is what `wait: false` means.
+            return _refusal(
+                f"{persona_id} is on another install, and a cross-install send "
+                "returns a handle rather than a reply: send it with wait=false "
+                "and their answer will arrive as its own message in this "
+                "conversation.",
+                error_kind="remote_requires_detached",
+                target_persona=persona_id,
+            )
+        remote_target = resolve_install_target(peer_store_root(), install_qualifier)
+        if isinstance(remote_target, TargetRefusal):
+            # DETERMINISTIC, so it fails fast here and burns no attempt — the
+            # `dispatch_delivery.py:123-132` class, reached before any row
+            # exists rather than after eight identical retries.
+            extra = (
+                {"candidates": list(remote_target.candidates)}
+                if remote_target.candidates
+                else {}
+            )
+            return _refusal(
+                remote_target.message,
+                error_kind=remote_target.reason,
+                target_persona=persona_id,
+                **extra,
+            )
 
     if detached and not sender_session:
         # A detached dispatch is a PROMISE to deliver the answer back into the
@@ -399,7 +462,17 @@ def agent_chat_send(
     # instance's default session; the handler's canonical_persona_instance_id
     # preserves placement-backed sibling ids (personainst_<persona>_agent_2). A
     # bare persona id forwards no handle → the persona's canonical primary.
-    target_instance_id = persona_id if _looks_like_instance_handle(persona_id) else None
+    #
+    # A cross-install target forwards NO local handle: the string after the
+    # `/` is spelled in the far install's vocabulary and is split by the far
+    # install's own rule (`chat_turn.normalize_peer_chat_execute`), so running
+    # this machine's handle test over it would be this machine answering a
+    # question only the other one can.
+    target_instance_id = (
+        None
+        if remote_target is not None
+        else (persona_id if _looks_like_instance_handle(persona_id) else None)
+    )
 
     args = SimpleNamespace(
         persona_id=persona_id,
@@ -470,6 +543,7 @@ def agent_chat_send(
             notify_operator=notify,
             chain=chain,
             wall_budget=wall_budget,
+            remote_target=remote_target,
         )
 
     # The handler hands its payload dict straight over through the
@@ -638,6 +712,7 @@ def _dispatch_detached(
     notify_operator,
     chain,
     wall_budget,
+    remote_target=None,
 ):
     """Record a detached dispatch durably, queue its child turn, return the handle.
 
@@ -649,6 +724,16 @@ def _dispatch_detached(
     was ever asked for; a caller told ``dispatched: true`` for a row that failed
     to persist would wait forever for a delivery that can never be attempted.
     A store failure therefore REFUSES the dispatch instead of running it blind.
+
+    **Gateway Stage 7: the row is the same row when the target is on another
+    install.** Everything above is unchanged — the row is written first, on the
+    SENDER's install, and the sender's operator sees the outstanding ask in
+    Activity exactly as they do for a local one. What changes is one key on the
+    spec, and therefore which leg the supervisor takes: a spec carrying
+    ``remote_install_id`` is performed by a peer-tier call instead of by a child
+    process. There is no distributed row and no two-phase state to reconcile;
+    install B records the turn it ran in its own chat store, which is its own
+    business and not this row's.
     """
 
     from agent_runtime.config import mission_chat_dispatch_max_concurrent
@@ -662,6 +747,12 @@ def _dispatch_detached(
     ambient_home, background_home = _dispatch_homes()
     spec["hermes_home"] = ambient_home
     spec["head_home"] = background_home
+    if remote_target is not None:
+        # The ID, not the name. A display name is chrome two installs can share
+        # (Stage 6's field note #4), and the supervisor dials by id.
+        spec["remote_install_id"] = remote_target.install_id
+        spec["remote_display_name"] = remote_target.display_name
+        spec["remote_target"] = remote_target.target
     started_at = time.time()
     try:
         record_dispatch(
@@ -679,6 +770,9 @@ def _dispatch_detached(
             notify_operator=bool(notify_operator),
             relay_chain=list(chain),
             dispatched_at=started_at,
+            remote_install_id=(
+                "" if remote_target is None else remote_target.install_id
+            ),
         )
     except Exception as exc:
         logger.exception("agent_chat_send could not record dispatch %s", dispatch_id)
