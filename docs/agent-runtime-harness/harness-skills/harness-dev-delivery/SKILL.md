@@ -1,6 +1,6 @@
 ---
 name: harness-dev-delivery
-description: Shared Backend Dev and Launcher Dev working contract — repo discipline, focused self-tests, commit hygiene, backend Postgres proof, the cross-stack API contract packet Backend writes before Frontend integrates, and honest reporting on a chat turn.
+description: "ALWAYS-ON working contract for EVERY Backend Dev and Launcher Dev chat turn, from a one-line fix to a staged program — repo discipline, focused self-tests, commit hygiene, backend Postgres proof, the cross-stack API contract packet Backend writes before Frontend integrates, and honest reporting. This is the per-turn baseline; for a staged multi-stage implementation order, load staged-deep-audit-delivery ON TOP of it."
 metadata:
   hermes:
     surfaces: [mission_chat]
@@ -22,7 +22,11 @@ metadata:
 > the focused command yourself, commit exactly your slice, and report the real result in
 > the chat.
 
-Use this skill for non-trivial Backend Dev or Launcher Dev work.
+**This is the always-on contract, not an occasional process.** It applies to every
+Backend Dev or Launcher Dev chat turn — a one-line fix as much as a feature slice.
+The occasional process lives elsewhere: for a staged, multi-stage implementation
+order, load `staged-deep-audit-delivery` on top of this skill; it wraps these rules
+in the stage/docs/deep-audit loop and never replaces them.
 
 ## Delivery Rules
 
