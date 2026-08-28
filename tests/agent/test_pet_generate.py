@@ -7,6 +7,7 @@ exercised hermetically.
 
 from __future__ import annotations
 
+import logging
 import os
 
 import pytest
@@ -53,6 +54,155 @@ def test_extract_strip_frames_transparent_returns_centered_cells():
         assert frame.getpixel((0, 0))[3] == 0
         # Something is drawn.
         assert frame.getchannel("A").getextrema()[1] > 0
+
+
+# ─────────────────── severed subjects: the walk-se failure ───────────────────
+#
+# Live, a charsheet row died on "frame 3 contains multiple separated subjects".
+# The pose was ONE connected component in its slot; it was severed into stacked
+# slabs *inside* the extractor, and nothing put it back together. The boxes in
+# these tests are the ones measured on the rejected artifact.
+
+
+def test_merge_rejoins_a_subject_severed_into_stacked_slabs():
+    # Measured on the rejected walk-se frame: near-total x-overlap, 1px and 2px
+    # y-gaps. One character, three boxes.
+    merged = atlas._merge_related_boxes(
+        [(6, 303, 203, 426), (11, 427, 202, 450), (13, 452, 213, 581)]
+    )
+
+    assert merged == [(6, 303, 213, 581)]
+
+
+def test_merge_keeps_two_real_poses_apart():
+    poses = [(0, 0, 100, 200), (250, 0, 350, 200)]
+
+    assert sorted(atlas._merge_related_boxes(poses)) == poses
+
+
+def test_merge_keeps_two_grid_rows_apart():
+    """The 2D-grid path depends on stacked POSES staying separate subjects.
+
+    Rejoining slabs must not also rejoin the two visual rows a model draws when
+    it ignores "one horizontal row" — that is the case ``_component_crops``
+    exists to handle.
+    """
+    rows = [(0, 0, 200, 200), (0, 300, 200, 500)]
+
+    assert sorted(atlas._merge_related_boxes(rows)) == rows
+
+
+def test_merge_still_joins_a_prop_on_the_same_row():
+    # The behaviour that was already there: a cape a few px off the body.
+    merged = atlas._merge_related_boxes([(100, 50, 200, 250), (208, 80, 230, 200)])
+
+    assert merged == [(100, 50, 230, 250)]
+
+
+CHROMA = (255, 0, 255, 255)
+_SEAM_SLOT = 208
+_SEAM_FRAMES = 8
+
+
+def _seam_severed_strip(*, seams=(-40, 20), severed=3):
+    """An 8-pose chroma strip with one pose cut by thin full-width seam lines.
+
+    Poses sit close enough that the strip-level horizontal merge collapses them
+    into one box — exactly what the live artifact did — so extraction falls
+    through to the gutter path and each pose is validated as its own column.
+    The seams key out with the backdrop, severing that one pose into slabs.
+    """
+    width, height = _SEAM_SLOT * _SEAM_FRAMES, 800
+    img = Image.new("RGBA", (width, height), CHROMA)
+    draw = ImageDraw.Draw(img)
+    rx, ry, cy = 95, 140, 400
+    for i in range(_SEAM_FRAMES):
+        cx = i * _SEAM_SLOT + _SEAM_SLOT // 2
+        draw.ellipse((cx - rx, cy - ry, cx + rx, cy + ry), fill=(60, 90, 200, 255))
+        if i == severed:
+            for offset in seams:
+                y = cy + offset
+                draw.rectangle((cx - rx, y, cx + rx, y + 1), fill=CHROMA)
+    return img
+
+
+def test_a_pose_severed_by_seam_lines_still_slices_into_whole_frames():
+    frames = atlas.extract_strip_frames(
+        _seam_severed_strip(), _SEAM_FRAMES, method="auto", fit=False
+    )
+
+    assert len(frames) == _SEAM_FRAMES
+    severed = frames[3].getbbox()
+    intact = frames[2].getbbox()
+    assert severed is not None and intact is not None
+    # The repaired frame must carry the WHOLE pose, not the tallest slab: its
+    # vertical span matches an untouched neighbour's within the seam width.
+    assert abs((severed[3] - severed[1]) - (intact[3] - intact[1])) <= 6
+
+
+# ─────────────── the auto/components leniency contract ───────────────
+
+
+def _frame_with(boxes, size=(220, 600)):
+    img = Image.new("RGBA", size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    for left, top, right, bottom in boxes:
+        draw.rectangle((left, top, right - 1, bottom - 1), fill=(200, 60, 60, 255))
+    return img
+
+
+def _multi_subject_frames():
+    scattered = _frame_with([(20, 20, 200, 180), (20, 260, 200, 420), (20, 500, 200, 590)])
+    plain = _frame_with([(20, 200, 200, 400)])
+    return [plain, plain, scattered] + [plain] * 5
+
+
+def _width_outlier_frames():
+    narrow = _frame_with([(90, 200, 130, 400)])
+    wide = _frame_with([(20, 200, 420, 400)], size=(440, 600))
+    return [narrow] * 7 + [wide]
+
+
+@pytest.mark.parametrize(
+    "frames,message",
+    [
+        (_multi_subject_frames, "multiple separated subjects"),
+        (_width_outlier_frames, "multi-pose width outlier"),
+    ],
+)
+def test_a_soft_check_raises_strict_and_only_warns_lenient(frames, message, caplog):
+    built = frames()
+
+    with pytest.raises(ValueError, match=message):
+        atlas._validate_extracted_frames(built, 8, strict=True)
+
+    with caplog.at_level(logging.WARNING, logger=atlas.__name__):
+        atlas._validate_extracted_frames(built, 8, strict=False)
+
+    assert any(message in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize("strict", [True, False])
+def test_an_empty_frame_is_a_hard_error_under_both_methods(strict):
+    frames = [_frame_with([(20, 200, 200, 400)])] * 7 + [_frame_with([])]
+
+    with pytest.raises(ValueError, match="frame 7 is empty"):
+        atlas._validate_extracted_frames(frames, 8, strict=strict)
+
+
+@pytest.mark.parametrize("strict", [True, False])
+def test_a_short_frame_count_is_a_hard_error_under_both_methods(strict):
+    frames = [_frame_with([(20, 200, 200, 400)])] * 7
+
+    with pytest.raises(ValueError, match="expected 8 frames, got 7"):
+        atlas._validate_extracted_frames(frames, 8, strict=strict)
+
+
+def test_a_fully_keyed_out_strip_still_raises_under_auto():
+    blank = Image.new("RGBA", (_SEAM_SLOT * _SEAM_FRAMES, 800), CHROMA)
+
+    with pytest.raises(ValueError):
+        atlas.extract_strip_frames(blank, _SEAM_FRAMES, method="auto", fit=False)
 
 
 
