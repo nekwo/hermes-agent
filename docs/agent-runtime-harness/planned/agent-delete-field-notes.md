@@ -107,6 +107,20 @@ annotation (`placement_id: str = "qa_retire_1"`); fixed by hand in
 `test_agent_retire_service.py`, `test_serve_rpc_agent_retire.py`, and
 `test_agent_retire_verb.py`.
 
+**A static scan cannot find them all, and the suites that hide them are the
+ones a reviewer would never look at.** The literal-pattern migration keyed on
+`placement_id=`, `"placement_id":` and `"--placement-id",`. Five suites build
+the id dynamically instead — `_create(persona, placement)`,
+`_drag_in_an_agent("qa_agent_threaded")`, `_create_with_skills(..., placement=...)`
+— so their ids were invisible to every regex and to the "which files declare a
+placement id" file list the migration was scoped by. They were found only by
+running the full `tests/agent_runtime tests/hermes_cli` sweep, which is also why
+that sweep is not optional on a change of this shape: the four suites named in
+the plan's acceptance were green while `test_agent_create_subphases`,
+`test_persona_prewarm`, `test_harness_doctor`, `test_persona_skill_policy` and
+`test_created_agent_first_message` were red. Fixed in a follow-up commit
+(24 literals).
+
 **A scripted edit on Windows must write bytes, not text.** `Path.write_text`
 applies the platform newline translation, so the migration silently flipped 13
 LF files to CRLF and turned a 244-literal rename into a 16 000-line diff — and
