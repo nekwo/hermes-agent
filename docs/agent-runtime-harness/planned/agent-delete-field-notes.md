@@ -244,6 +244,44 @@ merge-base diff selects any additional claim, the gate will exit 2 on the cap
 rather than on a survivor — split the landing or raise the cap deliberately, and
 do not read that exit as a mutation failure.
 
+## F8 — the two persona-instance doors disagreed about refusal ORDER
+
+Adding the fence beside each door's existing `placement_id is required`
+pre-check put it in a different position on each verb, and only running
+`test_persona_instance_roster_fence.py` showed it:
+
+* `persona instance create` calls `require_known_persona` BEFORE the block that
+  holds the placement checks, so the roster answer already won there.
+* `persona instance open-chat` asks its roster check INSIDE the
+  `--add-instance` branch, AFTER the placement pre-check — so the new fence
+  landed in front of it and an unknown persona with a badly-shaped placement id
+  started hearing "wrong shape" instead of "no such agent".
+
+Moved open-chat's fence below `require_known_persona` to match create. "That
+agent does not exist" is the more fundamental answer than "that id is the wrong
+shape", and an operator who typed both mistakes should hear the one that is
+about the agent. Both still refuse before any store write.
+
+Worth stating as a general lesson: placing a new guard "next to the similar
+existing guard" is not the same as placing it at the same POINT IN THE ORDER,
+and two doors onto one service had already drifted.
+
+## F9 — the affected-file set had to be derived three times
+
+The full-tree sweep is the only thing that actually settled which suites mint
+placements. Three rounds of stragglers, each invisible to the previous scan:
+
+1. thirteen files matching the three literal spellings (`placement_id=`,
+   `"placement_id":`, `"--placement-id",`);
+2. six files that build the id dynamically
+   (`_create(persona, placement)`, `_drag_in_an_agent("...")`,
+   `_create_with_skills(..., placement=...)`), found by the first full sweep;
+3. `test_persona_set_skills.py` and `test_persona_instance_roster_fence.py`,
+   found by grepping the hyphenated flag spelling `--placement-id` and
+   `--add-instance`, which the underscore-keyed greps had never matched.
+
+Total across the three rounds: 271 literals in 21 files.
+
 ## F7 — D4 (hermes half): an alias, and the dump the plan expects does not exist here
 
 `persona instance delete` is `add_parser("retire", aliases=["delete"])` — ONE
