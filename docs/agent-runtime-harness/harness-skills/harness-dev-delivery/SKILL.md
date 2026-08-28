@@ -1,6 +1,6 @@
 ---
 name: harness-dev-delivery
-description: Shared Backend Dev and Launcher Dev working contract — repo discipline, focused self-tests, commit hygiene, backend Postgres proof, and honest reporting on a chat turn.
+description: Shared Backend Dev and Launcher Dev working contract — repo discipline, focused self-tests, commit hygiene, backend Postgres proof, the cross-stack API contract packet Backend writes before Frontend integrates, and honest reporting on a chat turn.
 metadata:
   hermes:
     surfaces: [mission_chat]
@@ -82,6 +82,100 @@ Use this skill for non-trivial Backend Dev or Launcher Dev work.
   build / Stage C visual preflight, not a blanket excuse for `flutter test` failures.
 - See the `harness-qa-verdict` skill (which absorbed `launcher-analyze-proof` 2026-08-28)
   for choosing the narrowest analyze/test command and for the Stage C screenshot call shape.
+
+## Cross-stack contract handoff
+
+*Absorbed from `frontend-backend-contract-handoff` 2026-08-28.*
+
+Use this whenever work crosses Eternia Backend APIs and Launcher/frontend integration —
+a new or changed endpoint, schema, serializer, payload, entitlement, feed, admin/config, or
+websocket/event contract that the Launcher will consume. Skip it for backend-only work with
+no frontend consumer, or frontend-only work against an already-frozen documented contract.
+
+**Order of work: Backend, then Frontend, then QA.** This is an ordering rule you keep
+yourself; nothing enforces it and no router reads what you write.
+
+1. Backend Dev designs, implements, tests, and documents the contract, then posts the
+   contract packet **in the chat** before Frontend integrates.
+2. Frontend Dev reads the packet and integrates UI/provider/state against it.
+3. QA verifies the integrated evidence and the user flow.
+
+Frontend may start in parallel only against a frozen fixture/schema Backend has said it will
+not change underneath. If the contract is still moving, wait for the packet.
+
+Backend Dev owns the contract before Frontend integrates it. Frontend Dev must not
+reverse-engineer endpoint behavior from backend code, must not guess missing semantics, and
+must not leave the gap for QA to discover — ask for the missing fields by name
+(`agent_chat_send` to the owning Dev, or the operator in the reply) and say what is blocked.
+QA **verifies, not designs**: QA is never the first party to decide API shape, field names,
+nullability, error semantics, pagination, auth, or frontend mapping. A contract mismatch goes
+back to the owning Dev as a named handoff failure listing the exact missing or contradictory
+fields; QA does not invent the schema.
+
+Mocked-only evidence does not release either side (see Backend Commands above for the backend
+tier rule): a green provider test over a hand-written fixture proves the mapping, not the
+contract.
+
+### Contract packet
+
+Post this in the chat reply so the next agent and the operator both see it. Document the
+contract durably too when it is reusable — the `EterniaBackend_brain` note, or the project's
+OpenAPI/schema file; inline test fixtures only when the contract is narrow and already obvious
+from the tests.
+
+```yaml
+contract_owner: backend_dev
+consumer: dev
+contract_status: proposed|implemented|tested|blocked
+endpoint:
+  method: GET|POST|PATCH|DELETE
+  path: /api/...
+  route_name: optional_name
+auth:
+  required: true|false
+  roles:
+    - user|admin|owner
+request_schema:
+  path_params: {}
+  query_params: {}
+  body: {}
+response_schema:
+  type: object|array
+  fields:
+    field_name:
+      type: string|number|integer|boolean|object|array|null
+      required: true|false
+      nullable: true|false
+      description: stable semantic meaning
+errors:
+  - status: 400
+    code: validation.some_code
+    shape: {detail: string, code: string}
+examples:
+  happy_path: {}
+  empty_state: {}
+  validation_error: {}
+compatibility:
+  additive: true|false
+  migration_required: true|false
+  frontend_fallback: required|not_required
+backend_evidence:
+  targeted_tests:
+    - command: scripts/test.sh app.tests.ContractTests
+      result: PASS|FAIL (exit code, test count)
+  full_gate:
+    command: scripts/test.sh
+    result: PASS|FAIL|not_run:<exact reason>
+frontend_unblock_criteria:
+  - Contract status is `tested` or explicitly accepted as fixture-frozen.
+  - Example payloads are present.
+  - Error/null/empty semantics are defined.
+```
+
+A command you did not run is not evidence. Backend proof must cover validation/error/null/
+empty behavior, not only the happy path — every frontend-visible behavior. Frontend maps
+contract fields through domain models/adapters and provider/repository tests using the
+packet's fixture payloads, not ad-hoc maps inside widgets.
 
 ## Deployment Is Not Local Delivery
 

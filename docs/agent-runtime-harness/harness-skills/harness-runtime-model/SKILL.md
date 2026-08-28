@@ -1,6 +1,6 @@
 ---
 name: harness-runtime-model
-description: Hermes Agent Runtime mental model + first-class commands to view and operate Mission Control (personas / instances / chats / graph / board). Use instead of low-level DB/Python/scripts.
+description: Hermes Agent Runtime mental model AND the operating manual for Mission Control — personas / instances / chats / graph / board / office, the first-class commands to view and operate them, and (in references/) the live operating loop: place-message-delete a QA instance, read MCP admission receipts, triage stalled turns, capture Stage C proof, preserve evidence. Use instead of low-level DB/Python/scripts.
 metadata:
   hermes:
     surfaces: [mission_chat]
@@ -40,6 +40,52 @@ to read. A card never starts, routes, or changes anything.
 
 `hermes` == `python -m hermes_cli.main`. There is no `hermes harness runtime`
 command. Always `--json`. Never use raw DB / Python / ad-hoc scripts to inspect.
+
+## Operating loop — load the reference that matches the task
+
+This package absorbed `mission-control-harness` (2026-08-28); it is now the whole
+operator manual. This file is the preloaded model. The operating detail is in
+`references/`, loaded on demand — read the one that matches BEFORE acting:
+
+- `references/operations.md` — **the operating loop.** Roots and the `base` vs `alice`
+  home caveat, the start checklist, the extra inspect/operate rows this file does not
+  carry, the fresh-instance-per-QA-task recipe (create · office write · message ·
+  delete), the delete lane, MCP admission receipts, stalled-turn triage, evidence
+  preservation, and the final report shape. Read it before operating anything live.
+- `references/persona-chat.md` — operator-channel behavior, the canonical new-chat
+  contract, identity/latency/turn-identity rules, agent-to-agent `agent_chat_send`
+  and the relay policy. Read before persona-chat / operator-channel / bridge work.
+- `references/proof.md` — Backend and Launcher proof commands, the Stage C MCP
+  visual-proof recipe, and its known hazards. Read before attaching or judging proof.
+- `references/debugging.md` — the snapshot parity envelope, UI⟷harness divergence
+  classes, the MC/UI checklist. Read when the UI disagrees with harness truth.
+
+## Non-negotiables
+
+- Do not trust an agent summary as proof, and never claim something works from code
+  inspection. Run it, and cite the receipt (tool-trace row, artifact path,
+  `client_message_id`/`turn_id`, `mcp_calls_spent`).
+- Check `.parity.runtime_root` and `.parity.profile` in `harness snapshot --json`
+  before believing anything. Roster/office/board/graph answers are home-independent;
+  **admission, model, and profile answers are not** — the launcher's serve child runs
+  under `profiles\base` or the persona's bound profile, not your CLI's `alice`. Say
+  which home produced any receipt you report (`references/operations.md`, "Roots").
+- Use first-class harness CLI verbs. Never inspect or mutate runtime state with raw
+  DB access, ad-hoc Python, or hand-editing store files.
+- **Archive-never-delete**, including the verb named `delete` (a full alias of
+  `retire`, which archives and preserves chat history). There is no hard-delete verb
+  to reach for.
+- Visual claims need Stage C proof captured through the MCP path in
+  `launcher-mcp-operations` — the only sanctioned one. If it is blocked, record the
+  exact blocker and still attach command/code proof. Never kill Tony's live Launcher.
+- Image lines pass through UNTOUCHED — reproduce every `MEDIA:<absolute image path>`
+  line, and every bare absolute screenshot path, VERBATIM on a line of its own, in
+  your own reports and in every relay, quote, and summary. Canonical rule:
+  `launcher-mcp-operations` SKILL.md, "Screenshot capture and delivery".
+- Never write raw secrets into SessionDB (recall-reachable). Do not overwrite
+  unrelated local changes.
+- If agents loop, stall, or take the wrong proof path, that is a Harness gap: name
+  the command, the typed error, and the missing receipt. "It hung" is not a report.
 
 ## View
 

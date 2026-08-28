@@ -303,7 +303,11 @@ The directories present match `hermes_constants.CANONICAL_SHARED_SKILL_IDS`
 `harness-dev-delivery`, `harness-continuity`, `harness-qa-verdict`,
 `harness-runtime-model` and `harness-charsheet-authoring`. The 2026-08-28
 skills consolidation deleted `harness-mission-lead` (the mission-lane tombstone)
-outright and folded `launcher-analyze-proof` into `harness-qa-verdict`. Read
+outright, folded `launcher-analyze-proof` into `harness-qa-verdict`, and folded
+the shared-root-only `mission-control-harness` into `harness-runtime-model` —
+whose lean `SKILL.md` stays the required preload while the absorbed operating
+manual lives in its on-demand `references/operations.md`. Each of those merges
+kept the count at five, not raised it. Read
 the constant for the count; this list is a gloss and went stale within a day of
 `harness-charsheet-authoring` joining it.
 
