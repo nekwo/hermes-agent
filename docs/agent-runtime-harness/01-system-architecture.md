@@ -136,14 +136,19 @@ the placement consequence is
 always did both halves (`PersonaInstanceStore.retire` archives the row AND, through
 `OfficeStore.archive_actors_for_instance`, every actor bound to the instance).
 What it adds is a DOOR (`runtime.agent.retire`, `harness agent retire`, and
-`persona instance retire` delegating to the same function) and a RECEIPT: the ack
+`persona instance retire` delegating to the same function — with `persona
+instance delete` as a full argparse alias since 2026-08-27, because the
+operator's verb is delete) and a RECEIPT: the ack
 NAMES every actor it archived (`archived_actor_keys`) beside every one it could
 not (`office_archive_failures`). The office half is still best-effort — the roster
 archive is authoritative with or without the office projection — but it is no
 longer SILENT, which is what let a half-state (row archived, desk still on the
 canvas) exist with nothing able to detect it. Retiring an already-archived id
 replays the same ack with `already_retired: true` rather than refusing, so a
-client that lost the ack can ask again.
+client that lost the ack can ask again — and the replay first SWEEPS any actor a
+client mechanically resurrected back into the archive, because idempotent must
+not mean inert (the boot-flush resurrection incident, [06
+§inverse](06-office-and-board.md#the-inverse--one-call-takes-an-agent-off-the-level-and-says-what-left)).
 
 **"Placed" is the JOIN, and neither store is folded into the other** (placement
 plan D1). Entity 2 answers *does this agent exist* — `persona instance create

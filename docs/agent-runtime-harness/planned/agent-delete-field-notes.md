@@ -2,8 +2,9 @@
 
 Running record for the hermes half of
 `agent-delete-and-roster-identity.md` (Stages R1, D1, D2, and the hermes half of
-D4). House rule: a falsified assumption is written here the moment it falsifies,
-not at the end.
+D4; the plan file was deleted by the landing that folded its shipped facts into
+docs 01 and 06 — the placement-verb precedent). House rule: a falsified
+assumption is written here the moment it falsifies, not at the end.
 
 Base ref: `01b6ad1813` (the plan commit). Worktree branch:
 `worktree-agent-a32a0ca2d070be5db`.

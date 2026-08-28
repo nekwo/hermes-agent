@@ -61,9 +61,29 @@ store method, and every guard lives in that method rather than in either door
 (`OfficeStore.upsert_actor`, all of it inside `office_lock`). In order:
 `_guard_class_keyed_write` (the class→instance re-key fence, hoisted out of four
 callers by EG-6.6), `_guard_no_conflict` (an unresolved realm-sync sidecar),
-`_guard_duplicate_desk`, then `_check_revision`. Each door keeps only a
+`_guard_duplicate_desk`, `_guard_archived_actor` (the tombstone fence, asked only
+when no live row exists), then `_check_revision`. Each door keeps only a
 TRANSLATION of the typed refusal into its own taxonomy — never a copy of the
 predicate — so deleting a fence does not leave either door guarded.
+
+**`_guard_archived_actor` is the tombstone fence (D1, 2026-08-27), and it ends
+the store's most dangerous courtesy.** Until then an upsert whose key had an
+archive copy was read as "operator intent to re-add": the store cleared the
+resurrection-guard ledger entry AND unlinked the archive copy. But the caller
+audit found no designed re-add gesture behind that arm at all — `harness office
+actor-restore`, the documented un-archive, calls `restore_actor` directly and
+never passes through `upsert_actor` — so every write that reached it was
+MECHANICAL, including the launcher's boot-window held-flush drain, which is
+exactly how a retired agent came back `state: active` nineteen seconds after its
+retire acked clean (the live 2026-08-27 incident), with the unlinked archive copy
+then wedging the retire replay into `archived_actor_keys: []` forever. Now an
+upsert of an archived key refuses `4090` / `data.reason: "actor_archived"` and
+leaves both the ledger entry and the archive copy INTACT; the cure is
+delete-local on the client, never a retry — re-placing is a NEW create with a
+fresh minted id. Consent to resurrect is its own flag (`--resurrect` on `harness
+office actor-upsert`), deliberately NOT implied by `--allow-class-key`: one
+consent answers "may this write use a class key", the other "may this write raise
+the dead", and an operator who typed the first was never asked the second.
 
 **`_guard_duplicate_desk` is the newest, and it is a store fence for a rule that
 used to be the launcher's alone.** One persona holds ONE live desk per level.
@@ -199,6 +219,25 @@ An explicit JSON `null` is read as ABSENT, deliberately: a client spelling "no
 opinion" as `null` means what one omitting the key means, and refusing one while
 accepting the other would make the wire's meaning depend on a serializer's
 omit-none setting.
+
+**The placement id must be classifiable by both repos, and the server's own mint
+never was (R1, 2026-08-27).** The launcher tells a deliberate placement from an
+operator channel by one regex — `_agent_(\d+|[0-9a-f]{8})$`
+(`mission_agent_identity.dart:121`) — and `mint_placement_id` claimed parity with
+the launcher's mint while producing `{token}_{hex8}` with no `_agent_` marker. So
+every server-minted placement derived an instance id the launcher classified as a
+CONVERSATIONAL channel, fed into the operator-channel dedupe, and — newer wins —
+silently evicted the operator's real channel from the roster: the wrong-alice
+incident, reachable with no operator input at all. The mint now produces
+`{token}_agent_{hex8}`, the shape authority lives once in `models.py`
+(`looks_like_deliberate_placement`, with the launcher regex named as its peer),
+and a CALLER-supplied `--placement-id` that does not end in the deliberate shape
+refuses `placement_id_not_discriminable` at all three doors (`agent create`,
+`persona instance create`, `persona instance open-chat`) — refuses rather than
+canonicalizes, because the flag exists to PREDICT the actor key and a rewritten
+id breaks the prediction. The unknown-persona question is asked before the shape
+question at every door, so "that agent does not exist" never hides behind a
+spelling complaint.
 
 **The policy is hermes', and the launcher's copy is a prediction.** The launcher
 needs a world position for the pending chip and the staged scene node before the
@@ -461,12 +500,29 @@ the only join an operator has left.
 `data.reason` carrying the code verbatim, because the launcher decodes
 `data.reason` first and the numeric code second.
 
-**Retiring the same id twice is an ANSWER, not an error.** The second call
-replays the ack with `already_retired: true` — the same `archive_path`, and the
-same `archived_actor_keys`, re-read from the office archive rather than
-reconstructed — because a remote client that lost the first ack must be able to
-ask again. An id that never existed still refuses `not_found`: the replay reads a
-TOMBSTONE, and absence alone is not one.
+**Retiring the same id twice is an ANSWER, not an error — and idempotent is not
+INERT (D2, 2026-08-27).** The second call replays the ack with `already_retired:
+true` and `archived_actor_keys` re-read from the office archive rather than
+reconstructed, because a remote client that lost the first ack must be able to
+ask again. But before answering, the replay SWEEPS: any actor still live and
+bound to the retired instance is archived on the spot, reporting per-actor
+failures exactly as the fresh arm does. The old replay "archived nothing, so it
+could fail at nothing" — which read as elegance and was the wedge itself: when
+the launcher's boot flush resurrected an archived actor (and the pre-D1 store
+unlinked the archive copy on the way), every retry answered `already_retired:
+true, archived_actor_keys: []` forever, and the verb could not remove what its
+own ack said was gone. An id that never existed still refuses `not_found`: the
+replay reads a TOMBSTONE, and absence alone is not one.
+
+**The operator's spelling of this verb is `delete` (D4, operator ruling
+2026-08-27: "why retire — it should just be delete").** `harness persona
+instance delete` is a full argparse ALIAS of `persona instance retire` — same
+handler, same flags, registered as an alias precisely so the two spellings
+cannot drift. Nothing that crosses the wire moved: the RPC method is still
+`runtime.agent.retire`, the launcher capability id still
+`persona.instance.retire`; only operator-facing language (and the launcher's
+labels) says Delete. The archive underneath is unchanged — delete means "gone
+from the level, survivable by no running launcher", not "unrecoverable".
 
 Adding the name grew the manifest's method SET without moving
 `RPC_CONTRACT_VERSION`, and that presence is also the launcher's D12 rollout
@@ -839,6 +895,18 @@ omit it — the office's revision guard lives on the RPC lane only.
   `SCOUT_LAUNCHER_LANE_MAP_2026-08-17.md` §4.
 
 ## Open rows
+
+- **The delete lane SHIPPED end to end** (R1/D1/D2/D4 hermes, R2/R3/D3/D4
+  launcher, 2026-08-27) and its plan file was deleted by the landing that folded
+  it into this doc and 01. Landing record and every escalation it raised: the
+  launcher brain's `mission-control-queue.md` rows of 2026-08-27 (the sync-pull
+  tombstone bypass, the migration seed's third store, two bare-name surfaces,
+  the placement verb's discoverability) plus the field notes kept in both repos
+  (`planned/agent-delete-field-notes.md` here). Left open here:
+  `office_sync.apply_office_pull` still writes actor files past the tombstone
+  fence (`CARVED_OUT_ACTOR_WRITERS`' known hole — the last resurrection door),
+  and the launcher's replay verdict deliberately lags D2 (see its 04 §delete
+  lane).
 
 - **The placement verb SHIPPED end to end** (S0–S9, both repos, 2026-08-26/27)
   and its plan file was deleted by the commit that folded it into this doc,
