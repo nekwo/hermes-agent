@@ -60,6 +60,24 @@ operator manual. This file is the preloaded model. The operating detail is in
 - `references/debugging.md` — the snapshot parity envelope, UI⟷harness divergence
   classes, the MC/UI checklist. Read when the UI disagrees with harness truth.
 
+## The work contracts — load by role and order size
+
+This package is how to OPERATE the runtime. The work itself has its own
+contracts — separate skills, loaded to match the work, never folded in here:
+
+- `harness-dev-delivery` — the ALWAYS-ON contract for every dev chat turn,
+  one-line fix included: repo discipline, focused self-tests, commit hygiene,
+  the cross-stack contract packet, honest reporting.
+- `staged-deep-audit-delivery` — the LOAD-ON-ORDER process for a staged,
+  multi-stage implementation order: the trigger checklist plus the
+  stage → docs → deep-audit → prove loop. It wraps dev-delivery's rules and
+  never replaces them.
+- `eternia-writing-plans` — the plan-document quality bar, when the
+  deliverable is an implementation-ready plan rather than code.
+- QA turns load `harness-qa-verdict` INSTEAD of the dev contract: evidence
+  discipline and the narrowest proof command. QA judges work; it never
+  patches code.
+
 ## Non-negotiables
 
 - Do not trust an agent summary as proof, and never claim something works from code
