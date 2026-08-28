@@ -36,14 +36,14 @@ def test_dev_role_allows_skills_toolset_for_alice_style_loading():
 def test_harness_personas_expose_mission_dev_and_qa_skills():
     personas = {persona.id: persona for persona in sample_personas()}
 
-    assert "harness-mission-lead" in personas["neko_supervisor"].skills
     assert "harness-continuity" in personas["neko_supervisor"].skills
+    assert "harness-runtime-model" in personas["neko_supervisor"].skills
     assert "harness-dev-delivery" in personas["dev"].skills
     assert "harness-continuity" in personas["dev"].skills
-    assert "launcher-analyze-proof" in personas["dev"].skills
+    assert "harness-qa-verdict" in personas["dev"].skills
     assert "harness-dev-delivery" in personas["backend_dev"].skills
     assert "harness-continuity" in personas["backend_dev"].skills
-    assert "launcher-analyze-proof" not in personas["backend_dev"].skills
+    assert "launcher-stagec-mcp-screenshot" not in personas["backend_dev"].skills
     assert "harness-qa-verdict" in personas["qa"].skills
 
 
@@ -62,7 +62,6 @@ def test_harness_install_uses_persona_declared_skills_not_role_map():
 def test_stage59_hud_skill_sections_exist_in_role_skills():
     root = Path(__file__).resolve().parents[2] / "docs" / "agent-runtime-harness" / "harness-skills"
     expected = {
-        "harness-mission-lead": {"Scope Route", "Bounded Recovery", "QA Release", "Incident Resolution"},
         "harness-continuity": {"Spawn And Resume", "Return Command", "Progress Peek", "Never Slurp"},
         "harness-dev-delivery": {"Hand Off", "Request Proof Recipe", "Request Context", "Stage Plan", "Report Blocker"},
         "harness-qa-verdict": {"QA Verdict", "Request Missing Proof", "Report Blocker"},
@@ -515,16 +514,6 @@ def test_a_repair_archives_the_package_it_displaces_rather_than_destroying_it(
     before = list((shared_root / REPLACED_ARCHIVE_DIR_NAME).iterdir())
     assert not install_harness_skill(skill).changed
     assert list((shared_root / REPLACED_ARCHIVE_DIR_NAME).iterdir()) == before
-
-
-def test_mission_lead_skill_answers_graph_from_supplied_task_plan():
-    root = Path(__file__).resolve().parents[2] / "docs" / "agent-runtime-harness" / "harness-skills"
-    text = (root / "harness-mission-lead" / "SKILL.md").read_text(encoding="utf-8")
-
-    assert 'When asked "what graph/flow are you using?"' in text
-    assert "supplied active task's `mission_plan`" in text
-    assert "not from the most recent running goal" in text
-    assert "`blueprint_id`, active stage, stage order, owners, and outgoing edges" in text
 
 
 def test_harness_skill_install_allows_readiness_from_temp_home(tmp_path, monkeypatch):

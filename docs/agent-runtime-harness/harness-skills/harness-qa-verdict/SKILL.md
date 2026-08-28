@@ -1,6 +1,6 @@
 ---
 name: harness-qa-verdict
-description: QA review discipline for Eternia work — what counts as evidence, when visual/Stage C proof is required, cross-stack coverage, and reporting gaps honestly on a chat turn.
+description: QA discipline for Eternia work — what counts as evidence, choosing the narrowest correct analyze/test/screenshot command, when visual/Stage C proof is required, and reporting verdicts and gaps honestly on a chat turn.
 metadata:
   hermes:
     surfaces: [mission_chat]
@@ -16,15 +16,23 @@ metadata:
 > `outgoing_edges`), stage IDs, the `proofs/` store and its proof records, `checklist_updates`,
 > `validation_repair`, handoff/delivery packets, `request_missing_proof` as a routed action,
 > and Harness final-gate proof IDs. All of it was removed with the mission lane — see
-> `docs/agent-runtime-harness/16-mission-lane-removal.md`. There is no HUD, no gate, no
+> `docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/16-mission-lane-removal.md`
+> (archived with the 2026-08-22 docs consolidation). There is no HUD, no gate, no
 > proof store, and no release you can block. Your verdict is now an opinion delivered in
 > chat, and it is worth exactly as much as the evidence you actually looked at.
 >
 > Stage C visual proof is a KEEP: the `launcher_qa` MCP server, the PowerShell helpers, and
 > the screenshot artifacts are all live. "Proof ID" below means a Stage C artifact handle or
 > a command result you or someone else really produced — not a row in a deleted store.
+>
+> **Merged (2026-08-28).** This skill absorbed `launcher-analyze-proof`: one skill now
+> carries both halves of QA — how to produce the right evidence (narrowest correct command)
+> and how to judge it.
 
-Use this skill for QA review of Eternia implementation work.
+Use this skill for QA review of Eternia implementation work, and for choosing the
+narrowest correct command when Launcher work needs static analysis, a focused test, or a
+Mission Control screenshot. Run the command yourself and report the real result; there is
+no proof runner to ask and no gate to satisfy.
 
 ## What Counts As Evidence
 
@@ -48,6 +56,67 @@ Use this skill for QA review of Eternia implementation work.
   broad searching means you are looping: stop and report what you reviewed and what gap
   remains.
 - Do not patch the code yourself, and do not approve a visual claim with no visual evidence.
+- Never use `flutter --version`, `flutter doctor`, `where flutter`, or `which flutter` as
+  evidence that Launcher code works. Those are readiness signals only.
+
+## First Preflight For Launcher Windows / Stage C Proof
+
+- Before any Windows debug rebuild, Marionette freshness check, Stage C MCP launch/attach,
+  screenshot, or video capture — and before accepting such an artifact in review — check
+  for already-running `eternia_launcher.exe` and stale `stagec_qa_mcp_server.exe`
+  processes first.
+- If either is running and the next capture needs a fresh debug binary or a fresh Stage C
+  window, close/kill those processes before rebuilding or capturing (or, in review, require
+  a cleanup/relaunch or classify the artifact as stale). Stale Launcher windows can lock
+  `build/windows/.../Debug` files, keep an old `lib/main.dart` binary alive, or make MCP
+  attach to the wrong window.
+- Do not blame ordinary `flutter test` widget failures on a running Launcher by default;
+  inspect the output. A running Launcher mostly affects Windows build/Marionette/Stage C
+  visual capture, not headless widget tests.
+- After cleanup, rerun the narrowest valid command once. If cleanup is impossible, report a
+  redaction-safe environment blocker that names the process owner/IDs and what it blocks.
+- If a matching screenshot/video already exists for the same target and state, inspect it
+  rather than asking for another copy.
+
+## Choose The Narrowest Analyze
+
+- Full release gate only: `flutter analyze`.
+- Mission Control feature gate: `flutter analyze lib/features/mission_control test/features/mission_control`.
+- Changed-file gate: `flutter analyze <changed lib/test files or containing feature dirs>`.
+- Stage C/Marionette wiring gate: `flutter analyze lib/main_marionette.dart lib/core/qa test/core/qa`.
+- Do not use `flutter analyze lib/main.dart` unless `lib/main.dart`, bootstrap routing, or app startup wiring changed.
+
+## Choose The Narrowest Test
+
+- For Mission Control page/event-view rendering changes, use the focused page/widget test:
+  `flutter test test/features/mission_control/mission_control_page_test.dart`.
+- For Mission Control bridge/archive/snapshot changes, do not recycle the page/widget test.
+  Use the bridge regression pair:
+  `flutter test test/features/mission_control/mission_control_snapshot_test.dart test/features/mission_control/mission_control_bridge_test.dart`.
+- Use repo-wide `flutter test` only when the operator asks for the full suite.
+- Report the command, its exit status, and the failure excerpt. Do not paste whole logs into
+  the chat; keep the artifact and carry a pointer.
+
+## Stage C Screenshot Essentials
+
+- Mission Control visual proof must be pinned to the live Harness runtime. In every
+  `mcp_launcher_qa_open_app_tab` or `mcp_launcher_qa_launch_or_attach` call for Mission
+  Control, pass `hermes_profile`, `harness_runtime_root`, and `hermes_home`, then verify the
+  envelope shows `hermes_profile` non-null, `harness_runtime_root_configured:true`, and
+  `hermes_home_configured:true`. Unpinned pixels do not prove the correct runtime root/profile.
+- `mcp_launcher_qa_open_app_tab` owns composed screenshot knobs: `screenshot_stabilize_ms`,
+  `screenshot_max_retries`, and `screenshot_retry_delay_ms`.
+- `mcp_launcher_qa_screenshot_window` is a primitive and accepts only
+  `window_title_prefix`/`window_title`/`window`, `label`, `out_dir`, `foreground`,
+  `max_retries`, and `retry_delay_ms`. Do not pass the composed `screenshot_*` knobs to
+  `screenshot_window`; use `max_retries` and `retry_delay_ms` there, or add a bounded
+  `Start-Sleep` between navigation and capture.
+- For operator-facing Mission Control screenshots, capture a fullscreen or maximized
+  Launcher window. If the artifact is visibly compressed, too small, blank/white, or
+  low-information, do not call it done; report the exact blocker and retry once.
+- The full MCP operating workflow — capture vs driven-proof lanes, semantic controls,
+  delivery format, credential preflight, and the pitfall corpus — lives in the
+  `launcher-mcp-operations` skill.
 
 ## Backend And Deployment Review
 
@@ -66,18 +135,6 @@ Use this skill for QA review of Eternia implementation work.
 - When production deployment is push-triggered, a rollout account must show a remote sync
   step before the push (pull/fetch, rebase when needed) and then the push. A bare `git push`
   is not a rollout account.
-
-## Stage C Visual Review
-
-Before reviewing or asking for a Launcher Stage C screenshot/video, verify the capture came
-from a fresh intended Launcher window. If `eternia_launcher.exe` or a stale
-`stagec_qa_mcp_server.exe` was already running before the rebuild/capture, require a
-cleanup/relaunch or classify the artifact as stale. This preflight is for Windows
-build/Marionette/visual freshness; do not reinterpret ordinary `flutter test` assertion
-failures as process-lock failures unless the log shows a lock/attach/build error.
-
-If a matching screenshot/video already exists for the same target and state, inspect it
-rather than asking for another copy.
 
 ## QA Verdict
 

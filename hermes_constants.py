@@ -18,13 +18,11 @@ from pathlib import Path
 # same authority without introducing dependency cycles.
 CANONICAL_SHARED_SKILL_IDS = frozenset(
     {
-        "harness-mission-lead",
         "harness-dev-delivery",
         "harness-continuity",
         "harness-qa-verdict",
         "harness-runtime-model",
         "harness-charsheet-authoring",
-        "launcher-analyze-proof",
     }
 )
 

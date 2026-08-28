@@ -80,8 +80,8 @@ Use this skill for non-trivial Backend Dev or Launcher Dev work.
   screenshots/videos, first check for already-running `eternia_launcher.exe` and stale
   `stagec_qa_mcp_server.exe` processes and close them before capturing. This is a Windows
   build / Stage C visual preflight, not a blanket excuse for `flutter test` failures.
-- See the `launcher-analyze-proof` skill for choosing the narrowest analyze/test command and
-  for the Stage C screenshot call shape.
+- See the `harness-qa-verdict` skill (which absorbed `launcher-analyze-proof` 2026-08-28)
+  for choosing the narrowest analyze/test command and for the Stage C screenshot call shape.
 
 ## Deployment Is Not Local Delivery
 

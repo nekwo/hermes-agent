@@ -50,14 +50,14 @@ def sample_personas() -> list[AgentPersona]:
     neko = sample_persona(
         "neko_supervisor",
         toolsets=["file", "search", "terminal", "session_search", "code_execution", "todo", "skills"],
-        skills=["harness-mission-lead", "harness-continuity", "harness-runtime-model"],
+        skills=["harness-continuity", "harness-runtime-model"],
     )
     neko.display_name = "Neko Mission Lead"
     dev = sample_persona(
         "dev",
         toolsets=["file", "search", "terminal", "session_search", "code_execution", "skills"],
         hermes_profile="gpt-launcher",
-        skills=["harness-continuity", "harness-dev-delivery", "launcher-analyze-proof", "launcher-stagec-mcp-screenshot"],
+        skills=["harness-continuity", "harness-dev-delivery", "harness-qa-verdict", "launcher-stagec-mcp-screenshot"],
     )
     dev.display_name = "Launcher Dev Agent"
     dev.repo_scope_label = "EterniaLauncher"
