@@ -448,13 +448,24 @@ def _normalize_skill_selection(selection: list[str] | None) -> list[str]:
     return sorted(cleaned)
 
 
-def _tombstone_blocks(entry_slug: str, slug: str) -> bool:
+def skill_tombstone_matches(entry_slug: str, slug: str) -> bool:
     """Does ledger entry ``entry_slug`` block the package published as ``slug``?
 
     Mirrors ``realm_sync._skill_slug_selected`` exactly: the slug itself, or —
     for a categorized ``<cat>/<child>`` slug — its bare child name. The
     selection and the tombstone MUST agree about what a name means, or a slug
     could be simultaneously "selected" and "not the thing that was deleted".
+
+    Public because the operator delete verb (``hermes harness skills delete``)
+    asks the rule while holding a CANDIDATE entry slug and no realm yet — "which
+    canonical packages would a tombstone on this name cover, and which realms
+    currently publish one of them" — a question :func:`skill_tombstoned` cannot
+    be asked, since there is no ledger to read. Two entry points, ONE rule; a
+    second spelling in the CLI is precisely what §2.3 forbids.
+
+    Because the rule is deliberately identical to the SELECTION rule, the same
+    function answers "is this package selected" as
+    ``any(skill_tombstone_matches(entry, slug) for entry in selection)``.
     """
 
     if entry_slug == slug:
@@ -462,6 +473,11 @@ def _tombstone_blocks(entry_slug: str, slug: str) -> bool:
     if "/" in slug:
         return entry_slug == slug.split("/", 1)[1]
     return False
+
+
+#: Historical private name, kept for this module's own call sites (the
+#: ``validate_skill_slug`` / ``_validate_slug`` idiom in ``skill_promotion``).
+_tombstone_blocks = skill_tombstone_matches
 
 
 def skill_tombstoned(realm: Realm, slug: str) -> SkillTombstone | None:

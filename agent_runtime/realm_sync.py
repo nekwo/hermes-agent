@@ -677,8 +677,13 @@ def _apply_skill_tombstones(realm: Realm) -> dict[str, list]:
     return summary
 
 
-def _skill_tombstone_rows(realm: Realm) -> list[dict[str, Any]]:
-    """The ledger as receipt rows for the status envelope and the sidecar."""
+def skill_tombstone_rows(realm: Realm) -> list[dict[str, Any]]:
+    """The ledger as receipt rows for the status envelope and the sidecar.
+
+    Public because ``hermes harness realm skills show`` renders the SAME rows
+    (plan §4): a second rendering in the CLI is how one ledger ends up with two
+    receipt shapes that drift.
+    """
 
     return [
         {
@@ -690,6 +695,10 @@ def _skill_tombstone_rows(realm: Realm) -> list[dict[str, Any]]:
             getattr(realm, "skill_tombstones", None) or [], key=lambda item: item.slug
         )
     ]
+
+
+#: Historical private name, kept for this module's own call sites.
+_skill_tombstone_rows = skill_tombstone_rows
 
 
 @dataclass(frozen=True, slots=True)

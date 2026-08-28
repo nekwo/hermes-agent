@@ -108,6 +108,16 @@ ERROR_EXIT_CODES = {
     "invalid_request": 2,
     "invalid_payload": 2,
     "invalid_isolation": 2,
+    # `harness skills delete` refusals (SkillTombstoneRefused). Family 2 because
+    # the fault is in the REQUEST and the operator's next move is to change what
+    # they typed: a malformed slug is retyped, and an installer-owned id is
+    # deleted through the other lane entirely (the constant plus the repo source
+    # under docs/agent-runtime-harness/harness-skills/) rather than through a
+    # realm ledger the next pull's installer would overrule. Two codes and one
+    # family, on this table's standing rule: the family is the next MOVE, the
+    # code is WHICH correction.
+    "skill_slug_invalid": 2,
+    "skill_installer_owned": 2,
     "duplicate_conflict": 4,
     # The office desk fence (D6): this persona already holds a live desk on this
     # level. Family 4 beside ``duplicate_conflict`` because the operator's next
@@ -339,6 +349,11 @@ def _error_hint(code: str) -> str:
         # ``emit_harness_error`` merges details for three named types and this is
         # not one of them), so the default would point at an empty object.
         "duplicate_desk": "Move the desk this persona already holds — named in the message — or remove it with `harness office actor-remove`, then retry.",
+        # Both name the operator's actual next move rather than the default's
+        # "inspect safe_details": the details carry only the slug, which is the
+        # one thing the operator already typed.
+        "skill_slug_invalid": "Use a bare slug or <category>/<name>; see `hermes harness skills inventory --json` for the catalog spelling.",
+        "skill_installer_owned": "This id is reinstalled from repo source on every pull. Remove it from hermes_constants.CANONICAL_SHARED_SKILL_IDS and docs/agent-runtime-harness/harness-skills/ instead.",
     }.get(code, "Inspect safe_details and retry after correcting the request.")
 
 
