@@ -2032,6 +2032,71 @@ of this file. Two things, and the first is the correction to OP's own entry abov
   ran back to back. Whatever flips (a lease, a keepalive, a per-turn registry rebuild)
   flips per-turn, not per-session.
 
+## 2026-08-27 — the env bleed, fixed at the consumer (envbleed slice)
+
+Standing in the hermes repo, worktree `X:/wt/envbleed` off `4ab953df89`. Sent to fix the
+cross-persona `HERMES_HOME` bleed the three entries above measured. Four things, and the
+first two correct the plan I was handed rather than confirming it.
+
+- **[READ] `persona_chat_actor_prewarm` has NO bind site of its own.** The plan said "the
+  prewarm switches its bind to `persona_profile_scope`", and there is no bind there to
+  switch: the module resolves a `PersonaProfileBinding`, puts `profile=binding.hermes_profile`
+  on an `AgentRunRequest`, and hands it to `ProfileAgentRunner.prewarm`. The bind happens one
+  layer down, in `_execute_agent_run` (`agent_runtime/profile_runner.py:857`), inside the
+  `with` stack a REAL TURN uses — same `_WORKDIR_LOCK`, same `persona_profile_context`,
+  same everything, deliberately, because that module's whole premise is that an actor built
+  under different scopes is a different actor. So there is no prewarm-only knob; the only
+  available spelling is `export_env=not request.prewarm_only` on the shared body.
+  **Consequence:** any statement of the form "the prewarm does X to the environment" is
+  really a statement about `_execute_agent_run`, and applies to every chat turn too.
+
+- **[READ] Turning the mirror off for the prewarm is NOT sound, and the blocker is a
+  thread, not a subprocess.** I went looking for the spawn the plan told me to check for
+  and found something narrower and worse: `mcp_admission.admit_mcp_servers` runs its
+  registrar on a thread it starts itself (`threading.Thread(..., name="mcp-admission")`,
+  `agent_runtime/mcp_admission.py:1226`), and the cold path from there is
+  `register_mcp_servers`, which spawns. A ContextVar crosses neither boundary — not the
+  thread, not the spawn — so the `os.environ` mirror is the ONLY channel by which an
+  admitted MCP server learns which persona home it is serving. Drop the mirror for the
+  prewarm and a prewarmed chat's servers come up on the head home while the turn's come up
+  on the persona's: the prewarmed actor stops byte-matching, `acquire()` rebuilds, and the
+  module has paid 3 s to produce something it then throws away. **Consequence:** "a prewarm
+  only builds an actor, it cannot need a global mirror" is false — construction includes
+  admission, and admission spawns. The mirror stays.
+
+- **[READ] The fix therefore belongs at the CONSUMER, and the repo had already litigated
+  this exact class twice.** `core_cache`'s HC-1 note (`agent_runtime/core_cache.py:1268`)
+  argues it at length for the snapshot fingerprint — including the part that matters most
+  here, that resolving through `get_hermes_head_home()` is *necessary and not sufficient*,
+  because its first authority is a ContextVar and the bleeding thread has none. Its answer
+  is capture-once at a declared boot instant. `chat_live_log`'s module docstring has the
+  same finding under the heading "THE HERMES_HOME TRAP" and the same answer. The argv lane
+  simply never got its capture. It has one now: `serve_loop` captures `get_hermes_home()`
+  beside `capture_fingerprint_home()` — the boot instant that provably precedes every
+  persona scope — and `_run` binds it per request through a new
+  `profile_context.process_home_scope`. A ContextVar out-ranks the env var in
+  `get_hermes_home()`'s ladder, so the argv lane wins without taking anything away from the
+  lane that needs the global. Not the head home, deliberately: under the launcher's
+  `HERMES_HEAD_HOME` the head and the runtime home are different directories on purpose,
+  and an argv request belongs to the runtime one.
+
+- **[READ] What I did NOT do, so the next slice does not assume it.** (i) The mirror is
+  untouched — `persona_profile_context` still writes process-global env for every turn and
+  every prewarm, and every OTHER unbound thread in the serve is still a passenger on it.
+  I fixed the lane that was measured, not the class. The snapshot fingerprint and the chat
+  live log have their own captures; anything else that grows a thread in this process needs
+  its own. (ii) Only `HERMES_HOME` is pinned. `HOME` has no context-scoped hook at all and
+  is unobservable on native Windows anyway (`ntpath.expanduser` reads `USERPROFILE`);
+  `HERMES_AUTH_HOME`'s mirror is written with the HEAD auth home rather than the persona's,
+  so it was never a cross-persona bleed. (iii) A subprocess spawned from inside an argv
+  request still inherits ambient `os.environ`, mirror and all — the ContextVar does not
+  reach it. (iv) I did not reproduce the original `characters status --draft` failure
+  end-to-end against a live serve; the regression test drives the real `serve_loop` seam
+  with an injected dispatch that resolves `drafts_dir()`, which is the same four-frame-deep
+  reader the incident hit, but Stage C on a running launcher is still owed — and per the
+  entry above, the primary checkout has to fast-forward before the running serve has this
+  code at all.
+
 <!-- A2, A3, R1 and any slice standing in the HERMES repo: append your entries above this
      line, under the matching heading, or add a heading if none fits. Then say in your
      slice report that you did.

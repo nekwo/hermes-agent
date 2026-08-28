@@ -1714,6 +1714,42 @@ def serve_loop(
 
     _core_cache.declare_fingerprint_home_boot_site(FINGERPRINT_HOME_BOOT_SITE)
     _core_cache.capture_fingerprint_home()
+    # THIS SERVE'S OWN HERMES HOME, captured at the same instant and for the
+    # same reason — and then handed to every argv request below (see ``_run``).
+    #
+    # The fingerprint capture above protects the snapshot cache's closure from a
+    # concurrent persona scope. This protects the REQUESTS. Same mechanism, same
+    # boot instant, different victim, and it is worth stating why one capture
+    # cannot serve both: ``capture_fingerprint_home`` resolves through
+    # ``get_hermes_head_home()`` and reports whether that answer was
+    # authoritative, because a cache key must know when its home is a guess. A
+    # request does not want the head — under an operator-supplied
+    # ``HERMES_HEAD_HOME`` (the launcher sets it so the Mission Control
+    # transcript store stays put while ``HERMES_HOME`` selects a profile) the
+    # head and the runtime home are DIFFERENT directories on purpose, and an
+    # argv request belongs to the runtime one. So this reads ``get_hermes_home``
+    # directly.
+    #
+    # WHAT IT FIXES (measured 2026-08-27, operator's screen). This process is
+    # booted onto one home and then runs ``persona_chat_actor_prewarm`` over
+    # every placed persona; each warm binds ``persona_profile_context`` with the
+    # ``os.environ`` mirror ON — necessarily, because a spawned MCP server and a
+    # raw-env in-process plugin have no other channel. On the incident boot that
+    # was four instances on the profile ``launcher-qa``, 20:56:06-20:56:14, the
+    # first bind held 11.25 s. For that whole span every pool worker without a
+    # binding of its own resolved ``get_hermes_home()`` to ``launcher-qa``:
+    # ``harness characters status --draft 20260827-150945-7ba0cb`` read
+    # ``profiles\launcher-qa\characters\.drafts`` and reported a base-authored
+    # draft as nonexistent.
+    #
+    # Captured, never re-read per request: at this instant no persona scope can
+    # exist in the process (the anchor, the store-root resolve, the sweeps, the
+    # ready frame and the prewarm thread all come after), whereas a read at
+    # request entry would inherit a flip that was already live — which is half
+    # the field cases.
+    from hermes_constants import get_hermes_home as _get_hermes_home
+
+    serve_request_home = _get_hermes_home()
     # The METHOD lane's registry + its manifest. Imported here rather than at
     # module scope for the same reason as everything else in this function —
     # nothing agent_runtime-shaped is paid for before ``booting`` is out — and
@@ -1867,6 +1903,7 @@ def serve_loop(
             pass
 
     def _run(request: _ArgvRequest) -> None:
+        from agent_runtime.profile_context import process_home_scope
         from agent_runtime.request_control import request_cancel_scope
 
         token = _request_id.set(request.rid)
@@ -1901,7 +1938,36 @@ def serve_loop(
                 stdout_proxy.begin_capture(request.rid)
                 capturing = True
             try:
-                with request_cancel_scope(request.cancel_event):
+                # THE REQUEST'S OWN HOME, pinned for the width of the dispatch.
+                #
+                # A ContextVar, so it is per-worker and out-ranks
+                # ``os.environ["HERMES_HOME"]`` in ``get_hermes_home()``'s
+                # ladder — which is exactly the asymmetry the fix needs. A
+                # persona lane that mirrors the env keeps the global channel it
+                # genuinely requires (spawns, raw-env plugins), and this lane
+                # stops being a passenger on it. See
+                # ``profile_context.process_home_scope`` for the measured
+                # incident and for what the scope deliberately does not cover.
+                #
+                # Placed OUTSIDE ``request_cancel_scope`` and around the whole
+                # dispatch, not around a resolver: the bled reader was
+                # ``agent.charsheet.draft.drafts_dir()``, four call frames deep
+                # inside a ``_cmd_*`` handler, and there is no list of such
+                # readers worth maintaining — every handler that resolves a home
+                # is one. Binding at the seam covers all of them, including the
+                # ones added tomorrow.
+                #
+                # Chat turns arrive here too, on both lanes (the RPC
+                # ``spawn_chat_turn`` builds an ``_ArgvRequest`` and submits it
+                # to this same ``_run``). This does not disturb them: a turn's
+                # own ``persona_profile_context`` binds INSIDE this scope and
+                # its ContextVar override nests over this one, so the persona
+                # still gets its profile home. What changes is only the turn's
+                # STARTING home, which is now this serve's rather than whatever
+                # another lane last left in the environment.
+                with process_home_scope(serve_request_home), request_cancel_scope(
+                    request.cancel_event
+                ):
                     if cache_key is not None:
                         from agent_runtime.snapshot import snapshot_build_context_scope
 

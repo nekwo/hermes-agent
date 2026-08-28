@@ -405,3 +405,68 @@ def persona_profile_scope(
 
     with persona_profile_context(binding, runtime_root=runtime_root, export_env=False):
         yield
+
+
+@contextmanager
+def process_home_scope(home: Path | str | None) -> Iterator[None]:
+    """Bind *home* as THIS task's Hermes home, context-locally. The other half.
+
+    Everything above is written from the producing side — a lane that needs a
+    persona's home and takes it. This is the CONSUMING side: a lane that has a
+    home of its own and must not lose it to somebody else's mirror.
+
+    **The defect it retires** (measured 2026-08-27, operator's screen). The
+    launcher's serve child was booted onto ``profiles\\alice`` and ran its boot
+    actor prewarm (``persona_chat_actor_prewarm``) over every placed persona at
+    20:56:06-20:56:14: four instances bound to the profile ``launcher-qa``, the
+    first bind held for 11.25 s. Each of those binds runs
+    :func:`persona_profile_context` with ``export_env=True`` — the mirror, which
+    is process-global by construction and MUST stay so (a spawned MCP server or
+    a raw-env in-process plugin has no other channel; see the pinned-readers
+    block in that function). A concurrent ``harness characters status --draft
+    ...`` on the serve's argv lane, on a pool worker with no binding of its own,
+    fell through ``get_hermes_home()``'s ladder to the mirrored
+    ``os.environ["HERMES_HOME"]`` and resolved
+    ``...\\profiles\\launcher-qa\\characters\\.drafts``. It then reported a
+    base-authored draft as nonexistent. Nothing was wrong with the draft; the
+    request was asked to read the wrong disk.
+
+    **Why a ContextVar is the right instrument and env is not.** The override
+    installed here is per-task and per-thread, so it out-ranks the env var for
+    this lane and is invisible to every other one. That asymmetry is the fix:
+    the mirroring lane keeps the global channel it genuinely needs, and the lane
+    that reads in-process stops being a passenger on it. Writing a second env
+    var would only add another global to lose the same race.
+
+    **The home must be CAPTURED, not re-read.** The caller hands over a home it
+    resolved at a boot instant that provably precedes any persona scope in the
+    process — for ``harness serve`` that is the same instant
+    ``core_cache.capture_fingerprint_home`` is taken at, and for the same reason
+    (that module's HC-1 note argues it at length: resolving lazily pins whatever
+    scope happened to be live at first use). Re-reading ``os.environ`` at
+    request entry would simply inherit a flip that was already live, which is
+    half the field cases.
+
+    **What it does NOT cover, named rather than discovered later.** Only
+    ``HERMES_HOME``. ``HOME`` has no context-scoped hook at all (POSIX
+    ``expanduser``; unobservable on native Windows, where ``ntpath`` consults
+    ``USERPROFILE``), and ``HERMES_AUTH_HOME``'s mirror is written with the HEAD
+    auth home rather than the persona's, so it is not a cross-persona bleed to
+    begin with. A subprocess spawned from inside this scope still inherits the
+    ambient ``os.environ`` — a ContextVar never crosses a spawn — so a lane that
+    spawns and must not be redirected needs more than this.
+
+    ``None`` binds nothing and yields. A plain CLI process never captured a boot
+    home and must behave exactly as it does today; pinning an empty override
+    would out-rank a legitimate persona binding, which is a worse fault than the
+    one being fixed.
+    """
+
+    if home is None or not str(home):
+        yield
+        return
+    token = set_hermes_home_override(str(home))
+    try:
+        yield
+    finally:
+        reset_hermes_home_override(token)
