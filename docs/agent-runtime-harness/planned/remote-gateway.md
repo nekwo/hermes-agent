@@ -885,3 +885,149 @@ stream, not a lens. And the resume's remaining window is one drain pass wide: a
 batch already gated when a declaration lands can still go out bare, which costs
 the joiner one resync and cannot lose an event, because the client's
 `base_offset` gate refuses a patch it cannot chain.
+
+---
+
+## Stage 8 notes (hermes half) — landed 2026-08-28
+
+**The FINAL stage. `fetch` shipped as `runtime.media.index` + `runtime.media.get`.**
+
+### What shipped, in the order it landed
+
+- `fb895cbafb` — `agent_runtime/media_handles.py`: the handle grammar, the
+  derivation, the cap, the refusal vocabulary. 18 tests.
+- `1e6423a527` — the two verbs at the dispatcher, nine manifest pins in the same
+  commit, 19 predicate/authorization tests, 5 real-serve acceptance tests, and
+  one duplicate-helper fold the gate caught (`paths.safe_mtime`).
+
+### The design question the plan's sketch did not have an answer to
+
+§4's Stage 8 line says "`runtime.media.get` by handle" and stops there, which
+leaves the load-bearing question open: **how does a client learn a handle?**
+
+It cannot compute one. The discovery step (field notes, 2026-08-28) found that a
+chat image reaches an operator as a `MEDIA:<absolute path>` line inside the
+message TEXT — there is no media field on any chat record and no blob store under
+the runtime root — so the client's only pointer is a PATH, and the bytes are on
+the other machine.
+
+Two ways to close that, and the second is what shipped.
+
+1. **Rewrite `MEDIA:` lines server-side on the way out**, so the stream carries
+   handles. Rejected: it moves the stream contract for every client on every
+   lane to solve a problem only a remote one has, and this stack's stream
+   goldens are a cross-stack family whose movement is a design smell by standing
+   rule.
+2. **A second verb.** `runtime.media.index` answers with the artifacts in scope,
+   each row carrying BOTH the `reference` (the path string the client already
+   rendered) and the `handle` (a digest of the bytes). The client joins on what
+   it holds and spends what it was given.
+
+**The asymmetry is the whole security story: a reference travels OUT and never
+IN.** What comes back is a string the caller already read out of a message it was
+already allowed to read, so it discloses nothing new. What goes in is
+`sha256:<64 hex>` and is refused by a regex before this process constructs a
+`Path` at all — so there is no traversal surface, because there is no step that
+turns caller input into a path. The lookup can only answer with something the
+derivation itself put in the set.
+
+### Deviations from the plan, and the argument for each
+
+1. **TWO verbs where the plan named one.** Argued above. §3.3 calls this a
+   "verb family", which is what a family is.
+
+2. **The tier is `console` for both, and the one-line classification rule does
+   not decide it.** "A level MUTATION is `console`, everything else is `read`"
+   would make these `read` — neither writes anything. They are `console` because
+   the read arm is deliberately open to `unknown` (A5 kept that on purpose), and
+   an authenticated-but-unplaceable caller is exactly the one who must not be
+   able to pull bytes off the disk. Handing over a file's contents is an EGRESS,
+   not a read of the level. It is also what a `read`-tier device gets refused
+   with, and that is correct: "viewer" is an operator saying *look at my level*,
+   not *stream me every proof screenshot on this machine*.
+
+3. **The scope is derived from the chat live-log MIRROR, not from SessionDB.**
+   The transcript of record is SessionDB, whose schema is upstream's; the mirror
+   (`chat_live_log.py`) is the file-shaped projection of the same transcripts
+   that already exists for exactly this reason. The derivation reads it through
+   `capture_chat_live_log_root` — the mirror's OWN resolution, not a second
+   ladder, because a second ladder is how that module's documented `HERMES_HOME`
+   trap gets rebuilt one door over. Honest cost: the mirror caps a line at
+   `LIVE_LOG_TEXT_LIMIT` and omits intermediate assistant rows, so the scope is a
+   subset of what a transcript could offer. It fails CLOSED.
+
+4. **Reachability is necessary and not sufficient, so there is an extension
+   allowlist.** `MEDIA:` is a line the model writes; reachability alone makes
+   `MEDIA:~/.ssh/id_rsa` fetchable. The allowlist makes a credential
+   *unrepresentable* in the handle namespace rather than rejected by it. It is
+   deliberately NOT `gateway/platforms/base.py`'s `validate_media_delivery_path`,
+   whose 600 s recency window and cache-root allowlist would refuse yesterday's
+   Stage-C proof — the artifact this stage exists to deliver. Honest cost: video
+   and PDF are not in the namespace at all, and the largest `MEDIA:`-delivered
+   artifact on this machine is a 1.1 GB MP4.
+
+5. **The cap is 5 MiB and is not a new number.** `api_server.py`'s
+   `_MEDIA_DATA_URL_MAX_BYTES`, reused: same question, same protocol, same
+   reason. Measured first — 428 Stage-C screenshots, median 351,423 B, largest
+   2,146,781 B; whole image corpus tops out at 2,722,628 B — because a 1 MiB cap
+   (the number `MAX_LINE_BYTES` uses) would have refused a real one.
+
+6. **R9 consumed: mDNS NOT built.** Adopted at its recommendation, and nothing
+   in this stage reaches toward discovery. R7 consumed as a no-op: no telemetry
+   demanded a snapshot diet and Stage 5 shipped watermark resume, so none was
+   done.
+
+### No ranging, and the reason is measured
+
+Zero real artifacts on this machine exceed the cap. `MAX_LINE_BYTES` bounds what
+a CLIENT sends (a ~200-byte request); the reply is a server-to-client frame and
+the launcher's reader splits lines with no ceiling. 5 MiB of artifact is
+~6.99 MB of base64 on one line, which both ends carry. An over-cap artifact is
+indexed with `fetchable: false` and refused with `cap_bytes` and `size_bytes` on
+the frame, so a client learns the number instead of guessing it.
+
+### What the acceptance proves
+
+`tests/agent_runtime/test_gateway_media_fetch_e2e.py`, real `serve_loop`, second
+listener up, real TLS with a real certificate pin, real HMAC over a real paired
+credential:
+
+- a `console` device indexes, joins on the reference, fetches, and the received
+  bytes are sha256-equal to the file on disk;
+- the artifact's OWN absolute path, sent as a handle, is refused
+  `handle_invalid` with a message naming what the lane takes;
+- a traversal string is refused the same way; a guessed digest is
+  `unknown_handle`;
+- an over-cap artifact is indexed `fetchable: false` and refused with the cap
+  named;
+- a device paired at `read` is refused the whole family with the typed
+  `scope_denied` the launcher's decoders already branch on;
+- an unpaired caller's connection is dead at the hello, so the verb is not
+  merely refused — it is unreachable, and a frame written after gets no reply.
+
+The peer refusal needed no new code and no allowlist edit: Stage 6's iterated
+registry test covers both verbs automatically because it asserts the RULE.
+
+### Honest gaps
+
+1. **Still one machine.** Stage 1's gap, inherited unchanged: every listener
+   binds loopback. "A phone on the LAN fetched a screenshot from this desktop"
+   is unproven; what is proven is a paired-device-shaped client on loopback
+   doing exactly that.
+2. **Cross-install media is not built.** `PEER_METHOD_ALLOWLIST` untouched by
+   design. An operator on install A cannot fetch an artifact from install B even
+   through a chat B ran. Open row.
+3. **The scope is a subset of the transcript.** See deviation 3: an image
+   declared in a message longer than `LIVE_LOG_TEXT_LIMIT`, or in an
+   intermediate assistant row, has no handle. Nothing measured has hit this —
+   the real declarations sit at the head of their replies — and it is not
+   disproven.
+4. **Non-image media has no handle.** Deliberate (deviation 4), and it means the
+   Stage C video lane is not served by this stage at all.
+5. **The index is unfiltered and unpaginated.** Bounded by
+   `MAX_SCOPE_ARTIFACTS` / `MAX_SCOPE_LOGS` / `SCOPE_LOG_TAIL_BYTES` and
+   reporting `truncated`, which is honest but is not paging. The live corpus is
+   46 mirrors and 138,622 bytes, so no bound bites today.
+6. **No Stage C screenshot of a remote picture rendering.** The launcher half is
+   proven against a real serve at the connector and at the widget seam; a
+   captured proof of a phone painting a desktop's screenshot is still owed.

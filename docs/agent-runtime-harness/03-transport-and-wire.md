@@ -268,6 +268,8 @@ the only registration site, so this list is
 | `runtime.persona.prewarm` | `_runtime_persona_prewarm` | warm a persona |
 | `runtime.chat.message` | `_runtime_chat_message` | send one mission-chat turn |
 | `runtime.chat.steer` | `_runtime_chat_steer` | steer the running turn |
+| `runtime.media.index` | `_runtime_media_index` | what media this install can hand over |
+| `runtime.media.get` | `_runtime_media_get` | one artifact's bytes, by content handle |
 | `peer.ping` | `_peer_ping` | is the install⇄install edge alive |
 | `peer.agent_chat.execute` | `_peer_agent_chat_execute` | run one chat turn for a paired install |
 
@@ -275,7 +277,9 @@ the only registration site, so this list is
 listed ten while the runtime had twelve: Stage 3's `runtime.chat.*` pair landed
 in the manifest and in four literal pins but not here. The two rows above are
 that correction, made while adding the thirteenth rather than filed for later.
-**Fourteen since gateway Stage 7** added `peer.agent_chat.execute` (§1.3).
+**Fourteen since gateway Stage 7** added `peer.agent_chat.execute` (§1.3), and
+**SIXTEEN since gateway Stage 8** added the two `runtime.media.*` verbs
+(§2.1).
 
 `peer.ping` is the first name outside the `runtime.*` family, and the prefix is
 a declaration: `runtime.*` verbs act on this install's level — read it, mutate
@@ -345,6 +349,18 @@ still not what admits a peer, and the verb refuses a non-peer caller with its
 own `peer_identity_required` rather than `scope_denied`: the chokepoint DID
 admit a console caller, and it is the VERB that has no provenance to run under.
 
+**Both `runtime.media.*` verbs declare `console`, and this is the row where the
+one-line rule does NOT decide it** (gateway Stage 8). Neither mutates anything,
+so the rule as stated would put them with the reads. They are `console` for two
+reasons the rule does not cover. Handing a caller the raw BYTES of a file on
+this machine is an EGRESS, not a read of the level. And the read tier is
+deliberately open to `unknown` — a caller the transport authenticated and could
+not place — which is exactly the caller who must not be able to pull files off
+the disk; A5 kept that arm open on purpose, so a `read` declaration here would
+have been a hole shaped like a classification. It also settles what a
+`read`-tier device gets: a viewer is a viewer of the LEVEL, not a subscriber to
+every proof screenshot on the machine.
+
 This table used to be a list of ten LINE NUMBERS. Two of them (`2055`, `2115`)
 had already rotted by 2026-08-27 — a slice landing above them moved both — while
 the sentence around them still read as verified. A method name is what a client
@@ -396,6 +412,53 @@ mint-iff-absent — deliberately NOT `monitoring.install_id` (home-scoped and
 rotatable by design) nor the telemetry `install_id` (an anonymity primitive).
 The argument is in the module's own docstring; the staged plan is
 `planned/remote-gateway.md`.
+
+### 2.1 The `fetch` family — media by content handle (gateway Stage 8)
+
+`runtime.media.index` answers `{contract, cap_bytes, truncated, artifacts:
+[{handle, reference, media_type, size_bytes, fetchable}], scanned: {logs,
+declarations}}` and takes no argument but `correlation_id`.
+`runtime.media.get` takes `{handle}` and answers `{contract, handle,
+media_type, size_bytes, encoding: "base64", data}`.
+
+**Why two verbs.** A chat image reaches a client as a `MEDIA:<absolute path>`
+line inside the message TEXT — there is no media field on any chat record and no
+blob store under the store root — so the client's only pointer is a PATH, and it
+cannot compute a content handle from one. `index` is the bridge: each row
+carries the `reference` the client already rendered AND the `handle` it may
+spend.
+
+**A reference travels OUT and never IN, and that asymmetry is the security
+story.** What comes back is a string the caller already read out of a message it
+was allowed to read. What goes in is `sha256:<64 hex>`, refused by a regex
+before the process constructs a `Path`, so there is no traversal surface — there
+is no step that turns caller input into a path. A handle resolves only by
+LOOKUP in a set the server enumerated itself.
+
+**The scope is DERIVED, never registered** (`agent_runtime/media_handles.py`).
+It is rebuilt per call from the chat live-log mirror
+(`<head-home>/chat_live_logs/*.jsonl`), through that module's own
+`capture_chat_live_log_root` rather than a second resolution ladder. There is no
+handle registry to drift, and the per-file digest memo is keyed on
+`(path, size, mtime_ns)` so a rewritten file mints a new handle instead of
+serving the old one's bytes.
+
+**Two bounds beyond reachability.** Only files whose extension is in the image
+set ever become handles — `MEDIA:` is a line the MODEL writes, so reachability
+alone would put `MEDIA:~/.ssh/id_rsa` in the namespace; the allowlist makes a
+credential unrepresentable rather than rejected. And `MAX_FETCH_BYTES` is 5 MiB,
+which is `gateway/platforms/api_server.py`'s `_MEDIA_DATA_URL_MAX_BYTES` reused
+rather than re-decided: the same question about the same protocol. Consequence,
+stated rather than hidden: video and PDF have no handle at all.
+
+Refusals branch on `data.reason`: `handle_invalid` (where a path-shaped argument
+lands), `unknown_handle`, `artifact_too_large` (carrying `cap_bytes` and
+`size_bytes`), `artifact_unreadable`. No ranging exists, because no artifact
+measured on this machine exceeds the cap.
+
+**`PEER_METHOD_ALLOWLIST` was not widened**, so a paired install is refused both
+verbs by construction — the property the iterated registry test asserts about
+the rule rather than about names. Cross-install media is an open row.
 
 ## 3. The mission-control stream
 

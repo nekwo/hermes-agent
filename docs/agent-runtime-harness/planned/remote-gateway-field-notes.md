@@ -1157,3 +1157,123 @@ finding a lost commit is to fix the branch, and every one of those fixes appends
 an entry that makes the original question harder to answer. Read first, preserve
 with operations that do not write to the ref you are reasoning about, and hand
 the restore to whoever owns the branch.
+
+## 2026-08-28 — Stage 8: what the media survey actually found
+
+**Brief.** Build the `fetch` verb family: content-addressed handles for chat
+media and Stage-C proof, size-bounded, scope-checked, so remote clients stop
+needing install-local paths. The brief named a discovery step and made it part
+of the stage. This is that step's record.
+
+**Read, in this order.**
+
+- `agent_runtime/models.py`, `agent_runtime/persona_chat_history.py:1492-1549`,
+  `agent_runtime/mission_chat_turns.py` — looking for a media field on a chat
+  record.
+- `agent_runtime/persona_runtime.py:430-441` — the runtime's own prompt, which
+  is where the `MEDIA:` protocol is actually specified.
+- `gateway/platforms/base.py:1620-1760` (`extract_media`,
+  `MEDIA_TAG_CLEANUP_RE`, `validate_media_delivery_path`,
+  `MEDIA_DELIVERY_SAFE_ROOTS`, `_MEDIA_DELIVERY_DENIED_PREFIXES`) and
+  `gateway/platforms/api_server.py:840-900` (`_MEDIA_IMG_EXT`, `_MEDIA_MIME`,
+  `_MEDIA_DATA_URL_MAX_BYTES`).
+- `agent_runtime/chat_live_log.py` whole file — the mirror, its root capture,
+  `LIVE_LOG_TEXT_LIMIT`, `LIVE_LOG_ROTATE_BYTES`.
+- `agent_runtime/paths.py` — every store-root child, looking for a blob store.
+- `agent_runtime/serve_socket.py:340-360` (`MAX_LINE_BYTES`) and `:2130-2180`
+  (`_LineReader`) — the frame bound, and WHICH direction it bounds.
+- The launcher's render path:
+  `lib/features/messaging/content/text/local_document_reference.dart`,
+  `local_image_attachment.dart:960-1000`,
+  `lib/features/media/fullscreen_image_source.dart:400-405`.
+
+**Four findings, and the first two changed the design.**
+
+1. **There is no media field on any chat record, on either side of the wire, and
+   there is no blob store under the runtime root.** An image reaches an operator
+   as a `MEDIA:<absolute path>` line inside the message TEXT, and that is the
+   entire protocol. The launcher's model chain agrees: `AgentChatMessage` and the
+   shared `ChatMessage` both carry `content`/`text` and nothing else. So the
+   stage's phrase "chat media travels as install-local filesystem paths" is not
+   a shorthand — the path is literally the whole record, and the client's only
+   pointer to a picture is a string it parsed out of prose.
+
+   The consequence for the design: a client CANNOT compute a content handle,
+   because it holds a path and not the bytes. Some verb has to carry it from one
+   to the other, which is why the family is `index` + `get` and not `get` alone.
+
+2. **"Chat media" and "Stage-C proof" are ONE artifact family, not two.** The
+   Stage C skill's contract is to reply with a `MEDIA:<absolute path>` line, so a
+   proof screenshot reaches the launcher through exactly the chat-media lane. The
+   live corpus on this machine confirms it in one grep: of six resolvable
+   declarations, four are `X:\tmp\stagec\screenshots\*.png` and two are generated
+   chat images under `.hermes/profiles/base/cache/`. So one derivation covers
+   both halves of the stage's title, and a second "proof" surface would have been
+   a second name for the same thing.
+
+3. **The cap did not need to be invented — this repo had already answered it.**
+   `gateway/platforms/api_server.py:851` inlines `MEDIA:` files as base64 data
+   URLs for remote OpenAI-compatible frontends, capped at
+   `_MEDIA_DATA_URL_MAX_BYTES = 5 MiB`. That is the same question about the same
+   protocol for the same reason ("remote frontends can't read local file paths"),
+   so Stage 8 reuses the number rather than minting a second policy on one lane.
+
+   Measured before adopting it, because the brief asked for real sizes: 428
+   Stage-C screenshots under `stagec-smoke-local`, 166,382,102 B total, median
+   351,423 B, largest 2,146,781 B. Seven generated chat images, 1,138,544 –
+   1,422,827 B. The whole 175-file image corpus under both hermes homes tops out
+   at 2,722,628 B. **A 1 MiB cap — the number `MAX_LINE_BYTES` uses, and the
+   obvious first guess — would refuse a real artifact, measured.** 5 MiB clears
+   every image with headroom and refuses the 1.1 GB MP4 in
+   `stagec-smoke-local/videos`, which is the refusal being correct.
+
+4. **`MAX_LINE_BYTES` bounds the wrong direction to matter here, and the launcher
+   has no bound at all.** `_LineReader` is the SERVER reading a CLIENT's line; a
+   `runtime.media.get` request is ~200 bytes. The reply is a server→client frame,
+   and the launcher reads with `Utf8Decoder` + `LineSplitter`
+   (`lan_socket_connector.dart:1185`), which has no per-line ceiling. So a 5 MiB
+   artifact at ~6.99 MB of base64 rides one frame and touches neither bound. That
+   is why no ranging is built: not because ranging is hard, but because nothing
+   this machine produces needs it.
+
+**What contradicted the brief.** Two things.
+
+*The brief says "prefer deriving handles server-side at read time from the same
+stores that already know the artifacts."* That is exactly what shipped — but the
+store that knows them is not the one a reader would guess. The transcript of
+record is SessionDB (`state.db`, 15 MB on this machine), whose schema is
+upstream's; the thing that is greppable, file-shaped and already a projection of
+those transcripts is `chat_live_log`'s mirror, which exists because a head agent
+asked for exactly this in 2026-08. The derivation reads the mirror. The honest
+cost is recorded in the module: the mirror caps a line at
+`LIVE_LOG_TEXT_LIMIT = 8000` characters and does not carry intermediate
+assistant rows, so the scope is a SUBSET of what a transcript could offer — and
+it fails CLOSED (an unknown handle), never open.
+
+*The brief's scope rule — "artifacts reachable from data their tier already lets
+them read" — is necessary and is NOT sufficient, and this is the finding worth
+carrying forward.* `MEDIA:` is a line the MODEL writes. Reachability alone
+therefore makes "whatever the model typed" fetchable, and a model that typed
+`MEDIA:~/.ssh/id_rsa` would have written an exfiltration primitive into a chat
+log. `gateway/platforms/base.py` already knows this — its denylist comment says
+so outright — but its `validate_media_delivery_path` is wrong for THIS question:
+a 600 s recency window and a cache-root allowlist would refuse yesterday's
+Stage-C proof, which is the artifact the stage exists to deliver. So the bound
+that shipped is an extension allowlist, which makes a credential
+*unrepresentable* in the handle namespace rather than *rejected* by it. The
+honest cost, stated rather than hidden: video and PDF are not fetchable at all.
+
+**One measured thing that reads as a bug and is not.** Of 17 `MEDIA:`
+declarations in the live corpus, only 6 resolve to a file. The other 11 point
+into `characters/.drafts/<stamp>/`, which the charsheet lane sweeps. A declared
+artifact that is gone is not an error and not a handle — which is also why the
+index reports `scanned.declarations` separately from the artifact count.
+
+**What a later session should not re-derive.** The peer surface was deliberately
+not widened. `PEER_METHOD_ALLOWLIST` admits nothing it was not edited to admit,
+so registering two verbs excluded them from the cross-install surface with no
+edit at all, and Stage 6's iterated registry test covered them the moment they
+existed. Cross-install media is a real question (an operator on install A
+looking at a chat B ran) and it is a different one: an install's artifacts are
+its operator's, and a peer is another runtime whose agents drive it. Open row,
+not an oversight.
