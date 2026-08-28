@@ -944,3 +944,216 @@ leaves their staged files and the conflict exactly as found), then waited for
 — *stage and commit in one breath* — has a corollary: **check for an in-progress
 merge/cherry-pick before staging, because "one breath" is not atomic when
 somebody else's operation is already holding the index open.**
+
+## 2026-08-27 — Stage 5's hermes half: per-subscriber promotion, and a resume that is finally asked for
+
+**Brief.** Two rows the launcher-side plan assigned here: R10's recorded
+consequence (the fold intersection demotes a whole room to its narrowest
+subscriber) and Stage 2's recorded gap (watermark resume is client-side only —
+hermes re-sends the full hydrate on every reattach).
+
+### R10: the intersection was never wrong, the FRAME SHAPE was
+
+`accepted_fold_entities` takes the intersection across every attached
+subscriber, and its docstring's argument is airtight *for the wire it was
+written against*: one producer feeds N subscribers, every frame is fanned to all
+of them, so a batch may only be promoted when everyone can fold it. Union is the
+bug, aimed at the wrong client.
+
+What that argument actually rests on is an unstated premise — **a fan-out can
+deliver exactly one shape of a frame**. Remove the premise and the conclusion
+goes with it. A batch the room disagrees about now ships as ONE `fold_variants`
+envelope carrying the promoted patch AND the demoted core, and each
+subscription's pump resolves it against its own declaration on the way to its
+own sink. The producer promotes at the union; the demotion moves from the ROOM
+to the SUBSCRIBER.
+
+**No extra build is paid, and that is the load-bearing check.** The core inside
+the envelope is the one the intersection rule was already making for everybody —
+a batch that any subscriber could not fold demoted the whole room, so the
+snapshot build happened then too. What changes is who receives the megabyte, not
+how many megabytes are made. A batch nobody can fold never reaches the envelope
+(bare core), and a batch everybody can fold never reaches it either (bare patch,
+no core built at all), so it exists exactly on the batches where the room
+genuinely disagrees.
+
+### The gate is a containment, and the equivalence is tested rather than asserted
+
+`batch_required_fold_tokens` is `batch_is_patch_coverable` re-expressed as the
+SET it tests rather than the boolean it returns. Every declaration-dependent
+branch in the coverage classifier is a membership test against `declared` and
+every other branch is a flat refusal, so
+`coverable(e, d) == (req(e) is not None and req(e) <= d)` holds by construction.
+
+It is held by a TEST over the real event vocabulary against nine declaration
+shapes, not by a docstring, because an equivalence maintained in two places by
+hand is one that drifts — and it would drift silently: every homogeneous test
+would keep passing while the bare-patch path used one rule and the split gate
+used another.
+
+### The single-subscriber pin is a property of two lines, not a promise
+
+With one declaration the union and the floor are the SAME set, so
+`required <= accepted` takes every batch `required <= promote` could have and
+the split branch has no input that reaches it. Pinned twice: at the gate (with
+the snapshot builder monkeypatched to RAISE, so "no core was built" is proven
+rather than inferred) and end to end against a real `serve_loop`.
+
+### Two things the wire says differently, and one it deliberately does not
+
+The per-connection `subscribed` ack now answers with THIS client's accepted set.
+It used to be able to come back narrower than asked because a neighbour folded
+less; per-subscriber promotion retired that, so the honest content of a
+per-connection field is that connection's own answer. For a single subscriber it
+is the same value — which is why the launcher's byte-pinned `subscribed.json`
+capture does not move.
+
+The hydrate keeps echoing the INTERSECTION, and that asymmetry is deliberate:
+one hydrate is fanned to N subscribers and the floor is the only value true for
+every recipient. A subscriber may then be handed patches ABOVE that floor, which
+it can fold by construction — the fan-out only routes a patch to a declaration
+that covers it — so the echo is a guarantee and never a ceiling.
+
+**`test_a_subscriber_declares_what_it_can_fold_and_the_ack_says_what_was_accepted`
+asserted the OPPOSITE, and the inversion is the fix rather than a relaxation.**
+Read as a product sentence, the old assertion said a phone may cost a desktop its
+patch lane.
+
+### The envelope cannot reach a wire, and that is structural
+
+It is resolved on the consumer thread at the last moment before each sink — the
+only point in the fan-out that knows both the frame and WHO is about to receive
+it. A subscriber that declared nothing resolves through the historical set
+exactly as the coverage gate reads it, so a lane that never learned to declare
+keeps folding what it always folded and takes the core for everything else. The
+office push lane declares explicitly for exactly that reason: reading it as the
+historical set would have handed its sink a core for the very rows it exists to
+patch.
+
+**One honest cost, stated where it is paid:** the hub's byte bound over-counts a
+split frame, because `_frame_bytes` measures once on the producer thread before
+anyone knows which half each subscriber takes. Measuring per subscriber would put
+the serialization on the fan-out — the cost that class exists to avoid — and the
+error is in the safe direction: a stalled reader is dropped slightly sooner than
+its real backlog, never later.
+
+### The resume, and the restart-free join it needed first
+
+Stage 2 recorded the gap correctly: `subscribe` took no resume parameter, the hub
+restarts its producer so a rejoin's first frame is a hydrate, and the launcher's
+watermark could only feed its own `>`-gate — it paid for the megabyte and then
+dropped it.
+
+A resume is now the journal's tail from the client's own position, expressed as
+ordinary v2 `patch` frames chained `base_offset`→`watermark`. **No new fold
+contract, no new frame type, no second projection.** And the case a phone
+actually hits is the empty span: back after ninety quiet seconds, the watermark
+IS the tail, and the honest answer to "what did I miss" is nothing at all — zero
+frames where it used to be a full core.
+
+**The half that took the real thinking: a honoured resume must NOT restart the
+producer.** A restart re-baselines the room, so a resume that restarted would
+hand the client the very hydrate it just proved it did not need and charge every
+other subscriber a fresh core for it. `restart_producer=False` already existed
+for the office lane — and its own docstring names the precondition: the joiner
+must not be NARROWING what the room may promote, because a producer whose floor
+was frozen at build time keeps emitting BARE patches inside that floor, and a
+joiner that folds less answers them with re-hydrates.
+
+So the room is now read LIVE, once per drain pass, instead of once per producer
+(`stream_frames(fold_room=…)`). The next pass sees the narrowed floor and splits
+instead. This also retires a wart the old comment had to accept: a LEAVE could
+not re-widen the running producer without restarting it and charging everyone a
+core; re-read, a leave re-widens for free.
+
+**The window that remains, measured and named:** one drain pass wide — a batch
+already GATED when a declaration lands can still go out bare. It costs the joiner
+one resync and cannot lose an event, because the client's `base_offset` gate
+refuses a patch it cannot chain. Written into
+`serve.py::_accepted_fold_entities` rather than left for a reader to find.
+
+### Every refusal is named, because a silent fallback is the expensive one
+
+`patch_lane_disabled`, `journal_unreadable`, `journal_truncated`,
+`watermark_ahead_of_journal`, `backlog_exceeds_cap`, `span_not_foldable`,
+`span_without_patch_rows` — each on the ack. A resume that quietly fell back is
+indistinguishable from one that worked and cost a megabyte, which is the
+false-all-clear class this workstream exists to retire.
+
+`journal_truncated` needed a new primitive. `iter_from_offset` is a TAILER: it
+skips a slice whose file is missing and yields what remains, which is right for a
+tail and exactly wrong for a resume, where a skipped slice is a silent hole in a
+span the client is about to fold as contiguous. `resume_floor_offset()` walks
+BACKWARDS and answers the start of the earliest slice from which every later one
+is present, so a hole raises the floor above it rather than being averaged out.
+
+### One assertion the measurement moved
+
+The first draft asserted that deleting the live slice makes the floor `None`. It
+does not, and it cannot: once the file is gone, the bytes that would say how much
+it held are the bytes that are missing, so the floor has no honest way to tell
+"deleted with content" from "not created yet" — and refusing the latter would
+make a brand-new install the one runtime that can never resume. What DOES catch
+it is the TAIL: `log_end_offset` collapses to the live slice's start, and a client
+holding a real position is refused as ahead of the journal. The test now pins
+that, and names the bound it leaves (a client at or below the collapsed tail is
+told there is nothing to replay, and is re-baselined by the producer's next core
+— a store somebody deleted under a running serve, not a case this lane repairs).
+
+### Numbers
+
+* Promotion, real serve + two real socket clients + a real event log, one office
+  write: **desktop patch 407 B, phone core 7,968 B — 19.6x** on a test store
+  whose core is small; the field core is ~1 MB.
+* Resume, resolver lane: a two-event span is **429 B** against a **7,406 B**
+  hydrate on the same store. The empty span is **0 B**.
+* Suites: the gateway/serve/stream group **420 passed, 0 failed**, run with
+  `--timeout=300` because this machine takes 65 s on
+  `test_stream_stale_first_routing`'s repo-wide AST walk and the repo's cap is
+  30 s — environmental slowness, not a change of mine; the same file passes
+  cleanly on its own.
+
+### The known foreign red, unchanged
+
+`tests/agent_runtime/test_stream_contract_fixture.py` has 3 failures owned by the
+office lane's placement-id fence. Confirmed pre-existing before any change here
+and untouched: this work forced no golden regeneration, so the collision the
+brief warned about never arose.
+
+### The landing, and a shared-index incident worth the space
+
+Mid-stage, an external branch-repoint moved `main` to `origin/main`
+(`refs/heads/main@{0}: branch: Reset to origin/main`), discarding ~96 files of
+local commits from four lanes into the shared index. **Resolved: `main` was
+restored with full history, and both halves of this stage landed on it.**
+
+Recorded because the RECOVERY is the reusable part.
+
+*What was done at the moment of discovery, before anything else.* The promotion
+commit was reachable only from the reflog — in the object store, on no ref, and
+therefore exposed to GC and to any further branch movement. So:
+`git branch gateway-s5-hermes 782e87f6f9`, which creates a ref and touches
+`main`, `HEAD`, the index and the worktree not at all. Then both halves out to
+patches (`format-patch` for the commit, `git diff <commit> -- <paths>` for the
+uncommitted slice). Preservation first, diagnosis second.
+
+*What was deliberately NOT done, and this is the judgement worth keeping.* The
+96-file staged set was not committed. Committing it would have swept four lanes
+into one commit under one lane's message — the exact failure the shared-index
+rule exists to prevent, arriving through the door marked "never leave work
+untracked". Nor was `main` repointed back unilaterally: restoring a shared
+branch is not a decision one lane makes on behalf of four.
+
+*What the reflog could prove.* Two facts settled authorship. `git reset` writes
+`reset: moving to <sha>`; this entry reads `branch: Reset to origin/main`, which
+is a branch-repoint and not a reset. And the `HEAD` reflog had NO entry for the
+move — `HEAD@{0}` was still this lane's commit — which a reset performed in this
+working tree necessarily writes. A branch ref that moved out from under a `HEAD`
+which never moved is not something a command in this worktree did.
+
+**The lesson, as a rule rather than a story: a reflog is only forensic evidence
+if you read it BEFORE doing anything that writes to it.** The first instinct on
+finding a lost commit is to fix the branch, and every one of those fixes appends
+an entry that makes the original question harder to answer. Read first, preserve
+with operations that do not write to the ref you are reasoning about, and hand
+the restore to whoever owns the branch.

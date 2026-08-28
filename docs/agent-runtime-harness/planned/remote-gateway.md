@@ -813,3 +813,75 @@ ride them, don't re-derive:
   deleted placement plan. The fold-set-intersection hazard (a narrow phone fold
   demotes every subscriber's patches to full cores; fix = per-subscriber promotion at
   the hub, owned by Stage 5) is filed in the primary plan's §5 R10.
+  **CLOSED by Stage 5 — see below.**
+
+## Stage 5 notes (hermes half) — landed 2026-08-27
+
+Stage 5 is launcher-owned; what is hermes' is the two rows the primary plan
+assigned here. `782e87f6f9` (per-subscriber promotion at the hub — R10's
+recorded consequence), `49f6500ca3` (server-side watermark resume — Stage 2's
+recorded gap). The launcher half and its own receipts are in that repo's
+`docs/mission_control/planned/universal-remote-gateway.md` §4 Stage 5. Full
+running record, both findings and every honest bound, in this directory's
+`remote-gateway-field-notes.md`.
+
+**R10's hazard is closed, and the intersection was never wrong — the FRAME SHAPE
+was.** `accepted_fold_entities` argues correctly that one producer feeds N
+subscribers, every frame is fanned to all of them, and a batch may only be
+promoted when everyone can fold it. What that rests on is an unstated premise:
+that a fan-out can deliver exactly one shape of a frame. A batch the room
+disagrees about now ships as ONE `fold_variants` envelope carrying the promoted
+patch AND the demoted core, and each subscription's pump resolves it against its
+own declaration on the way to its own sink. The producer promotes at the UNION;
+the demotion moves from the room to the subscriber.
+
+No extra build is paid — the core in the envelope is the one the intersection
+rule was already making for everybody. A batch nobody can fold never reaches it
+(bare core) and a batch everybody can fold never reaches it either (bare patch,
+no core built), so it exists exactly where the room genuinely disagrees.
+Measured on a real serve with two real clients and one office write: desktop
+patch **407 B**, phone core **7,968 B**.
+
+**Single-subscriber behaviour does not move, by construction rather than by
+convention:** with one declaration the union and the floor are the same set, so
+the split branch has no input that reaches it. Pinned at the gate (with the
+snapshot builder monkeypatched to RAISE, so "no core was built" is proven) and
+end to end against a real `serve_loop`.
+
+**The resume closes Stage 2's gap and the drop-latency tables' other half.** A
+reconnecting client is sent the journal's tail from its own position as ordinary
+v2 `patch` frames; the case a phone actually hits — already current — is **zero
+frames** where it used to be a full core. A honoured resume attaches to the
+RUNNING producer rather than restarting it, which is what makes it worth having:
+a restart re-baselines the room, so a resume that restarted would hand the
+client the hydrate it just proved it did not need and charge everyone else a
+fresh core for it.
+
+That safety turns on one change worth naming here because it affects every
+subscriber, not just resuming ones: **the room is now read LIVE, once per drain
+pass, instead of once per producer** (`stream_frames(fold_room=…)`). A
+restart-free join — the office lane's, and now a resume's — is otherwise
+invisible to a producer whose floor was frozen at build time, which keeps
+emitting bare patches inside that floor at a joiner who folds less. It also
+retires a wart: a LEAVE can now re-widen the lane for free, where before it
+would have meant restarting the producer and charging every remaining subscriber
+a core.
+
+**Two contract statements, one of which is a non-change.** The per-connection
+`subscribed` ack now answers with THIS client's accepted set rather than the
+room's intersection, because a joiner can no longer narrow it; for a single
+subscriber that is the same value, so the launcher's byte-pinned
+`subscribed.json` capture does not move. The ack carries `resume` only when one
+was asked for, for the same reason. The hydrate keeps echoing the intersection
+deliberately — one frame fanned to N subscribers can only honestly carry the
+floor, and a subscriber handed a patch above that floor can fold it by
+construction.
+
+**Honest gaps.** Still one machine (Stage 1's, inherited): every listener binds
+loopback, so "a phone on the LAN resumed against this install" is unproven —
+what is proven is a phone-shaped client on loopback doing exactly that. No
+physical phone and no camera; the launcher's scan flow is tested against a
+stream, not a lens. And the resume's remaining window is one drain pass wide: a
+batch already gated when a declaration lands can still go out bare, which costs
+the joiner one resync and cannot lose an event, because the client's
+`base_offset` gate refuses a patch it cannot chain.
