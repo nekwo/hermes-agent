@@ -2032,6 +2032,114 @@ of this file. Two things, and the first is the correction to OP's own entry abov
   ran back to back. Whatever flips (a lease, a keepalive, a per-turn registry rebuild)
   flips per-turn, not per-session.
 
+## The two serve-lane defects the W6 walk left behind (appended by the serve-diagnosis slice, 2026-08-27)
+
+Both were recorded above as measured-but-unexplained: the `characters list` that
+went silent through the serve socket, and the `launcher_qa` MCP admission that
+alternated 3/0/3/0. Both now have a mechanism, and both mechanisms were
+reproducible in a test — neither needed the live serve to be caught in the act.
+Worktree `X:/wt/servediag` off `4ab953df89`; nothing pushed, primary untouched.
+
+- **[FOUND — the silent `characters list` was POOL EXHAUSTION, and the pool is
+  drained by ABANDONED STREAMS.]** The serve request pool is
+  `DEFAULT_POOL_SIZE = 4`. `harness stream` is an argv request that never
+  returns and holds a worker for its entire life; the cancel op's own comment
+  prices this exactly — "otherwise four watchdog cycles exhaust the entire serve
+  pool with abandoned streams". The only thing that ever set the cancel event
+  was `{"op":"cancel"}`, sent by a launcher that came BACK. A client that simply
+  died, or a socket session that closed, left its stream running forever:
+  `_release_subscription` is the disconnect path and its docstring says "A
+  client left. Unsubscribe it, and do NOTHING else". `agent_runtime/
+  request_control.py` states the opposite as the contract in its own module
+  docstring — the stream handler "must release its worker when its consumer
+  disconnects" — and nothing implemented the disconnect half. **Consequence:**
+  every dropped stream is one of four workers gone for the life of the process,
+  and the fourth one turns every subsequent argv request into unbounded silence.
+  Reproduced as a test: a socket client opens a stream, disconnects, and a
+  following stdio request never runs — 20 s, zero frames carrying its id.
+
+- **[READ — and this is why it looked like a transport fault] an argv request
+  emits NO frame until its HANDLER writes one.** `_handle_message` registers the
+  request and calls `pool.submit`; a request sitting in the executor's queue is
+  byte-identical on the wire to one whose handler has wedged, and to a dead
+  service. The `busy` frame the liveness pump emits carries a count and no ids,
+  so it cannot answer the only question a waiting client has. **Consequence:**
+  "no drafts", "still queued" and "the serve is gone" were one observation. The
+  loop now emits `{"id":…,"event":"request_progress","state":"queued"|"running",
+  "waited_ms":…,"running_ms":…,"pending":…,"pool_size":…}` on the lane that
+  asked, once a request has produced nothing for `_REQUEST_SILENCE_SECONDS`
+  (15 s — longer than a warm `snapshot`, so the normal path pays no frames at
+  all). `state` is the field that matters: `queued` means no handler code has
+  run and a retry is free.
+
+- **[FOUND — the anti-silence pump was never wired to the socket lane at all.]**
+  `_liveness_pump` emits its `busy` frame to `frames` — stdout — and nowhere
+  else, while its own comment names the launcher's stream watchdog ("no frames
+  for N seconds") as the thing it exists to satisfy. The drain path had already
+  learned this lesson and broadcasts through `_broadcast_lanes` with the reason
+  written down: "the socket client IS such a watchdog: it reads with a finite
+  timeout and reports `transport_failed` on silence." The pump was left behind.
+  **Consequence:** a socket client attached to a busy serve reads NOTHING — the
+  measured ">120 s of zero frames" was literally true even though the pump was
+  emitting the whole time, to a stream that client cannot see. Reproduced by
+  attaching a real socket client and reading until its timeout. Now broadcast.
+
+- **[FOUND — the MCP 3/0/3/0 is a two-turn cycle, and the fault is one early
+  `return`.]** R2 keeps the transport warm across turns and tears the registry
+  scope down after each, so a server can sit in `tools/mcp_tool._servers` with
+  `session is None` and no registered tools. `_live_mcp_sessions` calls that
+  COLD and routes it to `register_mcp_servers` on a written belief — "it has
+  dedicated wake handling for exactly that case". It has a wake and no
+  REGISTRATION: the name is already in `_servers`, so `new_servers` is empty, so
+  it fires a fire-and-forget `_signal_reconnect` (deliberately NOT the
+  `_signal_reconnect_and_wait` sibling the tool-call path uses) and returns
+  `_existing_tool_names()` — a STALE list of tools it did not register.
+  `admit_mcp_servers` rightly does not trust that return and re-reads
+  `registered_mcp_server_names()`, which is empty: **admitted 0**, three
+  `mcp_not_registered_on_lane` denials, a turn with no MCP surface. The nudge
+  lands a second later on the background loop, so the NEXT turn finds a live
+  session, takes the warm path and admits 3 — and that turn is the only one that
+  registers a teardown and the only one that can kill the transport by using it,
+  so the turn after it is parked again. The two turns do opposite things, which
+  is what makes it alternate rather than settle. **Consequence:** the parked
+  server is now woken by the admission layer itself — nudged, then waited on for
+  a bounded `_PARKED_WAKE_TIMEOUT_SECONDS` (5 s, with every nudge sent before the
+  first wait so N servers reconnect in parallel) — and whatever comes back is
+  re-registered off its live session. Whatever does not falls through to the
+  cold path unchanged.
+
+- **[TRAP — the receipt's own denial text misdescribes this.]** On the 0-turn
+  the denial reads "did not connect or advertised no tools". The server was
+  connected minutes ago, is cached, and is reconnecting as the line is written;
+  it advertised its tools on the previous turn. **Consequence:** that sentence
+  is why this read as a mystery rather than as a park. A checkable
+  discriminator, if the count ever drops again: on a parked turn
+  `profile_timing.mcp_admission_ms` is TINY — the early return costs
+  microseconds — where a real connect failure costs the ~20 s connect timeout.
+  Small ms plus `cold` labels is this defect, not a timeout and not lane-busy.
+
+- **[READ] `mcp_admission_transport` is a SNAPSHOT, not an outcome, and it is
+  worth knowing which.** It is classified before registration, so a parked
+  server reads `cold` there even now that the registrar may wake it and
+  re-register it warm. That is honest for the question the label was added to
+  answer ("what did this turn have to pay for" — a wake is a cost on the cold
+  side of that line either way), but the comment claiming the label "can never
+  disagree with the path actually taken" was corrected in place: the registrar
+  logs the parked names it woke, and that log is where the finer distinction
+  lives.
+
+- **[NOT DONE, and deliberately]** Neither defect was re-measured on the LIVE
+  serve — the primary checkout is other sessions' surface and this slice never
+  touched it, so everything above is reproduced at the `serve_loop` and
+  `_default_registrar` seams instead. Two things remain owed as field gates:
+  whether a real launcher client tolerates the additive `request_progress` frame
+  (it is additive and unknown events are ignorable, but that is an argument, not
+  a measurement), and whether the parked-wake actually ends the alternation
+  across four consecutive live turns. Neither the pool SIZE nor the `harness
+  stream` design was changed, and no mutation or chat turn was made
+  interruptible: reclaiming a worker is limited to the one request shape the
+  cancel path already calls the sole safe cooperative exception.
+
 <!-- A2, A3, R1 and any slice standing in the HERMES repo: append your entries above this
      line, under the matching heading, or add a heading if none fits. Then say in your
      slice report that you did.
