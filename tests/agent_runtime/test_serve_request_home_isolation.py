@@ -21,10 +21,20 @@ drafts directory under ``...\\profiles\\launcher-qa`` — another persona's home
 and reported a base-authored draft as nonexistent. Nothing was wrong with the
 draft; the request was simply asked to read the wrong disk.
 
-``agent.charsheet.draft.drafts_dir()`` is the shortest true reproduction of the
-victim: it is ``get_hermes_home() / "characters" / ".drafts"``, with no home
-argument to pass and no binding of its own, exactly like the handler that filed
-the incident.
+The victim was ``agent.charsheet.draft.drafts_dir()`` — at the time
+``get_hermes_home() / "characters" / ".drafts"``, with no home argument to pass
+and no binding of its own, exactly like the handler that filed the incident.
+
+**It is no longer the observable, and why it stopped being one is the point.**
+The character library was head-homed to ``<hermes_root>/shared/characters``
+(launcher plan §A-1/§A-2, 2026-08-27), so every profile home under one root now
+resolves the SAME drafts directory — ``alice`` and ``launcher-qa`` included.
+That is the reversal's central claim made mechanical: a mis-resolved persona
+home is no longer a characters incident, because there is nothing per-home left
+to mis-resolve. So the probe below resolves ``get_hermes_home()`` itself, which
+is still bleed-sensitive and is what every OTHER profile-scoped reader on that
+lane rides, and it asserts the library's invariance beside it as the dividend.
+The bleed is fixed at the lane, not at one reader.
 
 WHY THE TEST DRIVES ``serve_loop`` RATHER THAN A BARE RESOLVER
 --------------------------------------------------------------
@@ -115,10 +125,10 @@ def test_argv_request_answers_the_serve_home_while_a_persona_bind_holds_the_env(
 ):
     """The incident, in one process: prewarm binds, the argv lane must not care.
 
-    RED before the fix — the dispatch resolves ``profiles/launcher-qa/characters
-    /.drafts``, the prewarm thread's home, because nothing on the pool worker
-    had bound a home and ``get_hermes_home()``'s ladder fell through to the
-    mirrored ``os.environ["HERMES_HOME"]``.
+    RED before the fix — the dispatch resolved ``profiles/launcher-qa``, the
+    prewarm thread's home, because nothing on the pool worker had bound a home
+    and ``get_hermes_home()``'s ladder fell through to the mirrored
+    ``os.environ["HERMES_HOME"]``.
     """
 
     process_home, persona_home = homes
@@ -126,6 +136,7 @@ def test_argv_request_answers_the_serve_home_while_a_persona_bind_holds_the_env(
     probe_done = threading.Event()
     holder_failed: list[BaseException] = []
     resolved: list[str] = []
+    library: list[str] = []
 
     def _hold_persona_bind() -> None:
         """Stand in for the prewarm's ``_execute_agent_run`` scope stack.
@@ -159,7 +170,11 @@ def test_argv_request_answers_the_serve_home_while_a_persona_bind_holds_the_env(
         holder.start()
         try:
             assert bind_live.wait(_WAIT_SECONDS), "persona bind never went live"
-            resolved.append(str(drafts_dir()))
+            resolved.append(str(get_hermes_home()))
+            # Taken from INSIDE the same bled window, so the two answers are
+            # comparable: what the lane resolves, and what the character library
+            # resolves from it.
+            library.append(str(drafts_dir()))
         finally:
             probe_done.set()
             holder.join(_WAIT_SECONDS)
@@ -179,11 +194,15 @@ def test_argv_request_answers_the_serve_home_while_a_persona_bind_holds_the_env(
     assert not holder_failed, holder_failed[0]
     assert resolved, "dispatch never ran"
     answered = resolved[0]
-    assert answered == str(process_home / "characters" / ".drafts"), (
+    assert answered == str(process_home), (
         "the argv request read another persona's home: "
         f"{answered!r} instead of the serve's own {str(process_home)!r}"
     )
     assert str(persona_home) not in answered
+    # The dividend, asserted so a regression to a per-home library would say so
+    # here too: both profiles sit under one root, so the character library is
+    # the same directory whichever of them the lane had answered.
+    assert library[0] == str(tmp_path / "shared" / "characters" / ".drafts")
 
     exits = [f for f in _frames(out) if f.get("event") == "exit"]
     assert exits == [{"id": "r1", "event": "exit", "code": 0}]

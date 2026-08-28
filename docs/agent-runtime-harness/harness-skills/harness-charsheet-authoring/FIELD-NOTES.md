@@ -2205,6 +2205,206 @@ Worktree `X:/wt/servediag` off `4ab953df89`; nothing pushed, primary untouched.
   interruptible: reclaiming a worker is limited to the one request shape the
   cancel path already calls the sole safe cooperative exception.
 
+## The one library (appended by the shared-library slice, 2026-08-27)
+
+### H1 — the resolver, and the fifteen verbs that followed it for free
+
+- **[READ] Fact 1 of the plan held exactly, and it is the reason this strip was small.** Two
+  files spell the characters location in the whole of hermes — `agent/charsheet/draft.py`
+  and `hermes_cli/harness.py`, and the second only by importing `characters_dir` from the
+  first. So head-homing the library was one function body plus the authority it delegates
+  to, and every one of the fifteen `harness characters` verbs moved without being touched.
+  A grep for `"characters"` as a path segment across `agent/`, `agent_runtime/`,
+  `hermes_cli/` and `hermes_constants.py` still returns one site after the change. That is
+  worth saying out loud because the same claim was false for `hermes_home` two waves ago,
+  and the difference was that this location had already been consolidated by someone else.
+
+- **[MEASURED] The planted defect is the only test in the file that can tell the two
+  implementations apart, and it does.** `get_shared_characters_dir()` computes the same
+  `<root>/profiles/<name>` → `<root>` mapping `get_default_hermes_root()` already
+  implements, so an implementation that reuses it passes three of the four resolver pins.
+  Built that way on purpose first, the ContextVar control reds and nothing else does:
+
+      assert foreign_root == other_root / "shared" / "characters"
+      E  AssertionError: assert WindowsPath('.../process/shared/characters')
+                             == WindowsPath('.../other/shared/characters')
+
+  With `HERMES_HOME` at `<process>/profiles/base` and a `set_hermes_home_override()` naming
+  `<other>/profiles/neko`, the bare-env derivation answers the PROCESS root — the
+  cross-persona bleed the serve lane retired last week, re-imported one directory later.
+  Riding `get_hermes_home()` answers `<other>`. **Consequence:** if a future reader is
+  tempted to collapse the two resolvers into one, that test is the argument, not the
+  docstring.
+
+- **[MEASURED] The env-bleed regression test lost its observable to this change, and the
+  retarget is itself the reversal's headline claim.**
+  `tests/agent_runtime/test_serve_request_home_isolation.py` reproduced the incident by
+  resolving `drafts_dir()` inside a bled window and asserting it named the serve's home.
+  After the head-home that assertion cannot fail for the reason it was written: `alice` and
+  `launcher-qa` sit under one root and now compute one library. It went red as
+  `.../profiles/alice/characters/.drafts` != the new library path — a red that means "the
+  probe stopped being sensitive", not "the fix regressed". The probe now resolves
+  `get_hermes_home()` itself (still bleed-sensitive, and what every other profile-scoped
+  reader on that lane rides) and asserts the library's invariance beside it. **Consequence:**
+  the W6 finding "a serve resolving a home nobody selected broke a characters read" is now
+  a statement about the LANE and no longer about characters at all — which is §A-1's
+  argument 1, mechanised.
+
+- **[READ] The `create()` comment fact 8 flagged was worse than "going false" — it was the
+  whole justification.** It read "the draft IS sitting where this key says it is, so
+  recording it is hermes stating a fact about its own filesystem rather than a consumer
+  deriving one from a path". The first clause is now false and the second is still true,
+  and they were welded into one sentence. Re-derived per §A-3 rather than deleted: hermes
+  asks its own resolver which home this turn answered, the draft does not sit under it, and
+  that divergence IS the field's meaning. The `hermes_home` property docstring gained an
+  explicit "it is not an address, and asking it for one gets the wrong answer by
+  construction" so the next reader does not have to reconstruct the reversal from a diff.
+
+- **[READ] What I did NOT do.** (i) No `SCHEMA` bump and no wire change — the plan's fact 9
+  is right that this wave adds no key, and the launcher fixtures stay contract-valid.
+  (ii) `backfill-home` STAYS (§A-5), with its help text re-derived; its population after
+  the OP run is empty but it is still the stamp path for a draft that arrives without the
+  key. (iii) Nothing migrates anything: after this strip a populated legacy
+  `<home>/characters` tree is simply invisible to the verbs. That window is real and H2/OP
+  are what close it — §C's second row says the same, and it is why H1→OP wants to be
+  same-day.
+
+### H2 — `migrate-home`, and the three defects worth planting
+
+- **[MEASURED] Stamping through `_save()` is the defect the byte pin exists for, and it is
+  invisible to a dict comparison.** Built wrong first, the red is exactly the key the ruling
+  is about:
+
+      assert dropped + "\n" == before
+      E  - "2026-08-24T14:07:56+00:00"
+      E  + "2026-08-28T02:55:08.776734+00:00"
+
+  That is `updated` on a dormant exhibit, rewritten to the moment the migration ran. The
+  assertion is textual — read the landed file, drop the `"hermes_home"` line, compare to the
+  bytes the source held — because a parsed-dict comparison passes through a re-serialisation
+  without noticing and would have let this land. Same lesson as the recorded-home wave's
+  §E.8, one verb later, and it earned its second outing.
+
+- **[MEASURED] The other two planted defects red on exactly one pin each and nothing else.**
+  Stamp-always: `assert receipt["stamped"] == []` against a draft that already named
+  `/somewhere/else/profiles/original` — a relocation is not a re-attribution, and the drafts
+  whose provenance is most interesting are the ones an unconditional stamp destroys first.
+  Overwrite-on-collision: `assert receipt["moved"] == []` while the source directory was
+  gone and the destination held the migration's copy. That second one is the shape worth
+  naming, because both directories carry the same id: a `list` afterwards looks IDENTICAL
+  whether the verb refused or ate a character. The receipt and the surviving source
+  directory are the only two things that can tell them apart.
+
+- **[READ] The source is spelled literally in the handler, and the helper refuses the
+  degenerate case anyway.** After H1, `characters_dir()` answers the DESTINATION — so a verb
+  that resolved its source through the ordinary authority would be asking to move the library
+  onto itself. The handler writes `get_hermes_home() / "characters"` out and says why in a
+  comment; `migrate_characters_home` compares resolved source and destination and returns an
+  empty receipt if they match, with a test standing on that. Belt and braces on purpose: the
+  handler's comment is the thing a future reader deletes, and the guard is the thing that
+  survives them doing it.
+
+- **[READ] A non-character directory under a legacy store is SKIPPED, not swept along.**
+  "Installed character" means "a directory carrying `character.json`" — the same definition
+  the CLI's installed rows already use — and anything else lands in `skipped` with a reason.
+  It is left where it is rather than guessed at, which is the archive-never-delete instinct
+  applied to a thing the verb does not recognise. A cross-volume rename, a lock or a
+  permission error is reported the same way, per entry, so one stuck directory cannot strand
+  the rest of the store half-migrated.
+
+- **[MEASURED] The verb-table pin does the §E.5 job without being asked twice.** Adding the
+  subparser reds `test_charsheet_skill_documents_exactly_the_characters_verbs_hermes_has`
+  with `Extra items in the right set: 'migrate-home'` — the live parser tree against the
+  skill's table. The `SKILL.md` row therefore rides this commit, not a later one. **Small
+  correction while there:** the table's header said "Fourteen, flat" and the table held
+  fifteen rows before this strip — a drift `backfill-home` introduced and nothing pins,
+  because the test counts the ROWS and not the sentence. It says sixteen now.
+
+- **[READ] What I did NOT do.** (i) The verb migrates ONE home per invocation and never
+  enumerates profiles — the operator runs it per home, which is what keeps the receipt
+  attributable. (ii) Nothing is deleted, the emptied `characters/` tree included; it is the
+  tombstone the receipt's `from` refers to, and a test stands on it still being there after
+  two runs. (iii) I did not run the migration on the live install — that is the OP strip's
+  operator-visible step, and this branch is not merged.
+
+### H3 — the skill catches up, and a pin nobody listed was the one that fought back
+
+- **[MEASURED] The plan's §D disposition table under-counted the hermes side: the seed
+  contract is pinned HERE, not only in the launcher.**
+  `tests/agent_runtime/test_persona_skill_policy.py` is listed as "RETARGET — the verb-table
+  set pin gains `migrate-home`", and that is true and was cheap. What the table does not say
+  is that the same file holds
+  `test_charsheet_skill_states_the_launcher_bindings_home_in_its_landed_meaning`, which pins
+  the skill's copy of the resume seed line **verbatim** — `"last observed home:"`,
+  `"never observed by the launcher"`, `"observed the draft readable in"` — as the hermes end
+  of the two-repo contract §13.26's rejection (d) created. §A-8 retires that line, so the
+  pin does not "retarget": it INVERTS, and it does so in this strip whether the plan said so
+  or not. The red is unambiguous:
+
+      assert "observed the draft readable in" in text.lower()
+      E  AssertionError
+
+  **Consequence:** a launcher builder doing L1 against §A-8 will find the launcher-side seed
+  test and may believe that is the whole contract. It is one end of it. This file is the
+  other, and the two must move in the same wave or the skill an agent preloads teaches a
+  message the seed no longer composes.
+
+- **[READ] The inverted pin is written to be unpassable by deletion, because the old one
+  was.** The retired strings are banned outright and the surviving ones are asserted
+  positively: `install-wide`, the library path, §13.27, §13.22 (its reader half still
+  stands), `legacy` (a stored observed home is preserved and labelled, never read), the
+  seed's closing sentence verbatim, and `provenance, not an address` for the draft's own
+  `hermes_home`. That last one is the trap that REPLACED the old one and is the reason the
+  field survives §A-3: the key still exists, still carries a real path, and now names a home
+  the draft is not under. An agent that reads it as an address chases a directory that has
+  nothing in it.
+
+- **[MEASURED] The blanket ban caught my own explanatory prose, and tightening the prose was
+  the right answer rather than loosening the ban.** The first draft of the skill's resume
+  bullet said "the `last observed home:` line retired with the sighting it quoted" — honest
+  history, and it reds the ban. A ban with a carve-out for "but only when you are explaining
+  that it is gone" is a ban an agent can pattern-match its way through. The bullet now says
+  the seed "used to carry a home line quoting the launcher's most recent sighting" without
+  spelling it, and adds the instruction that actually matters: do not wait for one, and do
+  not read its absence as the seed being incomplete.
+
+- **[READ] The one teaching that survived the reversal is the one written for a reason that
+  no longer applies.** *"Echo the home you resolve; do not assume it."* was a scoping check —
+  proof the agent could see the operator's draft. Under one library a wrong PROFILE is
+  harmless and a wrong ROOT is a different install, so the same sentence now surfaces a
+  mis-resolved root instead. The skill says that explicitly rather than leaving the sentence
+  standing with its original justification underneath it, which is the same failure mode as
+  the `create()` comment H1 had to rewrite: a true instruction welded to a reason that went
+  false.
+
+- **[OWED] The install-hash cycle is captured RED and is not discharged.** After the edits,
+
+      harness-skill-install: FAILED — the installed package differs from this repo for:
+      harness-charsheet-authoring
+      home X:\Eternia\.hermes  source X:\wt\sharedlib\docs\...  installed X:\Eternia\.hermes\shared\skills
+
+  Repair mode was proved to close the cycle against a throwaway root
+  (`ETERNIA_HERMES_HOME=<tmp>` → `refreshed from the repo: ...` → `--check` exit 0), so the
+  install takes. It was deliberately NOT run against the live `X:\Eternia\.hermes`, for two
+  reasons that point the same way. (i) The gate is discharged on push and this branch is not
+  pushed; the pre-push hook runs repair mode and is where a repo edit and a machine are
+  supposed to meet. (ii) More important: the live install's hermes is the PRIMARY checkout,
+  which is pre-H1 — its `characters list` still answers per-home. Installing a skill that
+  teaches one install-wide library onto a runtime that does not have one yet is exactly the
+  W3 failure this strip exists to prevent, pointed the other way: the preloaded skill would
+  contradict the screen from the moment it landed until the merge. **Owed to whoever lands
+  this branch:** run the install (or push, which runs it) AFTER the merge and after OP, and
+  re-run `--check`.
+
+- **[READ] What I did NOT do.** (i) The plan's §A-8 wording is what the skill was written
+  against, not L1's diff — L1 had not landed when this was written, and §A-8 says the frozen
+  text is the authority. (ii) No `CHARSHEET-QA:` change: the line still carries no home, and
+  under one library that stopped being a withholding and became "there is nothing to carry".
+  (iii) The skill's §13.24/§13.25 references survive as "re-deriving" pointers rather than
+  being deleted, so a reader who arrives from the register still lands somewhere — but
+  §13.27 is what the sentences now state, and strip D is what makes that register entry
+  exist. Until D lands, those pointers are forward references.
+
 <!-- A2, A3, R1 and any slice standing in the HERMES repo: append your entries above this
      line, under the matching heading, or add a heading if none fits. Then say in your
      slice report that you did.

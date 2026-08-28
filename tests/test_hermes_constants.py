@@ -600,3 +600,89 @@ class TestWslPathTranslation:
         assert hermes_constants.translate_cwd_for_wsl_backend(r"\\wsl.localhost\Ubuntu\home\alex") == "/home/alex"
         # Already-POSIX paths pass through untouched.
         assert hermes_constants.translate_cwd_for_wsl_backend("/home/alex") == "/home/alex"
+
+
+class TestSharedCharactersDir:
+    """The install-wide character library, and the ladder it must ride.
+
+    The library is ONE directory per hermes root — every persona profile under
+    that root computes it from its own ``HERMES_HOME`` with no env injection,
+    which is what makes a mis-resolved persona home stop being a characters
+    incident (launcher plan §A-1 argument 1). The pins below are the two halves
+    of that claim: convergence across profiles, and the ContextVar ladder the
+    convergence has to be built on.
+    """
+
+    def test_profiles_under_one_root_converge_on_one_library(self, tmp_path, monkeypatch):
+        root = tmp_path / ".hermes"
+        (root / "profiles" / "alice").mkdir(parents=True)
+        (root / "profiles" / "base").mkdir(parents=True)
+        monkeypatch.delenv("HERMES_SHARED_CHARACTERS", raising=False)
+
+        monkeypatch.setenv("HERMES_HOME", str(root / "profiles" / "alice"))
+        alice = hermes_constants.get_shared_characters_dir()
+        monkeypatch.setenv("HERMES_HOME", str(root / "profiles" / "base"))
+        base = hermes_constants.get_shared_characters_dir()
+
+        assert alice == root / "shared" / "characters"
+        assert alice == base
+
+    def test_a_bare_home_is_its_own_root(self, tmp_path, monkeypatch):
+        """A home that is not ``<root>/profiles/<name>`` IS the root.
+
+        This is the shape every test home and every plain-hermes install has,
+        and it is what makes a tmpdir-scoped test isolated for free.
+        """
+        monkeypatch.delenv("HERMES_SHARED_CHARACTERS", raising=False)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+        assert hermes_constants.get_shared_characters_dir() == tmp_path / "home" / "shared" / "characters"
+
+    def test_the_contextvar_override_is_the_home_the_library_derives_from(
+        self, tmp_path, monkeypatch
+    ):
+        """The control on a bare-env implementation.
+
+        ``get_default_hermes_root()`` reads ``os.environ["HERMES_HOME"]`` and
+        never consults the context-local override, so a resolver built on it
+        answers the PROCESS home while an in-process persona binding is scoped
+        to another one — the cross-persona bleed the serve lane just retired.
+        Two arms, and the second is the one that reds: an override under the
+        same root must agree (nothing moved), and an override under a DIFFERENT
+        root must answer THAT root's library.
+        """
+        monkeypatch.delenv("HERMES_SHARED_CHARACTERS", raising=False)
+        process_root = tmp_path / "process"
+        other_root = tmp_path / "other"
+        (process_root / "profiles" / "base").mkdir(parents=True)
+        (process_root / "profiles" / "alice").mkdir(parents=True)
+        (other_root / "profiles" / "neko").mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(process_root / "profiles" / "base"))
+
+        token = set_hermes_home_override(process_root / "profiles" / "alice")
+        try:
+            same_root = hermes_constants.get_shared_characters_dir()
+        finally:
+            reset_hermes_home_override(token)
+        token = set_hermes_home_override(other_root / "profiles" / "neko")
+        try:
+            foreign_root = hermes_constants.get_shared_characters_dir()
+        finally:
+            reset_hermes_home_override(token)
+
+        assert same_root == process_root / "shared" / "characters"
+        assert foreign_root == other_root / "shared" / "characters"
+
+    def test_the_env_override_wins_over_derivation(self, tmp_path, monkeypatch):
+        """An install-wide override is identical for every persona by definition.
+
+        That is why a bare ``os.environ`` read is sound for THIS authority and
+        not for the derivation below it: an operator/test that names the library
+        has named it for the whole install, so there is no persona-scoped answer
+        for a ContextVar to carry.
+        """
+        override = tmp_path / "custom-library"
+        monkeypatch.setenv("HERMES_SHARED_CHARACTERS", str(override))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes" / "profiles" / "alice"))
+
+        assert hermes_constants.get_shared_characters_dir() == override
