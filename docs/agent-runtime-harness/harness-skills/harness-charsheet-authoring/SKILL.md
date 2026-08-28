@@ -180,6 +180,15 @@ receipt names both addresses on every row; hand it to the operator verbatim
 rather than summarising it. Do not fire it as part of an authoring flow: it is
 run once per home, by an operator who decided to.
 
+**On THIS install it has already been run (2026-08-28) — `base` and `alice`,
+the only two homes that held a legacy store, and a sweep found no others.** So
+if you are asked to migrate here, expect an empty receipt and say so rather
+than hunting for the drafts: the verb is idempotent, a second run moves
+nothing, and an empty `moved` list is the correct answer, not a failure. The
+emptied `<HERMES_HOME>/characters` trees you may still see on disk are the
+tombstones the ruling leaves behind on purpose — they are not un-migrated
+work.
+
 Stages run `turnaround → rows → composed`. An out-of-order verb refuses with a
 flat `{"ok": false, "error": …, "stage": …}` and exit 2, and the error names the
 stage order — read it instead of guessing. These refusals are actionable text you

@@ -2405,6 +2405,85 @@ Worktree `X:/wt/servediag` off `4ab953df89`; nothing pushed, primary untouched.
   §13.27 is what the sentences now state, and strip D is what makes that register entry
   exist. Until D lands, those pointers are forward references.
 
+### OP + the closing pass — the migration ran, and the thing that proved the design was a turn, not a test
+
+- **[MEASURED] The migration ran on the live install, operator-authorized, and its inventory was
+  exactly fact 4's.** Two homes had legacy stores. `base`: three drafts — the two dormant
+  `cobalt-robot-courier` exhibits authored by `chara_a2` and W5's `teal-lantern-keeper` — plus the
+  installed `cobalt-robot-courier`. `alice`: the id-collision pair `20260824-140756-cd645a` and its
+  `.backup-2026-08-25-nefix` sibling, both listing under one id, plus the installed `anime-girl`.
+  Everything landed under `X:\Eternia\.hermes\shared\characters`. The sweep of the remaining
+  nine profiles turned up nothing. **The second run of each home moved nothing** — `moved: []`,
+  `stamped: []` — which is §A-4's idempotence claim measured on a populated install rather than
+  on a tmpdir.
+
+- **[MEASURED] `updated` came through byte-identical, and the exhibit that proves it is the one
+  that would have been destroyed.** `anime-girl`'s draft still reads
+  `2026-08-26T01:01:00.818441+00:00` after the move. That is the recorded-home wave's §E.8 lesson
+  holding across a second verb and a real filesystem: the stamp writer never goes through
+  `_save()`, and the dormant drafts — the ones whose whole value is that nothing has touched them
+  — are exactly the population an unconditional re-serialisation eats first. `authored_by` on the
+  two `chara_a2` exhibits is likewise unchanged; they travelled as mis-attribution evidence, which
+  is what they are for.
+
+- **[MEASURED] The proof that the design COMPOSES is a live agent turn, and no test in this wave
+  came close to it.** After the skill was reinstalled, the QA persona instance ran an authoring
+  turn and created draft `20260828-052440-cc39bb`. It landed in the shared library — install-wide,
+  as ruled — carrying `hermes_home: X:\Eternia\.hermes\profiles\launcher-qa`, the profile whose
+  turn authored it. **That single row is §A-3 and §A-1 composing on one file:** the location
+  stopped being per-home and the provenance stayed truthful about a home the draft is *not* under.
+  It is also the honest answer to the question H1's entry left hanging — whether a field
+  re-derived by argument would read as a mistake once real data hit it. It does not. It reads as
+  the only record saying which profile stood behind that turn.
+
+- **[MEASURED] The H3 install-hash cycle is DISCHARGED, and its precondition was met in the right
+  order.** H3 captured its red and deliberately left the install un-run because the live hermes
+  was still pre-H1 and a skill teaching one library onto a runtime without one is the W3 failure
+  pointed backwards. That ordering held: the merge landed, OP ran, and only then was the skill
+  installed against the live `X:\Eternia\.hermes`, with `--check` exiting 0 afterwards. The
+  owed-to-whoever-lands-this note in H3's entry above is closed by this paragraph. **Then this
+  strip paid the cycle a second time and on purpose:** marking `migrate-home`'s operational note
+  EXECUTED is a `SKILL.md` edit, so `--check` went `DIVERGED` (repo `2a134c39c2b24252` vs
+  installed `1b62edd62b2c67b3`) before the install and `ok — every canonical package installed and
+  current` after it. Cheap, and the point is that it is unavoidable: any true sentence added to
+  the skill costs an install, which is the property that keeps the runtime's copy honest.
+
+- **[MEASURED] The MCP admission field gate CLOSED: four consecutive live turns admitted 0 → 3 →
+  3 → 3.** The serve-diagnostics slice left this owed in as many words — "whether the parked-wake
+  actually ends the alternation across four consecutive live turns" — and the OP run plus the
+  authoring turn generated the traffic to answer it. The leading zero is the parked wake being
+  paid after idle, then stable; the pre-fix behaviour alternated 3/0/3/0 indefinitely. The
+  discriminator that entry filed (a tiny `profile_timing.mcp_admission_ms` on a parked turn) is
+  what makes that first zero readable as a park rather than a regression.
+
+- **[STILL OWED] The other field gate from that slice did NOT close, and nothing here touched
+  it.** Whether a real launcher client tolerates the additive `request_progress` frame is still an
+  argument (unknown events are ignorable) and not a measurement. No live launcher has been driven
+  against a serve emitting it since. It stays owed, in those words, and this paragraph exists so
+  that the closure of the admission gate above is not read as closing both.
+
+- **[MEASURED, and it cost the OP run its cleanest receipt] A docstring is parsed, and this one
+  had an invalid escape.** Every import of `agent.charsheet.draft` printed
+  `SyntaxWarning: invalid escape sequence '\ '` — the migrate-home docstring wrote
+  ``:class:`~pathlib.Path`\ s``, the Sphinx idiom for gluing a suffix onto a role, inside a plain
+  (non-raw) string. It was observed on the operator's own screen during the migration, which is
+  the only reason anyone saw it: nothing gates warnings on import. Reproduced as a hard red with
+  `python -W error::SyntaxWarning -c "import agent.charsheet.draft"` (a `SyntaxError` naming line
+  198) and fixed by rewording the sentence so the role ends the phrase and a plain word follows
+  it — "Path arguments" — rather than by making the docstring raw: no other docstring in the file
+  carries a backslash, so a lone raw prefix would have been a second convention on one function. **Consequence worth keeping:** the class here is not "escape
+  sequences"; it is that prose written for a documentation renderer this project does not run got
+  into a file the interpreter parses on every import.
+
+- **[READ] What I did NOT do.** (i) Nothing is pushed — both repos are landed on local `main` only,
+  and the pre-push hook's own install-hash discharge is still the operator's. (ii) No Stage C: the
+  wave built no on-screen proof of the one library and said so up front, and the row is filed on
+  the launcher's Mission Control queue rather than skipped quietly. (iii) The authoring instance
+  `personainst_chara_a2_7b31d0e4` was moved off `opencode-zen/big-pickle` to
+  `openai-codex/gpt-5.6-terra` at reasoning-effort medium after a provider 500 was measured live
+  — operator-ruled, verified answering, and recorded here because a model binding that changed
+  under a wave is the kind of fact a later reader will otherwise attribute to the wave.
+
 <!-- A2, A3, R1 and any slice standing in the HERMES repo: append your entries above this
      line, under the matching heading, or add a heading if none fits. Then say in your
      slice report that you did.

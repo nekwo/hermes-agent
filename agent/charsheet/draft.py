@@ -197,9 +197,9 @@ def _migration_entry_id(directory: Path) -> str:
 def migrate_characters_home(source: Path, destination: Path, *, source_home: str) -> dict:
     """Move a legacy per-home character store into the install-wide library.
 
-    Explicit source and destination :class:`~pathlib.Path`\ s, so the rules below
-    are unit-testable without env games and so the CALLER owns the decision of
-    which home is being migrated. That matters more than it looks: after the
+    Explicit source and destination :class:`~pathlib.Path` arguments, so the
+    rules below are unit-testable without env games and so the CALLER owns the
+    decision of which home is being migrated. That matters more than it looks: after the
     library head-homed, ``characters_dir()`` answers the DESTINATION, so a verb
     that resolved its source through it would be asking to move the library onto
     itself. The handler spells the legacy location literally and this function
