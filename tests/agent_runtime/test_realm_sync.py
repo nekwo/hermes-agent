@@ -228,8 +228,8 @@ def test_sync_destination_routes_skills_to_inbox_not_shared_root(isolate_agent_r
         "---\nname: legit\n---\n# L\n", encoding="utf-8"
     )
     inbox = realm_inbox_dir("hostile-realm")
-    removed, reserved = _mirror_realm_skill_inbox(source_skills, inbox)
-    assert removed == [] and reserved == []
+    removed, reserved, tombstoned = _mirror_realm_skill_inbox(source_skills, inbox)
+    assert removed == [] and reserved == [] and tombstoned == []
     written = [p for p in inbox.rglob("*") if p.is_file()]
     assert written, "mirror should have written the legit package"
     inbox_resolved = inbox.resolve()

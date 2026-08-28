@@ -48,7 +48,7 @@ from agent_runtime.skill_promotion import (
     realm_inbox_dir,
 )
 from agent_runtime.store import RealmStore
-from hermes_constants import get_shared_skills_dir
+from hermes_constants import CANONICAL_SHARED_SKILL_IDS, get_shared_skills_dir
 
 
 @pytest.fixture(autouse=True)
@@ -467,3 +467,247 @@ def test_dry_run_pull_writes_nothing(tmp_path):
     assert not realm_inbox_dir(realm.id).exists()
     assert not _canonical("foo").exists()
     assert _snapshot(shared) == before
+
+
+# ── S2: the skill-delete ledger enforced on pull and publish ─────────────────
+#
+# Every case below runs against ``_local_realm`` — ``server_id`` is None, the
+# asymmetry §5 of the plan names: ``_pulled_artifact_bytes``'s authority-field
+# merge only runs for a SERVER-bound realm, so a local realm's pulled realm JSON
+# (ledger included) overwrites wholesale, one fewer guard, same LWW posture.
+# ``test_pull_adopts_an_arriving_ledger_on_a_local_realm`` pins that directly.
+
+
+def _archived_package_names() -> list[str]:
+    """Slug-flattened package dirs sitting under ``shared/skills/.archive/<ts>``."""
+
+    root = get_shared_skills_dir() / ".archive"
+    if not root.is_dir():
+        return []
+    return sorted(
+        child.name
+        for stamp in root.iterdir()
+        if stamp.is_dir()
+        for child in stamp.iterdir()
+        if child.is_dir()
+    )
+
+
+def _publish_subtree_realm_record(repo: Path, realm) -> None:
+    """Copy this member's realm JSON into the subtree, as a publish would.
+
+    Lets one HERMES_HOME stand in for two members: the ledger written here is
+    the ledger that ARRIVES on the next pull through the generic overwrite loop
+    (``store/realms/<token>.json`` → the local realm record).
+    """
+
+    from agent_runtime import paths as runtime_paths
+
+    token = runtime_paths.safe_path_token(realm.id)
+    dest = repo / "realms" / realm.id / "store" / "realms" / f"{token}.json"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(runtime_paths.realm_path(realm.id).read_bytes())
+
+
+# (a) a tombstoned slug never reaches the promotion door.
+
+
+def test_pull_drops_a_tombstoned_package_from_the_mirror(tmp_path):
+    realm, repo = _local_realm(tmp_path)
+    _write_subtree_skill(repo, realm, "doomed", files={"SKILL.md": "---\nname: doomed\n---\n# D\n"})
+    _write_subtree_skill(repo, realm, "healthy", files={"SKILL.md": "---\nname: healthy\n---\n# H\n"})
+    RealmStore().tombstone_skill(realm.id, "doomed")
+
+    result = pull_realm_sync(realm.id)
+
+    assert result["state"] == "pulled"
+    assert result["skill_sync"]["tombstoned"] == ["doomed"]
+    # Not mirrored, so the auto-adopt door never sees it; the sibling promotes.
+    assert result["skill_sync"]["adopted"] == ["healthy"]
+    assert not (realm_inbox_dir(realm.id) / "doomed").exists()
+    assert not _canonical("doomed").exists()
+    assert (_canonical("healthy") / "SKILL.md").is_file()
+
+
+# (b) an existing local canonical copy is ARCHIVED, never deleted.
+
+
+def test_pull_archives_the_local_canonical_copy_of_a_tombstoned_skill(tmp_path):
+    realm, repo = _local_realm(tmp_path)
+    _write_subtree_skill(repo, realm, "doomed", files={"SKILL.md": "---\nname: doomed\n---\n# D\n"})
+    first = pull_realm_sync(realm.id)
+    assert first["skill_sync"]["adopted"] == ["doomed"]
+    assert (_canonical("doomed") / "SKILL.md").is_file()
+
+    RealmStore().tombstone_skill(realm.id, "doomed")
+    result = pull_realm_sync(realm.id)
+
+    assert result["skill_tombstones"]["archived"] == ["doomed"]
+    assert result["skill_tombstones"]["warnings"] == []
+    assert result["changed"] is True
+    # Archived (the skills lane never deletes), gone from the live namespace,
+    # and gone from the mirror too — reported as tombstoned, not as removed.
+    assert "doomed" in _archived_package_names()
+    assert not _canonical("doomed").exists()
+    _content_hash_cache_clear()
+    assert resolve_skills(["doomed"], roots=[get_shared_skills_dir()])["doomed"].status == "missing"
+    assert result["skill_sync"]["tombstoned"] == ["doomed"]
+    assert result["skill_sync"]["removed"] == []
+    assert not (realm_inbox_dir(realm.id) / "doomed").exists()
+
+
+def test_pull_adopts_an_arriving_ledger_on_a_local_realm(tmp_path):
+    # The propagation shape in one home: member A's delete travels in the realm
+    # JSON, and this member — who still holds a live canonical copy and an empty
+    # ledger of their own — has it applied on the pull that delivers it.
+    realm, repo = _local_realm(tmp_path)
+    assert RealmStore().get(realm.id).server_id is None
+    _seed_canonical("doomed", body="# Still live here\n")
+
+    RealmStore().tombstone_skill(realm.id, "doomed", deleted_hash="sha256:ab")
+    _publish_subtree_realm_record(repo, realm)
+    RealmStore().restore_skill(realm.id, "doomed")
+    assert RealmStore().get(realm.id).skill_tombstones == []
+
+    result = pull_realm_sync(realm.id)
+
+    # Wholesale overwrite (no server_id → no authority-field merge): the ledger
+    # lands, and the same pull enforces it.
+    assert [entry.slug for entry in RealmStore().get(realm.id).skill_tombstones] == ["doomed"]
+    assert result["skill_tombstones"]["archived"] == ["doomed"]
+    assert not _canonical("doomed").exists()
+    assert "doomed" in _archived_package_names()
+    assert [row["slug"] for row in realm_sync_status(realm.id)["skill_tombstones"]] == ["doomed"]
+    assert [row["slug"] for row in read_realm_sync_sidecar(realm.id)["skill_tombstones"]] == [
+        "doomed"
+    ]
+
+
+# (c) publish never re-exports a tombstoned slug.
+
+
+def test_publish_excludes_a_tombstoned_skill(tmp_path):
+    realm, repo = _local_realm(tmp_path)
+    _seed_canonical("doomed", body="# Doomed\n")
+    _seed_canonical("keeper", body="# Keeper\n")
+
+    before = [item["path"] for item in publish_realm_sync(realm.id, dry_run=True)["artifacts"]]
+    assert "skills/doomed/SKILL.md" in before
+
+    RealmStore().tombstone_skill(realm.id, "doomed")
+    after = [item["path"] for item in publish_realm_sync(realm.id, dry_run=True)["artifacts"]]
+
+    # Defense-in-depth: the canonical copy is still on disk here (this member
+    # re-materialized it out of band), and it still may not travel.
+    assert (_canonical("doomed") / "SKILL.md").is_file()
+    assert "skills/doomed/SKILL.md" not in after
+    assert "skills/keeper/SKILL.md" in after
+
+
+# (d) an installer-owned slug in a ledger is SKIPPED, with a warning.
+
+
+def test_pull_skips_an_installer_owned_tombstone_with_a_warning(tmp_path):
+    # The store chokepoint refuses to mint this (R-B), so it can only arrive
+    # from a peer that did not enforce it — written straight to the record here.
+    from agent_runtime.models import SkillTombstone
+    from hermes_time import now
+
+    slug = sorted(CANONICAL_SHARED_SKILL_IDS)[0]
+    realm, repo = _local_realm(tmp_path)
+    _seed_canonical(slug, body="# Installer owned\n")
+    item = RealmStore().get(realm.id)
+    item.skill_tombstones = [SkillTombstone(slug=slug, deleted_at=now())]
+    RealmStore().save(item)
+
+    result = pull_realm_sync(realm.id)
+
+    assert result["skill_tombstones"]["skipped_installer_owned"] == [slug]
+    assert result["skill_tombstones"]["archived"] == []
+    assert [row["code"] for row in result["skill_tombstones"]["warnings"]] == [
+        "skill_tombstone_installer_owned"
+    ]
+    # The package is left standing — the installer re-copies it from repo source
+    # on this very pull, so archiving it would be undone inside the same verb.
+    assert (_canonical(slug) / "SKILL.md").is_file()
+    assert slug not in _archived_package_names()
+
+
+# (e) restore re-opens the normal promote_new door.
+
+
+def test_restore_lets_a_republished_package_re_adopt_on_the_next_pull(tmp_path):
+    realm, repo = _local_realm(tmp_path)
+    _write_subtree_skill(repo, realm, "doomed", files={"SKILL.md": "---\nname: doomed\n---\n# D\n"})
+    RealmStore().tombstone_skill(realm.id, "doomed")
+    blocked = pull_realm_sync(realm.id)
+    assert blocked["skill_sync"]["tombstoned"] == ["doomed"]
+    assert not _canonical("doomed").exists()
+
+    RealmStore().restore_skill(realm.id, "doomed")
+    result = pull_realm_sync(realm.id)
+
+    # No new machinery: the package walks back in through the same auto-adopt
+    # door it was always going to use.
+    assert result["skill_sync"]["adopted"] == ["doomed"]
+    assert result["skill_sync"]["tombstoned"] == []
+    assert (_canonical("doomed") / "SKILL.md").is_file()
+    assert _provenance("doomed")["source"] == {"kind": "realm", "realm_id": realm.id}
+
+
+# (f) the categorized-child match rule, shared with the selection.
+
+
+def test_tombstone_matches_a_categorized_package_by_its_child_name(tmp_path):
+    realm, repo = _local_realm(tmp_path)
+    _write_subtree_skill(
+        repo, realm, "software-development/hermes-agent",
+        files={"SKILL.md": "---\nname: hermes-agent\n---\n# Agent\n"},
+    )
+    _write_subtree_skill(
+        repo, realm, "software-development/sibling",
+        files={"SKILL.md": "---\nname: sibling\n---\n# Sibling\n"},
+    )
+    # The bare child name is what the launcher picker offers, so it is what a
+    # delete names — exactly as ``selected`` mode matches it.
+    RealmStore().tombstone_skill(realm.id, "hermes-agent")
+
+    result = pull_realm_sync(realm.id)
+
+    assert result["skill_sync"]["tombstoned"] == ["software-development/hermes-agent"]
+    assert result["skill_sync"]["adopted"] == ["software-development/sibling"]
+    # The innocent sibling under the same category dir is untouched.
+    inbox = realm_inbox_dir(realm.id)
+    assert not (inbox / "software-development" / "hermes-agent").exists()
+    assert (inbox / "software-development" / "sibling" / "SKILL.md").is_file()
+    assert not _canonical("software-development/hermes-agent").exists()
+    assert (_canonical("software-development/sibling") / "SKILL.md").is_file()
+
+    # ...and the publish filter answers the same way about the same package.
+    published = [
+        item["path"] for item in publish_realm_sync(realm.id, dry_run=True)["artifacts"]
+    ]
+    assert "skills/software-development/sibling/SKILL.md" in published
+    assert all("hermes-agent" not in path for path in published)
+
+
+# (g) dry-run stays a read, ledger or not.
+
+
+def test_dry_run_pull_writes_nothing_with_a_ledger(tmp_path):
+    realm, repo = _local_realm(tmp_path)
+    _write_subtree_skill(repo, realm, "doomed", files={"SKILL.md": "---\nname: doomed\n---\n# D\n"})
+    _seed_canonical("doomed", body="# Local copy\n")
+    RealmStore().tombstone_skill(realm.id, "doomed")
+    shared = get_shared_skills_dir()
+    before = _snapshot(shared)
+
+    result = pull_realm_sync(realm.id, dry_run=True)
+
+    assert result["state"] == "dry_run"
+    assert "skill_tombstones" not in result
+    # Nothing archived, nothing mirrored — a dry run returns before every
+    # applier, and the tombstone lane is an applier like the rest.
+    assert _snapshot(shared) == before
+    assert _archived_package_names() == []
+    assert not realm_inbox_dir(realm.id).exists()

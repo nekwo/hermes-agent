@@ -29,7 +29,7 @@ from .models import AgentPersona, Event, Realm, Workspace
 from .profile_context import active_profile_name, resolve_persona_profile
 from .redaction import SECRET_ASSIGNMENT_RE
 from .skill_install import HARNESS_SKILLS, install_harness_skills, install_harness_skills_for_personas
-from .store import RealmStore, WorkspaceStore
+from .store import RealmStore, WorkspaceStore, skill_tombstoned
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +210,11 @@ def realm_sync_status(
         "skills_drift": skills_drift,
         "skill_publish_mode": realm.skill_publish_mode,
         "skill_selection": sorted(realm.skill_selection or []),
+        # Additive: the realm's skill-delete ledger as receipt rows. The
+        # launcher's realm-sync sheet reads this envelope absent-tolerantly, so
+        # a "deleted from realm" row with a restore affordance needs nothing
+        # else from the backend.
+        "skill_tombstones": _skill_tombstone_rows(realm),
         "skills_published": _distinct_skill_package_count(artifacts),
         "agent_publish_mode": agent_state["mode"],
         "agent_selection": agent_state["selection"],
@@ -436,8 +441,21 @@ def pull_realm_sync(
     # _destination_for_sync_path None). Mirror them into the resolver-invisible
     # per-realm inbox and admit them to the canonical root only through the one
     # guarded promotion door (auto-adopt new, converge identical, hold divergent).
+    # Re-read first: the overwrite loop above may have replaced the realm record
+    # with the publisher's snapshot, so the skill lane must decide against the
+    # ledger that just ARRIVED, not the one this pull started with (the same
+    # reason ``_apply_workspace_tombstones`` re-reads). Every use of ``realm``
+    # below — sidecar, result, event — wants the pulled record too.
+    realm = RealmStore().get(realm.id)
     skill_summary = apply_skill_inbox_pull(realm, subtree)
-    if skill_summary.adopted or skill_summary.removed:
+    if skill_summary.adopted or skill_summary.removed or skill_summary.tombstoned:
+        changed = True
+    # Skill deletions: archive the local canonical copy of anything the pulled
+    # ledger blocks. AFTER the inbox applier (the archive must not race the
+    # promotion loop's occupancy guard) and BEFORE install_harness_skills (a
+    # no-op for tombstonable slugs, but the order is the argument).
+    skill_tombstone_summary = _apply_skill_tombstones(realm)
+    if skill_tombstone_summary["archived"]:
         changed = True
     # Persona definitions: excluded from the generic loop too
     # (profiles/<name>/config.yaml → _destination_for_sync_path None). The member's
@@ -480,6 +498,8 @@ def pull_realm_sync(
     result["profile_artifact_sync"] = profile_files_summary.as_dict()
     if tombstone_summary["deleted"] or tombstone_summary["archived"] or tombstone_summary["warnings"]:
         result["workspace_tombstones"] = tombstone_summary
+    if any(skill_tombstone_summary.values()):
+        result["skill_tombstones"] = skill_tombstone_summary
     # ``profile_sync`` carries the W-H4 rows (which profile homes this pull
     # touched/materialized) PLUS the persona-definition merge accounting PLUS the
     # profile-FILE merge accounting. Emitted whenever any half has something to
@@ -588,6 +608,88 @@ def _apply_workspace_tombstones(realm_id: str) -> dict[str, list]:
                 {"code": "workspace_tombstone_failed", "workspace_id": workspace_id, "message": str(exc)}
             )
     return summary
+
+
+def _apply_skill_tombstones(realm: Realm) -> dict[str, list]:
+    """Apply the realm's ``skill_tombstones`` ledger to the CANONICAL root.
+
+    The workspace twin one function up, with one deliberate difference: this
+    lane ARCHIVES where that one hard-deletes. ``shared/skills`` is governed by
+    the promotion door's standing "never delete — archive" invariant, and a
+    skill package is always operator/agent-authored content — i.e. always
+    evidence — so the displaced copy moves to ``.archive/<UTC ts>/<slug>``
+    (resolver- and publish-invisible) instead of going away. That also makes
+    restore-with-content a two-step operator verb (un-tombstone + promote from
+    the archive) rather than a data-recovery incident.
+
+    Packages are matched through ``skill_tombstoned``, the same rule the mirror
+    and the publish filter ask, so "deleted" means one thing in all three
+    places. ``CANONICAL_SHARED_SKILL_IDS`` are skipped with a warning rather
+    than archived: the installer re-copies them from repo source on the very
+    same pull, so archiving one would be undone within the same verb — belt to
+    the store chokepoint's suspenders, for a ledger written by a peer that did
+    not enforce it. Per-slug isolation: one failed archive is a typed warning
+    row, never an aborted pull.
+
+    ``realm`` must be the PULLED record (see ``pull_realm_sync``'s re-read).
+    """
+
+    summary: dict[str, list] = {"archived": [], "skipped_installer_owned": [], "warnings": []}
+    if not (getattr(realm, "skill_tombstones", None) or []):
+        return summary
+    root = get_shared_skills_dir()
+    if not root.exists():
+        return summary
+
+    from hermes_constants import CANONICAL_SHARED_SKILL_IDS
+
+    from .skill_promotion import _archive_package
+
+    # Materialized before the first move: the walk reads the directory the
+    # archive step is about to mutate.
+    for slug, package_dir in list(_iter_publishable_skill_packages(root)):
+        if skill_tombstoned(realm, slug) is None:
+            continue
+        if slug in CANONICAL_SHARED_SKILL_IDS:
+            summary["skipped_installer_owned"].append(slug)
+            summary["warnings"].append(
+                {
+                    "code": "skill_tombstone_installer_owned",
+                    "skill": slug,
+                    "message": (
+                        "Tombstoned in the realm but hermes-installed here; the "
+                        "installer re-copies it from repo source on every pull, so "
+                        "the local package is left intact."
+                    ),
+                }
+            )
+            continue
+        try:
+            _archive_package(package_dir, slug)
+            summary["archived"].append(slug)
+        except Exception as exc:  # noqa: BLE001 — accounted, never silent
+            summary["warnings"].append(
+                {"code": "skill_tombstone_failed", "skill": slug, "message": str(exc)}
+            )
+    # The ``.provenance/<slug>.json`` sidecar is deliberately left in place:
+    # provenance is history (what was promoted, from where), not liveness, and a
+    # later promotion of the same slug overwrites it.
+    return summary
+
+
+def _skill_tombstone_rows(realm: Realm) -> list[dict[str, Any]]:
+    """The ledger as receipt rows for the status envelope and the sidecar."""
+
+    return [
+        {
+            "slug": entry.slug,
+            "deleted_at": entry.deleted_at.astimezone(timezone.utc).isoformat(),
+            "deleted_hash": entry.deleted_hash,
+        }
+        for entry in sorted(
+            getattr(realm, "skill_tombstones", None) or [], key=lambda item: item.slug
+        )
+    ]
 
 
 @dataclass(frozen=True, slots=True)
@@ -808,6 +910,19 @@ def _skill_artifacts(realm: Realm) -> list[RealmSyncArtifact]:
     # Launcher picker offers; categorized selection by bare child name works
     # today (the picker doesn't yet offer categorized slugs — documented
     # follow-up), and the categorized id itself is honored too.
+    #
+    # Deleted skills never publish, whatever the selection says (the
+    # ``workspace_ids -= deleted_workspace_ids`` idiom in
+    # ``_workspaces_for_realm``). Normally the pull already archived the local
+    # canonical copy, so this filter has nothing to do — it is the
+    # defense-in-depth half for a copy re-materialized out of band (a stray
+    # ``promote --from-path``, a manual copy) and for a publish racing ahead of
+    # its pull. Together with the existing chain — a stale member's publish is
+    # refused ``sync_behind`` → they pull → the pull hands them the ledger in the
+    # realm JSON → ``_apply_skill_tombstones`` archives their copy → their
+    # retried publish neither contains the skill nor could include it — this is
+    # why no server-side hook is needed: every writer is a hermes running this
+    # code, and the git host can only gate WHO writes, never WHAT is written.
     root = get_shared_skills_dir()
     artifacts: list[RealmSyncArtifact] = []
     if not root.exists():
@@ -816,6 +931,8 @@ def _skill_artifacts(realm: Realm) -> list[RealmSyncArtifact]:
     selection = set(realm.skill_selection or [])
     for slug, package_dir in _iter_publishable_skill_packages(root):
         if selected_only and not _skill_slug_selected(slug, selection):
+            continue
+        if skill_tombstoned(realm, slug) is not None:
             continue
         _append_skill_package_artifacts(artifacts, root, slug, package_dir)
     return artifacts
@@ -1891,6 +2008,9 @@ def read_realm_sync_sidecar(realm_id: str) -> dict[str, Any] | None:
         "skills_drift": raw.get("skills_drift") or [],
         "skill_publish_mode": raw.get("skill_publish_mode") or "all",
         "skill_selection": raw.get("skill_selection") or [],
+        # Additive + absent-tolerant, like ``profile_artifacts_held`` below: a
+        # sidecar written before the skill-delete ledger existed reports none.
+        "skill_tombstones": raw.get("skill_tombstones") or [],
         "skills_published": raw.get("skills_published") or 0,
         "agent_publish_mode": raw.get("agent_publish_mode") or "workspace",
         "agent_selection": raw.get("agent_selection") or [],
@@ -1943,6 +2063,7 @@ def _write_sync_sidecar(
         "skills_drift": skills_drift,
         "skill_publish_mode": realm.skill_publish_mode,
         "skill_selection": sorted(realm.skill_selection or []),
+        "skill_tombstones": _skill_tombstone_rows(realm),
         "skills_published": _distinct_skill_package_count(artifacts),
         "agent_publish_mode": agent_state["mode"],
         "agent_selection": agent_state["selection"],
@@ -2043,14 +2164,19 @@ class SkillSyncSummary:
     existing category dir, or a categorized child whose parent is a bare skill),
     or a per-package error — isolated so ONE bad package can never abort the pull.
     Refused packages are deliberately kept OUT of ``skills_drift`` (which stays the
-    held-divergent set the operator resolves); they are surfaced only here. All
-    lists are sorted, de-duplicated skill slugs (bare or ``<category>/<name>``)."""
+    held-divergent set the operator resolves); they are surfaced only here.
+    ``tombstoned`` are packages a still-stale publisher put in the subtree that
+    the realm's skill-delete ledger blocks: they are dropped from the mirror
+    exactly like a ``removed`` package, so the promotion loop never sees them and
+    a tombstoned slug can never auto-adopt. All lists are sorted, de-duplicated
+    skill slugs (bare or ``<category>/<name>``)."""
 
     adopted: list[str]
     converged: list[str]
     held: list[str]
     removed: list[str]
     refused: list[str]
+    tombstoned: list[str] = ()  # type: ignore[assignment]
 
     def as_dict(self) -> dict[str, list[str]]:
         return {
@@ -2059,6 +2185,9 @@ class SkillSyncSummary:
             "held": list(self.held),
             "removed": list(self.removed),
             "refused": list(self.refused),
+            # Additive key — the launcher's realm-sync sheet is absent-tolerant
+            # (the ``store_drift`` precedent), so an older reader ignores it.
+            "tombstoned": list(self.tombstoned),
         }
 
 
@@ -2080,6 +2209,12 @@ def apply_skill_inbox_pull(realm: Realm, subtree: Path) -> SkillSyncSummary:
     - ``noop_identical`` → converged; canonical untouched.
     - ``hold_divergent`` → held; canonical untouched, surfaced as drift.
 
+    A package the realm's skill-delete ledger blocks never reaches that
+    classification at all: the mirror drops it (``tombstoned``), so a stale
+    publisher's surviving copy cannot walk back in through the auto-adopt door.
+    ``realm`` must therefore be the PULLED record — ``pull_realm_sync`` re-reads
+    it after the artifact overwrite loop.
+
     Never called on a dry-run pull (``pull_realm_sync`` returns before this),
     so the mirror — itself a mutation — is skipped when ``dry_run=True``.
     """
@@ -2092,7 +2227,11 @@ def apply_skill_inbox_pull(realm: Realm, subtree: Path) -> SkillSyncSummary:
     )
 
     inbox = realm_inbox_dir(realm.id)
-    removed, reserved_refused = _mirror_realm_skill_inbox(subtree / "skills", inbox)
+    removed, reserved_refused, tombstoned = _mirror_realm_skill_inbox(
+        subtree / "skills",
+        inbox,
+        tombstoned=lambda slug: skill_tombstoned(realm, slug) is not None,
+    )
 
     adopted: list[str] = []
     converged: list[str] = []
@@ -2152,22 +2291,60 @@ def apply_skill_inbox_pull(realm: Realm, subtree: Path) -> SkillSyncSummary:
         held=sorted(set(held)),
         removed=sorted(set(removed)),
         refused=sorted(set(refused)),
+        tombstoned=sorted(set(tombstoned)),
     )
 
 
-def _mirror_realm_skill_inbox(source_skills: Path, inbox: Path) -> tuple[list[str], list[str]]:
+def _subtree_package_slug(source_skills: Path, rel_parts: tuple[str, ...]) -> str | None:
+    """Which published package does ``rel_parts`` belong to?
+
+    Answers with the SAME package-shape rules the promotion door and the
+    publisher use (``iter_skill_packages`` / ``_iter_publishable_skill_packages``):
+    a top-level dir with a ``SKILL.md`` is a bare package; otherwise its
+    immediate children are ``<category>/<child>``. ``None`` for a loose file at
+    the root of ``skills/``, which belongs to no package.
+
+    Needed because the mirror works on FILES while the tombstone ledger names
+    packages: dropping by top-level component alone would take a categorized
+    package's innocent siblings with it.
+    """
+
+    if not rel_parts:
+        return None
+    top = rel_parts[0]
+    if (source_skills / top / "SKILL.md").is_file():
+        return top
+    if len(rel_parts) >= 2:
+        return f"{top}/{rel_parts[1]}"
+    return None
+
+
+def _mirror_realm_skill_inbox(
+    source_skills: Path,
+    inbox: Path,
+    *,
+    tombstoned=None,
+) -> tuple[list[str], list[str], list[str]]:
     """Mirror ``source_skills`` (the pulled ``subtree/skills``) into ``inbox`` as
     an LF-canonical, resolver-invisible copy.
 
-    Returns ``(removed, reserved_refused)``: ``removed`` are the top-level packages
-    pruned (present in the inbox, gone from the subtree); ``reserved_refused`` are
+    Returns ``(removed, reserved_refused, tombstoned)``: ``removed`` are the
+    top-level packages pruned (present in the inbox, gone from the subtree);
+    ``reserved_refused`` are
     the top-level packages skipped WITHOUT any write because a relative path
     component maps to a Windows reserved device name (``con`` / ``nul`` /
     ``com1`` … — a realm publishing such a package would otherwise crash the
     mirror on Windows, a pull DoS). Reserved packages are skipped on every
     platform for deterministic behaviour (a reserved slug can never be promoted
-    anyway — ``_validate_slug`` refuses it) and reported so the caller can record
-    them as ``refused``.
+    anyway — ``validate_skill_slug`` refuses it) and reported so the caller can
+    record them as ``refused``.
+
+    ``tombstoned`` are the package slugs the realm's skill-delete ledger blocks
+    (``tombstoned`` predicate, the ONE match rule in ``store.skill_tombstoned``).
+    They are excluded from the desired set, so an already-mirrored copy is
+    unlinked exactly like a ``removed`` one and the promotion loop never sees
+    them. Filtering is per PACKAGE, not per top-level dir, so a tombstoned
+    ``<category>/<child>`` never takes its siblings with it.
 
     Text is LF-normalized at this write chokepoint (matching the publisher's
     ``_canonicalize_text_bytes``) so a package converges against an LF canonical
@@ -2200,11 +2377,19 @@ def _mirror_realm_skill_inbox(source_skills: Path, inbox: Path) -> tuple[list[st
             candidates.append((rel_parts, src))
 
     desired: dict[str, bytes] = {}
+    tombstoned_slugs: set[str] = set()
+    tombstoned_tops: set[str] = set()
     for rel_parts, src in candidates:
         # A sibling file of a reserved path within the same top-level family is
         # dropped too, so the family is quarantined whole (never half-written).
         if rel_parts[0] in reserved_tops:
             continue
+        if tombstoned is not None:
+            slug = _subtree_package_slug(source_skills, rel_parts)
+            if slug is not None and tombstoned(slug):
+                tombstoned_slugs.add(slug)
+                tombstoned_tops.add(rel_parts[0])
+                continue
         desired["/".join(rel_parts)] = _canonicalize_text_bytes(src.read_bytes())
 
     existing: dict[str, bytes] = {}
@@ -2214,7 +2399,10 @@ def _mirror_realm_skill_inbox(source_skills: Path, inbox: Path) -> tuple[list[st
 
     desired_top = {rel.split("/", 1)[0] for rel in desired}
     existing_top = {rel.split("/", 1)[0] for rel in existing}
-    removed = sorted(existing_top - desired_top - reserved_tops)
+    # A tombstoned package the inbox still held IS unlinked below, but it is
+    # reported as ``tombstoned``, not as ``removed`` — the realm did not stop
+    # publishing it, a member deleted it.
+    removed = sorted(existing_top - desired_top - reserved_tops - tombstoned_tops)
 
     for rel, data in desired.items():
         prior = existing.get(rel)
@@ -2228,7 +2416,7 @@ def _mirror_realm_skill_inbox(source_skills: Path, inbox: Path) -> tuple[list[st
         if rel not in desired:
             inbox.joinpath(*rel.split("/")).unlink()
     _prune_empty_dirs(inbox)
-    return removed, sorted(reserved_tops)
+    return removed, sorted(reserved_tops), sorted(tombstoned_slugs)
 
 
 def _prune_empty_dirs(root: Path) -> None:

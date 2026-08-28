@@ -492,10 +492,11 @@ def test_mirror_skips_reserved_name_package(tmp_path, monkeypatch):
     (src / "carrier" / "blocked.md").write_text("device\n", encoding="utf-8")
 
     inbox = tmp_path / "inbox"
-    removed, reserved = _mirror_realm_skill_inbox(src, inbox)
+    removed, reserved, tombstoned = _mirror_realm_skill_inbox(src, inbox)
 
     assert removed == []
     assert reserved == ["blocked", "carrier"]
+    assert tombstoned == []
     # The healthy package IS mirrored; both reserved families are written NOWHERE.
     assert (inbox / "ok" / "SKILL.md").is_file()
     assert not (inbox / "blocked").exists()
