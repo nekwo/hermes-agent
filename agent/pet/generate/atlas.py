@@ -387,12 +387,20 @@ def _drop_side_bleed(image):
 
 
 def _erase_long_axis_lines(image):
-    """Remove thin slot-spanning guide/floor/divider lines.
+    """Remove thin STRIP-spanning guide/floor/divider lines.
 
     Gemini will sometimes satisfy "baseline" / "cell" language by drawing
     literal horizontal floors or vertical panel dividers. They survive chroma
     keying and connect otherwise clean poses. Drop only *thin* rows/columns that
-    span nearly the whole slot; thick sprite body rows are left alone.
+    span nearly the whole image; thick sprite body rows are left alone.
+
+    Scale is load-bearing and this must only ever run on a WHOLE strip. "Spans
+    85% of the image" identifies a drawn floor across a ~1700px row; across a
+    ~220px single-pose crop it identifies the character's own shoulders, belt or
+    outstretched arms, and erasing those cuts the pose into slabs and punches
+    transparent scanlines through the saved frame. That is exactly what happened
+    to the live walk-se row, so the callers hoist this to strip scale rather than
+    letting :func:`_isolate_slot_subject` repeat it per slot.
     """
     from PIL import Image
 
@@ -486,10 +494,17 @@ def _component_boxes(image) -> list[tuple[tuple[int, int, int, int], int]]:
 
 
 def _isolate_slot_subject(image):
-    """Keep the slot's real subject; drop detached effects/noise."""
+    """Keep the slot's real subject; drop detached effects/noise.
+
+    Deliberately does NOT erase long-axis lines. This runs on a single-pose
+    crop, where that test cannot tell a drawn floor from the character's own
+    widest row — see :func:`_erase_long_axis_lines`. Callers that want lines
+    gone hand in a strip that has already had them erased, at the scale where
+    the question is answerable.
+    """
     from PIL import Image
 
-    rgba = _erase_long_axis_lines(image)
+    rgba = image.convert("RGBA")
     comps = _component_boxes(rgba)
     if not comps:
         return rgba
@@ -879,8 +894,16 @@ def extract_strip_frames(
     # the intended one-row strip and model-cheated 2D grids without ever stacking
     # two visual rows into one frame.
     frames = _component_crops(strip, frame_count, require_padding=True)
+    destriped = None
     if frames is None:
-        frames = _slot_crops(strip, frame_count, require_padding=True)
+        # Off the clean path. Every route below cuts the strip into single-pose
+        # columns, and a drawn floor/divider must be gone BEFORE that cut: it is
+        # a strip-scale fact (one line crossing every pose), and once we are
+        # inside a ~220px column it is indistinguishable from the character's own
+        # widest row. Erase once, here; the slot crops never repeat the test.
+        # Computed lazily because it is a full per-pixel pass over the strip.
+        destriped = _erase_long_axis_lines(strip)
+        frames = _slot_crops(destriped, frame_count, require_padding=True)
     if frames is None:
         if method == "components":
             raise ValueError(f"could not segment {frame_count} padded sprites from strip")
@@ -891,10 +914,13 @@ def extract_strip_frames(
         # cached/borderline model rolls can be inspected without stacking a 2D grid.
         frames = _component_crops(strip, frame_count, require_padding=False)
     if frames is None:
-        source = strip
+        # Only reachable once the block above ran, so `destriped` is bound; the
+        # fallback keeps that from being a trap if this order ever changes.
+        source = destriped if destriped is not None else _erase_long_axis_lines(strip)
+        base = source
         ranges = _frame_x_ranges(source, frame_count)
         if ranges is None:
-            source = _sever_expected_gutters(strip, frame_count)
+            source = _sever_expected_gutters(base, frame_count)
             ranges = _frame_x_ranges(source, frame_count)
 
         if ranges is None:

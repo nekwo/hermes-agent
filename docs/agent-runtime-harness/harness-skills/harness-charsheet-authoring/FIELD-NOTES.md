@@ -2542,6 +2542,50 @@ was right about the repair and wrong about the wound.
   test-verified only. (iv) Not proven end-to-end through a live `characters` generation — the
   proof is the two cached artifacts plus synthetic strips, not a fresh provider roll.
 
+### Appendix, same day — the root got fixed, and the fixture lied twice
+
+The entry above closed with "the next slice should consider fixing it at the source". The
+coordinator promoted that, so it is done. Four things worth keeping, two of them about how
+hard it was to write an HONEST test for this.
+
+- **[FIXED] Line erasure is hoisted to strip scale; the slot crop never repeats it.**
+  `_isolate_slot_subject` no longer calls `_erase_long_axis_lines`. `extract_strip_frames`
+  calls it once, on the whole strip, at the moment it falls off the clean path — lazily,
+  because it is a full per-pixel pass and the happy path should not pay for it. Both
+  slot-cutting routes (`_slot_crops` and the gutter path) now consume that already-cleaned
+  strip. Chose caller-hoisting over the two alternatives I was offered: an explicit
+  `erase_lines=` flag would have been dead weight (both callers of `_isolate_slot_subject`
+  are slot-scale, so every call site would pass `False` forever), and an aspect/width
+  threshold would have been a magic number guessing at the very thing the caller already
+  knows for certain. The caller does decide — it just decides once, at the top, where the
+  strip still exists.
+
+- **[MEASURED] The real repair, on the two cached artifacts.** Interior transparent rows
+  inside each pose's own bbox, before → after: `…_81776461.png` **12 rows across 5 of 8
+  frames → 0**, `…_76c03b99.png` **15 rows across 4 of 8 frames → 0**. Frame 3 of the first
+  file listed rows `426, 450, 451` — the exact rows named in the entry above, which is the
+  cleanest confirmation available that the mechanism was identified correctly.
+
+- **[READ] The defect was not only scanlines; it silently beheaded poses.** Building the
+  synthetic case I found a frame with NO scanline that was 23px shorter than its neighbours
+  (256 vs 279). When the erased row falls near one end of a pose, the smaller slab is left
+  below `_isolate_slot_subject`'s keep threshold and is dropped as noise, so the pose loses
+  its head and the frame closes up around the loss. A hole is detectable; this is not. The
+  test asserts uniform pose height as well as absence of scanlines, because the
+  scanline-only assertion passed on a frame that had lost its head.
+
+- **[READ] What actually discriminates a floor from a body row is ALIGNMENT, not width.**
+  My first two fixtures were wrong and both were wrong in the instructive direction. Eight
+  identical poses each carrying a wide bar at the SAME height really do span the strip —
+  that is a floor by any definition available to us, and the eraser removing it is correct
+  behaviour, not a bug. Drawing the poses narrower to dodge that just routed the strip down
+  the uniform-slot path, where the slot width IS the strip width over eight and the two
+  scales cannot disagree, so the test passed for no reason. The fixture only became honest
+  once poses varied frame to frame, which is what real art does and precisely why the live
+  strip had nothing erased at strip scale while its slots were being cut to ribbons.
+  **Consequence:** if a provider ever draws the same wide feature at the same height in all
+  eight poses, we will erase it and we will be right to. Do not "fix" that later.
+
 <!-- A2, A3, R1 and any slice standing in the HERMES repo: append your entries above this
      line, under the matching heading, or add a heading if none fits. Then say in your
      slice report that you did.

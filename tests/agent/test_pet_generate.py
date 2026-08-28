@@ -105,12 +105,18 @@ _SEAM_FRAMES = 8
 
 
 def _seam_severed_strip(*, seams=(-40, 20), severed=3):
-    """An 8-pose chroma strip with one pose cut by thin full-width seam lines.
+    """An 8-pose chroma strip with one pose cut by thin chroma-coloured seams.
 
     Poses sit close enough that the strip-level horizontal merge collapses them
-    into one box — exactly what the live artifact did — so extraction falls
-    through to the gutter path and each pose is validated as its own column.
-    The seams key out with the backdrop, severing that one pose into slabs.
+    into one box — that part is exactly what the live artifact did — so
+    extraction falls through to the gutter path and each pose is validated as
+    its own column.
+
+    The seams themselves are this fixture's own mechanism, NOT the live one: a
+    genuine seam the chroma key opens up. What actually severed the live walk-se
+    pose was our own slot-scale line erase, which is fixed at the root and has
+    its own tests below. A keyed seam remains possible — a provider really can
+    draw one — so this stays as the merge's coverage.
     """
     width, height = _SEAM_SLOT * _SEAM_FRAMES, 800
     img = Image.new("RGBA", (width, height), CHROMA)
@@ -138,6 +144,135 @@ def test_a_pose_severed_by_seam_lines_still_slices_into_whole_frames():
     # The repaired frame must carry the WHOLE pose, not the tallest slab: its
     # vertical span matches an untouched neighbour's within the seam width.
     assert abs((severed[3] - severed[1]) - (intact[3] - intact[1])) <= 6
+
+
+# ───────── drawn lines are a STRIP-scale fact, never a slot-scale one ─────────
+#
+# `_erase_long_axis_lines` deletes thin rows spanning >=85% of the image, to kill
+# floors and panel dividers a model draws across a row. That test means what it
+# says against a ~1700px strip. Against a ~220px single-pose crop it means
+# something else entirely — a character's own shoulders, belt or outstretched
+# arms span that width — and it was deleting body rows. This is the root of the
+# live walk-se failure.
+
+
+def _interior_empty_rows(frame):
+    """Fully transparent rows strictly inside the frame's own content bbox."""
+    bbox = frame.getbbox()
+    if bbox is None:
+        return []
+    alpha = frame.getchannel("A")
+    return [
+        y
+        for y in range(bbox[1] + 1, bbox[3] - 1)
+        if alpha.crop((bbox[0], y, bbox[2], y + 1)).getbbox() is None
+    ]
+
+
+def _slot_crop_with_a_wide_body_row(width=221, height=400):
+    """One pose, cropped to its own slot, with a bar of its own art across it.
+
+    Already keyed, so the bar is the 3 rows the eraser would see after
+    defringing: thin enough to read as a "line", and 88% of the crop wide.
+    Nothing here is a drawn floor; it is all one character.
+    """
+    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    body = round(width * 0.45)
+    x0 = (width - body) // 2
+    draw.rectangle((x0, 60, x0 + body, 340), fill=(60, 90, 200, 255))
+    bar = round(width * 0.88)
+    bx = (width - bar) // 2
+    draw.rectangle((bx, 198, bx + bar, 200), fill=(60, 90, 200, 255))
+    return img
+
+
+def test_a_slot_crop_keeps_the_poses_own_wide_rows():
+    isolated = atlas._isolate_slot_subject(_slot_crop_with_a_wide_body_row())
+
+    assert _interior_empty_rows(isolated) == []
+    # The wide row itself is still drawn, not merely bridged by something else.
+    assert isolated.getchannel("A").crop((0, 198, 221, 201)).getbbox() is not None
+
+
+def _strip_with_a_drawn_floor(*, floor=True):
+    """Eight poses on chroma, optionally standing on one drawn ground line."""
+    width, height = _SEAM_SLOT * _SEAM_FRAMES, 800
+    img = Image.new("RGBA", (width, height), CHROMA)
+    draw = ImageDraw.Draw(img)
+    rx, ry, cy = 95, 140, 400
+    for i in range(_SEAM_FRAMES):
+        cx = i * _SEAM_SLOT + _SEAM_SLOT // 2
+        draw.ellipse((cx - rx, cy - ry, cx + rx, cy + ry), fill=(60, 90, 200, 255))
+    if floor:
+        # Spans the whole strip and touches every pose — the thing the eraser
+        # was built for.
+        draw.rectangle((0, 536, width, 540), fill=(90, 90, 90, 255))
+    return img
+
+
+def test_a_floor_line_drawn_across_the_whole_strip_is_still_erased():
+    keyed = atlas.remove_background(_strip_with_a_drawn_floor())
+    width = keyed.width
+
+    erased = atlas._erase_long_axis_lines(keyed)
+
+    assert erased.getchannel("A").crop((0, 537, width, 540)).getbbox() is None
+    # The poses are untouched: the strip still has content above the floor.
+    assert erased.getchannel("A").crop((0, 300, width, 500)).getbbox() is not None
+
+
+def test_a_strip_with_a_drawn_floor_still_slices_into_whole_frames():
+    frames = atlas.extract_strip_frames(
+        _strip_with_a_drawn_floor(), _SEAM_FRAMES, method="auto", fit=False
+    )
+
+    assert len(frames) == _SEAM_FRAMES
+    for frame in frames:
+        assert frame.getbbox() is not None
+
+
+def _wide_row_strip():
+    """The live shape: every pose carries a thin wide row of its OWN art.
+
+    Poses sit close enough that the strip-level merge collapses them, so this
+    goes down the gutter path and each pose is isolated inside its own narrow
+    crop — the exact place the eraser used to mistake a body row for a floor.
+
+    What separates a body row from a floor is not how wide it is but whether the
+    OTHER poses are wide at the same height. Only two frames get a bar, and each
+    sits where every pose is narrow, so at strip scale the row is ~55% covered
+    (no floor) while inside that pose's own slot it clears 85% and used to be
+    deleted. This is the live artifact's shape: real poses differ frame to frame,
+    which is why nothing was erased from the strip but plenty was from the slots.
+    """
+    width, height = _SEAM_SLOT * _SEAM_FRAMES, 800
+    img = Image.new("RGBA", (width, height), CHROMA)
+    draw = ImageDraw.Draw(img)
+    rx, ry, cy = 95, 140, 400
+    bars = {3: cy - 120, 6: cy + 108}
+    for i in range(_SEAM_FRAMES):
+        cx = i * _SEAM_SLOT + _SEAM_SLOT // 2
+        draw.ellipse((cx - rx, cy - ry, cx + rx, cy + ry), fill=(60, 90, 200, 255))
+        if i in bars:
+            top = bars[i]
+            draw.rectangle((cx - rx, top, cx + rx, top + 4), fill=(60, 90, 200, 255))
+    return img
+
+
+def test_a_poses_own_wide_row_is_not_erased_into_a_scanline():
+    frames = atlas.extract_strip_frames(_wide_row_strip(), _SEAM_FRAMES, method="auto", fit=False)
+
+    assert len(frames) == _SEAM_FRAMES
+    scanlines = {i: _interior_empty_rows(f) for i, f in enumerate(frames)}
+    assert all(rows == [] for rows in scanlines.values()), scanlines
+
+    # An erased row does not always leave a hole: when it cuts near one end, the
+    # smaller slab is dropped as noise and the pose silently loses its head. So
+    # measure the pose too — every frame must still be as tall as its unbarred
+    # neighbours.
+    heights = [f.getbbox()[3] - f.getbbox()[1] for f in frames]
+    assert max(heights) - min(heights) <= 6, heights
 
 
 # ─────────────── the auto/components leniency contract ───────────────
