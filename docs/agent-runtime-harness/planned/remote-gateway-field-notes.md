@@ -906,3 +906,41 @@ B's real mission-chat handler in B's runtime. It is NOT a model turn: both roots
 are fresh and this suite has no provider, so "an agent on B composed a reply and
 it was forged into A's chat" is proven by the unit lane and the delivery lane's
 own suites, not by two serve children.
+
+**Final sweep, measured on a clean tree after the docs landed.**
+
+| suite | result |
+|---|---|
+| `tests/agent_runtime` (whole tree, minus the two e2e files) | **6800 passed, 2 skipped, 1 failed** |
+| both two-roots e2e files together | **5 passed** in 98s |
+| the gateway/serve/auth/dispatch group (25 files) | **686 passed, 1 skipped, 3 failed** |
+| `tests/gateway` (4465 tests) | 5 failed — **all 5 pass in isolation**; ordering pollution in a suite Stage 7 does not touch |
+| launcher `test/features/mission_control/` | **5291 passed, 1 skipped** |
+
+**The reds are not Stage 7's, and here is the proof rather than the claim.** All
+of them are `tests/agent_runtime/test_stream_contract_fixture.py`, failing on
+`AgentCreateRefusal … placement_id 'qa_fixture' is not a deliberate-placement
+id`. That fence was introduced by `d941c01db1` (office R1, "a placement id must
+be classifiable by both repos"), and `git merge-base --is-ancestor d941c01db1
+3d0a17922d` answers NO — it arrived AFTER Stage 7's first commit, through a
+concurrent session's merge of `origin/main`. Stage 7 touched neither
+`scripts/generate_agent_runtime_stream_fixtures.py` nor `agent_create.py`.
+
+**That lane is already chasing this exact class and has not found this site.**
+`012956ab67` — *"five suites build their placement ids dynamically, and only
+running them found it"* — plus `fc4c4e8308` for a sixth. The stream-fixture
+GENERATOR (`scripts/generate_agent_runtime_stream_fixtures.py:829`) is a
+seventh: it hardcodes `placement_id="qa_fixture"`, which the new fence refuses,
+so the goldens cannot be regenerated at all. Handed over here rather than fixed,
+because regenerating stream goldens from inside a gateway stage would put
+another lane's contract bytes in a gateway commit.
+
+**A shared-index near-miss worth recording.** Mid-session another agent had a
+CHERRY-PICK in progress with a conflict, and a plain `git add` of one Stage 7
+test file put that file into THEIR staged set — one `--continue` away from
+landing in their commit. Backed out with `git restore --staged <path>` (which
+leaves their staged files and the conflict exactly as found), then waited for
+`.git/CHERRY_PICK_HEAD` to disappear before committing. The memory entry's rule
+— *stage and commit in one breath* — has a corollary: **check for an in-progress
+merge/cherry-pick before staging, because "one breath" is not atomic when
+somebody else's operation is already holding the index open.**
