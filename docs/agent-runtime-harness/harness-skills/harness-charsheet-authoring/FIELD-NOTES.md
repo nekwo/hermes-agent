@@ -2586,6 +2586,58 @@ hard it was to write an HONEST test for this.
   **Consequence:** if a provider ever draws the same wide feature at the same height in all
   eight poses, we will erase it and we will be right to. Do not "fix" that later.
 
+### Appendix 2, same day — the corollary was wrong within the hour
+
+The appendix above ended: "if a provider ever draws the same wide feature at the same
+height in all eight poses, we will erase it and we will be right to. Do not fix that
+later." A compose run inside the hour produced exactly that shape and we were **wrong to**.
+Recording it in full, because the reasoning that produced the bad corollary was the good
+reasoning of the entry before it, applied one step too far.
+
+- **[MEASURED] The shape is anatomy, and it is only at the diagonals.** The installed
+  moss-golem sheet had interior transparent scanlines in the two SE rows and nowhere else.
+  On the source strips (`…/20260828-052440-cc39bb/strips/`): `idle-se-1.png` has wide-row
+  runs `(485,489)` — four rows — and `(522,613)`; `walk-se-1.png` has `(386,390)` and
+  `(394,429)`. In both, the thin band that got erased sits a handful of rows above a thick
+  band that did not. That is one continuous silhouette, not a line near a body. The `s`
+  control has a single 85-row run and no gaps at all. At a diagonal the chin/shoulder
+  contour aligns across all eight poses; head-on it does not, which is why only SE and NE
+  can produce this.
+
+- **[READ] Coverage-thinness cannot discriminate a floor from anatomy. Full stop.** The two
+  are the same measurement: a thin band covering >=85% of the strip. The previous appendix
+  reasoned that eight aligned bars "really do span the strip, so that is a floor by any
+  definition available to us" — true about the definition, false about the world. The
+  definition was the defect.
+
+- **[FIXED] The discriminator is background context, and it separates cleanly.** A drawn
+  floor crosses the BACKGROUND between poses; aligned anatomy has body directly above and
+  below every column of it, because it is the silhouette's own widest row. `_erase_long_axis_lines`
+  now locates a band by width exactly as before, then erases only the columns whose local
+  vertical context (3px, judged against the ORIGINAL mask — the erase must not eat its own
+  evidence) is empty. Measured: `idle-se` band 1320/1342 columns are body-context (98.4%),
+  `walk-se` 1857/1871 (99.3%), a synthetic drawn floor 0/1664 (100% background-crossing).
+  Not a threshold that needs tuning — the populations do not overlap.
+
+- **[READ] Why not the segmentation-only design.** The other option on the table was to use
+  the erase purely as a segmentation mask and crop output frames from the unerased strip,
+  letting `_isolate_slot_subject`/`_drop_side_bleed` drop floor fragments as detached
+  components. Measured, it does not work: a floor touching the feet makes the whole strip
+  ONE component and the slot crop ONE component, so nothing is detached and the floor
+  survives into every frame. It would have traded a scanline for a bar across every cell.
+
+- **[READ] Accepted residue, stated plainly.** A floor's stub directly under a pose's own
+  feet has body above it and is kept. It merges into the pose it touches and bridges
+  nothing, so segmentation is unaffected; it is cosmetic and it is the price of never
+  cutting anatomy again. The `s`-row control and both walk-se cache artifacts from the
+  earlier entries still extract clean, and pose heights are unchanged (no beheading).
+
+- **[READ] The lesson under both appendices.** Twice now the fix was right and the stated
+  justification for its BOUNDARY was wrong — first "a slot-scale wide row is a floor", then
+  "a strip-scale aligned wide row is a floor". Both times the boundary was drawn from what
+  the code could measure rather than from what the artifact is. If the next slice finds
+  itself writing "X is Y by any definition available to us", that sentence is the bug.
+
 <!-- A2, A3, R1 and any slice standing in the HERMES repo: append your entries above this
      line, under the matching heading, or add a heading if none fits. Then say in your
      slice report that you did.
