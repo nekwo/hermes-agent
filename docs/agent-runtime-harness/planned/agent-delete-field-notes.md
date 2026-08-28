@@ -219,6 +219,28 @@ merge-base diff selects any additional claim, the gate will exit 2 on the cap
 rather than on a survivor — split the landing or raise the cap deliberately, and
 do not read that exit as a mutation failure.
 
+## F7 — D4 (hermes half): an alias, and the dump the plan expects does not exist here
+
+`persona instance delete` is `add_parser("retire", aliases=["delete"])` — ONE
+parser object, so the two spellings share flags, defaults, help and handler by
+construction rather than by assertion. The only field that differs is
+argparse's record of which word the operator typed
+(`args.persona_instance_command`), and nothing reads it (checked: its only other
+readers are the parser-shape tests' own lookup tables).
+
+`retire` stays the canonical machine-readable name everywhere — RPC method,
+capability id `persona.instance.retire`, event types, internal symbols — per the
+plan's surface-language-only scope.
+
+**The plan's D4 says to regenerate `hermes_cli_contract.json` "plus the
+byte-pinned copy in hermes if the fixture is mirrored". It is NOT mirrored: no
+`hermes_cli_contract.json` exists anywhere in this repo, and no JSON fixture
+here mentions `placement-id`.** So there is nothing for the hermes agent to
+regenerate, and the launcher agent's dump is the only copy. This branch DOES
+make the committed dump stale, on two counts (see the report's landing section):
+the new `delete` alias, and three `--placement-id` help strings plus a new
+`--resurrect` flag on `office actor-upsert`.
+
 **Not fixed, and the coordinator should know:** `office_sync.apply_office_pull`
 (`office_sync.py:414`) writes actor files with `atomic_json_write`, bypassing
 `upsert_actor` and therefore this fence entirely. It is the blindest

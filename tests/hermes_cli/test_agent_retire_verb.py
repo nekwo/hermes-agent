@@ -468,3 +468,79 @@ def test_the_persona_instance_door_carries_the_token_too(
     ]
     assert [payload.get(CORRELATION_ID_KEY) for payload in removed] == [token]
     assert [payload.get("actor_key") for payload in removed] == [placed["actor_key"]]
+
+
+# ── D4: the operator's verb is Delete ───────────────────────────────────────
+
+
+def test_delete_is_the_same_parser_as_retire_and_cannot_drift_from_it():
+    """D4. An argparse ALIAS, not a second parser.
+
+    The operator ruling is about the WORD ("why retire it should just be
+    delete"), so the two spellings must be one behaviour — and the way to
+    guarantee that is structural rather than asserted verb by verb: one parser
+    object means the flags, the defaults, the help and the handler are the same
+    objects, so there is nothing left that COULD drift.
+
+    Probed as the whole parsed namespace rather than just ``func``: a second
+    parser wired to the same handler would satisfy a ``func`` check and still
+    differ on a default nobody re-typed, which is precisely the failure a copied
+    ``add_parser`` produces.
+    """
+
+    from hermes_cli import harness
+
+    def _parse(spelling: str):
+        root = argparse.ArgumentParser(prog="hermes")
+        harness.build_parser(root.add_subparsers(dest="command"))
+        return root.parse_args([
+            "harness", "persona", "instance", spelling,
+            "personainst_qa_agent_2",
+            "--reason", "the operator dragged it off the level",
+            "--requested-by", "cli",
+            "--correlation-id", "g-delete-1",
+            "--json",
+        ])
+
+    retire = vars(_parse("retire"))
+    delete = vars(_parse("delete"))
+
+    assert retire.pop("func").__name__ == "_cmd_persona_instance_retire"
+    assert delete.pop("func").__name__ == "_cmd_persona_instance_retire"
+
+    # The ONE field that legitimately differs: argparse records which spelling
+    # the operator typed. Popped explicitly rather than ignored, so that if a
+    # SECOND difference ever appears it reds here instead of hiding behind a
+    # loosened comparison. Nothing reads this dest — checked: its only other
+    # readers are the parser tests' own lookup tables — so recording the word
+    # cannot become a behaviour.
+    assert retire.pop("persona_instance_command") == "retire"
+    assert delete.pop("persona_instance_command") == "delete"
+
+    assert retire == delete
+
+
+def test_the_delete_spelling_actually_retires_an_agent(
+    qa_persona, seeded_workspace, capsys
+):
+    """ANTI-VACUITY for the alias above: a namespace comparison passes against a
+    parser that routes nowhere. This one drives the verb end to end and reads
+    the store."""
+
+    from agent_runtime.office_store import OfficeStore
+
+    placed = _place(capsys, placement_id="qa_verb_delete_agent_2")
+
+    code = _dispatch([
+        "harness", "persona", "instance", "delete",
+        placed["persona_instance_id"],
+        "--json",
+    ])
+    data = json.loads(capsys.readouterr().out)
+
+    assert code == 0, data
+    assert data["persona_instance_retired"]["persona_instance_id"] == (
+        placed["persona_instance_id"]
+    )
+    # Both halves left, which is what makes Delete an honest word for it.
+    assert OfficeStore().list_actors(WORKSPACE) == []

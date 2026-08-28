@@ -1154,7 +1154,18 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_archive.add_argument("--requested-by", default="cli")
     persona_instance_archive.add_argument("--json", action="store_true")
     persona_instance_archive.set_defaults(func=_cmd_persona_instance_archive)
-    persona_instance_retire = persona_instance_subs.add_parser("retire", help="Retire (end-of-life) a placement-backed persona instance: archive its row (chat history preserved)")
+    # D4. `delete` is an argparse ALIAS, not a second parser: one parser object,
+    # so the two spellings cannot drift in flags, help, or handler — which is
+    # the failure mode a copied `add_parser` would have had, and the operator
+    # ruling ("why retire it should just be delete") is about the WORD, not
+    # about a second behaviour.
+    #
+    # `retire` stays the canonical name here and everywhere machine-readable —
+    # the RPC method, the capability id `persona.instance.retire`, the event
+    # types, the internal symbols. Renaming those would break every launcher
+    # build in the field to change a noun; the operator reads "delete" on the
+    # surface, and the surface is where the ruling applies.
+    persona_instance_retire = persona_instance_subs.add_parser("retire", aliases=["delete"], help="Delete (end-of-life) a placement-backed persona instance: archive its row (chat history preserved)")
     persona_instance_retire.add_argument("persona_instance_id")
     persona_instance_retire.add_argument("--reason", default="placement removed")
     persona_instance_retire.add_argument("--requested-by", default="cli")
