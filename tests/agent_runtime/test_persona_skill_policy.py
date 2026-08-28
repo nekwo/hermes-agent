@@ -43,7 +43,7 @@ def test_harness_personas_expose_mission_dev_and_qa_skills():
     assert "harness-qa-verdict" in personas["dev"].skills
     assert "harness-dev-delivery" in personas["backend_dev"].skills
     assert "harness-continuity" in personas["backend_dev"].skills
-    assert "launcher-stagec-mcp-screenshot" not in personas["backend_dev"].skills
+    assert "launcher-mcp-operations" not in personas["backend_dev"].skills
     assert "harness-qa-verdict" in personas["qa"].skills
 
 

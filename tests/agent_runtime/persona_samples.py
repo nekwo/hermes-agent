@@ -57,7 +57,7 @@ def sample_personas() -> list[AgentPersona]:
         "dev",
         toolsets=["file", "search", "terminal", "session_search", "code_execution", "skills"],
         hermes_profile="gpt-launcher",
-        skills=["harness-continuity", "harness-dev-delivery", "harness-qa-verdict", "launcher-stagec-mcp-screenshot"],
+        skills=["harness-continuity", "harness-dev-delivery", "harness-qa-verdict", "launcher-mcp-operations"],
     )
     dev.display_name = "Launcher Dev Agent"
     dev.repo_scope_label = "EterniaLauncher"
@@ -74,7 +74,7 @@ def sample_personas() -> list[AgentPersona]:
         "qa",
         toolsets=["file", "search", "terminal", "browser", "vision", "session_search", "skills"],
         hermes_profile="qa",
-        skills=["harness-qa-verdict", "launcher-stagec-mcp-screenshot"],
+        skills=["harness-qa-verdict", "launcher-mcp-operations"],
     )
     qa.display_name = "QA Agent"
     return [neko, dev, backend, qa, sample_persona("base", hermes_profile="base")]

@@ -573,7 +573,7 @@ def test_unbounded_chat_lane_resolution_is_scoped_end_to_end(
 # ``launcher_qa`` surface reported ``used_skills: []`` /
 # ``queued_skills_loaded: []``. The agent hit ``helper_low_information_capture``
 # from ``screenshot_window`` and burned the turn rediscovering nothing — while
-# ``launcher-stagec-mcp-screenshot``, granted to the persona and documenting that
+# ``launcher-mcp-operations``, granted to the persona and documenting that
 # exact refusal's remedy, was never put in context. Admitting a tool surface
 # without its manual is the gap these pin closed.
 
@@ -581,7 +581,7 @@ def test_unbounded_chat_lane_resolution_is_scoped_end_to_end(
 def _qa_with_manual(*servers: str):
     persona = _declaring("qa", *servers)
     return dataclasses.replace(
-        persona, skills=[*persona.skills, "launcher-stagec-mcp-screenshot"]
+        persona, skills=[*persona.skills, "launcher-mcp-operations"]
     )
 
 
@@ -593,7 +593,7 @@ def test_an_admitted_server_resolves_its_operating_manual(qa_profile):
     assert admission.server_names == ("launcher_qa",)
     assert admitted_operating_skill_ids(
         admission, granted_skills=_qa_with_manual().skills
-    ) == ["launcher-stagec-mcp-screenshot"]
+    ) == ["launcher-mcp-operations"]
 
 
 def test_the_manual_is_never_invented_for_a_persona_that_was_not_granted_it(qa_profile):
@@ -612,7 +612,7 @@ def test_the_manual_is_never_invented_for_a_persona_that_was_not_granted_it(qa_p
         skills=[
             skill
             for skill in _persona("qa").skills
-            if skill != "launcher-stagec-mcp-screenshot"
+            if skill != "launcher-mcp-operations"
         ],
     )
 
@@ -621,12 +621,12 @@ def test_the_manual_is_never_invented_for_a_persona_that_was_not_granted_it(qa_p
     )
 
     assert admission.server_names == ("launcher_qa",)
-    assert "launcher-stagec-mcp-screenshot" not in revoked.skills
+    assert "launcher-mcp-operations" not in revoked.skills
     assert admitted_operating_skill_ids(admission, granted_skills=revoked.skills) == []
 
 
 def test_no_admission_object_resolves_no_manual():
-    assert admitted_operating_skill_ids(None, granted_skills=["launcher-stagec-mcp-screenshot"]) == []
+    assert admitted_operating_skill_ids(None, granted_skills=["launcher-mcp-operations"]) == []
 
 
 def test_every_mapped_manual_names_an_admissible_server():
@@ -666,7 +666,7 @@ def test_the_live_turn_resolves_the_manual_for_an_admitted_persona(
 
     assert persona_runtime.mission_chat_operating_skills(
         _qa_with_manual(), session_id=None
-    ) == ["launcher-stagec-mcp-screenshot"]
+    ) == ["launcher-mcp-operations"]
 
 
 def test_the_seeded_dev_persona_grants_the_admitted_surfaces_manual():
@@ -678,7 +678,7 @@ def test_the_seeded_dev_persona_grants_the_admitted_surfaces_manual():
     Launcher Dev and ship no manual — the 2026-07-29 gap, one persona over.
     """
 
-    assert "launcher-stagec-mcp-screenshot" in _persona("dev").skills
+    assert "launcher-mcp-operations" in _persona("dev").skills
 
 
 def test_an_admitted_manual_that_is_not_installed_degrades_the_preload_quietly(
@@ -686,7 +686,7 @@ def test_an_admitted_manual_that_is_not_installed_degrades_the_preload_quietly(
 ):
     """Hermes grants the manual; it cannot install the manual's CONTENT.
 
-    ``launcher-stagec-mcp-screenshot`` is realm-owned — not under
+    ``launcher-mcp-operations`` is realm-owned — not under
     ``docs/agent-runtime-harness/harness-skills`` and never written by
     ``skill_install`` — so a realm pull that renames or removes it leaves the
     grant and the admission intact while the file is gone. This drives the REAL
@@ -714,10 +714,10 @@ def test_an_admitted_manual_that_is_not_installed_degrades_the_preload_quietly(
     )
 
     # Admitted + granted ⇒ runtime policy still REQUIRES it this turn ...
-    assert "launcher-stagec-mcp-screenshot" in preload.required
+    assert "launcher-mcp-operations" in preload.required
     # ... it just is not on disk, so it is reported, not raised.
-    assert "launcher-stagec-mcp-screenshot" in preload.missing
-    assert "launcher-stagec-mcp-screenshot" not in preload.loaded
+    assert "launcher-mcp-operations" in preload.missing
+    assert "launcher-mcp-operations" not in preload.loaded
 
 
 def test_a_non_qa_persona_resolves_the_same_surfaces_manual(qa_profile, monkeypatch):
@@ -730,10 +730,10 @@ def test_a_non_qa_persona_resolves_the_same_surfaces_manual(qa_profile, monkeypa
     _enable_root_admission(monkeypatch)
     dev = dataclasses.replace(
         _declaring("dev", "launcher_qa"),
-        skills=["harness-dev-delivery", "launcher-stagec-mcp-screenshot"],
+        skills=["harness-dev-delivery", "launcher-mcp-operations"],
     )
 
-    assert persona_runtime.mission_chat_operating_skills(dev, session_id=None) == ["launcher-stagec-mcp-screenshot"]
+    assert persona_runtime.mission_chat_operating_skills(dev, session_id=None) == ["launcher-mcp-operations"]
 
 
 def test_manual_resolution_never_fails_a_turn(qa_profile, monkeypatch):

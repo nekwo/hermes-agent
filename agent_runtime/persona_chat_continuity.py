@@ -75,7 +75,8 @@ _MAX_ARGUMENTS = 4_000
 #: silently disagree with it.
 #:
 #: 256 KiB is ~4.6x the largest real preload measured on this lane (qa's
-#: ``launcher-stagec-mcp-screenshot``, 54 KB) and it is paid at most ONCE per
+#: ``launcher-mcp-operations``, formerly ``launcher-stagec-mcp-screenshot``,
+#: 54 KB) and it is paid at most ONCE per
 #: thread: turn 2+ delivers the compact ``unchanged`` stub, so steady-state rows
 #: are a few hundred bytes.
 _MAX_USER_ROW_CONTENT = 262_144

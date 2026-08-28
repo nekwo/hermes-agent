@@ -296,7 +296,8 @@ READ_ONLY_EXCLUDED_TOOLS: Mapping[str, tuple[str, ...]] = {
 #:   admitted the server". A persona that declares ``launcher_qa`` on a lane
 #:   where admission is off, or under a role the config does not name, gets no
 #:   MCP tools — and must not pay a 45KB manual for tools it does not have.
-#: * ``launcher-stagec-mcp-screenshot`` is not a Harness-owned skill: it is not
+#: * ``launcher-mcp-operations`` (renamed 2026-08-28 from
+#:   ``launcher-stagec-mcp-screenshot``) is not a Harness-owned skill: it is not
 #:   under ``docs/agent-runtime-harness/harness-skills`` and ``skill_install``
 #:   never writes it, so its frontmatter is a realm-published runtime artifact
 #:   that the next realm pull would overwrite. A policy Hermes must hold cannot
@@ -307,7 +308,7 @@ READ_ONLY_EXCLUDED_TOOLS: Mapping[str, tuple[str, ...]] = {
 #: manual belongs to the SURFACE. A second role admitted the same server would
 #: need the same manual, and a role admitted nothing needs none.
 MCP_OPERATING_SKILLS: Mapping[str, tuple[str, ...]] = {
-    "launcher_qa": ("launcher-stagec-mcp-screenshot",),
+    "launcher_qa": ("launcher-mcp-operations",),
 }
 
 _DEFAULT_CONNECT_TIMEOUT_SECONDS = 20.0
