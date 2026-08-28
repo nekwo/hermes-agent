@@ -107,6 +107,17 @@ annotation (`placement_id: str = "qa_retire_1"`); fixed by hand in
 `test_agent_retire_service.py`, `test_serve_rpc_agent_retire.py`, and
 `test_agent_retire_verb.py`.
 
+**A scripted edit on Windows must write bytes, not text.** `Path.write_text`
+applies the platform newline translation, so the migration silently flipped 13
+LF files to CRLF and turned a 244-literal rename into a 16 000-line diff — and
+`tests/mutation_claims.json` the same way, where it first read as a 730/670
+rewrite of a file I had appended four rows to. The repo is MIXED (e.g.
+`test_office_store.py` is natively CRLF), so "normalise everything to LF" would
+be wrong too; the rule is to preserve each file's own convention. Restored in a
+separate commit rather than folded into the stage commits, so the fix is
+legible as what it is. Anything scripted over this tree should use
+`read_bytes`/`write_bytes`, or `open(..., newline="")`.
+
 `test_agent_create_service.py::test_every_invalid_arm_has_a_case` is an AST walk
 over the module's refusal arms, so the new reason had to be parametrised there —
 that test is what stops a new arm from shipping uncovered, and it worked.
