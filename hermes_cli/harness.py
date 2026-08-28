@@ -1740,15 +1740,18 @@ def build_parser(parent_subparsers) -> None:
     characters_start.add_argument("--states", default="", help="Animation states as 'idle:6,walk:8[,cheer:5:fixed]'; default = the CHAR8 states")
     characters_start.add_argument("--directions", default="8", help="Direction scheme: 8 (five authored, three mirrored) or 4")
     characters_start.add_argument("--base-image", dest="base_image", default="", help="Identity-anchor image; copied into the draft")
-    characters_start.add_argument("--authored-by", dest="authored_by", default="", help="Persona driving this authoring run, recorded as provenance; it never scopes where the draft lives (that is the HERMES_HOME this turn resolved) but it is what lets a later reader check a resume is opening under the profile that authored it")
+    characters_start.add_argument("--authored-by", dest="authored_by", default="", help="Persona driving this authoring run, recorded as provenance; nothing scopes where the draft lives — the character library is install-wide at <hermes_root>/shared/characters, one directory for every persona and profile — but it is what lets a later reader check a resume is opening under the profile that authored it")
     characters_start.add_argument("--json", action="store_true")
     characters_start.set_defaults(func=_cmd_characters_start)
     characters_list = characters_subs.add_parser("list", help="List character drafts and installed characters")
     characters_list.add_argument("--json", action="store_true")
     characters_list.set_defaults(func=_cmd_characters_list)
-    characters_backfill_home = characters_subs.add_parser("backfill-home", help="Record `hermes_home` on drafts under THIS home that predate the field, and on no others. Explicit and receipted on purpose: a draft that already states a home keeps it (a copied draft's original home is the field being honest), and the write leaves `updated` and every other key exactly as it found them, because the drafts this reaches are dormant exhibits whose timeline is evidence. Idempotent — a second run stamps nothing")
+    characters_backfill_home = characters_subs.add_parser("backfill-home", help="Record `hermes_home` on library drafts that carry no home, and on no others. The field is provenance of the authoring RUN, not an address — the library is install-wide, so this stamps the home THIS run resolved onto a draft that arrived without one (restored from quarantine, hand-copied in); `migrate-home` stamps the legacy source home instead, which is the case that had a better answer available. Explicit and receipted on purpose: a draft that already states a home keeps it, and the write leaves `updated` and every other key exactly as it found them, because the drafts this reaches are dormant exhibits whose timeline is evidence. Idempotent — a second run stamps nothing")
     characters_backfill_home.add_argument("--json", action="store_true")
     characters_backfill_home.set_defaults(func=_cmd_characters_backfill_home)
+    characters_migrate_home = characters_subs.add_parser("migrate-home", help="Move THIS home's legacy `<HERMES_HOME>/characters` store into the install-wide library at `<hermes_root>/shared/characters`. Run once per profile that has one. Drafts keep their directory leaf names and installed characters keep their slugs, so a stored draft id still resolves; a draft carrying no `hermes_home` is stamped with the SOURCE home BEFORE it moves, because afterwards the directory no longer witnesses where it lived. A destination that already holds the leaf or slug is a per-entry REFUSAL, never a merge and never an overwrite, and nothing is deleted — the emptied source tree is left standing as its own tombstone. Idempotent: a second run moves nothing")
+    characters_migrate_home.add_argument("--json", action="store_true")
+    characters_migrate_home.set_defaults(func=_cmd_characters_migrate_home)
     characters_status = characters_subs.add_parser("status", help="Full draft state: stage, spec, per-item QA history")
     characters_status.add_argument("--draft", required=True, help="Draft id from `harness characters list`")
     characters_status.add_argument("--json", action="store_true")
@@ -3711,7 +3714,7 @@ def _cmd_characters_list(args) -> int:
 
 
 def _cmd_characters_backfill_home(args) -> int:
-    """Stamp `hermes_home` on the drafts under this home that lack it.
+    """Stamp `hermes_home` on the library drafts that lack it, with THIS run's home.
 
     **Why a verb, and not a hook.** Doing it on LOAD turns every read into a
     disk writer — `characters list` is the launcher's cached polling read, and a
@@ -3748,6 +3751,54 @@ def _cmd_characters_backfill_home(args) -> int:
     lines += [f"  stamped {row['id']}  {row['directory']}" for row in stamped]
     lines += [f"  skipped {row['id']}  already {row['hermesHome']}" for row in skipped]
     return _characters_emit(args, data, "\n".join(lines))
+
+
+def _cmd_characters_migrate_home(args) -> int:
+    """Move this home's legacy character store into the install-wide library.
+
+    **The source is spelled literally, and that is not laziness.** It is
+    `get_hermes_home() / "characters"` written out here rather than resolved
+    through `characters_dir()`, because after the head-home that function answers
+    the DESTINATION — a source resolved through it would ask the verb to move
+    the library onto itself. This is the one site in hermes that is allowed to
+    name the legacy location, and it names it because the location is legacy:
+    nothing writes there any more, and this verb exists to empty it once.
+
+    **Explicit and per-home, not a sweep.** One invocation migrates ONE home, the
+    `backfill-home` operational pattern: the receipt stays attributable to the
+    home the operator named, and the verb never has to enumerate profiles —
+    which is the per-home resolution the launcher refused to do and hermes has
+    no better claim to guess at. The operator runs it once per profile that has
+    a store.
+    """
+    from agent.charsheet.draft import migrate_characters_home
+    from hermes_constants import get_hermes_home, get_shared_characters_dir
+
+    home = get_hermes_home()
+    try:
+        receipt = migrate_characters_home(
+            home / "characters", get_shared_characters_dir(), source_home=str(home)
+        )
+    except _CHARACTERS_EXPECTED as exc:
+        return _characters_error(args, exc)
+    moved, stamped, skipped = receipt["moved"], receipt["stamped"], receipt["skipped"]
+    lines = [
+        f"{len(moved)} entr(ies) moved from {receipt['from']} to {receipt['to']}; "
+        f"{len(stamped)} stamped, {len(skipped)} skipped"
+    ]
+    # Every line names the DIRECTORY beside the id or slug, for the reason the
+    # backfill's receipt does: an id-collision pair lists twice under one id, and
+    # the directory is the only thing that says which entry a row is about.
+    lines += [
+        f"  moved {row['kind']} {row.get('id') or row.get('slug')}  {row['from']} -> {row['to']}"
+        for row in moved
+    ]
+    lines += [f"  stamped {row['id']}  {row['directory']}" for row in stamped]
+    lines += [
+        f"  skipped {row['kind']} {row.get('id') or row.get('slug')}  {row['reason']}"
+        for row in skipped
+    ]
+    return _characters_emit(args, receipt, "\n".join(lines))
 
 
 def _cmd_characters_status(args) -> int:

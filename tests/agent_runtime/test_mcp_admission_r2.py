@@ -445,11 +445,21 @@ def test_a_missing_warm_seam_fails_closed(monkeypatch, clean_registry, warm_laun
     assert _registered_launcher_qa_tools(clean_registry) == set()
 
 
-def test_a_parked_server_is_treated_as_cold(monkeypatch, clean_registry):
-    """A cached entry with no live session belongs to ``register_mcp_servers``.
+def test_a_parked_server_is_not_live(monkeypatch, clean_registry):
+    """A cached entry with no live session is NOT warm.
 
-    It has dedicated wake handling for exactly that case; re-registering off a
-    dead session would register handlers that cannot dispatch.
+    Re-registering off a dead session would register handlers that cannot
+    dispatch, so this predicate must keep excluding it — that half is unchanged.
+
+    CORRECTED 2026-08-27, which is why the name moved. It used to say the parked
+    server "belongs to ``register_mcp_servers``: it has dedicated wake handling
+    for exactly that case". It has a WAKE and no REGISTRATION — it fires
+    ``_signal_reconnect`` and returns on ``if not new_servers``, leaving the
+    registry empty — so believing that sentence cost live turns their entire MCP
+    surface, measured as a 3/0/3/0 alternation across four consecutive
+    mission-chat turns to one session. ``_default_registrar`` now wakes parked
+    servers itself; see ``test_mcp_admission_parked_wake.py``, the test this
+    one's scope left room for.
     """
 
     import tools.mcp_tool as mcp_tool

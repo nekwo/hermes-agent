@@ -2032,6 +2032,379 @@ of this file. Two things, and the first is the correction to OP's own entry abov
   ran back to back. Whatever flips (a lease, a keepalive, a per-turn registry rebuild)
   flips per-turn, not per-session.
 
+## 2026-08-27 — the env bleed, fixed at the consumer (envbleed slice)
+
+Standing in the hermes repo, worktree `X:/wt/envbleed` off `4ab953df89`. Sent to fix the
+cross-persona `HERMES_HOME` bleed the three entries above measured. Four things, and the
+first two correct the plan I was handed rather than confirming it.
+
+- **[READ] `persona_chat_actor_prewarm` has NO bind site of its own.** The plan said "the
+  prewarm switches its bind to `persona_profile_scope`", and there is no bind there to
+  switch: the module resolves a `PersonaProfileBinding`, puts `profile=binding.hermes_profile`
+  on an `AgentRunRequest`, and hands it to `ProfileAgentRunner.prewarm`. The bind happens one
+  layer down, in `_execute_agent_run` (`agent_runtime/profile_runner.py:857`), inside the
+  `with` stack a REAL TURN uses — same `_WORKDIR_LOCK`, same `persona_profile_context`,
+  same everything, deliberately, because that module's whole premise is that an actor built
+  under different scopes is a different actor. So there is no prewarm-only knob; the only
+  available spelling is `export_env=not request.prewarm_only` on the shared body.
+  **Consequence:** any statement of the form "the prewarm does X to the environment" is
+  really a statement about `_execute_agent_run`, and applies to every chat turn too.
+
+- **[READ] Turning the mirror off for the prewarm is NOT sound, and the blocker is a
+  thread, not a subprocess.** I went looking for the spawn the plan told me to check for
+  and found something narrower and worse: `mcp_admission.admit_mcp_servers` runs its
+  registrar on a thread it starts itself (`threading.Thread(..., name="mcp-admission")`,
+  `agent_runtime/mcp_admission.py:1226`), and the cold path from there is
+  `register_mcp_servers`, which spawns. A ContextVar crosses neither boundary — not the
+  thread, not the spawn — so the `os.environ` mirror is the ONLY channel by which an
+  admitted MCP server learns which persona home it is serving. Drop the mirror for the
+  prewarm and a prewarmed chat's servers come up on the head home while the turn's come up
+  on the persona's: the prewarmed actor stops byte-matching, `acquire()` rebuilds, and the
+  module has paid 3 s to produce something it then throws away. **Consequence:** "a prewarm
+  only builds an actor, it cannot need a global mirror" is false — construction includes
+  admission, and admission spawns. The mirror stays.
+
+- **[READ] The fix therefore belongs at the CONSUMER, and the repo had already litigated
+  this exact class twice.** `core_cache`'s HC-1 note (`agent_runtime/core_cache.py:1268`)
+  argues it at length for the snapshot fingerprint — including the part that matters most
+  here, that resolving through `get_hermes_head_home()` is *necessary and not sufficient*,
+  because its first authority is a ContextVar and the bleeding thread has none. Its answer
+  is capture-once at a declared boot instant. `chat_live_log`'s module docstring has the
+  same finding under the heading "THE HERMES_HOME TRAP" and the same answer. The argv lane
+  simply never got its capture. It has one now: `serve_loop` captures `get_hermes_home()`
+  beside `capture_fingerprint_home()` — the boot instant that provably precedes every
+  persona scope — and `_run` binds it per request through a new
+  `profile_context.process_home_scope`. A ContextVar out-ranks the env var in
+  `get_hermes_home()`'s ladder, so the argv lane wins without taking anything away from the
+  lane that needs the global. Not the head home, deliberately: under the launcher's
+  `HERMES_HEAD_HOME` the head and the runtime home are different directories on purpose,
+  and an argv request belongs to the runtime one.
+
+- **[READ] What I did NOT do, so the next slice does not assume it.** (i) The mirror is
+  untouched — `persona_profile_context` still writes process-global env for every turn and
+  every prewarm, and every OTHER unbound thread in the serve is still a passenger on it.
+  I fixed the lane that was measured, not the class. The snapshot fingerprint and the chat
+  live log have their own captures; anything else that grows a thread in this process needs
+  its own. (ii) Only `HERMES_HOME` is pinned. `HOME` has no context-scoped hook at all and
+  is unobservable on native Windows anyway (`ntpath.expanduser` reads `USERPROFILE`);
+  `HERMES_AUTH_HOME`'s mirror is written with the HEAD auth home rather than the persona's,
+  so it was never a cross-persona bleed. (iii) A subprocess spawned from inside an argv
+  request still inherits ambient `os.environ`, mirror and all — the ContextVar does not
+  reach it. (iv) I did not reproduce the original `characters status --draft` failure
+  end-to-end against a live serve; the regression test drives the real `serve_loop` seam
+  with an injected dispatch that resolves `drafts_dir()`, which is the same four-frame-deep
+  reader the incident hit, but Stage C on a running launcher is still owed — and per the
+  entry above, the primary checkout has to fast-forward before the running serve has this
+  code at all.
+
+## The two serve-lane defects the W6 walk left behind (appended by the serve-diagnosis slice, 2026-08-27)
+
+Both were recorded above as measured-but-unexplained: the `characters list` that
+went silent through the serve socket, and the `launcher_qa` MCP admission that
+alternated 3/0/3/0. Both now have a mechanism, and both mechanisms were
+reproducible in a test — neither needed the live serve to be caught in the act.
+Worktree `X:/wt/servediag` off `4ab953df89`; nothing pushed, primary untouched.
+
+- **[FOUND — the silent `characters list` was POOL EXHAUSTION, and the pool is
+  drained by ABANDONED STREAMS.]** The serve request pool is
+  `DEFAULT_POOL_SIZE = 4`. `harness stream` is an argv request that never
+  returns and holds a worker for its entire life; the cancel op's own comment
+  prices this exactly — "otherwise four watchdog cycles exhaust the entire serve
+  pool with abandoned streams". The only thing that ever set the cancel event
+  was `{"op":"cancel"}`, sent by a launcher that came BACK. A client that simply
+  died, or a socket session that closed, left its stream running forever:
+  `_release_subscription` is the disconnect path and its docstring says "A
+  client left. Unsubscribe it, and do NOTHING else". `agent_runtime/
+  request_control.py` states the opposite as the contract in its own module
+  docstring — the stream handler "must release its worker when its consumer
+  disconnects" — and nothing implemented the disconnect half. **Consequence:**
+  every dropped stream is one of four workers gone for the life of the process,
+  and the fourth one turns every subsequent argv request into unbounded silence.
+  Reproduced as a test: a socket client opens a stream, disconnects, and a
+  following stdio request never runs — 20 s, zero frames carrying its id.
+
+- **[READ — and this is why it looked like a transport fault] an argv request
+  emits NO frame until its HANDLER writes one.** `_handle_message` registers the
+  request and calls `pool.submit`; a request sitting in the executor's queue is
+  byte-identical on the wire to one whose handler has wedged, and to a dead
+  service. The `busy` frame the liveness pump emits carries a count and no ids,
+  so it cannot answer the only question a waiting client has. **Consequence:**
+  "no drafts", "still queued" and "the serve is gone" were one observation. The
+  loop now emits `{"id":…,"event":"request_progress","state":"queued"|"running",
+  "waited_ms":…,"running_ms":…,"pending":…,"pool_size":…}` on the lane that
+  asked, once a request has produced nothing for `_REQUEST_SILENCE_SECONDS`
+  (15 s — longer than a warm `snapshot`, so the normal path pays no frames at
+  all). `state` is the field that matters: `queued` means no handler code has
+  run and a retry is free.
+
+- **[FOUND — the anti-silence pump was never wired to the socket lane at all.]**
+  `_liveness_pump` emits its `busy` frame to `frames` — stdout — and nowhere
+  else, while its own comment names the launcher's stream watchdog ("no frames
+  for N seconds") as the thing it exists to satisfy. The drain path had already
+  learned this lesson and broadcasts through `_broadcast_lanes` with the reason
+  written down: "the socket client IS such a watchdog: it reads with a finite
+  timeout and reports `transport_failed` on silence." The pump was left behind.
+  **Consequence:** a socket client attached to a busy serve reads NOTHING — the
+  measured ">120 s of zero frames" was literally true even though the pump was
+  emitting the whole time, to a stream that client cannot see. Reproduced by
+  attaching a real socket client and reading until its timeout. Now broadcast.
+
+- **[FOUND — the MCP 3/0/3/0 is a two-turn cycle, and the fault is one early
+  `return`.]** R2 keeps the transport warm across turns and tears the registry
+  scope down after each, so a server can sit in `tools/mcp_tool._servers` with
+  `session is None` and no registered tools. `_live_mcp_sessions` calls that
+  COLD and routes it to `register_mcp_servers` on a written belief — "it has
+  dedicated wake handling for exactly that case". It has a wake and no
+  REGISTRATION: the name is already in `_servers`, so `new_servers` is empty, so
+  it fires a fire-and-forget `_signal_reconnect` (deliberately NOT the
+  `_signal_reconnect_and_wait` sibling the tool-call path uses) and returns
+  `_existing_tool_names()` — a STALE list of tools it did not register.
+  `admit_mcp_servers` rightly does not trust that return and re-reads
+  `registered_mcp_server_names()`, which is empty: **admitted 0**, three
+  `mcp_not_registered_on_lane` denials, a turn with no MCP surface. The nudge
+  lands a second later on the background loop, so the NEXT turn finds a live
+  session, takes the warm path and admits 3 — and that turn is the only one that
+  registers a teardown and the only one that can kill the transport by using it,
+  so the turn after it is parked again. The two turns do opposite things, which
+  is what makes it alternate rather than settle. **Consequence:** the parked
+  server is now woken by the admission layer itself — nudged, then waited on for
+  a bounded `_PARKED_WAKE_TIMEOUT_SECONDS` (5 s, with every nudge sent before the
+  first wait so N servers reconnect in parallel) — and whatever comes back is
+  re-registered off its live session. Whatever does not falls through to the
+  cold path unchanged.
+
+- **[TRAP — the receipt's own denial text misdescribes this.]** On the 0-turn
+  the denial reads "did not connect or advertised no tools". The server was
+  connected minutes ago, is cached, and is reconnecting as the line is written;
+  it advertised its tools on the previous turn. **Consequence:** that sentence
+  is why this read as a mystery rather than as a park. A checkable
+  discriminator, if the count ever drops again: on a parked turn
+  `profile_timing.mcp_admission_ms` is TINY — the early return costs
+  microseconds — where a real connect failure costs the ~20 s connect timeout.
+  Small ms plus `cold` labels is this defect, not a timeout and not lane-busy.
+
+- **[READ] `mcp_admission_transport` is a SNAPSHOT, not an outcome, and it is
+  worth knowing which.** It is classified before registration, so a parked
+  server reads `cold` there even now that the registrar may wake it and
+  re-register it warm. That is honest for the question the label was added to
+  answer ("what did this turn have to pay for" — a wake is a cost on the cold
+  side of that line either way), but the comment claiming the label "can never
+  disagree with the path actually taken" was corrected in place: the registrar
+  logs the parked names it woke, and that log is where the finer distinction
+  lives.
+
+- **[NOT DONE, and deliberately]** Neither defect was re-measured on the LIVE
+  serve — the primary checkout is other sessions' surface and this slice never
+  touched it, so everything above is reproduced at the `serve_loop` and
+  `_default_registrar` seams instead. Two things remain owed as field gates:
+  whether a real launcher client tolerates the additive `request_progress` frame
+  (it is additive and unknown events are ignorable, but that is an argument, not
+  a measurement), and whether the parked-wake actually ends the alternation
+  across four consecutive live turns. Neither the pool SIZE nor the `harness
+  stream` design was changed, and no mutation or chat turn was made
+  interruptible: reclaiming a worker is limited to the one request shape the
+  cancel path already calls the sole safe cooperative exception.
+
+## The one library (appended by the shared-library slice, 2026-08-27)
+
+### H1 — the resolver, and the fifteen verbs that followed it for free
+
+- **[READ] Fact 1 of the plan held exactly, and it is the reason this strip was small.** Two
+  files spell the characters location in the whole of hermes — `agent/charsheet/draft.py`
+  and `hermes_cli/harness.py`, and the second only by importing `characters_dir` from the
+  first. So head-homing the library was one function body plus the authority it delegates
+  to, and every one of the fifteen `harness characters` verbs moved without being touched.
+  A grep for `"characters"` as a path segment across `agent/`, `agent_runtime/`,
+  `hermes_cli/` and `hermes_constants.py` still returns one site after the change. That is
+  worth saying out loud because the same claim was false for `hermes_home` two waves ago,
+  and the difference was that this location had already been consolidated by someone else.
+
+- **[MEASURED] The planted defect is the only test in the file that can tell the two
+  implementations apart, and it does.** `get_shared_characters_dir()` computes the same
+  `<root>/profiles/<name>` → `<root>` mapping `get_default_hermes_root()` already
+  implements, so an implementation that reuses it passes three of the four resolver pins.
+  Built that way on purpose first, the ContextVar control reds and nothing else does:
+
+      assert foreign_root == other_root / "shared" / "characters"
+      E  AssertionError: assert WindowsPath('.../process/shared/characters')
+                             == WindowsPath('.../other/shared/characters')
+
+  With `HERMES_HOME` at `<process>/profiles/base` and a `set_hermes_home_override()` naming
+  `<other>/profiles/neko`, the bare-env derivation answers the PROCESS root — the
+  cross-persona bleed the serve lane retired last week, re-imported one directory later.
+  Riding `get_hermes_home()` answers `<other>`. **Consequence:** if a future reader is
+  tempted to collapse the two resolvers into one, that test is the argument, not the
+  docstring.
+
+- **[MEASURED] The env-bleed regression test lost its observable to this change, and the
+  retarget is itself the reversal's headline claim.**
+  `tests/agent_runtime/test_serve_request_home_isolation.py` reproduced the incident by
+  resolving `drafts_dir()` inside a bled window and asserting it named the serve's home.
+  After the head-home that assertion cannot fail for the reason it was written: `alice` and
+  `launcher-qa` sit under one root and now compute one library. It went red as
+  `.../profiles/alice/characters/.drafts` != the new library path — a red that means "the
+  probe stopped being sensitive", not "the fix regressed". The probe now resolves
+  `get_hermes_home()` itself (still bleed-sensitive, and what every other profile-scoped
+  reader on that lane rides) and asserts the library's invariance beside it. **Consequence:**
+  the W6 finding "a serve resolving a home nobody selected broke a characters read" is now
+  a statement about the LANE and no longer about characters at all — which is §A-1's
+  argument 1, mechanised.
+
+- **[READ] The `create()` comment fact 8 flagged was worse than "going false" — it was the
+  whole justification.** It read "the draft IS sitting where this key says it is, so
+  recording it is hermes stating a fact about its own filesystem rather than a consumer
+  deriving one from a path". The first clause is now false and the second is still true,
+  and they were welded into one sentence. Re-derived per §A-3 rather than deleted: hermes
+  asks its own resolver which home this turn answered, the draft does not sit under it, and
+  that divergence IS the field's meaning. The `hermes_home` property docstring gained an
+  explicit "it is not an address, and asking it for one gets the wrong answer by
+  construction" so the next reader does not have to reconstruct the reversal from a diff.
+
+- **[READ] What I did NOT do.** (i) No `SCHEMA` bump and no wire change — the plan's fact 9
+  is right that this wave adds no key, and the launcher fixtures stay contract-valid.
+  (ii) `backfill-home` STAYS (§A-5), with its help text re-derived; its population after
+  the OP run is empty but it is still the stamp path for a draft that arrives without the
+  key. (iii) Nothing migrates anything: after this strip a populated legacy
+  `<home>/characters` tree is simply invisible to the verbs. That window is real and H2/OP
+  are what close it — §C's second row says the same, and it is why H1→OP wants to be
+  same-day.
+
+### H2 — `migrate-home`, and the three defects worth planting
+
+- **[MEASURED] Stamping through `_save()` is the defect the byte pin exists for, and it is
+  invisible to a dict comparison.** Built wrong first, the red is exactly the key the ruling
+  is about:
+
+      assert dropped + "\n" == before
+      E  - "2026-08-24T14:07:56+00:00"
+      E  + "2026-08-28T02:55:08.776734+00:00"
+
+  That is `updated` on a dormant exhibit, rewritten to the moment the migration ran. The
+  assertion is textual — read the landed file, drop the `"hermes_home"` line, compare to the
+  bytes the source held — because a parsed-dict comparison passes through a re-serialisation
+  without noticing and would have let this land. Same lesson as the recorded-home wave's
+  §E.8, one verb later, and it earned its second outing.
+
+- **[MEASURED] The other two planted defects red on exactly one pin each and nothing else.**
+  Stamp-always: `assert receipt["stamped"] == []` against a draft that already named
+  `/somewhere/else/profiles/original` — a relocation is not a re-attribution, and the drafts
+  whose provenance is most interesting are the ones an unconditional stamp destroys first.
+  Overwrite-on-collision: `assert receipt["moved"] == []` while the source directory was
+  gone and the destination held the migration's copy. That second one is the shape worth
+  naming, because both directories carry the same id: a `list` afterwards looks IDENTICAL
+  whether the verb refused or ate a character. The receipt and the surviving source
+  directory are the only two things that can tell them apart.
+
+- **[READ] The source is spelled literally in the handler, and the helper refuses the
+  degenerate case anyway.** After H1, `characters_dir()` answers the DESTINATION — so a verb
+  that resolved its source through the ordinary authority would be asking to move the library
+  onto itself. The handler writes `get_hermes_home() / "characters"` out and says why in a
+  comment; `migrate_characters_home` compares resolved source and destination and returns an
+  empty receipt if they match, with a test standing on that. Belt and braces on purpose: the
+  handler's comment is the thing a future reader deletes, and the guard is the thing that
+  survives them doing it.
+
+- **[READ] A non-character directory under a legacy store is SKIPPED, not swept along.**
+  "Installed character" means "a directory carrying `character.json`" — the same definition
+  the CLI's installed rows already use — and anything else lands in `skipped` with a reason.
+  It is left where it is rather than guessed at, which is the archive-never-delete instinct
+  applied to a thing the verb does not recognise. A cross-volume rename, a lock or a
+  permission error is reported the same way, per entry, so one stuck directory cannot strand
+  the rest of the store half-migrated.
+
+- **[MEASURED] The verb-table pin does the §E.5 job without being asked twice.** Adding the
+  subparser reds `test_charsheet_skill_documents_exactly_the_characters_verbs_hermes_has`
+  with `Extra items in the right set: 'migrate-home'` — the live parser tree against the
+  skill's table. The `SKILL.md` row therefore rides this commit, not a later one. **Small
+  correction while there:** the table's header said "Fourteen, flat" and the table held
+  fifteen rows before this strip — a drift `backfill-home` introduced and nothing pins,
+  because the test counts the ROWS and not the sentence. It says sixteen now.
+
+- **[READ] What I did NOT do.** (i) The verb migrates ONE home per invocation and never
+  enumerates profiles — the operator runs it per home, which is what keeps the receipt
+  attributable. (ii) Nothing is deleted, the emptied `characters/` tree included; it is the
+  tombstone the receipt's `from` refers to, and a test stands on it still being there after
+  two runs. (iii) I did not run the migration on the live install — that is the OP strip's
+  operator-visible step, and this branch is not merged.
+
+### H3 — the skill catches up, and a pin nobody listed was the one that fought back
+
+- **[MEASURED] The plan's §D disposition table under-counted the hermes side: the seed
+  contract is pinned HERE, not only in the launcher.**
+  `tests/agent_runtime/test_persona_skill_policy.py` is listed as "RETARGET — the verb-table
+  set pin gains `migrate-home`", and that is true and was cheap. What the table does not say
+  is that the same file holds
+  `test_charsheet_skill_states_the_launcher_bindings_home_in_its_landed_meaning`, which pins
+  the skill's copy of the resume seed line **verbatim** — `"last observed home:"`,
+  `"never observed by the launcher"`, `"observed the draft readable in"` — as the hermes end
+  of the two-repo contract §13.26's rejection (d) created. §A-8 retires that line, so the
+  pin does not "retarget": it INVERTS, and it does so in this strip whether the plan said so
+  or not. The red is unambiguous:
+
+      assert "observed the draft readable in" in text.lower()
+      E  AssertionError
+
+  **Consequence:** a launcher builder doing L1 against §A-8 will find the launcher-side seed
+  test and may believe that is the whole contract. It is one end of it. This file is the
+  other, and the two must move in the same wave or the skill an agent preloads teaches a
+  message the seed no longer composes.
+
+- **[READ] The inverted pin is written to be unpassable by deletion, because the old one
+  was.** The retired strings are banned outright and the surviving ones are asserted
+  positively: `install-wide`, the library path, §13.27, §13.22 (its reader half still
+  stands), `legacy` (a stored observed home is preserved and labelled, never read), the
+  seed's closing sentence verbatim, and `provenance, not an address` for the draft's own
+  `hermes_home`. That last one is the trap that REPLACED the old one and is the reason the
+  field survives §A-3: the key still exists, still carries a real path, and now names a home
+  the draft is not under. An agent that reads it as an address chases a directory that has
+  nothing in it.
+
+- **[MEASURED] The blanket ban caught my own explanatory prose, and tightening the prose was
+  the right answer rather than loosening the ban.** The first draft of the skill's resume
+  bullet said "the `last observed home:` line retired with the sighting it quoted" — honest
+  history, and it reds the ban. A ban with a carve-out for "but only when you are explaining
+  that it is gone" is a ban an agent can pattern-match its way through. The bullet now says
+  the seed "used to carry a home line quoting the launcher's most recent sighting" without
+  spelling it, and adds the instruction that actually matters: do not wait for one, and do
+  not read its absence as the seed being incomplete.
+
+- **[READ] The one teaching that survived the reversal is the one written for a reason that
+  no longer applies.** *"Echo the home you resolve; do not assume it."* was a scoping check —
+  proof the agent could see the operator's draft. Under one library a wrong PROFILE is
+  harmless and a wrong ROOT is a different install, so the same sentence now surfaces a
+  mis-resolved root instead. The skill says that explicitly rather than leaving the sentence
+  standing with its original justification underneath it, which is the same failure mode as
+  the `create()` comment H1 had to rewrite: a true instruction welded to a reason that went
+  false.
+
+- **[OWED] The install-hash cycle is captured RED and is not discharged.** After the edits,
+
+      harness-skill-install: FAILED — the installed package differs from this repo for:
+      harness-charsheet-authoring
+      home X:\Eternia\.hermes  source X:\wt\sharedlib\docs\...  installed X:\Eternia\.hermes\shared\skills
+
+  Repair mode was proved to close the cycle against a throwaway root
+  (`ETERNIA_HERMES_HOME=<tmp>` → `refreshed from the repo: ...` → `--check` exit 0), so the
+  install takes. It was deliberately NOT run against the live `X:\Eternia\.hermes`, for two
+  reasons that point the same way. (i) The gate is discharged on push and this branch is not
+  pushed; the pre-push hook runs repair mode and is where a repo edit and a machine are
+  supposed to meet. (ii) More important: the live install's hermes is the PRIMARY checkout,
+  which is pre-H1 — its `characters list` still answers per-home. Installing a skill that
+  teaches one install-wide library onto a runtime that does not have one yet is exactly the
+  W3 failure this strip exists to prevent, pointed the other way: the preloaded skill would
+  contradict the screen from the moment it landed until the merge. **Owed to whoever lands
+  this branch:** run the install (or push, which runs it) AFTER the merge and after OP, and
+  re-run `--check`.
+
+- **[READ] What I did NOT do.** (i) The plan's §A-8 wording is what the skill was written
+  against, not L1's diff — L1 had not landed when this was written, and §A-8 says the frozen
+  text is the authority. (ii) No `CHARSHEET-QA:` change: the line still carries no home, and
+  under one library that stopped being a withholding and became "there is nothing to carry".
+  (iii) The skill's §13.24/§13.25 references survive as "re-deriving" pointers rather than
+  being deleted, so a reader who arrives from the register still lands somewhere — but
+  §13.27 is what the sentences now state, and strip D is what makes that register entry
+  exist. Until D lands, those pointers are forward references.
+
 <!-- A2, A3, R1 and any slice standing in the HERMES repo: append your entries above this
      line, under the matching heading, or add a heading if none fits. Then say in your
      slice report that you did.

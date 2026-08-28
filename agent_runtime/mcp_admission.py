@@ -180,6 +180,23 @@ _MCP_TOOLSET_PREFIX = "mcp-"
 TRANSPORT_WARM = "warm"
 TRANSPORT_COLD = "cold"
 
+#: How long an admission waits for a PARKED server's session to come back after
+#: it has asked for one.
+#:
+#: A cached server with ``session is None`` has no registered tools and cannot
+#: be re-registered off a session it does not have. The reconnect that repairs
+#: that is asynchronous — it lands on ``tools/mcp_tool``'s background loop — so
+#: an admission that nudged and looked once would find nothing and hand the turn
+#: zero tools while the cure it had just asked for was already in flight.
+#: Measured 2026-08-27 as a 3/0/3/0 alternation across four consecutive
+#: mission-chat turns to one session.
+#:
+#: The BOUND is the point. Waiting is only worth it against the alternative,
+#: which is a whole turn with no MCP surface at all; a server that is genuinely
+#: gone must not hold the turn open, so this gives up and lets it fall through
+#: to the cold path exactly as before. Read at call time so a test can lower it.
+_PARKED_WAKE_TIMEOUT_SECONDS = 5.0
+
 #: The launcher-allowlist PROFILE ROW a ``read_only`` admission compiles from.
 #: ``read_only`` is "inspect what others captured", which is exactly what that
 #: row was written to express — see the parity fixture below.
@@ -1484,11 +1501,34 @@ def _default_registrar(servers: Mapping[str, Mapping[str, Any]]) -> list[str]:
     So the admitted set is split: warm servers are re-registered off their live
     session (no spawn, no handshake, and this run's ``tools`` filter applied to
     the already-listed tools), cold ones go through ``register_mcp_servers``.
+
+    THE THIRD STATE, and the one that cost turns their tools. A server can be
+    cached in ``_servers`` with ``session is None`` — parked after a transport
+    death, or mid-reconnect. That is not warm (there is no session to re-register
+    off) and it is not cold either, and routing it to ``register_mcp_servers``
+    hands it to a function that CANNOT register it: the name is already in
+    ``_servers``, so ``new_servers`` is empty, so it fires a fire-and-forget
+    ``_signal_reconnect`` and returns ``_existing_tool_names()`` — a stale list
+    of tools it did not register. Nothing reaches the registry, the caller's
+    honest re-read of ``registered_mcp_server_names()`` finds nothing, and the
+    turn runs with no MCP surface while the reconnect it just asked for lands a
+    second later. That is the 2026-08-27 3/0/3/0 alternation: the parked turn
+    admits zero and cures the next one, which admits everything and parks it
+    again.
+
+    So a parked server is WOKEN here — nudged, then waited on for a bounded
+    ``_PARKED_WAKE_TIMEOUT_SECONDS`` — and whatever comes back joins the warm
+    set. Whatever does not falls through to the cold path exactly as before:
+    this widens nothing and re-registers nothing off a dead session, it only
+    stops discarding a turn's tools while the fix is in flight.
     """
 
     warm: dict[str, Mapping[str, Any]] = {}
     cold: dict[str, Any] = {}
     live = _live_mcp_sessions()
+    parked = [name for name in servers if name not in live and _is_parked(name)]
+    if parked:
+        live = live | _wake_parked_servers(parked)
     for name, cfg in servers.items():
         (warm if name in live else cold)[name] = cfg
 
@@ -1511,10 +1551,17 @@ def classify_admission_transport(servers: Iterable[str] | None) -> dict[str, str
     :data:`TRANSPORT_WARM` for the measurements that make the distinction worth
     recording, and the analysis it corrects.
 
-    Uses the same liveness predicate :func:`_default_registrar` routes on
-    (``_live_mcp_sessions``), so the label can never disagree with the path
-    actually taken: a session-less cached entry is COLD to both, because
-    ``register_mcp_servers`` is what handles the wake.
+    Uses the same liveness predicate :func:`_default_registrar` starts from
+    (``_live_mcp_sessions``), read at the same instant, so ``warm`` here is
+    always a real live session and never a hopeful one.
+
+    ONE label is a snapshot rather than an outcome, and it is worth saying which:
+    a PARKED entry (cached, no session) reads ``cold`` here, and the registrar
+    may then wake it and re-register it off the session it gets back. The label
+    is honest about what was true when the turn started — which is the question
+    it was added to answer, "what did this turn have to pay for" — and a wake is
+    a cost on the cold side of that line either way. The registrar logs the
+    parked names it woke; that is where the finer distinction lives.
     """
 
     names = [str(name).strip() for name in servers or () if str(name or "").strip()]
@@ -1527,9 +1574,12 @@ def classify_admission_transport(servers: Iterable[str] | None) -> dict[str, str
 def _live_mcp_sessions() -> frozenset[str]:
     """Admitted-server names already connected WITH a live session.
 
-    A cached entry whose ``session`` is ``None`` is parked or mid-reconnect;
-    ``register_mcp_servers`` has dedicated wake handling for exactly that case,
-    so those are deliberately treated as COLD and left to it.
+    A cached entry whose ``session`` is ``None`` is parked or mid-reconnect and
+    is NOT live: there is nothing to re-register off. It is not left to
+    ``register_mcp_servers`` any more, either — that function has a wake and no
+    registration, which is what cost the measured turns their whole MCP surface.
+    :func:`_default_registrar` wakes those itself and re-asks this question; see
+    :func:`_wake_parked_servers`.
     """
 
     try:
@@ -1545,6 +1595,92 @@ def _live_mcp_sessions() -> frozenset[str]:
     except Exception:  # pragma: no cover - defensive
         logger.debug("MCP admission could not read the warm-server map", exc_info=True)
         return frozenset()
+
+
+def _is_parked(name: str) -> bool:
+    """Cached in ``tools/mcp_tool._servers`` but holding no session.
+
+    The third state, and the only one worth waking: a name that is ABSENT from
+    the cache is genuinely cold and belongs to ``register_mcp_servers``, which
+    can and does spawn it.
+    """
+
+    try:
+        from tools.mcp_tool import _servers
+
+        server = dict(_servers).get(str(name))
+    except Exception:  # pragma: no cover - MCP SDK absent ⇒ nothing is cached
+        return False
+    return server is not None and getattr(server, "session", None) is None
+
+
+def _wake_parked_servers(names: Sequence[str]) -> frozenset[str]:
+    """Nudge parked servers, wait a bounded moment, report which came back.
+
+    Every nudge goes out BEFORE the first wait, so three parked servers
+    reconnect in parallel and the budget is paid roughly once rather than three
+    times — the same reason the cold path connects with ``asyncio.gather``.
+
+    Fails CLOSED and fails QUIET. A wake that raises, a seam that upstream drift
+    has moved, or a session that never comes back all return the same thing: the
+    name is not in the answer, so it routes cold exactly as it does today.
+    Nothing here can register a tool or widen an admission — the only thing it
+    changes is which of two existing paths a parked name takes.
+    """
+
+    wanted = [str(name) for name in names if str(name)]
+    if not wanted:
+        return frozenset()
+    try:
+        from tools.mcp_tool import (
+            _servers,
+            _signal_reconnect,
+            _wait_for_server_session_ready,
+        )
+    except Exception:  # pragma: no cover - upstream drift ⇒ behave as before
+        logger.debug("MCP admission could not reach the reconnect seam", exc_info=True)
+        return frozenset()
+
+    cache = dict(_servers)
+    parked = {name: cache[name] for name in wanted if name in cache}
+    nudged: dict[str, Any] = {}
+    for name, server in parked.items():
+        try:
+            if _signal_reconnect(server):
+                nudged[name] = server
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("MCP admission could not nudge %r", name, exc_info=True)
+    if not nudged:
+        return frozenset()
+
+    # ONE budget for the whole set, not one EACH. The nudges above all went out
+    # before this loop, so the reconnects are already racing each other; a
+    # per-server budget would multiply by N and could push the admission past
+    # its own ``connect_timeout_seconds``, turning a park into a turn-long
+    # timeout. Summed per-step budgets are not a bound.
+    budget = max(0.0, float(_PARKED_WAKE_TIMEOUT_SECONDS))
+    deadline = time.monotonic() + budget
+    revived: set[str] = set()
+    for name, server in nudged.items():
+        # Cheap first: the earlier nudges have been landing while this loop ran,
+        # so after the first wait the rest are normally already up and pay
+        # nothing at all.
+        if getattr(server, "session", None) is not None:
+            revived.add(name)
+            continue
+        try:
+            remaining = min(budget, max(0.0, deadline - time.monotonic()))
+            if _wait_for_server_session_ready(server, timeout=remaining):
+                revived.add(name)
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("MCP admission could not wait for %r", name, exc_info=True)
+    logger.info(
+        "MCP admission woke %d/%d parked server(s): %s",
+        len(revived),
+        len(nudged),
+        ", ".join(sorted(nudged)) or "-",
+    )
+    return frozenset(revived)
 
 
 def _reregister_warm_server(name: str, config: dict[str, Any]) -> list[str]:

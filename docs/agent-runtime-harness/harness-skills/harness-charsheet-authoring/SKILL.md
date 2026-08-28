@@ -40,56 +40,73 @@ retire, and the next `compose` overwrites any hand edit to the sheet anyway.
 
 ## Preflight — three probes, before any generation
 
-**1. Which home am I authoring into?** The draft root is
-`$HERMES_HOME/characters` (`characters_dir()`), drafts under
-`.drafts/<draft-id>/`, installed sheets under `<slug>/`. Your turn's
-`HERMES_HOME` is **your persona's own profile home** — the runtime rebinds it
-for the duration of the turn from the persona's `hermes_profile`
-(`profile_context.persona_profile_context`, which rebinds a ContextVar *and*
-`os.environ`), so it is *not* necessarily the home the console's `harness serve`
-process was launched with. It early-returns without rebinding for a persona that
-declares no profile at all, and then the home really does follow serve — so this
-is two answers, not one. §13.6 is the single statement of the rule; the
-operative instruction is *read back the home the runtime resolved, never assert
-one*:
+**1. Which home am I authoring into — and which library does it reach?** The
+character library is **install-wide**: `<hermes_root>/shared/characters`
+(`characters_dir()` → `hermes_constants.get_shared_characters_dir()`), drafts
+under `.drafts/<draft-id>/`, installed sheets under `<slug>/`. **One directory
+for every persona and every profile under one hermes root** (§13.27). It sits
+beside `profiles/`, not inside any one of them, and every profile home computes
+the same answer from its own `HERMES_HOME` with no env injection — the same
+property `shared/skills` has.
+
+So the question that used to matter — *can my home see the operator's draft?* —
+has no answer any more, because it has no content. It cannot. Every draft on
+this install is in your list. If the operator names one and it is not there, the
+draft does not exist on this install or your ROOT is wrong, and those are the
+only two possibilities left.
+
+Your turn's `HERMES_HOME` is still **your persona's own profile home** — the
+runtime rebinds it for the duration of the turn from the persona's
+`hermes_profile` (`profile_context.persona_profile_context`, which rebinds a
+ContextVar *and* `os.environ`) — and it still matters, for credentials
+(`auth.json` is per-home, probe 2) and for everything else profile-scoped. What
+it no longer does is scope the library. The operative instruction is unchanged
+and is now about the ROOT: *read back the home the runtime resolved, never
+assert one*:
 
 ```
 hermes harness status --json      # → .runtime_health.hermes_home
 hermes harness characters list --json
 ```
 
-**Echo that path in your first reply, in prose.** Nothing else carries it. The
-`CHARSHEET-QA:` line deliberately does not (§13.22), so the console mints the
-character's binding with its home UNKNOWN, and your transcript is the only place
-the home your turn resolved will ever exist. The launcher does record a home of
-its own on that binding — but it is a SIGHTING, *a home the launcher OBSERVED
-the draft readable in* (§13.24), written when an operator opens Studio's adopt
-door and never by anything you emit. It is not the home you authored from, and
-nothing downstream will turn it into one. Do not derive a home from a profile
-name or from a spawn environment; a derived home looks exactly like an observed
-one, and this is the one fact that is not derivable.
+**Echo that path in your first reply, in prose.** Nothing else carries it — the
+`CHARSHEET-QA:` line deliberately carries no home and is not to grow one
+(§13.22's reader half stands), so your transcript is the only place the home
+your turn resolved will ever exist. Under one library that echo is not a
+scoping check any more; it is the discipline that surfaces a mis-resolved ROOT.
+A wrong profile is now harmless for characters. A wrong root is a different
+install, and the symptom is an empty list where the operator expects a draft.
 
-Three ways this goes wrong, all seen live:
+Two ways the root still goes wrong, both seen live:
 
 - **A relative `HERMES_HOME` resolves against the shell's cwd.** `HERMES_HOME`
   is used as written (`hermes_constants._hermes_home_from_env`), and the CLI
   trusts any value whose immediate parent directory is named `profiles`. So
-  `HERMES_HOME=profiles/base` run from a repo checkout authors *into the repo
-  working tree*. A whole `fox-scout` character sits in one today and had to be
+  `HERMES_HOME=profiles/base` run from a repo checkout authors into a
+  `shared/characters` *inside the repo working tree* — a whole second library
+  nobody else can see. A `fox-scout` character sits in one today and had to be
   gitignored. Always absolute.
 - **A home that is not profile-shaped is re-pointed at the sticky active
   profile.** If `HERMES_HOME` names the hermes ROOT (or is unset), the CLI reads
   the `active_profile` marker and rewrites the home to that profile
-  (`hermes_cli/main.py:_apply_profile_override`). Same command, two answers,
-  depending on a file you did not set — and a root is a different SHAPE from a
-  profile home, not merely a different value.
+  (`hermes_cli/main.py:_apply_profile_override`). Both spellings land on the
+  same library when the root is the same, which is exactly the bleed the one
+  library made harmless — but the rewrite is still a different SHAPE, and it is
+  what makes an unset `HERMES_HOME` reach the platform-default shadow root
+  instead of this install's.
 - **Never rebuild a path from a slug or an attempt number.** Every payload names
   its own `directory` / `path` / `source`. Read those — and treat an absent path
   as absent whichever way it arrives (`null` or `""`). Never turn one into a
-  bare `MEDIA:` line.
+  bare `MEDIA:` line. That includes the library path itself: you never compose
+  `shared/characters`, you read `directory` off the row.
 
-If the operator's draft is not in your list, say which home you are in and which
-home the draft is in. Do not author a second copy.
+**A `hermes_home` on a draft is provenance, not an address.** `characters list
+--json` carries `hermesHome` per draft (string or `null`). It records which
+profile's turn authored the draft — the profile-side complement of
+`authoredBy`'s persona — and it is NOT where the draft sits, which is the
+library and is the same for all of them (§13.27, re-deriving §13.26). A draft
+naming a home that is not yours is telling you who authored it, not that you are
+looking in the wrong place. Never chase it.
 
 **2. Does the image provider actually return an image?** Credentials are
 per-home (`auth.json`), and a plan-gated account fails *politely*: HTTP 200, the
@@ -127,7 +144,7 @@ flag is not neutral: it strands the draft.
 
 ## The verbs
 
-Fourteen, flat, all with `--json`. Every draft verb takes `--draft <id>` as a
+Sixteen, flat, all with `--json`. Every draft verb takes `--draft <id>` as a
 **required flag**; only `sprite` takes a positional `<slug>`. **The draft id is
 not the slug** (`20260824-140756-cd645a` vs `anime-girl`).
 
@@ -135,7 +152,8 @@ not the slug** (`20260824-140756-cd645a` vs `anime-girl`).
 |---|---|---|
 | `start --concept … [--slug] [--display-name] [--style] [--states] [--directions] [--base-image] [--authored-by]` | Creates the draft. Generates nothing. | — |
 | `list` | Drafts + installed characters, with their directories. | — |
-| `backfill-home` | Records `hermes_home` on drafts under THIS home that predate the field, and on no others. An already-recorded home is never rewritten; `updated` is left untouched. Idempotent, receipted. **Operator-run — do not fire it as part of an authoring flow.** | — |
+| `backfill-home` | Records `hermes_home` — provenance of the authoring RUN, not an address — on library drafts that carry none, using the home THIS run resolved, and on no others. An already-recorded home is never rewritten; `updated` is left untouched. Idempotent, receipted. **Operator-run — do not fire it as part of an authoring flow.** | — |
+| `migrate-home` | Moves THIS home's legacy `<HERMES_HOME>/characters` store into the install-wide library. Drafts keep their directory leaf names and installed characters keep their slugs; a draft carrying no `hermes_home` is stamped with the SOURCE home before it moves. A destination collision is a per-entry refusal, never an overwrite, and nothing is deleted. Idempotent, receipted. **Operator-run — do not fire it as part of an authoring flow.** | — |
 | `status --draft <id>` | Stage, spec, per-item QA history with every attempt's `path`. | any |
 | `base --draft <id> --image <path>` | Sets/replaces the identity anchor. | any |
 | `turnaround --draft <id>` | One generation per **authored** direction (`s se e ne n` for the 8-way scheme). | `turnaround` |
@@ -148,6 +166,19 @@ not the slug** (`20260824-140756-cd645a` vs `anime-girl`).
 | `reopen --draft <id>` | Back to `rows` for fixes. Installed sheet untouched. | `composed` |
 | `add-state --draft <id> --state <name>:<frames>[:fixed]` | Adds ONE state; seeds its rows un-generated, touches no approved attempt. | `rows` |
 | `sprite <slug>` | The installed payload the launcher reads. **Never pipe it into a turn** — see below. | — |
+
+**`migrate-home` is an operator's verb and its receipt is the whole point.** It
+exists for one historical shape: a home that still holds a pre-library
+`<HERMES_HOME>/characters` store from before the library was install-wide. It
+moves those entries into the library — drafts keep their directory leaf names so
+a stored draft id still resolves, installed characters keep their slugs, a draft
+carrying no `hermes_home` is stamped with the home it is LEAVING before it moves
+(afterwards the directory no longer witnesses where it lived), a destination
+collision is a per-entry refusal rather than an overwrite, and nothing at all is
+deleted — the emptied source tree is left standing as its own tombstone. The
+receipt names both addresses on every row; hand it to the operator verbatim
+rather than summarising it. Do not fire it as part of an authoring flow: it is
+run once per home, by an operator who decided to.
 
 Stages run `turnaround → rows → composed`. An out-of-order verb refuses with a
 flat `{"ok": false, "error": …, "stage": …}` and exit 2, and the error names the
@@ -588,8 +619,9 @@ Three line shapes leave your reply, and two of them are parsed out of it.
   use the same one on every line of one draft, item-level lines included. Nothing
   keys on it; the DRAFT ID is the key, and project creation is idempotent on it,
   so emitting the line again for the same draft is safe by design. **The line
-  carries no home and is not to grow one** (§13.22, which §13.24 explicitly left
-  standing) — put the home your turn resolved in your prose instead. A parsed
+  carries no home and is not to grow one** (§13.22's reader half, which §13.27
+  explicitly left standing — with one library there is nothing for it to carry)
+  — put the home your turn resolved in your prose instead. A parsed
   line is lifted out of the visible text; a malformed one is deliberately left
   in, because a stage change that vanished would be one the operator cannot see
   went wrong.
@@ -638,28 +670,29 @@ conversation outlives leaving the Mission Control tab.
   line**, keyed by draft id, and that project — not a drafts listing — is what the
   operator later resumes from. The binding takes its authoring persona from
   `authored_by`, which is the whole reason probe 3 matters, and its home is minted
-  UNKNOWN, because the line carries none (§13.22). The one thing that ever writes
-  a home onto that binding is an operator opening Studio's adopt door, which
-  stamps *a home the launcher OBSERVED the draft readable in* — the home that
-  lane read back at that moment, and never the home you authored from (§13.24).
-  The fold takes the FRESHEST sighting and an unknown never clobbers an observed
-  one (§13.25), so the field is the launcher's most recent sighting and nothing
-  more. A draft authored before projects existed is reachable only through that
-  door (§13.23); one the console already adopted is offered it again whenever the
-  fold would learn something, which is how a moved draft gets corrected.
+  UNKNOWN, because the line carries none. Nothing writes a home onto it any more:
+  the adopt door stopped minting sightings when the library went install-wide
+  (§13.27, re-deriving §13.24/§13.25), because "which home can read this draft"
+  stopped being a question with more than one answer. A binding that still shows
+  an observed home is a LEGACY record of a sighting taken before the reversal —
+  the launcher preserves it and labels it as legacy rather than deleting it, and
+  nothing reads it to decide anything. A draft authored before projects existed
+  is still reachable through the adopt door, which now sees every draft on the
+  install rather than only the ones its own home could read.
 - **What a resume hands you, and what it does not.** Resuming from the project
-  seeds your first message with the draft id and one home line, spelled
-  `last observed home: <path>` — or, when no sighting exists,
-  `last observed home: never observed by the launcher`. That is the sighting
-  above, and a sighting goes STALE: the draft may have been read from another
-  home since, and the launcher fills nothing in when it has none. The seed says
-  so in its own closing sentence:
+  seeds your first message with the draft id and the character's name, and
+  nothing else. It used to carry a home line quoting the launcher's most recent
+  sighting; that line retired with the sighting itself, so do not wait for one
+  and do not treat its absence as the seed being incomplete. What the seed keeps
+  is its closing sentence:
   *"Echo the home you resolve; do not assume it."*
-  So resume exactly the way you start: run the preflight probes, echo
-  `.runtime_health.hermes_home` in prose, and if the draft is not in your list,
-  say which home you are in and which home the seed named. Never quote the
-  seeded home back as though you had resolved it, and never author a second copy
-  because a seeded home disagreed with yours.
+  That sentence outlived the scoping it was written for, and under one library it
+  is the discipline that surfaces a mis-resolved ROOT — a wrong install — instead
+  of letting you assume one. So resume exactly the way you start: run the
+  preflight probes, echo `.runtime_health.hermes_home` in prose, and read the
+  draft yourself (`status --draft <id> --json`) before doing anything to it. If
+  the draft is not in your list, do not author a second copy — say so, and say
+  which root you are in.
 
 ## Cost, batches, and what breaks
 

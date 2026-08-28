@@ -427,6 +427,48 @@ def get_shared_skills_dir(default: Path | None = None) -> Path:
     return get_default_hermes_root() / "shared" / "skills"
 
 
+def get_shared_characters_dir(default: Path | None = None) -> Path:
+    """Return the ONE install-wide character library every persona authors into.
+
+    The sibling of :func:`get_shared_skills_dir`, and it exists for the same
+    reason: the library lives under the Hermes *root* (beside ``profiles/``),
+    not inside any one profile, so ``alice``, ``base``, ``neko``, … all compute
+    the SAME directory from their own home with no env injection and no
+    per-profile config. That convergence is the whole point — a character draft
+    is addressed install-wide by its id, and a turn that resolved a home nobody
+    selected still reads and writes the library the operator meant.
+
+    **Why this does NOT reuse** :func:`get_default_hermes_root` **, despite
+    computing the same mapping.** That function reads bare
+    ``os.environ["HERMES_HOME"]`` and never consults the context-local override
+    (:func:`get_hermes_home_override`). A resolver built on it answers the
+    PROCESS home while an in-process persona binding is scoped to another one —
+    which is precisely the cross-persona bleed the serve lane retired, re-imported
+    one directory later. So the derivation rides :func:`get_hermes_home` (the
+    override → env → platform-default ladder) and maps the profile shell off it
+    here.
+
+    Resolution order:
+        1. ``HERMES_SHARED_CHARACTERS`` env var (explicit operator/test
+           override). A bare env read is sound for THIS authority and not for
+           the derivation below it: an install-wide library named explicitly is
+           named for the whole install, so there is no persona-scoped answer a
+           ContextVar could carry.
+        2. Caller-supplied ``default``
+        3. ``<hermes_root>/shared/characters`` — where ``<hermes_root>`` is the
+           resolved home's grandparent when the home is ``<root>/profiles/<name>``,
+           and the home itself otherwise (a bare or Docker-style home IS the root).
+    """
+    override = os.getenv("HERMES_SHARED_CHARACTERS", "").strip()
+    if override:
+        return Path(override).expanduser()
+    if default is not None:
+        return default
+    home = get_hermes_home()
+    root = home.parent.parent if home.parent.name == "profiles" else home
+    return root / "shared" / "characters"
+
+
 def get_hermes_dir(
     new_subpath: str,
     old_name: str,
