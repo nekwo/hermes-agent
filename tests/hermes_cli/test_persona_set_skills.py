@@ -454,7 +454,7 @@ def test_a_new_placement_with_no_skill_flag_carries_the_new_template_set(
     assert _dispatch(_set_skills("qa", "--skill", "alpha", "--skill", "beta")) == 0
     capsys.readouterr()
 
-    created = _create_agent("qa", "pl_fresh")
+    created = _create_agent("qa", "pl_fresh_agent_2")
     capsys.readouterr()
 
     assert created["skills"]["inherited"] is True
@@ -480,7 +480,7 @@ def test_a_pre_existing_non_overridden_instance_follows_the_template_live(
     """
 
     _seed_persona(skills=["seeded-skill"])
-    created = _create_agent("qa", "pl_early")
+    created = _create_agent("qa", "pl_early_agent_2")
     capsys.readouterr()
     instance_id = created["persona_instance_id"]
     assert _resolved_skills(instance_id) == ["seeded-skill"]
@@ -505,7 +505,7 @@ def test_an_instance_with_its_own_overrides_is_untouched_by_the_template_write(
     """
 
     _seed_persona(skills=["seeded-skill"])
-    created = _create_agent("qa", "pl_over")
+    created = _create_agent("qa", "pl_over_agent_2")
     capsys.readouterr()
     instance_id = created["persona_instance_id"]
     assert created["skills"]["inherited"] is True
