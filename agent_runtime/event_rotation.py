@@ -187,6 +187,47 @@ def log_end_offset() -> int:
     return live.start_offset + _live_size(live)
 
 
+def resume_floor_offset() -> int | None:
+    """The oldest logical offset this journal can still be REPLAYED from.
+
+    ``iter_from_offset`` is a tailer: it skips a slice whose file is missing and
+    yields whatever the remaining ones hold. That is the right behaviour for a
+    tail — the alternative is refusing to read a log at all because its oldest
+    archive was moved — and it is exactly the wrong behaviour for a RESUME,
+    where a skipped slice is a silent hole in a span a client is about to fold
+    as if it were contiguous.
+
+    So this answers the question a resume actually has to ask, and it walks
+    BACKWARDS to answer it: the floor is the start of the earliest slice from
+    which every later slice is present on disk. A hole anywhere raises the floor
+    above it rather than being averaged out, and a missing LIVE slice answers
+    ``None`` — nothing can be replayed from a journal whose tail is gone.
+
+    ``0`` is a real answer and means the whole log is intact, which is the
+    pristine state — INCLUDING the pristine state where no event has been
+    appended yet and ``events.jsonl`` does not exist. A slice that spans zero
+    bytes is not a hole: there is nothing in it to have lost, and refusing a
+    resume on a runtime that has never written an event would make a brand new
+    install the one case that can never resume. ``None`` is the refusal, and it
+    means a slice with CONTENT is gone.
+    """
+
+    ordered = slices()
+    if not ordered:
+        return None
+    floor: int | None = None
+    for sl in reversed(ordered):
+        span = (
+            _live_size(sl)
+            if sl.live
+            else max(0, _as_int(sl.end_offset) - _as_int(sl.start_offset))
+        )
+        if span and not sl.path.exists():
+            break
+        floor = sl.start_offset
+    return floor
+
+
 def offset_reads(start: int) -> list[tuple[Path, int, int]]:
     """Resolve a logical ``start`` offset into the slice reads needed to iterate
     forward from it, as ``(slice_path, slice_start_offset, seek_within)`` tuples

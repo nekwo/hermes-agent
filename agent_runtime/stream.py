@@ -5,7 +5,7 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 from hermes_time import now
@@ -971,6 +971,7 @@ def stream_frames(
     resync: bool = False,
     fold_entities: Iterable[str] | None = None,
     promote_fold_entities: Iterable[str] | None = None,
+    fold_room: Callable[[], tuple[Any, Any]] | None = None,
     caller: str = DEFAULT_STREAM_CALLER,
     wants_stale_first: bool = False,
 ) -> Iterator[dict[str, Any]]:
@@ -1062,6 +1063,46 @@ def stream_frames(
         if promote_fold_entities is None
         else normalize_fold_entities(promote_fold_entities)
     )
+
+    def _room() -> tuple[frozenset[str], frozenset[str]]:
+        """The (floor, union) this drain pass promotes against.
+
+        ``fold_room`` is the serve hub's live reading of its two subscriber
+        tables; everyone else gets the pair resolved once above, which is
+        exactly the behaviour that existed before either parameter did.
+
+        **Why the hub reads it per pass rather than once per producer.** A
+        restart-free join — the office lane's, and now a watermark resume's —
+        adds a subscriber the running producer never counted. If the floor is
+        frozen at build time, a batch inside the OLD floor still ships as a BARE
+        patch, and a joiner that folds less than that floor is handed a frame it
+        answers with a re-hydrate: the promotion regression the negotiation
+        exists to prevent, arriving through the door built to avoid a restart.
+        Re-read, the very next pass sees the narrowed floor and splits instead.
+        The cost is two small set derivations per DRAIN PASS, not per event and
+        not per frame.
+
+        It also makes a LEAVE re-widen for free, which the old comment on
+        ``serve.py::_accepted_fold_entities`` had to decline because re-widening
+        meant restarting the producer and charging every remaining subscriber a
+        fresh core.
+
+        The hydrate's echo is deliberately NOT re-read: it is resolved once,
+        above, so the frame a client re-baselines on and the answer it was given
+        on its ack cannot disagree about a set that moved between them.
+        """
+
+        if fold_room is None:
+            return declared_entities, promote_entities
+        try:
+            floor, union = fold_room()
+        except Exception:
+            # A room that cannot be read is answered with the pair this
+            # generator was BUILT with — the conservative direction, and the
+            # same one every other ambiguity in this module takes.
+            return declared_entities, promote_entities
+        return normalize_fold_entities(floor), normalize_fold_entities(union)
+
     resync_pending = bool(resync)
     emitted = 0
     # EG-3.1's mismatch half. A persisted core whose fingerprint does NOT match
@@ -1236,6 +1277,13 @@ def stream_frames(
         # read, a racing write always lands in a LATER iteration's candidate
         # and reconciles at the next heartbeat.
         fingerprint_candidate = _scope_fingerprint()
+        # The room, re-read once per drain pass. See ``_room``: a restart-free
+        # join is only safe when the producer can NOTICE it, and this is where it
+        # does. Read beside the fingerprint and for a sibling reason — both are
+        # facts about the world that must be taken before the events are, so a
+        # change racing the drain lands in a later pass rather than being missed
+        # by this one.
+        batch_floor, batch_promote = _room()
         emitted_delta = False
         pending: list[tuple[int, Event]] = []
         # The offset a flushed batch applies FROM (S6 gap detection): the cursor
@@ -1252,8 +1300,8 @@ def stream_frames(
                     delta_patches=delta_patches,
                     resync=resync_pending,
                     heartbeat_interval_seconds=heartbeat_interval_seconds,
-                    fold_entities=declared_entities,
-                    promote_fold_entities=promote_entities,
+                    fold_entities=batch_floor,
+                    promote_fold_entities=batch_promote,
                     caller=caller,
                 ):
                     yield frame
@@ -1282,8 +1330,8 @@ def stream_frames(
                         delta_patches=delta_patches,
                         resync=resync_pending,
                         heartbeat_interval_seconds=heartbeat_interval_seconds,
-                        fold_entities=declared_entities,
-                        promote_fold_entities=promote_entities,
+                        fold_entities=batch_floor,
+                        promote_fold_entities=batch_promote,
                         caller=caller,
                     ):
                         yield frame
@@ -1303,8 +1351,8 @@ def stream_frames(
                 delta_patches=delta_patches,
                 resync=resync_pending,
                 heartbeat_interval_seconds=heartbeat_interval_seconds,
-                fold_entities=declared_entities,
-                promote_fold_entities=promote_entities,
+                fold_entities=batch_floor,
+                promote_fold_entities=batch_promote,
                 caller=caller,
             ):
                 yield frame

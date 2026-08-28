@@ -2658,11 +2658,27 @@ def serve_loop(
             but resync. Both tables are read, so the intersection is taken over
             everyone actually attached.
 
-            Read at PRODUCER-BUILD time (``subscribe`` restarts the producer, so
-            every join re-derives it). A LEAVE deliberately does not re-widen the
-            running producer: it would have to restart it — costing every
-            remaining subscriber a fresh full core — to buy back a promotion they
-            were already living without. The next join re-derives it anyway.
+            **Read LIVE, once per drain pass, not once per producer.** It used to
+            be producer-build-time, and the note here said a LEAVE deliberately
+            does not re-widen the running producer because re-widening would mean
+            RESTARTING it — charging every remaining subscriber a fresh full core
+            to buy back a promotion they were living without. That trade is gone:
+            ``stream_frames`` takes this derivation as ``fold_room`` and re-reads
+            it between drains, so a leave re-widens for free and a JOIN is
+            noticed by a producer nobody restarted.
+
+            The second half is what makes a restart-free join safe at all. A
+            joiner that folds LESS than the frozen floor would otherwise be
+            handed bare patches inside that floor and answer them with
+            re-hydrates — the promotion regression this negotiation exists to
+            prevent, arriving through the door built to avoid a restart. Read
+            live, the next pass sees the narrowed floor and splits instead.
+
+            The window that remains is one drain pass wide: a batch already
+            GATED when a declaration lands can still go out bare. It costs the
+            joiner one resync and cannot lose an event — the client's
+            ``base_offset`` gate refuses a patch it cannot chain — and it is
+            named here rather than left for a reader to find.
             """
 
             from agent_runtime.patch_coverage import accepted_fold_entities
@@ -2847,6 +2863,17 @@ def serve_loop(
                     for frame in stream_frames(
                         fold_entities=fold_entities,
                         promote_fold_entities=promote_entities,
+                        # The LIVE room, re-read by the producer once per drain
+                        # pass. The two sets above still seed the hydrate's echo
+                        # (resolved once, so a client's ack and its baseline
+                        # cannot disagree); this is what a batch is promoted
+                        # against, and it is what lets a restart-free join —
+                        # the office lane's, and a watermark resume's — be
+                        # noticed by a producer nobody restarted.
+                        fold_room=lambda: (
+                            _accepted_fold_entities(),
+                            _promoted_fold_entities(),
+                        ),
                         caller="hub",
                         wants_stale_first=wants_stale_first,
                     ):
@@ -3490,6 +3517,29 @@ def serve_loop(
                         }
                     )
                     return None
+                # Optional watermark RESUME. Same discipline as the declaration
+                # above: absent means the client asked for nothing (and gets the
+                # hydrate it always got, with no `resume` key anywhere on the
+                # ack, so a subscribe that predates this parameter is answered
+                # byte-identically); present-but-malformed is REFUSED rather
+                # than read as absent, because a client that meant to resume and
+                # was silently re-baselined would pay the megabyte it asked not
+                # to and have nothing to grep for.
+                resume_raw = message.get("resume")
+                resume_requested = resume_raw is not None
+                resume_offset: Any = None
+                if resume_requested:
+                    if isinstance(resume_raw, dict):
+                        resume_offset = resume_raw.get("event_offset")
+                    else:
+                        sink.emit(
+                            {
+                                "event": "subscribe_denied",
+                                "lane": "stream",
+                                "reason": "invalid_resume",
+                            }
+                        )
+                        return None
                 key = _owner_of(connection)
                 hub = _ensure_stream_hub()
                 if hub.has(key):
@@ -3523,6 +3573,33 @@ def serve_loop(
                     normalize_fold_entities(declared_fold_entities)
                 )
                 raw_sink = connection.emit if connection is not None else frames.emit
+
+                # The resume decision, taken AFTER this connection's declaration
+                # is recorded and BEFORE the hub join, which is the only window
+                # where both facts are true: the span is judged against what this
+                # client says it folds, and the producer that will feed it can
+                # already see the narrowed room (`stream_frames` re-reads the
+                # room per drain pass — see `_room` there, which is what makes a
+                # restart-free join safe at all).
+                resume = None
+                if resume_requested:
+                    from agent_runtime.stream_resume import resolve_stream_resume
+
+                    try:
+                        resume = resolve_stream_resume(
+                            resume_offset, fold_entities=declared_fold_entities
+                        )
+                    except Exception as exc:  # noqa: BLE001 - never fatal
+                        # A resume that cannot be COMPUTED must still leave the
+                        # client subscribed. The hydrate is the answer to every
+                        # question this path could have answered more cheaply, so
+                        # a failure here costs bytes and never a lane.
+                        from agent_runtime.stream_resume import StreamResume
+
+                        resume = StreamResume(
+                            honored=False,
+                            reason=f"resume_failed:{type(exc).__name__}",
+                        )
 
                 def _on_drop(reason: str, stats: dict[str, Any]) -> None:
                     # Typed, never silent: an unsubscribed client that was told
@@ -3589,12 +3666,11 @@ def serve_loop(
                 # something else" would discard its own baseline.
                 if connection is not None:
                     connection.subscribed = True
-                sink.emit(
-                    {
-                        "event": "subscribed",
-                        "lane": "stream",
-                        "connection": key,
-                        "buffer_limit": hub.stats().get("buffer_limit"),
+                ack: dict[str, Any] = {
+                    "event": "subscribed",
+                    "lane": "stream",
+                    "connection": key,
+                    "buffer_limit": hub.stats().get("buffer_limit"),
                         # What the producer will actually promote FOR THIS
                         # CLIENT. It used to be able to come back narrower than
                         # asked because another subscriber folded less; per
@@ -3602,14 +3678,48 @@ def serve_loop(
                         # disagrees now ships both halves and each pump takes
                         # its own. So this is the client's own declaration,
                         # normalized (an absent one resolving to the historical
-                        # set, which is the answer it always got).
-                        "fold_entities": accepted_entities,
-                    }
-                )
+                    # set, which is the answer it always got).
+                    "fold_entities": accepted_entities,
+                }
+                # Present ONLY when a resume was asked for, so the ack a client
+                # that asked for nothing receives is byte-for-byte the one it
+                # received before this lane existed — which is what keeps the
+                # launcher's `subscribed.json` capture from moving.
+                if resume is not None:
+                    ack["resume"] = resume.payload()
+                sink.emit(ack)
+
+                # The catch-up span, on THIS connection's own sink, between the
+                # ack and the join. Both edges matter: after the ack, because a
+                # client reads everything before its ack as a reply to something
+                # else; before the join, because the hub's first frame has to be
+                # able to CHAIN onto the last of these.
+                #
+                # A honoured resume with zero frames is the whole feature working
+                # — the client was already current and is sent nothing at all,
+                # where it used to be sent the core.
+                if resume is not None and resume.honored:
+                    for frame in resume.frames:
+                        _emit_safely(sink, frame)
+
                 if not hub.subscribe(
                     key,
                     sink=raw_sink,
                     on_drop=_on_drop,
+                    # A honoured resume attaches to the RUNNING producer instead
+                    # of restarting it, and that is the half that actually saves
+                    # the megabyte: a restart re-baselines the room, so a resume
+                    # that restarted would hand this client the very hydrate it
+                    # just proved it did not need — and charge every other
+                    # subscriber a fresh full core for the privilege.
+                    #
+                    # Safe because `stream_frames` re-reads the room per drain
+                    # pass: a producer that has not been restarted still NOTICES
+                    # this subscriber's declaration and splits for it. The hub's
+                    # own floor still starts a producer when none is running, so
+                    # a resume into an empty room is not a subscription attached
+                    # to nothing.
+                    restart_producer=not (resume is not None and resume.honored),
                     # What this pump resolves a split frame against. Passing the
                     # RAW declaration rather than the normalized one keeps
                     # "said nothing" distinguishable all the way down, exactly
