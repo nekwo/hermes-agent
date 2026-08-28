@@ -199,60 +199,82 @@ def test_charsheet_skill_teaches_all_three_environment_traps():
     assert "A relative `HERMES_HOME` resolves against the shell's cwd" in text
 
 
-def test_charsheet_skill_states_the_launcher_bindings_home_in_its_landed_meaning():
-    """The launcher's `home` field is a SIGHTING now, and the skill has to say so.
+def test_charsheet_skill_teaches_one_install_wide_library_and_no_home_scoping():
+    """The reversal, pinned at the hermes end of a two-repo contract.
 
-    Launcher ``9e17d05ad`` (owner decision §13.24) redefined
-    ``CharaDraftBinding.home`` from *the home the authoring turn resolved* — a
-    fact nothing in that launcher has ever known — to *a home this launcher
-    OBSERVED the draft readable in*, gave it its one production writer (Studio's
-    adopt door) and renamed the sealed family ``CharaAuthoringHome`` ->
-    ``CharaDraftHome``. ``9b44617c5`` (§13.25) then flipped the fold from
-    first-observation-wins to freshest-wins, with an unknown never clobbering an
-    observed home. Both landed with ``grep -ri "authoring home" lib/ test/``
-    returning zero hits on that side; this is the hermes end of the same sweep.
+    The owner's 2026-08-27 ruling head-homed creation and reads to ONE location
+    — ``<hermes_root>/shared/characters`` (§13.27) — whatever persona or profile
+    runs the turn. Three of this skill's teachings died with the scoping they
+    described, and each one is a live failure mode if it survives in the copy an
+    agent preloads:
 
-    It is a gate and not a tidy-up. An authoring agent that reads "the binding
-    records the AUTHORING home" believes the launcher stores the one fact its
-    own doc comment says nothing there can produce, and will then trust a seeded
-    home instead of echoing the home it resolved — the single failure this
-    skill's entire preflight exists to prevent.
+    * *"which home can see that draft"* was the question the whole preflight was
+      shaped around. There is no such question now: every draft on the install
+      is in every list. An agent still asking it reports a draft "not in my home"
+      that is sitting right in front of it — or, worse, authors a second copy.
+    * The launcher's ``CharaDraftBinding.home`` lost its production writer AND
+      its policy reader in the same wave (§13.27 re-deriving §13.24/§13.25): the
+      adopt door mints unknown, nothing reads a stored one, and the values that
+      remain are LEGACY sightings preserved rather than deleted. A skill still
+      teaching "an operator opening the adopt door stamps a home" describes a
+      writer that no longer exists.
+    * The resume seed's ``last observed home:`` line RETIRED with the sighting it
+      quoted. The seed spelling is a contract across two repos — the launcher
+      pins it in
+      ``test/features/mission_control/state/mission_character_resume_seed_test.dart``
+      and this is the other end — so a skill quoting a line the seed no longer
+      composes is teaching an agent to expect a message it will never receive.
 
-    The seed spelling is pinned at BOTH ends on purpose. The launcher pins it in
-    ``test/features/mission_control/state/mission_character_resume_seed_test.dart``
-    and ``MissionCharacterResumeSeed.message``'s own doc comment says the
-    spelling is "a contract across two repos rather than launcher copy". This is
-    the other end of that contract: if the launcher re-words the line, this test
-    is what says the skill quoting it went stale.
+    What SURVIVES is the closing sentence, and the reason it survives is the
+    interesting half: *"Echo the home you resolve; do not assume it."* was
+    written as a scoping check and outlived its scoping. Under one library a
+    wrong profile is harmless and a wrong ROOT is a different install — so the
+    echo stopped being how an agent proves it can see a draft and became how a
+    mis-resolved root gets surfaced instead of assumed. Pinning it positively is
+    what stops this test being passable by deletion.
     """
     text = _charsheet_skill_text()
+    lowered = text.lower()
 
-    # The phrase is banned outright, in all three places it stood (the preflight
-    # echo, the `CHARSHEET-QA:` line's ruling, and the Studio-project bullet).
-    # Not a style rule: since §13.24 the words name a fact no launcher field
-    # holds, so a sentence built on them is wrong wherever it appears.
-    assert "authoring home" not in text.lower(), (
-        "the skill still says 'authoring home' about a launcher field that, "
-        "since §13.24, records a home the launcher OBSERVED the draft readable "
-        "in — never the home the authoring turn resolved"
+    # Still banned, and now for a second reason on top of the first: no field
+    # anywhere records the home an authoring turn resolved onto a binding, and
+    # under one library there is nothing for such a field to have been for.
+    assert "authoring home" not in lowered, (
+        "the skill still says 'authoring home' about a launcher field that has "
+        "never held one and, since §13.27, has no reader left either"
+    )
+    # The retired seed line, in both its spellings. A skill that still quotes it
+    # tells an agent to read a line the launcher stopped composing.
+    assert "last observed home:" not in lowered, (
+        "the skill still quotes the resume seed's retired `last observed home:` "
+        "line; §13.27 removed it and the seed now carries draft id and name only"
+    )
+    assert "never observed by the launcher" not in lowered
+    # And no live MINT: the adopt door stopped writing sightings.
+    assert "observed the draft readable in" not in lowered, (
+        "the skill still teaches the adopt door's observed-home mint, which "
+        "retired with the one-home scoping it existed to serve"
     )
 
     # Stated positively, so deleting the sentences is not a way to pass.
-    assert "observed the draft readable in" in text.lower()
-    assert "§13.24" in text
-    # §13.25: the fold, in both directions, because a stale sighting is the
-    # thing that makes the seeded home untrustworthy.
-    assert "§13.25" in text
-    # §13.22 is UNTOUCHED by §13.24 and must still be taught: the line itself
-    # carries no home, so prose remains the only carrier of the authored one.
+    assert "install-wide" in lowered
+    assert "`<hermes_root>/shared/characters`" in text
+    assert "§13.27" in text
+    # §13.22's READER half stands and must still be taught: the `CHARSHEET-QA:`
+    # line carries no home and is not to grow one — which under one library is
+    # not a withholding any more, there is simply nothing to carry.
     assert "§13.22" in text
-
-    # The resume seed's home line, spelled exactly as the launcher composes it.
-    assert "last observed home:" in text
-    assert "never observed by the launcher" in text
-    # ...and the seed's own closing sentence, which is what makes a stale
-    # sighting harmless when the agent obeys it.
+    # A stored observed home is legacy provenance: preserved, labelled, never
+    # read. An agent that thinks it is live chases a path nothing maintains.
+    assert "legacy" in lowered
+    # The seed's closing sentence, which outlived the scoping it was written for
+    # and is now the only thing that surfaces a mis-resolved ROOT.
     assert "Echo the home you resolve; do not assume it." in text
+    # `hermes_home` on a draft is the run's provenance, not an address (§13.26
+    # as re-derived by §13.27). This is the trap that replaced the old one: the
+    # field still exists, still carries a path, and now names a home the draft
+    # is NOT under.
+    assert "provenance, not an address" in lowered
 
 
 def _charsheet_qa_line_contract() -> dict:

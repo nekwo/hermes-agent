@@ -2219,6 +2219,84 @@ first two correct the plan I was handed rather than confirming it.
   two runs. (iii) I did not run the migration on the live install — that is the OP strip's
   operator-visible step, and this branch is not merged.
 
+### H3 — the skill catches up, and a pin nobody listed was the one that fought back
+
+- **[MEASURED] The plan's §D disposition table under-counted the hermes side: the seed
+  contract is pinned HERE, not only in the launcher.**
+  `tests/agent_runtime/test_persona_skill_policy.py` is listed as "RETARGET — the verb-table
+  set pin gains `migrate-home`", and that is true and was cheap. What the table does not say
+  is that the same file holds
+  `test_charsheet_skill_states_the_launcher_bindings_home_in_its_landed_meaning`, which pins
+  the skill's copy of the resume seed line **verbatim** — `"last observed home:"`,
+  `"never observed by the launcher"`, `"observed the draft readable in"` — as the hermes end
+  of the two-repo contract §13.26's rejection (d) created. §A-8 retires that line, so the
+  pin does not "retarget": it INVERTS, and it does so in this strip whether the plan said so
+  or not. The red is unambiguous:
+
+      assert "observed the draft readable in" in text.lower()
+      E  AssertionError
+
+  **Consequence:** a launcher builder doing L1 against §A-8 will find the launcher-side seed
+  test and may believe that is the whole contract. It is one end of it. This file is the
+  other, and the two must move in the same wave or the skill an agent preloads teaches a
+  message the seed no longer composes.
+
+- **[READ] The inverted pin is written to be unpassable by deletion, because the old one
+  was.** The retired strings are banned outright and the surviving ones are asserted
+  positively: `install-wide`, the library path, §13.27, §13.22 (its reader half still
+  stands), `legacy` (a stored observed home is preserved and labelled, never read), the
+  seed's closing sentence verbatim, and `provenance, not an address` for the draft's own
+  `hermes_home`. That last one is the trap that REPLACED the old one and is the reason the
+  field survives §A-3: the key still exists, still carries a real path, and now names a home
+  the draft is not under. An agent that reads it as an address chases a directory that has
+  nothing in it.
+
+- **[MEASURED] The blanket ban caught my own explanatory prose, and tightening the prose was
+  the right answer rather than loosening the ban.** The first draft of the skill's resume
+  bullet said "the `last observed home:` line retired with the sighting it quoted" — honest
+  history, and it reds the ban. A ban with a carve-out for "but only when you are explaining
+  that it is gone" is a ban an agent can pattern-match its way through. The bullet now says
+  the seed "used to carry a home line quoting the launcher's most recent sighting" without
+  spelling it, and adds the instruction that actually matters: do not wait for one, and do
+  not read its absence as the seed being incomplete.
+
+- **[READ] The one teaching that survived the reversal is the one written for a reason that
+  no longer applies.** *"Echo the home you resolve; do not assume it."* was a scoping check —
+  proof the agent could see the operator's draft. Under one library a wrong PROFILE is
+  harmless and a wrong ROOT is a different install, so the same sentence now surfaces a
+  mis-resolved root instead. The skill says that explicitly rather than leaving the sentence
+  standing with its original justification underneath it, which is the same failure mode as
+  the `create()` comment H1 had to rewrite: a true instruction welded to a reason that went
+  false.
+
+- **[OWED] The install-hash cycle is captured RED and is not discharged.** After the edits,
+
+      harness-skill-install: FAILED — the installed package differs from this repo for:
+      harness-charsheet-authoring
+      home X:\Eternia\.hermes  source X:\wt\sharedlib\docs\...  installed X:\Eternia\.hermes\shared\skills
+
+  Repair mode was proved to close the cycle against a throwaway root
+  (`ETERNIA_HERMES_HOME=<tmp>` → `refreshed from the repo: ...` → `--check` exit 0), so the
+  install takes. It was deliberately NOT run against the live `X:\Eternia\.hermes`, for two
+  reasons that point the same way. (i) The gate is discharged on push and this branch is not
+  pushed; the pre-push hook runs repair mode and is where a repo edit and a machine are
+  supposed to meet. (ii) More important: the live install's hermes is the PRIMARY checkout,
+  which is pre-H1 — its `characters list` still answers per-home. Installing a skill that
+  teaches one install-wide library onto a runtime that does not have one yet is exactly the
+  W3 failure this strip exists to prevent, pointed the other way: the preloaded skill would
+  contradict the screen from the moment it landed until the merge. **Owed to whoever lands
+  this branch:** run the install (or push, which runs it) AFTER the merge and after OP, and
+  re-run `--check`.
+
+- **[READ] What I did NOT do.** (i) The plan's §A-8 wording is what the skill was written
+  against, not L1's diff — L1 had not landed when this was written, and §A-8 says the frozen
+  text is the authority. (ii) No `CHARSHEET-QA:` change: the line still carries no home, and
+  under one library that stopped being a withholding and became "there is nothing to carry".
+  (iii) The skill's §13.24/§13.25 references survive as "re-deriving" pointers rather than
+  being deleted, so a reader who arrives from the register still lands somewhere — but
+  §13.27 is what the sentences now state, and strip D is what makes that register entry
+  exist. Until D lands, those pointers are forward references.
+
 <!-- A2, A3, R1 and any slice standing in the HERMES repo: append your entries above this
      line, under the matching heading, or add a heading if none fits. Then say in your
      slice report that you did.
