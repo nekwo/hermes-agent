@@ -875,3 +875,34 @@ the PUSH lane contributed no name, and a family it does not know about should
 still fail it. The S6b lesson ("every manifest pin, same commit") turns out to
 have a second half: *find them by RUNNING the suites, not by grepping for the
 verb you added* — this pin never spells a method name at all.
+
+**S7c/S7d: the acceptance found two bugs the unit lane could not, and one of
+them is a lesson about fakes.**
+
+1. **The serve stdout event is `line`, not `stdout`.** `serve.py:1784` builds
+   `_LineFrameProxy(frames, "line")` for OUT and `_LineFrameProxy(frames,
+   "stderr")` for ERR — only the error stream is named after itself. The remote
+   leg's frame reader guessed `"stdout"`, collected nothing, and reported every
+   remote turn as "no reply payload". **The unit test was green** because its
+   fake emitted `"stdout"` too: a fake that spells the wire itself can be wrong
+   in the same direction as the code it tests. Fixed by naming the constant
+   (`agent_chat_dispatch.SERVE_STDOUT_EVENT`), having the fake read it, and
+   adding a grep fence against the one line in `serve.py` that decides it.
+2. **A replayed accept carries no frames, and waiting for them is a hang.** B's
+   per-request frames go to the sink of the connection that ASKED. So when the
+   retry posture WORKS — the same `turn_request_id` stops B running the agent a
+   second time — the retrying socket gets an ack and then silence, and the
+   reader sat for the full 180s CLI timeout. The success path of the property
+   was the thing that hung. The leg now branches on the ack: `settled` replays
+   settle the row from the receipt (saying plainly that the answer is in the
+   thread on the other install, because the connection that carried it is gone),
+   and unsettled ones — the turn still running over there — count an attempt and
+   retry.
+
+**What the acceptance proves and what it does not.** B answers
+`{"error_kind": "unsupported_persona", "error": "unknown persona dev"}` out of
+its OWN empty roster, at exit code 2 — which is the proof that the argv reached
+B's real mission-chat handler in B's runtime. It is NOT a model turn: both roots
+are fresh and this suite has no provider, so "an agent on B composed a reply and
+it was forged into A's chat" is proven by the unit lane and the delivery lane's
+own suites, not by two serve children.

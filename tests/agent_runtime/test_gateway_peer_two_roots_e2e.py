@@ -173,17 +173,22 @@ class _Install:
                 payload = None
         return completed.returncode, payload, stdout + (completed.stderr or "")
 
-    def python(self, source: str) -> tuple[int, str]:
+    def python(self, source: str, *args: str) -> tuple[int, str]:
         """Run a snippet inside THIS install's environment.
 
         Used for the A→B dial, which has no CLI verb of its own in Stage 6 —
         ``peer.ping`` is the wire proof rather than an operator surface, and
         inventing a verb to make a test convenient would ship an operator door
         nobody asked for.
+
+        ``*args`` land on the snippet's ``sys.argv`` (Stage 7, whose acceptance
+        parameterises the same snippet over a target spelling and a method
+        name). Variadic and defaulted to nothing, so the Stage 6 snippets that
+        read ``sys.argv[1] if len(sys.argv) > 1`` behave exactly as they did.
         """
 
         completed = subprocess.run(
-            [sys.executable, "-c", source],
+            [sys.executable, "-c", source, *args],
             cwd=str(REPO_ROOT),
             env=self.env,
             capture_output=True,
