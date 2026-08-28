@@ -37,6 +37,15 @@ id answers the same ack with ``already_retired: true`` rather than
 a retrying client resolves its intent on the replay exactly as it would have on
 the original.
 
+Idempotent is not the same as INERT, and treating them as the same was a bug
+(D2). The replay used to only re-read; a live actor that had come back between
+the two calls was therefore reported by neither arm, and "ask again" — the
+operator's one obvious move when a desk is still on the canvas — was the single
+gesture guaranteed to do nothing about it. The replay now sweeps live
+placements bound to the instance and archives them, reporting per-actor
+failures exactly as the fresh arm does. What stays identical is the ANSWER's
+shape: same keys, ``already_retired`` still ``true``.
+
 The refusal vocabulary is the store's, one-to-one
 -------------------------------------------------
 ``PersonaInstanceRetireError.code`` is not re-spelled here. ``not_found`` maps to
@@ -158,12 +167,53 @@ def _with_correlation(
     return {**result, "correlation_id": correlation_id}
 
 
+def _sweep_live_placements(
+    instance_id: str,
+    *,
+    reason: str,
+    correlation_id: str | None,
+) -> dict[str, Any]:
+    """Archive every LIVE actor still bound to an already-retired instance.
+
+    The replay's self-heal (D2). Same chokepoint the fresh arm reaches through
+    ``PersonaInstanceStore._archive_office_placements``, and the same
+    projection-fault posture: a fault in the office projection ITSELF is not one
+    actor's fault, so it is reported with ``actor_key: None`` rather than a
+    guess, and it never raises — the retirement is authoritative with or without
+    the office projection, and a replay that raised would leave an operator
+    unable to ask a second time at all.
+    """
+
+    try:
+        from .office_store import OfficeStore
+
+        return OfficeStore().archive_actors_for_instance(
+            instance_id,
+            reason=reason,
+            correlation_id=correlation_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - the retirement is authoritative regardless
+        return {
+            "archived": 0,
+            "failed": 1,
+            "archived_actor_keys": [],
+            "failures": [
+                {
+                    "actor_key": None,
+                    "workspace_id": None,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            ],
+        }
+
+
 def _already_retired_ack(
     instance_id: str,
     tombstone,
     *,
     reason: str,
     requested_by: str | None,
+    correlation_id: str | None = None,
 ) -> dict[str, Any]:
     """The replay ack for an id whose row is already in the retire archive.
 
@@ -174,6 +224,22 @@ def _already_retired_ack(
     REQUEST's rather than the store's (``reason``, ``requested_by``) are this
     call's, and that is deliberate: echoing the first call's reason would mean
     inventing a value from a payload nothing persisted.
+
+    A replay also ARCHIVES (D2), and until 2026-08-27 it did not. The docstring
+    here used to say "a replay archives nothing, so it can fail at nothing",
+    which was the wedge's own words: measured live, a retire acked cleanly, a
+    launcher re-pushed the archived actors as ``state: active``, and every
+    subsequent retire answered ``already_retired: true`` while the desks stayed
+    on the canvas — because this arm only ever RE-READ the archive and had no
+    way to put back what something else had taken out. D1 stops the re-push at
+    the store; this is the other half, because an install already wedged does
+    not un-wedge itself by the fence arriving.
+
+    So the replay sweeps live placements first and reports what it could not
+    archive, exactly as the fresh arm does. ``archived_actor_keys`` is still
+    RE-READ from the archive rather than taken from the sweep's return — the
+    archive is the superset (another lane may have archived one earlier) and a
+    replay names the union, never one call's list.
     """
 
     from .models import PersonaInstance
@@ -193,6 +259,12 @@ def _already_retired_ack(
         persona_id = row.persona_id
         display_name = row.display_name
         mode = row.mode
+    # BEFORE the archived-keys read, so the keys this sweep just archived are in
+    # the list the replay reports. The order is the whole self-heal: reading
+    # first would answer with the wedge's own empty list and then quietly fix it.
+    sweep = _sweep_live_placements(
+        instance_id, reason="instance_reaped", correlation_id=correlation_id
+    )
     try:
         archived_actor_keys = OfficeStore().archived_actor_keys_for_instance(instance_id)
     except Exception:  # noqa: BLE001 - the office projection is never authoritative here
@@ -207,11 +279,14 @@ def _already_retired_ack(
         "archive_path": str(tombstone),
         "archive_dir": str(tombstone.parent),
         "archived_actor_keys": archived_actor_keys,
-        # A replay archives nothing, so it can fail at nothing. An empty list is
-        # the honest answer and NOT a claim that the first call had none — that
-        # claim was the first ack's to make, which is why losing that ack costs
-        # a client the failures only, never the identities.
-        "office_archive_failures": [],
+        # THIS call's failures, not the first call's. A replay now archives, so
+        # it can fail, and an empty list is again the positive claim the fresh
+        # arm makes with it: every actor bound to this instance is off the level
+        # as of this answer. It is still NOT a claim about what the first call
+        # found — that claim was the first ack's to make, which is why losing
+        # that ack costs a client the earlier failures only, never the
+        # identities.
+        "office_archive_failures": sweep["failures"],
         "already_retired": True,
     }
 
@@ -293,6 +368,11 @@ def perform_agent_retire(params: dict[str, Any]) -> AgentRetireOutcome:
                             tombstone,
                             reason=reason,
                             requested_by=requested_by,
+                            # The replay's sweep emits office writes of its own
+                            # (D2), so the gesture token has to reach it or the
+                            # self-heal lands in the unjoinable correlation
+                            # space this verb's own S8b fix removed.
+                            correlation_id=correlation_id,
                         ),
                         correlation_id,
                     )

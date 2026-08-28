@@ -800,6 +800,51 @@
         "-q",
         "tests/agent_runtime/test_office_actor_tombstone_fence.py::test_the_wire_refuses_with_the_pinned_code_and_reason"
       ]
+    },
+    {
+      "id": "d2-replay-goes-back-to-archiving-nothing",
+      "path": "agent_runtime/agent_retire.py",
+      "symbol": "_already_retired_ack",
+      "operator": "remove-self-heal",
+      "find": "    sweep = _sweep_live_placements(\n        instance_id, reason=\"instance_reaped\", correlation_id=correlation_id\n    )",
+      "replace": "    sweep = {\"failures\": []}",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_a_replay_re_archives_an_actor_that_came_back"
+      ]
+    },
+    {
+      "id": "d2-replay-hides-the-failures-it-can-now-have",
+      "path": "agent_runtime/agent_retire.py",
+      "symbol": "_already_retired_ack",
+      "operator": "swallow-reported-fault",
+      "find": "        \"office_archive_failures\": sweep[\"failures\"],",
+      "replace": "        \"office_archive_failures\": [],",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_a_replay_sweep_that_fails_reports_the_actor_instead_of_lying"
+      ]
+    },
+    {
+      "id": "d2-replay-blames-one-actor-for-a-projection-fault",
+      "path": "agent_runtime/agent_retire.py",
+      "symbol": "_sweep_live_placements",
+      "operator": "guess-fault-attribution",
+      "find": "                {\n                    \"actor_key\": None,\n                    \"workspace_id\": None,",
+      "replace": "                {\n                    \"actor_key\": instance_id,\n                    \"workspace_id\": None,",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_a_projection_fault_on_the_replay_is_not_blamed_on_an_actor"
+      ]
     }
   ]
 }

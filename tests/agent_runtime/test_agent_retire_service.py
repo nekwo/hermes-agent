@@ -519,3 +519,198 @@ def test_an_illegal_token_is_dropped_rather_than_stamped(qa_persona, seeded_work
     assert outcome.refusal is None, outcome.refusal
     removed = _payloads("office.actor.removed")
     assert [payload.get(CORRELATION_ID_KEY) for payload in removed] == [None]
+
+
+# ── D2: the replay self-heals ───────────────────────────────────────────────
+
+
+def _resurrect(actor_key: str, placed: dict) -> None:
+    """Put a live actor back on the level for an already-retired instance.
+
+    A STORE-level write with explicit consent, which is what D1 left as the only
+    way to do this at all. It stands in for the launcher that re-pushed archived
+    actors nineteen seconds after boot — that lane is fenced now, but an install
+    already wedged by it is still wedged, which is the state this fixture builds.
+    """
+
+    from agent_runtime.office_store import OfficeStore
+
+    OfficeStore().upsert_actor(
+        WORKSPACE,
+        {
+            "persona_id": placed["persona_id"],
+            "persona_instance_id": placed["persona_instance_id"],
+            "items": [
+                {
+                    "item_id": placed["persona_instance_id"],
+                    "kind": "agent",
+                    "position": [7.0, 7.0],
+                    "folder": "Agents",
+                    "display_name": "QA Agent",
+                }
+            ],
+        },
+        updated_by="operator",
+        resurrect=True,
+    )
+    assert actor_key in {a.actor_key for a in OfficeStore().list_actors(WORKSPACE)}
+
+
+def test_a_replay_re_archives_an_actor_that_came_back(qa_persona, seeded_workspace):
+    """THE live wedge of 2026-08-27, reproduced and then cured.
+
+    Before D2 this was permanent: the replay only RE-READ the archive, so once
+    a re-add had cleared the archive copy the ack answered
+    ``archived_actor_keys: []`` forever while the desk stayed on the canvas, and
+    ``harness office actor-remove`` was the only way out. "Ask again" — the
+    operator's one obvious move — was the single gesture guaranteed to do
+    nothing.
+
+    KILLING MUTATION: drop the sweep from ``_already_retired_ack`` (or run it
+    AFTER the archived-keys read) and both witnesses red — the level keeps the
+    actor, and the ack keeps naming an empty list.
+
+    ANTI-VACUITY: the witness is the STORE (no live actors bound to the
+    instance) beside the ack, not the ack alone. An arm that reported the key
+    without archiving it would satisfy the list and fail the level.
+    """
+
+    from agent_runtime.office_store import OfficeStore
+
+    placed = _place(placement_id="qa_replay_heal_agent_2")
+    first = perform_agent_retire(
+        {"persona_instance_id": placed["persona_instance_id"]}
+    ).result
+    assert first["archived_actor_keys"] == [placed["actor_key"]]
+
+    _resurrect(placed["actor_key"], placed)
+
+    outcome = perform_agent_retire(
+        {"persona_instance_id": placed["persona_instance_id"]}
+    )
+
+    assert outcome.refusal is None, outcome.refusal
+    second = outcome.result
+    # The answer's SHAPE is unchanged — this is still a replay.
+    assert second["already_retired"] is True
+    assert second["archive_path"] == first["archive_path"]
+    # And it names the key it just put back in the archive.
+    assert second["archived_actor_keys"] == [placed["actor_key"]]
+    assert second["office_archive_failures"] == []
+    # The level is clean: the fact the ack is claiming, measured at the store.
+    assert OfficeStore().list_actors(WORKSPACE) == []
+
+
+def test_a_replay_with_nothing_to_heal_still_answers_the_same_way(
+    qa_persona, seeded_workspace
+):
+    """ANTI-VACUITY for the sweep: it must not become the reason the ordinary
+    replay passes, and it must not double-report.
+
+    An empty ``office_archive_failures`` here is the fresh arm's positive claim,
+    now available on the replay too: every actor bound to this instance is off
+    the level as of THIS answer.
+    """
+
+    placed = _place(placement_id="qa_replay_noop_agent_2")
+    first = perform_agent_retire(
+        {"persona_instance_id": placed["persona_instance_id"]}
+    ).result
+    second = perform_agent_retire(
+        {"persona_instance_id": placed["persona_instance_id"]}
+    ).result
+
+    assert second["archived_actor_keys"] == first["archived_actor_keys"]
+    assert second["office_archive_failures"] == []
+    assert second["already_retired"] is True
+
+
+def test_a_replay_sweep_that_fails_reports_the_actor_instead_of_lying(
+    qa_persona, seeded_workspace, monkeypatch
+):
+    """The replay can fail now, so it must SAY so — the fresh arm's rule (D7)
+    applied to the arm that used to claim it could fail at nothing.
+
+    An ack that reported no failures while a desk stayed on the canvas is
+    exactly the receipt that made the original wedge invisible.
+    """
+
+    from agent_runtime.office_store import OfficeStore
+
+    placed = _place(placement_id="qa_replay_fault_agent_2")
+    perform_agent_retire({"persona_instance_id": placed["persona_instance_id"]})
+    _resurrect(placed["actor_key"], placed)
+
+    def _boom(self, workspace_id, actor_key, **kwargs):
+        raise OSError("desk file locked")
+
+    monkeypatch.setattr(OfficeStore, "remove_actor", _boom)
+
+    second = perform_agent_retire(
+        {"persona_instance_id": placed["persona_instance_id"]}
+    ).result
+
+    assert second["already_retired"] is True
+    failures = second["office_archive_failures"]
+    assert [f["actor_key"] for f in failures] == [placed["actor_key"]]
+    assert failures[0]["workspace_id"] == WORKSPACE
+    assert "desk file locked" in failures[0]["error"]
+
+
+def test_a_projection_fault_on_the_replay_is_not_blamed_on_an_actor(
+    qa_persona, seeded_workspace, monkeypatch
+):
+    """The fresh arm's ``actor_key: None`` rule, on the replay.
+
+    A fault in the office projection ITSELF is not one actor's fault, and
+    naming one would be a guess — the whole point of this field is that it
+    stops guessing.
+    """
+
+    from agent_runtime.office_store import OfficeStore
+
+    placed = _place(placement_id="qa_replay_proj_agent_2")
+    perform_agent_retire({"persona_instance_id": placed["persona_instance_id"]})
+
+    def _boom(self, *args, **kwargs):
+        raise RuntimeError("office projection unreadable")
+
+    monkeypatch.setattr(OfficeStore, "archive_actors_for_instance", _boom)
+
+    second = perform_agent_retire(
+        {"persona_instance_id": placed["persona_instance_id"]}
+    ).result
+
+    assert second["already_retired"] is True
+    failures = second["office_archive_failures"]
+    assert [f["actor_key"] for f in failures] == [None]
+    assert "office projection unreadable" in failures[0]["error"]
+
+
+def test_the_replay_sweeps_under_the_callers_gesture_token(
+    qa_persona, seeded_workspace
+):
+    """The self-heal's office writes join the gesture that asked for them.
+
+    S8b's fix for this verb was that a retire's create half and delete half
+    stopped living in two correlation spaces. A sweep that emitted untokened
+    ``office.actor.removed`` events would re-open exactly that gap, one arm
+    over.
+    """
+
+    from agent_runtime.state_patches import CORRELATION_ID_KEY
+
+    placed = _place(placement_id="qa_replay_corr_agent_2")
+    perform_agent_retire({"persona_instance_id": placed["persona_instance_id"]})
+    _resurrect(placed["actor_key"], placed)
+
+    before = len(_payloads("office.actor.removed"))
+    perform_agent_retire(
+        {
+            "persona_instance_id": placed["persona_instance_id"],
+            "correlation_id": "gesture-replay-heal",
+        }
+    )
+
+    swept = _payloads("office.actor.removed")[before:]
+    assert [p.get(CORRELATION_ID_KEY) for p in swept] == ["gesture-replay-heal"]

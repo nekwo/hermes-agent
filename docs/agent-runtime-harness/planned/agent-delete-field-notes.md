@@ -191,6 +191,34 @@ Three consequences worth recording:
   for the commonest override run in the program. The arm is repeated inside that
   handler, with a comment saying why.
 
+## F6 — D2 built as written; the mutation cap is now the binding constraint
+
+D2 needed no adaptation — `OfficeStore.archive_actors_for_instance` already IS
+the sweep the plan describes (it lists live actors bound to the instance through
+`_instance_bound_actor`, the same binding the fresh arm uses, and returns
+`archived_actor_keys` + per-actor `failures`). So the replay reaches the same
+chokepoint the fresh arm does rather than growing a second scan.
+
+Two things the plan did not name, both added:
+
+* the sweep runs BEFORE the archived-keys re-read, not after. Reading first
+  would answer with the wedge's own empty list and then quietly fix it, so a
+  client that lost its ack would still be told nothing came back.
+* `correlation_id` is threaded into `_already_retired_ack`. The sweep emits
+  `office.actor.removed` events and `state.patched` rows of its own, and this
+  verb's S8b fix was precisely that its halves stopped living in two correlation
+  spaces; an untokened self-heal would re-open that gap one arm over.
+
+**The mutation-claim cap is now exactly full.** `scripts/changed_line_mutation_check.py`
+defaults to `--max-candidates 12` and `.github/workflows/tests.yml` runs it with
+the default, so 12 is a hard ceiling for this branch's diff. R1 + D1 + D2 select
+exactly 12, all KILLED. One property is therefore covered by TEST but not by a
+mutation claim: the replay's `correlation_id` threading
+(`test_the_replay_sweeps_under_the_callers_gesture_token`). If the coordinator's
+merge-base diff selects any additional claim, the gate will exit 2 on the cap
+rather than on a survivor — split the landing or raise the cap deliberately, and
+do not read that exit as a mutation failure.
+
 **Not fixed, and the coordinator should know:** `office_sync.apply_office_pull`
 (`office_sync.py:414`) writes actor files with `atomic_json_write`, bypassing
 `upsert_actor` and therefore this fence entirely. It is the blindest
