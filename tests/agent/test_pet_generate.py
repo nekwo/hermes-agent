@@ -211,15 +211,76 @@ def _strip_with_a_drawn_floor(*, floor=True):
     return img
 
 
-def test_a_floor_line_drawn_across_the_whole_strip_is_still_erased():
+def test_a_floor_line_drawn_across_the_whole_strip_stops_bridging_the_poses():
+    """The floor's PURPOSE test: it must stop welding the row into one blob.
+
+    Not "every floor pixel is gone" — the span under a pose's own feet has body
+    directly above it and is kept, which is what protects a character's own
+    aligned anatomy. That stub belongs to the pose it touches and separates
+    nothing. What has to die is the span crossing the background BETWEEN poses.
+    """
     keyed = atlas.remove_background(_strip_with_a_drawn_floor())
-    width = keyed.width
+    assert len(atlas._component_boxes(keyed)) == 1  # one welded blob
 
     erased = atlas._erase_long_axis_lines(keyed)
 
-    assert erased.getchannel("A").crop((0, 537, width, 540)).getbbox() is None
-    # The poses are untouched: the strip still has content above the floor.
-    assert erased.getchannel("A").crop((0, 300, width, 500)).getbbox() is not None
+    assert len(atlas._component_boxes(erased)) >= _SEAM_FRAMES
+    # The gutter between the first two poses is clear through the floor band.
+    gutter = (_SEAM_SLOT - 12, 537, _SEAM_SLOT + 12, 540)
+    assert erased.getchannel("A").crop(gutter).getbbox() is None
+    # The poses themselves are untouched.
+    assert erased.getchannel("A").crop((0, 300, keyed.width, 500)).getbbox() is not None
+
+
+def _aligned_band_strip():
+    """The SE shape: every pose carries the SAME thin wide row at the SAME height.
+
+    This is what a chin/shoulder contour does at a diagonal angle — it lands at
+    one height in all eight poses and the band covers >=85% of the strip while
+    being pure anatomy. Coverage cannot tell it from a drawn floor. What can:
+    every column of it has body directly above and below, because it is the
+    silhouette's own widest row, not something laid across the background.
+    """
+    width, height = _SEAM_SLOT * _SEAM_FRAMES, 800
+    img = Image.new("RGBA", (width, height), CHROMA)
+    draw = ImageDraw.Draw(img)
+    rx, ry, cy = 95, 140, 400
+    for i in range(_SEAM_FRAMES):
+        cx = i * _SEAM_SLOT + _SEAM_SLOT // 2
+        draw.ellipse((cx - rx, cy - ry, cx + rx, cy + ry), fill=(60, 90, 200, 255))
+        # The shoulder line: wider than the body here, same height every frame.
+        draw.rectangle((cx - rx, cy - 101, cx + rx, cy - 97), fill=(60, 90, 200, 255))
+    return img
+
+
+def test_anatomy_aligned_across_every_pose_is_not_mistaken_for_a_floor():
+    frames = atlas.extract_strip_frames(
+        _aligned_band_strip(), _SEAM_FRAMES, method="auto", fit=False
+    )
+
+    assert len(frames) == _SEAM_FRAMES
+    scanlines = {i: _interior_empty_rows(f) for i, f in enumerate(frames)}
+    assert all(rows == [] for rows in scanlines.values()), scanlines
+    heights = [f.getbbox()[3] - f.getbbox()[1] for f in frames]
+    assert max(heights) - min(heights) <= 6, heights
+
+
+def test_an_aligned_body_band_survives_the_eraser_and_a_floor_does_not():
+    """Same width, same thinness, opposite verdicts — decided by context alone."""
+    body = atlas.remove_background(_aligned_band_strip())
+    floor = atlas.remove_background(_strip_with_a_drawn_floor())
+
+    body_kept = atlas._erase_long_axis_lines(body)
+    floor_cut = atlas._erase_long_axis_lines(floor)
+
+    band = (0, 299, body.width, 303)
+    before = body.getchannel("A").crop(band).getbbox()
+    after = body_kept.getchannel("A").crop(band).getbbox()
+    assert before is not None and after is not None
+    # The anatomy band is still substantially there, not a residue.
+    assert len(atlas._component_boxes(body_kept)) == len(atlas._component_boxes(body))
+    # The floor, meanwhile, no longer welds the row together.
+    assert len(atlas._component_boxes(floor_cut)) > len(atlas._component_boxes(floor))
 
 
 def test_a_strip_with_a_drawn_floor_still_slices_into_whole_frames():

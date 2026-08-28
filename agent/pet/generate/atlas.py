@@ -63,6 +63,10 @@ FRAME_COUNTS: dict[str, int] = {state: count for state, _, count in ROW_SPECS}
 _ALPHA_FLOOR = 16
 # Cell padding kept around a fitted sprite so poses never touch the edge.
 _CELL_PAD = 10
+# How far above/below a detected line-band to look for body before erasing it.
+# Small on purpose: a drawn floor has clear background hugging it, while body
+# that merely thins out for a few rows is still body.
+_LINE_CONTEXT_MARGIN = 3
 # Margin for the normalized pass — small, to fill the cell like real petdex pets
 # (they sit ~5px from the edges); the width clamp, not the pad, prevents clipping.
 _NORMALIZE_PAD = 14
@@ -398,15 +402,37 @@ def _erase_long_axis_lines(image):
     85% of the image" identifies a drawn floor across a ~1700px row; across a
     ~220px single-pose crop it identifies the character's own shoulders, belt or
     outstretched arms, and erasing those cuts the pose into slabs and punches
-    transparent scanlines through the saved frame. That is exactly what happened
-    to the live walk-se row, so the callers hoist this to strip scale rather than
-    letting :func:`_isolate_slot_subject` repeat it per slot.
-    """
-    from PIL import Image
+    transparent scanlines through the saved frame. So the callers hoist this to
+    strip scale rather than letting :func:`_isolate_slot_subject` repeat it per
+    slot.
 
+    Strip scale is necessary and NOT sufficient, because width does not identify
+    a line. At a diagonal angle a character's chin and shoulder contour lands at
+    the same height in all eight poses and forms a thin band covering >=85% of
+    the strip that is pure anatomy — measured at 96% coverage on a live se row,
+    where erasing it cut a transparent scanline through every frame of the
+    installed sheet. A thin wide band of body and a drawn floor are
+    indistinguishable by coverage.
+
+    What separates them is what the band is embedded in. A drawn floor crosses
+    the BACKGROUND between poses; aligned anatomy is body with more body directly
+    above and below it. So a band is located by width and then erased only where
+    its local vertical context is empty, judged against the original mask so the
+    erase cannot eat its own evidence. Measured: that keeps 98-99% of the live se
+    bands, and removes 100% of a drawn floor's span between poses. The floor's
+    stub under a pose's own feet is kept — it belongs to the pose it touches,
+    merges into it, and bridges nothing.
+    """
     rgba = image.convert("RGBA").copy()
     w, h = rgba.size
     alpha = rgba.getchannel("A")
+    # `alpha` is a detached copy, so it stays the ORIGINAL mask while we write
+    # into `rgba` below. Context must never be judged against a partly-erased
+    # band, or the first column cleared would make its neighbour look like
+    # background too and the erase would unzip along the row.
+    src = alpha.load()
+    dst = rgba.load()
+    margin = _LINE_CONTEXT_MARGIN
 
     def _thin_groups(indices: list[int]) -> list[tuple[int, int]]:
         groups: list[tuple[int, int]] = []
@@ -429,19 +455,34 @@ def _erase_long_axis_lines(image):
     wide_rows = [
         y
         for y in range(h)
-        if sum(1 for x in range(w) if alpha.getpixel((x, y)) > _ALPHA_FLOOR) >= w * 0.85
+        if sum(1 for x in range(w) if src[x, y] > _ALPHA_FLOOR) >= w * 0.85
     ]
     tall_cols = [
         x
         for x in range(w)
-        if sum(1 for y in range(h) if alpha.getpixel((x, y)) > _ALPHA_FLOOR) >= h * 0.85
+        if sum(1 for y in range(h) if src[x, y] > _ALPHA_FLOOR) >= h * 0.85
     ]
 
-    clear = Image.new("RGBA", rgba.size, (0, 0, 0, 0))
+    def _clear(x: int, y: int) -> None:
+        r, g, b, _a = dst[x, y]
+        dst[x, y] = (r, g, b, 0)
+
     for top, bottom in _thin_groups(wide_rows):
-        rgba.paste(clear.crop((0, top, w, bottom)), (0, top))
+        for x in range(w):
+            above = any(src[x, y] > _ALPHA_FLOOR for y in range(max(0, top - margin), top))
+            below = any(src[x, y] > _ALPHA_FLOOR for y in range(bottom, min(h, bottom + margin)))
+            if above or below:
+                continue
+            for y in range(top, bottom):
+                _clear(x, y)
     for left, right in _thin_groups(tall_cols):
-        rgba.paste(clear.crop((left, 0, right, h)), (left, 0))
+        for y in range(h):
+            before = any(src[x, y] > _ALPHA_FLOOR for x in range(max(0, left - margin), left))
+            after = any(src[x, y] > _ALPHA_FLOOR for x in range(right, min(w, right + margin)))
+            if before or after:
+                continue
+            for x in range(left, right):
+                _clear(x, y)
     return rgba
 
 
