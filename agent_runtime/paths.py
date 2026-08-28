@@ -471,3 +471,19 @@ def unlink_quietly(path: Path) -> None:
         path.unlink()
     except OSError:
         pass
+
+
+def safe_mtime(path: Path) -> float:
+    """Modification time, or ``0.0`` for anything that cannot be stat'd.
+
+    ONE authority: ``repo_context`` carried this as ``_safe_mtime`` and gateway
+    Stage 8's media derivation needed the same "newest first, and a path that
+    vanished mid-sort must not raise" ordering key. ``0.0`` sorts oldest, which
+    is the honest answer for a file that is not there: whatever it was, it is
+    not the newest.
+    """
+
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0

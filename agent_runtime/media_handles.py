@@ -92,6 +92,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from . import paths
+
 __all__ = [
     "HANDLE_PREFIX",
     "HANDLE_RE",
@@ -352,7 +354,7 @@ def build_media_scope(
         logs = [p for p in directory.glob("*.jsonl") if p.is_file()]
     except OSError:
         return MediaScope({}, 0, 0, False)
-    logs.sort(key=_mtime_or_zero, reverse=True)
+    logs.sort(key=paths.safe_mtime, reverse=True)
     truncated = len(logs) > max_logs
     logs = logs[:max_logs]
 
@@ -450,13 +452,6 @@ def _live_log_root() -> Path | None:
         return capture_chat_live_log_root()
     except Exception:  # pragma: no cover - defensive; a scope must never raise
         return None
-
-
-def _mtime_or_zero(path: Path) -> float:
-    try:
-        return path.stat().st_mtime
-    except OSError:  # pragma: no cover - defensive
-        return 0.0
 
 
 def _extension(reference: str) -> str:

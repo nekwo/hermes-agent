@@ -2130,6 +2130,9 @@ def test_the_reclaim_pair_joins_the_manifest_without_moving_the_contract_version
         # move, because a client only calls methods it found in the set.
         "runtime.chat.message",
         "runtime.chat.steer",
+        # Gateway Stage 8, additive: the fetch family joins the set.
+        "runtime.media.get",
+        "runtime.media.index",
         "runtime.office.get",
         "runtime.office.remove",
         "runtime.office.resolve_conflict",

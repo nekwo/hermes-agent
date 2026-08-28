@@ -543,7 +543,7 @@ def harness_worktree_inventory(
                 continue
             seen.add(resolved)
             rows.append((worktree, base, source, None))
-    return sorted(rows, key=lambda row: _safe_mtime(row[0]))
+    return sorted(rows, key=lambda row: paths.safe_mtime(row[0]))
 
 
 def _path_is_reparse_point(path: Path) -> bool:
@@ -556,13 +556,6 @@ def _path_is_reparse_point(path: Path) -> bool:
         return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
     except OSError:
         return False
-
-
-def _safe_mtime(path: Path) -> float:
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return 0.0
 
 
 def worktree_source_root(worktree: Path) -> Path | None:

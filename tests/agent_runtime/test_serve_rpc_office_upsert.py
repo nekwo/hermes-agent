@@ -1065,6 +1065,9 @@ def test_the_method_set_grew_and_the_contract_integer_did_not_move():
             # Gateway Stage 3, additive.
             "runtime.chat.message",
             "runtime.chat.steer",
+            # Gateway Stage 8, additive: the fetch family joins the set.
+            "runtime.media.get",
+            "runtime.media.index",
             "runtime.office.get",
             "runtime.office.remove",
             "runtime.office.resolve_conflict",
@@ -1082,6 +1085,8 @@ def test_the_method_set_grew_and_the_contract_integer_did_not_move():
             # A chat turn runs an agent with tools; see _runtime_chat_message.
             "runtime.chat.message": "console",
             "runtime.chat.steer": "console",
+            "runtime.media.get": "console",
+            "runtime.media.index": "console",
             "runtime.office.get": "read",
             "runtime.office.remove": "console",
             "runtime.office.resolve_conflict": "console",
@@ -1211,6 +1216,9 @@ def test_the_write_method_is_transport_agnostic_and_answers_on_the_socket():
                     "runtime.agent.retire",
                     "runtime.chat.message",
                     "runtime.chat.steer",
+                    # Gateway Stage 8, additive: the fetch family joins the set.
+                    "runtime.media.get",
+                    "runtime.media.index",
                     "runtime.office.get",
                     "runtime.office.remove",
                     "runtime.office.resolve_conflict",
@@ -1227,6 +1235,8 @@ def test_the_write_method_is_transport_agnostic_and_answers_on_the_socket():
                     "runtime.agent.retire": "console",
                     "runtime.chat.message": "console",
                     "runtime.chat.steer": "console",
+                    "runtime.media.get": "console",
+                    "runtime.media.index": "console",
                     "runtime.office.get": "read",
                     "runtime.office.remove": "console",
                     "runtime.office.resolve_conflict": "console",

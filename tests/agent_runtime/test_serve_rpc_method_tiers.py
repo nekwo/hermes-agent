@@ -84,6 +84,17 @@ def test_level_mutations_are_console_and_reads_are_read() -> None:
     # The one row worth arguing: prewarm writes no store state, emits no event
     # and mints no id — its own contract — so it sits with the reads.
     assert tiers["runtime.persona.prewarm"] == TIER_READ
+    # Gateway Stage 8, and the SECOND row worth arguing — the one where the
+    # one-line rule does not decide it. Neither media verb mutates a level, so
+    # the rule as stated would say ``read``; both say ``console``, because
+    # handing over the raw bytes of a file on this machine is an EGRESS rather
+    # than a read of the level, and because the read tier is deliberately open
+    # to ``unknown`` — a caller the transport authenticated and could not place
+    # — which is exactly the caller who must not be able to pull files off the
+    # disk. A ``read`` device is a viewer of the level, not a subscriber to
+    # every proof screenshot on the machine.
+    assert tiers["runtime.media.get"] == TIER_CONSOLE
+    assert tiers["runtime.media.index"] == TIER_CONSOLE
 
 
 def test_adding_the_tiers_block_did_not_move_the_contract_integer() -> None:
