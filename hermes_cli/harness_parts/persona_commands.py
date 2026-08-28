@@ -1005,10 +1005,6 @@ def _cmd_persona_instance_open_chat(args) -> int:
                 data = {"ok": False, "error": "placement_id is required when add_instance is true"}
                 print(emit_json(data) if args.json else data["error"])
                 return 2
-            placement_refusal = _placement_discriminability_refusal(placement_id)
-            if placement_refusal is not None:
-                print(emit_json(placement_refusal) if args.json else placement_refusal["error"])
-                return 2
             # UC-H4, scoped to --add-instance ONLY. The other branches of this
             # verb REBIND an instance that already exists (and the recorded
             # 2026-07-25 recovery replayed ten of them out of the event log);
@@ -1020,6 +1016,15 @@ def _cmd_persona_instance_open_chat(args) -> int:
             refusal = require_known_persona(persona_id, persona)
             if refusal is not None:
                 print(emit_json(refusal) if args.json else refusal["error"])
+                return 2
+            # AFTER the roster check, matching the order `persona instance
+            # create` already had: "that agent does not exist" is the more
+            # fundamental answer than "that id is the wrong shape", and an
+            # operator who typed both mistakes should hear the one that is
+            # about the agent. Both still refuse before any store write.
+            placement_refusal = _placement_discriminability_refusal(placement_id)
+            if placement_refusal is not None:
+                print(emit_json(placement_refusal) if args.json else placement_refusal["error"])
                 return 2
             try:
                 # Local import: this file is exec'd into harness.py globals, and

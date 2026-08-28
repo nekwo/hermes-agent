@@ -120,7 +120,7 @@ def _instance_ids() -> set[str]:
     return {path.name for path in directory.iterdir()}
 
 
-def _create(capsys, persona: str, placement: str = "ph_one", **flags):
+def _create(capsys, persona: str, placement: str = "ph_one_agent_2", **flags):
     argv = [
         "harness", "persona", "instance", "create",
         "--persona", persona,
@@ -135,7 +135,7 @@ def _create(capsys, persona: str, placement: str = "ph_one", **flags):
     return code, json.loads(capsys.readouterr().out)
 
 
-def _open_chat(capsys, persona: str, placement: str = "ph_open", extra: list | None = None):
+def _open_chat(capsys, persona: str, placement: str = "ph_open_agent_2", extra: list | None = None):
     argv = [
         "harness", "persona", "instance", "open-chat",
         "--persona", persona,
@@ -209,12 +209,12 @@ def test_create_with_a_roster_persona_still_mints(qa_persona, session_db, capsys
     over-broad guard looks like from the caller's side.
     """
 
-    code, data = _create(capsys, "qa", placement="ph_real")
+    code, data = _create(capsys, "qa", placement="ph_real_agent_2")
 
     assert code == 0
     assert data["ok"] is True
-    assert data["persona_instance_id"] == "personainst_ph_real"
-    assert paths.persona_instance_path("personainst_ph_real").exists()
+    assert data["persona_instance_id"] == "personainst_ph_real_agent_2"
+    assert paths.persona_instance_path("personainst_ph_real_agent_2").exists()
     assert session_db.created == [data["default_chat_session_id"]]
 
 
@@ -247,11 +247,11 @@ def test_a_profile_id_for_a_profile_that_owns_nothing_still_instantiates(
     ``test_serve_rpc_agent_create.py::test_a_profile_id_for_a_profile_that_owns_nothing_still_creates``.
     """
 
-    code, data = _create(capsys, "profile:nosuchprofile", placement="ph_profile")
+    code, data = _create(capsys, "profile:nosuchprofile", placement="ph_profile_agent_2")
 
     assert code == 0
     assert data["persona_id"] == "profile:nosuchprofile"
-    assert paths.persona_instance_path("personainst_ph_profile").exists()
+    assert paths.persona_instance_path("personainst_ph_profile_agent_2").exists()
 
 
 def test_open_chat_without_add_instance_is_untouched_by_the_fence(
