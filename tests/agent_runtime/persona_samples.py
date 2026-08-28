@@ -50,14 +50,14 @@ def sample_personas() -> list[AgentPersona]:
     neko = sample_persona(
         "neko_supervisor",
         toolsets=["file", "search", "terminal", "session_search", "code_execution", "todo", "skills"],
-        skills=["harness-continuity", "harness-runtime-model"],
+        skills=["harness-runtime-model"],
     )
     neko.display_name = "Neko Mission Lead"
     dev = sample_persona(
         "dev",
         toolsets=["file", "search", "terminal", "session_search", "code_execution", "skills"],
         hermes_profile="gpt-launcher",
-        skills=["harness-continuity", "harness-dev-delivery", "harness-qa-verdict", "launcher-mcp-operations"],
+        skills=["harness-runtime-model", "harness-dev-delivery", "harness-qa-verdict", "launcher-mcp-operations"],
     )
     dev.display_name = "Launcher Dev Agent"
     dev.repo_scope_label = "EterniaLauncher"
@@ -65,7 +65,7 @@ def sample_personas() -> list[AgentPersona]:
         "backend_dev",
         toolsets=["file", "search", "terminal", "session_search", "code_execution", "skills"],
         hermes_profile="backend-dev",
-        skills=["harness-continuity", "harness-dev-delivery"],
+        skills=["harness-runtime-model", "harness-dev-delivery"],
     )
     backend.display_name = "Backend Dev Agent"
     backend.repo_scope = "X:/Unreal Engine/Engine/EterniaBackend/eternia-backend"

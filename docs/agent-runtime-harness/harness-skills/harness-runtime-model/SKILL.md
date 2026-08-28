@@ -1,6 +1,6 @@
 ---
 name: harness-runtime-model
-description: Hermes Agent Runtime mental model AND the operating manual for Mission Control — personas / instances / chats / graph / board / office, the first-class commands to view and operate them, and (in references/) the live operating loop: place-message-delete a QA instance, read MCP admission receipts, triage stalled turns, capture Stage C proof, preserve evidence. Use instead of low-level DB/Python/scripts.
+description: Hermes Agent Runtime mental model AND the operating manual for Mission Control — personas / instances / chats / graph / board / office, the first-class commands to view and operate them, helper delegation without context bloat, and (in references/) the live operating loop: place-message-delete a QA instance, read MCP admission receipts, triage stalled turns, capture Stage C proof, preserve evidence. Use instead of low-level DB/Python/scripts.
 metadata:
   hermes:
     surfaces: [mission_chat]
@@ -161,10 +161,12 @@ for the `open-chat --new-session` result.
 The pointer can go stale: `mission-chat message` may reject a roster-listed
 root with `unknown_chat_session` ("unknown explicit persona chat root"). Do not
 keep retrying it — mint a fresh root with `open-chat --new-session
---idempotency-key <key>` and message that. External operators must run the CLI
-with the runtime's `HERMES_HOME` (the profile that owns the harness store);
-under the wrong home, `persona list` returns an empty roster and chat roots
-resolve nowhere.
+--idempotency-key <key>` and message that. The roster and chat roots hang off
+the runtime ROOT, not the profile home: under the wrong store root,
+`persona list` returns an empty roster and chat roots resolve nowhere, while
+the wrong HOME gives you the right roster with the wrong profile answers
+(admission, model, auth) — measured 2026-08-28, see the Non-negotiables above
+and `references/operations.md`, "Roots".
 
 Treat `session_id` in chat commands as the stable root. Native compression may
 rotate `active_session_id`; it does not change the root selected by Mission
@@ -176,3 +178,23 @@ If a turn returns `chat_turn_outcome_unknown`, do not retry it. Resolve the
 exact `(root, client_message_id, turn_id)` tuple with `turn-resolve ...
 --action abandon`, then send the text as a new turn with a fresh client
 message ID.
+
+## Delegation — helpers without context bloat
+
+*(Absorbed `harness-continuity` 2026-08-28; full recipe and the return-summary
+flag set: `references/operations.md`, "Delegation".)*
+
+- Message exactly ONE helper at a time — `agent_chat_send` from inside a turn,
+  or `mission-chat message` against its chat root. A message is the whole
+  handoff: narrow objective, explicit stop condition, the parent session id.
+- **Never slurp.** Do not read or paste the helper's full transcript, raw
+  logs, or hidden reasoning into the parent. Carry pointers: the parent gets
+  one bounded summary plus artifact/proof refs, nothing more.
+- The first-class return is `persona instance return-summary` (Operate table
+  above): posts a redaction-safe bounded message into the parent session,
+  records lineage via `returned_to`, emits `steer.returned`. The summary is
+  hard-truncated and refs are capped — send pointers, not payload.
+- Progress is what the helper says in chat plus the artifacts it names (the
+  daemon/run-row `progress_peek` died 2026-07-30). Intervene only on a stall,
+  an explicit block, or scope drift — by another message on the SAME chat
+  root, so the helper keeps its context and prompt cache.

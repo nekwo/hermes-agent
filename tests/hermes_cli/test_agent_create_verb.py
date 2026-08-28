@@ -854,13 +854,13 @@ def test_the_flag_is_repeatable_and_keeps_the_operators_order(
         capsys,
         "--idempotency-key", "verb-skills-two",
         "--placement-id", "qa_sk_two_agent_2",
-        "--skill", "harness-continuity",
+        "--skill", "harness-runtime-model",
         "--skill", "harness-qa-verdict",
     )
 
     assert data["ok"] is True
     assert _overrides("personainst_qa_sk_two_agent_2") == [
-        "harness-continuity",
+        "harness-runtime-model",
         "harness-qa-verdict",
     ]
 

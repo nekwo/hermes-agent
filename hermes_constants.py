@@ -19,7 +19,6 @@ from pathlib import Path
 CANONICAL_SHARED_SKILL_IDS = frozenset(
     {
         "harness-dev-delivery",
-        "harness-continuity",
         "harness-qa-verdict",
         "harness-runtime-model",
         "harness-charsheet-authoring",

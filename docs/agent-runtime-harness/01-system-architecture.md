@@ -299,9 +299,11 @@ root-relative, not per-profile, so every persona references one copy and realm
 sync publishes it (`skill_install.py:38-43`). Never edit the installed copy.
 
 The directories present match `hermes_constants.CANONICAL_SHARED_SKILL_IDS`
-(`hermes_constants.py:19`) exactly — five since 2026-08-28:
-`harness-dev-delivery`, `harness-continuity`, `harness-qa-verdict`,
-`harness-runtime-model` and `harness-charsheet-authoring`. The 2026-08-28
+(`hermes_constants.py:19`) exactly — four since 2026-08-28:
+`harness-dev-delivery`, `harness-qa-verdict`, `harness-runtime-model` and
+`harness-charsheet-authoring`. `harness-continuity` folded into
+`harness-runtime-model` the same day (lean-preload rule: the digest in
+SKILL.md, the full recipe in `references/operations.md`). The 2026-08-28
 skills consolidation deleted `harness-mission-lead` (the mission-lane tombstone)
 outright, folded `launcher-analyze-proof` into `harness-qa-verdict`, and folded
 the shared-root-only `mission-control-harness` into `harness-runtime-model` —

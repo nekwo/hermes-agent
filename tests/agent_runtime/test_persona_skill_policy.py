@@ -36,13 +36,12 @@ def test_dev_role_allows_skills_toolset_for_alice_style_loading():
 def test_harness_personas_expose_mission_dev_and_qa_skills():
     personas = {persona.id: persona for persona in sample_personas()}
 
-    assert "harness-continuity" in personas["neko_supervisor"].skills
     assert "harness-runtime-model" in personas["neko_supervisor"].skills
     assert "harness-dev-delivery" in personas["dev"].skills
-    assert "harness-continuity" in personas["dev"].skills
+    assert "harness-runtime-model" in personas["dev"].skills
     assert "harness-qa-verdict" in personas["dev"].skills
     assert "harness-dev-delivery" in personas["backend_dev"].skills
-    assert "harness-continuity" in personas["backend_dev"].skills
+    assert "harness-runtime-model" in personas["backend_dev"].skills
     assert "launcher-mcp-operations" not in personas["backend_dev"].skills
     assert "harness-qa-verdict" in personas["qa"].skills
 
@@ -62,7 +61,7 @@ def test_harness_install_uses_persona_declared_skills_not_role_map():
 def test_stage59_hud_skill_sections_exist_in_role_skills():
     root = Path(__file__).resolve().parents[2] / "docs" / "agent-runtime-harness" / "harness-skills"
     expected = {
-        "harness-continuity": {"Spawn And Resume", "Return Command", "Progress Peek", "Never Slurp"},
+        "harness-runtime-model": {"Delegation — helpers without context bloat"},
         "harness-dev-delivery": {"Hand Off", "Request Proof Recipe", "Request Context", "Stage Plan", "Report Blocker"},
         "harness-qa-verdict": {"QA Verdict", "Request Missing Proof", "Report Blocker"},
     }
@@ -362,7 +361,7 @@ def test_installed_canonical_skill_drift_fails_the_pre_push_gate(tmp_path, monke
 
     source_root = tmp_path / "repo-skills"
     shared_root = tmp_path / "shared" / "skills"
-    skill = "harness-continuity"  # a real canonical id — the installer refuses any other
+    skill = "harness-qa-verdict"  # a real canonical id — the installer refuses any other
 
     monkeypatch.setattr(
         "agent_runtime.skill_install.harness_skill_source_root", lambda: source_root
@@ -489,7 +488,7 @@ def test_a_repair_archives_the_package_it_displaces_rather_than_destroying_it(
 
     source_root = tmp_path / "repo-skills"
     shared_root = tmp_path / "shared" / "skills"
-    skill = "harness-continuity"
+    skill = "harness-qa-verdict"
 
     monkeypatch.setattr(
         "agent_runtime.skill_install.harness_skill_source_root", lambda: source_root
@@ -895,7 +894,7 @@ def test_the_verb_writes_the_INSTANCE_tier_and_never_the_persona_template(
 
     before = list(AgentStore().get("qa").skills or [])
     outcome = _create_with_skills(
-        "harness-continuity", placement="qa_tier_agent_2", key="skills-tier"
+        "harness-qa-verdict", placement="qa_tier_agent_2", key="skills-tier"
     )
 
     assert outcome.refusal is None
@@ -903,6 +902,6 @@ def test_the_verb_writes_the_INSTANCE_tier_and_never_the_persona_template(
     from agent_runtime.persona_assignments import PersonaInstanceStore
 
     assert PersonaInstanceStore().get("personainst_qa_tier_agent_2").skill_overrides == [
-        "harness-continuity"
+        "harness-qa-verdict"
     ]
 
