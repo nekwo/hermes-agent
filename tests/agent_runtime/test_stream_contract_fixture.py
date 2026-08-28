@@ -555,8 +555,8 @@ def test_the_agent_create_patch_golden_carries_exactly_the_two_creates():
         ("office_actor", "upsert"),
     ], rows
     assert all(row["created"] is True for row in rows), rows
-    assert rows[0]["id"] == "personainst_qa_fixture"
-    assert rows[1]["id"] == "ws_office_pilot/personainst_qa_fixture"
+    assert rows[0]["id"] == "personainst_qa_fixture_agent_2"
+    assert rows[1]["id"] == "ws_office_pilot/personainst_qa_fixture_agent_2"
     # The placement is instance-keyed by construction
     # (``agent_create.placement_actor_payload``), which is what keeps the office
     # store's class-key fence unreachable from this method.
@@ -598,9 +598,9 @@ def test_the_narrow_profile_golden_is_the_honest_full_core():
     # would have folded: BOTH halves of the create are in it.
     actors = core["offices"]["ws_office_pilot"]["actors"]
     assert any(
-        actor["actor_key"] == "personainst_qa_fixture" for actor in actors
+        actor["actor_key"] == "personainst_qa_fixture_agent_2" for actor in actors
     ), actors
-    assert "personainst_qa_fixture" in core["persona_instances"]
+    assert "personainst_qa_fixture_agent_2" in core["persona_instances"]
 
 
 def test_the_agent_create_pair_is_one_batch_seen_two_ways():

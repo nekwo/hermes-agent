@@ -121,8 +121,8 @@ FIXTURE_DISPATCHED_AT = 1_760_000_000.0
 FIXTURE_CREATE_PERSONA_ID = "qa"
 FIXTURE_CREATE_PERSONA_DISPLAY_NAME = "QA Agent"
 FIXTURE_CREATE_WORKSPACE_ID = "ws_office_pilot"
-FIXTURE_CREATE_PLACEMENT_ID = "qa_fixture"
-FIXTURE_CREATE_INSTANCE_ID = "personainst_qa_fixture"
+FIXTURE_CREATE_PLACEMENT_ID = "qa_fixture_agent_2"
+FIXTURE_CREATE_INSTANCE_ID = "personainst_qa_fixture_agent_2"
 FIXTURE_CREATE_IDEMPOTENCY_KEY = "fixture-agent-create"
 FIXTURE_CREATE_POSITION = (0.0, 0.0)
 #: ``persona_chat_session_id_for`` mints ``persona_chat_<instance>_<12 hex of a
