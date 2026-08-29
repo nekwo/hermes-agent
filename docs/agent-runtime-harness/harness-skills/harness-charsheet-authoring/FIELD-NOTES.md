@@ -2638,6 +2638,70 @@ reasoning of the entry before it, applied one step too far.
   the code could measure rather than from what the artifact is. If the next slice finds
   itself writing "X is Y by any definition available to us", that sentence is the bug.
 
+## 2026-08-28 — the QA crop had its own frame grammar, and it cut characters in half
+
+An operator opened `walk-e-attempt-1-frame-1-x1.png` fullscreen and found half a character.
+The mechanism was not in the picture code at all: the strip had **two boundary rules**, and
+the QA surface was reading the wrong one.
+
+- **[MEASURED] The severing, on the strip that shipped it.**
+  `revisions/row@walk-e/attempt-1.png` is 2172x724, 8 frames. The poses the model drew sit at
+  x `(66,298) (340,578) (630,839) (900,1094) (1139,1359) (1390,1626) (1684,1877) (1927,2116)`.
+  The even-slot boundaries are `0,272,543,814,1086,1358,1629,1900,2172`. Frame 0's slot ends at
+  272 against a pose reaching 298, so the crop stopped 26 columns into the body and the cut
+  edge stood as a **205px column of body pixels flush against the frame's right side**. Six of
+  the eight frames were severed on at least one side — measured edge columns L/R before:
+  `0/205, 199/237, 232/183, 170/93, 91/52, 42/0, 0/0, 0/0`. After: `0/0` on all eight. Frame 0
+  recovered 3163 body pixels (43517 → 46680).
+
+- **[READ] The defect is a duplicated grammar, not a bad constant.** `pipeline.frame_cell`
+  divided the strip's width by the frame count and called the result a frame. The real frame
+  extraction (`atlas.extract_strip_frames`) has been content-aware since it was written,
+  *precisely because* even slots are wrong on real strips — that is the same lesson the two
+  appendices above are about. So the package already knew; the knowledge just was not reachable
+  from the surface whose entire job is to show an operator the truth. This is the launcher's
+  same-day bug in a different repo: a second hand-rolled grammar standing beside the real one.
+
+- **[FIXED] One authority, exported as a value.** `atlas.frame_x_bounds(strip, frame_count)`
+  returns the per-frame `(left, right)` in strip coordinates, running exactly `method="auto"`'s
+  order — key the background, erase strip-spanning floors, `_frame_x_ranges` (gutters merged
+  down to the frame count), sever expected boundaries and retry, and only then `_slot_bounds`.
+  `frame_cell` crops the SOURCE at those bounds, so the operator still sees the provider's own
+  pixels, magenta field and all; `extract_strip_frames` is untouched. The x-bounds are a value
+  and not a set of frames because a QA crop cannot use extracted frames at all — those have been
+  keyed, isolated and re-fitted, which is three edits away from what the provider returned.
+
+- **[READ] Width is the pose's, height is the strip's, and the asymmetry is deliberate.** A
+  frame boundary is a fact about the row that can be read off the pixels. A subject's top and
+  bottom are not — trimming to them would be the module guessing which pixels the operator came
+  to look at. Full strip height stays.
+
+- **[READ] The pad is clamped to the neighbour's content edge, and the extraction's is not.**
+  Both add ~4% of a slot as breathing room. The extraction can afford a raw pad because it
+  cleans slivers out of every crop afterwards; a caller cropping the source verbatim cannot, so
+  `frame_x_bounds` clamps the pad so it can never reach another pose's pixels. Where poses truly
+  touch, the margin goes to zero and content sits flush — honestly, because the source does.
+
+- **[MEASURED] Four existing tests asserted the defect.** `round(source.width / frames)` was
+  written into two size assertions, and two deep-zoom tests only cleared the console budget
+  because the old cell was a whole slot wide (`--scale 10` on a 63px-wide content cell is
+  1.2M px, under the ceiling; on the old 256px slot it was 4.9M). The zoom factor is now
+  computed from the cell the row actually crops to. **The tests were measuring the fixture's
+  slot arithmetic and calling it a contract** — the same failure mode as the 2026-08-24 mutation
+  audit, where a +3px shift on both bounds left the whole suite green because every assertion
+  read the cell's SIZE. Size assertions cannot see this class of defect. The new tests read pose
+  mass per column.
+
+- **[READ] Cost, since it is now a keying pass and not a division.** 0.371s for one
+  `frame_cell` on the 2172x724 strip, decode included — the strip is decoded once and the open
+  image handed to the geometry. `thumb` writes one crop, so this is not on a hot path.
+
+- **[READ] Left alone, on purpose.** `extract_strip_frames`'s lenient branch still composes
+  those same helpers inline rather than calling `frame_x_bounds`. The boundary RULE is shared
+  (`_frame_x_ranges`), so the two cannot disagree about where a gutter is, but the composition
+  is written twice and could drift. Folding it in means touching the generation gate, which was
+  fenced out of this slice.
+
 <!-- A2, A3, R1 and any slice standing in the HERMES repo: append your entries above this
      line, under the matching heading, or add a heading if none fits. Then say in your
      slice report that you did.

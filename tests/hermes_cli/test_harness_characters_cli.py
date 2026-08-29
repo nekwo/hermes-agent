@@ -401,8 +401,14 @@ def test_thumb_writes_the_crop_its_payload_describes(fake, base_image, capsys, t
         crop = opened.convert("RGBA")
         source = opened_source.convert("RGBA")
         assert (crop.width, crop.height) == (payload["width"], payload["height"])
-        # ONE frame cell of the strip, then upscaled — not the whole strip.
-        assert (crop.width, crop.height) == (round(source.width / 2) * 2, source.height * 2)
+        # ONE frame cell of the strip, then upscaled — not the whole strip. The
+        # width is the content-aware frame boundary's, not `source.width / 2`:
+        # that arithmetic IS the 2026-08-28 half-a-character defect.
+        from agent.pet.generate.atlas import frame_x_bounds
+
+        left, right = frame_x_bounds(source, payload["frames"])[payload["frame"]]
+        assert (crop.width, crop.height) == ((right - left) * 2, source.height * 2)
+        assert crop.width < source.width, "nothing was cropped"
         assert source.getpixel((0, 0))[:3] == pipeline.MAGENTA, "not a live-shaped strip"
         assert crop.getpixel((0, 0)) == pipeline.QA_BACKDROP, (
             "the chroma field reached the crop: the backdrop never showed"
@@ -496,8 +502,8 @@ def test_a_deep_zoom_says_it_is_not_a_card_in_the_payload_and_in_the_line(
 ):
     """An agent reads the sentence as often as the JSON, so both carry it.
 
-    The one thing it must not do with a `--scale 10` crop is declare it with a
-    `MEDIA:` line — that hands the console a decode several times the sheet's
+    The one thing it must not do with a deliberately deep crop is declare it with
+    a `MEDIA:` line — that hands the console a decode several times the sheet's
     for a 420px square (risk D.3). The file is fine; the claim "this is a card"
     is not, and silence is what let the claim through.
     """
@@ -506,14 +512,30 @@ def test_a_deep_zoom_says_it_is_not_a_card_in_the_payload_and_in_the_line(
     run(["harness", "characters", "approve-direction", "--draft", draft_id, "--all", "--json"], capsys)
     run(["harness", "characters", "rows", "--draft", draft_id, "--only", "walk-e", "--json"], capsys)
 
+    # Deep enough to leave the console budget, computed from the cell this row
+    # actually crops to. A hardcoded `--scale 10` measured the fixture's even
+    # slot, which stopped being the frame boundary on 2026-08-28.
+    _code, one = run(
+        ["harness", "characters", "thumb", "--draft", draft_id, "--row", "walk-e",
+         "--scale", "1", "--json"],
+        capsys,
+    )
+    deep = str(
+        next(
+            s
+            for s in range(2, 128)
+            if one["width"] * one["height"] * s * s > pipeline.MAX_CONSOLE_CARD_PIXELS
+        )
+    )
+
     code, zoomed = run(
         ["harness", "characters", "thumb", "--draft", draft_id, "--row", "walk-e",
-         "--scale", "10", "--json"],
+         "--scale", deep, "--json"],
         capsys,
     )
     spoken = parser().parse_args(
         ["harness", "characters", "thumb", "--draft", draft_id, "--row", "walk-e",
-         "--scale", "10"]
+         "--scale", deep]
     )
     assert spoken.func(spoken) == 0
     line = capsys.readouterr().out.strip()
