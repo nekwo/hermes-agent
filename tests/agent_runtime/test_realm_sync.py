@@ -1181,6 +1181,87 @@ def test_status_surfaces_store_drift_and_unpublished_changes(
     }
 
 
+# ── S1: office store drift is accounted in the same envelope ──────────────
+#
+# The measured defect (2026-08-29): every actor of a workspace was archived
+# locally, the realm repo never moved, and `store_drift` counted boards only —
+# so the sheet said "In sync" with nothing to publish. These three cover the
+# outbound direction the way the board rows cover theirs.
+
+
+_OFFICE_ACTOR_PAYLOAD = {
+    "persona_id": "dev",
+    "items": [
+        {"item_id": "dev", "persona_id": "dev", "kind": "agent", "position": [1.0, 2.0], "folder": "Agents"},
+    ],
+}
+
+
+def test_status_office_drift_is_zero_after_publish(isolate_agent_runtime_root, tmp_path):
+    from agent_runtime.office_store import OfficeStore
+
+    realm, _repo = _realm_with_remote(tmp_path)
+    ws = WorkspaceStore().create(name="Office WS", realm_id=realm.id, agent_ids=["dev"])
+    OfficeStore().upsert_actor(ws.id, dict(_OFFICE_ACTOR_PAYLOAD))
+
+    published = publish_realm_sync(realm.id)
+    assert published["state"] == "published"
+
+    status = realm_sync_status(realm.id)
+    office = status["store_drift"]["office"]
+    assert set(office) == {"offices_changed", "actors_changed", "actors_added", "actors_removed"}
+    # The publish wrote the office baseline, so nothing is outstanding.
+    assert office == {
+        "offices_changed": 0,
+        "actors_changed": 0,
+        "actors_added": 0,
+        "actors_removed": 0,
+    }
+    assert status["unpublished_changes"] is False
+
+
+def test_status_marks_archived_office_actor_as_unpublished_removal(isolate_agent_runtime_root, tmp_path):
+    from agent_runtime.office_store import OfficeStore
+
+    realm, _repo = _realm_with_remote(tmp_path)
+    ws = WorkspaceStore().create(name="Office WS", realm_id=realm.id, agent_ids=["dev"])
+    store = OfficeStore()
+    actor = store.upsert_actor(ws.id, dict(_OFFICE_ACTOR_PAYLOAD))
+    assert publish_realm_sync(realm.id)["state"] == "published"
+    assert realm_sync_status(realm.id)["unpublished_changes"] is False
+
+    # Removal through the store's OWN verb (archive-never-delete), not a raw
+    # unlink — this is exactly the gesture the operator made in the field.
+    store.remove_actor(ws.id, actor.actor_key)
+
+    status = realm_sync_status(realm.id)
+    office = status["store_drift"]["office"]
+    assert office["actors_removed"] >= 1
+    assert office["actors_added"] == 0
+    assert status["unpublished_changes"] is True
+    # The realm repo never moved: git is still in_sync and it is the store
+    # drift — not the git state — that carries the "publish me" signal.
+    assert status["state"] == "in_sync"
+    assert status["ahead"] == 0
+    assert status["behind"] == 0
+
+
+def test_status_office_drift_never_published_counts_actors_as_added(isolate_agent_runtime_root, tmp_path):
+    from agent_runtime.office_store import OfficeStore
+
+    realm, _repo = _realm_with_repo(tmp_path)
+    ws = WorkspaceStore().create(name="Office WS", realm_id=realm.id, agent_ids=["dev"])
+    OfficeStore().upsert_actor(ws.id, dict(_OFFICE_ACTOR_PAYLOAD))
+
+    office = realm_sync_status(realm.id)["store_drift"]["office"]
+    # No baseline at all: the surface and its actor are wholly unpublished, and
+    # saying so is the honest answer (same rule the board family follows).
+    assert office["actors_added"] >= 1
+    assert office["offices_changed"] == 1
+    assert office["actors_removed"] == 0
+    assert realm_sync_status(realm.id)["unpublished_changes"] is True
+
+
 # ── H3: publish no-diff no-op is graceful (launcher auto-publishes) ────────
 
 

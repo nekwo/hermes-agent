@@ -192,12 +192,13 @@ def realm_sync_status(
     skills_drift = _held_skill_packages_for_realm(realm)
     state = _sync_state(git)
     # Local store drift vs the never-synced baseline sidecar: the git state above
-    # only knows the checked-out realm repo, so a local board card add — which
-    # never touches the repo until publish — leaves git ``in_sync`` while real
-    # unpublished changes sit in the store. This surfaces that honestly (pure
-    # hash/baseline compare — no extra git/network on the status path).
+    # only knows the checked-out realm repo, so a local board card add or an
+    # archived office actor — neither of which touches the repo until publish —
+    # leaves git ``in_sync`` while real unpublished changes sit in the store.
+    # This surfaces that honestly (pure hash/baseline compare — no extra
+    # git/network on the status path).
     board_drift = _board_store_drift(realm.id, workspaces)
-    store_drift = {"boards": board_drift}
+    store_drift = {"boards": board_drift, "office": _office_store_drift(realm.id, workspaces)}
     profile_artifacts_held = _held_profile_artifacts(realm, repo)
     _write_sync_sidecar(
         realm,
@@ -1201,6 +1202,89 @@ def _board_store_drift(realm_id: str, workspaces: list[Workspace]) -> dict[str, 
         "cards_changed": cards_changed,
         "cards_added": cards_added,
         "cards_removed": cards_removed,
+    }
+
+
+def _office_store_drift(realm_id: str, workspaces: list[Workspace]) -> dict[str, int]:
+    """Mission Office content drift vs the never-synced baseline sidecar, for the
+    workspaces that belong to this realm.
+
+    The office twin of ``_board_store_drift`` directly above, and deliberately
+    the same shape: compare CURRENT ``OfficeStore`` semantic content hashes
+    (``office_content_hash`` — revision/timestamps excluded) against
+    ``read_office_baseline(realm_id)``, the exact baseline the office publish and
+    pull lanes already write and read. A missing/empty baseline on a server-bound
+    realm means nothing has been published yet, so every current actor counts as
+    added — that is honest, and it mirrors the board rule.
+
+    This exists because the outbound direction had no accounting at all: git only
+    knows the checked-out realm repo, and archiving every actor of a workspace
+    never touches that repo until publish, so the sheet kept saying "In sync"
+    while the local store had drifted away from what was published (measured
+    2026-08-29 on ``ws_testv4_afb811``).
+
+    Pure and read-only: no git, no network, no writes (office plan §10 simplicity
+    budget). ``offices_changed`` counts surfaces whose hash drifted;
+    ``actors_changed`` counts active actors whose hash drifted from a known
+    baseline; ``actors_added`` counts active actors with no baseline entry; and
+    ``actors_removed`` counts baseline actors no longer active locally (archived
+    or removed since the last publish).
+
+    Two under-count guards, both preferring silence to a delete-shaped lie:
+
+    * an actor directory that does not fully READ (``scan.unreadable``) skips
+      that workspace's ENTIRE actor accounting. ``scan_actors`` is the
+      chokepoint that carries the shortfall precisely so this arm can ask; the
+      thin ``list_actors`` view would hand back a short list and the baseline
+      diff would then report N removals for actors whose files merely would not
+      open here — the same lie ``update_office_baseline_after_sync`` refuses to
+      write.
+    * a workspace with no office directory contributes nothing, and a
+      missing/unreadable surface only skips its own ``offices_changed`` row (the
+      actor accounting still runs when the listing is readable).
+    """
+
+    from . import office_models
+    from .office_store import OfficeStore
+    from .office_sync import _actor_key, _surface_key, read_office_baseline
+
+    baseline = read_office_baseline(realm_id)
+    store = OfficeStore()
+    offices_changed = actors_changed = actors_added = actors_removed = 0
+    for workspace in workspaces:
+        workspace_id = workspace.id
+        if not paths.office_dir(workspace_id).exists():
+            continue
+        try:
+            surface = store.get_surface(workspace_id)
+        except Exception:  # noqa: BLE001 — missing or unreadable: skip the row, never guess
+            surface = None
+        if surface is not None and baseline.get(_surface_key(workspace_id)) != office_models.office_content_hash(
+            surface
+        ):
+            offices_changed += 1
+        try:
+            scan = store.scan_actors(workspace_id)
+        except Exception:  # noqa: BLE001 — unreadable listing is not evidence of removal
+            continue
+        if scan.unreadable:
+            continue
+        actor_prefix = _actor_key(workspace_id, "")
+        baseline_actor_keys = {key[len(actor_prefix):] for key in baseline if key.startswith(actor_prefix)}
+        current_actor_keys: set[str] = set()
+        for actor in scan.actors:
+            current_actor_keys.add(actor.actor_key)
+            base_hash = baseline.get(_actor_key(workspace_id, actor.actor_key))
+            if base_hash is None:
+                actors_added += 1
+            elif base_hash != office_models.office_content_hash(actor):
+                actors_changed += 1
+        actors_removed += len(baseline_actor_keys - current_actor_keys)
+    return {
+        "offices_changed": offices_changed,
+        "actors_changed": actors_changed,
+        "actors_added": actors_added,
+        "actors_removed": actors_removed,
     }
 
 
