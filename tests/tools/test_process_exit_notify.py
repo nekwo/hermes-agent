@@ -160,6 +160,44 @@ class TestNotifyStore:
         assert settle_notify_request("proc_a", state=STATE_FIRED) is True
         assert pending_notify_request("proc_a") is None
 
+    def test_the_row_ceiling_evicts_settled_rows_first(self, notify_home):
+        from tools.process_notify_store import (
+            MAX_NOTIFY_ROWS,
+            STATE_FIRED,
+            notify_requests,
+            pending_notify_request,
+            record_notify_request,
+            settle_notify_request,
+        )
+
+        for index in range(MAX_NOTIFY_ROWS):
+            record_notify_request(
+                session_id=f"proc_settled_{index:03d}",
+                chat_session_id=ROOT,
+                persona_instance_id=INSTANCE,
+            )
+            settle_notify_request(f"proc_settled_{index:03d}", state=STATE_FIRED)
+        record_notify_request(
+            session_id="proc_live", chat_session_id=ROOT, persona_instance_id=INSTANCE
+        )
+        assert len(notify_requests()) <= MAX_NOTIFY_ROWS
+        # The promise nobody has kept yet is the LAST thing thrown away.
+        assert pending_notify_request("proc_live") is not None
+
+    def test_evicting_an_undelivered_promise_is_never_silent(
+        self, notify_home, caplog
+    ):
+        from tools.process_notify_store import MAX_NOTIFY_ROWS, record_notify_request
+
+        with caplog.at_level(logging.WARNING, logger="tools.process_notify_store"):
+            for index in range(MAX_NOTIFY_ROWS + 2):
+                record_notify_request(
+                    session_id=f"proc_pending_{index:03d}",
+                    chat_session_id=ROOT,
+                    persona_instance_id=INSTANCE,
+                )
+        assert any("evicted un-delivered" in r.getMessage() for r in caplog.records)
+
     def test_a_corrupt_file_never_raises(self, notify_home):
         from tools.process_notify_store import (
             notify_requests,

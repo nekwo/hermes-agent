@@ -208,9 +208,21 @@ def _pruned(payload: dict[str, Any]) -> dict[str, Any]:
             float(item[1].get("requested_at") or 0.0),
         ),
     )
-    for key, _row in order:
+    for key, row in order:
         if len(rows) <= MAX_NOTIFY_ROWS:
             break
+        if row.get("state") == STATE_PENDING:
+            # A promise nobody has kept yet, thrown away because the store is
+            # full. Vanishingly rare (the registry tracks at most MAX_PROCESSES
+            # sessions at all), and it must never be the SILENT kind of rare:
+            # the agent that armed this will end its turn and wait for a receipt
+            # that is no longer coming.
+            logger.warning(
+                "process notify request for %s evicted un-delivered: the drain file"
+                " is at its %d-row ceiling",
+                key,
+                MAX_NOTIFY_ROWS,
+            )
         rows.pop(key, None)
     return rows
 
