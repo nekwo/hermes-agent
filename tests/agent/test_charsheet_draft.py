@@ -888,20 +888,35 @@ def test_the_default_crop_is_one_frame_and_not_the_whole_strip(fake, base):
     Upscaling a whole row strip is not a crop — it is an enlargement, and at
     card width it resolves no better than the raw attempt while decoding twice
     the installed sheet it exists to avoid. So the default addresses one frame
-    cell, sliced by the row's own frame count.
+    cell, at the x-range the strip's own content puts it at.
+
+    The width used to be asserted as `round(strip_w / frames)`, and that
+    arithmetic was the 2026-08-28 defect written down: even slots are not where
+    a model draws poses, and a crop taken on them cuts characters in half. The
+    width is now whatever the geometry authority names for this frame — full
+    height, and materially narrower than the strip, which is the claim in the
+    test's own title.
     """
+    # Named through `atlas` on purpose: the point of the 2026-08-28 fix is that
+    # the frame boundary has ONE authority and the charsheet package is not it.
+    from agent.pet.generate.atlas import frame_x_bounds
+
     draft = run_to_rows(base)
     draft.run_rows(only=["walk-e"])
     frames = next(row.frames for row in SPEC.authored_rows() if row.key == "walk-e")
     source = draft.store.attempt_path(row_item("walk-e"), 0)
-    with Image.open(source) as strip:
+    with Image.open(source) as opened:
+        strip = opened.convert("RGBA")
         strip_w, strip_h = strip.size
+        bounds = frame_x_bounds(strip, frames)
 
     result = draft.row_thumb("walk-e", scale=2)
 
+    assert len(bounds) == frames
     assert result["frames"] == frames
     assert result["height"] == strip_h * 2
-    assert result["width"] == round(strip_w / frames) * 2
+    left, right = bounds[0]
+    assert result["width"] == (right - left) * 2
     assert result["width"] < strip_w, (
         "the crop is wider than the strip it came from — nothing was cropped"
     )
@@ -1158,12 +1173,24 @@ def test_a_deliberate_deep_zoom_is_written_and_labelled_viewer_only(fake, base):
     2176x5792 = 12_603_392 px — 3.94x the sheet — at exit 0 with nothing in the
     payload to stop an agent declaring it with a `MEDIA:` line. The file is
     legitimate (the viewer opens it); the claim "this is a card" is not.
+
+    The zoom factor is computed from the cell rather than hardcoded: a fixed
+    `--scale 10` only cleared the ceiling because the old crop was a whole even
+    slot wide, so the test was really measuring the fixture's slot arithmetic.
+    A content-sized cell is narrower, and "deep enough to leave the budget" is
+    the property this test is about.
     """
     draft = run_to_rows(base)
     draft.run_rows(only=["walk-e"])
 
     default = draft.row_thumb("walk-e")
-    zoomed = draft.row_thumb("walk-e", scale=10)
+    cell = draft.row_thumb("walk-e", scale=1)
+    deep = next(
+        s
+        for s in range(2, 128)
+        if cell["width"] * cell["height"] * s * s > pipeline.MAX_CONSOLE_CARD_PIXELS
+    )
+    zoomed = draft.row_thumb("walk-e", scale=deep)
 
     assert default["withinConsoleBudget"] is True
     assert default["width"] * default["height"] <= pipeline.MAX_CONSOLE_CARD_PIXELS

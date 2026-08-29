@@ -47,8 +47,12 @@ from agent.charsheet.spec import CHAR8, RowSpec, SheetSpec, row_key
 # validator enforces, so a local copy of either would drift silently as upstream
 # retunes. `CELL_WIDTH`/`CELL_HEIGHT` come along because `_fit_to_cell` hardcodes
 # that cell geometry: a spec with a different frame size must be refused rather
-# than silently re-fitted to 192x208. Centralized in this ONE block so an
-# upstream rename breaks loudly, at import time, in a single place (plan §A-6).
+# than silently re-fitted to 192x208. `frame_x_bounds` is here for the same
+# reason under a sharper lesson: this module HAD a local copy of frame geometry
+# (width / frames), it disagreed with upstream's content-aware rule on the first
+# real strip, and it shipped a QA crop with half a character in it (2026-08-28).
+# Centralized in this ONE block so an upstream rename breaks loudly, at import
+# time, in a single place (plan §A-6).
 from agent.pet.generate import imagegen
 from agent.pet.generate.atlas import (
     CELL_HEIGHT,
@@ -57,6 +61,7 @@ from agent.pet.generate.atlas import (
     _fit_to_cell,
     atlas_to_webp_bytes,
     extract_strip_frames,
+    frame_x_bounds,
     normalize_cells,
     remove_background,
 )
@@ -331,10 +336,29 @@ def frame_cell(image_or_path, *, frame: int, frames: int):
     reduction is per-frame, and a frame is the unit an operator judges: within-
     strip identity means a defect is looked for frame by frame.
 
-    Slot geometry is the strip's own: *frames* equal columns, boundaries rounded
-    so no column is dropped or double-counted. Full height is kept deliberately
-    — a seam sits wherever the model drew it, and trimming to the subject would
-    be this module guessing which pixels the operator came to look at.
+    Frame geometry is NOT this module's to invent: the x-range comes from
+    :func:`atlas.frame_x_bounds`, the same content-aware rule the real frame
+    extraction uses (gutters between poses, merged down to the frame count;
+    thin severs at the expected boundaries when the poses touch; even columns
+    ONLY as the last resort, when there is no content to read at all). This
+    module used to divide the width by *frames* and call that a frame, and on
+    2026-08-28 an operator opened the result fullscreen and found half a
+    character: `walk-e` attempt 1 is a 2172px 8-frame row whose first pose spans
+    x 66-298, the even boundary falls at 272, and the QA crop stopped there —
+    26 columns of body cut off, the cut edge standing as a 205px column of
+    pixels flush against the frame's right side. Even slots are wrong on real
+    strips, which is exactly why the extraction is content-aware; one strip with
+    two boundary rules meant the dumb one was feeding the surface whose whole
+    job is to show an operator the truth.
+
+    Full height is kept deliberately — a seam sits wherever the model drew it,
+    and trimming to the subject would be this module guessing which pixels the
+    operator came to look at. Width is the pose's, height is the strip's, and
+    the asymmetry is the point: a frame boundary is a fact about the row that
+    can be read off the pixels, a subject's top and bottom are not.
+
+    The strip is decoded ONCE and the open image is handed to the geometry, so
+    finding the boundary costs a keying pass, not a second read from disk.
     """
     if isinstance(frames, bool) or not isinstance(frames, int) or frames < 1:
         raise ValueError(f"frames must be an integer >= 1, got {frames!r}")
@@ -346,12 +370,11 @@ def frame_cell(image_or_path, *, frame: int, frames: int):
             f"addressed 0-{frames - 1}"
         )
     strip = _open_rgba(image_or_path)
-    left = round(frame * strip.width / frames)
-    right = round((frame + 1) * strip.width / frames)
+    left, right = frame_x_bounds(strip, frames)[frame]
     if right <= left:
         raise ValueError(
             f"a {strip.width}px strip cannot be split into {frames} frame(s): "
-            "frame 0 would be empty"
+            f"frame {frame} would be empty"
         )
     return strip.crop((left, 0, right, strip.height))
 

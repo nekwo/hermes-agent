@@ -620,27 +620,185 @@ def test_a_cell_of_the_wrong_size_is_refitted_only_at_the_upstream_geometry():
 
 
 # ────────────────────────── frame-cell geometry ──────────────────────────
+#
+# The defect this section pins SHIPPED, and an operator found it by opening a
+# picture fullscreen. On 2026-08-28 `characters thumb` wrote a 272x724 crop of
+# `walk-e` attempt 1 in which the character is SLICED mid-body: the pose the
+# model drew spans x 66-298 of a 2172px strip, the even-slot boundary for an
+# 8-frame row falls at x 272, and the crop stopped there — half a character,
+# with the cut edge showing as a tall column of body pixels flush against the
+# frame's right edge.
+#
+# The mechanism was two different boundary rules for the same strip. The real
+# frame extraction (`atlas.extract_strip_frames`) has always been content-aware,
+# precisely BECAUSE even slots are wrong on real strips; `frame_cell` had its
+# own hand-rolled grammar that divided the width by the frame count. The dumb
+# rule fed the QA surface — the one surface whose whole job is to show an
+# operator the truth.
+#
+# So these tests are about WHERE the crop is taken. A 2026-08-24 mutation audit
+# shifted the old window by +3px on BOTH bounds and the whole suite stayed
+# green: every assertion read the cell's SIZE, which a shift does not change.
+# Size assertions cannot see this class of defect at all; the assertions below
+# read pose mass, per-column.
+
+# The real measured pose ranges of the strip that carried the shipped defect
+# (`row@walk-e/attempt-1.png`, 2172x724, 8 frames). Used as the synthetic
+# fixture's geometry so the fixture is not a guess about what "off the grid"
+# looks like — it is the row that broke.
+WALK_E_POSES = [
+    (66, 298),
+    (340, 578),
+    (630, 839),
+    (900, 1094),
+    (1139, 1359),
+    (1390, 1626),
+    (1684, 1877),
+    (1927, 2116),
+]
+WALK_E_STRIP = Path(
+    r"X:\Eternia\.hermes\shared\characters\.drafts\20260828-212742-2f3ec6"
+    r"\revisions\row@walk-e\attempt-1.png"
+)
+
+
+def pose_columns(cell, *, field):
+    """Per-column count of pixels that are NOT the flat field — the pose's mass.
+
+    Deliberately independent of `atlas`'s keyer: the thing under test derives its
+    geometry from that keyer, so a test that measured the result with the same
+    tool could agree with a broken one. A pixel counts as pose when it is opaque
+    and far from the field colour, which is the operator's own criterion —
+    "something is drawn here" — expressed arithmetically.
+    """
+    px = cell.convert("RGBA").load()
+    fr, fg, fb = field[:3]
+    return [
+        sum(
+            1
+            for y in range(cell.height)
+            if (lambda p: p[3] > 16 and abs(p[0] - fr) + abs(p[1] - fg) + abs(p[2] - fb) > 90)(
+                px[x, y]
+            )
+        )
+        for x in range(cell.width)
+    ]
+
+
+def off_grid_strip(width=2172, height=724, poses=None):
+    """A row whose poses sit where a model drew them, not on the even-slot grid.
+
+    Every pose is a filled ellipse in its own measured x-range on the flat
+    magenta field the package generates onto. Pose 0 straddles the 8-frame
+    even-slot boundary at x 272 — the exact straddle that shipped.
+    """
+    strip = Image.new("RGBA", (width, height), MAGENTA)
+    draw = ImageDraw.Draw(strip)
+    for k, (left, right) in enumerate(poses or WALK_E_POSES):
+        top = 140 + (k % 3) * 12
+        draw.ellipse((left, top, right - 1, height - 170), fill=(20, 30 + k * 8, 220, 255))
+    return strip
+
+
+def test_a_frame_cell_follows_the_poses_the_model_drew_not_the_even_slots():
+    """Every frame comes out WHOLE, including the pose that straddles a slot.
+
+    Two claims, and the second is the one that shipped broken. **Whole**: the
+    cell holds all of its own pose — measured as mass, so a cell that lost a
+    limb to a boundary fails even though its size is right. **Only its own**:
+    the cell's first and last columns are empty field, so nothing of the
+    neighbour came along and, more to the point, the pose did not run off the
+    edge of its own frame.
+    """
+    strip = off_grid_strip()
+    whole = pose_columns(strip, field=MAGENTA)
+    slots = [(round(k * 2172 / 8), round((k + 1) * 2172 / 8)) for k in range(8)]
+
+    # The fixture is genuinely off the grid: pose 0 spans a slot boundary, so
+    # the OLD rule had to cut it. Asserted on the slot arithmetic itself, not on
+    # `frame_cell`, so this guard stays true after the fix.
+    assert WALK_E_POSES[0][0] < slots[0][1] < WALK_E_POSES[0][1]
+
+    for k, (left, right) in enumerate(WALK_E_POSES):
+        cell = pipeline.frame_cell(strip, frame=k, frames=8)
+        cols = pose_columns(cell, field=MAGENTA)
+        assert cell.height == strip.height, "full strip height is deliberate"
+        assert sum(cols) == sum(whole[left:right]), (
+            f"frame {k} lost pose pixels: the cell holds {sum(cols)} of the "
+            f"{sum(whole[left:right])} the pose is drawn with"
+        )
+        assert cols[0] == 0 and cols[-1] == 0, (
+            f"frame {k} has content flush against a vertical edge "
+            f"(left column {cols[0]}px, right column {cols[-1]}px) — the "
+            "severing signature"
+        )
+
+
+@pytest.mark.skipif(not WALK_E_STRIP.is_file(), reason="live draft evidence not on this machine")
+def test_the_shipped_walk_e_row_crops_whole_frames():
+    """The real strip that produced the sliced 272x724 thumb, read-only.
+
+    Frame 0 is the one an operator opened fullscreen and found half a character
+    in. Under the even-slot rule its cell was (0, 272) against a pose spanning
+    66-298: 26 columns of body cut off, and 193 body pixels standing in the
+    cell's rightmost column. Under the content rule the pose is whole with field
+    on both sides.
+    """
+    with Image.open(WALK_E_STRIP) as opened:
+        strip = opened.convert("RGBA")
+    assert strip.size == (2172, 724)
+    field = strip.getpixel((0, 0))
+
+    severed = pose_columns(strip.crop((0, 0, 272, 724)), field=field)
+    assert severed[-1] > 724 * 0.15, "fixture check: the even slot really did sever the pose"
+
+    for k in range(8):
+        cell = pipeline.frame_cell(WALK_E_STRIP, frame=k, frames=8)
+        cols = pose_columns(cell, field=field)
+        assert cols[0] == 0 and cols[-1] == 0, (
+            f"frame {k}: content flush to a vertical edge "
+            f"(left {cols[0]}px, right {cols[-1]}px)"
+        )
+        assert sum(cols) > 0
+
+
+def test_all_touching_poses_still_yield_ordered_non_overlapping_cells():
+    """No gutters anywhere — the crop must degrade, never raise.
+
+    A row the model drew shoulder to shoulder has no empty columns to read, so
+    content segmentation has nothing to segment. The QA verb still owes the
+    operator a picture: the frames come back in order, covering the row, without
+    one cell reaching into the next.
+    """
+    touching = [(k * 271, (k + 1) * 271) for k in range(8)]
+    strip = Image.new("RGBA", (2168, 724), MAGENTA)
+    draw = ImageDraw.Draw(strip)
+    for left, right in touching:
+        draw.rectangle((left, 100, right - 1, 600), fill=(20, 40, 220, 255))
+
+    cells = [pipeline.frame_cell(strip, frame=k, frames=8) for k in range(8)]
+
+    assert all(cell.height == 724 for cell in cells)
+    assert all(cell.width > 0 for cell in cells)
+    assert sum(cell.width for cell in cells) <= strip.width * 1.05
 
 
 @pytest.mark.parametrize("width, frames", [(768, 3), (770, 3), (2172, 8), (100, 7), (13, 13)])
-def test_a_frame_cell_is_the_frames_own_slot_and_the_slots_tile_the_strip(width, frames):
-    """WHERE the crop is taken, not just how wide it comes out.
+def test_a_strip_with_no_readable_content_falls_back_to_even_slots(width, frames):
+    """The last-resort rule, and the WHERE guard that outlived the old contract.
 
-    A 2026-08-24 mutation audit shifted this window by +3px on BOTH bounds and
-    the whole suite stayed green: every assertion in it read the cell's SIZE,
-    which a shift does not change, so the verb could have been showing an
-    operator the wrong slice of the strip while reporting the right dimensions.
-    A defect is hunted frame by frame — a cell that is three pixels off cuts
-    through the neighbour it was supposed to exclude.
+    Nothing is drawn (a fully transparent strip), so there are no content runs
+    and no gutters to sever — the only honest answer left is the strip's own
+    arithmetic. That answer must still be exact: the slots tile the strip with
+    no gap, no overlap and no dropped column, which is what makes `round()` on
+    both bounds a contract rather than an implementation detail (widths
+    770/100/13 are the cases where the division does not divide).
 
-    Each column carries its own x in its pixels, so a cell's contents name the
-    columns it came from. The boundaries are the strip's own rounding: the slots
-    must tile it with no gap, no overlap and no dropped column, which is what
-    makes `round()` on both bounds the contract rather than an implementation
-    detail (widths 770/100/13 are the cases where the division does not divide).
+    Each column carries its own x in its RGB, so a cell's contents name the
+    columns it came from — the assertion the +3px mutation could not survive.
     """
     height = 24
-    row = b"".join(bytes((x % 256, x // 256, 40, 255)) for x in range(width))
+    row = b"".join(bytes((x % 256, x // 256, 40, 0)) for x in range(width))
     strip = Image.frombytes("RGBA", (width, height), row * height)
 
     cells = [pipeline.frame_cell(strip, frame=k, frames=frames) for k in range(frames)]
