@@ -343,7 +343,10 @@ class AgentPersona:
     provider: str | None
     api_mode: str | None
     toolsets: list[str]
-    system_prompt_path: str
+    # Empty string and absent are the same thing — no dedicated prompt file
+    # (resolve_persona_system_prompt_path returns None for both). Rows written
+    # before 2026-08-29 may omit the key entirely.
+    system_prompt_path: str = ""
     autonomy: str = "review"
     hermes_profile: str | None = None
     skills: list[str] = field(default_factory=list)
