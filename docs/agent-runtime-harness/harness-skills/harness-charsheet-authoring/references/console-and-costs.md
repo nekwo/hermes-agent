@@ -55,8 +55,11 @@ Three line shapes leave your reply, and two of them are parsed out of it.
   Studio project off it, so prose cannot substitute:
   `{"draft":"<id>","slug":"<slug>","displayName":"<name>","stage":"<stage>","generator":"<image provider>"}`
   plus `"item":"<row or direction key>","path":"<absolute path>"` when one image
-  changed. Take `draft`/`slug`/`displayName`/`stage` from the verb's own payload —
-  never retype them. `item` may be the bare key (`walk-n`) or the store's
+  changed — `path` uses FORWARD slashes (`X:/Eternia/...`; backslashes
+  double-escape under hand-writing and the console formatter mangles `\t`
+  sequences, turning the line into an unparseable raw-text wall, measured
+  2026-08-29). Take `draft`/`slug`/`displayName`/`stage` from the verb's own
+  payload — never retype them. `item` may be the bare key (`walk-n`) or the store's
   (`row@walk-n`); the bare form is what the flags take. `generator` names the
   IMAGE PROVIDER, and nothing in any payload sources it — pick one spelling and
   use the same one on every line of one draft, item-level lines included. Nothing

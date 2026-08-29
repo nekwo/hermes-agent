@@ -128,12 +128,24 @@ stage it completed:
   `{"draft":"<id>","slug":"<slug>","displayName":"<name>","stage":"<stage>","generator":"<image provider>"}`
 
   plus `"item":"<row or direction key>","path":"<absolute path>"` when one image
-  changed. Take `draft`/`slug`/`displayName`/`stage` from the verb's own payload
-  — never retype them. `generator` names the IMAGE PROVIDER, which no payload
-  sources: pick one spelling and keep it for the whole draft. Re-emitting for
-  the same draft is safe — project creation is idempotent on the draft id. **The
-  line carries no home and is not to grow one** (§13.22) — the home goes in your
-  prose.
+  changed. **`path` uses FORWARD slashes** (`X:/Eternia/...`) — measured live
+  2026-08-29: hand-escaped backslash paths in this JSON double-escape under
+  pressure and the console's text formatter mangles `\t` sequences, so the line
+  fails to parse and dumps as a raw text wall. Forward slashes have no escape
+  hazard in JSON and Windows accepts them. Take `draft`/`slug`/`displayName`/
+  `stage` from the verb's own payload — never retype them. `generator` names the
+  IMAGE PROVIDER, which no payload sources: pick one spelling and keep it for
+  the whole draft. Re-emitting for the same draft is safe — project creation is
+  idempotent on the draft id. **The line carries no home and is not to grow
+  one** (§13.22) — the home goes in your prose.
+- **An action turn replies SCOPED.** When the operator's message is a single
+  card action — reroll one row, reopen, compose, one direction's verb — the
+  reply carries ONLY the affected item's `CHARSHEET-QA:` line and its `MEDIA:`
+  line(s) (plus the installed sheet if the action composed). Never re-dump the
+  full media wall the completion report already delivered: measured live
+  2026-08-29, two reroll clicks re-sent the entire 14-image wall twice and the
+  operator read it as the console malfunctioning. The full wall belongs to the
+  run-completion reply, once.
 - **`MEDIA:<absolute path>`** — on its own line, absolute, one path and nothing
   else on the line. A fenced block never reaches the parser and a path retyped
   into a paragraph previews untitled, so write it bare. One line for each thing
