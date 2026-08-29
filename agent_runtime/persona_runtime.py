@@ -359,7 +359,25 @@ def _mission_chat_operative_rules() -> str:
     go-ahead, and the model picked one. The failure is silent: it surfaces only
     as odd behavior in a live operator session. Workspace files are arbitrary
     (any directory the operator points the picker at), so the preamble scopes
-    them OUT of this policy rather than any allowlist trying to name them."""
+    them OUT of this policy rather than any allowlist trying to name them.
+
+    ONE ROUTING RULE lives here too — charsheet authoring is a delegation — and
+    it is here because there is nowhere else in the REPO to put it. A persona's
+    own prompt material is its profile-owned ``SOUL.md`` in the operator's
+    Hermes home, outside this tree and hand-edited; ``system_prompt_path``
+    resolves to nothing on the live supervisor row (it still points at
+    ``agent_runtime/prompts/alice_supervisor.md``, deleted in 5a1267ef60). So a
+    posture the runtime must carry has exactly one served, version-controlled
+    home: this string.
+
+    That makes the rule CHANNEL-WIDE, which is why it is written against a
+    capability rather than a persona: the agent that already holds the charsheet
+    authoring skill exempts itself in the same sentence, or this layer would
+    instruct the authoring specialist to delegate its own job to itself. Same
+    reason it names no ``@personainst_*`` id — the live specimen instance is
+    disposable and the roster in the HUD is the address book. Owner ruling R-1 =
+    option 1b (delegation), NOT 1a (assign the skill to the supervisor):
+    ``docs/agent-runtime-harness/planned/charsheet-turn-efficiency-2026-08-29.md``."""
 
     return (
         "Mission Control operator-chat rules (these govern this live operator channel):\n"
@@ -425,6 +443,21 @@ def _mission_chat_operative_rules() -> str:
         "keep an unrelated task thread alive just to preserve memory. `agent_chat_threads` lists your threads.\n"
         "- When a persona runs more than one instance on your level, a BARE persona id is ambiguous and the send is refused "
         "(`ambiguous_target`) with the candidate @personainst_* handles — address the exact instance you mean by its @handle.\n"
+        "- Character and sprite-sheet authoring is a DELEGATION, not your own pipeline. When the ask is to make, fix, "
+        "resume, add a state to, or install a character or an 8-way sprite sheet, and the charsheet authoring skill is "
+        "NOT in your context this turn, do not drive `hermes harness characters` verbs yourself: dispatch the ask with "
+        "`agent_chat_send` to the teammate on your level who carries the charsheet authoring skill. That persona holds "
+        "the authoring contract preloaded on every turn and runs the generation spend on a cheaper model, so the same "
+        "work costs a fraction of what it costs here — and driving it from this seat has already produced a 20-minute "
+        "turn that shipped no pictures. Pick them by what they ARE, from the roster in your Runtime Situation HUD, and "
+        "address the @personainst_* handle you find there; never an id you memorized from a previous run. Pass the "
+        "operator's ask through intact along with any draft id already in play, and name in your acknowledgement who "
+        "you handed it to. Their answer comes back as a background-dispatch delivery turn: relay it with every `MEDIA:` "
+        "and `CHARSHEET-QA:` line reproduced verbatim, each alone on its own line, under the image-line carve-out "
+        "below — those lines are the operator's only window onto the art, and a run that ends without them delivered "
+        "nothing anyone can see. If nobody on your level carries that skill, say so and use `clarify` to ask whether to "
+        "place an authoring agent, rather than quietly taking the pipeline. If the charsheet authoring skill IS in your "
+        "context, none of this is aimed at you — you are that specialist; do the work.\n"
         "- Keep replies as clean teammate prose. Don't paste decision JSON, task scopes, acceptance criteria, handoff "
         "packets, or raw tool/tick scaffolding into the message — your tool calls are tracked separately in the trace lane.\n"
         "- One carve-out to that: image lines are content, not scaffolding. When you relay, quote, or summarize a "

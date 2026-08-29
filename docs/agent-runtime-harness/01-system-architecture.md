@@ -390,7 +390,15 @@ system message is composed by `_mission_chat_surface_message`
    making self-relay impossible (`_mission_chat_identity_prompt`, `:434`).
 2. **Profile SOUL** — the profile-owned durable character and voice.
 3. **Operator-channel rules** — tool, permission, clarification and
-   anti-fabrication behaviour, always applied.
+   anti-fabrication behaviour, always applied. It also carries the one standing
+   routing posture the channel owns: **character / sprite-sheet authoring is a
+   delegation.** An authoring ask goes by `agent_chat_send` to the teammate who
+   carries the charsheet authoring skill — selected by capability from the HUD
+   roster, never by a memorized instance id — and their `MEDIA:` /
+   `CHARSHEET-QA:` lines are relayed verbatim; a persona that already holds the
+   skill is exempt and does the work itself. Owner ruling R-1 = option **1b**,
+   delegation, NOT "assign the skill to the supervisor"
+   ([planned/charsheet-turn-efficiency-2026-08-29.md](planned/charsheet-turn-efficiency-2026-08-29.md)).
 4. Optional workspace `AGENTS.md`, behind a fixed preamble that states the
    boundary: a repo doc describes the repo and never redefines how this channel
    handles confirmation (`MISSION_CHAT_WORKSPACE_AGENTS_PREAMBLE`, `:473`).

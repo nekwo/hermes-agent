@@ -546,6 +546,67 @@ def test_mission_chat_operative_rules_route_named_agents_without_creating_goals(
     assert "chat-only for every role" in routing
 
 
+def test_mission_chat_operative_rules_delegate_charsheet_authoring():
+    # Owner ruling R-1 = option 1b, DELEGATION (not 1a, "give the supervisor the
+    # skill"): docs/agent-runtime-harness/planned/charsheet-turn-efficiency-2026-08-29.md.
+    #
+    # Measured 2026-08-28 on the fire-imp one-shot: the supervisor drove the
+    # whole 8-way pipeline itself, on the expensive model, WITHOUT the authoring
+    # skill in context — 27 API calls, 36 tool elements (72% of them
+    # rediscovery / environment archaeology / redundant state reads), 1.556M
+    # cumulative prompt tokens, 19.7 min — and then shipped a reply carrying
+    # ZERO `MEDIA:` and ZERO `CHARSHEET-QA:` lines, costing a whole remediation
+    # turn to show the operator the character that was already installed. It had
+    # already dispatched the authoring specialist for standby QA in that same
+    # turn and then kept the pipeline anyway; the fix is posture, not preloads.
+    #
+    # Pin the RULE, not the paragraph. Four halves have to survive any rewrite:
+    # recognize the ask, dispatch it BY CAPABILITY (never a memorized instance
+    # id — the live specimen instance is disposable), relay the receipt lines
+    # verbatim, and do not drive the `characters` verbs. Plus the self-exemption:
+    # without it this same channel-wide rule would tell the authoring agent to
+    # delegate its own job.
+    from agent_runtime.persona_runtime import _mission_chat_operative_rules
+
+    rules = _mission_chat_operative_rules()
+    bullets = [line for line in rules.splitlines() if line.startswith("- ")]
+    assert "HARD RULE" in bullets[0], "the acknowledge-before-acting rule must remain first"
+
+    delegation = next(
+        (line for line in bullets if "charsheet authoring skill" in line),
+        None,
+    )
+    assert delegation is not None, "operative rules must make charsheet authoring a delegation"
+
+    # 1. Recognize the ask by the operator's own verbs, not one keyword.
+    for verb in ("make", "fix", "resume", "add a state", "install"):
+        assert verb in delegation, f"the authoring ask must be recognizable by {verb!r}"
+    assert "sprite sheet" in delegation
+
+    # 2. Dispatch by capability, through the machinery that already exists. A
+    #    persona id or an @personainst_ id baked into the prompt would rot the
+    #    moment the operator places a different authoring agent.
+    assert "agent_chat_send" in delegation
+    assert "carries the charsheet authoring skill" in delegation
+    assert "chara_a2" not in rules, "the rules must not hardcode the live specimen instance"
+    assert "personainst_chara" not in rules
+
+    # 3. The receipts ARE the deliverable, and they pass through untouched.
+    assert "MEDIA:" in delegation
+    assert "CHARSHEET-QA:" in delegation
+    assert "verbatim" in delegation
+
+    # 4. Don't drive the pipeline yourself...
+    assert "hermes harness characters" in delegation
+    # ...unless you are the one holding the skill.
+    assert "you are that specialist" in delegation
+
+    # The verbatim-relay half must land BEFORE the image-line carve-out it
+    # leans on, or the cross-reference points backwards.
+    media_carveout = next(line for line in bullets if "One carve-out to that" in line)
+    assert rules.index(delegation) < rules.index(media_carveout)
+
+
 def test_mission_chat_operative_rules_preserve_media_lines_verbatim():
     # A MEDIA:<path> line standing alone is a DECLARATION the operator console
     # renders as a titled image card. The two failure modes are NOT the same:
@@ -562,8 +623,13 @@ def test_mission_chat_operative_rules_preserve_media_lines_verbatim():
     rules = _mission_chat_operative_rules()
     bullets = [line for line in rules.splitlines() if line.startswith("- ")]
 
-    media_bullet = next((line for line in bullets if "MEDIA:" in line), None)
+    # Select the carve-out by its own opening, not by "MEDIA:" alone: the
+    # charsheet delegation bullet above also names MEDIA:/CHARSHEET-QA: when it
+    # tells the relay what to pass through, so a bare substring match now picks
+    # the wrong bullet.
+    media_bullet = next((line for line in bullets if "One carve-out to that" in line), None)
     assert media_bullet is not None, "operative rules must teach the MEDIA-verbatim relay"
+    assert "MEDIA:" in media_bullet
     assert "VERBATIM" in media_bullet
     assert "never wrap it in backticks or a code fence" in media_bullet
     assert "bare absolute screenshot path" in media_bullet
