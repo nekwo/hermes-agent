@@ -2728,6 +2728,44 @@ the QA surface was reading the wrong one.
   blocks still leave headroom inside a default charsheet turn budget. There is no timer of
   this lane's own, and there should not be one.
 
+## 2026-08-29 — you can now END the turn on a generation: `process notify` (Stage 3b slice)
+
+- **[READ] `process notify <session_id>` arms a process-exit delivery, and then you STOP.**
+  Fire the long verb with `terminal(background=true)`, call
+  `process` with `action: "notify"` on the returned session id, and end your turn. When
+  that process exits, a NEW turn arrives in this same chat thread carrying the exit code
+  and the output tail, opening with `[BACKGROUND PROCESS COMPLETE — …]` and a line saying
+  you asked for it. **Consequence: the wait-poll bucket goes to zero on a staged
+  generation** — and the operator's console is free during the 10–20 minutes a `rows` batch
+  runs, instead of being held by a turn that is only polling.
+
+- **[READ] It rides the delivery road that already existed, not a new one.** The exit
+  publishes onto the same `process_registry.completion_queue` the serve drain
+  (`dispatch_delivery.drain_background_completions`) has always consumed, and the drain
+  forges the same kind of turn a detached `agent_chat_send` reply comes back in. So the
+  same rules apply, unchanged: the delivery lands only when your thread is IDLE (it is
+  never spliced into a turn in flight), and it is deduped by the chat lane's own
+  idempotency.
+
+- **[READ] The four edges, so you can trust it.** (1) If the process ALREADY exited when
+  you call notify, the receipt is queued immediately — the wake-up is not lost. (2) Calling
+  notify twice on one session is one row and one delivery. (3) If the process NEVER exits,
+  nothing is delivered — there is deliberately no timer; the turn wall is the guard, and
+  the fallback for an agent that would rather block is the 600 s wait ceiling above.
+  (4) If your persona instance is retired before the process exits, the request is dropped
+  with a logged line rather than delivered into a thread nobody owns.
+
+- **[READ] Notify is refused, honestly, when there is no thread to deliver into.**
+  `status: "unavailable"` with a message pointing at `process wait` — that happens off the
+  mission-chat lane, or when the chat root no longer resolves to a live persona instance.
+  A refusal is not a failure of the run; take the wait instead.
+
+- **[READ] The durable record is a drain file beside `processes.json`** in the
+  background-work home (`process_notify_requests.json`), carrying `{turn_id, session_id,
+  persona_instance_id}` plus the chat root it must be delivered into. Recorded at request
+  time because that is the only moment the run knows who is asking — the same reason the
+  dispatch lane records a sender before its target starts working.
+
 <!-- A2, A3, R1 and any slice standing in the HERMES repo: append your entries above this
      line, under the matching heading, or add a heading if none fits. Then say in your
      slice report that you did.

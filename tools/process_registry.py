@@ -1278,23 +1278,318 @@ class ProcessRegistry:
         # Only enqueue completion notification on the FIRST move.  Without
         # this guard, kill_process() and the reader thread can both call
         # _move_to_finished(), producing duplicate [IMPORTANT: ...] messages.
-        if was_running and session.notify_on_complete:
-            from tools.ansi_strip import strip_ansi
-            output_tail = strip_ansi(session.output_buffer[-2000:]) if session.output_buffer else ""
-            self.completion_queue.put({
-                "type": "completion",
-                "session_id": session.id,
-                "session_key": session.session_key,
-                "command": session.command,
-                "exit_code": session.exit_code,
-                "completion_reason": session.completion_reason,
-                "termination_source": session.termination_source,
-                "output": output_tail,
-                # Stable producer identity across checkpoint recovery; unlike
-                # a consumer-observed completion timestamp, this does not vary
-                # based on which watcher notices exit first.
-                "started_at": session.started_at,
-            })
+        if not was_running:
+            return
+        # A ``process notify`` request is the SECOND reason a completion is
+        # owed — the first being a spawn-time notify_on_complete. Both produce
+        # ONE event: a session that is armed twice over must not deliver twice.
+        notify_row = self._notify_request_row(session.id)
+        if not session.notify_on_complete and notify_row is None:
+            return
+        if notify_row is not None and not self._notify_target_is_live(notify_row):
+            # The persona instance that asked is gone. DROP it — the delivery
+            # lane's positive-ownership rule (#64484) says absence of the
+            # instance means "do not deliver", never "deliver anyway" — and say
+            # so out loud, because a silently abandoned completion is the exact
+            # failure class this lane exists to retire.
+            logger.warning(
+                "process-exit notify for %s dropped: persona instance %s no longer"
+                " owns chat root %s",
+                session.id,
+                notify_row.get("persona_instance_id") or "?",
+                notify_row.get("chat_session_id") or "?",
+            )
+            self._settle_notify_request(
+                session.id, fired=False, detail="persona_instance_missing"
+            )
+            notify_row = None
+            if not session.notify_on_complete:
+                return
+        event = self._completion_event_payload(session)
+        if notify_row is not None:
+            self._stamp_notify_routing(event, notify_row)
+            self._settle_notify_request(session.id, fired=True)
+        self.completion_queue.put(event)
+
+    # ----- process-exit delivery (``process notify``) -----
+
+    def _completion_event_payload(self, session: ProcessSession) -> dict:
+        """The completion event a finished session produces.
+
+        ONE shape for both arming paths — the spawn-time ``notify_on_complete``
+        flag and an after-the-fact ``process notify`` — so the drain that
+        consumes them cannot end up reading two vocabularies for one fact.
+        """
+
+        from tools.ansi_strip import strip_ansi
+
+        output_tail = (
+            strip_ansi(session.output_buffer[-2000:]) if session.output_buffer else ""
+        )
+        return {
+            "type": "completion",
+            "session_id": session.id,
+            "session_key": session.session_key,
+            "command": session.command,
+            "exit_code": session.exit_code,
+            "completion_reason": session.completion_reason,
+            "termination_source": session.termination_source,
+            "output": output_tail,
+            # Stable producer identity across checkpoint recovery; unlike
+            # a consumer-observed completion timestamp, this does not vary
+            # based on which watcher notices exit first.
+            "started_at": session.started_at,
+        }
+
+    @staticmethod
+    def _stamp_notify_routing(event: dict, row: dict) -> None:
+        """Carry the request's identity onto the completion it answers.
+
+        ``origin_ui_session_id`` is the key the serve delivery drain resolves a
+        chat root from FIRST (``dispatch_delivery._chat_root_of_completion``),
+        so stamping it is what makes an exit reach the thread that asked —
+        positive knowledge recorded at request time, never drain-time guessing.
+        The turn and instance ride along as provenance for the same reason the
+        dispatch lane's ``requested_by`` carries its dispatch id: this row is
+        the last place they are knowable.
+        """
+
+        root = str(row.get("chat_session_id") or "")
+        event["notify_requested"] = True
+        if root:
+            event["origin_ui_session_id"] = root
+        turn_id = str(row.get("turn_id") or "")
+        if turn_id:
+            event["notify_turn_id"] = turn_id
+        instance = str(row.get("persona_instance_id") or "")
+        if instance:
+            event["notify_persona_instance_id"] = instance
+
+    @staticmethod
+    def _notify_request_row(session_id: str) -> Optional[dict]:
+        """The pending notify row for a session, or None. Never raises.
+
+        Called from the reader thread at every process exit, so a store fault
+        degrades to "nobody asked" rather than killing the reaper mid-move.
+        """
+
+        try:
+            import tools.process_notify_store as notify_store
+
+            return notify_store.pending_notify_request(session_id)
+        except Exception:
+            logger.debug("process notify lookup failed for %s", session_id, exc_info=True)
+            return None
+
+    @staticmethod
+    def _settle_notify_request(session_id: str, *, fired: bool, detail: str = "") -> None:
+        try:
+            import tools.process_notify_store as notify_store
+
+            notify_store.settle_notify_request(
+                session_id,
+                state=notify_store.STATE_FIRED if fired else notify_store.STATE_DROPPED,
+                detail=detail,
+            )
+        except Exception:
+            logger.debug("process notify settle failed for %s", session_id, exc_info=True)
+
+    @staticmethod
+    def _notify_owner(chat_session_id: str) -> Optional[tuple]:
+        """``(persona_id, persona_instance_id)`` owning a chat root, or None.
+
+        Resolved through the runtime's ONE answer to "whose work is this"
+        (``persona_assignments.chat_session_owner_persona``) — the same call the
+        dispatch delivery drain proves ownership with, never a second
+        derivation.
+        """
+
+        try:
+            from agent_runtime.persona_assignments import chat_session_owner_persona
+
+            owner = chat_session_owner_persona(chat_session_id)
+        except Exception:
+            logger.debug("persona owner lookup failed for %s", chat_session_id, exc_info=True)
+            return None
+        return owner
+
+    @classmethod
+    def _notify_target_is_live(cls, row: dict) -> bool:
+        """Whether the instance that asked still owns the root it named.
+
+        Fail OPEN on an unresolvable lookup and CLOSED on a resolved absence,
+        which is the same asymmetry ``dispatch_store``'s restore sweep holds: an
+        unreadable probe is absence of proof, a store that answers "no owner" is
+        proof of absence. Only the second drops the row.
+        """
+
+        root = str(row.get("chat_session_id") or "")
+        if not root:
+            return True
+        try:
+            owner = cls._notify_owner(root)
+        except Exception:  # pragma: no cover - defensive; the reaper must survive
+            return True
+        if owner is None:
+            return False
+        recorded = str(row.get("persona_instance_id") or "")
+        if recorded and str(owner[1]) != recorded:
+            # The root resolves, but to somebody else — the requester was
+            # retired and its thread re-owned. Same verdict, different cause.
+            return False
+        return True
+
+    def _notify_chat_root(self, session: ProcessSession) -> str:
+        """The persona chat root a notify request would be delivered into.
+
+        Three sources, most authoritative first, and every one of them is
+        POSITIVE knowledge rather than a guess:
+
+        * the run's bound session key (``persona_chat_continuity.
+          chat_root_session_key_scope`` puts the chat root into
+          ``tools.approval``'s ContextVar for the whole persona run);
+        * the terminal envelope scope's session id, for a run that bound the
+          envelope but not the key;
+        * the session's own ``session_key``, which the terminal tool stamped at
+          spawn from the first of those.
+
+        Empty when none of them names a persona chat root — which is how a
+        gateway, CLI or worker-lane caller is refused instead of delivered into
+        somebody else's thread.
+        """
+
+        candidates = []
+        try:
+            from tools.approval import get_current_session_key
+
+            candidates.append(get_current_session_key(default="") or "")
+        except Exception:
+            pass
+        try:
+            from agent_runtime.terminal_envelope import current_terminal_envelope_scope
+
+            scope = current_terminal_envelope_scope()
+            candidates.append(str(getattr(scope, "session_id", "") or ""))
+        except Exception:
+            pass
+        candidates.append(str(session.session_key or ""))
+        for candidate in candidates:
+            if candidate.startswith("persona_chat_"):
+                return candidate
+        return ""
+
+    @staticmethod
+    def _notify_turn_id(chat_session_id: str) -> str:
+        """The in-flight turn id on a chat root, or "". Provenance only.
+
+        Read from the turn journal the same way the delivery drain's idle probe
+        reads it, so "which turn asked" is answered by the record rather than by
+        a value this lane would have to invent and thread through.
+        """
+
+        try:
+            from agent_runtime.mission_chat_turns import (
+                INFLIGHT_TURN_STATES,
+                mission_chat_turn_records,
+            )
+
+            for record in mission_chat_turn_records(session_id=chat_session_id) or []:
+                if str((record or {}).get("state") or "") in INFLIGHT_TURN_STATES:
+                    return str((record or {}).get("turn_id") or "")
+        except Exception:
+            logger.debug("notify turn lookup failed for %s", chat_session_id, exc_info=True)
+        return ""
+
+    def notify_on_exit(self, session_id: str) -> dict:
+        """Arm a process-exit delivery for a background session.
+
+        The agent contract this exists for: fire a long verb in the background,
+        call this, and END THE TURN. On exit the completion is published to the
+        queue the serve delivery drain already consumes, and the agent's next
+        turn arrives carrying the receipt — the same road a detached
+        ``agent_chat_send`` reply travels back.
+
+        Idempotent, and immediate when the process has ALREADY exited: an exit
+        that happened between the verb and this call must not become a lost
+        wake-up, so the completion is published right here instead of waiting
+        for a reaper that has already run.
+
+        A process that never exits delivers nothing. That is deliberate — the
+        turn wall/budget system is the guard, and an agent that would rather
+        block is bounded by :data:`MISSION_CHAT_WAIT_MAX_SECONDS`.
+        """
+
+        session = self.get(session_id)
+        if session is None:
+            return {"status": "not_found", "error": f"No process with ID {session_id}"}
+
+        root = self._notify_chat_root(session)
+        if not root:
+            return {
+                "status": "unavailable",
+                "error": (
+                    "process-exit delivery needs a persona chat thread to deliver "
+                    "into, and this run is not on one. Use process wait with a "
+                    "timeout instead."
+                ),
+            }
+        owner = self._notify_owner(root)
+        if owner is None:
+            return {
+                "status": "unavailable",
+                "error": (
+                    f"chat root {root} does not resolve to a live persona instance, "
+                    "so a delivery turn would have nowhere to land. Use process "
+                    "wait with a timeout instead."
+                ),
+            }
+        persona_id, instance_id = str(owner[0]), str(owner[1])
+
+        import tools.process_notify_store as notify_store
+
+        row, created = notify_store.record_notify_request(
+            session_id=session.id,
+            chat_session_id=root,
+            persona_instance_id=instance_id,
+            persona_id=persona_id,
+            turn_id=self._notify_turn_id(root),
+            command=session.command,
+        )
+        result = {
+            "session_id": session.id,
+            "command": session.command,
+            "chat_session_id": root,
+            "persona_id": persona_id,
+            "persona_instance_id": instance_id,
+            "turn_id": row.get("turn_id", ""),
+            "already_armed": not created,
+        }
+        if not session.exited:
+            result["status"] = "armed"
+            result["delivery"] = "on_exit"
+            result["note"] = (
+                "End your turn. When this process exits you will receive a new turn "
+                "carrying its exit code and output tail."
+            )
+            return result
+
+        # Already finished. Deliver now unless this row already did.
+        if row.get("state") != notify_store.STATE_PENDING:
+            result["status"] = "exited"
+            result["delivery"] = "already_queued"
+            result["exit_code"] = session.exit_code
+            return result
+        event = self._completion_event_payload(session)
+        self._stamp_notify_routing(event, row)
+        self.completion_queue.put(event)
+        self._settle_notify_request(session.id, fired=True)
+        result["status"] = "exited"
+        result["delivery"] = "queued"
+        result["exit_code"] = session.exit_code
+        result["note"] = (
+            "The process had already exited; its completion is queued for delivery."
+        )
+        return result
 
     # ----- Query Methods -----
 
@@ -1430,8 +1725,17 @@ class ProcessRegistry:
             # session owns (or legacy ownerless ordinary events). Routing must
             # happen first so a foreign session cannot drop the owner's event.
             _evt_sid = evt.get("session_id", "")
-            if evt.get("type") == "completion" and self._drain_should_skip(
-                _evt_sid, skip_poll_observed=skip_poll_observed
+            # An EXPLICIT ``process notify`` outranks inline consumption. The
+            # skip below exists so a completion the agent already read this turn
+            # is not injected twice; a notify request is the agent asking for
+            # the out-of-turn delivery ON PURPOSE, and swallowing it here would
+            # be the wake-up disappearing with nothing to show it ever existed.
+            if (
+                evt.get("type") == "completion"
+                and not evt.get("notify_requested")
+                and self._drain_should_skip(
+                    _evt_sid, skip_poll_observed=skip_poll_observed
+                )
             ):
                 continue
 
@@ -2459,6 +2763,20 @@ def format_process_notification(evt: dict) -> "str | None":
         _status = "completed normally"
     else:
         _status = "exited"
+    if evt.get("notify_requested"):
+        # Self-contained, for the same reason ``dispatch_delivery.
+        # format_dispatch_delivery`` is: by the time this re-enters the
+        # conversation the agent's turn has ENDED and a new one is reading it
+        # cold. It must say why this arrived without being asked.
+        return (
+            f"[BACKGROUND PROCESS COMPLETE — {_sid} {_status} "
+            f"(exit code {_exit}{_signal}).\n"
+            "You asked to be told when this finished (process notify) and ended "
+            "your turn. This is that receipt — you may have moved on since, so "
+            "check it against what you were doing.\n"
+            f"Command: {_cmd}\n"
+            f"Output:\n{_out}]"
+        )
     return (
         f"[IMPORTANT: Background process {_sid} {_status} "
         f"(exit code {_exit}{_signal}).\n"
@@ -2475,14 +2793,14 @@ from tools.registry import registry, tool_error
 PROCESS_SCHEMA = {
     "name": "process",
     "description": (
-        "Manage background processes from terminal(background=true). Actions: list, poll (status + new output), log, wait, kill, write (raw stdin), submit (stdin + Enter), close (EOF)."
+        "Manage background processes from terminal(background=true). Actions: list, poll (status + new output), log, wait, kill, notify (deliver the result in a NEW turn when the process exits, so you can end this one), write (raw stdin), submit (stdin + Enter), close (EOF)."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["list", "poll", "log", "wait", "kill", "write", "submit", "close"],
+                "enum": ["list", "poll", "log", "wait", "kill", "notify", "write", "submit", "close"],
                 "description": "Action to perform on background processes"
             },
             "session_id": {
@@ -2557,7 +2875,7 @@ def _handle_process(args, **kw):
             {"processes": process_registry.list_sessions(task_id=task_id, session_key=session_key or None)},
             ensure_ascii=False,
         )
-    elif action in {"poll", "log", "wait", "kill", "write", "submit", "close"}:
+    elif action in {"poll", "log", "wait", "kill", "notify", "write", "submit", "close"}:
         if not session_id:
             return tool_error(f"session_id is required for {action}")
         if action == "poll":
@@ -2572,13 +2890,18 @@ def _handle_process(args, **kw):
                 _redact_process_result(process_registry.kill_process(session_id)),
                 ensure_ascii=False,
             )
+        elif action == "notify":
+            return json.dumps(
+                _redact_process_result(process_registry.notify_on_exit(session_id)),
+                ensure_ascii=False,
+            )
         elif action == "write":
             return json.dumps(process_registry.write_stdin(session_id, str(args.get("data", ""))), ensure_ascii=False)
         elif action == "submit":
             return json.dumps(process_registry.submit_stdin(session_id, str(args.get("data", ""))), ensure_ascii=False)
         elif action == "close":
             return json.dumps(process_registry.close_stdin(session_id), ensure_ascii=False)
-    return tool_error(f"Unknown process action: {action}. Use: list, poll, log, wait, kill, write, submit, close")
+    return tool_error(f"Unknown process action: {action}. Use: list, poll, log, wait, kill, notify, write, submit, close")
 
 
 registry.register(
