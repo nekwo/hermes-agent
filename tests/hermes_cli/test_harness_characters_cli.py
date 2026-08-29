@@ -354,6 +354,212 @@ def test_a_reroll_and_a_row_reroll_are_reachable_through_the_cli(fake, base_imag
     assert row["attempts"] == 2
 
 
+# ───────────────────── machine next-step hints (`next`) ─────────────────────
+#
+# Stage 4b of the turn-efficiency plan. Measured cause: one authoring turn spent
+# 7 `--help` elements and six per-verb probes working out which verb came next,
+# and every one of those round-trips re-sent the whole turn context (~60-120k
+# prompt tokens each). A payload that names its own successor costs nothing and
+# answers the question before it is asked — including for a caller with no skill
+# in context at all.
+#
+# `next` is ADDITIVE and OPTIONAL: the payloads are ruled supersets
+# (SKILL.md:206-208), so no consumer breaks on a new key, and a verb with no
+# next step omits it rather than carrying an empty one.
+
+
+@pytest.fixture
+def fake_unsliceable_walk_e(fake, monkeypatch, tmp_path):
+    """The fake draftsman, except `walk-e` comes back as a bare chroma field.
+
+    The production failure, not a stub of it: `generate_row_strip` retries and
+    then raises when no attempt yields a strip its frame count can be read off,
+    which is what a live `rows` batch does when the model keeps drawing mush.
+    """
+    blank = tmp_path / "generated" / "unsliceable.png"
+    blank.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGBA", (STRIP_W, STRIP_H), MAGENTA).save(blank)
+
+    def draftsman(prompt, *, reference_images, aspect_ratio, prefix, provider):
+        if prefix == pipeline.row_prefix("walk-e"):
+            return blank
+        return fake(
+            prompt,
+            reference_images=reference_images,
+            aspect_ratio=aspect_ratio,
+            prefix=prefix,
+            provider=provider,
+        )
+
+    monkeypatch.setattr(pipeline, "_generate_image", draftsman)
+    return draftsman
+
+
+def to_rows(capsys, base_image):
+    """A draft at stage `rows` through the CLI, the way an agent gets there."""
+    draft_id = start_draft(capsys, "--base-image", str(base_image))
+    run(["harness", "characters", "turnaround", "--draft", draft_id, "--json"], capsys)
+    run(["harness", "characters", "approve-direction", "--draft", draft_id, "--all", "--json"], capsys)
+    return draft_id
+
+
+def test_start_hands_the_next_verb_as_a_command_that_can_be_run_as_written(
+    fake, base_image, capsys
+):
+    """The hint is a COMMAND, not a verb name, and it spells the entrypoint `hermes`.
+
+    A verb name still costs a `--help` to turn into a command line, which is the
+    round-trip this exists to remove. The `hermes` spelling is the one the skill
+    teaches and the one that keeps an operator's 500-char trace row legible.
+    """
+    code, payload = run(
+        [
+            "harness", "characters", "start", "--concept", "an arrow knight",
+            "--slug", "arrow-knight", "--states", STATES_FLAG,
+            "--directions", DIRECTIONS_FLAG, "--base-image", str(base_image),
+            "--json",
+        ],
+        capsys,
+    )
+    draft_id = payload["draft"]
+
+    assert (code, payload["ok"]) == (0, True)
+    assert payload["next"] == {
+        "verb": "turnaround",
+        "cmd": f"hermes harness characters turnaround --draft {draft_id} --json",
+    }
+
+
+def test_a_draft_started_without_an_anchor_is_pointed_at_base_not_turnaround(
+    fake, capsys
+):
+    """A hint that names a verb the draft would refuse is worse than no hint.
+
+    `start` without `--base-image` is the CS-5 repair shape: `turnaround` needs
+    the anchor and refuses without it, so naming it here would buy the caller
+    exactly the round-trip this key exists to save. The `<image>` placeholder is
+    the one thing the runtime cannot know.
+    """
+    code, payload = run(
+        [
+            "harness", "characters", "start", "--concept", "an arrow knight",
+            "--states", STATES_FLAG, "--directions", DIRECTIONS_FLAG, "--json",
+        ],
+        capsys,
+    )
+
+    assert (code, payload["ok"]) == (0, True)
+    assert payload["next"]["verb"] == "base"
+    assert payload["next"]["cmd"] == (
+        f"hermes harness characters base --draft {payload['draft']} "
+        "--image <image> --json"
+    )
+
+
+def test_approve_direction_hands_the_rows_command_only_once_it_advances(
+    fake, base_image, capsys
+):
+    """The hint tracks the STAGE, not the verb: approving one of three moves nothing.
+
+    A `next` on a non-advancing approval would send the caller at `rows`, which
+    refuses at stage `turnaround` — and the payload already says `advanced:
+    false`, so a hint disagreeing with it is a payload arguing with itself.
+    """
+    draft_id = start_draft(capsys, "--base-image", str(base_image))
+    run(["harness", "characters", "turnaround", "--draft", draft_id, "--json"], capsys)
+
+    code, one = run(
+        [
+            "harness", "characters", "approve-direction", "--draft", draft_id,
+            "--direction", "e", "--json",
+        ],
+        capsys,
+    )
+    assert (code, one["advanced"], one["stage"]) == (0, False, "turnaround")
+    assert "next" not in one, "a hint that names a verb this draft would refuse"
+
+    code, rest = run(
+        ["harness", "characters", "approve-direction", "--draft", draft_id, "--all", "--json"],
+        capsys,
+    )
+
+    assert (code, rest["advanced"], rest["stage"]) == (0, True, "rows")
+    assert rest["next"] == {
+        "verb": "rows",
+        "cmd": f"hermes harness characters rows --draft {draft_id} --json",
+    }
+
+
+def test_a_failed_rows_hands_back_the_reroll_and_the_resume(
+    fake_unsliceable_walk_e, base_image, capsys
+):
+    """The expensive moment: a batch died mid-flight and the caller must resume it.
+
+    Two moves, and the payload names both — re-roll the row that failed (a note
+    is what changes the prompt), or resume the batch with the rows that never
+    landed. The rows are read off the draft's own pending list intersected with
+    what was ASKED for, so the hint never names a row the caller did not want.
+    """
+    draft_id = to_rows(capsys, base_image)
+
+    code, payload = run(
+        [
+            "harness", "characters", "rows", "--draft", draft_id,
+            "--only", "walk-e,walk-n", "--json",
+        ],
+        capsys,
+    )
+
+    assert (code, payload["ok"]) == (2, False)
+    assert "walk-e" in payload["error"]
+    assert payload["next"] == {
+        "verb": "reroll-row",
+        "cmd": (
+            f"hermes harness characters reroll-row --draft {draft_id} "
+            "--row walk-e --json"
+        ),
+        "alternatives": [
+            {
+                "verb": "rows",
+                "cmd": (
+                    f"hermes harness characters rows --draft {draft_id} "
+                    "--only walk-e,walk-n --json"
+                ),
+            }
+        ],
+    }
+
+
+def test_a_rows_batch_that_lands_hands_no_next_and_the_error_shape_is_unchanged(
+    fake, base_image, capsys
+):
+    """`next` is additive: it adds a key, and it takes nothing away.
+
+    The flat pets error shape is what a shipped launcher panel parses, so a
+    refusal still carries exactly `ok`, `error`, `draft`, `stage` beside it.
+
+    And a `rows` that refuses for being OUT OF ORDER gets no hint either — at
+    stage `turnaround` every row is "pending" while `reroll-row` is exactly as
+    illegal as the `rows` that just bounced, so a hint there would send the
+    caller straight at a second refusal. That arm is pinned by
+    `test_an_out_of_order_verb_reports_the_pets_error_shape`, which asserts the
+    payload dict exactly and is what caught this while it was wrong.
+    """
+    draft_id = to_rows(capsys, base_image)
+
+    code, rows = run(["harness", "characters", "rows", "--draft", draft_id, "--json"], capsys)
+    assert (code, rows["ok"]) == (0, True)
+
+    # A second `rows` at stage `rows` is fine; an out-of-order verb is not, and
+    # that refusal has no pending-row story to tell.
+    code, refused = run(
+        ["harness", "characters", "turnaround", "--draft", draft_id, "--json"], capsys
+    )
+
+    assert (code, refused["ok"]) == (2, False)
+    assert set(refused) == {"ok", "error", "draft", "stage"}
+
+
 # FIXTURE RULE for every assertion below that judges PIXELS: the crop's input
 # comes from `generate_row_strip` through the fake provider (`rows` /
 # `reroll-row`), never from a hand-built PIL image proposed into the store. A

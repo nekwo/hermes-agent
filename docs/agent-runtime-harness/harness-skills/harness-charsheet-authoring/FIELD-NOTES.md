@@ -2702,6 +2702,116 @@ the QA surface was reading the wrong one.
   is written twice and could drift. Folding it in means touching the generation gate, which was
   fenced out of this slice.
 
+## 2026-08-29 — the square hero crop, and payloads that name their own successor (Stage 4 slice)
+
+Stage 4a and 4b of `planned/charsheet-turn-efficiency-2026-08-29.md`, built as two commits on
+top of the same-day frame-geometry fix above. Both are about the same currency: a charsheet
+turn's cost is API round-trips, and a round-trip late in a heavy turn re-sends the whole
+context at 60–120k prompt tokens. 4a removes a *looking* round-trip (open the fullscreen
+viewer to see what the card cropped away); 4b removes a *finding out what to run next*
+round-trip.
+
+### 4a — `thumb --square`
+
+- **[READ] The card is not the defect; the shape mismatch is.** The console hero card is a
+  fixed 1:1 centre-cover square (§13.17, ruled — it is not moving) and a character cell is
+  taller than it is wide. Centre-cover on a tall crop draws the middle of the frame and calls
+  it the frame, so an operator glancing at a card sees a torso zoom. The card was ruled "never
+  the verdict surface" and that ruling stands; the confusion is still real, and it is cheaper
+  to fix on the hermes side than to argue about which surface is authoritative.
+
+- **[FIXED] One pad step, last, and it is the only step in the looking procedure that cannot
+  remove a pixel.** `pipeline.pad_to_square` centres the FINISHED crop on a square field of
+  `QA_BACKDROP` — the same ground `upscale_on_backdrop` composites on — with
+  `side = max(width, height)`. It runs *after* the NEAREST upscale on purpose: a pad applied
+  before would be enlarged along with the art, and the margins would stop being a known flat
+  colour. It sits downstream of `frame_cell`'s content-aware bounds and touches none of that
+  geometry. The default stays tall, because a compare pair's panes align on today's shapes and
+  a pad changes the aspect.
+
+- **[MEASURED] On the real strip, not a fixture.** `walk-e` attempt 1 of the live fire-imp
+  draft (2172x724, 8 frames): bare crop **508x1448**, square **1448x1448**, margins **470px on
+  each side**, top/bottom 0 (height was already the longer axis). The interior window is
+  byte-identical to the bare crop, the margins are exactly `(18, 18, 22, 255)` and nothing
+  else, alpha is 255 everywhere, and the content's horizontal centre is **724.0** against an
+  image centre of **724.0**. Opened fullscreen: the pose is whole.
+
+- **[FIXED] Both budget booleans are weighed on the PADDED output, and so is the refusal.**
+  Padding raises the pixel count and the file a consumer decodes is the padded one, so
+  computing the flags on the intermediate crop would mean declaring a card on the strength of
+  a picture nobody wrote. The consequence is real and worth stating: **a square crop can be
+  refused at the default scale where the bare crop of the same cell passes.** Measured on a
+  1536x3120 draft, one cell at `--scale 3`: bare 750x2400 = 1.8M px, both flags true; square
+  2400x2400 = 5.76M px, **both false** — over the fixed console ceiling AND heavier than the
+  sheet the crop exists to avoid decoding. The refusal names the padded size and adds "or drop
+  `--square`" to its escapes, because arguing about the unpadded size would be arguing about a
+  file nobody asked for. `pad_to_square` checks the write ceiling before it allocates.
+
+- **[READ] Two shapes, two files, one cell.** The filename gains `-sq`
+  (`walk-e-attempt-1-frame-1-x2-sq.png`) so a hero crop and a compare crop can sit in
+  `thumbs/` at the same time, and the payload carries `square` **unconditionally** — a
+  consumer deciding *where* to draw a crop cannot infer the shape from a filename, and the
+  default is a shape too. Same rule as the two budget booleans beside it.
+
+### 4b — `next`, the machine hint
+
+- **[MEASURED] What this is paying for.** The fire-imp one-shot spent `characters --help` plus
+  SIX per-verb `--help`s working out which verb came next and how to spell it — every one a
+  full round-trip re-sending the turn. The verb table answers all of it, but only for a caller
+  that has the skill in context, and the persona that ran it did not.
+
+- **[FIXED] The hint is a COMMAND, not a verb name.** `{"verb": ..., "cmd": ...}`, additive and
+  optional. A bare verb name still costs a `--help` to turn into a command line, which is the
+  round-trip being removed. Spelled with the `hermes` entrypoint the skill teaches, not
+  `python -m hermes_cli.main` — both resolve, but the long one is noise in every trace row and
+  the operator trace truncates at 500 chars.
+
+- **[FIXED] Three arms, and each one reads STATE rather than a plan.**
+  `start` → `turnaround`, except a draft started without `--base-image` (the CS-5 repair
+  shape), which is pointed at `base --image <image>` instead, because `turnaround` refuses
+  without the anchor and a hint naming a verb the draft would refuse costs exactly the
+  round-trip this key exists to save. `approve-direction` → `rows` **only when the approval
+  advanced the stage**; a payload whose hint disagrees with its own `advanced: false` is a
+  payload arguing with itself. A failed `rows` → `reroll-row --row <the row it died on>` with
+  the resume `rows --only <the rows that never landed>` as `alternatives[0]`.
+
+- **[READ] The failed-`rows` rows come off the draft's pending list, intersected with what was
+  asked for.** Not off the error text: parsing a message for a row key is a grammar that drifts
+  from the message. And the intersection matters — a caller who ran `--only walk-e` must not be
+  handed a resume naming eleven rows they never wanted. Spec order makes `pending[0]` the row
+  the loop stopped on.
+
+- **[MEASURED] The first cut of the failed-`rows` hint was wrong, and an existing test caught
+  it.** `rows` refuses for two different reasons, and only one of them is a generation failure:
+  called at stage `turnaround` it bounces as OUT OF ORDER, at which point every row is
+  "pending" and the hint cheerfully offered `reroll-row` — which is exactly as illegal at that
+  stage as the `rows` that just bounced. A hint sending the caller at a second refusal is worse
+  than no hint. `test_an_out_of_order_verb_reports_the_pets_error_shape` failed because it
+  asserts the refusal payload dict EXACTLY, not with `>=`; a subset assertion would have let it
+  through. The hint is now gated on `draft.stage == "rows"`. Worth stating twice: my own
+  targeted `-k` filter ran green over this the whole time — the full suite is what found it.
+
+- **[READ] Absence is an omitted key, not `null`.** A verb with no next step omits `next`. A
+  refusal with no pending-row story keeps the flat pets error shape exactly — `ok`, `error`,
+  `draft`, `stage` and nothing else — which is what a shipped launcher panel parses. `next` is
+  additive under the superset rule (SKILL.md:206–208): it adds a key and takes nothing away.
+
+- **[READ] `compose`'s refusal was left alone.** It already hands its verb in prose, and making
+  it uniform was not free. Two more gaps stand open, deliberately out of this slice's scope:
+  `turnaround` hands no hint (its successor is `approve-direction`, so the spine has a hole in
+  the middle), and no hint carries `--square` — the crop verb has no successor to name.
+
+- **[MEASURED] The failure fixture is the production path.** The failed-`rows` test drives a
+  draftsman that returns a bare chroma field for `walk-e`, so `generate_row_strip` genuinely
+  exhausts its three attempts ("could not segment 2 padded sprites from strip", then "frame 0
+  is empty") and raises. Stubbing the raise would have tested the hint against a failure shape
+  the code cannot actually produce.
+
+- **[READ] For the skill (handoff, not written here — SKILL.md has another owner tonight).**
+  The reply contract should now recommend **`--square` for hero-card thumbs and bare crops for
+  compare pairs**, and it can stop teaching agents to probe for the next verb: the payloads
+  carry it.
+
 <!-- A2, A3, R1 and any slice standing in the HERMES repo: append your entries above this
      line, under the matching heading, or add a heading if none fits. Then say in your
      slice report that you did.

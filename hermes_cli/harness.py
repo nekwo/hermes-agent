@@ -4007,6 +4007,41 @@ def _characters_error(args, exc: BaseException, **extra) -> int:
     return 2
 
 
+def _characters_next(verb: str, *flags: str, alternatives=()) -> dict:
+    """The machine next-step hint: `{verb, cmd}`, and sometimes a second way on.
+
+    Measured cause (turn-efficiency plan, Stage 4b): one authoring turn spent
+    seven `--help` elements and a `characters --help` working out which verb came
+    next and how to spell it. Every one of those is a full API round-trip that
+    re-sends the whole turn context — 60-120k prompt tokens each, late in a heavy
+    turn. A payload that names its own successor answers the question before it
+    is asked, and it answers it for a caller with no skill in context at all.
+
+    A COMMAND, not a verb name: a bare name still costs a `--help` to turn into a
+    command line, which is the round-trip being removed. It is spelled with the
+    `hermes` entrypoint the skill teaches rather than `python -m hermes_cli.main`
+    — both resolve, but the long one is noise in every trace row and the operator
+    trace truncates commands at 500 chars.
+
+    `alternatives` carries the second legal move when there genuinely are two
+    (a failed batch: re-roll the row that died, or resume the ones that never
+    landed). One shape, so a consumer reads `next["cmd"]` and, if it wants the
+    fork, `next["alternatives"]` — never a different key per verb.
+
+    ADDITIVE and OPTIONAL. The payloads are ruled supersets, so a new key breaks
+    no consumer; a verb with no next step omits `next` rather than carrying an
+    empty one, because a hint naming a verb the draft would refuse costs the
+    caller exactly the round-trip this exists to save.
+    """
+    hint = {
+        "verb": verb,
+        "cmd": " ".join(["hermes", "harness", "characters", verb, *flags, "--json"]),
+    }
+    if alternatives:
+        hint["alternatives"] = list(alternatives)
+    return hint
+
+
 def _characters_emit(args, data: dict, human: str) -> int:
     print(emit_json(data) if getattr(args, "json", False) else human)
     return 0
@@ -4035,12 +4070,17 @@ def _attempt_label(index: int, total: int | None = None) -> str:
 _CHARACTERS_EXPECTED = (ValueError, FileNotFoundError, IndexError)
 
 
-def _characters_verb(args, call) -> int:
+def _characters_verb(args, call, on_error=None) -> int:
     """Load `--draft`, run one backend call, emit the house payload.
 
     *call* takes the draft and returns `(payload_dict, human_line)`. The draft id
     and the stage AFTER the call ride on every response: a verb can advance the
     stage, and the caller's next legal verb depends on knowing that it did.
+
+    *on_error*, when given, takes `(draft, exception)` and returns extra keys for
+    the REFUSAL payload — the one place a verb knows something about its own
+    failure that the flat error shape cannot carry. It runs only for refusals a
+    caller can act on (`_CHARACTERS_EXPECTED`); a bug still keeps its traceback.
     """
     from agent.charsheet.draft import CharacterDraft
 
@@ -4052,7 +4092,8 @@ def _characters_verb(args, call) -> int:
     try:
         result, human = call(draft)
     except _CHARACTERS_EXPECTED as exc:
-        return _characters_error(args, exc, draft=draft.id, stage=draft.stage)
+        extra = (on_error(draft, exc) or {}) if on_error is not None else {}
+        return _characters_error(args, exc, draft=draft.id, stage=draft.stage, **extra)
     data = {"ok": True, "draft": draft.id, "stage": draft.stage}
     data.update(result)
     return _characters_emit(args, data, human)
@@ -4161,6 +4202,17 @@ def _cmd_characters_start(args) -> int:
     except _CHARACTERS_EXPECTED as exc:
         return _characters_error(args, exc)
     data = {"ok": True, "draft": draft.id, "stage": draft.stage, "summary": _characters_draft_summary(draft)}
+    # The pipeline's first hint, and it reads the draft rather than the plan: a
+    # draft started WITHOUT `--base-image` is the CS-5 repair shape, and
+    # `turnaround` refuses without the anchor. Naming it there would hand the
+    # caller the one round-trip this key exists to remove, so the anchorless
+    # draft is pointed at the verb that repairs it. `<image>` is the single thing
+    # the runtime cannot know.
+    data["next"] = (
+        _characters_next("turnaround", "--draft", draft.id)
+        if draft.base_image is not None
+        else _characters_next("base", "--draft", draft.id, "--image", "<image>")
+    )
     return _characters_emit(
         args,
         data,
@@ -4395,6 +4447,11 @@ def _cmd_characters_approve_direction(args) -> int:
                 f"Draft {draft.id}: approved {result['direction']} "
                 f"{_attempt_label(result['approved'])}; stage is now '{draft.stage}'"
             )
+        # Only when the approval ADVANCED the stage. `rows` refuses at stage
+        # `turnaround`, and the payload already says `advanced: false` — a hint
+        # disagreeing with the key beside it is a payload arguing with itself.
+        if result.get("advanced"):
+            result["next"] = _characters_next("rows", "--draft", draft.id)
         return result, human
 
     return _characters_verb(args, call)
@@ -4408,7 +4465,50 @@ def _cmd_characters_rows(args) -> int:
         result = draft.run_rows(only=only)
         return result, f"Draft {draft.id}: generated {len(result.get('rows', {}))} row strip(s)"
 
-    return _characters_verb(args, call)
+    def on_error(draft, exc):
+        """A batch that died mid-flight is the expensive moment to be lost in.
+
+        `run_rows` generates and approves row by row, so a refusal leaves some
+        rows landed and the rest not — and the two moves from here are re-roll
+        the row that died (a `--note` is what changes the prompt) or resume the
+        batch with the ones that never landed.
+
+        The rows come off the draft's OWN pending list rather than off the error
+        text, intersected with what this call ASKED for: a caller who ran
+        `--only walk-e` must not be handed a resume naming eleven rows they
+        never wanted. Order is the spec's, so the first pending requested row is
+        the one the loop stopped on.
+        """
+        # ONLY a refusal that happened while generating. `rows` also refuses for
+        # being out of order, and at stage `turnaround` every row is "pending"
+        # while `reroll-row` is just as illegal as `rows` was — a hint there
+        # sends the caller at a second refusal. Caught by the existing
+        # out-of-order test, which asserts the flat shape exactly.
+        if draft.stage != "rows":
+            return None
+        # A hint may never cost the caller the refusal it rides on: if reading
+        # the draft's state fails here, the flat error shape still travels.
+        try:
+            pending = draft.status_payload()["pending"]["rows"]
+        except Exception:  # noqa: BLE001 - a missing hint beats a lost refusal
+            return None
+        if only is not None:
+            wanted = set(only)
+            pending = [key for key in pending if key in wanted]
+        if not pending:
+            return None
+        return {
+            "next": _characters_next(
+                "reroll-row", "--draft", draft.id, "--row", pending[0],
+                alternatives=[
+                    _characters_next(
+                        "rows", "--draft", draft.id, "--only", ",".join(pending)
+                    )
+                ],
+            )
+        }
+
+    return _characters_verb(args, call, on_error=on_error)
 
 
 def _cmd_characters_reroll_row(args) -> int:
