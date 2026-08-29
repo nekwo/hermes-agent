@@ -1220,12 +1220,20 @@ class CharacterDraft:
                 "withinConsoleBudget: false"
                 + (", or drop --square to take the cell unpadded" if square else "")
             )
-        image = pipeline.upscale_on_backdrop(cell, scale=scale)
+        # Two grounds for two consumers (operator ruling 2026-08-29): the
+        # `--square` CARD crop keeps the keyed sprite's transparency — the
+        # console draws its own ground (checkerboard) behind it — while the
+        # bare COMPARE crop keeps the flat dark looking-procedure ground,
+        # where a 1-px seam must not vanish into a viewer's flatten color.
+        backdrop = (
+            pipeline.TRANSPARENT_BACKDROP if square else pipeline.QA_BACKDROP
+        )
+        image = pipeline.upscale_on_backdrop(cell, scale=scale, backdrop=backdrop)
         if square:
             # ONE pad step, last: the crop is finished before the margin is
             # added, so nothing the looking procedure did is enlarged, keyed or
             # resampled a second time.
-            image = pipeline.pad_to_square(image)
+            image = pipeline.pad_to_square(image, backdrop=backdrop)
         # The filename is a HUMAN surface — an operator correlating a crop back
         # to the attempt it came from — so it counts the way the store's own
         # filenames count: `walk-n-attempt-3-frame-1-x2.png` sits beside

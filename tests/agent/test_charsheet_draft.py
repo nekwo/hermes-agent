@@ -1336,13 +1336,19 @@ def test_a_row_with_no_attempt_yet_says_so_instead_of_cropping_nothing(fake, bas
 
 
 def test_a_square_crop_pads_the_finished_cell_and_keeps_the_pose_whole(fake, base):
-    """The pad is the LAST step, and it adds pixels rather than removing any.
+    """The pad is the LAST step, adds pixels only — and the card crop is
+    TRANSPARENT.
 
-    The claim in the title is asserted the only way it can be: the square's
-    interior window must be byte-identical to the crop taken without ``square``,
-    and everything outside that window must be the backdrop and nothing else. A
-    pad that cropped, re-scaled, or re-keyed anything would fail on the window;
-    a pad that centred wrongly would fail on the margins.
+    Operator ruling 2026-08-29: the console card shows the character on the
+    console's own ground (checkerboard), so the ``--square`` card crop keeps the
+    keyed sprite's transparency instead of the looking-procedure's flat dark
+    composite. The bare compare crop keeps the dark ground — that lane exists
+    for seam-spotting, where flat opaque is the considered design.
+
+    Asserted per-pixel against the bare crop of the same cell: every opaque
+    pixel of the square's interior window is the same sprite pixel the bare
+    crop shows; every transparent window pixel sits where the bare crop shows
+    only backdrop; every margin pixel the pad added is fully transparent.
     """
     draft = run_to_rows(base)
     draft.run_rows(only=["walk-e"])
@@ -1363,13 +1369,29 @@ def test_a_square_crop_pads_the_finished_cell_and_keeps_the_pose_whole(fake, bas
     with Image.open(square["path"]) as padded, Image.open(bare["path"]) as inner:
         padded = padded.convert("RGBA")
         inner = inner.convert("RGBA")
-        window = padded.crop((left, top, left + inner.width, top + inner.height))
-        assert window.tobytes() == inner.tobytes(), (
-            "the pose inside the square is not the crop that was padded"
+        # The card crop carries real transparency: the sprite is opaque, the
+        # keyed field and the pad margins are not.
+        assert padded.getchannel("A").getextrema() == (0, 255), (
+            "the square card crop is flattened — the console can draw no ground "
+            "behind an opaque picture"
         )
+        window = padded.crop((left, top, left + inner.width, top + inner.height))
+        for y in range(inner.height):
+            for x in range(inner.width):
+                wr, wg, wb, wa = window.getpixel((x, y))
+                br, bg, bb, ba = inner.getpixel((x, y))
+                if wa == 255:
+                    assert (wr, wg, wb) == (br, bg, bb), (
+                        f"sprite pixel ({x},{y}) differs from the bare crop"
+                    )
+                else:
+                    assert wa == 0, f"partial alpha at ({x},{y}): {wa}"
+                    assert (br, bg, bb, ba) == pipeline.QA_BACKDROP, (
+                        f"transparent at ({x},{y}) where the bare crop shows "
+                        f"sprite, not backdrop: {(br, bg, bb, ba)}"
+                    )
         # Centred: the margins are equal to within the one pixel an odd
-        # difference cannot split, and they carry the SAME flat dark ground the
-        # upscale composites on — a second colour here is a second backdrop.
+        # difference cannot split, and the pad's own pixels are transparent.
         assert side - inner.width - left in (left, left + 1)
         assert side - inner.height - top in (top, top + 1)
         margin = {
@@ -1378,8 +1400,7 @@ def test_a_square_crop_pads_the_finished_cell_and_keeps_the_pose_whole(fake, bas
             for x in range(padded.width)
             if not (left <= x < left + inner.width and top <= y < top + inner.height)
         }
-        assert margin <= {pipeline.QA_BACKDROP}, f"the pad is not flat dark: {margin}"
-        assert padded.getchannel("A").getextrema() == (255, 255)
+        assert margin <= {(0, 0, 0, 0)}, f"the pad is not transparent: {margin}"
 
 
 def test_the_default_crop_is_still_the_tall_cell(fake, base):

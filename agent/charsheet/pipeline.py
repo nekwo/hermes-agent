@@ -90,6 +90,7 @@ __all__ = [
     "registration_window",
     "row_prefix",
     "turnaround_order",
+    "TRANSPARENT_BACKDROP",
     "upscale_on_backdrop",
     "validate_sheet",
     "view_prefix",
@@ -113,6 +114,13 @@ MAGENTA: tuple[int, int, int] = (255, 0, 255)
 # compositing that over the backdrop replaces every backdrop pixel — the step
 # renders, costs a full-image composite, and changes nothing.
 QA_BACKDROP: tuple[int, int, int, int] = (18, 18, 22, 255)
+
+# The console-card ground (operator ruling 2026-08-29): a `--square` card crop
+# keeps the keyed sprite's transparency and lets the console draw its own
+# ground (checkerboard) behind it. Compare crops keep QA_BACKDROP — flat opaque
+# is the looking procedure's considered design, where a 1-px seam must not
+# vanish into a viewer's unknown flatten color.
+TRANSPARENT_BACKDROP: tuple[int, int, int, int] = (0, 0, 0, 0)
 
 # Two bounds with two different correct values. They were ONE number until a
 # 2026-08-24 re-review, and one number could not be right for both.
@@ -413,8 +421,10 @@ def upscale_on_backdrop(
     the draft's own sheet bound) by the verb that knows which crop is the
     default one.
 
-    Returns an RGBA image whose alpha is 255 everywhere: the caller writes a
-    picture, not a mask, and "is it opaque?" must be answerable from the file.
+    Returns an RGBA image whose alpha is 255 everywhere *when the backdrop is
+    opaque* (the default). With :data:`TRANSPARENT_BACKDROP` the keyed sprite's
+    own alpha survives — the console-card lane, where the viewer draws the
+    ground.
     """
     from PIL import Image
 
