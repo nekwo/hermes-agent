@@ -1325,6 +1325,163 @@ def test_a_row_with_no_attempt_yet_says_so_instead_of_cropping_nothing(fake, bas
         draft.row_thumb("walk-e")
 
 
+# ─────────────────────── the square crop (hero-card shape) ───────────────────
+#
+# Why a second shape at all: the console's hero card is a fixed 1:1 centre-cover
+# square (§13.17), and a character cell is taller than it is wide. Centre-cover
+# on a tall crop is a torso zoom — the operator is handed a picture of the
+# middle of the frame and told it is the frame. Padding to square on THIS side
+# leaves the launcher ruling untouched and hands the card a picture whose whole
+# content is already inside the square it will draw.
+
+
+def test_a_square_crop_pads_the_finished_cell_and_keeps_the_pose_whole(fake, base):
+    """The pad is the LAST step, and it adds pixels rather than removing any.
+
+    The claim in the title is asserted the only way it can be: the square's
+    interior window must be byte-identical to the crop taken without ``square``,
+    and everything outside that window must be the backdrop and nothing else. A
+    pad that cropped, re-scaled, or re-keyed anything would fail on the window;
+    a pad that centred wrongly would fail on the margins.
+    """
+    draft = run_to_rows(base)
+    draft.run_rows(only=["walk-e"])
+
+    bare = draft.row_thumb("walk-e", scale=2)
+    square = draft.row_thumb("walk-e", scale=2, square=True)
+
+    side = max(bare["width"], bare["height"])
+    assert (square["width"], square["height"]) == (side, side)
+    assert square["square"] is True
+    assert Path(square["path"]).name == "walk-e-attempt-1-frame-1-x2-sq.png"
+    assert Path(square["path"]) != Path(bare["path"]), (
+        "the square crop overwrote the bare one — two artifacts, two filenames"
+    )
+
+    left = (side - bare["width"]) // 2
+    top = (side - bare["height"]) // 2
+    with Image.open(square["path"]) as padded, Image.open(bare["path"]) as inner:
+        padded = padded.convert("RGBA")
+        inner = inner.convert("RGBA")
+        window = padded.crop((left, top, left + inner.width, top + inner.height))
+        assert window.tobytes() == inner.tobytes(), (
+            "the pose inside the square is not the crop that was padded"
+        )
+        # Centred: the margins are equal to within the one pixel an odd
+        # difference cannot split, and they carry the SAME flat dark ground the
+        # upscale composites on — a second colour here is a second backdrop.
+        assert side - inner.width - left in (left, left + 1)
+        assert side - inner.height - top in (top, top + 1)
+        margin = {
+            padded.getpixel((x, y))
+            for y in range(padded.height)
+            for x in range(padded.width)
+            if not (left <= x < left + inner.width and top <= y < top + inner.height)
+        }
+        assert margin <= {pipeline.QA_BACKDROP}, f"the pad is not flat dark: {margin}"
+        assert padded.getchannel("A").getextrema() == (255, 255)
+
+
+def test_the_default_crop_is_still_the_tall_cell(fake, base):
+    """Default stays non-square: the compare viewer aligns panes.
+
+    §13.17's compare guidance assumes today's shapes, and a pad changes the
+    aspect. `--square` is opt-in for the hero card; a compare pair takes the
+    bare crops.
+    """
+    draft = run_to_rows(base)
+    draft.run_rows(only=["walk-e"])
+
+    result = draft.row_thumb("walk-e", scale=2)
+
+    assert result["square"] is False
+    assert result["width"] != result["height"], "the fixture cell is not square"
+    assert Path(result["path"]).name == "walk-e-attempt-1-frame-1-x2.png"
+    assert "-sq" not in Path(result["path"]).name
+
+
+def test_both_budget_booleans_are_weighed_on_the_PADDED_output(fake, base, tmp_path):
+    """Padding raises the pixel count, so it is the padded count both bounds ask about.
+
+    The failure this fences is a square crop declared with `MEDIA:` on the
+    strength of the bare crop's flags: the file a card would decode is the
+    square one, and here it is 3.2x the picture the flags were computed from.
+    Both bounds flip on the SAME crop, which is only observable because the pad
+    is weighed after it happens.
+    """
+    grown = SheetSpec(
+        states=(
+            StateSpec("idle", 6, True),
+            StateSpec("walk", 8, True),
+            StateSpec("jumping", 6, True),
+        ),
+        scheme=EIGHT_WAY,
+    )
+    assert grown.sheet_size() == (1536, 3120)
+    draft = hand_sized_draft(
+        grown,
+        slug="grown-8way-sq",
+        row_key="jumping-e",
+        strip_size=(1500, 800),
+        base=base,
+        tmp_path=tmp_path,
+    )
+
+    # Scale 3: above the default, so nothing is refused and both crops are
+    # written as the viewer artifacts they are.
+    bare = draft.row_thumb("jumping-e", scale=3)
+    square = draft.row_thumb("jumping-e", scale=3, square=True)
+
+    assert (bare["width"], bare["height"]) == (750, 2400)
+    assert (square["width"], square["height"]) == (2400, 2400)
+    assert bare["withinConsoleBudget"] is True and bare["withinOwnSheet"] is True
+    assert square["withinConsoleBudget"] is False, (
+        "5,760,000 padded pixels are over the fixed console ceiling"
+    )
+    assert square["withinOwnSheet"] is False, (
+        "the padded square is heavier than the 1536x3120 sheet it exists to "
+        "avoid decoding — cropping bought nothing"
+    )
+    with Image.open(square["path"]) as written:
+        assert written.size == (2400, 2400), "the payload and the file disagree"
+
+
+def test_a_square_crop_over_the_console_ceiling_is_refused_at_the_default_scale(
+    fake, base, tmp_path
+):
+    """The default crop is the one an agent hands to a card — padded or not.
+
+    Here the bare crop clears the ceiling and the padded square does not, so the
+    refusal must fire on the shape actually being written. It names the padded
+    size, because a refusal quoting the unpadded one would be arguing against a
+    file nobody asked for.
+    """
+    small = SheetSpec(states=(StateSpec("idle", 2, True),), scheme=FOUR_WAY)
+    draft = hand_sized_draft(
+        small,
+        slug="small-4way-sq",
+        row_key="idle-s",
+        strip_size=(800, 900),
+        base=base,
+        tmp_path=tmp_path,
+    )
+    bare = draft.row_thumb("idle-s")
+    assert (bare["width"], bare["height"]) == (800, 1800)
+    assert bare["withinConsoleBudget"] is True
+
+    with pytest.raises(ValueError) as refusal:
+        draft.row_thumb("idle-s", square=True)
+
+    message = str(refusal.value)
+    assert "console budget" in message
+    assert "1800x1800" in message, "the refusal quotes the unpadded size"
+    assert f"{pipeline.MAX_CONSOLE_CARD_PIXELS:,}" in message
+    written = sorted(p.name for p in (draft.directory / "thumbs").iterdir())
+    assert not [name for name in written if name.endswith("-sq.png")], (
+        "the refusal wrote the square crop anyway"
+    )
+
+
 # ───────────────────────────── the base image ─────────────────────────────
 
 

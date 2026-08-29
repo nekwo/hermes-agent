@@ -1791,6 +1791,7 @@ def build_parser(parent_subparsers) -> None:
     # must not pull in Pillow.
     characters_thumb.add_argument("--frame", type=int, default=None, help="Which frame cell of the strip to crop, 0-based (default 0); the crop is the half that removes pixels, so there is always one")
     characters_thumb.add_argument("--scale", type=int, default=None, help="NEAREST upscale factor (default 2); refused, never clamped. At or below the default the OUTPUT must fit the console's fixed decode ceiling; above it the crop is a fullscreen-viewer artifact, bounded by the write ceiling and reported as withinConsoleBudget=false. The payload carries a SECOND bound, withinOwnSheet — is the crop no larger than the sheet THIS draft composes — which refuses nothing and is reported at every scale. Draw a crop inline only when BOTH are true; otherwise open it in the viewer")
+    characters_thumb.add_argument("--square", action="store_true", help="Pad the finished crop onto a square flat-dark backdrop (side = the longer edge, cell centred) so the console's 1:1 centre-cover hero card shows the WHOLE frame instead of a torso zoom. The filename gains -sq and the payload says square: true. Both budget booleans are weighed on the padded output. Use it for a hero card; take the bare crop for a compare pair, whose panes align on today's shapes")
     characters_thumb.add_argument("--json", action="store_true")
     characters_thumb.set_defaults(func=_cmd_characters_thumb)
     characters_base = characters_subs.add_parser("base", help="Set or replace the draft's base identity image")
@@ -4307,9 +4308,12 @@ def _cmd_characters_thumb(args) -> int:
     frame = DEFAULT_THUMB_FRAME if requested_frame is None else int(requested_frame)
     requested_scale = getattr(args, "scale", None)
     scale = DEFAULT_THUMB_SCALE if requested_scale is None else int(requested_scale)
+    square = bool(getattr(args, "square", False))
 
     def call(draft):
-        result = draft.row_thumb(row_key, attempt=attempt, frame=frame, scale=scale)
+        result = draft.row_thumb(
+            row_key, attempt=attempt, frame=frame, scale=scale, square=square
+        )
         # An agent reads the human line as often as the payload, and the one
         # thing it must not do with a deep zoom is declare it with `MEDIA:`. So
         # the line says which artifact this is, not just how big it came out.
@@ -4325,12 +4329,16 @@ def _cmd_characters_thumb(args) -> int:
             weight = " — heavier than this draft's own sheet, so cropping bought nothing; open it in the viewer"
         else:
             weight = ""
+        # And WHICH SHAPE, because the two are used for different things: a
+        # padded square is the hero-card crop, a bare cell is what a compare
+        # pair's panes align on.
+        shape = ", padded square" if result["square"] else ""
         return result, (
             f"Draft {draft.id}: row {result['row']} "
             f"{_attempt_label(result['attempt'], result['attempts'])}, "
             f"frame {result['frame'] + 1} of {result['frames']}, "
             f"cropped at {result['width']}x{result['height']} "
-            f"({result['scale']}x) → {result['path']}{weight}"
+            f"({result['scale']}x{shape}) → {result['path']}{weight}"
         )
 
     return _characters_verb(args, call)

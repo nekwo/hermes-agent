@@ -417,6 +417,64 @@ def test_thumb_writes_the_crop_its_payload_describes(fake, base_image, capsys, t
     assert "base64" not in json.dumps(payload).lower()
 
 
+def test_square_is_a_flag_on_the_thumb_verb_and_it_reaches_the_file(
+    fake, base_image, capsys
+):
+    """`--square` is the hero-card shape, opt-in, and the payload says which one it got.
+
+    The console card is a fixed 1:1 centre-cover square (§13.17) and a character
+    cell is taller than wide, so an unpadded crop renders there as a torso zoom.
+    The flag pads; the default does not. `square` rides in BOTH payloads because
+    a consumer choosing where to draw a crop cannot infer the shape from a
+    filename, and the two artifacts differ by more than their names.
+    """
+    draft_id = start_draft(capsys, "--base-image", str(base_image))
+    run(["harness", "characters", "turnaround", "--draft", draft_id, "--json"], capsys)
+    run(["harness", "characters", "approve-direction", "--draft", draft_id, "--all", "--json"], capsys)
+    run(["harness", "characters", "rows", "--draft", draft_id, "--only", "walk-e", "--json"], capsys)
+
+    code, bare = run(
+        ["harness", "characters", "thumb", "--draft", draft_id, "--row", "walk-e", "--json"],
+        capsys,
+    )
+    assert (code, bare["square"]) == (0, False)
+    assert bare["width"] != bare["height"]
+
+    code, payload = run(
+        [
+            "harness", "characters", "thumb", "--draft", draft_id, "--row", "walk-e",
+            "--square", "--json",
+        ],
+        capsys,
+    )
+
+    assert (code, payload["ok"], payload["square"]) == (0, True, True)
+    side = max(bare["width"], bare["height"])
+    assert (payload["width"], payload["height"]) == (side, side)
+    out = Path(payload["path"])
+    assert out.name == "walk-e-attempt-1-frame-1-x2-sq.png"
+    assert out.is_file() and Path(bare["path"]).is_file(), "one shape overwrote the other"
+    with Image.open(out) as opened:
+        assert opened.size == (side, side)
+
+
+def test_the_human_line_says_a_crop_was_padded_square(fake, base_image, capsys):
+    """The line is read as often as the payload, and the two shapes are not one shape."""
+    draft_id = start_draft(capsys, "--base-image", str(base_image))
+    run(["harness", "characters", "turnaround", "--draft", draft_id, "--json"], capsys)
+    run(["harness", "characters", "approve-direction", "--draft", draft_id, "--all", "--json"], capsys)
+    run(["harness", "characters", "rows", "--draft", draft_id, "--only", "walk-e", "--json"], capsys)
+
+    args = parser().parse_args(
+        ["harness", "characters", "thumb", "--draft", draft_id, "--row", "walk-e", "--square"]
+    )
+    assert args.func(args) == 0
+    line = capsys.readouterr().out.strip()
+
+    assert "square" in line
+    assert "-sq.png" in line
+
+
 def test_thumb_addresses_one_attempt_and_one_frame_at_a_time(fake, base_image, capsys):
     draft_id = start_draft(capsys, "--base-image", str(base_image))
     run(["harness", "characters", "turnaround", "--draft", draft_id, "--json"], capsys)

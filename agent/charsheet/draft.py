@@ -1078,6 +1078,7 @@ class CharacterDraft:
         attempt: int = -1,
         frame: int = DEFAULT_THUMB_FRAME,
         scale: int = DEFAULT_THUMB_SCALE,
+        square: bool = False,
     ) -> dict:
         """Write a card-size QA crop of ONE frame of ONE row attempt.
 
@@ -1142,6 +1143,24 @@ class CharacterDraft:
         draft will compose. ``cardSafe``, which this payload carried until
         2026-08-25, was the first of these two wearing the second one's name.
 
+        **``square`` is the hero-card shape, and it is opt-in.** The console
+        card is a fixed 1:1 centre-cover square (§13.17, ruled: the card is not
+        moving), and a character cell is taller than it is wide — so the default
+        crop renders there as a torso zoom, which is real confusion even though
+        the card was never the verdict surface. With *square*, the finished crop
+        is centred on a square field of the same flat dark backdrop
+        (:func:`pipeline.pad_to_square`, side = the longer edge) so the card
+        draws the whole frame; the filename gains ``-sq`` and the payload says
+        ``square: true``. The DEFAULT stays tall: a compare pair aligns its
+        panes, and padding changes the aspect the compare guidance assumes. Use
+        ``--square`` for a card, bare crops for a comparison.
+
+        **Both bounds are weighed on the PADDED output**, because padding adds
+        pixels and the file a consumer decodes is the padded one. A square crop
+        can therefore be refused at the default scale where the bare crop of the
+        same cell is fine — the refusal names the padded size, since arguing
+        about the unpadded one would be arguing about a file nobody asked for.
+
         Returns a PATH and never bytes (plan A-4): the launcher runs on this
         machine, and the trace lane that would carry an inline image is capped at
         4 KiB.
@@ -1175,14 +1194,23 @@ class CharacterDraft:
         # through the same helper `upscale_on_backdrop` uses — weighing an
         # output means multiplying by it, and `512 * "2"` is a string.
         scale = pipeline.require_scale(scale)
+        square = bool(square)
         out_w, out_h = cell.width * scale, cell.height * scale
+        # The PADDED size when one is coming: `--square` adds margin to the
+        # shorter axis, and every number below — both booleans, the refusal, the
+        # payload — is about the file a consumer will decode, not about the
+        # intermediate crop that is never written.
+        if square:
+            out_w = out_h = max(out_w, out_h)
         within_console_budget = pipeline.fits_console_budget(out_w, out_h)
         within_own_sheet = pipeline.fits_own_sheet(out_w, out_h, spec)
         if not within_console_budget and scale <= DEFAULT_THUMB_SCALE:
             raise ValueError(
                 f"scale {scale} on this {cell.width}x{cell.height} frame of row "
-                f"{row.key!r} would write {out_w}x{out_h} "
-                f"= {cell.width * cell.height * scale * scale:,} pixels, over the "
+                f"{row.key!r} would write "
+                + ("a square " if square else "")
+                + f"{out_w}x{out_h} "
+                f"= {out_w * out_h:,} pixels, over the "
                 f"{pipeline.MAX_CONSOLE_CARD_PIXELS:,}-pixel console budget — the "
                 "fixed ceiling on what a chat card may decode, which is NOT a "
                 "comparison against this draft's own sheet (the payload answers "
@@ -1190,15 +1218,25 @@ class CharacterDraft:
                 "ask for --scale 1, or a row with more frames to slice, or "
                 "--scale 3 or more to take it as a viewer artifact carrying "
                 "withinConsoleBudget: false"
+                + (", or drop --square to take the cell unpadded" if square else "")
             )
         image = pipeline.upscale_on_backdrop(cell, scale=scale)
+        if square:
+            # ONE pad step, last: the crop is finished before the margin is
+            # added, so nothing the looking procedure did is enlarged, keyed or
+            # resampled a second time.
+            image = pipeline.pad_to_square(image)
         # The filename is a HUMAN surface — an operator correlating a crop back
         # to the attempt it came from — so it counts the way the store's own
         # filenames count: `walk-n-attempt-3-frame-1-x2.png` sits beside
         # `revisions/row@walk-n/attempt-3.png`. The payload below stays 0-based
         # machine truth. A QA surface relabels; it never renumbers.
+        # `-sq` because the two shapes are two artifacts of the same cell: a card
+        # crop and a compare crop must be able to sit in the thumbs directory at
+        # once, and an operator must be able to tell which is which by name.
         out = self.directory / THUMBS_DIRNAME / (
-            f"{row.key}-attempt-{index + 1}-frame-{frame + 1}-x{scale}.png"
+            f"{row.key}-attempt-{index + 1}-frame-{frame + 1}-x{scale}"
+            f"{'-sq' if square else ''}.png"
         )
         out.parent.mkdir(parents=True, exist_ok=True)
         image.save(out, format="PNG")
@@ -1219,6 +1257,10 @@ class CharacterDraft:
             "frame": frame,
             "frames": row.frames,
             "scale": scale,
+            # Unconditional, like the two booleans below and for the same
+            # reason: a consumer deciding WHERE to draw a crop cannot infer the
+            # shape from a filename, and the default is a shape too.
+            "square": square,
             "source": str(source),
             "path": str(out),
             "width": image.width,

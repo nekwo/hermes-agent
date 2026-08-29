@@ -85,6 +85,7 @@ __all__ = [
     "generate_row_strip",
     "generate_turnaround",
     "handedness_summary",
+    "pad_to_square",
     "recomposite_on_magenta",
     "registration_window",
     "row_prefix",
@@ -434,6 +435,46 @@ def upscale_on_backdrop(
     if scale == 1:
         return field
     return field.resize((field.width * scale, field.height * scale), Image.NEAREST)
+
+
+def pad_to_square(image_or_path, *, backdrop=QA_BACKDROP):
+    """Centre a FINISHED crop on a square field of the same flat dark ground.
+
+    The console's hero card is a fixed 1:1 centre-cover square (§13.17) and a
+    character cell is taller than it is wide, so an unpadded crop is drawn there
+    as a torso zoom — the operator is shown the middle of a frame and told it is
+    the frame. The launcher's card geometry is ruled and is not moving, so the
+    fix is on this side: hand the card a picture whose whole content already sits
+    inside the square it will draw.
+
+    **Additive by construction.** Side is ``max(width, height)``, so the shorter
+    axis gains margin and NEITHER axis loses a pixel — this is the one step in
+    the looking procedure that cannot remove anything. It runs last, after
+    :func:`upscale_on_backdrop`, because a pad before the NEAREST upscale would
+    be enlarged along with the art and the margins would stop being a known flat
+    colour. Same *backdrop* as the upscale for the same reason it has one at all:
+    a second ground colour in one picture reads as a second image.
+
+    The write-safety ceiling is checked against the PADDED size and before the
+    field is allocated — padding raises the pixel count, and the count that
+    matters is the file's.
+    """
+    from PIL import Image
+
+    source = _open_rgba(image_or_path)
+    side = max(source.width, source.height)
+    pixels = side * side
+    if pixels > MAX_THUMB_PIXELS:
+        raise ValueError(
+            f"padding a {source.width}x{source.height} crop square would write "
+            f"{side}x{side} = {pixels:,} pixels, over the {MAX_THUMB_PIXELS:,}-pixel "
+            "write budget; ask for a smaller scale, or take the crop without --square"
+        )
+    if source.width == source.height:
+        return source
+    field = Image.new("RGBA", (side, side), tuple(backdrop))
+    field.alpha_composite(source, ((side - source.width) // 2, (side - source.height) // 2))
+    return field
 
 
 def turnaround_order(authored: Iterable[str]) -> tuple[str, ...]:
