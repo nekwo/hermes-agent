@@ -23,7 +23,9 @@ The Mission Control chat system prompt is assembled in this order:
 
 For Neko, the SOUL source is
 `X:\Eternia\.hermes\profiles\neko\SOUL.md`. The repository reference is
-`docs/agent-runtime-harness/neko_SOUL_draft.md`.
+`docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/neko_SOUL_draft.md`
+(moved here in the 2026-08-22 docs consolidation; bytes still match the live
+profile SOUL, stripped).
 
 ## What belongs in SOUL.md
 
