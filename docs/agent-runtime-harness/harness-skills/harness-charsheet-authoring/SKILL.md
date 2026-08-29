@@ -18,7 +18,9 @@ ask one question per decision, and hand back an installed sheet.
 
 - **This skill is in your context.** Never re-read `SKILL.md` or
   `FIELD-NOTES.md` from disk, and never run `--help` on a `characters` verb —
-  the verb table below is complete, flags included.
+  the verb table below is complete, flags included, and each verb's payload
+  carries a `"next"` object naming the follow-on command; read it instead of
+  reasoning about what comes next.
 - **This is not a repo task.** No `CLAUDE.md`, no `git status`, no file
   searches, no `pwd`/`ls` orientation. Nothing in an authoring ask names a file
   in a checkout.
@@ -49,13 +51,15 @@ ask one question per decision, and hand back an installed sheet.
   Control persona id inside the parenthesis, never a slug of your display name.
   A draft with no resolvable `authored_by` refuses to resume at all.
 - **Wait cadence.** One generation is 1–2 minutes; a full `rows` batch is 10–20.
-  Fire the batch, then call `process` with `action: "notify"` for that session
-  and **end your turn** — a delivery turn arrives when the process exits, and the
-  operator's console is free in the meantime. *[lands with process-exit delivery
-  — if that build is reverted, delete this sentence]* When you block anyway, pass
-  `timeout: 600` and never less: every expiry is a full API round-trip that
-  re-sends the whole prompt. Between waits do QA that is already available —
-  thumb the rows that already landed — rather than polling empty-handed.
+  Fire the batch with `terminal(background=true)`, call `process` with
+  `action: "notify"` and the returned `session_id`, and **end your turn** — a
+  new turn arrives when the process exits, opening with
+  `[BACKGROUND PROCESS COMPLETE — …]`; it waits for your thread to go idle, and
+  a duplicate or post-exit notify is safe. If notify answers
+  `status: "unavailable"`, fall back to blocking: pass `timeout: 600` and never
+  less — every expiry is a full API round-trip that re-sends the whole prompt.
+  Between waits do QA that is already available — thumb the rows that already
+  landed — rather than polling empty-handed.
 - **Batch: many verbs, one tool call.** Ten thumbs in one command —
 
   ```
@@ -137,7 +141,10 @@ stage it completed:
   row's first-frame thumb (the `thumbs/` path read off `status --json`, **never
   a rebuilt path**); and, when you composed, the installed `sheet.webp` as the
   LAST media line, so the finished character is the card the operator sees
-  first. Ten row thumbs is not too many cards; **zero is a bug.**
+  first. Ten row thumbs is not too many cards; **zero is a bug.** For hero-card
+  thumbs pass `--square` — the console card is a 1:1 centre-cover square, and a
+  bare tall crop shows only its middle band; keep bare crops for compare pairs,
+  which assume today's shapes.
 - **Declare a crop only when BOTH `thumb` booleans are true.** They answer
   different questions and disagree in both directions: `withinConsoleBudget`
   (will this file sink the console — the only one that refuses anything) and
