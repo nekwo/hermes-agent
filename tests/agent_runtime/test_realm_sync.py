@@ -260,6 +260,69 @@ def test_realm_sync_status_cli_uses_stage42_envelope(isolate_agent_runtime_root,
     assert "sync_repo" in payload
 
 
+def test_status_fetches_remote_so_upstream_changes_mark_behind(
+    isolate_agent_runtime_root, tmp_path,
+):
+    """"Check now" must see a change made directly on the remote (a member —
+    or the GitHub web UI — editing/deleting published files). Before the
+    fetch-first fix, status compared against the cached ``@{u}`` and reported
+    ``in_sync`` forever, so the update-policy banner never fired."""
+    realm, _repo = _realm_with_remote(tmp_path)
+    WorkspaceStore().create(name="Launcher", realm_id=realm.id, agent_ids=["dev"])
+    publish_realm_sync(realm.id)
+
+    assert realm_sync_status(realm.id)["state"] == "in_sync"
+
+    # Another member rewrites the remote: clone the bare upstream, delete the
+    # whole published subtree, push.
+    other = tmp_path / "other-member"
+    subprocess.run(
+        ["git", "clone", str(tmp_path / "origin.git"), str(other)],
+        check=True, capture_output=True, text=True,
+    )
+    _git_in(other, "config", "user.email", "other-member@localhost")
+    _git_in(other, "config", "user.name", "Other Member")
+    _git_in(other, "rm", "-r", "-q", "realms")
+    _git_in(other, "commit", "-m", "delete everything")
+    _git_in(other, "push")
+
+    status = realm_sync_status(realm.id)
+    assert status["remote_checked"] is True
+    assert status["remote_check_error"] is None
+    assert status["behind"] >= 1
+    assert status["state"] == "behind"
+    # The sidecar (what the snapshot/banner overview reads) carries it too.
+    assert read_realm_sync_sidecar(realm.id)["state"] == "behind"
+
+    # Publishing over a moved remote is the typed pull-first refusal, not a
+    # failed push mislabeled as an unreachable remote.
+    with pytest.raises(RealmSyncError) as excinfo:
+        publish_realm_sync(realm.id)
+    assert excinfo.value.code == "sync_behind"
+
+
+def test_status_survives_unreachable_remote(isolate_agent_runtime_root, tmp_path):
+    realm, repo = _realm_with_remote(tmp_path)
+    _git_in(repo, "remote", "set-url", "origin", str(tmp_path / "missing.git"))
+
+    status = realm_sync_status(realm.id)
+
+    assert status["remote_checked"] is False
+    assert status["remote_check_error"] == "sync_remote_unreachable"
+    assert status["state"] in {"in_sync", "ahead", "behind", "conflict"}
+
+
+def test_status_without_remote_reports_unchecked_without_error(
+    isolate_agent_runtime_root, tmp_path,
+):
+    realm, _repo = _realm_with_repo(tmp_path)
+
+    status = realm_sync_status(realm.id)
+
+    assert status["remote_checked"] is False
+    assert status["remote_check_error"] is None
+
+
 def test_local_workspace_status_is_local(isolate_agent_runtime_root, tmp_path):
     realm, _repo = _realm_with_repo(tmp_path)
     workspace = WorkspaceStore().create(name="Local Office", realm_id=realm.id)

@@ -177,6 +177,13 @@ def realm_sync_status(
     realm = RealmStore().get(realm_id)
     _authorize(realm, "status", membership, credential)
     repo = _ensure_sync_repo(realm, credential=credential)
+    # Refresh the remote-tracking ref FIRST: ahead/behind below are computed
+    # against ``@{u}``, and without a fetch that ref is whatever the last
+    # pull/publish left behind — a member editing (or deleting) files upstream
+    # stayed invisible to "Check now" forever, so the update-policy banner
+    # never fired. Best-effort: an offline check still answers from the local
+    # state, and says so via ``remote_checked``.
+    remote_check = _refresh_remote_tracking(repo, credential=credential)
     git = _git_state(repo)
     artifacts = resolve_realm_sync_artifacts(realm_id)
     agent_state = realm_agent_selection_state(realm_id)
@@ -207,6 +214,13 @@ def realm_sync_status(
         "state": state,
         "ahead": git["ahead"],
         "behind": git["behind"],
+        # Additive honesty pair for the fetch above (absent-tolerant consumers):
+        # ``remote_checked`` is True only when a remote exists AND the fetch
+        # succeeded — i.e. ahead/behind reflect the real upstream right now.
+        # When False, ``remote_check_error`` carries the typed code (or None for
+        # a repo with no remote at all).
+        "remote_checked": remote_check["checked"],
+        "remote_check_error": remote_check["error"],
         "skills_drift": skills_drift,
         "skill_publish_mode": realm.skill_publish_mode,
         "skill_selection": sorted(realm.skill_selection or []),
@@ -248,6 +262,12 @@ def publish_realm_sync(
     realm = RealmStore().get(realm_id)
     _authorize(realm, "publish", membership, credential)
     repo = _ensure_sync_repo(realm, credential=credential)
+    # Same fetch-first discipline as the status path: the ``sync_behind``
+    # refusal below is only honest against a refreshed ``@{u}``. Without it a
+    # remote-side change surfaced here as a failed push (mislabeled
+    # ``sync_remote_unreachable``) instead of the typed pull-first refusal.
+    # Best-effort — an unreachable remote falls through to the push's own error.
+    _refresh_remote_tracking(repo, credential=credential)
     git = _git_state(repo)
     if git["conflicts"]:
         raise RealmSyncError("sync_conflict", "Realm sync repo has unresolved git conflicts.", safe_details={"conflicts": git["conflicts"]})
@@ -1913,6 +1933,28 @@ def _sync_state(git: dict[str, Any]) -> str:
 
 def _has_remote(repo: Path) -> bool:
     return bool(_git(repo, "remote", check=False).strip())
+
+
+def _refresh_remote_tracking(repo: Path, *, credential: "RealmSyncCredential | None" = None) -> dict[str, Any]:
+    """Best-effort ``git fetch`` so ``_git_state``'s ahead/behind answer against
+    the remote AS IT IS, not as the last pull/publish left it cached.
+
+    Returns a typed row, never raises: ``checked`` is True only when a remote
+    exists and the fetch succeeded; ``error`` carries the ``RealmSyncError``
+    code (``sync_auth_failed`` / ``sync_remote_unreachable``) when it did not,
+    and stays None for a repo with no remote (nothing to check is not a
+    failure). Callers that must hard-fail on remote problems (push) keep their
+    own typed errors — this helper exists for the read paths, where an offline
+    box still deserves a local answer.
+    """
+
+    if not _has_remote(repo):
+        return {"checked": False, "error": None}
+    try:
+        _git(repo, "fetch", extra_config=_credential_git_config(credential))
+    except RealmSyncError as exc:
+        return {"checked": False, "error": exc.code}
+    return {"checked": True, "error": None}
 
 
 def _git(repo: Path, *args: str, check: bool = True, extra_config: Sequence[str] | None = None) -> str:
