@@ -2702,6 +2702,32 @@ the QA surface was reading the wrong one.
   is written twice and could drift. Folding it in means touching the generation gate, which was
   fenced out of this slice.
 
+## 2026-08-29 — the wait cadence changed: 600 s on this lane (Stage 3a slice)
+
+- **[READ] `process wait` now blocks up to 600 s on the mission-chat lane, not 180.** The
+  clamp lives in `ProcessRegistry.wait` and reads its ceiling from the new
+  `wait_ceiling_seconds`: `TERMINAL_TIMEOUT` (180 s by default) everywhere, raised to at
+  least `MISSION_CHAT_WAIT_MAX_SECONDS` (600) when the run's terminal envelope scope names
+  the mission-chat lane. **Consequence for an authoring agent: pass `timeout: 600`, not
+  180 and never 60.** A 10-strip `rows` batch at 1–2 min per generation is 10–20 min of
+  wall; at 180 s that is 4–7 forced round-trips, at 600 s it is 2–3, and every avoided
+  round-trip is a whole re-sent context (~60–120k prompt tokens on a heavy turn).
+
+- **[READ] The clamp still tells you when it bit.** `timeout_note` is unchanged in shape —
+  "Requested wait of Ns was clamped to configured limit of Ms". If you see 180 in that note
+  on a charsheet turn, you were NOT running under the mission-chat envelope scope, which is
+  worth reporting: it means the lane identity did not reach the tool.
+
+- **[READ] Nothing outside this lane moved, deliberately.** The raise is a `max()` against
+  the configured `TERMINAL_TIMEOUT`, applied only when the envelope scope says
+  `mission_chat`. A deployment that configured 900 s keeps 900 s; every other lane keeps
+  exactly the old number. The turn-efficiency plan named a blanket raise a non-goal because
+  no other lane's turn budget was measured.
+
+- **[READ] The 1800 s turn wall — not this clamp — is what bounds a runaway.** Two 600 s
+  blocks still leave headroom inside a default charsheet turn budget. There is no timer of
+  this lane's own, and there should not be one.
+
 <!-- A2, A3, R1 and any slice standing in the HERMES repo: append your entries above this
      line, under the matching heading, or add a heading if none fits. Then say in your
      slice report that you did.

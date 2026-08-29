@@ -79,6 +79,30 @@ FINISHED_TTL_SECONDS = 1800     # Keep finished processes for 30 minutes
 MAX_PROCESSES = 64              # Max concurrent tracked processes (LRU pruning)
 MAX_ACTIVE_PROCESS_AGE = 86400  # 24h default — see session_reset.bg_process_max_age_hours (#29177)
 
+# ``process wait`` ceiling on the governed mission-chat lane, in seconds.
+#
+# ``wait`` has always clamped a requested timeout to ``TERMINAL_TIMEOUT``
+# (180 s), lane-agnostically. The 2026-08-29 charsheet turn-efficiency
+# measurement priced that clamp: wait-polling was 12 of 27 API calls on the
+# fire-imp authoring turn (~690k of its 1.556M cumulative prompt tokens) and 8
+# of 13 on a lean staged turn, because a generation verb runs 1–2 minutes per
+# image and a 10-strip batch runs 10–20 minutes. The agent that asked for 600 s
+# was silently clamped to 180 and paid a full ~60–120k-token round-trip per
+# expiry. See docs/agent-runtime-harness/planned/
+# charsheet-turn-efficiency-2026-08-29.md, Stage 3a.
+#
+# LANE-SCOPED ON PURPOSE. The same plan names "no blanket TERMINAL_TIMEOUT
+# raise outside the mission-chat lane" as a NON-GOAL — other lanes' turn budgets
+# were not measured — so this ceiling is read off the terminal envelope scope
+# (bound for the duration of a mission-chat run by ``profile_runner``, unbound
+# on every other lane), which makes "no other lane changes" structural rather
+# than conventional.
+#
+# The 1800 s mission-chat turn wall budget, not this number, is the real guard:
+# two 600 s blocks still leave headroom, and a process that never exits is
+# ended by the wall, not by a timer of this lane's own.
+MISSION_CHAT_WAIT_MAX_SECONDS = 600
+
 # Watch pattern rate limiting — PER SESSION.
 # Hard rule: at most ONE watch-match notification every WATCH_MIN_INTERVAL_SECONDS.
 # Any match arriving inside that cooldown window is dropped and counted as a strike.
@@ -93,6 +117,49 @@ WATCH_STRIKE_LIMIT = 3            # Strikes in a row → disable watch + promote
 WATCH_GLOBAL_MAX_PER_WINDOW = 15
 WATCH_GLOBAL_WINDOW_SECONDS = 10
 WATCH_GLOBAL_COOLDOWN_SECONDS = 30
+
+
+def _configured_wait_ceiling() -> int:
+    """``TERMINAL_TIMEOUT`` as an int, or the historical 180 s default."""
+
+    try:
+        return int(os.getenv("TERMINAL_TIMEOUT", "180"))
+    except (ValueError, TypeError):
+        return 180
+
+
+def wait_ceiling_seconds() -> int:
+    """The longest ``process wait`` this lane may block for.
+
+    Two inputs, and the mission-chat one can only ever RAISE the answer:
+
+    * ``TERMINAL_TIMEOUT`` — the deployment-wide configuration, unchanged, and
+      the only input on every lane that is not mission-chat.
+    * :data:`MISSION_CHAT_WAIT_MAX_SECONDS` — a FLOOR for the governed
+      mission-chat lane, applied with ``max()`` so an operator who configured a
+      longer ``TERMINAL_TIMEOUT`` keeps it and nobody's window is shortened.
+
+    Lane identity comes from ``agent_runtime.terminal_envelope``'s run scope —
+    the same ContextVar the terminal tool already resolves its envelope from, so
+    a wait issued inside a mission-chat turn is recognised without a second
+    notion of "which lane am I on". Any failure to resolve it (the import
+    missing on a lean install, an odd scope object) degrades to the configured
+    ceiling, i.e. to exactly today's behaviour.
+    """
+
+    ceiling = _configured_wait_ceiling()
+    try:
+        from agent_runtime.terminal_envelope import (
+            LANE_MISSION_CHAT,
+            current_terminal_envelope_scope,
+        )
+
+        scope = current_terminal_envelope_scope()
+        on_lane = scope is not None and str(getattr(scope, "lane", "")) == LANE_MISSION_CHAT
+    except Exception:  # pragma: no cover - defensive; a clamp must never fail a wait
+        logger.debug("terminal envelope lane unavailable for the wait ceiling", exc_info=True)
+        return ceiling
+    return max(ceiling, MISSION_CHAT_WAIT_MAX_SECONDS) if on_lane else ceiling
 
 
 def format_uptime_short(seconds: int) -> str:
@@ -1541,7 +1608,10 @@ class ProcessRegistry:
 
         Args:
             session_id: The process to wait for.
-            timeout: Max seconds to block. Falls back to TERMINAL_TIMEOUT config.
+            timeout: Max seconds to block. Falls back to the lane ceiling
+                (:func:`wait_ceiling_seconds` — ``TERMINAL_TIMEOUT`` off the
+                mission-chat lane, at least
+                :data:`MISSION_CHAT_WAIT_MAX_SECONDS` on it).
 
         Returns:
             dict with status ("exited", "timeout", "interrupted", "not_found")
@@ -1550,11 +1620,9 @@ class ProcessRegistry:
         from tools.ansi_strip import strip_ansi
         from tools.interrupt import is_interrupted as _is_interrupted
 
-        try:
-            default_timeout = int(os.getenv("TERMINAL_TIMEOUT", "180"))
-        except (ValueError, TypeError):
-            default_timeout = 180
-        max_timeout = default_timeout
+        # The ceiling is resolved per call, never at import: the lane is a
+        # ContextVar bound around a run, so one process serves several lanes.
+        max_timeout = wait_ceiling_seconds()
         requested_timeout = timeout
         timeout_note = None
 
