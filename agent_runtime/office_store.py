@@ -1020,6 +1020,138 @@ class OfficeStore:
             )
         return self.get_actor(wsid, actor_key)
 
+    # --- realm-sync adoption (the pull's write arms) -----------------------
+
+    def adopt_remote_surface(
+        self,
+        surface: OfficeSurface,
+        *,
+        updated_by: str = "realm_sync",
+        correlation_id: str | None = None,
+    ) -> OfficeSurface:
+        """Write a PEER's office surface verbatim — the realm pull's surface arm.
+
+        ``office_sync.apply_office_pull`` wrote this row with a raw
+        ``atomic_json_write`` until H1, so the ONE lane that rewrites a live
+        office from outside this machine emitted nothing while the archive arm
+        beside it (``remove_actor``) emitted a full pair. The asymmetry was the
+        defect: a pull that DELETED a desk reached every live consumer and a pull
+        that GAVE you one reached none.
+
+        A verb of its own rather than ``update_surface``, because the two write
+        different things. ``update_surface`` authors LOCAL intent — it lazily
+        creates the surface (refusing an unresolved workspace), normalizes the
+        folder list and BUMPS the revision. A pull adopts a record the peer
+        already numbered: the revision is the REMOTE's or the next
+        ``classify_three_way_pull`` re-classifies a row nobody edited, and the
+        surface must be writable for a workspace whose local record has not
+        arrived yet (the pull is exactly how such a workspace arrives).
+
+        ``updated_by`` records the SYNC, matching the archive arm's
+        ``updated_by="realm_sync"``. It is hash-neutral: ``office_content_hash``
+        excludes ``updated_by`` (with ``revision`` and the timestamps), so the
+        caller's ``baseline[key] = remote_hash`` stays keyed off the remote
+        content and the next pull still classifies this row as converged.
+
+        A CREATE emits only the domain ``office.surface.created`` and no patch —
+        the same ruling ``update_surface`` rides for the same reason (a client
+        that has never held this workspace answers a three-field subset with
+        ``patch_without_target`` and pays for the patch AND the core).
+        """
+
+        wsid = safe_id(surface.workspace_id)
+        if not wsid:
+            raise ValueError("invalid_request")
+        surface.workspace_id = wsid
+        surface.updated_by = _safe_actor_ref(updated_by)
+        with office_lock(wsid):
+            existed = self.surface_exists(wsid)
+            _write_surface(surface)
+            if existed:
+                # INSIDE the lock and BEFORE the domain event, like every other
+                # emitter in this class — see ``_emit_surface_patch``.
+                self._emit_surface_patch(surface, correlation_id=correlation_id)
+                self._emit(
+                    "office.surface.updated",
+                    correlation_id,
+                    workspace_id=wsid,
+                    change="realm_sync",
+                    revision=surface.revision,
+                )
+            else:
+                self._emit("office.surface.created", workspace_id=wsid)
+        return surface
+
+    def adopt_remote_actor(
+        self,
+        actor: OfficeActor,
+        *,
+        updated_by: str = "realm_sync",
+        correlation_id: str | None = None,
+    ) -> OfficeActor:
+        """Write a PEER's actor row verbatim — the realm pull's adopt/converge arm.
+
+        The twin of :meth:`adopt_remote_surface`, and the half that actually
+        puts a desk on somebody's canvas. Before H1 this was
+        ``atomic_json_write(paths.office_actor_path(...))`` inside
+        ``apply_office_pull``, so an adopted desk was invisible to the office
+        subscribe lane, to the patch fold, and to anything tailing ``office.*``.
+
+        Three properties the raw write had and this verb must not lose, each
+        pinned by a test rather than by this sentence:
+
+        (a) **the revision is the REMOTE's.** No ``base_revision + 1``. A pull
+            that renumbered revisions would hand the next
+            ``classify_three_way_pull`` a row that looks locally edited, turning
+            every subsequent pull of an untouched desk into a conflict.
+        (b) **``updated_by`` records the sync**, matching the archive arm
+            (``remove_actor(..., updated_by="realm_sync")``) rather than
+            defaulting to ``"operator"``. Hash-neutral, see the surface twin.
+        (c) **nothing is re-derived from the write.** The caller keys its
+            baseline off the REMOTE content hash; this verb returns the same
+            object it wrote so no re-read can drift from it.
+
+        NOT fenced, and that is the standing carve-out rather than an omission:
+        the class-key fence, the tombstone fence and the desk fence that
+        ``upsert_actor`` spends all refuse LOCAL authoring intent, and a pull
+        has no operator behind it to offer consent. A pulled duplicate desk (or
+        a peer's un-migrated class key) is a conflict-lane fact about what a
+        peer published, which is why the launcher's render-time
+        ``duplicate_desk`` warning stays and why task #33 still owns the
+        class-key ruling. H1 moved the write to the store so it EMITS; it did
+        not decide #33. ``tests/agent_runtime/test_office_class_key_one_fence
+        .py`` carries the disposition.
+
+        The resurrection question is answered UPSTREAM and not here:
+        ``classify_three_way_pull(..., locally_archived=True)`` never returns
+        ``WRITE_REMOTE`` for a key this store archived, so this verb is never
+        reached with a tombstoned key and does not need a second opinion about
+        one.
+        """
+
+        wsid = safe_id(actor.workspace_id)
+        if not wsid:
+            raise ValueError("invalid_request")
+        actor.workspace_id = wsid
+        actor.updated_by = _safe_actor_ref(updated_by)
+        with office_lock(wsid):
+            # ABSENCE of the live row, asked under the lock that will hold for
+            # the write — the same question ``upsert_actor`` asks, and the only
+            # one the fold's insert-on-absent cares about.
+            created = not self.actor_exists(wsid, actor.actor_key)
+            _write_actor(actor)
+            self._emit_actor_patch(actor, created=created, correlation_id=correlation_id)
+            self._emit(
+                "office.actor.upserted",
+                correlation_id,
+                workspace_id=wsid,
+                actor_key=actor.actor_key,
+                persona_id=actor.persona_id,
+                items=len(actor.items),
+                revision=actor.revision,
+            )
+        return actor
+
     def resolve_conflict(
         self,
         workspace_id: str,

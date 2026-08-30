@@ -384,9 +384,12 @@ def apply_office_pull(realm_id: str, subtree: Path, *, event_log: EventLog | Non
         remote_surface_hash = office_models.office_content_hash(remote_surface)
         surface_decision = classify_three_way_pull(local_surface_hash, remote_surface_hash, baseline.get(surface_key))
         if surface_decision.action == PullAction.WRITE_REMOTE or local_surface is None:
-            atomic_json_write(
-                paths.office_surface_path(workspace_id), to_jsonable(remote_surface), indent=2, sort_keys=True
-            )
+            # Through the store (H1), not ``atomic_json_write``: an event-less
+            # write is invisible to the watermark-gated snapshot/serve pipeline,
+            # and the archive arm below has always emitted. Baseline stays keyed
+            # off the REMOTE hash computed above — the adopt verb only stamps
+            # ``updated_by``, which ``office_content_hash`` excludes.
+            store.adopt_remote_surface(remote_surface)
             baseline[surface_key] = remote_surface_hash
 
         # Actors: the union of local-active, remote, and locally archived keys,
@@ -411,12 +414,11 @@ def apply_office_pull(realm_id: str, subtree: Path, *, event_log: EventLog | Non
             if decision.action == PullAction.WRITE_REMOTE and remote_actor is not None:
                 remote_actor.workspace_id = workspace_id
                 remote_actor.state = "active"
-                atomic_json_write(
-                    paths.office_actor_path(workspace_id, actor_key),
-                    to_jsonable(remote_actor),
-                    indent=2,
-                    sort_keys=True,
-                )
+                # THE adopt arm, through the store's evented verb (H1). It was a
+                # raw ``atomic_json_write`` until 2026-08-30, which is why a pull
+                # that ARCHIVED a desk was visible to every live consumer and a
+                # pull that GAVE you one was visible to none.
+                store.adopt_remote_actor(remote_actor)
                 baseline[key] = remote_hash or office_models.office_content_hash(remote_actor)
                 if decision.reason == "converged":
                     summary.converged += 1

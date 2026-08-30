@@ -210,6 +210,142 @@ def test_converged_edits_settle_silently(tmp_path):
     assert summary.converged == 1 and summary.conflicts == 0
 
 
+# ── H1: the adopt arm emits, like the archive arm always has ──────────────
+
+
+#: The EventLog is the STORE's log, not the instance's — every ``EventLog()``
+#: reads the same file — so a test that asks "what did THIS pull emit" has to
+#: slice the tail from a mark taken before the call, not filter the whole log.
+def _event_mark() -> int:
+    from agent_runtime.events import EventLog
+
+    return len(EventLog().tail(2000))
+
+
+def _events_since(mark: int) -> list:
+    from agent_runtime.events import EventLog
+
+    return EventLog().tail(2000)[mark:]
+
+
+def _office_events(mark: int) -> list:
+    return [evt for evt in _events_since(mark) if str(evt.type).startswith("office.")]
+
+
+def _actor_patches(mark: int, workspace_id: str) -> list:
+    from agent_runtime.state_patches import STATE_PATCHED_EVENT_TYPE, office_patch_scope
+
+    return [
+        evt
+        for evt in _events_since(mark)
+        if evt.type == STATE_PATCHED_EVENT_TYPE
+        and (evt.payload or {}).get("entity") == "office_actor"
+        and office_patch_scope(evt.payload or {}) == workspace_id
+    ]
+
+
+def test_adopting_a_remote_actor_emits_the_same_pair_the_archive_arm_does(tmp_path):
+    """The H1 defect in one test: a pull that GIVES you a desk was invisible to
+    every live consumer while a pull that TOOK one away was not."""
+
+    realm_id, ws = _make_realm_workspace()
+    subtree = tmp_path / "subtree"
+    _write_remote_office(subtree, ws, [_remote_actor(ws, "dev")])
+
+    mark = _event_mark()
+    summary = apply_office_pull(realm_id, subtree)
+    assert summary.adopted == 1
+
+    upserted = [evt for evt in _office_events(mark) if evt.type == "office.actor.upserted"]
+    assert [evt.payload.get("actor_key") for evt in upserted] == ["dev"]
+    assert upserted[0].payload.get("workspace_id") == ws
+    # …and its paired patch, without which the covered domain event would ship a
+    # patch frame with an EMPTY patches list.
+    assert len(_actor_patches(mark, ws)) == 1
+
+
+def test_the_adopted_row_keeps_the_remote_revision_and_names_the_sync(tmp_path):
+    """(a) and (b) of H1's three preserved properties. A local re-numbering would
+    make the next classify read an untouched desk as a local edit."""
+
+    realm_id, ws = _make_realm_workspace()
+    subtree = tmp_path / "subtree"
+    remote = _remote_actor(ws, "dev")
+    remote.revision = 7
+    _write_remote_office(subtree, ws, [remote])
+
+    apply_office_pull(realm_id, subtree)
+    adopted = OfficeStore().get_actor(ws, "dev")
+    assert adopted.revision == 7
+    assert adopted.updated_by == "realm_sync"
+
+
+def test_the_adopted_baseline_stays_keyed_off_the_remote_hash(tmp_path):
+    """(c). The stamped ``updated_by`` is excluded from ``office_content_hash``,
+    so the row the store wrote still hashes to the baseline the pull recorded —
+    which is exactly what makes the second pull a NOOP instead of a conflict."""
+
+    realm_id, ws = _make_realm_workspace()
+    subtree = tmp_path / "subtree"
+    remote = _remote_actor(ws, "dev")
+    _write_remote_office(subtree, ws, [remote])
+    apply_office_pull(realm_id, subtree)
+
+    baseline = read_office_baseline(realm_id)
+    on_disk = OfficeStore().get_actor(ws, "dev")
+    assert baseline[f"{ws}:actor:dev"] == office_models.office_content_hash(on_disk)
+
+    again = apply_office_pull(realm_id, subtree)
+    assert (again.adopted, again.converged, again.conflicts, again.kept_local) == (0, 0, 0, 0)
+
+
+def test_the_archive_arms_events_are_unchanged(tmp_path):
+    realm_id, ws = _make_realm_workspace()
+    subtree = tmp_path / "subtree"
+    _write_remote_office(subtree, ws, [_remote_actor(ws, "dev")])
+    apply_office_pull(realm_id, subtree)
+
+    _write_remote_office(subtree, ws, [])
+    mark = _event_mark()
+    summary = apply_office_pull(realm_id, subtree)
+    assert summary.archived == 1
+    removed = [evt for evt in _office_events(mark) if evt.type == "office.actor.removed"]
+    assert [evt.payload.get("reason") for evt in removed] == ["remote_removed"]
+
+
+def test_adopting_a_remote_surface_emits_for_a_workspace_that_already_had_one(tmp_path):
+    """The surface half. A CREATE stays on the full-core lane (no patch), which is
+    the same ruling ``update_surface`` rides."""
+
+    realm_id, ws = _make_realm_workspace()
+    subtree = tmp_path / "subtree"
+    _write_remote_office(subtree, ws, [_remote_actor(ws, "dev")])
+
+    created_mark = _event_mark()
+    apply_office_pull(realm_id, subtree)
+    assert [
+        evt.type for evt in _office_events(created_mark) if evt.type.startswith("office.surface.")
+    ] == ["office.surface.created"]
+
+    # Now a remote-only folder edit against an office this machine already holds
+    # (local untouched, so the classifier answers WRITE_REMOTE rather than the
+    # surface arm's keep-local-wins).
+    store = OfficeStore()
+    remote_surface = office_models.default_surface(ws, created_at=None)
+    remote_surface.folders = [*remote_surface.folders, "Peers"]
+    office_dir = subtree / "store" / "office" / ws
+    atomic_json_write(office_dir / "office.json", to_jsonable(remote_surface), indent=2, sort_keys=True)
+
+    mark = _event_mark()
+    apply_office_pull(realm_id, subtree)
+    surface_events = [
+        evt for evt in _office_events(mark) if evt.type.startswith("office.surface.")
+    ]
+    assert [evt.type for evt in surface_events] == ["office.surface.updated"]
+    assert surface_events[0].payload.get("change") == "realm_sync"
+    assert "Peers" in store.get_surface(ws).folders
+
+
 # ── baseline round trip ────────────────────────────────────────────────────
 
 

@@ -440,18 +440,23 @@ FENCED_ACTOR_WRITERS = {
 #: NOT blessed. Named, with its ruling, so the witness DOCUMENTS the hole instead
 #: of silently passing over it.
 CARVED_OUT_ACTOR_WRITERS = {
-    ("agent_runtime/office_sync.py", "apply_office_pull"): (
+    ("agent_runtime/office_store.py", "adopt_remote_actor"): (
         "OPEN HOLE, HELD FOR A RULING — task #33. The realm-sync pull's "
-        "PullAction.WRITE_REMOTE arm writes a peer's actor with atomic_json_write "
-        "straight to office_actor_path, past upsert_actor and therefore past the "
-        "class-key fence, so a peer that never migrated can land an archived class "
-        "key as ACTIVE beside its instance-keyed sibling with no operator in the "
-        "loop. It is carved out rather than fenced because the fix is a decision "
-        "this stage does not own: a pull is not an operator action, so it has no "
-        "consent to offer, and the choices (refuse the actor and write a conflict "
-        "sidecar, adopt it and warn on the pull summary, or re-key it on arrival) "
-        "each change what realm sync means. EG-6.6 fences the four OPERATOR-INTENT "
-        "writers and records this one as outstanding; #33 decides it."
+        "PullAction.WRITE_REMOTE arm writes a peer's actor row verbatim, past "
+        "upsert_actor and therefore past the class-key fence, so a peer that never "
+        "migrated can land an archived class key as ACTIVE beside its "
+        "instance-keyed sibling with no operator in the loop. It is carved out "
+        "rather than fenced because the fix is a decision this stage does not own: "
+        "a pull is not an operator action, so it has no consent to offer, and the "
+        "choices (refuse the actor and write a conflict sidecar, adopt it and warn "
+        "on the pull summary, or re-key it on arrival) each change what realm sync "
+        "means. EG-6.6 fences the four OPERATOR-INTENT writers and records this one "
+        "as outstanding; #33 decides it. "
+        "RELOCATED 2026-08-30 (plan realm-pull-live-projection H1): the write moved "
+        "OUT of office_sync.apply_office_pull's raw atomic_json_write and INTO this "
+        "store verb so the adopt arm finally emits its office.actor.upserted + "
+        "state.patched pair. H1 changed WHERE the unfenced write lives and what it "
+        "emits; it did not change WHETHER it is fenced, and #33 is still open."
     ),
 }
 
@@ -569,12 +574,19 @@ def test_the_carve_out_is_a_live_hole_and_not_a_stale_note():
     """The carve-out has to keep being TRUE, or the witness is documenting a
     fiction.
 
-    A note saying "``apply_office_pull`` writes past the fence" outlives the
-    condition it describes: someone fences that path, the note stays, and the next
-    reader budgets for a hole that is already closed (this repo's
+    A note saying "the realm pull writes past the fence" outlives the condition
+    it describes: someone fences that path, the note stays, and the next reader
+    budgets for a hole that is already closed (this repo's
     four-commits-inherited-a-dead-sentence precedent). So the carve-out asserts
-    the hole is still open — the pull's write arm still reaches
-    ``atomic_json_write`` directly and still names no class-key guard.
+    the hole is still open — the pull's adopt arm still writes a peer's row
+    directly and still names no class-key guard.
+
+    Two halves, because H1 (plan ``realm-pull-live-projection``) split the one
+    function this used to inspect into a caller and a store verb. The pull arm
+    must still route to the UNFENCED verb, and the verb must still be unfenced;
+    asserting only the second half would pass on the day someone quietly pointed
+    the pull at ``upsert_actor`` instead, which is a #33 ruling wearing a
+    refactor's clothes.
 
     When #33 lands, THIS test reds first and tells whoever fixed it to move the
     entry into ``FENCED_ACTOR_WRITERS``.
@@ -582,14 +594,20 @@ def test_the_carve_out_is_a_live_hole_and_not_a_stale_note():
 
     from agent_runtime import office_sync
 
-    source = inspect.getsource(office_sync.apply_office_pull)
-    assert "atomic_json_write(" in source
+    caller = inspect.getsource(office_sync.apply_office_pull)
+    assert "adopt_remote_actor(" in caller, (
+        "the realm pull's WRITE_REMOTE arm no longer routes through the carved-out "
+        "store verb — if it now reaches upsert_actor, task #33 was decided"
+    )
+
+    source = inspect.getsource(OfficeStore.adopt_remote_actor)
+    assert "_write_actor(" in source
     assert "_guard_class_keyed_" not in source and "class_key_collision(" not in source, (
-        "apply_office_pull grew a class-key fence — task #33 was decided. Move its "
+        "adopt_remote_actor grew a class-key fence — task #33 was decided. Move its "
         "entry from CARVED_OUT_ACTOR_WRITERS into FENCED_ACTOR_WRITERS with the "
         "disposition, and delete this test."
     )
-    assert ("agent_runtime/office_sync.py", "apply_office_pull") in CARVED_OUT_ACTOR_WRITERS
+    assert ("agent_runtime/office_store.py", "adopt_remote_actor") in CARVED_OUT_ACTOR_WRITERS
 
 
 # ── witness 4: the fence cannot be blinded by a file it cannot read ─────────

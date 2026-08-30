@@ -500,3 +500,75 @@ because three of these are dead ends someone else would otherwise re-walk.
    `agent.log` for `snapshot_build_core` and noticing two `pid=` values
    interleaving at the same offsets. It is in §4 and L2 because it sits exactly
    in the symptom's time window, not because anything proved it causal.
+
+---
+
+## Delivery notes — hermes H1–H4 (Backend Dev, 2026-08-30)
+
+Running record of the build, appended as each stage landed. Falsified
+assumptions are recorded the moment they falsified.
+
+### H1 — landed
+
+**What the plan said and what was actually possible.** Step 1 says route the two
+adopting writes through "the ``OfficeStore`` surface-write verb" and "the
+``OfficeStore`` actor-upsert verb". **Neither existing verb can take this write**,
+and the plan's own escape hatch (step 2: "widen the verb with an explicit
+parameter") turned out to be the wrong shape too — the divergence is not one
+parameter, it is four:
+
+* ``upsert_actor`` mints ``base_revision + 1`` (breaks property (a)),
+  re-canonicalizes the actor key through ``_canonical_actor_key`` (would rewrite
+  a peer's identity), and spends three fences that exist to refuse LOCAL
+  authoring intent — the class-key fence, the tombstone fence, and the
+  duplicate-desk fence whose own docstring (``office_store.py:1539``) says in as
+  many words that "Realm pull is deliberately NOT behind this fence". Routing
+  the pull through it would have silently decided task #33 and changed what a
+  realm pull means.
+* ``update_surface`` lazily creates the surface through ``ensure_surface``,
+  which REFUSES a workspace with no local record (``WorkspaceUnresolved``) — and
+  a pull is exactly how such a workspace arrives. It also bumps the revision and
+  re-normalizes the folder list.
+
+So H1 landed as two NEW store verbs, ``OfficeStore.adopt_remote_surface`` and
+``OfficeStore.adopt_remote_actor``: still the store chokepoint, still the store's
+lock, still the store's emitters, but writing a peer's record verbatim the way
+``resolve_conflict(take="remote")`` already does. The three preserved properties
+each have a test.
+
+**Property (b) is free, and the plan did not say why.** Stamping
+``updated_by="realm_sync"`` cannot disturb property (c), because
+``office_models._HASH_EXCLUDE`` drops ``revision``, ``created_at``,
+``updated_at`` and ``updated_by`` from ``office_content_hash``. Worth writing
+down: if it were hashed, (b) and (c) would be in direct conflict — the baseline
+would be keyed off a hash the file on disk no longer has, and the NEXT pull
+would read every adopted desk as a local edit.
+
+**The pinning test moved and had to.**
+``tests/agent_runtime/test_office_class_key_one_fence.py`` derives from the AST
+the set of functions that write a live actor file and compares it for equality
+against a hand-maintained disposition table. H1 moves the write, so the
+carve-out entry moved with it: ``("agent_runtime/office_sync.py",
+"apply_office_pull")`` → ``("agent_runtime/office_store.py",
+"adopt_remote_actor")``, ruling text unchanged and annotated with the
+relocation. ``test_the_carve_out_is_a_live_hole_and_not_a_stale_note`` now
+asserts BOTH halves — the pull still routes to the carved-out verb, AND the verb
+is still unfenced — because asserting only the second half would pass on the day
+someone quietly pointed the pull at ``upsert_actor``, which is a #33 ruling
+wearing a refactor's clothes. **Task #33 is still open. H1 changed where the
+unfenced write lives and what it emits, not whether it is fenced.**
+
+**Gotcha for the next test author.** ``EventLog()`` is the STORE's log, not the
+instance's — every construction reads the same file — so "what did this pull
+emit" has to be a tail sliced from a mark taken before the call. Filtering the
+whole log passes by luck on the first assertion and reds on the second.
+
+**Focused run:** ``python -m pytest tests/agent_runtime/test_office_sync.py
+tests/agent_runtime/test_office_class_key_one_fence.py -q`` → 35 passed.
+Neighbours re-run because they drive the same function: ``test_realm_sync.py
+test_sync_admission.py test_office_class_key_guard.py -q`` → 97 passed.
+
+**Live proof NOT taken.** Two serve children are live on the operator's store
+(§4) and were deliberately not restarted; the emission takes effect on the next
+serve restart. The office-canvas proof in H1 step 5 is owed and is the
+operator's to take.
