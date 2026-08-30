@@ -931,13 +931,23 @@ def _placement_census_report() -> dict[str, Any]:
         # `not_found` terminally. The refusal is correct; prescribing it was
         # not. Both repairs are named, keyed on the fact that decides between
         # them (does this install hold the instance), never on the id's shape.
+        #
+        # AX7. The pulled-orphan repair names `--local-only`, and that is not a
+        # detail. A doctor remediation is DIAGNOSTIC intent: the operator asked
+        # what is wrong with THIS install's projection, not to delete a
+        # placement on every machine in the realm. Prescribing the tombstoning
+        # form would have this report quietly authoring realm-wide deletes on
+        # the operator's behalf — the authored form stays available, and stays
+        # for the moment the operator actually means it.
         "remediation": (
             "an orphan actor whose instance this install still holds is cleared "
             "by retiring or re-creating its agent; one whose instance this "
             "install never held — a realm-pulled placement, whose instance "
-            "stayed on the peer — has nothing to retire, and is cleared with "
-            "`harness office actor-remove --workspace <ws> --actor <key>` or "
-            "`runtime.office.remove`; an unplaced row is either awaiting a "
+            "stayed on the peer — has nothing to retire, and is evicted from "
+            "this install with `harness office actor-remove --workspace <ws> "
+            "--actor <key> --local-only` (drop --local-only only if you mean to "
+            "delete the placement realm-wide, which is what the launcher's own "
+            "delete does); an unplaced row is either awaiting a "
             "placement or is the roster-only recovery door working as designed; "
             "a desk_litter row reading desk_kind_agent_binding wants a re-place, "
             "and the other three want a reap"

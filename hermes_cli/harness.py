@@ -912,10 +912,17 @@ def build_parser(parent_subparsers) -> None:
         office_actor_upsert, controls=frozenset({"dry_run"})
     )
     office_actor_upsert.set_defaults(func=_cmd_office_actor_upsert)
-    office_actor_remove = office_subs.add_parser("actor-remove", help="Archive an actor placement (archive-never-delete)")
+    office_actor_remove = office_subs.add_parser("actor-remove", help="Archive an actor placement (archive-never-delete); tombstones and propagates realm-wide unless --local-only")
     office_actor_remove.add_argument("--workspace", "--workspace-id", default=None)
     office_actor_remove.add_argument("--actor", required=True, help="Actor key")
     office_actor_remove.add_argument("--reason", default=None)
+    # The AUTHORED-vs-DIAGNOSTIC split (operator ruling, 2026-08-30). Without
+    # the flag this verb carries an operator's intent to delete and writes the
+    # tombstone a realm pull replicates — which is what makes a delete stick
+    # against a peer that still holds the row. With it, the actor is archived
+    # HERE and nothing is asserted about the realm, which is the only honest
+    # posture for a repair the operator did not ask for by name.
+    office_actor_remove.add_argument("--local-only", dest="local_only", action="store_true", help="Diagnostic repair: archive on THIS install only — no tombstone, nothing propagates, and a realm pull may legitimately bring the actor back. Use for doctor/dispatch/census repairs of local projection; omit when the operator means to delete the placement everywhere")
     office_actor_remove.add_argument("--expect-revision", dest="expect_revision", type=int, default=None)
     _add_stage42_global_args(
         office_actor_remove, controls=frozenset({"dry_run"})

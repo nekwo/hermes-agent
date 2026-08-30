@@ -355,19 +355,53 @@ def _cmd_office_actor_upsert(args) -> int:
 
 
 def _cmd_office_actor_remove(args) -> int:
+    """`harness office actor-remove` — the office's delete, in two intents.
+
+    Default: AUTHORED. The operator means this placement gone, so the tombstone
+    is written and a realm pull replicates it — that is how a delete survives a
+    peer that still holds the row.
+
+    ``--local-only``: DIAGNOSTIC. A doctor remediation, a dispatch step, a
+    census cleanup: the target is this install's projection and nobody asked to
+    delete anything realm-wide. The ledger write is skipped so no realm-visible
+    intent is minted; the archive copy is written either way.
+
+    The distinction is stated on the ACK as well as in the help, because the two
+    runs differ in exactly one invisible byte otherwise.
+    """
+
     store = _office_store()
     workspace = _office_workspace_for(args)
     if not workspace:
         return emit_harness_error(ValueError("no workspace selected; pass --workspace"), args=args, code="invalid_request")
     dry_run = bool(getattr(args, "dry_run", False))
+    local_only = bool(getattr(args, "local_only", False))
     actor = store.remove_actor(
         workspace,
         args.actor,
-        reason=getattr(args, "reason", None) or "operator",
+        # The default reason names the intent when the operator did not, so the
+        # `office.actor.removed` event can be told apart after the fact.
+        reason=getattr(args, "reason", None) or ("local_eviction" if local_only else "operator"),
         expect_revision=getattr(args, "expect_revision", None),
+        record_tombstone=not local_only,
         dry_run=dry_run,
     )
-    envelope = _object_envelope("office_actor", _office_actor_row(actor, full=True))
+    warnings: list[dict] = []
+    if local_only:
+        warnings.append(
+            {
+                "code": "office_actor_local_eviction",
+                "actor_key": actor.actor_key,
+                "message": (
+                    "--local-only was passed: the actor was archived on this "
+                    "install and NO tombstone was recorded, so nothing "
+                    "propagates and a realm pull may restore it"
+                ),
+            }
+        )
+    envelope = _object_envelope(
+        "office_actor", _office_actor_row(actor, full=True), warnings=warnings or None
+    )
     if dry_run:
         envelope["dry_run"] = True
     _print_stage42(envelope, args=args, default_output="json")

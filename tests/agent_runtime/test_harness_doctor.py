@@ -433,12 +433,18 @@ def test_the_orphan_remediation_names_the_verb_that_works_for_a_pulled_orphan(
     instances are per-install by ruling, so the instance never existed on this
     machine and ``agent retire`` refuses ``not_found`` terminally. The refusal is
     correct; prescribing it was not, and the verb that does work
-    (``harness office actor-remove`` / ``runtime.office.remove``, which needs
-    only the surface and the actor FILE) was not named at all.
+    (``harness office actor-remove``, which needs only the surface and the actor
+    FILE) was not named at all.
 
     The string keys on the FACT that picks between the two repairs — does this
     install hold the instance — never on the id's shape, which is the mistake
     one layer up in the launcher's removal plan.
+
+    AX7: and the form it names is ``--local-only``. A doctor remediation is
+    DIAGNOSTIC intent — the operator asked what is wrong with this install's
+    projection — so the repair it prescribes must not mint a realm-visible
+    tombstone that deletes the placement on every machine in the realm. The
+    authored form is named too, as the deliberate opposite.
     """
 
     _report, census = _census()
@@ -447,7 +453,11 @@ def test_the_orphan_remediation_names_the_verb_that_works_for_a_pulled_orphan(
     assert "harness office actor-remove" in remediation, (
         "the doctor still does not name the verb that clears a pulled orphan"
     )
-    assert "runtime.office.remove" in remediation
+    # The DIAGNOSTIC form, and its opposite said out loud rather than implied.
+    assert "--local-only" in remediation, (
+        "the doctor prescribes the tombstoning form for a diagnostic repair"
+    )
+    assert "delete the placement realm-wide" in remediation
     # Retire is still prescribed — for the orphan it CAN clear — and the two
     # arms are told apart by whether this install holds the instance.
     assert "retiring or re-creating its agent" in remediation

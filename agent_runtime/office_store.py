@@ -16,7 +16,11 @@ Hard invariants this store upholds:
   filename derivation.
 - **Archive-never-delete.** Removed actors move to ``archive/`` and their keys
   are recorded in the surface's ``archived_actor_keys`` resurrection-guard
-  ledger.
+  ledger. The LEDGER half — and only that half — is skipped by a diagnostic
+  local eviction (``remove_actor(record_tombstone=False)``), because the ledger
+  is the part a realm pull replicates: a repair aimed at this install's
+  projection must not mint intent for every machine in the realm. The archive
+  copy is always written, so ``actor-restore`` works in both modes.
 - **Display names are validated at WRITE time** against the realm-sync
   secret-assignment scanner, so one member's name can never hard-fail another
   member's realm publish (plan §4.2). The publish-time scan stays as
@@ -1015,8 +1019,26 @@ class OfficeStore:
         updated_by: str = "operator",
         expect_revision: int | None = None,
         correlation_id: str | None = None,
+        record_tombstone: bool = True,
         dry_run: bool = False,
     ) -> OfficeActor:
+        """Archive one actor placement — the office's delete.
+
+        ``record_tombstone`` is the AUTHORED-vs-DIAGNOSTIC split (operator
+        ruling, 2026-08-30). Defaulted true, which is every caller that carries
+        an operator's intent to delete: the launcher's delete button, the CLI
+        without ``--local-only``, the RPC verb. The tombstone is the point there
+        — the ledger entry is what a realm pull replicates, and what stops the
+        peer's still-live copy from resurrecting the row on the next sync.
+
+        ``False`` is for a repair aimed only at THIS install's projection — a
+        doctor remediation, a dispatch step, a census cleanup. Those have no
+        operator intent to propagate, and minting a realm-visible tombstone from
+        one would delete the row on every machine in the realm to fix a local
+        display. The archive copy is still written either way: archive-never-
+        delete is not what is being traded, and ``actor-restore`` still works.
+        """
+
         wsid = safe_id(workspace_id)
         if not wsid:
             raise ValueError("invalid_request")
@@ -1050,7 +1072,12 @@ class OfficeStore:
                 return actor
             surface = self.ensure_surface(wsid, created_by=updated_by)
             self._archive_actor_locked(
-                surface, actor, reason=reason, updated_by=updated_by, correlation_id=correlation_id
+                surface,
+                actor,
+                reason=reason,
+                updated_by=updated_by,
+                correlation_id=correlation_id,
+                record_tombstone=record_tombstone,
             )
         return from_jsonable(OfficeActor, _read_json(paths.office_archived_actor_path(wsid, actor_key)))
 
@@ -1719,6 +1746,7 @@ class OfficeStore:
         updated_by: str,
         emit: bool = True,
         correlation_id: str | None = None,
+        record_tombstone: bool = True,
     ) -> None:
         actor.state = "archived"
         actor.revision += 1
@@ -1731,7 +1759,13 @@ class OfficeStore:
             sort_keys=True,
         )
         paths.office_actor_path(actor.workspace_id, actor.actor_key).unlink(missing_ok=True)
-        if actor.actor_key not in surface.archived_actor_keys:
+        # The ONE line the diagnostic mode skips. The archive copy above is
+        # written unconditionally — archive-never-delete is not the thing being
+        # traded — and only the realm-visible ledger entry is withheld, because
+        # only that entry crosses machines (``adopt_remote_surface`` merges it)
+        # and therefore only that entry is an assertion about the realm rather
+        # than about this projection. See ``remove_actor``'s ``record_tombstone``.
+        if record_tombstone and actor.actor_key not in surface.archived_actor_keys:
             surface.archived_actor_keys = [*surface.archived_actor_keys, actor.actor_key][-ARCHIVED_LEDGER_CAP:]
             surface.updated_at = now()
             _write_surface(surface)

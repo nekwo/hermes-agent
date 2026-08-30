@@ -5,7 +5,7 @@
       "path": "hermes_cli/harness_parts/persona_commands.py",
       "symbol": "_cli_create_persona",
       "operator": "remove-typed-fault-wrap",
-      "find": "    try:\n        return _persona_by_id(load_agent_runtime_config(), persona_id)\n    except Exception as exc:  # noqa: BLE001 — re-raised as the typed fault\n        raise PersonaRosterUnavailable(str(exc)) from exc",
+      "find": "    try:\n        return _persona_by_id(load_agent_runtime_config(), persona_id)\n    except Exception as exc:  # noqa: BLE001 \u2014 re-raised as the typed fault\n        raise PersonaRosterUnavailable(str(exc)) from exc",
       "replace": "    return _persona_by_id(load_agent_runtime_config(), persona_id)",
       "test": [
         "{python}",
@@ -20,8 +20,8 @@
       "path": "hermes_cli/harness_parts/persona_commands.py",
       "symbol": "_cli_create_persona",
       "operator": "degrade-fault-to-absence",
-      "find": "    except Exception as exc:  # noqa: BLE001 — re-raised as the typed fault\n        raise PersonaRosterUnavailable(str(exc)) from exc",
-      "replace": "    except Exception:  # noqa: BLE001 — re-raised as the typed fault\n        return None",
+      "find": "    except Exception as exc:  # noqa: BLE001 \u2014 re-raised as the typed fault\n        raise PersonaRosterUnavailable(str(exc)) from exc",
+      "replace": "    except Exception:  # noqa: BLE001 \u2014 re-raised as the typed fault\n        return None",
       "test": [
         "{python}",
         "-m",
@@ -986,7 +986,7 @@
       "path": "agent_runtime/harness_doctor.py",
       "symbol": "_placement_census_report",
       "operator": "drop-pulled-orphan-repair",
-      "find": "            \"install never held — a realm-pulled placement, whose instance \"\n            \"stayed on the peer — has nothing to retire, and is cleared with \"\n            \"`harness office actor-remove --workspace <ws> --actor <key>` or \"\n            \"`runtime.office.remove`; an unplaced row is either awaiting a \"",
+      "find": "            \"install never held \u2014 a realm-pulled placement, whose instance \"\n            \"stayed on the peer \u2014 has nothing to retire, and is evicted from \"\n            \"this install with `harness office actor-remove --workspace <ws> \"\n            \"--actor <key> --local-only` (drop --local-only only if you mean to \"\n            \"delete the placement realm-wide, which is what the launcher's own \"\n            \"delete does); an unplaced row is either awaiting a \"",
       "replace": "            \"install never held is cleared the same way; an unplaced row is either awaiting a \"",
       "test": [
         "{python}",
@@ -1088,6 +1088,52 @@
         "pytest",
         "-q",
         "tests/scripts/test_mutation_claim_anchoring.py::test_the_mutation_is_spliced_at_the_anchor_not_at_the_first_occurrence"
+      ]
+    },
+    {
+      "id": "ax7-a-diagnostic-repair-mints-a-realm-wide-tombstone",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "_archive_actor_locked",
+      "operator": "ignore-the-eviction-mode",
+      "find": "        if record_tombstone and actor.actor_key not in surface.archived_actor_keys:",
+      "replace": "        if actor.actor_key not in surface.archived_actor_keys:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_actor_local_eviction.py::test_a_local_eviction_archives_the_actor_and_mints_no_realm_intent",
+        "tests/agent_runtime/test_office_actor_local_eviction.py::test_the_cli_flag_reaches_the_store_and_says_so_on_the_ack"
+      ]
+    },
+    {
+      "id": "ax7-the-cli-flag-parses-and-goes-nowhere",
+      "path": "hermes_cli/harness_parts/office.py",
+      "symbol": "_cmd_office_actor_remove",
+      "operator": "drop-the-flag-on-the-floor",
+      "find": "        record_tombstone=not local_only,",
+      "replace": "        record_tombstone=True,",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_actor_local_eviction.py::test_the_cli_flag_reaches_the_store_and_says_so_on_the_ack"
+      ]
+    },
+    {
+      "id": "ax7-the-doctor-goes-back-to-prescribing-the-tombstoning-form",
+      "path": "agent_runtime/harness_doctor.py",
+      "symbol": "_placement_census_report",
+      "operator": "drop-the-diagnostic-qualifier",
+      "find": "            \"--actor <key> --local-only` (drop --local-only only if you mean to \"\n            \"delete the placement realm-wide, which is what the launcher's own \"\n            \"delete does); an unplaced row is either awaiting a \"",
+      "replace": "            \"--actor <key>`; an unplaced row is either awaiting a \"",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_harness_doctor.py::test_the_orphan_remediation_names_the_verb_that_works_for_a_pulled_orphan"
       ]
     }
   ]

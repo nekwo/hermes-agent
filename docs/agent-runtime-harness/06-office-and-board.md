@@ -64,6 +64,24 @@ eviction — a doctor remediation, a dispatch step, a census cleanup aimed only 
 local projection; that lane gets its own local-only mode rather than borrowing
 this one.
 
+**What that local-only mode withholds, and what it does not (AX7).**
+`remove_actor` writes two things: the archive copy, and the
+`archived_actor_keys` ledger entry. Only the ledger crosses machines —
+`adopt_remote_surface` merges it on a pull — so it is the only half that asserts
+anything about the realm, and the only half the diagnostic mode skips:
+`harness office actor-remove --local-only`, store
+`remove_actor(record_tombstone=False)`. Nothing propagates, and a later realm
+pull may legitimately restore the row — correct, because the peer's copy is
+still live and nobody said otherwise. The archive copy is written in BOTH modes,
+so archive-never-delete is not what is being traded and `actor-restore` works
+after either. The ack carries an `office_actor_local_eviction` warning and the
+event a `local_eviction` reason, because the two runs are otherwise one
+invisible byte apart. `harness_doctor`'s orphan remediation names the
+`--local-only` form; the live case it was ruled against is
+`personainst_neko_supervisor_agent_9682caf4`, archived at revision 3 on the Mac
+by a dispatch-ordered repair while still active at revision 2 at its Windows
+origin.
+
 Three ack shapes are load-bearing and the handler docstrings say why. The remove
 returns the **post**-archive revision, because `_archive_actor_locked` bumps on
 the way out and an archived key carries the number forward through a restore — a
