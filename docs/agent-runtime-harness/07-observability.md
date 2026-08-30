@@ -410,6 +410,19 @@ the only writer — the realm pull's `adopt_remote_actor` writes a peer's row
 verbatim, legacy spelling and all — so a pulled actor reported as an
 `orphan_actor` against the roster row it names correctly.
 
+Each `orphan_actors` row also carries a **`reason`** (H-H4, 2026-08-30) — one of
+`retire_incomplete` / `instance_retired` / `instance_unknown`, decided by
+`_orphan_actor_reason` from two facts the store recorded about itself: a
+retirement tombstone, and a retire receipt (06 § the retire's receipt) whose
+recorded `office_archive_failures` names THIS actor key. It is a discrimination,
+not a new count and not a health change: the bucket, the `finding_counts` entry
+and the `defect` verdict are unchanged. It exists because the three have
+different repairs and the remediation string could previously only describe the
+split in prose — and because `retire_incomplete` is the standing detector for
+the "row archived, desk still live" half-state that the retire ack alone used to
+witness. The reason never reads an id's spelling; an absent or unreadable
+receipt degrades to `instance_retired`, which is the safe direction.
+
 **`desk_litter`** (desk-litter plan DL-H1) is the same section's ITEM-level
 sweep, added because the join above is structurally blind to it: that join is
 actor-level and instance-keyed, and a desk minted by `materializeAgentDesk`

@@ -4,6 +4,7 @@ import inspect
 
 import pytest
 
+from agent_runtime import harness_doctor
 from agent_runtime.harness_doctor import run_harness_doctor
 from agent_runtime.models import AgentPersona
 
@@ -559,7 +560,7 @@ def test_the_orphan_remediation_names_the_verb_that_works_for_a_pulled_orphan(
     (``harness office actor-remove``, which needs only the surface and the actor
     FILE) was not named at all.
 
-    The string keys on the FACT that picks between the two repairs — does this
+    The string keys on the FACT that picks between the repairs — does this
     install hold the instance — never on the id's shape, which is the mistake
     one layer up in the launcher's removal plan.
 
@@ -568,6 +569,17 @@ def test_the_orphan_remediation_names_the_verb_that_works_for_a_pulled_orphan(
     projection — so the repair it prescribes must not mint a realm-visible
     tombstone that deletes the placement on every machine in the realm. The
     authored form is named too, as the deliberate opposite.
+
+    H-H4 moved the deciding fact off the sentence and onto the ROWS, so the
+    sentence now names the ``reason`` tokens as well as describing the
+    conditions behind them. The assertions were ADDED to, not replaced: A4's
+    guarantee ("both repairs are named and told apart by a fact") and AX7's
+    ("the form prescribed is the local-only one") are guarantees about what the
+    string promises, not about its phrasing, and both are still checkable
+    against a sentence that now also names three grep-able tokens. The one
+    thing this test must not become is a pin on whichever author phrased it
+    last — which is what merging the two revisions by picking a side would have
+    made it.
     """
 
     _report, census = _census()
@@ -576,15 +588,22 @@ def test_the_orphan_remediation_names_the_verb_that_works_for_a_pulled_orphan(
     assert "harness office actor-remove" in remediation, (
         "the doctor still does not name the verb that clears a pulled orphan"
     )
+    assert "runtime.office.remove" in remediation
     # The DIAGNOSTIC form, and its opposite said out loud rather than implied.
     assert "--local-only" in remediation, (
         "the doctor prescribes the tombstoning form for a diagnostic repair"
     )
     assert "delete the placement realm-wide" in remediation
-    # Retire is still prescribed — for the orphan it CAN clear — and the two
-    # arms are told apart by whether this install holds the instance.
+    # Retire is still prescribed — for the two orphans it CAN clear — and the
+    # arms are told apart both by whether this install holds the instance and
+    # by the reason the row itself now carries.
+    assert "agent retire" in remediation
     assert "retiring or re-creating its agent" in remediation
     assert "never held" in remediation
+    for reason in harness_doctor.ORPHAN_ACTOR_REASONS:
+        assert reason in remediation, f"{reason} has no repair named"
+    # The pulled orphan's arm still says retire is not its verb.
+    assert "has nothing to retire" in remediation
 
 
 def test_the_census_repairs_nothing(isolate_agent_runtime_root):
@@ -1405,8 +1424,135 @@ def test_the_doctor_report_declares_its_schema_version(isolate_agent_runtime_roo
     change that forgot to say so, with the same green suite either way. This
     pins the number; changing it is then a deliberate edit here, beside the
     numbered note in the payload that says what moved.
+
+    It earned its keep at 8, immediately: ``duplicate_placements`` (7, H-H8)
+    and the ``orphan_actors`` ``reason`` field (8, H-H4) were authored
+    concurrently on two branches and BOTH shipped claiming 7. They are two
+    independent payload additions, so the merge numbered them in landing order
+    — one 7 would have meant two different contracts answering to one number,
+    which is the exact failure this pin exists to catch.
     """
 
     report = run_harness_doctor(include_worktrees=False, snapshot_builder=lambda: {})
 
-    assert report["schema_version"] == 7
+    assert report["schema_version"] == 8
+
+
+# ── H-H4: which orphan, keyed on facts the store holds ───────────────────────
+
+
+@pytest.mark.parametrize(
+    "retired, receipt, expected",
+    [
+        # No tombstone: this install never held the instance. The realm-pulled
+        # placement — `agent retire` refuses it terminally.
+        (frozenset(), None, harness_doctor.ORPHAN_ACTOR_INSTANCE_UNKNOWN),
+        # Tombstoned, and no receipt to say more. Every retire from before H-H5
+        # lands here, and so does one whose receipt would not read.
+        (frozenset({"personainst_qa_x"}), None,
+         harness_doctor.ORPHAN_ACTOR_INSTANCE_RETIRED),
+        # Tombstoned with a clean receipt: the retire archived everything it
+        # found, so this actor was written AFTER it.
+        (frozenset({"personainst_qa_x"}), {"office_archive_failures": []},
+         harness_doctor.ORPHAN_ACTOR_INSTANCE_RETIRED),
+        # Tombstoned, and its own retire recorded that it could not archive THIS
+        # actor. The close-the-loop row.
+        (frozenset({"personainst_qa_x"}),
+         {"office_archive_failures": [{"actor_key": "qa_x_actor"}]},
+         harness_doctor.ORPHAN_ACTOR_RETIRE_INCOMPLETE),
+        # A receipt whose failure names a DIFFERENT actor says nothing about
+        # this one — the narrow reason has to be earned per key, not per retire.
+        (frozenset({"personainst_qa_x"}),
+         {"office_archive_failures": [{"actor_key": "someone_else"}]},
+         harness_doctor.ORPHAN_ACTOR_INSTANCE_RETIRED),
+        # A projection-level failure carries ``actor_key: None`` by design (it
+        # is not one actor's fault). It must not be read as naming this one.
+        (frozenset({"personainst_qa_x"}),
+         {"office_archive_failures": [{"actor_key": None}]},
+         harness_doctor.ORPHAN_ACTOR_INSTANCE_RETIRED),
+    ],
+)
+def test_the_orphan_partition_is_a_pure_function_of_two_facts(
+    retired, receipt, expected
+):
+    """The partition, unit-tested off the filesystem.
+
+    The census's other partition (:func:`_desk_litter_reason`) is pure for the
+    stated reason that the decision is the part worth testing and must not be
+    reachable only through a store fixture. This one is pure for the same
+    reason, and the two facts it reads — a tombstone, and a receipt naming this
+    ACTOR KEY — are both things the store recorded about itself. Neither is a
+    spelling.
+    """
+
+    assert harness_doctor._orphan_actor_reason(
+        actor_key="qa_x_actor",
+        instance_id="personainst_qa_x",
+        retired=retired,
+        receipt=receipt,
+    ) == expected
+
+
+def test_the_census_names_a_retire_that_left_its_desk_standing(
+    isolate_agent_runtime_root, monkeypatch
+):
+    """H-H4, end to end: the retire's failed office half gets a standing detector.
+
+    S5 made "row archived, desk still live" VISIBLE — on the ack, once, to
+    whoever was holding it. Nothing closed the loop: the ack expired, and the
+    census that could still see the wreckage reported it as an undifferentiated
+    ``orphan_actor``, indistinguishable from a realm-pulled placement whose
+    instance was never here. Two very different repairs behind one token.
+
+    RED-FIRST: before this, ``orphan_actors`` rows carried no ``reason`` at all,
+    so the assertion is a ``KeyError``.
+
+    ANTI-VACUITY: the SECOND orphan is built the way the census's own fixture
+    builds one — the row unlinked underneath a live actor, no retire involved —
+    and it must NOT read ``retire_incomplete``. A mutant that stamped the narrow
+    reason on every tombstoned orphan, or on every orphan, fails on that row.
+
+    KILLING MUTATION: have :func:`_orphan_actor_reason` ignore ``receipt`` and
+    answer ``instance_retired`` for everything tombstoned — the retired half
+    still passes and the ``retire_incomplete`` assertion reds.
+    """
+
+    from agent_runtime import paths
+    from agent_runtime.agent_retire import perform_agent_retire
+    from agent_runtime.office_store import OfficeStore
+
+    workspace = "ws_census_retire_incomplete"
+    _qa_persona_saved()
+    _seed_office(workspace)
+
+    wedged = _create(workspace, "qa_wedged_agent_2")
+    never_here = _create(workspace, "qa_never_here_agent_2")
+
+    # A real retire whose office half cannot land — the share violation this
+    # platform actually raises on a desk file an AV scanner is holding.
+    def _refuse(*_args, **_kwargs):
+        raise OSError("share violation")
+
+    monkeypatch.setattr(OfficeStore, "remove_actor", _refuse)
+    retired = perform_agent_retire(
+        {"persona_instance_id": wedged["persona_instance_id"]}
+    ).result
+    assert [f["actor_key"] for f in retired["office_archive_failures"]] == [
+        wedged["actor_key"]
+    ]
+
+    # The other orphan: no retire ever ran for it, so nothing this install holds
+    # explains its actor.
+    paths.persona_instance_path(never_here["persona_instance_id"]).unlink()
+
+    _report, census = _census()
+
+    reasons = {row["actor_key"]: row["reason"] for row in census["orphan_actors"]}
+    assert reasons == {
+        wedged["actor_key"]: harness_doctor.ORPHAN_ACTOR_RETIRE_INCOMPLETE,
+        never_here["actor_key"]: harness_doctor.ORPHAN_ACTOR_INSTANCE_UNKNOWN,
+    }
+    # Still one bucket and still a defect: the reason is a discrimination, not a
+    # new count and not a health change.
+    assert census["health"] == "defect"
+    assert _report["summary"]["finding_counts"]["orphan_actors"] == 2

@@ -46,6 +46,12 @@ placements bound to the instance and archives them, reporting per-actor
 failures exactly as the fresh arm does. What stays identical is the ANSWER's
 shape: same keys, ``already_retired`` still ``true``.
 
+What a replay could still not report was the FIRST call's failures — they lived
+only on the ack that was lost. Every retire now persists a receipt beside its
+tombstone (``PersonaInstanceStore._write_retire_receipt``, H-H5) and the replay
+carries it as ``first_attempt``, so "the desk did not archive and nobody can
+ever be told which one" stops being a reachable state.
+
 The refusal vocabulary is the store's, one-to-one
 -------------------------------------------------
 ``PersonaInstanceRetireError.code`` is not re-spelled here. ``not_found`` maps to
@@ -240,10 +246,21 @@ def _already_retired_ack(
     RE-READ from the archive rather than taken from the sweep's return — the
     archive is the superset (another lane may have archived one earlier) and a
     replay names the union, never one call's list.
+
+    ``first_attempt`` is the FIRST call's recorded ack (H-H5), and it is the one
+    thing a replay could never previously recover. ``office_archive_failures``
+    below is and stays THIS call's — the positive claim "every actor bound to
+    this instance is off the level as of this answer" has to keep meaning that —
+    so the first attempt's failures ride their own key rather than being unioned
+    into a list whose emptiness is load-bearing. ``None`` when there is no
+    receipt to read: a retire from before receipts existed, or one whose receipt
+    would not write. That absence is the honest statement of what every replay
+    used to answer silently.
     """
 
     from .models import PersonaInstance
     from .office_store import OfficeStore
+    from .persona_assignments import PersonaInstanceStore
     from .serde import from_jsonable
 
     persona_id: str | None = None
@@ -300,6 +317,9 @@ def _already_retired_ack(
         # that ack costs a client the earlier failures only, never the
         # identities.
         "office_archive_failures": office_archive_failures,
+        # What the FIRST call reported, recovered from the receipt it persisted
+        # beside the tombstone (H-H5) — or ``None`` when there is none to read.
+        "first_attempt": PersonaInstanceStore().read_retire_receipt(instance_id),
         "already_retired": True,
     }
 
@@ -316,7 +336,17 @@ def perform_agent_retire(params: dict[str, Any]) -> AgentRetireOutcome:
         {persona_instance_id, persona_id, display_name, mode, reason,
          requested_by, archive_path, archive_dir,
          archived_actor_keys: [...], office_archive_failures: [{actor_key,
-         workspace_id, error}], already_retired, correlation_id?}
+         workspace_id, error}], already_retired, correlation_id?,
+         retire_receipt_path?, retire_receipt_error?, first_attempt?}
+
+    The last three are H-H5's, and they split by arm on purpose. The FRESH ack
+    carries ``retire_receipt_path`` (``None`` plus ``retire_receipt_error`` when
+    the receipt would not write) — where this call's outcome was recorded, so
+    the client that is about to lose this ack knows whether it can be recovered.
+    The REPLAY carries ``first_attempt``: the recorded first ack, or ``None``
+    when there is none. Neither key appears on the other arm, because on the
+    fresh arm ``first_attempt`` would point at itself and on the replay arm
+    nothing was written to have a path.
 
     ``correlation_id`` is the LEVEL-MUTATION join, and it was this verb's alone
     to be missing (S8b). ``runtime.agent.create``, ``runtime.office.*`` and

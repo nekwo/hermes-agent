@@ -149,6 +149,11 @@ client that lost the ack can ask again — and the replay first SWEEPS any actor
 client mechanically resurrected back into the archive, because idempotent must
 not mean inert (the boot-flush resurrection incident, [06
 §inverse](06-office-and-board.md#the-inverse--one-call-takes-an-agent-off-the-level-and-says-what-left)).
+The receipt is also PERSISTED beside the tombstone, so what the office half did
+outlives the ack that carried it and a replay answers `first_attempt` instead of
+an empty failure list it cannot stand behind (H-H5); the doctor's placement
+census reads it, which is what gives "row archived, desk still live" a standing
+detector rather than a one-shot ack (H-H4).
 
 **"Placed" is the JOIN, and neither store is folded into the other** (placement
 plan D1). Entity 2 answers *does this agent exist* — `persona instance create

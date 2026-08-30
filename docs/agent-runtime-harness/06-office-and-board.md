@@ -25,7 +25,7 @@ JSON-RPC methods on the serve child today (`agent_runtime/serve_rpc.py`,
 | folder taxonomy | `runtime.office.surface.update` | `_runtime_office_surface_update` | `{workspace_id, folders, revision}` |
 | realm-sync resolve | `runtime.office.resolve_conflict` | `_runtime_office_resolve_conflict` | `{actor_key, take, state, revision?}` |
 | place an AGENT (roster row + chat root + actor) | `runtime.agent.create` | `_runtime_agent_create` | `{persona_instance_id, actor_key, revision, position, actor, actor_fresh, skills, phases, …}` |
-| retire an agent (row + every actor bound to it) | `runtime.agent.retire` | `_runtime_agent_retire` | `{persona_instance_id, archive_path, archived_actor_keys, office_archive_failures, already_retired, correlation_id?, …}` |
+| retire an agent (row + every actor bound to it) | `runtime.agent.retire` | `_runtime_agent_retire` | `{persona_instance_id, archive_path, archived_actor_keys, office_archive_failures, already_retired, correlation_id?, retire_receipt_path? \| first_attempt?, …}` |
 
 **Handlers are named, never `file:line`, and the reason is this table's own
 history.** The retire row carried `serve_rpc.py:2055` from the day S5 landed it,
@@ -565,6 +565,40 @@ unlinked the archive copy on the way), every retry answered `already_retired:
 true, archived_actor_keys: []` forever, and the verb could not remove what its
 own ack said was gone. An id that never existed still refuses `not_found`: the
 replay reads a TOMBSTONE, and absence alone is not one.
+
+**Every retire persists a RECEIPT, so the ack is no longer the only witness
+(H-H5, 2026-08-30).** `archived_actor_keys` survived a lost ack because the
+archive can be re-read; `office_archive_failures` did not, so a client that lost
+the first ack was answered with the positive-claim shape — an empty list — for a
+retire that had in fact left a desk standing, and the answer to "did anything go
+wrong" degraded to "no". `PersonaInstanceStore.retire` now writes the outcome to
+`persona_instances_archive/<ts>_retire/receipts/<instance_id>.json` and the
+replay carries it as `first_attempt` (`null` when there is none — a retire from
+before this landed, or one whose receipt would not write; that absence is the
+honest statement of what every earlier replay answered silently). The receipt is
+in a SUBDIRECTORY rather than beside the archived row because every `*.json`
+FILE directly inside a `*_retire` batch is read as a tombstone by
+`retired_persona_instance_ids`, which would have minted a phantom retired id and
+made some future legitimate mint impossible. The two failure lists stay separate
+questions: `office_archive_failures` is and remains THIS call's, because the
+positive claim it carries has to keep meaning "as of this answer". The write is
+best-effort — the retirement is already durable when it runs — but not silent:
+the fresh ack carries `retire_receipt_path` (`null`, with
+`retire_receipt_error` beside it, when nothing was written).
+
+**And the census reads it, which is what closes the loop (H-H4).** Every
+`placement_census.orphan_actors` row now carries a `reason`:
+`retire_incomplete` (this actor is named by its own retire's recorded failure
+list), `instance_retired` (a tombstone, no recorded failure for this key — where
+an absent or unreadable receipt also degrades, the softer of two statements
+about one absence), or `instance_unknown` (no tombstone: the realm-pulled
+placement, whose instance stayed on the peer). Report `schema_version` moved to
+7. Until this, "row archived, desk still live" was visible on one ack and then
+gone — the census could still see the wreckage but reported it under the same
+token as a pulled placement, two very different repairs behind one word. The
+repair remains the operator's: re-run the retire (its replay sweeps) or
+`harness office actor-remove` / `runtime.office.remove`. Nothing auto-reconciles,
+because both repairs are deliberate gestures and the doctor sees one snapshot.
 
 **The operator's spelling of this verb is `delete` (D4, operator ruling
 2026-08-27: "why retire — it should just be delete").** `harness persona

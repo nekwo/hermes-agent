@@ -365,6 +365,29 @@ def _retired_persona_instance_archive_path(
     return None
 
 
+#: The retire receipt subdirectory inside a ``*_retire`` batch. A SUBDIRECTORY
+#: and never a sibling file, because every ``*.json`` FILE directly inside a
+#: batch is read as a tombstone by :func:`retired_persona_instance_ids` — it
+#: takes ``row.stem`` as the instance id — so a receipt written beside the row
+#: would mint a phantom retired id and the retirement predicate would start
+#: refusing legitimate mints for an agent that never existed. ``iterdir`` skips
+#: directories and the per-id probe asks for an exact child, so this name is
+#: invisible to both by construction rather than by their remembering to skip it.
+RETIRE_RECEIPTS_DIRNAME = "receipts"
+
+
+def retire_receipt_path(archive_dir: Path, persona_instance_id: str) -> Path:
+    """Where THIS retire's receipt lives — the one layout authority, both ways.
+
+    Spent by the writer (:meth:`PersonaInstanceStore.retire`) and by the reader
+    (:meth:`PersonaInstanceStore.read_retire_receipt`), so the batch layout is
+    stated once. See :data:`RETIRE_RECEIPTS_DIRNAME` for why it is a
+    subdirectory.
+    """
+
+    return archive_dir / RETIRE_RECEIPTS_DIRNAME / f"{persona_instance_id}.json"
+
+
 def retired_persona_instance_ids() -> frozenset[str]:
     """Every instance id carrying a retirement tombstone, in ONE archive listing.
 
@@ -1566,6 +1589,12 @@ class PersonaInstanceStore:
         able to detect it. ``agent_retire.perform_agent_retire`` is the service
         that puts them on an operator ack (placement plan D7).
 
+        They are also PERSISTED, beside the tombstone, so a client that lost the
+        ack can still be told what the office half did
+        (:meth:`_write_retire_receipt`, H-H5). ``retire_receipt_path`` says
+        where — ``None``, with ``retire_receipt_error`` beside it, when nothing
+        could be written.
+
         Refuses with a typed :class:`PersonaInstanceRetireError` (never a silent
         no-op) when the row is the canonical persona/profile channel
         (``canonical_persona_channel`` — the global-singleton retirement is the
@@ -1674,7 +1703,7 @@ class PersonaInstanceStore:
         office = self._archive_office_placements(
             instance, correlation_id=correlation_id
         )
-        return {
+        result = {
             "persona_instance_id": instance.id,
             "persona_id": instance.persona_id,
             "display_name": instance.display_name,
@@ -1691,6 +1720,96 @@ class PersonaInstanceStore:
             "archived_actor_keys": list(office.get("archived_actor_keys") or []),
             "office_archive_failures": list(office.get("failures") or []),
         }
+        return {**result, **self._write_retire_receipt(archive_dir, result)}
+
+    def _write_retire_receipt(
+        self, archive_dir: Path, result: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Persist THIS retire's outcome beside its tombstone (H-H5).
+
+        The office half is the part of a retire that only ever existed on the
+        ack. ``archived_actor_keys`` survived a lost ack because the archive can
+        be re-read; ``office_archive_failures`` did not, so a replay answered the
+        positive-claim shape — the empty list — for a first attempt that had
+        actually failed to take a desk off the canvas, and the operator whose ack
+        went missing was told the opposite of what happened. The create has had a
+        receipt for this reason since S4; this is the retire's.
+
+        BEST-EFFORT AND SAID, never best-effort and silent. The retirement is
+        already durable when this runs — refusing it because a receipt would not
+        write would fail a retire that has succeeded — but a failed write is
+        reported on the ack (``retire_receipt_path: None`` plus
+        ``retire_receipt_error``), because "a best-effort lane discarded its
+        outcome" is the exact class this repo has already paid for three times
+        and the fourth instance is not going to be one written by the fix for the
+        third.
+
+        ``retire_receipt_path`` is present on every fresh ack, ``None`` when
+        nothing was written — one shape, so a client never reads an absent key as
+        "yes, it was recorded".
+        """
+
+        path = retire_receipt_path(archive_dir, result["persona_instance_id"])
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_json_write(
+                path,
+                {
+                    # The wall clock this retire ran at. Not derivable from the
+                    # batch directory name by a reader that should not have to
+                    # parse a path to learn a time.
+                    "retired_at": now().isoformat(timespec="microseconds").replace(
+                        "+00:00", "Z"
+                    ),
+                    **result,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - the retirement is already durable
+            logging.getLogger(__name__).warning(
+                "retire receipt write failed for %s",
+                result["persona_instance_id"],
+                exc_info=True,
+            )
+            return {
+                "retire_receipt_path": None,
+                "retire_receipt_error": f"{type(exc).__name__}: {exc}",
+            }
+        return {"retire_receipt_path": str(path)}
+
+    def read_retire_receipt(
+        self, persona_instance_id: str | None
+    ) -> dict[str, Any] | None:
+        """The recorded outcome of the retire that archived this id, or ``None``.
+
+        ``None`` for every answer that is not a receipt: no tombstone, a retire
+        from before receipts existed, an unreadable file. NEVER RAISES — every
+        caller is on a lane whose whole point is to answer a client that already
+        lost its ack, and a traceback there would cost the answer as well as the
+        receipt.
+
+        The absence is INFORMATION, not a gap to paper over: it says the first
+        attempt's per-actor failures are unrecoverable, which is exactly what was
+        true of every retire before H-H5 and is what the replay reports instead
+        of inventing an empty list.
+        """
+
+        tombstone = self.retired_instance_archive_path(persona_instance_id)
+        if tombstone is None:
+            return None
+        instance_id = safe_assignment_token(persona_instance_id)
+        if not instance_id:
+            return None
+        try:
+            raw = json.loads(
+                retire_receipt_path(tombstone.parent, instance_id).read_text(
+                    encoding="utf-8"
+                )
+            )
+        except Exception:  # noqa: BLE001 - absent, unreadable, or not JSON
+            return None
+        return raw if isinstance(raw, dict) else None
 
     def _scan_active_assignments_for_instance(self, instance_id: str) -> ActiveAssignmentScan:
         """Ids of active persona assignments bound to this instance, beside how

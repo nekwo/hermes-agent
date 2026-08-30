@@ -238,7 +238,17 @@ def run_harness_doctor(
         # ``summary.finding_counts`` gaining ``duplicate_placements``. No new
         # section again, and the census's health absorbs it at ``notice``
         # EXCEPT for the ``same_instance`` reason, which is a defect.
-        "schema_version": 7,
+        # 8: every ``findings.placement_census.orphan_actors`` row gains a
+        # ``reason`` (H-H4), one of the three ``ORPHAN_ACTOR_*`` tokens. No new
+        # section, no new count and no health change — the split the
+        # remediation string described in prose is now a field, and
+        # ``retire_incomplete`` is the standing detector for the "row archived,
+        # desk still live" half-state the retire ack alone used to witness.
+        # (7 and 8 were authored concurrently on two branches and BOTH claimed
+        # 7; they are two independent schema-visible additions, so the merge
+        # numbered them in landing order rather than folding two contracts into
+        # one version an operator could not tell apart.)
+        "schema_version": 8,
         "generated_at": ref,
         "ok": not defective and not unexamined,
         "mode": {"fix": bool(fix), "dry_run": bool(dry_run)},
@@ -692,6 +702,72 @@ def _office_item_id_shape(item_id: Any) -> str:
     return ITEM_ID_SHAPE_UNKNOWN
 
 
+#: The retire that archived this actor's roster row RECORDED that it could not
+#: archive this actor (H-H5's receipt names the key). This is the "row archived,
+#: desk still live" half-state the retire ack has reported since S5 and nothing
+#: could see afterwards — the ack was the only witness and it expired with the
+#: call. The repair is a re-retire (the replay sweeps live placements, D2) or
+#: ``runtime.office.remove``.
+ORPHAN_ACTOR_RETIRE_INCOMPLETE = "retire_incomplete"
+
+#: This install holds a retirement tombstone for the instance and its receipt
+#: does NOT name this actor — so the actor was placed after the retire, or the
+#: receipt is from before H-H5 and cannot say. Softer than
+#: ``retire_incomplete`` on purpose: an unreadable or absent receipt degrades to
+#: here, and both reasons share a repair set.
+ORPHAN_ACTOR_INSTANCE_RETIRED = "instance_retired"
+
+#: No tombstone and no live row: this install has never held the instance. The
+#: realm-pulled placement (office actors sync, persona instances are per-install
+#: by ruling), for which `agent retire` is the refusal arm by construction and
+#: ``runtime.office.remove`` is the only verb that works.
+ORPHAN_ACTOR_INSTANCE_UNKNOWN = "instance_unknown"
+
+ORPHAN_ACTOR_REASONS = (
+    ORPHAN_ACTOR_RETIRE_INCOMPLETE,
+    ORPHAN_ACTOR_INSTANCE_RETIRED,
+    ORPHAN_ACTOR_INSTANCE_UNKNOWN,
+)
+
+
+def _orphan_actor_reason(
+    *,
+    actor_key: str,
+    instance_id: str,
+    retired: frozenset[str],
+    receipt: dict[str, Any] | None,
+) -> str:
+    """Which of the three orphans this actor is (H-H4).
+
+    Pure — the tombstone set and the receipt are both read by the caller, once
+    each, so the partition is unit-testable without a filesystem fixture.
+
+    The census has reported ``orphan_actors`` as one undifferentiated bucket
+    since S6, and the doctor's remediation string has had to describe the split
+    in PROSE ("an orphan actor whose instance this install still holds … one
+    whose instance this install never held …") because there was no field to key
+    it on. There is now, and it is keyed on facts the store holds — a tombstone,
+    and a receipt naming this actor key — never on an id's shape.
+
+    ``retire_incomplete`` first, because it is the narrowest: an actor named by
+    its own retire's failure list is retired AND unarchived, and reporting it as
+    merely ``instance_retired`` would lose the one fact that says a retry is the
+    repair. A receipt that is absent or unreadable degrades to
+    ``instance_retired``, which is the safe direction — same row, same count,
+    the softer of two statements about the same absence.
+    """
+
+    if instance_id not in retired:
+        return ORPHAN_ACTOR_INSTANCE_UNKNOWN
+    failures = (receipt or {}).get("office_archive_failures") or []
+    if isinstance(failures, list) and any(
+        isinstance(failure, dict) and str(failure.get("actor_key") or "") == actor_key
+        for failure in failures
+    ):
+        return ORPHAN_ACTOR_RETIRE_INCOMPLETE
+    return ORPHAN_ACTOR_INSTANCE_RETIRED
+
+
 def _desk_litter_reason(
     *,
     item_id: Any,
@@ -859,7 +935,12 @@ def _placement_census_report(_context: _DoctorProbeContext | None = None) -> dic
       the doctor calling a supported gesture broken.
     * ``orphan_actors`` — a live instance-keyed actor whose instance is retired
       or missing. A DEFECT: it renders on the level as an agent nothing can
-      message.
+      message. Each row carries a ``reason`` (H-H4), one of the three
+      ``ORPHAN_ACTOR_*`` tokens, because the three have different repairs and
+      the remediation string could previously only describe the split in prose.
+      ``retire_incomplete`` is the close-the-loop half of the retire's office
+      report: a failure the ack named and nothing could see once the ack was
+      gone now has a standing detector.
     * ``desk_litter`` (plan DL-H1) — a live ``kind: "desk"`` ITEM whose agent
       half is missing, stale, personaless, or never was a desk at all, one of
       the four ``DESK_LITTER_*`` reasons each. A ``notice``, never a defect:
@@ -968,6 +1049,8 @@ def _placement_census_report(_context: _DoctorProbeContext | None = None) -> dic
         if normalized
     }
     live_instance_ids = frozenset(live_rows)
+    #: One receipt read per orphaned instance, for the whole census (H-H4).
+    retire_receipts: dict[str, dict[str, Any] | None] = {}
 
     for workspace_id, scan in scans:
         ws_placed: list[dict[str, Any]] = []
@@ -997,6 +1080,24 @@ def _placement_census_report(_context: _DoctorProbeContext | None = None) -> dic
             if instance_id in live_rows:
                 ws_placed.append(row)
             else:
+                # H-H4: WHICH orphan, keyed on the two facts the store holds —
+                # a retirement tombstone, and a retire receipt naming this actor
+                # key. The receipt read is per orphaned INSTANCE and memoized,
+                # never per actor and never on the healthy path: a clean store
+                # reaches zero reads, which is what keeps this affordable in a
+                # doctor section that already walks both stores in full.
+                if instance_id not in retire_receipts:
+                    retire_receipts[instance_id] = (
+                        PersonaInstanceStore().read_retire_receipt(instance_id)
+                        if instance_id in retired_instances
+                        else None
+                    )
+                row["reason"] = _orphan_actor_reason(
+                    actor_key=actor.actor_key,
+                    instance_id=instance_id,
+                    retired=retired_instances,
+                    receipt=retire_receipts[instance_id],
+                )
                 ws_orphans.append(row)
 
         # The desk sweep, over the SAME live actors of the SAME fully-read
@@ -1172,15 +1273,28 @@ def _placement_census_report(_context: _DoctorProbeContext | None = None) -> dic
         # form would have this report quietly authoring realm-wide deletes on
         # the operator's behalf — the authored form stays available, and stays
         # for the moment the operator actually means it.
+        #
+        # H-H4 turns the prose split into the rows' own ``reason`` field, so the
+        # three repairs are keyed on a token a reader can grep rather than on a
+        # sentence they have to parse — and the sentence now names the tokens
+        # instead of re-describing the conditions behind them. It names them
+        # WITHOUT dropping either of the two guarantees A4 and AX7 put in this
+        # string: the arms are still told apart by a fact rather than a
+        # spelling, and the form prescribed for the pulled orphan is still the
+        # local-only one.
         "remediation": (
-            "an orphan actor whose instance this install still holds is cleared "
-            "by retiring or re-creating its agent; one whose instance this "
-            "install never held — a realm-pulled placement, whose instance "
-            "stayed on the peer — has nothing to retire, and is evicted from "
-            "this install with `harness office actor-remove --workspace <ws> "
-            "--actor <key> --local-only` (drop --local-only only if you mean to "
-            "delete the placement realm-wide, which is what the launcher's own "
-            "delete does); an unplaced row is either awaiting a "
+            "an orphan actor reading retire_incomplete was named by its own "
+            "retire's failure list: re-run `agent retire` — retiring or "
+            "re-creating its agent still clears it, and the retire's replay "
+            "sweeps live placements — or evict the desk from this install with "
+            "`harness office actor-remove --workspace <ws> --actor <key> "
+            "--local-only`; one reading instance_retired is cleared the same "
+            "two ways; one reading instance_unknown — a realm-pulled placement "
+            "this install never held, whose instance stayed on the peer — has "
+            "nothing to retire and is cleared with actor-remove --local-only "
+            "or `runtime.office.remove` alone (drop --local-only only if you "
+            "mean to delete the placement realm-wide, which is what the "
+            "launcher's own delete does); an unplaced row is either awaiting a "
             "placement or is the roster-only recovery door working as designed; "
             "a desk_litter row reading desk_kind_agent_binding wants a re-place, "
             "and the other three want a reap; a duplicate_placements row reading "

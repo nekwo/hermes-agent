@@ -986,14 +986,15 @@
       "path": "agent_runtime/harness_doctor.py",
       "symbol": "_placement_census_report",
       "operator": "drop-pulled-orphan-repair",
-      "find": "            \"by retiring or re-creating its agent; one whose instance this \"\n            \"install never held — a realm-pulled placement, whose instance \"\n            \"stayed on the peer — has nothing to retire, and is evicted from \"\n            \"this install with `harness office actor-remove --workspace <ws> \"\n            \"--actor <key> --local-only` (drop --local-only only if you mean to \"\n            \"delete the placement realm-wide, which is what the launcher's own \"\n            \"delete does); an unplaced row is either awaiting a \"",
-      "replace": "            \"by retiring or re-creating its agent; an unplaced row is either awaiting a \"",
+      "find": "            \"re-creating its agent still clears it, and the retire's replay \"\n            \"sweeps live placements — or evict the desk from this install with \"\n            \"`harness office actor-remove --workspace <ws> --actor <key> \"\n            \"--local-only`; one reading instance_retired is cleared the same \"\n            \"two ways; one reading instance_unknown — a realm-pulled placement \"\n            \"this install never held, whose instance stayed on the peer — has \"\n            \"nothing to retire and is cleared with actor-remove --local-only \"\n            \"or `runtime.office.remove` alone (drop --local-only only if you \"\n            \"mean to delete the placement realm-wide, which is what the \"\n            \"launcher's own delete does); an unplaced row is either awaiting a \"",
+      "replace": "            \"re-creating its agent still clears it; an unplaced row is either awaiting a \"",
       "test": [
         "{python}",
         "-m",
         "pytest",
         "-q",
-        "tests/agent_runtime/test_harness_doctor.py::test_the_orphan_remediation_names_the_verb_that_works_for_a_pulled_orphan"
+        "tests/agent_runtime/test_harness_doctor.py::test_the_orphan_remediation_names_the_verb_that_works_for_a_pulled_orphan",
+        "--timeout=180"
       ]
     },
     {
@@ -1293,6 +1294,66 @@
         "pytest",
         "-q",
         "tests/agent_runtime/test_agent_create_service.py::test_every_ok_exit_answers_one_observation_of_the_live_row"
+      ]
+    },
+    {
+      "id": "hh5-the-retire-receipt-is-never-written",
+      "path": "agent_runtime/persona_assignments.py",
+      "symbol": "PersonaInstanceStore._write_retire_receipt",
+      "operator": "skip-receipt-write",
+      "find": "        path = retire_receipt_path(archive_dir, result[\"persona_instance_id\"])\n        try:",
+      "replace": "        path = retire_receipt_path(archive_dir, result[\"persona_instance_id\"])\n        return {\"retire_receipt_path\": None}\n        try:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_a_replay_reports_the_failures_the_lost_ack_carried"
+      ]
+    },
+    {
+      "id": "hh5-a-missing-receipt-is-read-as-an-empty-one",
+      "path": "agent_runtime/persona_assignments.py",
+      "symbol": "PersonaInstanceStore.read_retire_receipt",
+      "operator": "degrade-absence-to-empty",
+      "find": "        except Exception:  # noqa: BLE001 - absent, unreadable, or not JSON\n            return None",
+      "replace": "        except Exception:  # noqa: BLE001 - absent, unreadable, or not JSON\n            return {}",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_a_replay_with_no_receipt_says_so_instead_of_inventing_an_empty_first_attempt"
+      ]
+    },
+    {
+      "id": "hh5-the-receipt-lands-where-tombstones-are-counted",
+      "path": "agent_runtime/persona_assignments.py",
+      "symbol": "retire_receipt_path",
+      "operator": "flatten-receipt-into-the-batch",
+      "find": "    return archive_dir / RETIRE_RECEIPTS_DIRNAME / f\"{persona_instance_id}.json\"",
+      "replace": "    return archive_dir / f\"{persona_instance_id}.receipt.json\"",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_the_receipt_is_not_read_as_a_retirement_tombstone"
+      ]
+    },
+    {
+      "id": "hh4-the-orphan-reason-stops-reading-the-receipt",
+      "path": "agent_runtime/harness_doctor.py",
+      "symbol": "_orphan_actor_reason",
+      "operator": "drop-receipt-evidence",
+      "find": "    failures = (receipt or {}).get(\"office_archive_failures\") or []",
+      "replace": "    failures = []",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_harness_doctor.py::test_the_census_names_a_retire_that_left_its_desk_standing"
       ]
     }
   ]

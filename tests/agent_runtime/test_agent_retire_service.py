@@ -752,3 +752,143 @@ def test_the_replay_sweeps_under_the_callers_gesture_token(
 
     swept = _payloads("office.actor.removed")[before:]
     assert [p.get(CORRELATION_ID_KEY) for p in swept] == ["gesture-replay-heal"]
+
+
+# ── H-H5: the receipt, so a lost ack is recoverable ──────────────────────────
+
+
+def test_a_replay_reports_the_failures_the_lost_ack_carried(
+    qa_persona, seeded_workspace, monkeypatch
+):
+    """The first attempt's per-actor failures survive the ack that carried them.
+
+    RED-FIRST against the arm this replaces. ``already_retired: true`` re-read
+    ``archived_actor_keys`` from the archive — durable, so recoverable — and
+    answered ``office_archive_failures`` from its own sweep alone. The first
+    call's failures had lived only on the ack, so a client that lost it was
+    answered with the positive-claim shape (an empty list) for a retire that had
+    in fact left a desk standing. That is the one direction an honest system must
+    not fail in: the answer to "did anything go wrong" degraded to "no".
+
+    THE TWO LISTS ARE DIFFERENT QUESTIONS AND STAY SEPARATE.
+    ``office_archive_failures`` is and remains THIS call's — the positive claim
+    "every actor bound to this instance is off the level as of this answer" has
+    to keep meaning that, and unioning the first call's failures into it would
+    make an empty list unreachable forever after one bad retire.
+    ``first_attempt`` carries the recorded ack instead.
+
+    ANTI-VACUITY: the replay's own sweep SUCCEEDS here (the injection is lifted
+    before it runs), so the two lists genuinely disagree — a mutant that answered
+    ``first_attempt`` from this call's sweep reports an empty failure list and
+    reds.
+
+    KILLING MUTATION: make ``_write_retire_receipt`` a no-op and ``first_attempt``
+    comes back ``None``.
+    """
+
+    from agent_runtime.office_store import OfficeStore
+
+    placed = _place(placement_id="qa_receipt_failed_agent_2")
+    actor_key = placed["actor_key"]
+
+    # A flag rather than ``monkeypatch.undo()``: undo takes no argument and
+    # drops the whole shared stack, including this tree's autouse root pins —
+    # the tripwire in ``conftest`` reds on it, and the incident it names is why.
+    scanner_holding = {"on": True}
+    real_remove = OfficeStore.remove_actor
+
+    def _refuse(self, *args, **kwargs):
+        if scanner_holding["on"]:
+            raise OSError("share violation")
+        return real_remove(self, *args, **kwargs)
+
+    monkeypatch.setattr(OfficeStore, "remove_actor", _refuse)
+    first = perform_agent_retire(
+        {"persona_instance_id": placed["persona_instance_id"]}
+    ).result
+    assert [f["actor_key"] for f in first["office_archive_failures"]] == [actor_key]
+    # The receipt is where the ack says it is.
+    assert first["retire_receipt_path"], "no receipt was written"
+    assert "retire_receipt_error" not in first
+
+    # The scanner lets go. The desk is still standing, so the replay's sweep
+    # both runs and succeeds — this call's failure list is empty and the first
+    # call's is not.
+    scanner_holding["on"] = False
+    replay = perform_agent_retire(
+        {"persona_instance_id": placed["persona_instance_id"]}
+    ).result
+
+    assert replay["already_retired"] is True
+    assert replay["office_archive_failures"] == []
+    assert actor_key not in _live_actor_keys(), "the replay's self-heal did not run"
+
+    recovered = replay["first_attempt"]
+    assert recovered is not None, "the lost ack is still unrecoverable"
+    assert [f["actor_key"] for f in recovered["office_archive_failures"]] == [actor_key]
+    assert "share violation" in recovered["office_archive_failures"][0]["error"]
+    assert recovered["persona_instance_id"] == placed["persona_instance_id"]
+    assert recovered["retired_at"]
+
+
+def test_a_replay_with_no_receipt_says_so_instead_of_inventing_an_empty_first_attempt(
+    qa_persona, seeded_workspace
+):
+    """Every retire that ran before H-H5 has no receipt, and that is INFORMATION.
+
+    ``first_attempt: None`` says the first attempt's per-actor failures are
+    unrecoverable — which is the literal truth of every retire this store
+    performed before the receipt existed, and of any whose receipt would not
+    write. The alternative, an empty dict or an empty failure list, is the same
+    confident "nothing went wrong" the whole stage exists to stop being said by
+    accident.
+
+    KILLING MUTATION: have ``read_retire_receipt`` answer ``{}`` on a missing
+    file and this reds on the ``is None``.
+    """
+
+    import pathlib
+
+    placed = _place(placement_id="qa_receipt_absent_agent_2")
+    first = perform_agent_retire(
+        {"persona_instance_id": placed["persona_instance_id"]}
+    ).result
+    # The pre-H-H5 store, made by removing the artifact this stage adds.
+    pathlib.Path(first["retire_receipt_path"]).unlink()
+
+    replay = perform_agent_retire(
+        {"persona_instance_id": placed["persona_instance_id"]}
+    ).result
+
+    assert replay["already_retired"] is True
+    assert replay["first_attempt"] is None
+    # The durable half is unaffected: identities were never the receipt's to
+    # carry, which is why losing an ack only ever cost the failures.
+    assert replay["archived_actor_keys"] == first["archived_actor_keys"]
+
+
+def test_the_receipt_is_not_read_as_a_retirement_tombstone(
+    qa_persona, seeded_workspace
+):
+    """The receipt lives in a SUBDIRECTORY, and this is why.
+
+    ``retired_persona_instance_ids`` walks each ``*_retire`` batch and takes the
+    stem of every ``*.json`` FILE as a retired instance id. A receipt written
+    beside the archived row would therefore mint a phantom retired id — and the
+    retirement predicate is what refuses a mint, so the phantom would make some
+    future legitimate agent unmintable, from a file written by a stage whose
+    whole subject is an ack nobody can read.
+
+    KILLING MUTATION: return ``archive_dir / f"{id}.json"`` from
+    :func:`persona_assignments.retire_receipt_path` — the receipt lands beside
+    the row, is still perfectly readable, every other test here still passes, and
+    this one reds on the id set.
+    """
+
+    from agent_runtime.persona_assignments import retired_persona_instance_ids
+
+    placed = _place(placement_id="qa_receipt_tombstone_agent_2")
+    instance_id = placed["persona_instance_id"]
+    perform_agent_retire({"persona_instance_id": instance_id})
+
+    assert retired_persona_instance_ids() == {instance_id}
