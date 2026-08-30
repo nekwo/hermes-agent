@@ -360,7 +360,7 @@ probe raised). `unknown` clears `ok` without claiming a defect nobody saw, and
 its counterpart in `summary.finding_counts` is `None`, never `0`: a zero there
 is what sends an investigator hunting a class the doctor never looked at.
 
-The sections, each contributing one health value (`schema_version: 5`):
+The sections, each contributing one health value (`schema_version: 6`):
 
 | Section | What it observes | Verdict weight |
 |---|---|---|
@@ -370,7 +370,7 @@ The sections, each contributing one health value (`schema_version: 5`):
 | `model_authority` | shadowing/redundant pins (`describe_runtime_default_authority`) | notice only |
 | `persona_binding` | config-vs-store divergence (`binding_index`) | defect, with the remediation command |
 | `root_config_misplacement` | root-only keys set in a PROFILE, where nothing reads them | defect when inert, notice when duplicated |
-| `placement_census` | the roster/office join — see below | defect on an orphan actor, notice on an unplaced row |
+| `placement_census` | the roster/office join + the desk-litter item sweep — see below | defect on an orphan actor, notice on an unplaced row or a litter desk |
 
 **`placement_census`** (placement plan D8) is the join nothing watched:
 `persona instance reconcile` prunes orphan ROWS without ever opening the office,
@@ -396,10 +396,28 @@ Both sides of the join are compared through `canonical_persona_instance_id`, the
 single derivation authority, so id drift the reconcile verb exists to fold does
 not surface here as a fabricated orphan.
 
+**`desk_litter`** (desk-litter plan DL-H1) is the same section's ITEM-level
+sweep, added because the join above is structurally blind to it: that join is
+actor-level and instance-keyed, and a desk minted by `materializeAgentDesk`
+carries the persona CLASS id with no binding, so it lands in the class-keyed
+actor the join skips while its agent lands in the instance-keyed one. The sweep
+walks live `kind: "desk"` items of the same fully-read world and files each into
+exactly one of four reasons — `agent_missing` (widowed: no live agent item for
+the persona in the workspace), `agent_scope_stale` (every live agent item for
+the persona is bound to an instance no live roster row backs — the store-side
+shadow of the launcher's projection scope drop, deliberately overlapping
+`orphan_actors`), `persona_retired` (no live row and no retirement tombstone
+names the persona at all) and `desk_kind_agent_binding` (the item is
+structurally an agent's: it rides an actor with a LIVE instance binding, or its
+`item_id` carries an agent marker). The last is kept out of `agent_missing` by
+design — it wants a re-place, the other three want a reap, and conflating them
+is what the 2026-08-30 incident cost a day to. Litter raises the census to
+`notice` and never past it: nothing mis-renders, so `needs_fix` stays off.
+
 The text renderer prints every non-`ok` section with its own error text, then
 names each orphan actor individually — that id is the remediation argument —
-while counting unplaced rows, since a healthy runtime can legitimately carry
-several.
+and each litter desk with its reason, while counting unplaced rows, since a
+healthy runtime can legitimately carry several.
 
 ## The BO-1 fixture mirror
 

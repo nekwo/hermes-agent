@@ -78,10 +78,13 @@ def test_harness_doctor_reports_snapshot_null_ids(isolate_agent_runtime_root):
         "orphan_worktrees",
         "snapshot_null_id_rows",
         "misplaced_root_only_keys",
-        # The census contributes TWO counts, because an orphan actor is a
-        # defect and an unplaced row is a legal state of a supported door.
+        # The census contributes THREE counts, because they are three
+        # verdicts: an orphan actor is a defect, an unplaced row is a legal
+        # state of a supported door, and a litter desk is authored furniture
+        # standing where its agent no longer is.
         "orphan_actors",
         "unplaced_rows",
+        "desk_litter",
     }
     assert report["findings"]["snapshot_null_id_rows"] == [
         {"collection": "persona_instances", "index": 0, "id_key": "persona_instance_id"}
@@ -117,6 +120,7 @@ def test_harness_doctor_fix_is_idempotent(isolate_agent_runtime_root):
         "misplaced_root_only_keys": 0,
         "orphan_actors": 0,
         "unplaced_rows": 0,
+        "desk_litter": 0,
     }
 
 
@@ -543,3 +547,330 @@ def test_a_short_world_is_unknown_rather_than_a_fabricated_orphan(
     # would be a one-row list naming a placement that is entirely healthy.
     assert census["orphan_actors"] is None
     assert census["placed"] is None
+
+
+# ── desk litter: the item-level sweep the join cannot see (plan DL-H1) ────────
+
+
+def _desk_actor(store, workspace_id: str, item_id: str, *, persona_id: str = "qa"):
+    """A CLASS-KEYED desk actor, written through the store's own verb.
+
+    The shape §1 of the plan measures: a desk minted by the launcher's
+    ``materializeAgentDesk`` carries the persona CLASS id and no instance
+    binding, so it lands in its own class-keyed actor file while the agent it
+    belongs to lands in the instance-keyed one. Hand-writing the JSON would pin
+    the census against this fixture's idea of a desk rather than the store's.
+    """
+
+    return store.upsert_actor(
+        workspace_id,
+        {
+            "persona_id": persona_id,
+            "items": [
+                {
+                    "item_id": item_id,
+                    "persona_id": persona_id,
+                    "kind": "desk",
+                    "position": [1.0, 1.4],
+                }
+            ],
+        },
+        updated_by="desk litter fixture",
+    )
+
+
+def test_the_desk_litter_vocabulary_is_closed():
+    """The four reasons ARE the vocabulary, and the classifier never invents one.
+
+    Pinned because the buckets are the whole point of the sweep: DL-H2's reap
+    branches on them, so a fifth reason appearing without a decision is a write
+    verb meeting a value it has no arm for.
+    """
+
+    from agent_runtime import harness_doctor as doctor
+
+    assert doctor.DESK_LITTER_REASONS == (
+        "agent_missing",
+        "agent_scope_stale",
+        "persona_retired",
+        "desk_kind_agent_binding",
+    )
+    assert len(set(doctor.DESK_LITTER_REASONS)) == 4
+    assert {
+        doctor.DESK_LITTER_AGENT_MISSING,
+        doctor.DESK_LITTER_AGENT_SCOPE_STALE,
+        doctor.DESK_LITTER_PERSONA_RETIRED,
+        doctor.DESK_LITTER_DESK_KIND_AGENT_BINDING,
+    } == set(doctor.DESK_LITTER_REASONS)
+
+
+def test_the_item_id_shape_reads_the_launchers_minting_conventions():
+    """The desk marker WINS, and an unreadable id is ``unknown``, not "agent".
+
+    Pinned directly because both facts are load-bearing and neither is
+    reachable through a store fixture. ``desk-<agentItemId>`` is what
+    ``materializeAgentDesk`` mints for EVERY materialized desk on every store,
+    and it carries an ``_agent`` tail; reading the tail first would file all of
+    them as mis-kinded agents. And the agent test is POSITIVE — over-claiming
+    would fold widowed desks into ``desk_kind_agent_binding``, the exact
+    conflation the plan's §0 was written to stop.
+
+    KILLING MUTATION: check the tail before the head, or return ``agent`` for
+    an id carrying no marker, and this reds.
+    """
+
+    from agent_runtime.harness_doctor import _office_item_id_shape
+
+    assert _office_item_id_shape("desk-qa_agent") == "desk"
+    assert _office_item_id_shape("desk-personainst_qa_agent_2") == "desk"
+    assert _office_item_id_shape("qa_desk") == "desk"
+    assert _office_item_id_shape("qa_desk_2") == "desk"
+    assert _office_item_id_shape("qa_agent") == "agent"
+    assert _office_item_id_shape("qa_agent_2") == "agent"
+    assert _office_item_id_shape("personainst_neko_supervisor_agent_2a26ddcc") == "agent"
+    assert _office_item_id_shape("") == "unknown"
+    assert _office_item_id_shape("a_prop_somebody_named") == "unknown"
+
+
+def test_a_widowed_class_keyed_desk_is_agent_missing(isolate_agent_runtime_root):
+    """The retire seam's own litter: the agent's actor goes, the desk's stays.
+
+    ``OfficeStore.archive_actors_for_instance`` archives only actors BOUND to
+    the instance, and the desk lives in the class-keyed actor, which is bound to
+    nothing — so every retire that does not go through the launcher's scene
+    removal leaves this behind. Invisible to ``orphan_actors``, which skips
+    class-keyed actors by construction.
+
+    KILLING MUTATION: skip class-keyed actors in the desk sweep the way the
+    join does, and this reds with an empty list.
+    """
+
+    workspace = "ws_litter_widowed"
+    _qa_persona_saved()
+    store = _seed_office(workspace)
+
+    agent = _create(workspace, "qa_widow_agent_2")
+    _desk_actor(store, workspace, f"desk-{agent['persona_instance_id']}")
+    store.remove_actor(workspace, agent["actor_key"], reason="retire seam")
+
+    report, census = _census()
+
+    from agent_runtime.harness_doctor import DESK_LITTER_REASONS
+
+    assert [row["reason"] for row in census["desk_litter"]] == ["agent_missing"]
+    assert {row["reason"] for row in census["desk_litter"]} <= set(DESK_LITTER_REASONS)
+    assert census["desk_litter"][0]["item_id"] == f"desk-{agent['persona_instance_id']}"
+    assert census["desk_litter"][0]["persona_id"] == "qa"
+    # A class-keyed actor carries no binding, and the row says so rather than
+    # inventing one.
+    assert census["desk_litter"][0]["persona_instance_id"] is None
+    assert census["workspaces"][workspace]["desk_litter"] == census["desk_litter"]
+    assert report["summary"]["finding_counts"]["desk_litter"] == 1
+    # Never a DEFECT: the desk renders as a desk. Promoting litter would turn
+    # ``needs_fix`` on for a store whose only fault is furniture. The
+    # ``notice`` half is pinned on the mis-kinded fixture below, where litter
+    # is the sole cause — here the archived agent actor also leaves an unplaced
+    # row, so a ``notice`` assertion would pass with the litter term removed.
+    assert report["summary"]["needs_fix"] is False
+    assert report["summary"]["section_health"]["placement_census"] != "defect"
+
+
+def test_a_desk_beside_a_dead_instance_is_agent_scope_stale(isolate_agent_runtime_root):
+    """The store-side shadow of the launcher's projection scope drop.
+
+    The agent item is still there; every one of them is bound to an instance no
+    live roster row backs, so the launcher's scope policy drops the character
+    node and the desk renders on alone. The overlap with ``orphan_actors`` is
+    DELIBERATE and asserted here: that row names the actor, this one names the
+    desk left standing — two pointers to one fault, not a duplicate.
+
+    KILLING MUTATION: treat "an agent item exists" as healthy without testing
+    its binding, and this reds with an empty list.
+    """
+
+    from agent_runtime import paths
+
+    workspace = "ws_litter_stale"
+    _qa_persona_saved()
+    store = _seed_office(workspace)
+
+    agent = _create(workspace, "qa_stale_agent_2")
+    _desk_actor(store, workspace, f"desk-{agent['persona_instance_id']}")
+    paths.persona_instance_path(agent["persona_instance_id"]).unlink()
+
+    _report, census = _census()
+
+    assert [row["reason"] for row in census["desk_litter"]] == ["agent_scope_stale"]
+    assert [row["persona_instance_id"] for row in census["orphan_actors"]] == [
+        agent["persona_instance_id"]
+    ]
+    # The agent item IS present — otherwise this is indistinguishable from the
+    # widowed case above and proves nothing about the binding test.
+    assert store.get_actor(workspace, agent["actor_key"]).items[0].kind == "agent"
+
+
+def test_a_mis_kinded_agent_item_is_never_reported_as_a_widowed_desk(
+    isolate_agent_runtime_root,
+):
+    """Cause 1, kept out of ``agent_missing`` — the confusion the lane paid for.
+
+    Two rows, one per clause, so neither can carry the other. They sit in
+    separate workspaces because the store allows a persona ONE live desk per
+    level (``DuplicateDeskRefused``) — the fence is per workspace, and a fixture
+    that fought it would be authoring a shape the store refuses:
+
+    * the LIVE INSTANCE BINDING clause — a ``kind: "desk"`` item riding an
+      actor whose ``persona_instance_id`` names a live roster row. This is the
+      shape measured on the operator's store on 2026-08-30. Its id is
+      desk-shaped, so only the binding clause can fire.
+    * the AGENT-SHAPED ID clause — a ``kind: "desk"`` item on a class-keyed
+      actor whose ``item_id`` is an instance id, i.e. what
+      ``agent_create.placement_actor_payload`` mints for an AGENT.
+
+    KILLING MUTATIONS: drop the binding clause and the first row vanishes (its
+    persona has a live agent item, so it reads healthy); drop the id clause and
+    the second vanishes for the same reason. Reorder the classifier so the
+    absence buckets are tested first and both come back as ``agent_missing`` —
+    the misreport that sends an operator to reap an agent.
+    """
+
+    bound_ws = "ws_litter_miskinded_binding"
+    id_ws = "ws_litter_miskinded_id"
+    _qa_persona_saved()
+    store = _seed_office(bound_ws)
+    _seed_office(id_ws)
+
+    agent = _create(bound_ws, "qa_live_agent_2")
+    instance_id = agent["persona_instance_id"]
+    # The agent's OWN actor, re-written to carry its agent item plus a desk
+    # item — the mixed-actor shape §1 says older stores hold.
+    store.upsert_actor(
+        bound_ws,
+        {
+            "persona_id": "qa",
+            "persona_instance_id": instance_id,
+            "items": [
+                {
+                    "item_id": instance_id,
+                    "persona_id": "qa",
+                    "kind": "agent",
+                    "position": [0.0, 0.0],
+                },
+                {
+                    "item_id": "desk-qa_agent",
+                    "persona_id": "qa",
+                    "kind": "desk",
+                    "position": [0.0, 1.4],
+                },
+            ],
+        },
+        updated_by="desk litter fixture",
+    )
+
+    # Second workspace: a LIVE agent placement beside a class-keyed desk whose
+    # item id is an agent's. Without the id clause this row reads healthy.
+    other = _create(id_ws, "qa_other_agent_2")
+    _desk_actor(store, id_ws, "personainst_qa_ghost_agent_9")
+
+    report, census = _census()
+
+    assert {row["reason"] for row in census["desk_litter"]} == {
+        "desk_kind_agent_binding"
+    }
+    assert {row["item_id"] for row in census["desk_litter"]} == {
+        "desk-qa_agent",
+        "personainst_qa_ghost_agent_9",
+    }
+    by_item = {row["item_id"]: row for row in census["desk_litter"]}
+    assert by_item["desk-qa_agent"]["persona_instance_id"] == instance_id
+    assert by_item["desk-qa_agent"]["workspace_id"] == bound_ws
+    assert by_item["personainst_qa_ghost_agent_9"]["persona_instance_id"] is None
+    assert by_item["personainst_qa_ghost_agent_9"]["workspace_id"] == id_ws
+    # Both personas are alive and placed — so ``agent_missing`` was never the
+    # honest answer for either row.
+    assert census["placed"] == 2
+    assert other["persona_instance_id"] != instance_id
+    # THE health pin lives here rather than on the widowed fixture, because
+    # this is the only one of the four where litter is the SOLE cause: nothing
+    # is orphaned and nothing is unplaced, so ``notice`` can have come from
+    # nowhere else. (Measured: on the widowed fixture the archived agent actor
+    # leaves a live roster row behind, which is an unplaced row, which raises
+    # the same notice — an assertion there proves nothing about litter.)
+    assert census["orphan_actors"] == []
+    assert census["unplaced_rows"] == []
+    assert census["health"] == "notice"
+    assert report["summary"]["needs_fix"] is False
+    assert report["summary"]["finding_counts"]["desk_litter"] == 2
+
+
+def test_a_healthy_split_agent_and_desk_pair_reports_nothing(
+    isolate_agent_runtime_root,
+):
+    """The CURRENT common shape, and it must produce no row at all.
+
+    The agent lands in the instance-keyed actor, its desk in the class-keyed
+    one (§1) — two files, one persona, nothing wrong. This is the anti-vacuity
+    half of the four tests above: a sweep that flagged every desk would pass all
+    of them and fail only here.
+    """
+
+    workspace = "ws_litter_healthy"
+    _qa_persona_saved()
+    store = _seed_office(workspace)
+
+    agent = _create(workspace, "qa_healthy_agent_2")
+    _desk_actor(store, workspace, f"desk-{agent['persona_instance_id']}")
+
+    report, census = _census()
+
+    assert census["desk_litter"] == []
+    assert census["workspaces"][workspace]["desk_litter"] == []
+    assert report["summary"]["finding_counts"]["desk_litter"] == 0
+    assert census["health"] == "ok"
+    # The desk EXISTS — otherwise the empty list above is satisfied by a store
+    # with no desks in it and proves nothing.
+    assert any(
+        item.kind == "desk"
+        for actor in store.list_actors(workspace)
+        for item in actor.items
+    )
+
+
+def test_one_unreadable_actor_file_makes_the_whole_census_unknown(
+    isolate_agent_runtime_root,
+):
+    """WHOLE-world-or-nothing, and ``desk_litter`` is ``None`` — not ``[]``.
+
+    Every one of the four buckets is a statement about ABSENCE ("no live agent
+    item for this persona", "no roster row backs this binding"), and a file that
+    will not decode is exactly what absence is indistinguishable from. A sweep
+    over the readable remainder would report a perfectly healthy pair as
+    widowed, because the file that would not open is the agent's — inventing
+    the reap target out of an outage.
+
+    KILLING MUTATION: partition the readable remainder anyway, or seed the key
+    with ``[]`` in ``_census_unknown``, and this reds on the count, which would
+    read ``0`` — "looked, found none" — for a class nothing looked at.
+    """
+
+    from agent_runtime import paths
+
+    workspace = "ws_litter_short"
+    _qa_persona_saved()
+    store = _seed_office(workspace)
+
+    agent = _create(workspace, "qa_short_agent_2")
+    _desk_actor(store, workspace, f"desk-{agent['persona_instance_id']}")
+    # The AGENT's file is the one that will not open — the case that would turn
+    # a healthy desk into ``agent_missing`` under the mutation.
+    paths.office_actor_path(workspace, agent["actor_key"]).write_text(
+        "{ this is not json", encoding="utf-8"
+    )
+
+    report, census = _census()
+
+    assert census["health"] == "unknown"
+    assert census["observed"] is False
+    assert census["desk_litter"] is None
+    assert report["summary"]["finding_counts"]["desk_litter"] is None
+    assert "placement_census" in report["summary"]["unexamined_sections"]

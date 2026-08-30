@@ -5756,7 +5756,7 @@ def _cmd_doctor(args) -> int:
             )
         census = hygiene.get("findings", {}).get("placement_census") or {}
         if census.get("observed"):
-            # The census's own line, because its two lists are the payload an
+            # The census's own line, because its lists are the payload an
             # operator acts on and the ``findings:`` counts above only say how
             # many. Orphans are named individually — that id IS the remediation
             # argument — while unplaced rows are counted, since a healthy
@@ -5764,13 +5764,27 @@ def _cmd_doctor(args) -> int:
             print(
                 f"placement census: placed={census.get('placed')} "
                 f"unplaced_rows={len(census.get('unplaced_rows') or [])} "
-                f"orphan_actors={len(census.get('orphan_actors') or [])}"
+                f"orphan_actors={len(census.get('orphan_actors') or [])} "
+                f"desk_litter={len(census.get('desk_litter') or [])}"
             )
             for orphan in census.get("orphan_actors") or []:
                 print(
                     f"  orphan actor: {orphan.get('workspace_id')}/"
                     f"{orphan.get('actor_key')} -> "
                     f"{orphan.get('persona_instance_id')} (no live roster row)"
+                )
+            # Named individually for the same reason orphans are, and with the
+            # REASON on the line: the four buckets have two different cures, and
+            # a bare count would send an operator to reap a desk that is really
+            # a mis-kinded agent. Uncapped, like the orphan block above — the
+            # doctor's contract forbids a silent truncation, and a store with
+            # enough litter to make this long is a store that needs to see it.
+            for litter in census.get("desk_litter") or []:
+                print(
+                    f"  desk litter: {litter.get('workspace_id')}/"
+                    f"{litter.get('actor_key')} item={litter.get('item_id')} "
+                    f"persona={litter.get('persona_id')} "
+                    f"({litter.get('reason')})"
                 )
         binding = hygiene.get("persona_binding") or {}
         if binding.get("diverged_count"):
