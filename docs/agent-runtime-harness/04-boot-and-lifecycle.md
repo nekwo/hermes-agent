@@ -85,6 +85,36 @@ pays for before `ready` anyway. Then three cheap marked phases:
   real entry point turns it on, so a unit test can never write machine-global config. The typed
   outcome is emitted either way — a silent skip is the false-all-clear class the anchor retires.
 
+### Running a chat-binding maintenance verb OUTSIDE the launcher's serve — set `HERMES_HEAD_HOME`
+
+The serve child is spawned with `HERMES_HEAD_HOME` (Stage 0 above). An operator's own shell
+usually is not, and that changes what the chat-binding verbs are allowed to conclude — so the
+skip below is the fence working, not the runtime broken.
+
+Anything that could call a live chat binding STALE fails closed unless **this process** named
+the head home, by `HERMES_HEAD_HOME` or a relay context (`persona_assignments.py:224-228`,
+`_session_presence_probe`). The recorded head pointer for the shared runtime root is enough to
+read or mint a transcript and deliberately not enough to clear a binding: without the rule, a
+verb run under a profile home probes THAT profile's populated database and reads every operator
+chat as absent — which is not hypothetical, it is the 2026-07-25 incident, where a reconcile
+under the `alice` profile home cleared 10 live bindings on a false
+`session_missing_from_session_db` verdict.
+
+What an operator sees, and the way through:
+
+- `harness persona-instance chat-bindings` prints `chat bindings: NOT ANSWERED
+  (head_home_not_authoritative)` and **exits 1** — the question was not answered, which is not
+  the same as "nothing is stale" (`runtime_commands.py:118-128`).
+- `harness persona-instance reconcile` runs its other phases and reports
+  `session_binding_skipped: "head_home_not_authoritative"` with zero repairs
+  (`persona_instance_identity.py:508`, `:547`).
+- Re-run with `HERMES_HEAD_HOME=<the head home>` set — the same value the launcher spawns the
+  serve with, i.e. the **base profile home** (`<root>/profiles/base`), not the state root.
+
+The two nearby preconditions fail closed the same way and for the same reason: a database that
+does not resolve is `session_db_unavailable`, and one that enumerates zero sessions is
+`session_db_empty` — because "the home moved" must never present as "every chat was deleted".
+
 ## Stage 4 — service foundations (`service_foundations_ms`)
 
 Four things, all BEFORE `ready`, because `ready` is the frame that carries them — a client that
