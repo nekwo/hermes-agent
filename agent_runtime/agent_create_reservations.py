@@ -25,7 +25,7 @@ stranding:
     writes and re-enters at the SKILLS phase alone. Added by plan S4.
 ``done``
     Both landed. A replay writes nothing and returns the recorded reply with
-    its actor RE-READ off the live row (``agent_create.replayed_result``) — the
+    its actor RE-READ off the live row (``agent_create._reply``) — the
     receipt FILE is the witness that nothing was written, not the reply's
     revision, which is one of the fields the re-read deliberately refreshes.
 ``rolled_back``
@@ -172,7 +172,7 @@ class AgentCreateReservation:
         What it is NOT is the reply. The office actor is mutable by drag, by
         realm pull and by ``resolve_conflict``, so the recorded ``actor``,
         ``position`` and ``revision`` are observations that expire; the resume
-        arm hands them to :func:`agent_create.replayed_result` and answers with
+        arm hands them to :func:`agent_create._reply` and answers with
         the row as it IS, exactly as the ``done`` arm does. This docstring used
         to argue the opposite — "not a second read of a row anything could have
         moved since" — which is the argument for freezing precisely the three

@@ -1302,6 +1302,122 @@ def test_a_resumed_create_whose_actor_is_gone_says_so_instead_of_inventing_one(
     assert resumed.result["skills"]["assigned"] == ["harness-qa-verdict"]
 
 
+def test_every_ok_exit_answers_one_observation_of_the_live_row(
+    qa_persona, isolated_shared_skills
+):
+    """H-H2: the three ok exits stamp the four observation fields from ONE builder.
+
+    The two existing pins each hold ONE arm to the re-read rule — S4 the
+    ``done`` replay, S4b the ``placed`` resume — and both were written after
+    that arm had already shipped frozen. Neither says anything about the third
+    arm, and neither would notice a FOURTH exit built the old way. This one is
+    pinned at the level the guarantee actually lives at: whatever exit answers
+    ``ok``, ``actor``/``position``/``revision``/``actor_fresh`` describe the row
+    as the store holds it at that moment, and describe it consistently with each
+    other.
+
+    ANTI-VACUITY. The actor is MOVED through a real store write between the
+    fresh create and the two replays, so a reply that echoed its receipt reports
+    the old coordinates and the old revision and reds. The fresh arm is in the
+    same assertion loop because it is the arm whose fields used to be built
+    inline — a reader has to be able to see it obeying the same rule, not merely
+    to be told that it does.
+
+    KILLING MUTATIONS: drop ``result["revision"] = actor.revision`` from
+    :func:`agent_create._reply` and the two replay arms report the receipt's
+    revision beside a freshly-read actor; drop
+    ``result["actor"] = office_actor_wire_row(actor)`` and the fresh arm has no
+    ``actor`` key at all. Either way one builder is proven load-bearing for
+    every exit rather than for the arm its own test was written against.
+    """
+
+    from agent_runtime.office_models import office_actor_wire_row
+    from agent_runtime.office_store import OfficeStore
+
+    def _agent_position(actor):
+        for item in actor.items:
+            if item.kind == "agent":
+                return [float(item.position[0]), float(item.position[1])]
+        raise AssertionError("the create authors exactly one agent item")
+
+    def _assert_describes_the_live_row(label, result):
+        stored = OfficeStore().get_actor(WORKSPACE, result["actor_key"])
+        assert result["actor_fresh"] is True, label
+        assert result["actor"] == office_actor_wire_row(stored), label
+        assert result["revision"] == stored.revision, label
+        assert result["revision"] == result["actor"]["revision"], label
+        assert result["position"] == _agent_position(stored), label
+
+    _seed_workspace()
+
+    # Exit 1 — the fresh write.
+    fresh = perform_agent_create(
+        _params(idempotency_key="one-obs-fresh", placement_id="qa_one_obs_a_agent_2"),
+        persona=qa_persona,
+    )
+    assert fresh.refusal is None
+    _assert_describes_the_live_row("fresh", fresh.result)
+
+    # Exit 3 — the ``placed`` resume. Set up before the move so that BOTH
+    # replay arms have a receipt older than the drag below.
+    resume_key = "one-obs-resume"
+    refused = perform_agent_create(
+        _params(
+            idempotency_key=resume_key,
+            placement_id="qa_one_obs_b_agent_2",
+            skills=["not-a-skill-anyone-has"],
+        ),
+        persona=qa_persona,
+    )
+    assert refused.refusal is not None
+    assert _reservation_state(resume_key) == "placed"
+
+    # The drag. A real store write through the door an operator uses, so both
+    # receipts are now stale in revision AND in position.
+    for actor_key, moved_to in (
+        (fresh.result["actor_key"], [61.0, -23.0]),
+        (_reservation_record(resume_key)["result"]["actor_key"], [62.0, -24.0]),
+    ):
+        stored = OfficeStore().get_actor(WORKSPACE, actor_key)
+        OfficeStore().upsert_actor(
+            WORKSPACE,
+            {
+                "actor_key": actor_key,
+                "persona_id": stored.persona_id,
+                "persona_instance_id": stored.persona_instance_id,
+                "items": [
+                    {
+                        "item_id": item.item_id,
+                        "kind": item.kind,
+                        "position": moved_to,
+                        "folder": item.folder,
+                        "display_name": item.display_name,
+                    }
+                    for item in stored.items
+                ],
+            },
+        )
+
+    # Exit 2 — the ``done`` replay of the fresh key.
+    replayed = perform_agent_create(
+        _params(idempotency_key="one-obs-fresh", placement_id="qa_one_obs_a_agent_2"),
+        persona=qa_persona,
+    )
+    assert replayed.refusal is None
+    assert replayed.result["idempotent_replay"] is True
+    assert replayed.result["position"] == [61.0, -23.0]
+    _assert_describes_the_live_row("done replay", replayed.result)
+
+    resumed = perform_agent_create(
+        _params(idempotency_key=resume_key, placement_id="qa_one_obs_b_agent_2"),
+        persona=qa_persona,
+    )
+    assert resumed.refusal is None
+    assert resumed.result["idempotent_replay"] is False
+    assert resumed.result["position"] == [62.0, -24.0]
+    _assert_describes_the_live_row("placed resume", resumed.result)
+
+
 def test_the_skills_block_says_whether_the_agent_inherits_or_was_overridden(
     qa_persona, isolated_shared_skills
 ):

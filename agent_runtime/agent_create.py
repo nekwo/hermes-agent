@@ -1062,19 +1062,56 @@ def _inherited_skills_ack() -> dict[str, Any]:
     overrides the crashed attempt wrote and still answers ``inherited: True``.
     Re-reading the row here would make the ack a second authority for what this
     key decided (the same argument that keeps ``persona_instance_id`` out of
-    :func:`replayed_result`'s re-read), so the flag stays a statement of the
+    :func:`_reply`'s re-read), so the flag stays a statement of the
     request and this paragraph is the accounting for it.
     """
 
     return {"assigned": [], "installed": [], "inherited": True}
 
 
-def replayed_result(record_result: dict[str, Any]) -> dict[str, Any]:
-    """The recorded ack, with its actor keys RE-READ off the live row.
+def _live_actor(result: dict[str, Any]) -> Any | None:
+    """The actor this reply is about, read off the live store — or ``None``.
 
-    A ``done`` receipt records the ack the FIRST attempt returned, and the
-    office actor has been mutable ever since: an operator drags the agent, a
-    realm pull moves it, ``resolve_conflict`` bumps it. Returning the recorded
+    ``None`` on every failure and on every shape that gives nothing to look up
+    with: an archived actor, a deleted surface, a file that will not decode, a
+    receipt written before ``workspace_id`` rode the ack. The caller renders all
+    of those as ``actor_fresh: False`` rather than fabricating a row, which is
+    why this never raises and never guesses a lookup key.
+    """
+
+    from .office_store import OfficeStore
+
+    workspace_id = result.get("workspace_id")
+    actor_key = result.get("actor_key")
+    if not workspace_id or not actor_key:
+        return None
+    try:
+        return OfficeStore().get_actor(str(workspace_id), str(actor_key))
+    except Exception:  # noqa: BLE001 - NotFound, a decode fault, a gone surface
+        return None
+
+
+def _reply(result: dict[str, Any], *, observed: Any | None = None) -> dict[str, Any]:
+    """THE builder for every ``perform_agent_create`` exit that answers ``ok``.
+
+    ``actor``, ``position``, ``revision`` and ``actor_fresh`` are stamped HERE
+    and nowhere else. They used to be built independently at three sites — the
+    fresh write, the ``done`` replay and the ``placed`` resume — and only one of
+    them owned the rule at a time: S4 taught the ``done`` arm to re-read the
+    actor, S4b (``7ecd3504d6``) taught the ``placed`` arm the same cure one
+    branch over, and nothing stopped a fourth arm from freezing it again. One
+    builder is the structural answer; the arms now differ only in WHAT they
+    observed, which is the one thing that actually differs between them.
+
+    ``observed`` is the actor row this call itself WROTE. Omitted, the exit
+    wrote no row of its own and the live one is read here
+    (:func:`_live_actor`) — which is what makes a replay adopt the row as it is
+    NOW rather than as it was when the key first completed.
+
+    Why the re-read exists at all: a ``done``/``placed`` receipt records the ack
+    the FIRST attempt returned, and the office actor has been mutable ever
+    since — an operator drags the agent, a realm pull moves it,
+    ``resolve_conflict`` bumps it. Returning the recorded
     ``position``/``actor``/``revision`` verbatim therefore hands a replaying
     client the coordinates the agent had at 09:00 and calls them current.
 
@@ -1086,10 +1123,11 @@ def replayed_result(record_result: dict[str, Any]) -> dict[str, Any]:
     back to where it used to be. So the re-read happens here, hermes-side,
     BEFORE that adoption exists rather than after it has been debugged.
 
-    What is deliberately NOT re-read: ``persona_instance_id``, ``placement_id``,
-    ``default_chat_session_id`` and ``skills``. Those are IDENTITY and the
-    recorded decision, not observations — re-deriving them would be a second
-    authority for what this key created.
+    What is deliberately NOT stamped here: ``persona_instance_id``,
+    ``placement_id``, ``default_chat_session_id``, ``actor_key`` and
+    ``skills``. Those are IDENTITY and the recorded decision, not observations
+    — re-deriving them would be a second authority for what this key created,
+    and ``actor_key`` in particular is the key the observation was made WITH.
 
     **The "no second write happened" witness moves.** It used to be the ack's
     ``revision``, which is exactly the field this function stops freezing. The
@@ -1098,36 +1136,28 @@ def replayed_result(record_result: dict[str, Any]) -> dict[str, Any]:
     on the receipt (and on the actor's own revision read from the store), never
     on the reply.
 
-    ``actor_fresh`` is the honesty valve. When the actor cannot be read — it was
-    archived, the workspace was deleted, the file will not decode — the recorded
-    row is returned UNCHANGED and the flag says so. It is never fabricated and
-    never omitted: a client that must know whether it may adopt gets an answer
-    on every reply rather than having to infer one from a missing key.
+    ``actor_fresh`` is the honesty valve, and it is ONE shape on every reply:
+    present whether the row was written by this call (trivially ``true``) or
+    read for it. When a read finds nothing — the actor was archived, the
+    workspace was deleted, the file will not decode — the recorded row is
+    returned UNCHANGED and the flag says so. It is never fabricated and never
+    omitted: a client that must know whether it may adopt gets an answer on
+    every reply rather than having to infer one from a missing key.
     """
 
-    from .office_store import OfficeStore
     from .office_models import office_actor_wire_row
 
-    result = dict(record_result)
-    workspace_id = result.get("workspace_id")
-    actor_key = result.get("actor_key")
-    if not workspace_id or not actor_key:
-        # A receipt from before ``workspace_id`` rode the ack, or a hand-edited
-        # one. Nothing to re-read against, and inventing a lookup key would be
-        # the fabrication this function exists to avoid.
-        result["actor_fresh"] = False
-        return result
-    try:
-        actor = OfficeStore().get_actor(str(workspace_id), str(actor_key))
-    except Exception:  # noqa: BLE001 - NotFound, a decode fault, a gone surface
+    result = dict(result)
+    actor = observed if observed is not None else _live_actor(result)
+    if actor is None:
         result["actor_fresh"] = False
         return result
     # The AGENT item's position, because that is what the ack's ``position``
-    # named when it was written: this verb writes exactly one item and it is of
-    # kind ``agent`` (D6 — it authors no desk). The fallback to "the first item
-    # that has a position" is for a row something else has since added an item
-    # to, where answering ``None`` would be worse than answering the row's own
-    # first coordinate.
+    # names: this verb writes exactly one item and it is of kind ``agent``
+    # (D6 — it authors no desk). The fallback to "the first item that has a
+    # position" is for a row something else has since added an item to, where
+    # answering ``None`` would be worse than answering the row's own first
+    # coordinate.
     items = list(getattr(actor, "items", ()) or ())
     position = None
     for candidate in (
@@ -1265,7 +1295,7 @@ def perform_agent_create(
 
     On an ``idempotent_replay`` the actor is RE-READ rather than echoed from the
     receipt, so a client adopting it adopts the row as it is now
-    (:func:`replayed_result`). ``actor_fresh`` is ``false`` when that re-read
+    (:func:`_reply`). ``actor_fresh`` is ``false`` when that re-read
     could not be made — the actor was archived, the surface is gone — and the
     recorded row is returned unchanged rather than fabricated.
 
@@ -1335,7 +1365,6 @@ def perform_agent_create(
     )
     from .errors import StaleRevision, SyncConflict
     from .office_class_key_guard import ClassKeyedPlacementRefused
-    from .office_models import office_actor_wire_row
     from .office_store import OfficeStore
     from .persona_assignments import (
         PersonaInstanceStore,
@@ -1402,16 +1431,14 @@ def perform_agent_create(
             record = reservation.record
 
             if record.state == STATE_DONE:
-                # The recorded reply, with the actor RE-READ so a client that
-                # adopts it adopts the row as it is NOW and not as it was when
-                # this key first completed (:func:`replayed_result`). Still no
-                # second write — the witness for that is the receipt file and
-                # the actor's own revision in the store, never this reply.
+                # The recorded reply, through THE builder with nothing observed
+                # — so the actor is re-read and a client that adopts it adopts
+                # the row as it is NOW, not as it was when this key first
+                # completed (:func:`_reply`). Still no second write: the witness
+                # for that is the receipt file and the actor's own revision in
+                # the store, never this reply.
                 return AgentCreateOutcome(
-                    result={
-                        **replayed_result(record.result),
-                        "idempotent_replay": True,
-                    }
+                    result={**_reply(record.result), "idempotent_replay": True}
                 )
             if record.state == STATE_PLACED:
                 # Both writes landed under this key; only the skills phase is
@@ -1424,10 +1451,10 @@ def perform_agent_create(
                 # ever since — an operator drags the agent while they go and
                 # look up the skill id they mistyped, and the retry that fixes
                 # the typo would otherwise answer with the coordinates and the
-                # revision the row had before the drag. Same argument, same
-                # cure and the same re-read as the ``done`` arm above
-                # (:func:`replayed_result`), because it is the same defect:
-                # S7's launcher ADOPTS this actor.
+                # revision the row had before the drag. Same argument and the
+                # same builder as the ``done`` arm above (:func:`_reply`),
+                # because it is the same defect: S7's launcher ADOPTS this
+                # actor.
                 instance_id = record.persona_instance_id or ""
                 if not instance_id or not record.result:
                     # A shape this code never writes: ``mark_placed`` always
@@ -1442,7 +1469,7 @@ def perform_agent_create(
                         {"reason": "reservation_corrupt", "rolled_back": False},
                     )
                 skills_started = time.monotonic()
-                result = replayed_result(record.result)
+                result = _reply(record.result)
                 # The CURRENT request's list, not the receipt's. The whole
                 # point of the resume is that an operator who mistyped a skill
                 # id fixes it and retries under the same key; answering with the
@@ -1802,6 +1829,11 @@ def perform_agent_create(
                 return _refused(ERR_HANDLER_FAILED, exc, data)
 
             placement_ms = int((time.monotonic() - placement_started) * 1000)
+            # Identity and timings — everything this call DECIDED. What it
+            # OBSERVED (``actor``/``position``/``revision``/``actor_fresh``) is
+            # stamped by :func:`_reply` below, from the actor the store just
+            # returned, because that is the row the client adopts and this arm
+            # is not allowed a private opinion about it.
             result: dict[str, Any] = {
                 "persona_instance_id": instance.id,
                 "persona_id": instance.persona_id,
@@ -1809,31 +1841,14 @@ def perform_agent_create(
                 "display_name": instance.display_name,
                 "default_chat_session_id": instance.default_chat_session_id,
                 "actor_key": actor.actor_key,
-                "revision": actor.revision,
                 "workspace_id": request.workspace_id,
-                # D2/D11, both additive. ``position`` is what was WRITTEN —
-                # policy or verbatim — so a client that sent none learns where
-                # its agent went without a second read, and one that sent a
-                # position can see it was taken verbatim.
-                #
-                # ``actor`` is the row as STORED, in ``runtime.office.get``'s
-                # own item shape (``office_models.office_actor_wire_row``), and
-                # it is taken off the store's return value rather than rebuilt
-                # from the request — the whole point is that the client stops
-                # trusting its predicted key/position/revision and adopts the
-                # server's.
-                "position": [position[0], position[1]],
-                "actor": office_actor_wire_row(actor),
-                # ONE shape per method: present on every reply, so a client
-                # never has to read "the key is absent" as "yes, it is fresh".
-                # Trivially ``True`` here — this IS the row just written.
-                "actor_fresh": True,
                 "phases": {
                     "instance_ms": instance_ms,
                     "placement_ms": placement_ms,
                     "total_ms": int((time.monotonic() - started) * 1000),
                 },
             }
+            result = _reply(result, observed=actor)
             if request.correlation_id:
                 result["correlation_id"] = request.correlation_id
 

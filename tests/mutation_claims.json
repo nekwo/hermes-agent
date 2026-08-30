@@ -365,7 +365,7 @@
       "path": "agent_runtime/agent_create.py",
       "symbol": "perform_agent_create",
       "operator": "freeze-replay-actor",
-      "find": "                return AgentCreateOutcome(\n                    result={\n                        **replayed_result(record.result),\n                        \"idempotent_replay\": True,\n                    }\n                )",
+      "find": "                return AgentCreateOutcome(\n                    result={**_reply(record.result), \"idempotent_replay\": True}\n                )",
       "replace": "                return AgentCreateOutcome(\n                    result={**record.result, \"idempotent_replay\": True}\n                )",
       "test": [
         "{python}",
@@ -378,10 +378,10 @@
     {
       "id": "s4-an-unreadable-actor-is-reported-as-fresh",
       "path": "agent_runtime/agent_create.py",
-      "symbol": "replayed_result",
+      "symbol": "_reply",
       "operator": "fabricate-freshness",
-      "find": "    except Exception:  # noqa: BLE001 - NotFound, a decode fault, a gone surface\n        result[\"actor_fresh\"] = False\n        return result",
-      "replace": "    except Exception:  # noqa: BLE001 - NotFound, a decode fault, a gone surface\n        result[\"actor_fresh\"] = True\n        return result",
+      "find": "    actor = observed if observed is not None else _live_actor(result)\n    if actor is None:\n        result[\"actor_fresh\"] = False\n        return result",
+      "replace": "    actor = observed if observed is not None else _live_actor(result)\n    if actor is None:\n        result[\"actor_fresh\"] = True\n        return result",
       "test": [
         "{python}",
         "-m",
@@ -485,7 +485,7 @@
       "path": "agent_runtime/agent_create.py",
       "symbol": "perform_agent_create",
       "operator": "freeze-resume-actor",
-      "find": "                result = replayed_result(record.result)",
+      "find": "                result = _reply(record.result)",
       "replace": "                result = dict(record.result)",
       "test": [
         "{python}",
@@ -1278,6 +1278,21 @@
         "-q",
         "tests/hermes_cli/test_harness_cli.py::test_harness_doctor_human_branch_says_nothing_about_an_unexamined_census",
         "--timeout=180"
+      ]
+    },
+    {
+      "id": "hh2-the-one-reply-builder-stops-observing-the-revision",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "_reply",
+      "operator": "drop-observed-revision",
+      "find": "    result[\"actor\"] = office_actor_wire_row(actor)\n    result[\"revision\"] = actor.revision",
+      "replace": "    result[\"actor\"] = office_actor_wire_row(actor)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_every_ok_exit_answers_one_observation_of_the_live_row"
       ]
     }
   ]
