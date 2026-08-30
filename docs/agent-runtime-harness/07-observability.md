@@ -404,7 +404,11 @@ Two properties are the section's contract:
 
 Both sides of the join are compared through `canonical_persona_instance_id`, the
 single derivation authority, so id drift the reconcile verb exists to fold does
-not surface here as a fabricated orphan.
+not surface here as a fabricated orphan. **The actor side only joined that rule
+on 2026-08-30** (H-H11): it was read raw off the file, and `upsert_actor` is not
+the only writer — the realm pull's `adopt_remote_actor` writes a peer's row
+verbatim, legacy spelling and all — so a pulled actor reported as an
+`orphan_actor` against the roster row it names correctly.
 
 **`desk_litter`** (desk-litter plan DL-H1) is the same section's ITEM-level
 sweep, added because the join above is structurally blind to it: that join is

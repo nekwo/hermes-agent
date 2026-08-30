@@ -1225,6 +1225,51 @@
         "-q",
         "tests/agent_runtime/test_harness_doctor.py::test_the_duplicate_reason_classifier_is_total_over_its_bindings"
       ]
+    },
+    {
+      "id": "hh11-the-census-canonicalizes-the-actor-side-of-the-join",
+      "path": "agent_runtime/harness_doctor.py",
+      "symbol": "_placement_census_report",
+      "operator": "read-the-actor-binding-raw",
+      "find": "            (actor, _census_instance_key(actor.persona_instance_id, persona_id=actor.persona_id))",
+      "replace": "            (actor, str(actor.persona_instance_id or \"\").strip())",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_harness_doctor.py::test_a_pulled_actor_with_a_legacy_id_spelling_is_not_an_orphan"
+      ]
+    },
+    {
+      "id": "hh11-a-short-office-scan-forces-the-census-unknown",
+      "path": "agent_runtime/harness_doctor.py",
+      "symbol": "_placement_census_report",
+      "operator": "drop-the-office-side-unreadable-arm",
+      "find": "        if scan.unreadable:\n            unreadable.append(f\"office:{workspace_id}:{scan.unreadable}\")\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_harness_doctor.py::test_an_unreadable_office_actor_file_is_named_in_the_unreadable_list"
+      ]
+    },
+    {
+      "id": "hh11-the-cli-prints-no-census-block-for-an-unobserved-census",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_cmd_doctor",
+      "operator": "render-the-census-block-unconditionally",
+      "find": "        if census.get(\"observed\"):",
+      "replace": "        if True:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_cli.py::test_harness_doctor_human_branch_says_nothing_about_an_unexamined_census"
+      ]
     }
   ]
 }

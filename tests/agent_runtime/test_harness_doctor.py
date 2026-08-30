@@ -1310,3 +1310,103 @@ def test_the_duplicate_reason_classifier_is_total_over_its_bindings(
     from agent_runtime.harness_doctor import _duplicate_placement_reason
 
     assert _duplicate_placement_reason(bindings) == expected
+
+
+# ── census hardening: the join's actor side, the short-world arm, the schema ──
+
+
+def test_a_pulled_actor_with_a_legacy_id_spelling_is_not_an_orphan(
+    isolate_agent_runtime_root,
+):
+    """Both sides of the join are canonicalized, or a SPELLING invents a defect.
+
+    Only the roster side was routed through ``canonical_persona_instance_id``;
+    the actor side was read raw off the file. ``upsert_actor`` is not the only
+    writer — the realm pull's ``adopt_remote_actor`` writes a peer's row
+    verbatim, legacy spelling and all (``persona_personainst_…`` is the drift
+    the reconcile verb exists to fold, with live evidence from 2026-07-10) — so
+    that actor reported as an ``orphan_actor`` against a roster row it names
+    correctly.
+
+    ANTI-VACUITY: the two ids differ as STRINGS and name one instance. A census
+    that had stopped reading the actor's binding at all would report the row as
+    ``unplaced`` and fail here too.
+    """
+
+    workspace = "ws_census_legacy_spelling"
+    _qa_persona_saved()
+    agent = _create_in(workspace, "qa_legacy_agent_2")
+    legacy = f"persona_{agent['persona_instance_id']}"
+    assert legacy != agent["persona_instance_id"]
+    _adopt_actor(
+        workspace,
+        actor_key="peer_legacy_spelling",
+        persona_instance_id=legacy,
+        item_id="peer_qa_desk",
+    )
+
+    report, census = _census()
+
+    assert census["orphan_actors"] == []
+    assert census["unplaced_rows"] == []
+    assert sorted(row["actor_key"] for row in census["placed_actors"]) == [
+        "peer_legacy_spelling",
+        agent["actor_key"],
+    ]
+    # The canonical spelling is what the report carries, both rows alike.
+    assert {row["persona_instance_id"] for row in census["placed_actors"]} == {
+        agent["persona_instance_id"]
+    }
+    assert report["summary"]["finding_counts"]["orphan_actors"] == 0
+
+
+def test_an_unreadable_office_actor_file_is_named_in_the_unreadable_list(
+    isolate_agent_runtime_root,
+):
+    """The office-side ``if scan.unreadable:`` arm, asked directly.
+
+    The census has two ways to learn the office is short — ``scan_actors``
+    RAISING (the ``list_workspaces``/scan exception arm) and a scan that returns
+    rows beside a nonzero ``unreadable`` count — and only the first had a test
+    that named it. They are different code paths with the same verdict, and the
+    second is the one the field produces: a half-written or AV-held actor file
+    decodes nowhere while the directory lists fine.
+
+    KILLING MUTATION: drop the ``if scan.unreadable:`` arm and the census
+    partitions the readable remainder — reporting a healthy placement as an
+    orphan because the file that would not decode is its actor's.
+    """
+
+    from agent_runtime import paths
+
+    workspace = "ws_census_short_office"
+    _qa_persona_saved()
+    agent = _create_in(workspace, "qa_short_office_agent_2")
+    paths.office_actor_path(workspace, agent["actor_key"]).write_text(
+        "{ this is not json", encoding="utf-8"
+    )
+
+    report, census = _census()
+
+    assert census["unreadable"] == [f"office:{workspace}:1"]
+    assert f"office:{workspace}:1" in census["error"]
+    assert census["health"] == "unknown"
+    assert census["observed"] is False
+    assert census["orphan_actors"] is None
+    assert report["summary"]["section_health"]["placement_census"] == "unknown"
+
+
+def test_the_doctor_report_declares_its_schema_version(isolate_agent_runtime_root):
+    """The payload's own version number, asserted by something.
+
+    It was bumped four times — the derived verdict, root-config misplacement,
+    the census, desk litter — with no test on it at all, so a consumer keying
+    off `schema_version` could be broken by a change that added a key AND by a
+    change that forgot to say so, with the same green suite either way. This
+    pins the number; changing it is then a deliberate edit here, beside the
+    numbered note in the payload that says what moved.
+    """
+
+    report = run_harness_doctor(include_worktrees=False, snapshot_builder=lambda: {})
+
+    assert report["schema_version"] == 7

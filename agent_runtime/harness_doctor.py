@@ -514,8 +514,8 @@ def _snapshot_null_id_report(context: _DoctorProbeContext) -> dict[str, Any]:
 # evidence it can only see one snapshot of.
 
 
-def _census_instance_key(instance: Any) -> str:
-    """The one spelling both stores are compared in.
+def _census_instance_key(raw_id: Any, *, persona_id: Any = None) -> str:
+    """The one spelling BOTH sides of the join are compared in.
 
     ``OfficeStore.upsert_actor`` stores ``persona_instance_id`` through
     ``canonical_persona_instance_id`` (via ``_canonical_actor_key``), so a
@@ -524,14 +524,25 @@ def _census_instance_key(instance: Any) -> str:
     the single derivation authority is what keeps this census from inventing
     findings out of the id drift that ``persona instance reconcile`` exists to
     fold.
+
+    **Both sides means both.** Until H-H11 only the roster side was routed
+    through here, and the actor side was read raw off the file — which is not
+    the same set of ids, because ``upsert_actor`` is not the only writer: the
+    realm pull's ``adopt_remote_actor`` writes a PEER's row verbatim, legacy
+    spelling and all, and that actor then reported as an ``orphan_actor``
+    against a roster row it names correctly. A defect invented out of a
+    spelling, in the section whose whole contract is not to do that.
+
+    ``""`` for an id that is absent or unreadable — a class-keyed actor, which
+    is out of the join by construction rather than by omission.
     """
 
     from .persona_assignments import canonical_persona_instance_id
 
-    raw = str(getattr(instance, "id", "") or "").strip()
-    canonical = canonical_persona_instance_id(
-        raw, persona_id=getattr(instance, "persona_id", None)
-    )
+    raw = str(raw_id or "").strip()
+    if not raw:
+        return ""
+    canonical = canonical_persona_instance_id(raw, persona_id=persona_id)
     return canonical or raw
 
 
@@ -902,7 +913,10 @@ def _placement_census_report(_context: _DoctorProbeContext | None = None) -> dic
     if roster.unreadable:
         unreadable.append(f"persona_instances:{roster.unreadable}")
 
-    live_rows = {_census_instance_key(row): row for row in roster.instances}
+    live_rows = {
+        _census_instance_key(row.id, persona_id=row.persona_id): row
+        for row in roster.instances
+    }
 
     store = OfficeStore()
     try:
@@ -958,9 +972,16 @@ def _placement_census_report(_context: _DoctorProbeContext | None = None) -> dic
     for workspace_id, scan in scans:
         ws_placed: list[dict[str, Any]] = []
         ws_orphans: list[dict[str, Any]] = []
-        live_actors = [actor for actor in scan.actors if actor.state != "archived"]
-        for actor in live_actors:
-            instance_id = str(actor.persona_instance_id or "").strip()
+        # ONE canonical binding per live actor, resolved once here and read by
+        # every sweep below, so the actor side of every comparison in this
+        # workspace is spelled the way the roster side is. See
+        # :func:`_census_instance_key` for what a raw read cost.
+        live_actor_bindings = [
+            (actor, _census_instance_key(actor.persona_instance_id, persona_id=actor.persona_id))
+            for actor in scan.actors
+            if actor.state != "archived"
+        ]
+        for actor, instance_id in live_actor_bindings:
             if not instance_id:
                 # A class-keyed actor answers no roster question: it is keyed on
                 # the persona, not on an instance, so it is out of this join by
@@ -984,8 +1005,7 @@ def _placement_census_report(_context: _DoctorProbeContext | None = None) -> dic
         # workspace", and a single pass could only ask "…in an actor I have
         # already read", which is an answer that depends on directory order.
         agent_bindings: dict[str, list[str]] = {}
-        for actor in live_actors:
-            binding = str(actor.persona_instance_id or "").strip()
+        for actor, binding in live_actor_bindings:
             for item in actor.items or ():
                 if getattr(item, "kind", None) != "agent":
                     continue
@@ -996,8 +1016,7 @@ def _placement_census_report(_context: _DoctorProbeContext | None = None) -> dic
                     agent_bindings.setdefault(persona, []).append(binding)
 
         ws_litter: list[dict[str, Any]] = []
-        for actor in live_actors:
-            binding = str(actor.persona_instance_id or "").strip()
+        for actor, binding in live_actor_bindings:
             for item in actor.items or ():
                 if getattr(item, "kind", None) != "desk":
                     continue
@@ -1044,8 +1063,7 @@ def _placement_census_report(_context: _DoctorProbeContext | None = None) -> dic
         # holder, because the fault named here is two ROWS claiming one
         # placement.
         holders: dict[str, list[dict[str, Any]]] = {}
-        for actor in live_actors:
-            binding = str(actor.persona_instance_id or "").strip()
+        for actor, binding in live_actor_bindings:
             seen_in_actor: set[str] = set()
             for item in actor.items or ():
                 item_id = str(getattr(item, "item_id", "") or "").strip()

@@ -458,6 +458,153 @@ def test_the_doctor_detail_line_derives_from_the_section_table(tmp_path, monkeyp
     assert "orphan_worktrees: ok" not in out
 
 
+def test_harness_doctor_human_branch_renders_the_placement_census(
+    tmp_path, monkeypatch, capsys
+):
+    """The census print path, executed — all four of its print sites.
+
+    The renderer test above stubs a two-key report, so `if census.get(
+    "observed")` was false on every run and the whole census block — the
+    summary line, the per-orphan line, the per-litter line and the per-duplicate
+    line — had never executed under test. A typo in any of them reached an
+    operator before it reached a suite.
+
+    The lists are UNCAPPED by contract (the doctor may not truncate silently),
+    and each row is named individually because its id is the remediation's
+    argument — so the assertions are on the rows, not on a count.
+    """
+
+    import hermes_cli.harness as harness_mod
+
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "agent-runtime"))
+    monkeypatch.setattr(
+        harness_mod,
+        "run_harness_doctor",
+        lambda **_kwargs: {
+            "ok": False,
+            "summary": {
+                "finding_counts": {"orphan_actors": 1},
+                "section_health": {"placement_census": "defect"},
+                "needs_fix": True,
+            },
+            "findings": {
+                "event_log": {
+                    "size_bytes": 0,
+                    "line_count": 0,
+                    "archived_event_slices": 0,
+                    "index_health": "ok",
+                },
+                "placement_census": {
+                    "health": "defect",
+                    "observed": True,
+                    "placed": 2,
+                    "unplaced_rows": [{"persona_instance_id": "personainst_qa_agent_9"}],
+                    "orphan_actors": [
+                        {
+                            "workspace_id": "ws_demo",
+                            "actor_key": "personainst_qa_agent_2",
+                            "persona_instance_id": "personainst_qa_agent_2",
+                        }
+                    ],
+                    "desk_litter": [
+                        {
+                            "workspace_id": "ws_demo",
+                            "actor_key": "qa",
+                            "item_id": "qa_desk",
+                            "persona_id": "qa",
+                            "reason": "agent_missing",
+                        }
+                    ],
+                    "duplicate_placements": [
+                        {
+                            "workspace_id": "ws_demo",
+                            "item_id": "qa_desk_2",
+                            "holders": [
+                                {"actor_key": "personainst_qa_agent_2"},
+                                {"actor_key": "peer_qa_desk_holder"},
+                            ],
+                            "reason": "same_instance",
+                        }
+                    ],
+                },
+            },
+        },
+    )
+    args = parser().parse_args(["harness", "doctor"])
+
+    assert args.func(args) == 0
+    out = capsys.readouterr().out
+    assert (
+        "placement census: placed=2 unplaced_rows=1 orphan_actors=1 "
+        "desk_litter=1 duplicate_placements=1" in out
+    )
+    assert (
+        "  orphan actor: ws_demo/personainst_qa_agent_2 -> "
+        "personainst_qa_agent_2 (no live roster row)" in out
+    )
+    assert (
+        "  desk litter: ws_demo/qa item=qa_desk persona=qa (agent_missing)" in out
+    )
+    assert (
+        "  duplicate placement: ws_demo/qa_desk_2 held by "
+        "personainst_qa_agent_2, peer_qa_desk_holder (same_instance)" in out
+    )
+
+
+def test_harness_doctor_human_branch_says_nothing_about_an_unexamined_census(
+    tmp_path, monkeypatch, capsys
+):
+    """``observed: false`` prints no census block at all.
+
+    The anti-vacuity half of the test above: a renderer that printed the block
+    unconditionally would spend `placed=None` and four empty lists as though
+    they were observations — the false all-clear in its rendered form.
+    """
+
+    import hermes_cli.harness as harness_mod
+
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "agent-runtime"))
+    monkeypatch.setattr(
+        harness_mod,
+        "run_harness_doctor",
+        lambda **_kwargs: {
+            "ok": False,
+            "summary": {
+                "finding_counts": {"orphan_actors": None},
+                "section_health": {"placement_census": "unknown"},
+                "needs_fix": False,
+            },
+            "findings": {
+                "event_log": {
+                    "size_bytes": 0,
+                    "line_count": 0,
+                    "archived_event_slices": 0,
+                    "index_health": "ok",
+                },
+                "placement_census": {
+                    "health": "unknown",
+                    "observed": False,
+                    "error": "office unreadable",
+                    "placed": None,
+                    "unplaced_rows": None,
+                    "orphan_actors": None,
+                    "desk_litter": None,
+                    "duplicate_placements": None,
+                },
+            },
+        },
+    )
+    args = parser().parse_args(["harness", "doctor"])
+
+    assert args.func(args) == 0
+    out = capsys.readouterr().out
+    assert "placement census:" not in out
+    assert "findings: orphan_actors=unknown" in out
+    # The section still reports itself, with its error, on the per-section line.
+    assert "  placement_census: unknown (office unreadable)" in out
+    assert "verdict: UNKNOWN" in out
+
+
 def test_harness_parser_exposes_config_migrate_and_verify():
     p = parser()
     assert p.parse_args(["harness", "config", "show", "--json"]).config_command == "show"
