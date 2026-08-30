@@ -2,8 +2,26 @@
 
 **Owner domain:** system architecture ([01-system-architecture.md](../01-system-architecture.md)) —
 the charsheet lane and the mission-chat turn loop are both named there.
-**Status:** PLANNED. Nothing below is implemented; this file is the measured
-accounting and the staged fix order.
+**Status, corrected 2026-08-30: ~~PLANNED. Nothing below is implemented.~~
+MOSTLY BUILT — six of eight stages shipped 2026-08-29/30.** This file stays in
+`planned/` for the two that have not; the measured accounting above the stage
+list is unchanged and is what every stage was priced against.
+
+| Stage | State | Receipt |
+|---|---|---|
+| 1b — authoring is a delegation, not the supervisor's own pipeline | SHIPPED | `f8ae01a95` |
+| 2 — the skill restructured: 19.7k head + six references | SHIPPED | `b981b8d87` |
+| 3a — the mission-chat lane's `process wait` clamp to 600 s | SHIPPED | `d612cdf1a` |
+| 3b — `process notify`: fire the verb, end the turn, get the receipt on exit | SHIPPED | `29b8ecda4`, + `aa31cef44` (an evicted notify promise is logged, never silent) |
+| 4a — `thumb --square` | SHIPPED | `0a75a0b9a`, + `8a606d465` (square crops keep the sprite's transparency) |
+| 4b — payloads carry a machine `next` hint | SHIPPED | `cc519e638` |
+| **5 — `characters auto`, the one-shot autopilot verb** | **OPEN** | gated on owner ruling **R-3**, unmoved |
+| **6 — element `summary`/`tool_input` cross-pairing on concurrent tool starts** | **OPEN** | independent of everything else; land whenever |
+
+Stage 1's other option (**1a**, adding the skill to the persona's assignment)
+was not the one taken; 1b is the shipped posture. Where a stage's text below and
+its shipped commit disagree, the commit won — read the stage text as the design
+it was built from, not as a description of live behaviour.
 **Raised / verified:** 2026-08-29 against live turn records of 2026-08-28
 (`X:\Eternia\.hermes\agent-runtime\mission_chat_turns\` +
 `prompt_observability[_archive]/ctx_*.json`), the skill at
