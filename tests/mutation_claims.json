@@ -1385,6 +1385,51 @@
         "-q",
         "tests/agent_runtime/test_harness_doctor.py::test_the_minted_kind_is_what_the_store_recorded_not_what_the_id_looks_like"
       ]
+    },
+    {
+      "id": "hh13-the-dispatcher-stops-handing-over-the-proven-caller",
+      "path": "agent_runtime/serve_rpc.py",
+      "symbol": "_runtime_agent_retire",
+      "operator": "drop-caller-from-service-call",
+      "find": "    outcome = perform_agent_retire(\n        params, caller=context.caller if context is not None else None\n    )",
+      "replace": "    outcome = perform_agent_retire(params)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_serve_rpc_authorization.py::test_the_handlers_hand_the_proven_caller_to_the_service"
+      ]
+    },
+    {
+      "id": "hh13-the-retire-service-loses-its-backstop",
+      "path": "agent_runtime/agent_retire.py",
+      "symbol": "perform_agent_retire",
+      "operator": "skip-service-backstop",
+      "find": "    denied = service_backstop(caller, method=\"runtime.agent.retire\")",
+      "replace": "    denied = None",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_serve_rpc_authorization.py::test_the_service_refuses_a_read_tier_caller_with_no_dispatcher_involved"
+      ]
+    },
+    {
+      "id": "hh13-the-create-service-loses-its-backstop",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "perform_agent_create",
+      "operator": "skip-service-backstop",
+      "find": "    denied = service_backstop(caller, method=\"runtime.agent.create\")",
+      "replace": "    denied = None",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_serve_rpc_authorization.py::test_the_service_refuses_a_read_tier_caller_with_no_dispatcher_involved"
+      ]
     }
   ]
 }
