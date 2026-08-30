@@ -45,6 +45,7 @@ from agent_runtime.errors import (
 from agent_runtime.events import EventLog
 from agent_runtime.harness_doctor import (
     DEFAULT_WORKTREE_MIN_AGE_SECONDS,
+    doctor_detail_sources,
     run_harness_doctor,
 )
 from agent_runtime.models import AgentPersona, Event, apply_instance_model_overrides
@@ -5720,16 +5721,12 @@ def _cmd_doctor(args) -> int:
                 for name, count in counts.items()
             )
         )
-        # Where each section keeps its own error text. ``snapshot_null_id_rows``
-        # is a bare list of rows, so its build outcome lives one key over.
-        detail_sources = {
-            "orphan_worktrees": hygiene.get("findings", {}).get("orphan_worktrees"),
-            "snapshot_null_id_rows": hygiene.get("findings", {}).get("snapshot_build"),
-            "event_log": hygiene.get("findings", {}).get("event_log"),
-            "model_authority": hygiene.get("model_authority"),
-            "persona_binding": hygiene.get("persona_binding"),
-            "placement_census": hygiene.get("findings", {}).get("placement_census"),
-        }
+        # Where each section keeps its own error text — DERIVED from the
+        # doctor's own section table, not re-typed here. This roster was the
+        # fourth copy of one set and the only one no test pinned, so a section
+        # added to the report but forgotten here was counted and verdicted while
+        # rendering no operator line at all.
+        detail_sources = doctor_detail_sources(hygiene)
         for name, health in sorted((summary.get("section_health") or {}).items()):
             if health in (None, "ok"):
                 continue

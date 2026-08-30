@@ -5,7 +5,7 @@
       "path": "hermes_cli/harness_parts/persona_commands.py",
       "symbol": "_cli_create_persona",
       "operator": "remove-typed-fault-wrap",
-      "find": "    try:\n        return _persona_by_id(load_agent_runtime_config(), persona_id)\n    except Exception as exc:  # noqa: BLE001 \u2014 re-raised as the typed fault\n        raise PersonaRosterUnavailable(str(exc)) from exc",
+      "find": "    try:\n        return _persona_by_id(load_agent_runtime_config(), persona_id)\n    except Exception as exc:  # noqa: BLE001 — re-raised as the typed fault\n        raise PersonaRosterUnavailable(str(exc)) from exc",
       "replace": "    return _persona_by_id(load_agent_runtime_config(), persona_id)",
       "test": [
         "{python}",
@@ -20,8 +20,8 @@
       "path": "hermes_cli/harness_parts/persona_commands.py",
       "symbol": "_cli_create_persona",
       "operator": "degrade-fault-to-absence",
-      "find": "    except Exception as exc:  # noqa: BLE001 \u2014 re-raised as the typed fault\n        raise PersonaRosterUnavailable(str(exc)) from exc",
-      "replace": "    except Exception:  # noqa: BLE001 \u2014 re-raised as the typed fault\n        return None",
+      "find": "    except Exception as exc:  # noqa: BLE001 — re-raised as the typed fault\n        raise PersonaRosterUnavailable(str(exc)) from exc",
+      "replace": "    except Exception:  # noqa: BLE001 — re-raised as the typed fault\n        return None",
       "test": [
         "{python}",
         "-m",
@@ -215,7 +215,7 @@
       "path": "agent_runtime/skill_install.py",
       "symbol": "install_and_verify_harness_skill",
       "operator": "drop-post-install-verification",
-      "find": "    result = install_harness_skill(skill)\n    states = harness_skill_hash_states([skill])\n    if result.ok and states and states[0].state == SKILL_HASH_MATCHES:\n        return result",
+      "find": "    result = install_harness_skill(skill)\n    if result.installed and result.ok and not harness_skill_hash_mismatches([skill]):\n        return result",
       "replace": "    result = install_harness_skill(skill)\n    return result",
       "test": [
         "{python}",
@@ -684,7 +684,7 @@
     {
       "id": "r1-create-stops-fencing-the-supplied-placement",
       "path": "agent_runtime/agent_create.py",
-      "symbol": "normalize_agent_create",
+      "symbol": "_parse_request",
       "operator": "remove-guard",
       "find": "        if not looks_like_deliberate_placement(placement_id):\n            raise AgentCreateInvalid(\n                PLACEMENT_ID_NOT_DISCRIMINABLE_REASON,\n                placement_id_not_discriminable_message(placement_id),\n            )",
       "replace": "        pass",
@@ -986,7 +986,7 @@
       "path": "agent_runtime/harness_doctor.py",
       "symbol": "_placement_census_report",
       "operator": "drop-pulled-orphan-repair",
-      "find": "            \"install never held \u2014 a realm-pulled placement, whose instance \"\n            \"stayed on the peer \u2014 has nothing to retire, and is evicted from \"\n            \"this install with `harness office actor-remove --workspace <ws> \"\n            \"--actor <key> --local-only` (drop --local-only only if you mean to \"\n            \"delete the placement realm-wide, which is what the launcher's own \"\n            \"delete does); an unplaced row is either awaiting a \"",
+      "find": "            \"install never held — a realm-pulled placement, whose instance \"\n            \"stayed on the peer — has nothing to retire, and is cleared with \"\n            \"`harness office actor-remove --workspace <ws> --actor <key>` or \"\n            \"`runtime.office.remove`; an unplaced row is either awaiting a \"",
       "replace": "            \"install never held is cleared the same way; an unplaced row is either awaiting a \"",
       "test": [
         "{python}",
@@ -1134,6 +1134,51 @@
         "pytest",
         "-q",
         "tests/agent_runtime/test_harness_doctor.py::test_the_orphan_remediation_names_the_verb_that_works_for_a_pulled_orphan"
+      ]
+    },
+    {
+      "id": "hh1-doctor-counts-are-none-when-a-section-was-not-examined",
+      "path": "agent_runtime/harness_doctor.py",
+      "symbol": "run_harness_doctor",
+      "operator": "count-an-unobserved-class-as-zero",
+      "find": "            finding_counts[count_name] = (\n                None\n                if unexamined_section\n                else len(reports[section.name].get(list_key) or [])\n            )",
+      "replace": "            finding_counts[count_name] = len(reports[section.name].get(list_key) or [])",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_harness_doctor.py::test_an_unexamined_section_counts_none_from_the_same_table_row"
+      ]
+    },
+    {
+      "id": "hh1-a-section-publishes-every-payload-key-its-row-declares",
+      "path": "agent_runtime/harness_doctor.py",
+      "symbol": "run_harness_doctor",
+      "operator": "publish-only-the-first-declared-key",
+      "find": "        for destination, key in section.publish:\n            _publish_at(payload, destination, report if key is None else report.get(key))",
+      "replace": "        for destination, key in section.publish[:1]:\n            _publish_at(payload, destination, report if key is None else report.get(key))",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_harness_doctor.py::test_a_section_may_publish_two_payload_keys_from_one_probe"
+      ]
+    },
+    {
+      "id": "hh1-the-cli-detail-roster-derives-from-the-section-table",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_cmd_doctor",
+      "operator": "re-type-the-detail-roster-by-hand",
+      "find": "        detail_sources = doctor_detail_sources(hygiene)",
+      "replace": "        detail_sources = {\n            \"orphan_worktrees\": hygiene.get(\"findings\", {}).get(\"orphan_worktrees\"),\n        }",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_cli.py::test_the_doctor_detail_line_derives_from_the_section_table"
       ]
     }
   ]

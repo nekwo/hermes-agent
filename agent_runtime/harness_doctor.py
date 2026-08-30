@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import re
 from typing import Any, Callable
 
@@ -29,6 +30,109 @@ HEALTH_UNKNOWN = "unknown"  # NOT examined — the probe failed
 
 def _error_text(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"[:320]
+
+
+# ── the section table: ONE declaration, four derived rosters ─────────────────
+#
+# A doctor section used to be added by editing four hand-maintained lists of one
+# set — ``finding_counts``, ``section_health`` and ``findings`` here, plus
+# ``detail_sources`` in the CLI printer — with only ``section_health``'s key set
+# pinned by a test. A section added to three of the four was therefore counted
+# and verdicted while rendering NO operator line, and nothing failed. That is
+# the same shape the derived-verdict rework already fixed once by hand (``ok``
+# and ``needs_fix`` were computed from two of five sections), which is why this
+# one is fixed structurally instead: every roster below is DERIVED from
+# :data:`DOCTOR_SECTIONS`, so a new section is one table row and a missing one
+# is unspellable.
+#
+# The table lives at the BOTTOM of this module, where the probes it names are
+# defined. Read it first anyway — it is the index to everything above it.
+
+
+@dataclass(frozen=True)
+class _DoctorProbeContext:
+    """Every input a probe may read, so all probes share ONE signature.
+
+    A uniform signature is what lets the table hold the probe: a roster of
+    sections that could not also name how to run them would be a fifth list to
+    keep in step with the other four.
+    """
+
+    fix: bool
+    dry_run: bool
+    worktree_min_age_seconds: int
+    include_worktrees: bool
+    event_log: EventLog
+    snapshot_builder: Callable[[], dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class DoctorSection:
+    """One doctor section, declared once.
+
+    * ``name`` — its key in ``summary.section_health``, and the name an
+      operator sees on the CLI's per-section line.
+    * ``probe`` — the callable that observes it. It must return a dict carrying
+      a ``health`` from the vocabulary above; a section whose probe answers
+      without one reads ``unknown``, never ``ok``. A probe that reads NOTHING
+      from the context declares it optional (``_context=None``), which says so
+      in the signature and keeps the probe callable as a bare seam — several
+      suites unit-test one section by calling its probe directly, and making
+      them build a context to hand a function that ignores it would be
+      ceremony, not clarity.
+    * ``publish`` — where its report lands in the payload, as
+      ``(dotted destination, key inside the report)``. ``None`` publishes the
+      whole report dict; a key publishes that member, which is how
+      ``snapshot_null_id_rows`` (the row list) and ``snapshot_build`` (whether
+      the frame built at all) stay two payload keys from one probe.
+    * ``counts`` — the ``summary.finding_counts`` entries it contributes, as
+      ``(count name, list key inside the report)``. A count is an OBSERVATION:
+      an unexamined section's counts are ``None``, never ``0`` — see
+      :func:`run_harness_doctor`.
+    * ``detail_source`` — the dotted payload path whose ``error`` the CLI
+      prints beside a non-ok section. Usually the section's own report; the
+      exception is ``snapshot_null_id_rows``, a bare list whose build outcome
+      lives one key over.
+    """
+
+    name: str
+    probe: Callable[[_DoctorProbeContext], dict[str, Any]]
+    publish: tuple[tuple[str, str | None], ...]
+    detail_source: str
+    counts: tuple[tuple[str, str], ...] = field(default=())
+
+
+def _payload_at(payload: dict[str, Any], path: str) -> Any:
+    head, _, tail = path.partition(".")
+    value = payload.get(head)
+    if not tail:
+        return value
+    return value.get(tail) if isinstance(value, dict) else None
+
+
+def _publish_at(payload: dict[str, Any], path: str, value: Any) -> None:
+    head, _, tail = path.partition(".")
+    if not tail:
+        payload[head] = value
+        return
+    nested = payload.setdefault(head, {})
+    if not isinstance(nested, dict):  # pragma: no cover - the table names dicts
+        raise TypeError(f"cannot publish {path}: {head} is not a mapping")
+    nested[tail] = value
+
+
+def doctor_detail_sources(report: dict[str, Any]) -> dict[str, Any]:
+    """Where each section keeps its own error text, keyed by section name.
+
+    The CLI's fourth roster, derived rather than re-typed: a section added to
+    the table renders its detail line the day it is added, and a section that
+    keeps its error somewhere unusual says so once, in the table.
+    """
+
+    return {
+        section.name: _payload_at(report, section.detail_source)
+        for section in DOCTOR_SECTIONS
+    }
 
 
 def run_harness_doctor(
@@ -63,90 +167,46 @@ def run_harness_doctor(
 
     ``notice`` sections (stale/duplicate model pins) are informational by
     design and move neither flag.
+
+    **Every roster here is derived from :data:`DOCTOR_SECTIONS`.** Which
+    sections exist, what each contributes to ``finding_counts``, and where each
+    report lands in the payload are declared once in that table; this function
+    only spends it.
     """
 
     ref = now()
-    event_log = event_log or EventLog()
-    snapshot_builder = snapshot_builder or build_snapshot
-    if include_worktrees:
-        worktrees = _worktree_report(
-            min_age_seconds=max(0, int(worktree_min_age_seconds or 0)),
-            event_log=event_log,
-            dry_run=not fix or dry_run,
-        )
-    else:
-        worktrees = {
-            "reaped": [],
-            "kept": [],
-            "dry_run": True,
-            "skipped": "worktree_scan_disabled",
-            "health": HEALTH_OK,
-        }
+    context = _DoctorProbeContext(
+        fix=bool(fix),
+        dry_run=bool(dry_run),
+        worktree_min_age_seconds=max(0, int(worktree_min_age_seconds or 0)),
+        include_worktrees=bool(include_worktrees),
+        event_log=event_log or EventLog(),
+        snapshot_builder=snapshot_builder or build_snapshot,
+    )
 
-    snapshot_defects, snapshot_build = _snapshot_null_id_defects(snapshot_builder)
-    event_health = _event_log_report()
-    model_authority = _model_authority_report()
-    persona_binding = _persona_binding_report()
-    root_config = _root_config_misplacement_report()
-    placement_census = _placement_census_report()
+    reports = {section.name: section.probe(context) for section in DOCTOR_SECTIONS}
+    section_health = {
+        section.name: reports[section.name].get("health", HEALTH_UNKNOWN)
+        for section in DOCTOR_SECTIONS
+    }
     # A count is an OBSERVATION. When the probe for a class did not run, the
     # honest count is ``None`` ("not observed"), never ``0`` ("observed none") —
     # a zero here is what sends an investigator hunting a defect class the
-    # doctor never actually looked at.
-    finding_counts = {
-        "orphan_worktrees": (
-            None
-            if worktrees.get("health") == HEALTH_UNKNOWN
-            else len(worktrees.get("reaped") or [])
-        ),
-        "snapshot_null_id_rows": (
-            None if snapshot_build["health"] == HEALTH_UNKNOWN else len(snapshot_defects)
-        ),
-        "misplaced_root_only_keys": (
-            None
-            if root_config.get("health") == HEALTH_UNKNOWN
-            else len(root_config.get("misplaced") or [])
-        ),
-        # The census contributes TWO counts because they are two different
-        # verdicts: an orphan actor is a defect and an unplaced row is a legal
-        # state of a supported door. Folding them into one number would make the
-        # doctor's headline count climb every time the roster-only recovery
-        # door is used correctly.
-        "orphan_actors": (
-            None
-            if placement_census.get("health") == HEALTH_UNKNOWN
-            else len(placement_census.get("orphan_actors") or [])
-        ),
-        "unplaced_rows": (
-            None
-            if placement_census.get("health") == HEALTH_UNKNOWN
-            else len(placement_census.get("unplaced_rows") or [])
-        ),
-        # THREE, since DL-H1. Desk litter is a third verdict again: not a
-        # defect (nothing mis-renders — the desk is authored content standing
-        # where its agent no longer is) and not a legal door either. It rides
-        # the census's own report dict rather than a new section precisely so
-        # this is the ONLY roster the extension touches — ``section_health``,
-        # ``findings`` and the CLI's ``detail_sources`` already carry a
-        # ``placement_census`` row each. The four-hand-maintained-rosters
-        # weakness stays open and is deliberately not worked here.
-        "desk_litter": (
-            None
-            if placement_census.get("health") == HEALTH_UNKNOWN
-            else len(placement_census.get("desk_litter") or [])
-        ),
-    }
-    section_health = {
-        "orphan_worktrees": worktrees.get("health", HEALTH_UNKNOWN),
-        "snapshot_null_id_rows": snapshot_build["health"],
-        "event_log": event_health.get("health", HEALTH_UNKNOWN),
-        "model_authority": model_authority.get("health", HEALTH_UNKNOWN),
-        "persona_binding": persona_binding.get("health", HEALTH_UNKNOWN),
-        "root_config_misplacement": root_config.get("health", HEALTH_UNKNOWN),
-        "placement_census": placement_census.get("health", HEALTH_UNKNOWN),
-    }
+    # doctor never actually looked at. The rule is applied HERE, once, for every
+    # count in the table: it used to be re-typed per entry, which is a rule
+    # copied six times and free to be forgotten on the seventh.
+    finding_counts: dict[str, Any] = {}
+    for section in DOCTOR_SECTIONS:
+        unexamined_section = section_health[section.name] == HEALTH_UNKNOWN
+        for count_name, list_key in section.counts:
+            finding_counts[count_name] = (
+                None
+                if unexamined_section
+                else len(reports[section.name].get(list_key) or [])
+            )
     defective = sorted(k for k, v in section_health.items() if v == HEALTH_DEFECT)
     unexamined = sorted(k for k, v in section_health.items() if v == HEALTH_UNKNOWN)
+    worktrees = reports["orphan_worktrees"]
     repairs = {
         "worktrees_reaped": (
             [item.get("worktree") for item in (worktrees.get("reaped") or []) if item.get("worktree")]
@@ -155,7 +215,7 @@ def run_harness_doctor(
         ),
         "dry_run": bool(dry_run),
     }
-    return {
+    payload: dict[str, Any] = {
         # 3: ``ok``/``needs_fix`` became derived, ``summary.section_health`` /
         # ``defective_sections`` / ``unexamined_sections`` are new, a
         # ``finding_counts`` value may now be ``None`` (class not observed), and
@@ -191,36 +251,45 @@ def run_harness_doctor(
             "preserved_evidence": True,
             "product_repos_modified": False,
         },
-        "findings": {
-            "orphan_worktrees": worktrees,
-            "snapshot_null_id_rows": snapshot_defects,
-            "snapshot_build": snapshot_build,
-            "event_log": event_health,
-            "root_config_misplacement": root_config,
-            "placement_census": placement_census,
-        },
-        "model_authority": model_authority,
-        "persona_binding": persona_binding,
-        "repairs": repairs,
+        # Seeded empty and filled from the table below, so the sections that
+        # publish here need no second listing.
+        "findings": {},
     }
+    for section in DOCTOR_SECTIONS:
+        report = reports[section.name]
+        for destination, key in section.publish:
+            _publish_at(payload, destination, report if key is None else report.get(key))
+    payload["repairs"] = repairs
+    return payload
 
 
-def _worktree_report(
-    *, min_age_seconds: int, event_log: EventLog, dry_run: bool
-) -> dict[str, Any]:
+def _worktree_report(context: _DoctorProbeContext) -> dict[str, Any]:
     """Orphan-worktree sweep, with a failed sweep reported as unexamined.
 
     The sweep shells out to git across every registered worktree, so it is I/O
     that can fail (a deleted checkout, a locked index, a git that is not on
     PATH). It ran unguarded, which meant a failure either crashed the whole
     doctor or — worse, once wrapped naively — would have read as "no orphans".
+
+    ``include_worktrees=False`` is the caller's own choice not to scan, so it
+    reports ``ok`` + ``skipped`` rather than ``unknown``: nothing failed to be
+    observed, the observation was declined.
     """
 
+    if not context.include_worktrees:
+        return {
+            "reaped": [],
+            "kept": [],
+            "dry_run": True,
+            "skipped": "worktree_scan_disabled",
+            "health": HEALTH_OK,
+        }
+    dry_run = not context.fix or context.dry_run
     try:
         report = dict(
             reap_orphan_worktrees(
-                min_age_seconds=min_age_seconds,
-                event_log=event_log,
+                min_age_seconds=context.worktree_min_age_seconds,
+                event_log=context.event_log,
                 dry_run=dry_run,
             )
         )
@@ -237,7 +306,7 @@ def _worktree_report(
     return report
 
 
-def _event_log_report() -> dict[str, Any]:
+def _event_log_report(_context: _DoctorProbeContext | None = None) -> dict[str, Any]:
     """Event-log health, which rode the payload but never moved the verdict.
 
     ``event_log_health`` stats the live slice and the rotation manifest, so on
@@ -254,7 +323,7 @@ def _event_log_report() -> dict[str, Any]:
     return health
 
 
-def _persona_binding_report() -> dict[str, Any]:
+def _persona_binding_report(_context: _DoctorProbeContext | None = None) -> dict[str, Any]:
     try:
         from .persona_profile_binding import binding_index
 
@@ -280,7 +349,7 @@ def _persona_binding_report() -> dict[str, Any]:
     }
 
 
-def _root_config_misplacement_report() -> dict[str, Any]:
+def _root_config_misplacement_report(_context: _DoctorProbeContext | None = None) -> dict[str, Any]:
     """Root-only config keys an operator set in a PROFILE, where nothing reads them.
 
     Four keys resolve through :func:`config.harness_root_config_path` and never
@@ -334,7 +403,7 @@ def _root_config_misplacement_report() -> dict[str, Any]:
     }
 
 
-def _model_authority_report() -> dict[str, Any]:
+def _model_authority_report(_context: _DoctorProbeContext | None = None) -> dict[str, Any]:
     from .config import describe_runtime_default_authority
 
     try:
@@ -376,9 +445,7 @@ def _model_authority_report() -> dict[str, Any]:
     }
 
 
-def _snapshot_null_id_defects(
-    snapshot_builder: Callable[[], dict[str, Any]],
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def _snapshot_null_id_report(context: _DoctorProbeContext) -> dict[str, Any]:
     """Null-id rows observed in the frame, plus whether the frame built at all.
 
     A build CRASH used to be returned as one ``snapshot_null_id_rows`` defect —
@@ -387,16 +454,21 @@ def _snapshot_null_id_defects(
     separate: the defect list only ever holds rows actually inspected, and the
     build outcome rides its own ``snapshot_build`` section as ``unknown`` + the
     error, which clears the report's ``ok`` without inventing a finding.
+
+    They are two PAYLOAD keys from this one probe — ``rows`` and ``build`` —
+    published by the table, which is why the section still contributes exactly
+    one ``health`` and one count.
     """
 
     try:
-        snapshot = snapshot_builder()
+        snapshot = context.snapshot_builder()
     except Exception as exc:
-        return [], {
+        build = {
             "health": HEALTH_UNKNOWN,
             "observed": False,
             "error": _error_text(exc),
         }
+        return {"health": HEALTH_UNKNOWN, "rows": [], "build": build}
     expected = {
         "agents": "persona_id",
         "persona_instances": "persona_instance_id",
@@ -409,9 +481,11 @@ def _snapshot_null_id_defects(
         for index, row in enumerate(rows):
             if isinstance(row, dict) and not row.get(id_key):
                 defects.append({"collection": collection, "index": index, "id_key": id_key})
-    return defects, {
-        "health": HEALTH_DEFECT if defects else HEALTH_OK,
-        "observed": True,
+    health = HEALTH_DEFECT if defects else HEALTH_OK
+    return {
+        "health": health,
+        "rows": defects,
+        "build": {"health": health, "observed": True},
     }
 
 
@@ -680,7 +754,7 @@ def _persona_has_retired_instance(persona_id: str, retired: frozenset[str]) -> b
     )
 
 
-def _placement_census_report() -> dict[str, Any]:
+def _placement_census_report(_context: _DoctorProbeContext | None = None) -> dict[str, Any]:
     """Per-workspace roster/office join: placed, unplaced rows, orphan actors.
 
     The definitions are the plan's (D1), stated once here because three
@@ -954,3 +1028,79 @@ def _placement_census_report() -> dict[str, Any]:
         ),
     }
     return report
+
+
+# ── THE table ─────────────────────────────────────────────────────────────────
+#
+# Adding a section is one row here and nothing else: ``summary.section_health``,
+# ``summary.finding_counts``, the payload placement, and the CLI's per-section
+# detail line are all derived from it (see :class:`DoctorSection`). Order is the
+# operator-facing order of ``finding_counts``, so keep a new section where its
+# findings read naturally rather than appending by habit.
+DOCTOR_SECTIONS: tuple[DoctorSection, ...] = (
+    DoctorSection(
+        name="orphan_worktrees",
+        probe=_worktree_report,
+        publish=(("findings.orphan_worktrees", None),),
+        detail_source="findings.orphan_worktrees",
+        counts=(("orphan_worktrees", "reaped"),),
+    ),
+    DoctorSection(
+        name="snapshot_null_id_rows",
+        probe=_snapshot_null_id_report,
+        publish=(
+            ("findings.snapshot_null_id_rows", "rows"),
+            ("findings.snapshot_build", "build"),
+        ),
+        # A bare list of rows carries no error text; the build outcome does.
+        detail_source="findings.snapshot_build",
+        counts=(("snapshot_null_id_rows", "rows"),),
+    ),
+    DoctorSection(
+        name="event_log",
+        probe=_event_log_report,
+        publish=(("findings.event_log", None),),
+        detail_source="findings.event_log",
+    ),
+    # ``model_authority`` and ``persona_binding`` publish at the payload ROOT
+    # rather than under ``findings``. That predates the derived verdict and is
+    # kept because both are read by name off the JSON by operator tooling; the
+    # table is where the exception is stated instead of being a thing you had to
+    # already know.
+    DoctorSection(
+        name="model_authority",
+        probe=_model_authority_report,
+        publish=(("model_authority", None),),
+        detail_source="model_authority",
+    ),
+    DoctorSection(
+        name="persona_binding",
+        probe=_persona_binding_report,
+        publish=(("persona_binding", None),),
+        detail_source="persona_binding",
+    ),
+    DoctorSection(
+        name="root_config_misplacement",
+        probe=_root_config_misplacement_report,
+        publish=(("findings.root_config_misplacement", None),),
+        detail_source="findings.root_config_misplacement",
+        counts=(("misplaced_root_only_keys", "misplaced"),),
+    ),
+    # The census contributes FOUR counts because they are four different
+    # verdicts: an orphan actor is a defect, an unplaced row is a legal state of
+    # a supported door, a litter desk is authored furniture standing where its
+    # agent no longer is, and a duplicate placement is two live actors claiming
+    # one item id. Folding them into one number would make the doctor's headline
+    # count climb every time the roster-only recovery door is used correctly.
+    DoctorSection(
+        name="placement_census",
+        probe=_placement_census_report,
+        publish=(("findings.placement_census", None),),
+        detail_source="findings.placement_census",
+        counts=(
+            ("orphan_actors", "orphan_actors"),
+            ("unplaced_rows", "unplaced_rows"),
+            ("desk_litter", "desk_litter"),
+        ),
+    ),
+)

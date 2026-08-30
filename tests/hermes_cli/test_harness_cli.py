@@ -398,6 +398,66 @@ def test_harness_doctor_human_branch_renders_the_surviving_findings(tmp_path, mo
         assert retired not in out
 
 
+def test_the_doctor_detail_line_derives_from_the_section_table(tmp_path, monkeypatch, capsys):
+    """A section declared in the doctor's table renders here with NO edit here.
+
+    This printer kept the fourth hand-maintained copy of the section roster —
+    and the only one no test pinned — so a section added to the report and
+    forgotten here was counted and verdicted while rendering no operator line at
+    all. It now derives from ``DOCTOR_SECTIONS``.
+
+    ANTI-VACUITY: the synthetic section is added to the doctor's table and to
+    nothing in this file. The detail text can only reach the output through
+    ``doctor_detail_sources``.
+    """
+
+    import hermes_cli.harness as harness_mod
+    from agent_runtime import harness_doctor
+
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "agent-runtime"))
+    synthetic = harness_doctor.DoctorSection(
+        name="synthetic_probe",
+        probe=lambda _context: {"health": "defect"},
+        publish=(("findings.synthetic_probe", None),),
+        detail_source="findings.synthetic_probe",
+    )
+    monkeypatch.setattr(
+        harness_doctor,
+        "DOCTOR_SECTIONS",
+        (*harness_doctor.DOCTOR_SECTIONS, synthetic),
+    )
+    monkeypatch.setattr(
+        harness_mod,
+        "run_harness_doctor",
+        lambda **_kwargs: {
+            "ok": False,
+            "summary": {
+                "finding_counts": {"orphan_worktrees": 0},
+                "section_health": {"orphan_worktrees": "ok", "synthetic_probe": "defect"},
+                "needs_fix": True,
+            },
+            "findings": {
+                "event_log": {
+                    "size_bytes": 0,
+                    "line_count": 0,
+                    "archived_event_slices": 0,
+                    "index_health": "ok",
+                },
+                "synthetic_probe": {"health": "defect", "error": "synthetic probe error"},
+            },
+        },
+    )
+    args = parser().parse_args(["harness", "doctor"])
+
+    assert args.func(args) == 0
+    out = capsys.readouterr().out
+    assert "verdict: NEEDS FIX" in out
+    assert "  synthetic_probe: defect (synthetic probe error)" in out
+    # The ok section stays off the operator's line list — the printer reports
+    # what is wrong, not the whole table.
+    assert "orphan_worktrees: ok" not in out
+
+
 def test_harness_parser_exposes_config_migrate_and_verify():
     p = parser()
     assert p.parse_args(["harness", "config", "show", "--json"]).config_command == "show"

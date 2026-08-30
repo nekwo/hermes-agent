@@ -300,6 +300,126 @@ def test_harness_doctor_thresholds_and_findings_carry_no_mission_rows(isolate_ag
     assert "closed_incident_ids" not in report["repairs"]
 
 
+# ── the section table: one declaration, four derived rosters (H-H1) ───────────
+
+
+def _synthetic_section(**overrides):
+    from agent_runtime.harness_doctor import DoctorSection
+
+    fields = {
+        "name": "synthetic_probe",
+        "probe": lambda _context: {
+            "health": "defect",
+            "error": "synthetic probe error",
+            "widgets": [{"id": "one"}, {"id": "two"}],
+        },
+        "publish": (("findings.synthetic_probe", None),),
+        "detail_source": "findings.synthetic_probe",
+        "counts": (("synthetic_widgets", "widgets"),),
+    }
+    fields.update(overrides)
+    return DoctorSection(**fields)
+
+
+def test_one_table_row_is_the_whole_cost_of_a_new_doctor_section(
+    isolate_agent_runtime_root, monkeypatch
+):
+    """A section declared ONCE reaches every roster — the H-H1 guarantee.
+
+    The defect this pins against is not hypothetical: ``placement_census`` was
+    added by editing ``finding_counts``, ``section_health`` and ``findings``
+    here plus ``detail_sources`` in the CLI printer — four hand-maintained lists
+    of one set, of which only ``section_health``'s key set was pinned. A section
+    added to three of the four is counted and verdicted while rendering no
+    operator line, and nothing fails.
+
+    ANTI-VACUITY: the synthetic section is added to the TABLE and to nothing
+    else. Every assertion below is reachable only if that one row fed the
+    roster it names, so re-typing any roster by hand reds this test.
+    """
+
+    from agent_runtime import harness_doctor
+
+    monkeypatch.setattr(
+        harness_doctor,
+        "DOCTOR_SECTIONS",
+        (*harness_doctor.DOCTOR_SECTIONS, _synthetic_section()),
+    )
+
+    report = run_harness_doctor(include_worktrees=False, snapshot_builder=lambda: {})
+
+    # 1: section_health.  2: finding_counts.  3: the payload placement.
+    assert report["summary"]["section_health"]["synthetic_probe"] == "defect"
+    assert report["summary"]["finding_counts"]["synthetic_widgets"] == 2
+    assert report["findings"]["synthetic_probe"]["error"] == "synthetic probe error"
+    # 4: the CLI's detail roster, derived from the same row.
+    assert (
+        harness_doctor.doctor_detail_sources(report)["synthetic_probe"]["error"]
+        == "synthetic probe error"
+    )
+    # And the derived verdict spends it like any other section.
+    assert "synthetic_probe" in report["summary"]["defective_sections"]
+    assert report["summary"]["needs_fix"] is True
+    assert report["ok"] is False
+
+
+def test_an_unexamined_section_counts_none_from_the_same_table_row(
+    isolate_agent_runtime_root, monkeypatch
+):
+    """The None-not-zero rule is applied ONCE, for every count in the table.
+
+    It used to be re-typed per count — six copies of one rule, each free to be
+    forgotten on the seventh. A synthetic section whose probe reports
+    ``unknown`` must count ``None`` without anybody having written that arm for
+    it.
+
+    KILLING MUTATION: count ``len(...)`` unconditionally and this reds on a
+    ``0`` — "looked, found none" — for a class nothing looked at.
+    """
+
+    from agent_runtime import harness_doctor
+
+    unknown = _synthetic_section(
+        probe=lambda _context: {"health": "unknown", "error": "probe raised", "widgets": None}
+    )
+    monkeypatch.setattr(
+        harness_doctor,
+        "DOCTOR_SECTIONS",
+        (*harness_doctor.DOCTOR_SECTIONS, unknown),
+    )
+
+    report = run_harness_doctor(include_worktrees=False, snapshot_builder=lambda: {})
+
+    assert report["summary"]["finding_counts"]["synthetic_widgets"] is None
+    assert "synthetic_probe" in report["summary"]["unexamined_sections"]
+    assert report["summary"]["needs_fix"] is False
+    assert report["ok"] is False
+
+
+def test_a_section_may_publish_two_payload_keys_from_one_probe(
+    isolate_agent_runtime_root,
+):
+    """``snapshot_null_id_rows`` and ``snapshot_build``: one probe, two keys.
+
+    The row list and "did the frame build at all" are two different facts and
+    stay two payload keys — but ONE section, contributing one health and one
+    count. This is the case the table's per-key ``publish`` exists for, so it is
+    pinned rather than left as an implementation detail of one entry.
+    """
+
+    report = run_harness_doctor(
+        include_worktrees=False,
+        snapshot_builder=lambda: {"agents": [{"persona_id": None}]},
+    )
+
+    assert report["findings"]["snapshot_null_id_rows"] == [
+        {"collection": "agents", "index": 0, "id_key": "persona_id"}
+    ]
+    assert report["findings"]["snapshot_build"] == {"health": "defect", "observed": True}
+    assert report["summary"]["finding_counts"]["snapshot_null_id_rows"] == 1
+    assert report["summary"]["section_health"]["snapshot_null_id_rows"] == "defect"
+
+
 # ── the roster/office placement census (plan D8) ──────────────────────────────
 
 

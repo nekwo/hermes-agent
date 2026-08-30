@@ -360,6 +360,16 @@ probe raised). `unknown` clears `ok` without claiming a defect nobody saw, and
 its counterpart in `summary.finding_counts` is `None`, never `0`: a zero there
 is what sends an investigator hunting a class the doctor never looked at.
 
+**The sections are DECLARED, once.** `DOCTOR_SECTIONS` (bottom of
+`harness_doctor.py`) is one row per section — its name, its probe, where its
+report lands in the payload, and which `summary.finding_counts` entries it
+contributes — and `summary.section_health`, `summary.finding_counts`, the
+payload placement and the CLI printer's per-section detail line are all derived
+from it. Until 2026-08-30 those were four hand-maintained lists of one set with
+only `section_health`'s key set pinned, so a section added to three of the four
+was counted and verdicted while rendering no operator line at all. Adding a
+section is now one table row; a missing roster entry is unspellable.
+
 The sections, each contributing one health value (`schema_version: 6`):
 
 | Section | What it observes | Verdict weight |
