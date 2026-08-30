@@ -50,8 +50,8 @@
       "path": "agent_runtime/serve_rpc.py",
       "symbol": "_runtime_agent_create",
       "operator": "bypass-roster-check-with-object",
-      "find": "    outcome = perform_agent_create(params)",
-      "replace": "    outcome = perform_agent_create(params, persona=object())",
+      "find": "    outcome = perform_agent_create(\n        params, caller=context.caller if context is not None else None\n    )",
+      "replace": "    outcome = perform_agent_create(\n        params, persona=object(), caller=context.caller if context is not None else None\n    )",
       "test": [
         "{python}",
         "-m",
@@ -1354,6 +1354,36 @@
         "pytest",
         "-q",
         "tests/agent_runtime/test_harness_doctor.py::test_the_census_names_a_retire_that_left_its_desk_standing"
+      ]
+    },
+    {
+      "id": "hh12-the-minted-kind-echoes-the-write-instead-of-sticking",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "_stamp_minted_kinds",
+      "operator": "echo-current-kind",
+      "find": "        replace(item, minted_kind=on_record.get(item.item_id) or item.kind)",
+      "replace": "        replace(item, minted_kind=item.kind)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_minted_kind_is_stamped_once_and_never_moves_again"
+      ]
+    },
+    {
+      "id": "hh12-the-mis-kinded-test-over-claims-on-a-silent-item",
+      "path": "agent_runtime/harness_doctor.py",
+      "symbol": "_desk_litter_reason",
+      "operator": "widen-agent-test-to-not-desk",
+      "find": "    if on_live_instance_actor or minted_kind == \"agent\":",
+      "replace": "    if on_live_instance_actor or minted_kind != \"desk\":",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_harness_doctor.py::test_the_minted_kind_is_what_the_store_recorded_not_what_the_id_looks_like"
       ]
     }
   ]

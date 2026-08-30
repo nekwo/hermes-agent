@@ -3335,7 +3335,10 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         scope=("agent_runtime.snapshot",),
     ),
     *rows(
-        "hh12",
+        # ``s75`` and not ``hh12``: every wave in this table is ``sNN`` and the
+        # integrity test asserts it. The plan stage this cut belongs to (H-H12)
+        # is named in the reason, which is where a row's provenance lives.
+        "s75",
         "HEAD",
         Form.ATTR,
         "the desk-litter classifier's id-SPELLING reader, replaced by the "
