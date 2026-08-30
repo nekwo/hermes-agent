@@ -908,6 +908,24 @@ omit it — the office's revision guard lives on the RPC lane only.
   and the launcher's replay verdict deliberately lags D2 (see its 04 §delete
   lane).
 
+  **The resurrection door MOVED on 2026-08-30 and is not what this row
+  described.** H1 (`f810bd2ac`) took the raw write out of `apply_office_pull`
+  and put it in `OfficeStore.adopt_remote_actor`, which is still deliberately
+  unfenced — a pull has no operator behind it to give the consent the tombstone,
+  class-key and desk fences exist to demand. The resurrection question is now
+  answered UPSTREAM instead: `classify_three_way_pull(..., locally_archived=True)`
+  never returns `WRITE_REMOTE` for a key this store archived, so the verb is not
+  reached with a tombstoned key. So the carve-out is a ruling with a stated
+  reason rather than a hole. What remains is the two halves that upstream answer
+  leans on: the tombstone ledger must MERGE on pull rather than adopt the peer's
+  list wholesale (`adopt_remote_surface`), or a locally-archived key can be
+  forgotten by a peer that never heard of it; and the pull's archive arm must
+  account for itself instead of swallowing failures. Both are staged as **C1 and
+  C2 of the launcher's
+  `EterniaLauncher/docs/mission_control/planned/realm-actor-lifecycle-refactor.md`**
+  (cross-repo, cited as prose); the class-key half stays with task #33, whose
+  disposition `tests/agent_runtime/test_office_class_key_one_fence.py` carries.
+
 - **The placement verb SHIPPED end to end** (S0–S9, both repos, 2026-08-26/27)
   and its plan file was deleted by the commit that folded it into this doc,
   01, 03, 05 and 07. Nothing about it is planned any more; the landing record —
@@ -926,11 +944,18 @@ omit it — the office's revision guard lives on the RPC lane only.
     is still open belongs to the gateway, not here: Stage A5 — the policy the
     gate evaluates stays "allow every caller that exists" until
     `gateway/devices.json` mints a device credential with a tier.
-  - **Realm pull writes actor files with no office event**
-    (`office_sync.apply_office_pull`), so a `WRITE_REMOTE` never becomes a
-    patch. A real gap in the notification story and a realm-sync one, not a
-    placement one — recorded here because this is where the notification model
-    lives.
+  - **Realm pull writes actor files with no office event — CLOSED 2026-08-30**
+    (`f810bd2ac`, stage H1 of
+    [archive/realm-pull-live-projection.md](archive/realm-pull-live-projection.md)).
+    The adopt arm's raw `atomic_json_write` inside `apply_office_pull` is gone;
+    it now goes through `OfficeStore.adopt_remote_actor`, so a `WRITE_REMOTE`
+    becomes a patch and reaches the office subscribe lane, the patch fold and
+    anything tailing `office.*` — the twin of `adopt_remote_surface`, and the
+    half that actually puts a desk on somebody's canvas. Three properties the
+    raw write had are kept and each is pinned by a test, not by a sentence: the
+    revision stays the REMOTE's (no `base_revision + 1`, or every later pull of
+    an untouched desk would read as a conflict), `updated_by` records the sync,
+    and nothing is re-derived from the write.
   - **D6 — RULED 2026-08-27, deliberately not implemented.** Duplicate desks are
     allowed; only a duplicate on the same INSTANCE is not. Superseded in the same
     breath by the direction it was ruled inside: desks are a placeholder for
