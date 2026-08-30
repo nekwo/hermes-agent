@@ -1148,7 +1148,8 @@
         "-m",
         "pytest",
         "-q",
-        "tests/agent_runtime/test_harness_doctor.py::test_an_unexamined_section_counts_none_from_the_same_table_row"
+        "tests/agent_runtime/test_harness_doctor.py::test_an_unexamined_section_counts_none_from_the_same_table_row",
+        "--timeout=180"
       ]
     },
     {
@@ -1163,7 +1164,8 @@
         "-m",
         "pytest",
         "-q",
-        "tests/agent_runtime/test_harness_doctor.py::test_a_section_may_publish_two_payload_keys_from_one_probe"
+        "tests/agent_runtime/test_harness_doctor.py::test_a_section_may_publish_two_payload_keys_from_one_probe",
+        "--timeout=180"
       ]
     },
     {
@@ -1178,7 +1180,8 @@
         "-m",
         "pytest",
         "-q",
-        "tests/hermes_cli/test_harness_cli.py::test_the_doctor_detail_line_derives_from_the_section_table"
+        "tests/hermes_cli/test_harness_cli.py::test_the_doctor_detail_line_derives_from_the_section_table",
+        "--timeout=180"
       ]
     },
     {
@@ -1193,7 +1196,8 @@
         "-m",
         "pytest",
         "-q",
-        "tests/agent_runtime/test_harness_doctor.py::test_two_live_actors_holding_one_desk_id_are_seen"
+        "tests/agent_runtime/test_harness_doctor.py::test_two_live_actors_holding_one_desk_id_are_seen",
+        "--timeout=180"
       ]
     },
     {
@@ -1208,7 +1212,8 @@
         "-m",
         "pytest",
         "-q",
-        "tests/agent_runtime/test_harness_doctor.py::test_a_same_instance_duplicate_is_a_defect"
+        "tests/agent_runtime/test_harness_doctor.py::test_a_same_instance_duplicate_is_a_defect",
+        "--timeout=180"
       ]
     },
     {
@@ -1223,7 +1228,8 @@
         "-m",
         "pytest",
         "-q",
-        "tests/agent_runtime/test_harness_doctor.py::test_the_duplicate_reason_classifier_is_total_over_its_bindings"
+        "tests/agent_runtime/test_harness_doctor.py::test_the_duplicate_reason_classifier_is_total_over_its_bindings",
+        "--timeout=180"
       ]
     },
     {
@@ -1238,7 +1244,8 @@
         "-m",
         "pytest",
         "-q",
-        "tests/agent_runtime/test_harness_doctor.py::test_a_pulled_actor_with_a_legacy_id_spelling_is_not_an_orphan"
+        "tests/agent_runtime/test_harness_doctor.py::test_a_pulled_actor_with_a_legacy_id_spelling_is_not_an_orphan",
+        "--timeout=180"
       ]
     },
     {
@@ -1253,7 +1260,8 @@
         "-m",
         "pytest",
         "-q",
-        "tests/agent_runtime/test_harness_doctor.py::test_an_unreadable_office_actor_file_is_named_in_the_unreadable_list"
+        "tests/agent_runtime/test_harness_doctor.py::test_an_unreadable_office_actor_file_is_named_in_the_unreadable_list",
+        "--timeout=180"
       ]
     },
     {
@@ -1268,7 +1276,8 @@
         "-m",
         "pytest",
         "-q",
-        "tests/hermes_cli/test_harness_cli.py::test_harness_doctor_human_branch_says_nothing_about_an_unexamined_census"
+        "tests/hermes_cli/test_harness_cli.py::test_harness_doctor_human_branch_says_nothing_about_an_unexamined_census",
+        "--timeout=180"
       ]
     }
   ]
