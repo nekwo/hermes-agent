@@ -1,11 +1,21 @@
 # Planned — realm-sync writes that never reach a live projection
 
-**Status:** PLANNED. Nothing here is implemented. **Domain:** runtime data and
-shapes / stream + office delivery. **Opened:** 2026-08-30, from a live report on
-the operator's machine plus a read-only evidence pass over the live store.
+**Status, corrected 2026-08-30 on archiving: ~~PLANNED. Nothing here is
+implemented.~~ BUILT AND LANDED — all seven stages.** hermes H1 `f810bd2ac`,
+H2 `178480483`, H3 `4e26fbf94`, H4 `6979bad59`; launcher L1–L3 landed the same
+day. **The delivery notes in this file are the authority for what each stage
+actually did** — several stages landed a different shape than the stage text
+above them proposed, and each says so where it landed, not here. **Domain:**
+runtime data and shapes / stream + office delivery. **Opened:** 2026-08-30, from
+a live report on the operator's machine plus a read-only evidence pass over the
+live store.
+
+**One of this document's own findings was measured FALSE by the work: §4's
+socket-ownership claim.** The correction is stamped in §4 itself; read it before
+citing §4 for anything.
 
 **Repos:** hermes-agent (H1–H4), EterniaLauncher (L1–L3). The two halves touch
-different git indexes and are safe to run in parallel.
+different git indexes and were run in parallel.
 
 ---
 
@@ -182,6 +192,31 @@ actor is NOT accounted by any `ProjectionAccountant`; the only four are
 ever appear in this chip.
 
 ## 4. Two live serve children, one socket, one store
+
+> **CORRECTION, 2026-08-30, measured at L2's landing — the last sentence of this
+> section is FALSE and must not be carried forward.** This section says the
+> older child "owns the RPC socket the office/`runtime.office.get` lane dials".
+> It does not. The launcher's office lane is `session.callRpc`, which is
+> **stdio to the child that launcher itself spawned**
+> (`mission_office_rpc_reader.dart:180`, `mission_office_rpc_writer.dart:445`,
+> `mission_office_subscribe_lane.dart:819`, and the agent create/retire/prewarm
+> clients all bind the same seam). The socket is the REMOTE lane —
+> `lan_socket_connector.dart`, `mission_remote_gateway.dart` — for phones and
+> peers. **Socket ownership therefore cannot make the office canvas stale**, and
+> the "single most promising live lead" sentence below rests on a mechanism that
+> does not exist.
+>
+> What survives is the observation, not its explanation: two live serves against
+> one root are real, and hermes' own contract calls them LEGITIMATE
+> (`agent_runtime/serve_socket.py`, "One owner per root" — the loser of the
+> `<store_root>/serve_socket.lock` race runs stdio-only and says so on its
+> greeting, `socket: {"outcome": "lock_held_by", "pid": …}`, `serve.py:2435` →
+> `SocketLockResult.payload()`). Their real and silent cost is on the LAN door:
+> a launcher whose child lost the lock advertises no endpoint at all. L2 shipped
+> the disclosure of that, not a lifecycle — orphaned serve accumulation is a
+> separate open row on the launcher's Mission Control queue. Full record:
+> `EterniaLauncher/Launcher_Brain/20 — Active Initiatives/realm-pull-live-projection-notes-2026-08-30.md`
+> §9.
 
 `X:\Eternia\.hermes\agent-runtime\serve_instances\` holds two live descriptors,
 and both processes are running:

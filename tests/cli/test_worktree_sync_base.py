@@ -162,7 +162,16 @@ class TestResolveWorktreeBaseStartupCost:
         assert len(fetches) == 1, "timeout must not cascade into a second fetch"
         assert elapsed < 5, f"fallback path took {elapsed:.1f}s — must be fast"
         # The cached ref is the clone-time origin/main (pre-advance), which is
-        # still a valid base — staleness is backstopped by the pre-push gate.
+        # still a valid base. This comment used to add "staleness is backstopped
+        # by the pre-push gate", echoing cli.py's own claim of a "pre-push
+        # stale-base gate": NO SUCH GATE EXISTS. `.githooks/` holds one file,
+        # `post-merge`, and the only pre-push hook this repo ever had was the
+        # skill-install one, retired 2026-08-30 (`7bbf6db3b`). What actually
+        # backstops staleness is the label asserted just above — the session
+        # banner says "cached"/"timed out", so the operator is told, and nothing
+        # refuses the push. Corrected 2026-08-30; the measurement that found it
+        # is the FALSIFIED bullet in
+        # docs/agent-runtime-harness/archive/field-notes-skill-install-relocation.md.
         resolved = _run(["git", "rev-parse", base_ref], clone).stdout.strip()
         assert resolved == stale_local_head
 

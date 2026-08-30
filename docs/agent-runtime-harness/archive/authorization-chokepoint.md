@@ -25,13 +25,13 @@ create door mint the same `CLI_CONSOLE` identity through one helper. The policy
 allows every caller that exists, so no current caller's observable outcome
 moved — asserted directly in `tests/agent_runtime/test_serve_rpc_authorization.py`
 rather than inferred from a green suite. Landing receipts and the honest gaps
-are in [remote-gateway-field-notes.md](remote-gateway-field-notes.md),
+are in [remote-gateway-field-notes.md](../planned/remote-gateway-field-notes.md),
 2026-08-27.
 
 **Owner surface:**
 [06 — Office and board](../06-office-and-board.md) § "Authorization has an
 enforcement point" and its Open row.
-**Blocks:** [remote-gateway.md](remote-gateway.md) Stage 1, and through it the
+**Blocks:** [remote-gateway.md](../planned/remote-gateway.md) Stage 1, and through it the
 primary plan's R11 (launcher
 `docs/mission_control/planned/universal-remote-gateway.md` §5).
 **Everything below §1 was a READ when it was written.** No test was run and no
@@ -505,8 +505,8 @@ expensive option, and its whole value is the non-bypassability.
   the check runs. Stage A4(i) renames it; it does not redesign it.
 - **Whether the argv lane should exist.** Two lanes reach the CLI handlers, and
   collapsing them is
-  [single-transport-collapse.md](single-transport-collapse.md) /
-  [office-write-lane-collapse.md](office-write-lane-collapse.md).
+  [single-transport-collapse.md](../planned/single-transport-collapse.md) /
+  [office-write-lane-collapse.md](../planned/office-write-lane-collapse.md).
 
 ---
 
@@ -551,7 +551,7 @@ otherwise untouched:
 
 > ```
 >     The design and the placement options are
->     [planned/authorization-chokepoint.md](planned/authorization-chokepoint.md);
+>     [archive/authorization-chokepoint.md](archive/authorization-chokepoint.md);
 >     its Ruling A is R11's prerequisite.
 > ```
 >

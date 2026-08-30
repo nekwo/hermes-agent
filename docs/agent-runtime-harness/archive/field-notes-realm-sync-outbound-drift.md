@@ -1,7 +1,7 @@
 # Field notes — realm sync outbound drift (hermes lane)
 
 Running record for the hermes slices of
-`planned/realm-sync-outbound-drift-and-live-checks.md`. Append, never rewrite.
+`archive/realm-sync-outbound-drift-and-live-checks.md`. Append, never rewrite.
 
 ## S1 — office store drift in the status envelope (2026-08-29)
 

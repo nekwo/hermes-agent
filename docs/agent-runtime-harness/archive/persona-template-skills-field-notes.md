@@ -381,7 +381,7 @@ Docs only; no production line and no test changed, in either repo.
 DELETED, per [00-index.md](../00-index.md) § planned/: "when a plan ships, its
 file's content moves into the owning domain doc as verified truth and the
 planned file is deleted in the same commit". The plan's own §6 offered the
-alternative — `planned/authorization-chokepoint.md` survived its landing with a
+alternative — `archive/authorization-chokepoint.md` survived its landing with a
 receipt table — and said either way the canonical home is canon 06. The index
 rule was followed rather than the fresher precedent, because a shipped design
 left in `planned/` is a second authority free to disagree with the doc, and this

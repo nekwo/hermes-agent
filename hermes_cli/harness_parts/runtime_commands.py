@@ -55,7 +55,7 @@ def _cmd_worktree_reap(args) -> int:
 def _cmd_persona_instance_chat_bindings(args) -> int:
     """READ-ONLY: which persona instances point at a chat session SessionDB lost.
 
-    H4 of ``docs/agent-runtime-harness/planned/realm-pull-live-projection.md``.
+    H4 of ``docs/agent-runtime-harness/archive/realm-pull-live-projection.md``.
     This is the ONE question behind Mission Control's amber
     ``projection drops N`` chip when the reason code is ``session_not_in_db``:
     ``persona_chat_history`` is a READ-ONLY projection, so it can only hide the

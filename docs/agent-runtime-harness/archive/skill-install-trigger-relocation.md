@@ -1,6 +1,12 @@
 # Planned — skill-install trigger relocation (pre-push → serve start + git pull)
 
-**Status:** not built. **Ruling (operator, 2026-08-30):** running
+**Status, corrected 2026-08-30 on archiving: ~~not built.~~ BUILT AND LANDED,
+all three stages** — H1 `4f74f47fe` (serve boot re-joins the installed canonical
+skills), H2 `fb7ce83b7` (a `post-merge` hook repairs the packages after a pull),
+H3 `7bbf6db3b` (the pre-push gate retired, its references corrected). The build
+record, including one falsified plan anchor and a pre-existing red this lane did
+not own, is `field-notes-skill-install-relocation.md` beside this file.
+**Ruling (operator, 2026-08-30):** running
 `harness install-harness-skills` from a pre-push hook is the wrong trigger — it
 repairs the machine at the moment the *producer* publishes, and never at the
 moments a *consumer* acquires drift. "It should do it on launcher or hermes

@@ -1,7 +1,7 @@
 """WHO may call WHAT — the front-door authorization vocabulary for the method lane.
 
 Ruling A (2026-08-27,
-``docs/agent-runtime-harness/planned/authorization-chokepoint.md``) put the check
+``docs/agent-runtime-harness/archive/authorization-chokepoint.md``) put the check
 at the RPC dispatch layer, evaluated against what the TRANSPORT proved, and
 reframed the policy: **the tier is client security auth.** A credential that
 traces to account-authed pairing may run console verbs; one that does not, may

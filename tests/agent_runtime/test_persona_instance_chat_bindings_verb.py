@@ -1,6 +1,6 @@
 """H4 — `harness persona-instance chat-bindings` is read-only by construction.
 
-Plan: ``docs/agent-runtime-harness/planned/realm-pull-live-projection.md``.
+Plan: ``docs/agent-runtime-harness/archive/realm-pull-live-projection.md``.
 
 The verb answers the ONE question behind Mission Control's amber
 ``projection drops N`` chip when the reason code is ``session_not_in_db``:

@@ -336,7 +336,7 @@ which is where to look when a persona is behaving like an older version of its
 own skill.
 
 **Four triggers run the join, and the trigger set is the whole design**
-(operator ruling 2026-08-30; `planned/skill-install-trigger-relocation.md`):
+(operator ruling 2026-08-30; `archive/skill-install-trigger-relocation.md`):
 
 | Trigger | Where | Covers |
 |---|---|---|
@@ -532,7 +532,7 @@ Each links to a `planned/` file carrying its evidence and the gate to open it.
 - 2026-08-24 — **a character's state vocabulary is fixed at `start`**: there is
   no `characters add-state`, so adding a strip to an installed sheet means
   re-authoring the character →
-  [planned/charsheet-add-state.md](planned/charsheet-add-state.md)
+  [archive/charsheet-add-state.md](archive/charsheet-add-state.md)
 - 2026-08-28 — **the skill-tombstone ledger merges last-writer-wins**: two
   members publishing concurrently can silently drop a tombstone entry (R-D
   ruled LWW acceptable for v1; nothing fences the loss window) →

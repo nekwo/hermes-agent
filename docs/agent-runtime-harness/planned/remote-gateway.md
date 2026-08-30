@@ -4,7 +4,7 @@
 primary plan — no stage builds before its ruling.** 2026-08-27: R1 RULED (encrypt;
 self-signed pinned baseline + launcher-reuse survey) and the authorization
 chokepoint RULED (front door; tier = account auth) — see
-[authorization-chokepoint.md](authorization-chokepoint.md) § the three rulings;
+[authorization-chokepoint.md](../archive/authorization-chokepoint.md) § the three rulings;
 Stage 1's two prerequisites are now decisions, and its remaining gates are R3/R11's
 vocabulary details. **Evening 2026-08-27: R3 RULED (QR + typed-code fallback;
 CLI-first pairing surface), and R2/R4–R10 ADOPTED at their recommended options
@@ -793,7 +793,7 @@ ride them, don't re-derive:
   has nowhere to hook scopes (R11) until authorization moves to the chokepoint the
   three doors share; rule that with R11 before any non-loopback bind. **The design
   for that chokepoint — inventory, three placement options, staged — is
-  [authorization-chokepoint.md](authorization-chokepoint.md) (2026-08-27); its
+  [authorization-chokepoint.md](../archive/authorization-chokepoint.md) (2026-08-27); its
   Ruling A is R11's prerequisite, and it measured the gap to be wider than an
   asymmetry: the "gated" door's gate is unreachable on the spellings the launcher
   and the CLI actually send.**

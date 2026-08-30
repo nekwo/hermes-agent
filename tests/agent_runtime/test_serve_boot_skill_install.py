@@ -8,7 +8,7 @@ pull, pre-push hook). A machine that only ``git pull``s and boots was repaired
 by nothing. Boot is the moment a CONSUMER acquires the drift, so boot is where
 the join now runs.
 
-Plan: ``docs/agent-runtime-harness/planned/skill-install-trigger-relocation.md``.
+Plan: ``docs/agent-runtime-harness/archive/skill-install-trigger-relocation.md``.
 """
 
 from __future__ import annotations

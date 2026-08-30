@@ -32,8 +32,14 @@ Everything in [planned/](planned/) is a design that has NOT shipped. One file
 per plan, each carrying its evidence and the gate that opens the work. The
 domain docs link into this folder from their `## Open rows`; nothing in a
 domain doc describes unbuilt behavior. When a plan ships, its file's content
-moves into the owning domain doc as verified truth and the planned file is
-deleted in the same commit.
+moves into the owning domain doc as verified truth and the planned file leaves
+`planned/` in the same commit — **deleted** when nothing in it outlives the
+fold-in, **moved to `archive/`** under a sha-stamped header when it carries
+evidence (measurements, falsified assumptions, rejected designs) that the domain
+doc states the conclusion of rather than the proof. Field notes are always the
+second kind. A plan whose header still says "not built" after it shipped is
+corrected BEFORE it moves, so the archive never receives a document that lies
+about the code it shipped (operator ruling, 2026-08-30).
 
 ## archive/ — history, not truth
 
@@ -44,6 +50,13 @@ replaces. Archived docs are quotable as history only — several were verified
 stale at consolidation time, and every claim worth keeping was re-verified
 against code before it entered a domain doc. If an archived claim is not in a
 domain doc, treat it as unverified or false until re-proven.
+
+`archive/` also holds **shipped plans and their field notes**, moved out of
+`planned/` at the landing that finished them (first wave 2026-08-30). The
+sentence above governs them identically — the domain doc and the code are the
+truth. Each one names its shipping shas in its header, and where a plan's own
+findings were later measured false, the correction is stamped in the section
+that carried the claim rather than only at the top.
 
 ## Not in this tree
 

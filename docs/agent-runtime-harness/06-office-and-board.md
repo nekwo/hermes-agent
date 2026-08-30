@@ -902,7 +902,7 @@ omit it — the office's revision guard lives on the RPC lane only.
   launcher brain's `mission-control-queue.md` rows of 2026-08-27 (the sync-pull
   tombstone bypass, the migration seed's third store, two bare-name surfaces,
   the placement verb's discoverability) plus the field notes kept in both repos
-  (`planned/agent-delete-field-notes.md` here). Left open here:
+  (`archive/agent-delete-field-notes.md` here). Left open here:
   `office_sync.apply_office_pull` still writes actor files past the tombstone
   fence (`CARVED_OUT_ACTOR_WRITERS`' known hole — the last resurrection door),
   and the launcher's replay verdict deliberately lags D2 (see its 04 §delete
@@ -916,7 +916,7 @@ omit it — the office's revision guard lives on the RPC lane only.
   and every escalation it raised is a row in that brain's
   `mission-control-queue.md`. What it left open here:
   - **Authorization is at the chokepoint — CLOSED 2026-08-27.** Stages A1–A4 of
-    [planned/authorization-chokepoint.md](planned/authorization-chokepoint.md)
+    [archive/authorization-chokepoint.md](archive/authorization-chokepoint.md)
     landed the tier declaration, the proven caller, the front-door gate and the
     CLI mirror (`8d69f8858b`, `4d60060dc3`, `dba7ed19b6`, `290f6f461b`;
     launcher `2cf887b47`). The gate is at the RPC dispatch layer with a

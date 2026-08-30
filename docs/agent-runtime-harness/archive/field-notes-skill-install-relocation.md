@@ -1,7 +1,7 @@
 # Field notes — skill-install trigger relocation (hermes-agent)
 
 Running record for the build of
-`docs/agent-runtime-harness/planned/skill-install-trigger-relocation.md`
+`docs/agent-runtime-harness/archive/skill-install-trigger-relocation.md`
 (plan committed `1bd7f05805`). Written as things are found, newest at the
 bottom of each stage.
 

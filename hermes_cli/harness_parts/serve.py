@@ -1592,7 +1592,7 @@ def install_harness_skills_at_boot() -> str:
     """Re-join the runtime's copy of every canonical skill to this repo's copy.
 
     THE GAP THIS CLOSES (operator ruling 2026-08-30, plan
-    ``planned/skill-install-trigger-relocation.md``). A canonical shared skill
+    ``archive/skill-install-trigger-relocation.md``). A canonical shared skill
     has two copies and only one is ever executed: a chat turn loads
     ``<hermes root>/shared/skills/<id>/SKILL.md``, never the repo's
     ``docs/agent-runtime-harness/harness-skills/<id>/SKILL.md``, because

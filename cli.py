@@ -1492,7 +1492,11 @@ def _resolve_worktree_base(
     - The fetch is capped at *fetch_timeout* seconds. On timeout or failure we
       fall back to the locally-known remote-tracking ref (labelled "cached")
       instead of cascading into a second fetch attempt. Genuine staleness is
-      backstopped by the pre-push stale-base gate.
+      DISCLOSED, not gated: the returned label says "cached"/"timed out" and
+      the session banner shows it. (This line claimed a "pre-push stale-base
+      gate" until 2026-08-30. There is no such hook and there never was —
+      ``.githooks/`` holds only ``post-merge``, and the one pre-push hook this
+      repo ever had was the skill-install gate retired in ``7bbf6db3b``.)
 
     Returns ``(base_ref, label)`` where *base_ref* is a git revision suitable
     for ``git worktree add ... <base_ref>`` and *label* is a short

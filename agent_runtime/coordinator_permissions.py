@@ -1,7 +1,7 @@
 """A coordinator persona's SELF-DECLARED budget — advisory, never authorization.
 
 Renamed and re-documented by Stage A4 of
-``docs/agent-runtime-harness/planned/authorization-chokepoint.md``, because the
+``docs/agent-runtime-harness/archive/authorization-chokepoint.md``, because the
 old name (``authorize_coordinator_action``) claimed a job this code cannot do
 and was never built to do. What it is:
 

@@ -391,7 +391,7 @@ def test_installed_canonical_skill_drift_fails_the_install_verifier(tmp_path, mo
     take fails rather than passing quietly.
 
     The CALLER moved on 2026-08-30 (plan
-    ``planned/skill-install-trigger-relocation.md``) and this test did not need
+    ``archive/skill-install-trigger-relocation.md``) and this test did not need
     to: it ran from ``.githooks/pre-push``, the moment the PRODUCER publishes,
     and now runs from ``.githooks/post-merge`` — the moment a CONSUMER pulls the
     drift in. ``harness serve`` boot is the other half and calls the installers

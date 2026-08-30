@@ -3,7 +3,7 @@
 A running record, newest section last. Not a plan and not canon: what a working
 session actually READ, and where what it read disagreed with the brief it was
 given. Rows graduate into [remote-gateway.md](remote-gateway.md), into
-[authorization-chokepoint.md](authorization-chokepoint.md), or into canon — and
+[authorization-chokepoint.md](../archive/authorization-chokepoint.md), or into canon — and
 are left here either way, because the disagreement is the part a later session
 cannot re-derive.
 

@@ -1,6 +1,17 @@
 # Realm Sync — Outbound Drift Accounting + Live Checks (staged plan)
 
-Status: PLANNED (S1/S2/S3 dispatched 2026-08-29; S4 is operator-verified after landing)
+**Status, corrected 2026-08-30 on archiving: ~~PLANNED (S1/S2/S3 dispatched
+2026-08-29)~~ — S1, S2 and S3 all LANDED 2026-08-29.** hermes S1 `19f3aee24`
+(`_office_store_drift` in `agent_runtime/realm_sync.py`, in the status
+envelope); launcher S2 and S3 landed with their verification logs in
+`EterniaLauncher/Launcher_Brain/20 — Active Initiatives/realm-sync-outbound-drift-notes-2026-08-29.md`.
+**S4 is the open remainder and it is not agent work** — it is the operator's
+end-to-end live verification, still un-taken, and the launcher notes' own gap 1
+says everything below S1 is fixture-driven and has never been proven against a
+real `test realm` status run. Filed as a row on the launcher's Mission Control
+queue rather than kept here. **One decision inside S2 has since been
+superseded** ("N desks added" → "N placements added"; the counters count actors,
+not furniture) — see the SUPERSEDED section of those launcher notes.
 Author: Fable (plan), Opus agents (implementation)
 Repos: hermes-agent (S1), EterniaLauncher (S2, S3)
 
@@ -187,7 +198,7 @@ operator decisions).
 - harness-dev-delivery contract applies: narrow patches, focused self-tests,
   commit exactly your slice, report command + exit status honestly, no push.
 - Field notes: each agent keeps a running-record note in ITS repo —
-  hermes: `docs/agent-runtime-harness/planned/field-notes-realm-sync-outbound-drift.md`;
+  hermes: `docs/agent-runtime-harness/archive/field-notes-realm-sync-outbound-drift.md`;
   launcher: `Launcher_Brain/20 — Active Initiatives/realm-sync-outbound-drift-notes-2026-08-29.md`.
   Append as you go; the note is part of the commit.
 - The two agents work in DIFFERENT repos (separate git indexes) — safe in
