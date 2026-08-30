@@ -362,6 +362,146 @@ def _write_conflict_sidecar(
     )
 
 
+def _reconcile_surface(
+    store: OfficeStore,
+    baseline: dict[str, str],
+    *,
+    remote_surface: OfficeSurface,
+    local_surface: OfficeSurface | None,
+) -> None:
+    """The SURFACE half of one workspace's pull.
+
+    File-granular merge, keep-local-wins on both-changed (v1 — folders are
+    additive taxonomy, and a lost folder re-adds trivially). Takes no
+    ``summary``: the surface arm has never counted anything, and a parameter it
+    could write to would invite it to start.
+    """
+
+    workspace_id = remote_surface.workspace_id
+    surface_key = _surface_key(workspace_id)
+    local_hash = office_models.office_content_hash(local_surface) if local_surface is not None else None
+    remote_hash = office_models.office_content_hash(remote_surface)
+    decision = classify_three_way_pull(local_hash, remote_hash, baseline.get(surface_key))
+    if decision.action != PullAction.WRITE_REMOTE and local_surface is not None:
+        return
+    # Through the store (H1), not ``atomic_json_write``: an event-less write is
+    # invisible to the watermark-gated snapshot/serve pipeline, and the archive
+    # arm has always emitted. The baseline stays keyed off the REMOTE hash — the
+    # adopt verb stamps ``updated_by``, which ``office_content_hash`` excludes,
+    # and unions the tombstone ledger, which it does not (C1): where the union
+    # actually keeps a local-only key the surface reads as locally edited until
+    # the next publish, which is the honest state.
+    store.adopt_remote_surface(remote_surface)
+    baseline[surface_key] = remote_hash
+
+
+def _reconcile_actors(
+    store: OfficeStore,
+    summary: OfficePullSummary,
+    baseline: dict[str, str],
+    *,
+    workspace_id: str,
+    local_actors: dict[str, OfficeActor],
+    remote: RemoteOffice,
+    archived_keys: set[str],
+    refused_actor_keys: set[str],
+) -> None:
+    """The ACTOR half of one workspace's pull: one three-way decision per key,
+    over the union of local-active, remote, and locally archived keys, minus
+    anything the admission door refused.
+
+    ``deletes_fenced`` is derived HERE from ``remote.unreadable`` rather than
+    passed in, because this is the only arm entitled to ask the question:
+    whether the remote half read completely decides one thing only, and decides
+    it for this workspace alone — whether an absent key may be read as the peer
+    having removed the desk.
+    """
+
+    deletes_fenced = remote.unreadable > 0
+    remote_actors = remote.actors
+    for actor_key in sorted((set(local_actors) | set(remote_actors) | archived_keys) - refused_actor_keys):
+        local_actor = local_actors.get(actor_key)
+        remote_actor = remote_actors.get(actor_key)
+        local_hash = office_models.office_content_hash(local_actor) if local_actor is not None else None
+        remote_hash = office_models.office_content_hash(remote_actor) if remote_actor is not None else None
+        key = _actor_key(workspace_id, actor_key)
+        decision = classify_three_way_pull(
+            local_hash,
+            remote_hash,
+            baseline.get(key),
+            locally_archived=actor_key in archived_keys,
+        )
+        if decision.action == PullAction.NOOP:
+            continue
+        if decision.action == PullAction.KEEP_LOCAL:
+            summary.kept_local += 1
+            continue
+        if decision.action == PullAction.WRITE_REMOTE and remote_actor is not None:
+            remote_actor.workspace_id = workspace_id
+            remote_actor.state = "active"
+            # THE adopt arm, through the store's evented verb (H1). It was a raw
+            # ``atomic_json_write`` until 2026-08-30, which is why a pull that
+            # ARCHIVED a desk was visible to every live consumer and a pull that
+            # GAVE you one was visible to none.
+            store.adopt_remote_actor(remote_actor)
+            baseline[key] = remote_hash or office_models.office_content_hash(remote_actor)
+            if decision.reason == "converged":
+                summary.converged += 1
+            else:
+                summary.adopted += 1
+            continue
+        if decision.action == PullAction.ARCHIVE_LOCAL:
+            if deletes_fenced:
+                # THE delete-shaped decision, and the one this pull has not
+                # earned: "remote_removed" is inferred from the key being absent
+                # from a remote map we know to be short. Hold the desk, name it,
+                # and leave the baseline alone so a repaired pull can still
+                # converge it.
+                summary.delete_fenced.append(
+                    {
+                        "workspace_id": workspace_id,
+                        "actor_key": actor_key,
+                        "reason": "unreadable_remote",
+                        "unreadable_remote": remote.unreadable,
+                    }
+                )
+                continue
+            try:
+                store.remove_actor(workspace_id, actor_key, reason="remote_removed", updated_by="realm_sync")
+            except Exception as exc:  # noqa: BLE001 — accounted, never silent
+                # The loop SURVIVES one bad file — a whole realm must not stop
+                # converging because one actor would not archive — but the
+                # outcome leaves with the summary, and the baseline entry STAYS.
+                # Popping it here (which this arm did unconditionally until C2)
+                # tells the next pull there is no baseline for a row that is
+                # still live, and a row with no baseline reads as a local ADD:
+                # the failed delete came back as something to publish. Kept, the
+                # next pull re-decides ARCHIVE_LOCAL and retries, which is the
+                # repair.
+                summary.archive_outcomes.append(
+                    OfficeArchiveOutcome.failed(workspace_id, actor_key, exc).as_dict()
+                )
+                continue
+            summary.archived += 1
+            summary.archive_outcomes.append(
+                OfficeArchiveOutcome.archived(workspace_id, actor_key).as_dict()
+            )
+            # The baseline entry leaves WITH the row, and only with it.
+            baseline.pop(key, None)
+            continue
+        if decision.action == PullAction.CONFLICT:
+            _write_conflict_sidecar(
+                workspace_id,
+                actor_key,
+                kind=decision.reason,
+                remote_actor=remote_actor,
+                local_hash=local_hash,
+                remote_hash=remote_hash,
+            )
+            summary.conflicts += 1
+            continue
+
+
 def apply_office_pull(realm_id: str, subtree: Path, *, event_log: EventLog | None = None) -> OfficePullSummary:
     """Apply the per-actor decision table across every office surface in the
     pulled realm subtree. Updates the baseline for converged/adopted actors,
@@ -392,12 +532,6 @@ def apply_office_pull(realm_id: str, subtree: Path, *, event_log: EventLog | Non
                 summary.unreadable_remote += 1
             continue
         workspace_id = remote_surface.workspace_id
-        # Whether the REMOTE half was fully readable decides one thing only, and
-        # decides it for this workspace alone: whether an absent key may be read
-        # as the peer having removed the desk. Every other decision below is
-        # driven by rows that DID decode, so fencing them too would freeze a
-        # whole office over one bad file — the bystander rule again.
-        deletes_fenced = remote.unreadable > 0
         # The LOCAL half has to be knowable before any decision is taken about
         # it. ``scan_actors`` rather than ``list_actors``: an actor whose file
         # will not decode is dropped by the thin view, reaches the classifier
@@ -441,104 +575,19 @@ def apply_office_pull(realm_id: str, subtree: Path, *, event_log: EventLog | Non
             for actor in local_scan.actors:
                 local_actors[actor.actor_key] = actor
 
-        # Surface def: file-granular merge (keep-local-wins on both-changed for
-        # v1 — folders are additive taxonomy, a lost folder re-adds trivially).
-        surface_key = _surface_key(workspace_id)
-        local_surface_hash = office_models.office_content_hash(local_surface) if local_surface is not None else None
-        remote_surface_hash = office_models.office_content_hash(remote_surface)
-        surface_decision = classify_three_way_pull(local_surface_hash, remote_surface_hash, baseline.get(surface_key))
-        if surface_decision.action == PullAction.WRITE_REMOTE or local_surface is None:
-            # Through the store (H1), not ``atomic_json_write``: an event-less
-            # write is invisible to the watermark-gated snapshot/serve pipeline,
-            # and the archive arm below has always emitted. Baseline stays keyed
-            # off the REMOTE hash computed above — the adopt verb only stamps
-            # ``updated_by``, which ``office_content_hash`` excludes.
-            store.adopt_remote_surface(remote_surface)
-            baseline[surface_key] = remote_surface_hash
-
-        # Actors: the union of local-active, remote, and locally archived keys,
-        # minus anything the door refused (see above).
-        for actor_key in sorted((set(local_actors) | set(remote_actors) | archived_keys) - refused_actor_keys):
-            local_actor = local_actors.get(actor_key)
-            remote_actor = remote_actors.get(actor_key)
-            local_hash = office_models.office_content_hash(local_actor) if local_actor is not None else None
-            remote_hash = office_models.office_content_hash(remote_actor) if remote_actor is not None else None
-            key = _actor_key(workspace_id, actor_key)
-            decision = classify_three_way_pull(
-                local_hash,
-                remote_hash,
-                baseline.get(key),
-                locally_archived=actor_key in archived_keys,
-            )
-            if decision.action == PullAction.NOOP:
-                continue
-            if decision.action == PullAction.KEEP_LOCAL:
-                summary.kept_local += 1
-                continue
-            if decision.action == PullAction.WRITE_REMOTE and remote_actor is not None:
-                remote_actor.workspace_id = workspace_id
-                remote_actor.state = "active"
-                # THE adopt arm, through the store's evented verb (H1). It was a
-                # raw ``atomic_json_write`` until 2026-08-30, which is why a pull
-                # that ARCHIVED a desk was visible to every live consumer and a
-                # pull that GAVE you one was visible to none.
-                store.adopt_remote_actor(remote_actor)
-                baseline[key] = remote_hash or office_models.office_content_hash(remote_actor)
-                if decision.reason == "converged":
-                    summary.converged += 1
-                else:
-                    summary.adopted += 1
-                continue
-            if decision.action == PullAction.ARCHIVE_LOCAL:
-                if deletes_fenced:
-                    # THE delete-shaped decision, and the one this pull has not
-                    # earned: "remote_removed" is inferred from the key being
-                    # absent from a remote map we know to be short. Hold the
-                    # desk, name it, and leave the baseline alone so a repaired
-                    # pull can still converge it.
-                    summary.delete_fenced.append(
-                        {
-                            "workspace_id": workspace_id,
-                            "actor_key": actor_key,
-                            "reason": "unreadable_remote",
-                            "unreadable_remote": remote.unreadable,
-                        }
-                    )
-                    continue
-                try:
-                    store.remove_actor(workspace_id, actor_key, reason="remote_removed", updated_by="realm_sync")
-                except Exception as exc:  # noqa: BLE001 — accounted, never silent
-                    # The loop SURVIVES one bad file — a whole realm must not
-                    # stop converging because one actor would not archive — but
-                    # the outcome leaves with the summary, and the baseline entry
-                    # STAYS. Popping it here (which this arm did unconditionally
-                    # until C2) tells the next pull there is no baseline for a
-                    # row that is still live, and a row with no baseline reads as
-                    # a local ADD: the failed delete came back as something to
-                    # publish. Kept, the next pull re-decides ARCHIVE_LOCAL and
-                    # retries the archive, which is the repair.
-                    summary.archive_outcomes.append(
-                        OfficeArchiveOutcome.failed(workspace_id, actor_key, exc).as_dict()
-                    )
-                    continue
-                summary.archived += 1
-                summary.archive_outcomes.append(
-                    OfficeArchiveOutcome.archived(workspace_id, actor_key).as_dict()
-                )
-                # The baseline entry leaves WITH the row, and only with it.
-                baseline.pop(key, None)
-                continue
-            if decision.action == PullAction.CONFLICT:
-                _write_conflict_sidecar(
-                    workspace_id,
-                    actor_key,
-                    kind=decision.reason,
-                    remote_actor=remote_actor,
-                    local_hash=local_hash,
-                    remote_hash=remote_hash,
-                )
-                summary.conflicts += 1
-                continue
+        _reconcile_surface(
+            store, baseline, remote_surface=remote_surface, local_surface=local_surface
+        )
+        _reconcile_actors(
+            store,
+            summary,
+            baseline,
+            workspace_id=workspace_id,
+            local_actors=local_actors,
+            remote=remote,
+            archived_keys=archived_keys,
+            refused_actor_keys=refused_actor_keys,
+        )
 
     write_office_baseline(realm_id, baseline)
     return summary
