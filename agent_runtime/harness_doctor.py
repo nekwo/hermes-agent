@@ -923,12 +923,24 @@ def _placement_census_report() -> dict[str, Any]:
         "orphan_actors": orphan_actors,
         "desk_litter": desk_litter,
         "workspaces": per_workspace,
+        # A4. The orphan half used to read "retiring or re-creating its agent",
+        # and for the orphan this census reports most often that names the ONE
+        # verb that cannot work. A realm-pulled placement is born orphaned —
+        # office actors sync, persona instances are per-install by ruling — so
+        # its instance has never existed here, and `agent retire` refuses
+        # `not_found` terminally. The refusal is correct; prescribing it was
+        # not. Both repairs are named, keyed on the fact that decides between
+        # them (does this install hold the instance), never on the id's shape.
         "remediation": (
-            "an orphan actor is cleared by retiring or re-creating its agent; "
-            "an unplaced row is either awaiting a placement or is the "
-            "roster-only recovery door working as designed; a desk_litter row "
-            "reading desk_kind_agent_binding wants a re-place, and the other "
-            "three want a reap"
+            "an orphan actor whose instance this install still holds is cleared "
+            "by retiring or re-creating its agent; one whose instance this "
+            "install never held — a realm-pulled placement, whose instance "
+            "stayed on the peer — has nothing to retire, and is cleared with "
+            "`harness office actor-remove --workspace <ws> --actor <key>` or "
+            "`runtime.office.remove`; an unplaced row is either awaiting a "
+            "placement or is the roster-only recovery door working as designed; "
+            "a desk_litter row reading desk_kind_agent_binding wants a re-place, "
+            "and the other three want a reap"
         ),
     }
     return report

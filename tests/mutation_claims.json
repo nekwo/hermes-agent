@@ -980,6 +980,21 @@
         "-q",
         "tests/agent_runtime/test_agent_retire_service.py::test_an_unreadable_evidence_read_on_the_replay_reaches_the_ack"
       ]
+    },
+    {
+      "id": "a4-doctor-prescribes-retire-for-an-orphan-retire-cannot-reach",
+      "path": "agent_runtime/harness_doctor.py",
+      "symbol": "_placement_census_report",
+      "operator": "drop-pulled-orphan-repair",
+      "find": "            \"install never held — a realm-pulled placement, whose instance \"\n            \"stayed on the peer — has nothing to retire, and is cleared with \"\n            \"`harness office actor-remove --workspace <ws> --actor <key>` or \"\n            \"`runtime.office.remove`; an unplaced row is either awaiting a \"",
+      "replace": "            \"install never held is cleared the same way; an unplaced row is either awaiting a \"",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_harness_doctor.py::test_the_orphan_remediation_names_the_verb_that_works_for_a_pulled_orphan"
+      ]
     }
   ]
 }

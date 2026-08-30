@@ -422,6 +422,38 @@ def test_placement_census(isolate_agent_runtime_root):
     assert report["summary"]["finding_counts"]["unplaced_rows"] == 1
 
 
+def test_the_orphan_remediation_names_the_verb_that_works_for_a_pulled_orphan(
+    isolate_agent_runtime_root,
+):
+    """A4 (M13). The remediation said "retiring or re-creating its agent" — and
+    for the orphan this census reports most often, retire is the ONE verb that
+    cannot work.
+
+    A realm-pulled placement is born orphaned: office actors sync, persona
+    instances are per-install by ruling, so the instance never existed on this
+    machine and ``agent retire`` refuses ``not_found`` terminally. The refusal is
+    correct; prescribing it was not, and the verb that does work
+    (``harness office actor-remove`` / ``runtime.office.remove``, which needs
+    only the surface and the actor FILE) was not named at all.
+
+    The string keys on the FACT that picks between the two repairs — does this
+    install hold the instance — never on the id's shape, which is the mistake
+    one layer up in the launcher's removal plan.
+    """
+
+    _report, census = _census()
+    remediation = census["remediation"]
+
+    assert "harness office actor-remove" in remediation, (
+        "the doctor still does not name the verb that clears a pulled orphan"
+    )
+    assert "runtime.office.remove" in remediation
+    # Retire is still prescribed — for the orphan it CAN clear — and the two
+    # arms are told apart by whether this install holds the instance.
+    assert "retiring or re-creating its agent" in remediation
+    assert "never held" in remediation
+
+
 def test_the_census_repairs_nothing(isolate_agent_runtime_root):
     """Read-only, including under ``--fix``.
 
