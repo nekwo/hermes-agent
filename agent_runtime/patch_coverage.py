@@ -276,11 +276,25 @@ LIVE_COVERED_DOMAIN_EVENT_TYPES: frozenset[str] = frozenset(
         # ``office.surface.created`` move surface state a fold genuinely cannot
         # reproduce: a create authors a surface the client has never held (and
         # is emitted by lazy ``ensure_surface`` from inside other writes, so
-        # covering it would need a pairing audit of every one of them), a
-        # restore un-archives from a copy the client never held, and a conflict
-        # resolution adopts a peer's row through a path that bypasses the
-        # upsert chokepoint. Leaving them uncovered routes their batches down
-        # the full-core lane with no new code and no new failure mode.
+        # covering it would need a pairing audit of every one of them) and a
+        # restore un-archives from a copy the client never held. Leaving them
+        # uncovered routes their batches down the full-core lane with no new
+        # code and no new failure mode.
+        #
+        # ``.conflict_resolved`` is in that list too, but NOT for the reason
+        # this comment used to give. It said the resolution "adopts a peer's row
+        # through a path that bypasses the upsert chokepoint" — an argument H1
+        # (``f810bd2ac``) discharged for the pull arm one method over, when
+        # ``adopt_remote_actor`` started emitting ``_emit_actor_patch`` from
+        # outside ``upsert_actor``. Bypassing the chokepoint has not implied
+        # "cannot carry a patch" since that day. The LIVE reason is narrower and
+        # is about this write, not about chokepoints: ``resolve_conflict``'s
+        # ``take="remote"`` arm calls ``_write_actor`` and emits no actor patch
+        # at all, so there is no row for a covered batch to ride (its
+        # edit-vs-remove arm does emit one, through ``_archive_actor_locked``).
+        # Covering the event before that write emits its patch would promote a
+        # batch that carries nothing. Making it emit — and then covering it —
+        # is a follow-on, not a correction of this list.
         #
         # ``persona_instance.chat_binding_cleared`` is the PERSONA-side member
         # of that must-stay-absent list, and it is the one whose absence reads

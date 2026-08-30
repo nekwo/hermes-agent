@@ -47,6 +47,7 @@ import ast
 import inspect
 import json
 import pathlib
+from unittest import mock
 
 import pytest
 
@@ -456,7 +457,20 @@ CARVED_OUT_ACTOR_WRITERS = {
         "OUT of office_sync.apply_office_pull's raw atomic_json_write and INTO this "
         "store verb so the adopt arm finally emits its office.actor.upserted + "
         "state.patched pair. H1 changed WHERE the unfenced write lives and what it "
-        "emits; it did not change WHETHER it is fenced, and #33 is still open."
+        "emits; it did not change WHETHER it is fenced. "
+        "RULED 2026-08-30 (operator, realm-actor-lifecycle-refactor D3): the adopt "
+        "arm STAYS UNFENCED. A pull is REPLICATION, not authoring — the class-key, "
+        "tombstone and desk fences all refuse local operator intent, and a pull has "
+        "no operator behind it to offer consent, so fencing it would mean refusing "
+        "to hold a fact a peer already published. What #33 named as one hole was "
+        "three: the two REAL ones are closed instead — the surface arm no longer "
+        "overwrites the local tombstone ledger (C1, office_store.merge_archived_"
+        "ledgers) and the archive arm no longer discards the outcome of a delete "
+        "it could not take (C2, office_sync.OfficeArchiveOutcome). What remains is "
+        "the DISPOSITION above, not an open question: a pulled duplicate desk or a "
+        "peer's un-migrated class key is a conflict-lane fact, which is why the "
+        "launcher's render-time duplicate_desk warning stays. This entry no longer "
+        "moves to FENCED_ACTOR_WRITERS on a future ruling — it is the ruling."
     ),
 }
 
@@ -570,7 +584,7 @@ def test_every_production_writer_of_a_live_actor_file_is_enumerated_and_disposit
     assert "allow_class_key" not in restore_source
 
 
-def test_the_carve_out_is_a_live_hole_and_not_a_stale_note():
+def test_the_carve_out_is_a_live_hole_and_not_a_stale_note(tmp_path):
     """The carve-out has to keep being TRUE, or the witness is documenting a
     fiction.
 
@@ -588,24 +602,84 @@ def test_the_carve_out_is_a_live_hole_and_not_a_stale_note():
     the pull at ``upsert_actor`` instead, which is a #33 ruling wearing a
     refactor's clothes.
 
-    When #33 lands, THIS test reds first and tells whoever fixed it to move the
-    entry into ``FENCED_ACTOR_WRITERS``.
+    The first half asks the RUNTIME, not the source. It used to grep
+    ``apply_office_pull``'s text for ``adopt_remote_actor(`` — a POSITIVE claim
+    resting on a spelling, and the 2026-08-30 C2 extraction proved the cost: a
+    behaviour-preserving move of the arm into ``_reconcile_actors`` reddened this
+    gate while the property it guards never changed. A real pull is driven here
+    and the verb it reaches is recorded. The SECOND half stays a source walk,
+    correctly: "this function contains no fence" is a negative claim, where
+    over-approximation is the safe direction.
+
+    D3 (2026-08-30) ruled the hole stays open BY DISPOSITION, so this test no
+    longer waits for #33 to land — it pins the ruling.
     """
 
-    from agent_runtime import office_sync
+    from agent_runtime import office_models, office_sync
+    from agent_runtime.models import OfficeActor, OfficeItem
+    from agent_runtime.serde import to_jsonable
+    from agent_runtime.store import RealmStore, WorkspaceStore
+    from utils import atomic_json_write
 
-    caller = inspect.getsource(office_sync.apply_office_pull)
-    assert "adopt_remote_actor(" in caller, (
+    realm = RealmStore().create(name="Carve")
+    workspace = WorkspaceStore().create(name="Carve", realm_id=realm.id)
+    realm = RealmStore().get(realm.id)
+    realm.workspace_ids.append(workspace.id)
+    RealmStore().save(realm)
+    remote = OfficeActor(
+        actor_key="pulled_dev",
+        workspace_id=workspace.id,
+        persona_id="pulled_dev",
+        items=[OfficeItem(item_id="pulled_dev", persona_id="pulled_dev", kind="agent", position=[1.0, 1.0])],
+        revision=1,
+    )
+    office_dir = tmp_path / "subtree" / "store" / "office" / workspace.id
+    atomic_json_write(
+        office_dir / "office.json",
+        to_jsonable(office_models.default_surface(workspace.id, created_at=None)),
+        indent=2,
+        sort_keys=True,
+    )
+    atomic_json_write(
+        office_dir / "actors" / f"{office_models.actor_file_token(remote.actor_key)}.json",
+        to_jsonable(remote),
+        indent=2,
+        sort_keys=True,
+    )
+
+    reached: list[str] = []
+
+    def _spying(verb: str):
+        """A SCOPED patch, never ``monkeypatch``. The shared instance's
+        ``undo()`` takes no argument and would drop this suite's autouse root
+        and credential pins with it (tests/conftest.py's tripwire), and the
+        source walk below must read the real verb, not a wrapper."""
+
+        real = getattr(OfficeStore, verb)
+
+        def _spy(self, *args, **kwargs):
+            reached.append(verb)
+            return real(self, *args, **kwargs)
+
+        return mock.patch.object(OfficeStore, verb, _spy)
+
+    with _spying("adopt_remote_actor"), _spying("upsert_actor"):
+        summary = office_sync.apply_office_pull(realm.id, tmp_path / "subtree")
+
+    assert summary.adopted == 1, summary.as_dict()
+    assert reached == ["adopt_remote_actor"], (
         "the realm pull's WRITE_REMOTE arm no longer routes through the carved-out "
-        "store verb — if it now reaches upsert_actor, task #33 was decided"
+        f"store verb — it reached {reached}. If it now reaches upsert_actor, the D3 "
+        "ruling (a pull is replication, not authoring) was reversed."
     )
 
     source = inspect.getsource(OfficeStore.adopt_remote_actor)
     assert "_write_actor(" in source
     assert "_guard_class_keyed_" not in source and "class_key_collision(" not in source, (
-        "adopt_remote_actor grew a class-key fence — task #33 was decided. Move its "
-        "entry from CARVED_OUT_ACTOR_WRITERS into FENCED_ACTOR_WRITERS with the "
-        "disposition, and delete this test."
+        "adopt_remote_actor grew a class-key fence — which REVERSES D3 (2026-08-30: "
+        "a pull is replication, not authoring). Move its entry from "
+        "CARVED_OUT_ACTOR_WRITERS into FENCED_ACTOR_WRITERS with the new ruling, "
+        "and delete this test."
     )
     assert ("agent_runtime/office_store.py", "adopt_remote_actor") in CARVED_OUT_ACTOR_WRITERS
 

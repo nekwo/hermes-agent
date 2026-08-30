@@ -1202,16 +1202,26 @@ class OfficeStore:
             baseline off the REMOTE content hash; this verb returns the same
             object it wrote so no re-read can drift from it.
 
-        NOT fenced, and that is the standing carve-out rather than an omission:
-        the class-key fence, the tombstone fence and the desk fence that
+        NOT fenced — a RULING (operator, 2026-08-30, plan
+        ``realm-actor-lifecycle-refactor`` D3), no longer an open carve-out.
+        The class-key fence, the tombstone fence and the desk fence that
         ``upsert_actor`` spends all refuse LOCAL authoring intent, and a pull
-        has no operator behind it to offer consent. A pulled duplicate desk (or
-        a peer's un-migrated class key) is a conflict-lane fact about what a
-        peer published, which is why the launcher's render-time
-        ``duplicate_desk`` warning stays and why task #33 still owns the
-        class-key ruling. H1 moved the write to the store so it EMITS; it did
-        not decide #33. ``tests/agent_runtime/test_office_class_key_one_fence
-        .py`` carries the disposition.
+        has no operator behind it to offer consent, so fencing it would mean
+        refusing to hold a fact a peer already published with nobody present to
+        take the override. A pulled duplicate desk (or a peer's un-migrated
+        class key) is a conflict-lane fact about what a peer published, which is
+        why the launcher's render-time ``duplicate_desk`` warning stays. The two
+        REAL holes task #33 had bundled with this one were closed instead: the
+        surface arm's tombstone-ledger overwrite (C1,
+        :func:`merge_archived_ledgers`) and the pull archive arm's discarded
+        outcome (C2, ``office_sync.OfficeArchiveOutcome``).
+        ``tests/agent_runtime/test_office_class_key_one_fence.py`` carries the
+        ruling and pins it at runtime.
+
+        The neighbour one method down differs on purpose:
+        :meth:`resolve_conflict` with ``take="remote"`` writes a peer's row too
+        and IS class-key fenced, because an operator asked for it — see its
+        docstring for the discriminator.
 
         The resurrection question is answered UPSTREAM and not here:
         ``classify_three_way_pull(..., locally_archived=True)`` never returns
@@ -1261,7 +1271,20 @@ class OfficeStore:
 
         ``allow_class_key`` is the operator's on-the-record override for the
         class-key fence below (``harness office resolve-conflict
-        --allow-class-key``); see ``_guard_class_keyed_adoption``."""
+        --allow-class-key``); see ``_guard_class_keyed_adoption``.
+
+        Why this arm IS fenced when :meth:`adopt_remote_actor` is not, given
+        that both write a peer's row into the live directory of the same
+        workspace: the discriminator every fence in this store keys on is LOCAL
+        AUTHORING INTENT, not the row's provenance. A pull is automatic — no
+        operator, no consent to offer, and nobody to take an override — so
+        fencing it would only mean refusing to hold what a peer published (the
+        D3 ruling at :meth:`adopt_remote_actor`). ``resolve-conflict --take
+        remote`` is the opposite case in every respect: it is an operator
+        gesture whose whole content is the decision to adopt the peer's copy as
+        local truth, it has an override to hand them (``allow_class_key``), and
+        the refusal it can raise points at a real next move. Same input class,
+        opposite dispositions, one rule."""
 
         take = str(take or "").strip().lower()
         if take not in {"local", "remote"}:
