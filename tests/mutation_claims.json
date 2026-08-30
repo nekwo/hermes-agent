@@ -845,6 +845,36 @@
         "-q",
         "tests/agent_runtime/test_agent_retire_service.py::test_a_projection_fault_on_the_replay_is_not_blamed_on_an_actor"
       ]
+    },
+    {
+      "id": "c1-pull-adopts-the-peer-ledger-wholesale",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "OfficeStore.adopt_remote_surface",
+      "operator": "drop-archived-ledger-union",
+      "find": "                surface.archived_actor_keys = merge_archived_ledgers(\n                    surface.archived_actor_keys,\n                    self.get_surface(wsid).archived_actor_keys,\n                )",
+      "replace": "                surface.archived_actor_keys = list(surface.archived_actor_keys)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_sync.py::test_a_local_tombstone_survives_a_pull_from_a_peer_that_never_heard_of_it"
+      ]
+    },
+    {
+      "id": "c1-ledger-union-leads-with-the-local-list",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "merge_archived_ledgers",
+      "operator": "reverse-union-order",
+      "find": "    for key in (*(peer_keys or ()), *(local_keys or ())):",
+      "replace": "    for key in (*(local_keys or ()), *(peer_keys or ())):",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_ledger_union_leads_with_the_peer_so_a_subset_rehashes_identically"
+      ]
     }
   ]
 }

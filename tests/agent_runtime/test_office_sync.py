@@ -193,6 +193,94 @@ def test_resurrection_guard_blocks_pulled_copy_of_archived_actor(tmp_path):
     assert not store.actor_exists(ws, "dev")
 
 
+def test_a_local_tombstone_survives_a_pull_from_a_peer_that_never_heard_of_it(tmp_path):
+    """C1 (M4). The surface arm adopted the peer's ``archived_actor_keys``
+    WHOLESALE, so one pull from a member that had never seen this desk erased the
+    ledger half of the resurrection guard — the half
+    ``classify_three_way_pull(..., locally_archived=…)`` reads.
+
+    The state is reachable rather than contrived: publish records the LOCAL hash
+    as the baseline, so an install that archives a desk and publishes reads as
+    ``unchanged`` on its next pull, and one peer folder edit later the classifier
+    says ``take_remote`` over its own ledger.
+    """
+
+    realm_id, ws = _make_realm_workspace()
+    subtree = tmp_path / "subtree"
+    _write_remote_office(subtree, ws, [_remote_actor(ws, "dev"), _remote_actor(ws, "old")])
+    apply_office_pull(realm_id, subtree)
+
+    store = OfficeStore()
+    store.remove_actor(ws, "old", reason="operator")
+    assert store.get_surface(ws).archived_actor_keys == ["old"]
+    # The publish half: the baseline now records what THIS install holds, which
+    # is what makes the surface read ``unchanged`` on the next pull.
+    update_office_baseline_after_sync(realm_id, [ws])
+
+    # The peer edits a folder and knows nothing about ``old`` — its ledger is
+    # empty and its actor directory has never carried the row.
+    peer_surface = office_models.default_surface(ws, created_at=None)
+    peer_surface.folders = [*peer_surface.folders, "Peers"]
+    _write_remote_office(subtree, ws, [_remote_actor(ws, "dev")])
+    atomic_json_write(
+        subtree / "store" / "office" / ws / "office.json",
+        to_jsonable(peer_surface),
+        indent=2,
+        sort_keys=True,
+    )
+
+    apply_office_pull(realm_id, subtree)
+    surface = store.get_surface(ws)
+    # The tombstone survived AND the peer's edit still landed: a merge, not a
+    # refusal to adopt.
+    assert "old" in surface.archived_actor_keys
+    assert "Peers" in surface.folders
+    # The archived actor stays archived — the guard the ledger exists to hold.
+    assert not store.actor_exists(ws, "old")
+
+    # And it survives repetition: a second pull of the same peer state neither
+    # loses the key again nor re-adopts the desk.
+    apply_office_pull(realm_id, subtree)
+    assert "old" in store.get_surface(ws).archived_actor_keys
+    assert not store.actor_exists(ws, "old")
+
+
+def test_a_peer_ledger_that_already_holds_the_local_key_adopts_byte_for_byte(tmp_path):
+    """The hash-neutrality half of C1's merge. When the local ledger is a SUBSET
+    of the peer's, the merged list is the peer's list in the peer's order — so
+    the adopted surface still hashes to the baseline the pull recorded and the
+    next pull is a NOOP. A local-first union would re-hash every converged
+    surface into a permanent phantom "unpublished" edit."""
+
+    realm_id, ws = _make_realm_workspace()
+    subtree = tmp_path / "subtree"
+    _write_remote_office(subtree, ws, [_remote_actor(ws, "dev"), _remote_actor(ws, "old")])
+    apply_office_pull(realm_id, subtree)
+
+    store = OfficeStore()
+    store.remove_actor(ws, "old", reason="operator")
+    update_office_baseline_after_sync(realm_id, [ws])
+
+    # The peer has since heard about ``old`` too — behind a tombstone of its own
+    # that this install has never seen, so a local-first union would REORDER the
+    # list and re-hash the surface even though nothing was lost.
+    peer_surface = office_models.default_surface(ws, created_at=None)
+    peer_surface.folders = [*peer_surface.folders, "Peers"]
+    peer_surface.archived_actor_keys = ["ghost", "old"]
+    _write_remote_office(subtree, ws, [_remote_actor(ws, "dev")])
+    atomic_json_write(
+        subtree / "store" / "office" / ws / "office.json",
+        to_jsonable(peer_surface),
+        indent=2,
+        sort_keys=True,
+    )
+
+    apply_office_pull(realm_id, subtree)
+    local = store.get_surface(ws)
+    assert local.archived_actor_keys == ["ghost", "old"]
+    assert office_models.office_content_hash(local) == read_office_baseline(realm_id)[f"{ws}:office"]
+
+
 def test_converged_edits_settle_silently(tmp_path):
     realm_id, ws = _make_realm_workspace()
     subtree = tmp_path / "subtree"

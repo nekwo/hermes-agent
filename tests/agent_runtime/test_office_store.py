@@ -19,7 +19,12 @@ from agent_runtime.errors import (
     WorkspaceUnresolved,
 )
 from agent_runtime.events import EventLog
-from agent_runtime.office_store import DuplicateDeskRefused, OfficeStore
+from agent_runtime.office_store import (
+    ARCHIVED_LEDGER_CAP,
+    DuplicateDeskRefused,
+    OfficeStore,
+    merge_archived_ledgers,
+)
 from agent_runtime.snapshot import SNAPSHOT_CONTRACT_VERSION, build_snapshot
 from agent_runtime.store import WorkspaceStore
 
@@ -1136,3 +1141,42 @@ def test_the_refusal_reaches_the_operator_typed_and_not_as_an_internal_error():
     assert not paths.office_dir("ws_typo_here").exists(), (
         "the CLI write authored the office it was refusing"
     )
+
+
+# ── C1: the archived-ledger union (M4) ─────────────────────────────────────
+
+
+def test_the_ledger_union_leads_with_the_peer_so_a_subset_rehashes_identically():
+    """C1's hash-neutrality property, at the level it lives at. When the local
+    ledger is a SUBSET of the peer's, the union must BE the peer's list — same
+    members, same order — or ``office_content_hash`` disagrees with the remote
+    and every converged surface adopts into a permanent phantom local edit."""
+
+    peer = ["a", "b", "c"]
+    assert merge_archived_ledgers(peer, ["b"]) == peer
+    assert merge_archived_ledgers(peer, []) == peer
+    assert merge_archived_ledgers(peer, list(peer)) == peer
+
+
+def test_local_only_keys_land_on_the_cap_surviving_tail():
+    """The cap keeps the TAIL (``[-ARCHIVED_LEDGER_CAP:]``, the idiom
+    ``_archive_actor_locked`` spends), so the union must put local-only keys
+    there: this store is the only witness to a resurrection it alone archived,
+    while a key the peer holds is guarded on the peer too."""
+
+    assert merge_archived_ledgers(["a", "b"], ["z"]) == ["a", "b", "z"]
+
+    over_cap = merge_archived_ledgers(
+        [f"peer{i}" for i in range(ARCHIVED_LEDGER_CAP)], ["local_only"]
+    )
+    assert len(over_cap) == ARCHIVED_LEDGER_CAP
+    assert over_cap[-1] == "local_only"
+    assert "peer0" not in over_cap
+
+
+def test_the_union_deduplicates_on_first_occurrence():
+    """A repeat cannot be minted locally (``_archive_actor_locked`` guards it),
+    so one can only have arrived from a peer — and carrying it forward would
+    spend cap budget on a key already guarded."""
+
+    assert merge_archived_ledgers(["a", "a", "b"], ["b", "c", "c"]) == ["a", "b", "c"]

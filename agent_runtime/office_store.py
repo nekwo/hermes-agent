@@ -61,6 +61,46 @@ ARCHIVED_LEDGER_CAP = 5000
 MAX_ITEMS_PER_ACTOR = 32
 MAX_FOLDERS = 64
 
+
+def merge_archived_ledgers(peer_keys, local_keys) -> list[str]:
+    """Union two ``archived_actor_keys`` ledgers — peer order first, local tail.
+
+    The resurrection guard is a LEDGER, and a ledger that one side can overwrite
+    guards nothing: :meth:`OfficeStore.adopt_remote_surface` wrote the peer's
+    list verbatim, so a pull from a member that had never heard of a key this
+    install archived silently erased that key's tombstone. The archived FILE
+    survives, which is why the fence's OR-semantics papered the hole over; the
+    ledger half — the half ``classify_three_way_pull(..., locally_archived=)``
+    reads — did not.
+
+    Two properties, both load-bearing, neither an accident of the expression:
+
+    * **the peer's list leads, in the peer's order.** When the local ledger is a
+      subset of the peer's (the converged case, and the common one) the result is
+      the peer's list byte-for-byte, so ``office_content_hash`` still matches the
+      remote and a pull that changed nothing stays a no-op. Local-first ordering
+      would re-hash every converged surface and hand the next pull a permanent
+      "unpublished" local edit over identical content.
+    * **local-only keys land at the TAIL**, which is the end the
+      ``[-ARCHIVED_LEDGER_CAP:]`` truncation keeps. Under cap pressure the keys
+      that survive are the ones THIS install archived — the ones whose
+      resurrection this store is the only witness to.
+
+    Deduplicated on first occurrence: ``_archive_actor_locked`` cannot produce a
+    repeat locally, so a duplicate can only have arrived from a peer, and
+    carrying it forward would spend cap budget on a key already guarded.
+    """
+
+    merged: list[str] = []
+    seen: set[str] = set()
+    for key in (*(peer_keys or ()), *(local_keys or ())):
+        text = str(key)
+        if text in seen:
+            continue
+        seen.add(text)
+        merged.append(text)
+    return merged[-ARCHIVED_LEDGER_CAP:]
+
 #: Stage-42 error code for the desk fence, and the wire's ``data.reason``.
 #: One spelling per lane rather than two vocabularies for one refusal, and the
 #: same word the launcher's render-time detector already prints
@@ -1051,7 +1091,26 @@ class OfficeStore:
         ``updated_by="realm_sync"``. It is hash-neutral: ``office_content_hash``
         excludes ``updated_by`` (with ``revision`` and the timestamps), so the
         caller's ``baseline[key] = remote_hash`` stays keyed off the remote
-        content and the next pull still classifies this row as converged.
+        content.
+
+        Verbatim in every field BUT ONE. ``archived_actor_keys`` is UNIONED with
+        the local ledger (:func:`merge_archived_ledgers`), because that field is
+        not the peer's opinion about this workspace — it is the resurrection
+        guard, and the pull is the one lane that can reach it from outside this
+        machine. Adopting it wholesale erased any tombstone the peer had not
+        heard of, which is a deletion of the exact evidence
+        ``classify_three_way_pull(..., locally_archived=…)`` reads to refuse a
+        resurrection. Reachable, not theoretical: publish records the LOCAL hash
+        as the baseline, so an install that archives a desk and publishes is
+        ``unchanged`` on its next pull — and one peer edit away from
+        ``take_remote`` over its own ledger.
+
+        The merge is hash-neutral wherever nothing was actually lost (the peer's
+        order leads, so a local subset re-hashes to the remote's exact list); it
+        is deliberately hash-CHANGING when a local-only key survives, which
+        leaves the surface classified as locally edited until the next publish
+        carries the fuller ledger back to the realm. That is the honest state:
+        this install now holds a ledger the realm has not seen.
 
         A CREATE emits only the domain ``office.surface.created`` and no patch —
         the same ruling ``update_surface`` rides for the same reason (a client
@@ -1066,6 +1125,14 @@ class OfficeStore:
         surface.updated_by = _safe_actor_ref(updated_by)
         with office_lock(wsid):
             existed = self.surface_exists(wsid)
+            if existed:
+                # Read INSIDE the lock that will hold for the write: a local
+                # archive racing this pull must land on one side of the union or
+                # the other, never between the read and the write.
+                surface.archived_actor_keys = merge_archived_ledgers(
+                    surface.archived_actor_keys,
+                    self.get_surface(wsid).archived_actor_keys,
+                )
             _write_surface(surface)
             if existed:
                 # INSIDE the lock and BEFORE the domain event, like every other
