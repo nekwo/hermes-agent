@@ -37,7 +37,18 @@ _ATTACH_CALL = "attach_root_observability"
 # spawn environment carried. Status must therefore be able to say which rung
 # named the head it would read from — otherwise the runtime declares its own
 # identity and the verb an operator uses to check it still cannot show it.
-CHAT_SCOPE_REQUIRED = {"_cmd_persona_chat_history", "_cmd_status"}
+#
+# ``_cmd_persona_instance_chat_bindings`` judges chat bindings AGAINST a
+# SessionDB, so a wrong head corrupts both of its answers: ``stale_count: 0``
+# reads as a clean store, and a named stale row is a false accusation against a
+# live instance (the 2026-07-25 incident cleared 10 healthy bindings exactly
+# that way). The verb refuses to answer unless the head was named — the stamp
+# is how the envelope SHOWS which one.
+CHAT_SCOPE_REQUIRED = {
+    "_cmd_persona_chat_history",
+    "_cmd_persona_instance_chat_bindings",
+    "_cmd_status",
+}
 
 _BACKLOG_REASON = (
     "predates the resolution block (2026-08-12 root-observability wave); "

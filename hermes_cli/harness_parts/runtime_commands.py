@@ -85,6 +85,7 @@ def _cmd_persona_instance_chat_bindings(args) -> int:
     """
 
     from agent_runtime.persona_assignments import PersonaInstanceStore
+    from agent_runtime.root_observability import attach_root_observability
 
     report = PersonaInstanceStore().repair_missing_chat_session_bindings(apply=False)
     skipped = report.get("skipped")
@@ -92,15 +93,26 @@ def _cmd_persona_instance_chat_bindings(args) -> int:
     # repaired here and the word at this surface says so.
     stale = list(report.get("repaired") or [])
     held = list(report.get("held") or [])
-    data = {
-        "read_only": True,
-        "answered": skipped is None,
-        "skipped": skipped,
-        "stale": stale,
-        "stale_count": len(stale),
-        "held": held,
-        "held_count": len(held),
-    }
+    # ``chat_scope`` is this verb's whole subject, stated on the wire. The
+    # answer is a judgement about a SessionDB, so both of its shapes are read
+    # off the head this process resolved: ``stale_count: 0`` is "clean" only if
+    # the probed state.db is the operator's, and a named stale row is an
+    # accusation against a live instance that is false the same way. ``source:
+    # "ambient_home"`` beside either says nobody named the head (the 2026-08-12
+    # ambient chat-history incident), the same tell ``persona-chat history``
+    # stamps.
+    data = attach_root_observability(
+        {
+            "read_only": True,
+            "answered": skipped is None,
+            "skipped": skipped,
+            "stale": stale,
+            "stale_count": len(stale),
+            "held": held,
+            "held_count": len(held),
+        },
+        chat_scope=True,
+    )
     if getattr(args, "json", False):
         print(emit_json(data))
     elif skipped:
