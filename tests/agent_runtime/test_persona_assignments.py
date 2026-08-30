@@ -591,7 +591,11 @@ def test_persona_instance_create_without_display_name_refuses_and_mints_nothing(
 def test_persona_instance_message_verb_is_gone_from_the_parser():
     """S70 removed `persona instance message` (and create's --auto-run /
     --stream / --max-actions / --max-seconds). argparse must REJECT them
-    cleanly — a removed lane must never degrade to a silent ignore."""
+    cleanly — a removed lane must never degrade to a silent ignore.
+
+    The `--auto-run` vector carries `--auto-run` and nothing else removed: it
+    used to ride beside `--message`, which S-DUP5 has since deleted too, and a
+    vector with two rejected flags proves neither one is rejected."""
     import argparse
 
     from hermes_cli import harness
@@ -606,7 +610,7 @@ def test_persona_instance_message_verb_is_gone_from_the_parser():
         root.parse_args(
             [
                 "harness", "persona", "instance", "create",
-                "--persona", "dev", "--title", "t", "--message", "m",
+                "--persona", "dev", "--title", "t",
                 "--auto-run",
             ]
         )
@@ -614,7 +618,7 @@ def test_persona_instance_message_verb_is_gone_from_the_parser():
     args = root.parse_args(
         [
             "harness", "persona", "instance", "create",
-            "--persona", "dev", "--title", "t", "--message", "m",
+            "--persona", "dev", "--title", "t",
             "--display-name", "Dev Agent", "--json",
         ]
     )

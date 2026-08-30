@@ -1,8 +1,12 @@
 # Planned — duplicate-implementation retirement
 
-**Status:** audit complete. **Stage 2 renamed, Stage 4 folded, Stage 6 EXECUTED
-(this commit), Stage 7 CANCELLED by the Stage 6 ruling.** Stages 1, 3 and 5
-remain. **Audited:** 2026-08-22 against HEAD `b2eb1a15db` (working tree clean).
+**Status:** **CLOSED 2026-08-30 — every stage executed or cancelled.** Stages 1,
+3 and the demote half of 5 landed in `dd084605d6`; stages 2 and 4 in
+`910fca47b7`; stage 6 executed at authoring time and cancelled stage 7; stage
+5's DELETE half landed 2026-08-30 (Track Z0 of the realm-actor-lifecycle
+refactor) once the launcher stopped emitting the flag. Nothing here is open;
+the file survives as the record of the nine acquittals, which stay binding.
+**Audited:** 2026-08-22 against HEAD `b2eb1a15db` (working tree clean).
 **Owner domain:** spans 01/02/08; this file is the delete schedule, the domain
 docs stay the truth of what exists.
 
@@ -30,7 +34,7 @@ re-arguing it.
 Value order: cheapest-safest first. A stage is not "delete on sight" — it is
 the evidence, what breaks, the kill proof, and the class of decision it needs.
 
-### Stage 1 — `PERSONA_CHAT_SESSION_SOURCE` defined twice, same value
+### Stage 1 — `PERSONA_CHAT_SESSION_SOURCE` defined twice, same value — **EXECUTED `dd084605d6`**
 
 - **WHAT:** one wire-vocabulary constant, two definition sites:
   `agent_runtime/persona_chat_continuity.py:38` and
@@ -61,7 +65,7 @@ the evidence, what breaks, the kill proof, and the class of decision it needs.
 - **FORK-OWNED:** all files under `agent_runtime/` (doc 03 invariant 8) and
   `hermes_cli/harness*` (doc 17 §2 filter).
 
-### Stage 2 — `_ReadModelCache` in the serve: a response cache wearing the read model's name
+### Stage 2 — `_ReadModelCache` in the serve: a response cache wearing the read model's name — **EXECUTED `910fca47b7`**
 
 - **WHAT:** `hermes_cli/harness_parts/serve.py:616` `class _ReadModelCache`
   (+ `_ReadModelCacheEntry` `:604`, `_READ_CACHE_MAX_AGE_SECONDS` `:408`,
@@ -87,7 +91,10 @@ the evidence, what breaks, the kill proof, and the class of decision it needs.
 - **FORK-OWNED:** `hermes_cli/harness_parts/serve.py` matches the
   `hermes_cli/harness` boundary prefix (doc 17 §2).
 
-### Stage 3 — mirrored constants without the fence the house pattern requires
+### Stage 3 — mirrored constants without the fence the house pattern requires — **EXECUTED `dd084605d6`**
+
+> The fence lives at `tests/agent_runtime/test_mirrored_constant_fences.py` and
+> pins all three equalities; the mirror-declaration comments point at it.
 
 - **WHAT:** two deliberate same-value mirror pairs in `agent_runtime/` that,
   unlike the `ERR_*` precedent, have **no equality fence**:
@@ -115,7 +122,7 @@ the evidence, what breaks, the kill proof, and the class of decision it needs.
 - **FORK-OWNED:** `agent_runtime/*` (doc 03 invariant 8);
   `tools/agent_chat_tool.py` is fork-created (doc 17 §2 exclusion list).
 
-### Stage 4 — `PersonaInstanceStore.create_free_floating`: production-callerless mint
+### Stage 4 — `PersonaInstanceStore.create_free_floating`: production-callerless mint — **EXECUTED `910fca47b7`**
 
 - **WHAT:** `agent_runtime/persona_assignments.py:426`
   `create_free_floating(persona_or_template) -> PersonaInstance`.
@@ -136,7 +143,29 @@ the evidence, what breaks, the kill proof, and the class of decision it needs.
 - **RISK CLASS:** mechanical with test churn (~10 files, no production path).
 - **FORK-OWNED:** `agent_runtime/persona_assignments.py` (doc 03 invariant 8).
 
-### Stage 5 — `--message` on `persona instance create`: inert, and `required=True`
+### Stage 5 — `--message` on `persona instance create`: inert, and `required=True` — **EXECUTED, both halves**
+
+> **Demote `dd084605d6` (2026-08-22); DELETE 2026-08-30 (Track Z0).** The
+> forced order held: the launcher's create/instantiate argv builders stopped
+> emitting `--message` on 2026-08-22, hermes demoted `required=True` →
+> optional-ignored the same day, and the flag itself is now gone from
+> `persona_instance_create` — argparse rejects it beside the four `--auto-run`
+> family flags S70 removed. `tests/hermes_cli/test_harness_cli.py::
+> test_persona_instance_create_has_no_message_flag` pins both the rejection and
+> the absence of a `message` attribute on the parsed namespace.
+>
+> **One deviation from the kill proof below, deliberate and launcher-owned:**
+> the registry `allowedArgs` row does NOT drop `message`. The launcher keeps it
+> DECLARED because the send outbox (`outboundText`) and
+> `MissionChatOutcomeUnknown.originalMessage` read it client-side; neither ever
+> rode the argv, so the wire cut is complete without it.
+>
+> **Residue:** the launcher's committed argparse fixture
+> (`test/features/mission_control/fixtures/hermes_cli_contract.json`) still
+> lists `--message` under `harness persona instance create`. No launcher test
+> reddens — the conformance gate reads the fixture, and nothing renders the
+> flag — but `dump_hermes_cli_contract.dart --check` will report it stale until
+> the dump is regenerated launcher-side.
 
 - **WHAT:** `hermes_cli/harness.py:922-927` — the flag is accepted, marked
   DEPRECATED in its own help text, ignored by the handler (S70), and still

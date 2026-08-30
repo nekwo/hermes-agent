@@ -238,29 +238,25 @@ now unblocked (its gate was this row).
 ## Debt register
 
 Open refactor and dead-code rows only, each re-verified against the tree on 2026-08-22.
-Executed history stays archived.
+Executed history stays archived. The duplicate-implementation retirement's rows
+(`create_free_floating`, `PERSONA_CHAT_SESSION_SOURCE`, `--message`) were struck on
+2026-08-30 when its stages 1/3/4/5 finished — see
+[`planned/duplicate-implementation-retirement.md`](planned/duplicate-implementation-retirement.md).
 
 **From [`19-deferred-debt-ledger.md`](archive/2026-08-22-pre-consolidation/19-deferred-debt-ledger.md):**
 
-- `PersonaInstanceStore.create_free_floating` is production-callerless but is the mint
-  fixture for ~10 test files across flow-graph/checkpoint/state-patch suites — fold into
-  a shared test-support mint (`agent_runtime/persona_assignments.py:426`).
 - Full `PersonaAssignmentStore` retirement is blocked on Launcher wire consumers (a
   wire-block drop is a snapshot contract bump) and on residual rows whose only settle
   path is close/archive; the module has 6 production importers.
-- `--message` on `persona instance create` is accepted and ignored for wire compat
-  (its own comment at `hermes_cli/harness.py:922-926` says so); removal is a lockstep
-  launcher change. `--title` is NOT inert — it is the fallback display name
-  (`harness.py:921`, consumed at `persona_commands.py:599,607`) and stays.
-- Launcher-side handoff (not this repo): registry `persona.instance.create` `allowedArgs`
-  still advertises `auto_run`/`max_actions`/`max_seconds`/`message`, and the
-  `close`/`archive` bridge lanes have registry rows and argv builders but no dispatcher.
+- Launcher-side handoff (not this repo): the `close`/`archive` bridge lanes have registry
+  rows and argv builders but no dispatcher. (The `allowedArgs` half of this row is
+  CLOSED: `auto_run`/`max_actions`/`max_seconds` are gone from both create specs, and
+  `message` stays DECLARED on purpose — it feeds client-side reads that never rode the
+  argv.)
 - The `memory` parallel-authority ruling is owed: under the unbounded runtime default the
   upstream `memory` tool is on every chat lane's schema, so it and profile memory
   (`MEMORY.md` / `USER.md`) are two authorities over one question, and an agent can write
   where the profile-memory lane does not read.
-- `PERSONA_CHAT_SESSION_SOURCE` is still defined twice —
-  `persona_chat_continuity.py:38` and `persona_chat_history.py:44`.
 - `hermes_cli/harness.py` carries a blanket `F821` per-file ignore (`pyproject.toml:454`)
   because the exec loader makes ~62 `_cmd_*` names genuinely undefined until
   `_load_command_parts()` runs; retiring it needs full module conversion.

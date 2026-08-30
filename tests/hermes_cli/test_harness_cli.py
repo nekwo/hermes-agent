@@ -161,20 +161,19 @@ def test_harness_parser_exposes_idempotent_exact_instance_chat_mint():
     assert args.idempotency_key == "new-chat-dev-1"
 
 
-def test_persona_instance_create_message_is_optional_and_still_ignored():
-    """`--message` is DEPRECATED launcher wire-compat: accepted, never read.
+def test_persona_instance_create_has_no_message_flag():
+    """`--message` is GONE from this lane, and the namespace carries no trace.
 
-    It used to be ``required=True``, which forced every CLI caller to invent a
-    message that nothing consumes. The demotion to optional is the half of the
-    retirement this repo can do unilaterally — loosening a requirement cannot
-    break a launcher build that still sends the flag, while DELETING the flag
-    would turn every such build's create call into an argparse error. Full
-    deletion waits on ``mission_control_bridge.dart`` no longer emitting it.
+    Both halves are pinned because either alone is satisfiable by a mutation
+    that breaks the other. The flag must be REJECTED (a re-added
+    accepted-and-ignored flag makes the operator supply text nothing reads),
+    and the parsed namespace must have no ``message`` attribute at all (a
+    ``default=None`` re-add parses clean while handing every downstream
+    ``getattr(args, "message", None)`` a silent value from this lane).
 
-    Both halves are pinned, because either one alone is satisfiable by a
-    mutation that breaks the other: OMITTING the flag must parse (that is the
-    demotion), and SUPPLYING it must still parse and land nowhere but the
-    namespace (that is the wire-compat the demotion must not cost us).
+    Asked of argparse itself, not of the source: a respelling that reaches the
+    same parser — an alias, a parent parser, a shared group — walks through a
+    grep and not through this.
     """
 
     base = [
@@ -185,21 +184,17 @@ def test_persona_instance_create_message_is_optional_and_still_ignored():
         "--json",
     ]
 
-    omitted = parser().parse_args(base)
-    assert omitted.persona_instance_command == "create"
-    assert omitted.message is None, (
-        "hermes_cli/harness.py's persona instance create --message must default "
-        "to None when omitted; a non-None default would hand the handler a value "
-        "the operator never typed."
+    parsed = parser().parse_args(base)
+    assert parsed.persona_instance_command == "create"
+    assert not hasattr(parsed, "message"), (
+        "hermes_cli/harness.py's persona instance create must leave no `message` "
+        "on the namespace: the free-floating assignment lane that read it is "
+        "retired (S70), and a default-valued attribute is exactly what lets a "
+        "handler start reading it again without anyone noticing."
     )
 
-    supplied = parser().parse_args([*base, "--message", "still accepted"])
-    assert supplied.message == "still accepted", (
-        "hermes_cli/harness.py must keep ACCEPTING persona instance create "
-        "--message: every launcher build that still emits it (see "
-        "mission_control_bridge.dart's create/instantiate argv builders) breaks "
-        "with an argparse error the moment this flag stops parsing."
-    )
+    with pytest.raises(SystemExit):
+        parser().parse_args([*base, "--message", "no longer accepted"])
 
 
 def test_harness_mission_chat_steer_no_active_turn_returns_structured_json(tmp_path, monkeypatch, capsys):

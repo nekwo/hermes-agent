@@ -125,7 +125,6 @@ def _create(capsys, persona: str, placement: str = "ph_one_agent_2", **flags):
         "harness", "persona", "instance", "create",
         "--persona", persona,
         "--title", "T",
-        "--message", "m",
         "--display-name", "Placed Agent",
         "--add-instance",
         "--placement-id", placement,

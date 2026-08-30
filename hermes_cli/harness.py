@@ -1105,24 +1105,6 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_create = persona_instance_subs.add_parser("create", help="Create an Agent Profile (operator chat channel) or an additional placement-backed instance (--add-instance); requires --display-name")
     persona_instance_create.add_argument("--persona", dest="persona_id", required=True)
     persona_instance_create.add_argument("--title", required=True, help="Fallback display name when --display-name is empty (launcher wire-compat)")
-    # S70: `--message` is accepted for launcher wire-compat only and is NOT
-    # acted on — the free-floating assignment queue it used to feed is retired
-    # (messaging is `harness mission-chat message`). Removing the flag needs a
-    # lockstep launcher change: mission_control_bridge.dart emits it on every
-    # persona.instance.create / persona.profile.instantiate call.
-    #
-    # DEMOTED (duplicate-implementation retirement, Stage 5): it used to be
-    # `required=True`, so a CLI caller was forced to supply a message that
-    # nothing reads — the one half of the cross-repo compat we could drop
-    # unilaterally, because loosening a requirement cannot break a caller that
-    # still sends the flag. It is now optional-and-ignored: still ACCEPTED for
-    # every launcher build that emits it, still acted on by nobody.
-    # FULL DELETION is gated on the operator's launcher rebuild: once
-    # mission_control_bridge.dart's create/instantiate argv builders (and the
-    # registry `allowedArgs` row) no longer emit `--message`, this line goes.
-    # Deleting it before that turns every stale launcher build's create call
-    # into an argparse error.
-    persona_instance_create.add_argument("--message", required=False, default=None, help="DEPRECATED: accepted for launcher wire-compat and ignored; send messages with `harness mission-chat message`")
     persona_instance_create.add_argument("--requested-by", default="cli")
     _add_coordinator_permission_args(persona_instance_create)
     persona_instance_create.add_argument("--client-message-id", default=None)
@@ -1133,9 +1115,11 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_create.add_argument("--placement-id", default=None, help="Scene itemId for an additional placement-backed instance; must end in the deliberate-placement shape <persona-token>_agent_<hex8>")
     persona_instance_create.add_argument("--workspace-id", "--workspace", dest="workspace_id", default=None, help="Mission Control workspace the placement belongs to (scope-provenance pointer; only meaningful with --add-instance)")
     persona_instance_create.add_argument("--realm-id", dest="realm_id", default=None, help="Mission Control realm the placement belongs to (scope-provenance pointer; only meaningful with --add-instance)")
-    # S70 removed `--auto-run` / `--stream` / `--max-actions` / `--max-seconds`:
-    # they belonged to the retired free-floating assignment queue (argparse now
-    # rejects them cleanly instead of silently ignoring them).
+    # S70 removed `--auto-run` / `--stream` / `--max-actions` / `--max-seconds`,
+    # and S-DUP5 finished the set with `--message`: all five belonged to the
+    # retired free-floating assignment queue (argparse now rejects them cleanly
+    # instead of silently ignoring them). `--title` is NOT one of them — it is
+    # the live display-name fallback above.
     persona_instance_create.add_argument("--json", action="store_true")
     persona_instance_create.set_defaults(func=_cmd_persona_instance_create)
     persona_instance_open = persona_instance_subs.add_parser("open-chat", help="Bind a persona instance to a durable chat session without ticking")

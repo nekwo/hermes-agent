@@ -2759,9 +2759,12 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     # envelope advertised as next step never existed), the `--auto-run`
     # in-process runner was a second, parallel turn authority beside
     # `mission-chat message`, and the display-name branch of `create`
-    # silently DISCARDED the then-required `--message` (the flag survives as
-    # optional-and-ignored launcher wire-compat; verified live 2026-08-09:
-    # create --add-instance --message --auto-run landed no turn anywhere).
+    # silently DISCARDED the then-required `--message` (verified live
+    # 2026-08-09: create --add-instance --message --auto-run landed no turn
+    # anywhere). `--message` outlived the lane as launcher wire-compat and was
+    # cut in S-DUP5 once the launcher stopped emitting it; argparse now rejects
+    # it beside the other four, pinned by
+    # tests/hermes_cli/test_harness_cli.py::test_persona_instance_create_has_no_message_flag.
     # The READ/CLOSE store side, the `persona_assignments` wire block and the
     # close/archive maintenance verbs survive for residual rows (ledger S70).
     *rows(
