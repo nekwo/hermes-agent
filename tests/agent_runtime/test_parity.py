@@ -129,6 +129,48 @@ def test_projection_accountant_caps_drop_samples():
     assert len(acct.drop_samples()) == 50  # bounded sample
 
 
+def test_a_by_design_flood_cannot_starve_the_one_anomalous_drop():
+    """H3 (plan ``realm-pull-live-projection``). THE live shape, in miniature.
+
+    On the operator's store 132 by-design ``instance_retired`` rows filled every
+    one of the 50 FIFO slots before the single ``session_not_in_db`` row was
+    recorded, so the launcher's amber "projection drops 1" chip shipped with
+    ``hasDetail == false`` — a bare pill with nothing behind it, and naming the
+    offender took a Python join over a saved snapshot.
+
+    The by-design half is bounded FIRST, and the anomalous rows lead the sample.
+
+    Kill-mutation: put both kinds back in one FIFO list.
+    """
+
+    acct = ProjectionAccountant("persona_chat_history")
+    for index in range(60):
+        acct.drop("instance_retired", entity_id=f"retired_{index}", by_design=True)
+    acct.drop("session_not_in_db", entity_id="personainst_profile_alice")
+
+    samples = acct.drop_samples()
+    assert samples[0]["code"] == "session_not_in_db"
+    assert samples[0]["entity_id"] == "personainst_profile_alice"
+    assert len(samples) <= 50
+    # The envelope's own numbers do not move: every drop is still tallied and
+    # the by-design declaration still rides the summary.
+    assert acct.summary()["reasons"] == {"instance_retired": 60, "session_not_in_db": 1}
+    assert acct.summary()["dropped"] == 61
+    assert acct.summary()["by_design"] == ["instance_retired"]
+
+
+def test_an_all_anomalous_projection_still_gets_the_whole_budget():
+    """ANTI-VACUITY for the split: reserving a floor for anomalous rows must not
+    have shrunk what an anomalous-only projection can sample. The by-design cap
+    is a ceiling on ONE half, not a new total."""
+
+    acct = ProjectionAccountant("demo")
+    for index in range(120):
+        acct.drop("unrenderable_entry", entity_id=f"e{index}")
+    assert len(acct.drop_samples()) == 50
+    assert all(sample["by_design"] is False for sample in acct.drop_samples())
+
+
 def test_events_watermark_reports_offset(isolate_agent_runtime_root):
     from hermes_time import now
 

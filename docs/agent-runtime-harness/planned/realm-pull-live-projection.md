@@ -601,3 +601,49 @@ back on the unconditional-resync path O-H4 was written to leave.
 
 **Live proof NOT taken** — same reason as H1: the change takes effect on the
 next serve restart, and the operator's two serve children were left running.
+
+### H3 — landed, and the live proof is TAKEN
+
+Built as the plan's "simplest honest shape": two lists with their own budgets,
+re-joined by ``drop_samples()`` with the anomalous records FIRST. The total stays
+``_MAX_DROP_SAMPLE = 50``; the new ``_MAX_BY_DESIGN_DROP_SAMPLE = 40`` is a
+ceiling on ONE half, which is what reserves the floor. ``dropped``, ``reasons``
+and the record shape are untouched — the launcher's ``_isAnomalousDropSample``
+needs no change and the docstring says so in as many words.
+
+**One design note the plan did not specify.** The split is routed by the
+``by_design`` argument passed at THIS call, not by the sticky per-code verdict
+the summary reports. They agree at every honest site (the module docstring
+already requires a code be declared the same way everywhere), and a lane that
+disagreed with itself is a bug the sample should SHOW rather than a reason to
+re-derive the flag inside ``drop``.
+
+**Live proof, taken read-only against `X:\Eternia\.hermes\agent-runtime`**
+(``hermes harness snapshot --json``, ``HERMES_HOME=…\.hermes\profiles\base``,
+exit 0, same watermark ``event_offset: 91576451`` the plan measured):
+
+```
+completeness.persona_chat_history:
+  considered 202, dropped 152, included 50, truncated true
+  reasons {instance_retired: 132, limit: 19, session_not_in_db: 1}
+parity.drops: 43 records — 40 instance_retired (by_design), 2 tail_truncated
+  (by_design), and:
+  {"code": "session_not_in_db", "by_design": false,
+   "hop": "persona_chat_history",
+   "entity_id": "persona_chat_personainst_chara_a2_7b31d0e4_6295f065380f"}
+```
+
+**The chip's row now exists and the offender is named**: the entity is the CHAT
+ROOT id, and the instance inside it is ``personainst_chara_a2_7b31d0e4`` — the
+second of the three candidates §3 derived by hand. The Python join over a saved
+snapshot is no longer needed to answer "what is the amber chip". Note the sample
+is 43 and not 50: 40 by-design ``instance_retired`` rows is the new ceiling for
+that half, and the other three projections contributed the rest.
+
+**Entrypoint note for whoever takes a live reading next:**
+``python -m hermes_cli.harness …`` exits 0 and prints NOTHING — that module has
+no ``__main__`` guard, so ``-m`` imports it and stops. The verb runs through the
+``hermes`` console script (``hermes_cli.main:main``).
+
+**L3 is now unblocked** — the producer ships the sample, so the launcher half has
+something to render.

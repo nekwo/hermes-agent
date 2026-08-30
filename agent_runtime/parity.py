@@ -58,6 +58,22 @@ PARITY_ENVELOPE_VERSION = 1
 # (the full tallies are unbounded in `reasons`; the samples are for the inspector
 # and must not bloat the payload).
 _MAX_DROP_SAMPLE = 50
+
+#: How many of the 50 slots a BY-DESIGN flood may consume. The remainder is a
+#: reserved floor for anomalous records, and that reservation is the whole point
+#: (plan ``realm-pull-live-projection`` H3).
+#:
+#: The sample was one FIFO list, so on a real store the ordering of the drops
+#: decided what the operator could see: 132 ``instance_retired`` rows filled all
+#: 50 slots before the ONE ``session_not_in_db`` row was recorded, and the
+#: launcher's amber "projection drops 1" chip shipped with ``hasDetail == false``
+#: — a bare pill with nothing behind it. Naming the offending instance took a
+#: Python join over a saved snapshot, which is exactly the cost ``dropSummaries``
+#: was built to remove. A by-design drop is the steady state on a healthy
+#: runtime; an anomalous one is the only kind an operator can act on, so the
+#: bounded budget belongs to the by-design half.
+_MAX_BY_DESIGN_DROP_SAMPLE = 40
+
 _TEXT_LIMIT = 200
 
 
@@ -98,7 +114,10 @@ class ProjectionAccountant:
         self._reasons: dict[str, int] = {}
         self._by_design: set[str] = set()
         self._truncated = False
-        self._drops: list[DropRecord] = []
+        # TWO lists, one budget each — see ``_MAX_BY_DESIGN_DROP_SAMPLE``. They
+        # are re-joined by :meth:`drop_samples`, which is the only reader.
+        self._drops_anomalous: list[DropRecord] = []
+        self._drops_by_design: list[DropRecord] = []
 
     def consider(self, n: int = 1) -> None:
         self._considered += max(0, int(n))
@@ -123,14 +142,25 @@ class ProjectionAccountant:
         per-CODE and sticky: it surfaces in :meth:`summary` under ``by_design``
         so a reader can subtract bounded lanes from the anomaly count without
         maintaining its own reason allowlist.
+
+        ``by_design`` ALSO routes which sample budget this record spends, so a
+        by-design flood can never starve the anomalous rows the chip is about.
+        See :data:`_MAX_BY_DESIGN_DROP_SAMPLE`. Note the split is by the
+        argument passed at THIS call, not by the sticky per-code verdict: the
+        two agree at every honest site (a code is declared the same way
+        everywhere, which the module docstring already requires), and a lane
+        that disagreed with itself would be a bug the sample should show rather
+        than a reason to re-derive the flag here.
         """
 
         count = max(1, int(count))
         self._reasons[code] = self._reasons.get(code, 0) + count
         if by_design:
             self._by_design.add(str(code))
-        if len(self._drops) < _MAX_DROP_SAMPLE:
-            self._drops.append(
+        bucket = self._drops_by_design if by_design else self._drops_anomalous
+        cap = _MAX_BY_DESIGN_DROP_SAMPLE if by_design else _MAX_DROP_SAMPLE
+        if len(bucket) < cap:
+            bucket.append(
                 DropRecord(
                     hop=hop or self.projection,
                     code=str(code),
@@ -168,7 +198,28 @@ class ProjectionAccountant:
         }
 
     def drop_samples(self) -> list[dict[str, Any]]:
-        return [record.as_dict() for record in self._drops]
+        """The bounded sample of concrete drop records, ANOMALOUS ROWS FIRST.
+
+        **This is a sampling-policy change, not an envelope-shape change**, and
+        the distinction is load-bearing: the return type is still
+        ``list[dict]`` in the same record shape, ``dropped`` still counts EVERY
+        drop, ``reasons`` is still unbounded, and the total is still capped at
+        :data:`_MAX_DROP_SAMPLE`. The launcher's ``_isAnomalousDropSample``
+        (``mission_control_snapshot.dart:577``) needs no change and MUST need
+        none — it filters this list by the ``by_design`` flag each record
+        already carries.
+
+        What moved is WHICH records survive the cap. Anomalous first because
+        this list is read by an operator answering "what is the amber chip",
+        and because the concatenation is what re-imposes the single total: a
+        by-design half that was already bounded at
+        :data:`_MAX_BY_DESIGN_DROP_SAMPLE` can only be trimmed further here when
+        the anomalous half is genuinely large, which is a projection with
+        bigger problems than a short sample.
+        """
+
+        joined = [*self._drops_anomalous, *self._drops_by_design]
+        return [record.as_dict() for record in joined[:_MAX_DROP_SAMPLE]]
 
 
 def core_event_offset(core: Any) -> int | None:
