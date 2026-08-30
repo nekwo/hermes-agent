@@ -1180,6 +1180,51 @@
         "-q",
         "tests/hermes_cli/test_harness_cli.py::test_the_doctor_detail_line_derives_from_the_section_table"
       ]
+    },
+    {
+      "id": "hh8-the-census-opens-actor-items-for-duplicate-holders",
+      "path": "agent_runtime/harness_doctor.py",
+      "symbol": "_placement_census_report",
+      "operator": "drop-the-duplicate-placement-sweep",
+      "find": "        duplicate_placements.extend(ws_duplicates)\n",
+      "replace": "        ws_duplicates = []\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_harness_doctor.py::test_two_live_actors_holding_one_desk_id_are_seen"
+      ]
+    },
+    {
+      "id": "hh8-a-same-instance-duplicate-moves-the-verdict",
+      "path": "agent_runtime/harness_doctor.py",
+      "symbol": "_placement_census_report",
+      "operator": "demote-the-same-instance-duplicate-to-a-notice",
+      "find": "    if orphan_actors or same_instance_duplicates:",
+      "replace": "    if orphan_actors:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_harness_doctor.py::test_a_same_instance_duplicate_is_a_defect"
+      ]
+    },
+    {
+      "id": "hh8-the-duplicate-classifier-asks-the-unbound-arm-first",
+      "path": "agent_runtime/harness_doctor.py",
+      "symbol": "_duplicate_placement_reason",
+      "operator": "swap-the-unbound-and-same-instance-arms",
+      "find": "    if any(not binding for binding in bindings):\n        return DUPLICATE_PLACEMENT_UNBOUND_HOLDER\n    if len(set(bindings)) == 1:\n        return DUPLICATE_PLACEMENT_SAME_INSTANCE",
+      "replace": "    if len(set(bindings)) == 1:\n        return DUPLICATE_PLACEMENT_SAME_INSTANCE\n    if any(not binding for binding in bindings):\n        return DUPLICATE_PLACEMENT_UNBOUND_HOLDER",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_harness_doctor.py::test_the_duplicate_reason_classifier_is_total_over_its_bindings"
+      ]
     }
   ]
 }

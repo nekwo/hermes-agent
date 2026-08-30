@@ -78,13 +78,15 @@ def test_harness_doctor_reports_snapshot_null_ids(isolate_agent_runtime_root):
         "orphan_worktrees",
         "snapshot_null_id_rows",
         "misplaced_root_only_keys",
-        # The census contributes THREE counts, because they are three
-        # verdicts: an orphan actor is a defect, an unplaced row is a legal
-        # state of a supported door, and a litter desk is authored furniture
-        # standing where its agent no longer is.
+        # The census contributes FOUR counts, because they are four verdicts:
+        # an orphan actor is a defect, an unplaced row is a legal state of a
+        # supported door, a litter desk is authored furniture standing where its
+        # agent no longer is, and a duplicate placement is two live actors
+        # claiming one item id.
         "orphan_actors",
         "unplaced_rows",
         "desk_litter",
+        "duplicate_placements",
     }
     assert report["findings"]["snapshot_null_id_rows"] == [
         {"collection": "persona_instances", "index": 0, "id_key": "persona_instance_id"}
@@ -121,6 +123,7 @@ def test_harness_doctor_fix_is_idempotent(isolate_agent_runtime_root):
         "orphan_actors": 0,
         "unplaced_rows": 0,
         "desk_litter": 0,
+        "duplicate_placements": 0,
     }
 
 
@@ -1036,3 +1039,274 @@ def test_one_unreadable_actor_file_makes_the_whole_census_unknown(
     assert census["desk_litter"] is None
     assert report["summary"]["finding_counts"]["desk_litter"] is None
     assert "placement_census" in report["summary"]["unexamined_sections"]
+
+
+# ── duplicate placements: one item id, two live actor rows (H-H8) ─────────────
+
+
+def _create_in(workspace_id: str, placement_id: str):
+    """Seed the office, then place one REAL agent through the create service."""
+
+    _seed_office(workspace_id)
+    return _create(workspace_id, placement_id)
+
+
+def _adopt_actor(
+    workspace_id: str,
+    *,
+    actor_key: str,
+    persona_instance_id: str | None,
+    item_id: str,
+    kind: str = "desk",
+    persona_id: str = "qa",
+):
+    """A PEER's actor row, written through the pull's own verb.
+
+    ``adopt_remote_actor`` is the production path that puts another machine's
+    actor into this store verbatim — the one write that can land a second live
+    row claiming an id a local actor already holds, because it is deliberately
+    unfenced (D3). Hand-writing the JSON would pin the census against this
+    fixture's idea of a pulled actor rather than the store's.
+    """
+
+    from agent_runtime.models import OfficeActor, OfficeItem
+    from agent_runtime.office_store import OfficeStore
+
+    return OfficeStore().adopt_remote_actor(
+        OfficeActor(
+            actor_key=actor_key,
+            workspace_id=workspace_id,
+            persona_id=persona_id,
+            persona_instance_id=persona_instance_id,
+            items=[
+                OfficeItem(
+                    item_id=item_id,
+                    persona_id=persona_id,
+                    kind=kind,
+                    position=[3.0, 3.0],
+                )
+            ],
+        )
+    )
+
+
+def test_two_live_actors_holding_one_desk_id_are_seen(isolate_agent_runtime_root):
+    """The residual the two write fences leave, now READ by the census.
+
+    Doc 06's write-verbs section stated it and had nothing to point at: the
+    class-key fence guards class-keyed payloads only and the desk fence counts
+    distinct ids, so an instance-keyed write claiming a desk id another live
+    actor holds passes both. The census could not see it either — it joins on
+    ``persona_instance_id`` and never opened ``actor.items``, so BOTH holders
+    counted as ``placed`` and the section reported ``ok``.
+
+    ANTI-VACUITY: both holders are live and both are counted ``placed`` in the
+    same report. A census that had merely stopped counting one of them would
+    fail the ``placed`` assertion; only a census that opened the items can name
+    the id and both actor keys.
+    """
+
+    workspace = "ws_duplicate_desk"
+    _qa_persona_saved()
+    store = _seed_office(workspace)
+
+    agent = _create(workspace, "qa_dupe_agent_2")
+    store.upsert_actor(
+        workspace,
+        {
+            "persona_id": "qa",
+            "persona_instance_id": agent["persona_instance_id"],
+            "items": [
+                {
+                    "item_id": agent["persona_instance_id"],
+                    "persona_id": "qa",
+                    "kind": "agent",
+                    "position": [0.0, 0.0],
+                },
+                {
+                    "item_id": "qa_desk",
+                    "persona_id": "qa",
+                    "kind": "desk",
+                    "position": [1.0, 0.0],
+                },
+            ],
+        },
+    )
+    # The second holder: a peer's actor, adopted verbatim, claiming the SAME
+    # desk id under its own actor key.
+    _adopt_actor(
+        workspace,
+        actor_key="peer_qa_desk_holder",
+        persona_instance_id=agent["persona_instance_id"],
+        item_id="qa_desk",
+    )
+
+    report, census = _census()
+
+    duplicates = census["duplicate_placements"]
+    assert [row["item_id"] for row in duplicates] == ["qa_desk"]
+    assert sorted(holder["actor_key"] for holder in duplicates[0]["holders"]) == [
+        "peer_qa_desk_holder",
+        agent["actor_key"],
+    ]
+    assert duplicates[0]["kinds"] == ["desk"]
+    assert duplicates[0]["workspace_id"] == workspace
+    assert census["workspaces"][workspace]["duplicate_placements"] == duplicates
+    assert report["summary"]["finding_counts"]["duplicate_placements"] == 1
+    # Both rows are live and both still join the roster — the state the section
+    # used to report ``ok`` over.
+    assert census["placed"] == 2
+
+
+def test_a_same_instance_duplicate_is_a_defect(isolate_agent_runtime_root):
+    """One instance's placement claimed by two live actor rows moves the verdict.
+
+    D6 (operator, 2026-08-27) rules that duplicate desks are fine and only a
+    duplicate on the SAME INSTANCE is not. This is that case, and it is the only
+    duplicate the doctor calls a defect.
+    """
+
+    workspace = "ws_duplicate_same_instance"
+    _qa_persona_saved()
+    agent = _create_in(workspace, "qa_same_agent_2")
+    _adopt_actor(
+        workspace,
+        actor_key="peer_same_instance",
+        persona_instance_id=agent["persona_instance_id"],
+        item_id=agent["persona_instance_id"],
+        kind="agent",
+    )
+
+    report, census = _census()
+
+    assert [row["reason"] for row in census["duplicate_placements"]] == [
+        "same_instance"
+    ]
+    assert census["health"] == "defect"
+    assert report["summary"]["section_health"]["placement_census"] == "defect"
+    assert report["summary"]["needs_fix"] is True
+    assert "same_instance" in census["remediation"]
+
+
+def test_a_cross_instance_duplicate_is_reported_and_is_not_a_defect(
+    isolate_agent_runtime_root,
+):
+    """Two INSTANCES holding one desk id: reported, never a defect.
+
+    D6's ruling in its own words — "it's an instantiated system", the persona is
+    a template — and item ids are minted persona-scoped (``<persona>_<kind>``),
+    so two instances of one persona each authoring a desk produce exactly this.
+    Calling it a defect would re-key this predicate to the persona, the move the
+    ruling forbids.
+
+    ANTI-VACUITY: the row EXISTS. A census that simply ignored cross-instance
+    duplicates would satisfy the health assertions and fail the first one.
+    """
+
+    workspace = "ws_duplicate_cross_instance"
+    _qa_persona_saved()
+    first = _create_in(workspace, "qa_cross_one_agent_2")
+    second = _create(workspace, "qa_cross_two_agent_2")
+    assert first["persona_instance_id"] != second["persona_instance_id"]
+    _adopt_actor(
+        workspace,
+        actor_key="peer_cross_one",
+        persona_instance_id=first["persona_instance_id"],
+        item_id="qa_desk",
+    )
+    _adopt_actor(
+        workspace,
+        actor_key="peer_cross_two",
+        persona_instance_id=second["persona_instance_id"],
+        item_id="qa_desk",
+    )
+
+    report, census = _census()
+
+    assert [row["reason"] for row in census["duplicate_placements"]] == [
+        "cross_instance"
+    ]
+    assert census["health"] == "notice"
+    assert report["summary"]["needs_fix"] is False
+
+
+def test_the_rekey_migrations_transient_is_a_notice_not_a_defect(
+    isolate_agent_runtime_root,
+):
+    """A class-keyed holder beside an instance-keyed one is the migration.
+
+    ``scripts/office_actor_rekey_to_instance.py::_apply`` mints the
+    instance-keyed actor with the class-keyed actor's items copied verbatim and
+    only then archives the old key, so both rows briefly claim every id. A
+    census that called this a defect would report the one operator script whose
+    whole job is to move a placement.
+    """
+
+    workspace = "ws_duplicate_rekey"
+    _qa_persona_saved()
+    agent = _create_in(workspace, "qa_rekey_agent_2")
+    _adopt_actor(
+        workspace,
+        actor_key="qa",
+        persona_instance_id=None,
+        item_id=agent["persona_instance_id"],
+        kind="agent",
+    )
+
+    report, census = _census()
+
+    assert [row["reason"] for row in census["duplicate_placements"]] == [
+        "unbound_holder"
+    ]
+    assert census["health"] == "notice"
+    assert report["summary"]["needs_fix"] is False
+
+
+def test_distinct_ids_on_two_actors_are_not_a_duplicate(isolate_agent_runtime_root):
+    """The anti-vacuity half: the ordinary two-actor store reports nothing.
+
+    A sweep that flagged every id held by any actor would pass all four tests
+    above and fail only here.
+    """
+
+    workspace = "ws_duplicate_healthy"
+    _qa_persona_saved()
+    store = _seed_office(workspace)
+    agent = _create(workspace, "qa_healthy_dupe_agent_2")
+    _desk_actor(store, workspace, f"desk-{agent['persona_instance_id']}")
+
+    report, census = _census()
+
+    assert census["duplicate_placements"] == []
+    assert census["workspaces"][workspace]["duplicate_placements"] == []
+    assert report["summary"]["finding_counts"]["duplicate_placements"] == 0
+    # Two live actors DO hold items here — otherwise the empty list is
+    # satisfied by a store with nothing in it.
+    assert len(store.list_actors(workspace)) == 2
+
+
+@pytest.mark.parametrize(
+    ("bindings", "expected"),
+    [
+        (("personainst_a", "personainst_a"), "same_instance"),
+        (("personainst_a", "personainst_b"), "cross_instance"),
+        (("", "personainst_a"), "unbound_holder"),
+        (("personainst_a", ""), "unbound_holder"),
+        (("", ""), "unbound_holder"),
+        (("personainst_a", "personainst_a", "personainst_b"), "cross_instance"),
+    ],
+)
+def test_the_duplicate_reason_classifier_is_total_over_its_bindings(
+    bindings, expected
+):
+    """Pure, and the order is the design.
+
+    The unbound arm is asked FIRST: a class-keyed holder beside an
+    instance-keyed one is also a set of bindings that is not all-equal, so any
+    other order files the re-key migration's legal transient under
+    ``cross_instance`` and loses the one distinction an operator acts on.
+    """
+
+    from agent_runtime.harness_doctor import _duplicate_placement_reason
+
+    assert _duplicate_placement_reason(bindings) == expected

@@ -233,7 +233,12 @@ def run_harness_doctor(
         # the ITEM-level desk sweep the actor-level join is blind to, with
         # ``summary.finding_counts`` gaining ``desk_litter``. No new section:
         # the census's own health absorbs it, at ``notice``.
-        "schema_version": 6,
+        # 7: ``findings.placement_census.duplicate_placements`` is new (H-H8) —
+        # item ids held by more than one live actor, with
+        # ``summary.finding_counts`` gaining ``duplicate_placements``. No new
+        # section again, and the census's health absorbs it at ``notice``
+        # EXCEPT for the ``same_instance`` reason, which is a defect.
+        "schema_version": 7,
         "generated_at": ref,
         "ok": not defective and not unexamined,
         "mode": {"fix": bool(fix), "dry_run": bool(dry_run)},
@@ -562,6 +567,10 @@ def _census_unknown(detail: str, *, unreadable: list[str] | None = None) -> dict
         # "unknown for the workspace whose directory was short" — and this key
         # is ``None`` beside the other three.
         "desk_litter": None,
+        # Same rule again, and for a reason of its own: "no OTHER live actor
+        # holds this id" is the absence a duplicate sweep asserts, and a file
+        # that would not open is one that might be holding it.
+        "duplicate_placements": None,
         "workspaces": None,
     }
     if unreadable:
@@ -726,6 +735,75 @@ def _desk_litter_reason(
     return DESK_LITTER_AGENT_MISSING
 
 
+# ── duplicate placements: one item id, two live actor rows (H-H8) ────────────
+#
+# The residual the two write fences leave between them, stated in doc 06's
+# write-verbs section: the class-key fence guards class-keyed payloads only (an
+# instance-keyed write "IS the migration's shape"), and the duplicate-desk fence
+# counts DISTINCT desk ids per persona, so an instance-keyed write claiming an
+# item id another live actor already holds passes both. Until now nothing
+# server-side could see it — the census joins on ``persona_instance_id`` and
+# never opened ``actor.items``, so both holders counted as ``placed`` and the
+# section reported ``ok``, leaving the launcher's render-time ``duplicate_desk``
+# warning as the only detector.
+#
+# This is a READER and deliberately not a third fence: doc 06's D6 ruling says
+# the persona-keyed desk fence must NOT be re-keyed toward instances, because
+# desks are a placeholder for standalone artifacts and the invariant should stop
+# existing rather than move. A census row moves no fence.
+
+#: Every holder is bound to the SAME live-ish instance — one instance's
+#: placement claimed by two live actor rows. A DEFECT: nothing legitimate mints
+#: it, and it is the two-fences residual in the shape that actually costs
+#: something (the realm-pulled actor file written under a peer's actor key, or a
+#: legacy id spelling that canonicalizes onto a key already held).
+DUPLICATE_PLACEMENT_SAME_INSTANCE = "same_instance"
+
+#: The holders are different instances. Reported, never a defect: D6 rules that
+#: "duplicate desks are fine and only a duplicate on the SAME INSTANCE is not —
+#: it's an instantiated system", and item ids are minted persona-scoped
+#: (``<persona>_<kind>``), so two instances of one persona each authoring a desk
+#: produce exactly this. Calling it a defect would re-key this predicate to the
+#: persona, which is the move the ruling forbids.
+DUPLICATE_PLACEMENT_CROSS_INSTANCE = "cross_instance"
+
+#: At least one holder is CLASS-KEYED (no instance binding). Reported, never a
+#: defect: this is the class→instance re-key migration's own transient —
+#: ``scripts/office_actor_rekey_to_instance.py::_apply`` mints the instance-keyed
+#: actor with the class-keyed actor's items copied verbatim and only then
+#: archives the old key, so both rows briefly claim every id. A census that
+#: called it a defect would report the one operator script whose whole job is to
+#: move a placement.
+DUPLICATE_PLACEMENT_UNBOUND_HOLDER = "unbound_holder"
+
+DUPLICATE_PLACEMENT_REASONS = (
+    DUPLICATE_PLACEMENT_SAME_INSTANCE,
+    DUPLICATE_PLACEMENT_CROSS_INSTANCE,
+    DUPLICATE_PLACEMENT_UNBOUND_HOLDER,
+)
+
+
+def _duplicate_placement_reason(bindings: tuple[str, ...]) -> str:
+    """Which duplicate this is, from the holders' instance bindings alone.
+
+    ``bindings`` is one entry per HOLDER, ``""`` for a class-keyed actor. Pure,
+    total over its input, and — like the desk classifier — the part worth unit
+    testing, so it must not be reachable only through a filesystem fixture.
+
+    THE ORDER IS THE DESIGN: the unbound arm is asked first, because a
+    class-keyed holder beside an instance-keyed one is also, trivially, a set of
+    bindings that is not all-equal, so any other order would file the re-key
+    migration's legal transient under ``cross_instance`` and lose the one
+    distinction an operator acts on.
+    """
+
+    if any(not binding for binding in bindings):
+        return DUPLICATE_PLACEMENT_UNBOUND_HOLDER
+    if len(set(bindings)) == 1:
+        return DUPLICATE_PLACEMENT_SAME_INSTANCE
+    return DUPLICATE_PLACEMENT_CROSS_INSTANCE
+
+
 def _persona_has_retired_instance(persona_id: str, retired: frozenset[str]) -> bool:
     """Did any instance of this persona carry a retirement tombstone?
 
@@ -787,6 +865,14 @@ def _placement_census_report(_context: _DoctorProbeContext | None = None) -> dic
       storage is actor-level — is why this walk is over ITEMS and why it joins
       per workspace on ``persona_id``.
 
+    * ``duplicate_placements`` (H-H8) — an ITEM id held by more than one live
+      actor, with every holder named and one of the three
+      ``DUPLICATE_PLACEMENT_*`` reasons. A defect only for ``same_instance``;
+      the other two are reported at ``notice``, and the reasons are where the
+      D6 ruling is spent. The join above could not see any of them: it is
+      actor-level, so both holders counted as ``placed`` and the section
+      reported ``ok``.
+
     ``health`` is ``unknown`` — never ``ok`` — when either store could not be
     read in full. That includes a scan that returned rows AND a nonzero
     ``unreadable`` count: a census computed over a short world reports an actor
@@ -827,6 +913,7 @@ def _placement_census_report(_context: _DoctorProbeContext | None = None) -> dic
     placed: list[dict[str, Any]] = []
     orphan_actors: list[dict[str, Any]] = []
     desk_litter: list[dict[str, Any]] = []
+    duplicate_placements: list[dict[str, Any]] = []
     per_workspace: dict[str, dict[str, Any]] = {}
     referenced: set[str] = set()
 
@@ -946,14 +1033,59 @@ def _placement_census_report(_context: _DoctorProbeContext | None = None) -> dic
                     }
                 )
 
+        # The duplicate-placement sweep (H-H8), over the SAME live actors of the
+        # SAME fully-read world. This is the pass that opens ``actor.items`` for
+        # the JOIN's sake rather than the desk sweep's: the join above is
+        # actor-level, so two live actors holding one item id were both counted
+        # ``placed`` and the section reported ``ok``.
+        #
+        # Distinct HOLDERS per id, which is the mirror of the write fence's
+        # "distinct ids per persona": one actor listing an id twice is one
+        # holder, because the fault named here is two ROWS claiming one
+        # placement.
+        holders: dict[str, list[dict[str, Any]]] = {}
+        for actor in live_actors:
+            binding = str(actor.persona_instance_id or "").strip()
+            seen_in_actor: set[str] = set()
+            for item in actor.items or ():
+                item_id = str(getattr(item, "item_id", "") or "").strip()
+                if not item_id or item_id in seen_in_actor:
+                    continue
+                seen_in_actor.add(item_id)
+                holders.setdefault(item_id, []).append(
+                    {
+                        "actor_key": actor.actor_key,
+                        "persona_instance_id": binding or None,
+                        "kind": str(getattr(item, "kind", "") or ""),
+                    }
+                )
+
+        ws_duplicates: list[dict[str, Any]] = []
+        for item_id, rows in sorted(holders.items()):
+            if len(rows) < 2:
+                continue
+            ws_duplicates.append(
+                {
+                    "workspace_id": workspace_id,
+                    "item_id": item_id,
+                    "kinds": sorted({row["kind"] for row in rows if row["kind"]}),
+                    "holders": rows,
+                    "reason": _duplicate_placement_reason(
+                        tuple(str(row["persona_instance_id"] or "") for row in rows)
+                    ),
+                }
+            )
+
         placed.extend(ws_placed)
         orphan_actors.extend(ws_orphans)
         desk_litter.extend(ws_litter)
+        duplicate_placements.extend(ws_duplicates)
         per_workspace[workspace_id] = {
             "placed": len(ws_placed),
             "unplaced_rows": [],
             "orphan_actors": ws_orphans,
             "desk_litter": ws_litter,
+            "duplicate_placements": ws_duplicates,
             "observed": True,
         }
 
@@ -977,14 +1109,22 @@ def _placement_census_report(_context: _DoctorProbeContext | None = None) -> dic
         if isinstance(bucket, dict) and isinstance(bucket.get("unplaced_rows"), list):
             bucket["unplaced_rows"].append(entry)
 
-    if orphan_actors:
+    same_instance_duplicates = [
+        row
+        for row in duplicate_placements
+        if row.get("reason") == DUPLICATE_PLACEMENT_SAME_INSTANCE
+    ]
+    if orphan_actors or same_instance_duplicates:
         health = HEALTH_DEFECT
-    elif unplaced_rows or desk_litter:
+    elif unplaced_rows or desk_litter or duplicate_placements:
         # Litter raises the census to ``notice`` and NEVER past it. An orphan
         # actor is a defect because it renders as an agent nothing can message;
         # a litter desk renders as exactly what it is — a desk. Promoting it
         # would turn ``needs_fix`` on for a store whose only fault is furniture,
         # and the doctor's whole contract is that its flags mean something.
+        #
+        # A duplicate placement splits on the SAME line, and the D6 ruling is
+        # where the line comes from — see :func:`_duplicate_placement_reason`.
         health = HEALTH_NOTICE
     else:
         health = HEALTH_OK
@@ -996,6 +1136,7 @@ def _placement_census_report(_context: _DoctorProbeContext | None = None) -> dic
         "unplaced_rows": unplaced_rows,
         "orphan_actors": orphan_actors,
         "desk_litter": desk_litter,
+        "duplicate_placements": duplicate_placements,
         "workspaces": per_workspace,
         # A4. The orphan half used to read "retiring or re-creating its agent",
         # and for the orphan this census reports most often that names the ONE
@@ -1024,7 +1165,9 @@ def _placement_census_report(_context: _DoctorProbeContext | None = None) -> dic
             "delete does); an unplaced row is either awaiting a "
             "placement or is the roster-only recovery door working as designed; "
             "a desk_litter row reading desk_kind_agent_binding wants a re-place, "
-            "and the other three want a reap"
+            "and the other three want a reap; a duplicate_placements row reading "
+            "same_instance is one instance's placement claimed by two live actor "
+            "rows — remove or re-place one holder, whose actor_key is named"
         ),
     }
     return report
@@ -1101,6 +1244,7 @@ DOCTOR_SECTIONS: tuple[DoctorSection, ...] = (
             ("orphan_actors", "orphan_actors"),
             ("unplaced_rows", "unplaced_rows"),
             ("desk_litter", "desk_litter"),
+            ("duplicate_placements", "duplicate_placements"),
         ),
     ),
 )

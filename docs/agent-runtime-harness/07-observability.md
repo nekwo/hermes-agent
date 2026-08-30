@@ -370,7 +370,7 @@ only `section_health`'s key set pinned, so a section added to three of the four
 was counted and verdicted while rendering no operator line at all. Adding a
 section is now one table row; a missing roster entry is unspellable.
 
-The sections, each contributing one health value (`schema_version: 6`):
+The sections, each contributing one health value (`schema_version: 7`):
 
 | Section | What it observes | Verdict weight |
 |---|---|---|
@@ -380,7 +380,7 @@ The sections, each contributing one health value (`schema_version: 6`):
 | `model_authority` | shadowing/redundant pins (`describe_runtime_default_authority`) | notice only |
 | `persona_binding` | config-vs-store divergence (`binding_index`) | defect, with the remediation command |
 | `root_config_misplacement` | root-only keys set in a PROFILE, where nothing reads them | defect when inert, notice when duplicated |
-| `placement_census` | the roster/office join + the desk-litter item sweep — see below | defect on an orphan actor, notice on an unplaced row or a litter desk |
+| `placement_census` | the roster/office join + the desk-litter item sweep + the duplicate-placement sweep — see below | defect on an orphan actor or a `same_instance` duplicate, notice on an unplaced row, a litter desk or any other duplicate |
 
 **`placement_census`** (placement plan D8) is the join nothing watched:
 `persona instance reconcile` prunes orphan ROWS without ever opening the office,
@@ -424,10 +424,26 @@ design — it wants a re-place, the other three want a reap, and conflating them
 is what the 2026-08-30 incident cost a day to. Litter raises the census to
 `notice` and never past it: nothing mis-renders, so `needs_fix` stays off.
 
+**`duplicate_placements`** (H-H8) is the same section's third sweep, and the
+reader the two write fences' known residual needed: an instance-keyed write
+claiming an item id another live actor holds passes both fences, and the census
+could not see it either — the join is actor-level, so both holders counted as
+`placed` and the section reported `ok`. It now opens `actor.items` and reports
+one row per item id held by more than one live actor, naming every holder. The
+three reasons split on D6's ruling that the INSTANCE, not the persona, is the
+unit: `same_instance` (every holder bound to one instance) is a defect;
+`cross_instance` is a notice, because two instances of one persona each
+authoring a desk mint the same persona-scoped id and that is the instantiated
+system working; `unbound_holder` (a class-keyed holder) is a notice, because it
+is the class→instance re-key migration's own mint-then-archive transient. It is
+a READ, not a third fence — 06's D6 forbids re-keying that fence toward
+instances at all.
+
 The text renderer prints every non-`ok` section with its own error text, then
 names each orphan actor individually — that id is the remediation argument —
-and each litter desk with its reason, while counting unplaced rows, since a
-healthy runtime can legitimately carry several.
+each litter desk with its reason, and each duplicate placement with all of its
+holders, while counting unplaced rows, since a healthy runtime can legitimately
+carry several.
 
 ## The BO-1 fixture mirror
 

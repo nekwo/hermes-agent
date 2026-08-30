@@ -166,7 +166,9 @@ placement, on purpose — while entity 4 answers *is it on this level*. So:
 
 The join gets a **read**, never a merge: `harness doctor`'s `placement_census`
 (`harness_doctor.py::_placement_census_report`) reports the three per workspace
-and repairs nothing, because both repairs are operator gestures and a doctor
+— beside the two ITEM-level sweeps that ride the same section, desk litter and
+duplicate placements — and repairs nothing, because both repairs are operator
+gestures and a doctor
 reconciling them would be picking which store was wrong from one snapshot. See
 [07 — Observability](07-observability.md#the-doctors-report-roster).
 

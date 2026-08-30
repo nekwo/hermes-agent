@@ -5753,7 +5753,8 @@ def _cmd_doctor(args) -> int:
                 f"placement census: placed={census.get('placed')} "
                 f"unplaced_rows={len(census.get('unplaced_rows') or [])} "
                 f"orphan_actors={len(census.get('orphan_actors') or [])} "
-                f"desk_litter={len(census.get('desk_litter') or [])}"
+                f"desk_litter={len(census.get('desk_litter') or [])} "
+                f"duplicate_placements={len(census.get('duplicate_placements') or [])}"
             )
             for orphan in census.get("orphan_actors") or []:
                 print(
@@ -5773,6 +5774,20 @@ def _cmd_doctor(args) -> int:
                     f"{litter.get('actor_key')} item={litter.get('item_id')} "
                     f"persona={litter.get('persona_id')} "
                     f"({litter.get('reason')})"
+                )
+            # Every HOLDER on the line, for the same reason the orphan block
+            # names its actor: the repair is to remove or re-place one of them,
+            # and a row that named only the item id would leave the operator to
+            # go find out which two rows are claiming it.
+            for duplicate in census.get("duplicate_placements") or []:
+                holders = ", ".join(
+                    str(holder.get("actor_key"))
+                    for holder in duplicate.get("holders") or []
+                )
+                print(
+                    f"  duplicate placement: {duplicate.get('workspace_id')}/"
+                    f"{duplicate.get('item_id')} held by {holders} "
+                    f"({duplicate.get('reason')})"
                 )
         binding = hygiene.get("persona_binding") or {}
         if binding.get("diverged_count"):

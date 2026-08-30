@@ -180,18 +180,29 @@ launcher's detector counts. Pinned both ways:
 `::test_a_second_actor_desking_one_persona_is_refused_naming_the_holder` are a
 boundary, not one assertion twice.
 
-**Known residual, stated rather than implied.** Between the two fences, an
-INSTANCE-keyed write that claims a desk id another live actor already holds
-passes both: the class-key fence guards only class-keyed payloads (an
+**Known residual, and since 2026-08-30 it has a READER.** Between the two
+fences, an INSTANCE-keyed write that claims a desk id another live actor already
+holds passes both: the class-key fence guards only class-keyed payloads (an
 instance-keyed write "IS the migration's shape"), and this one counts distinct
 ids. That is the migration's transient made permanent if nobody finishes the
-migration, and the launcher's render-time `duplicate_desk` warning is what sees
-it. Nothing reads it today. `placement_census` (shipped in `bfdaf735c3`, D8) is not
-that reader: it joins the two stores on `persona_instance_id` and never opens
-`actor.items`, so two live actors holding one desk id are both counted as
-`placed` and the section reports `ok`. Closing it needs either an items-aware
-census row or a third predicate; until one exists the launcher's render-time
-`duplicate_desk` warning is the only detector.
+migration. The residual is unchanged — no third fence was added, because D6
+rules that this predicate must not be re-keyed toward instances at all — but it
+is no longer invisible server-side: `placement_census` now opens `actor.items`
+and reports `duplicate_placements`, one row per item id held by more than one
+LIVE actor, naming every holder (H-H8, plan `realm-actor-lifecycle-refactor`).
+It used to join the two stores on `persona_instance_id` only, so two live actors
+holding one desk id were both counted `placed` and the section reported `ok`.
+
+The row carries one of three reasons, and D6 is what draws the line between
+them: `same_instance` (every holder bound to the same instance) is a **defect**
+— one instance's placement claimed by two rows, which nothing legitimate mints;
+`cross_instance` is a **notice**, because "duplicate desks are fine and only a
+duplicate on the SAME INSTANCE is not" and item ids are minted persona-scoped,
+so two instances of one persona each authoring a desk produce exactly this; and
+`unbound_holder` (at least one class-keyed holder) is a **notice** because it is
+the re-key migration's own mint-then-archive transient. The launcher's
+render-time `duplicate_desk` warning stays — it is still the only thing that
+sees a duplicate on a canvas the store never wrote.
 
 It has **no override on either lane**, which is the deliberate asymmetry with
 `--allow-class-key`: that flag exists because an operator can legitimately want
@@ -899,6 +910,10 @@ omit it — the office's revision guard lives on the RPC lane only.
     launcher's gesture guard and render warning are the client's half; the
     fence that a raw `actor-upsert` cannot walk around is
     `OfficeStore._guard_duplicate_desk`. Realm pull is outside it by design.
+    The residual the two fences leave between them — one item id held by two
+    live actors — is not a third fence and never will be under D6: it is READ
+    by `placement_census.duplicate_placements`, a defect only for
+    `same_instance`.
 13. **Dead-symbol claims are repo-scoped or they are nothing.** A file-scoped grep
     answers "is it used here", not "is it dead"; and a `file:line` citation goes
     on reading as verified long after the code at it has moved.
