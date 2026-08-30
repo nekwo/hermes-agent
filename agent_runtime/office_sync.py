@@ -86,6 +86,61 @@ class OfficeSyncRefusal:
         }
 
 
+#: The one word an archive that actually happened is spelled with. Failures are
+#: ``archive_failed:<ExceptionClass>`` — the class, never the message, the same
+#: disclosure rule the rest of this runtime's receipts follow.
+ARCHIVE_OUTCOME_ARCHIVED = "archived"
+
+
+@dataclass(frozen=True, slots=True)
+class OfficeArchiveOutcome:
+    """What the pull's delete-shaped arm actually DID to one actor.
+
+    The arm was ``try: remove_actor(...) / except Exception: pass`` with the
+    ``baseline.pop`` outside the ``try``, which is the "best-effort lane
+    discarded its outcome" class this repo already tracks (see the queue row;
+    Track H-H3 closes the class across ``office_store``, this is the pull-side
+    instance). The cost here is not a missing log line: dropping the baseline
+    entry for a row that is STILL LIVE re-classifies it on the next pull as a
+    local ADD (``_local_state`` reads a missing baseline as ``new``), so a
+    failed archive becomes a desk the pull will offer to publish back to the
+    realm. The fenced sibling beside it has had an accounting row
+    (``delete_fenced``) since the day it was written; the failed case had none.
+
+    One outcome per key, successes included, because a list of only failures
+    cannot answer "did this arm reach this key at all" — the same reason
+    ``archive_actors_for_instance`` names the keys it archived beside the ones
+    it could not.
+    """
+
+    workspace_id: str
+    actor_key: str
+    outcome: str
+
+    @classmethod
+    def archived(cls, workspace_id: str, actor_key: str) -> "OfficeArchiveOutcome":
+        return cls(workspace_id=workspace_id, actor_key=actor_key, outcome=ARCHIVE_OUTCOME_ARCHIVED)
+
+    @classmethod
+    def failed(cls, workspace_id: str, actor_key: str, exc: BaseException) -> "OfficeArchiveOutcome":
+        return cls(
+            workspace_id=workspace_id,
+            actor_key=actor_key,
+            outcome=f"archive_failed:{type(exc).__name__}",
+        )
+
+    @property
+    def succeeded(self) -> bool:
+        return self.outcome == ARCHIVE_OUTCOME_ARCHIVED
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "workspace_id": self.workspace_id,
+            "actor_key": self.actor_key,
+            "outcome": self.outcome,
+        }
+
+
 @dataclass(slots=True)
 class OfficeBaselineSummary:
     """What the publish-side baseline arm actually recorded, and what it would
@@ -207,6 +262,12 @@ class OfficePullSummary:
     #: names the workspace and actor key so the desk that was NOT archived is a
     #: fact the operator can read, not an inference from a missing count.
     delete_fenced: list[dict[str, Any]] = None  # type: ignore[assignment]
+    #: One :class:`OfficeArchiveOutcome` per key the archive arm REACHED —
+    #: ``archived`` or ``archive_failed:<ExceptionClass>``. Beside
+    #: ``delete_fenced``, which names the deletes this pull declined to take;
+    #: this names the ones it took, and the ones it tried and could not.
+    #: ``archived`` is this list's success count by construction.
+    archive_outcomes: list[dict[str, Any]] = None  # type: ignore[assignment]
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -220,6 +281,7 @@ class OfficePullSummary:
             "unknowable": list(self.unknowable or []),
             "unreadable_remote": self.unreadable_remote,
             "delete_fenced": list(self.delete_fenced or []),
+            "archive_outcomes": list(self.archive_outcomes or []),
         }
 
 
@@ -311,7 +373,9 @@ def apply_office_pull(realm_id: str, subtree: Path, *, event_log: EventLog | Non
 
     store = OfficeStore(event_log=event_log)
     baseline = read_office_baseline(realm_id)
-    summary = OfficePullSummary(workspaces=[], refused=[], unknowable=[], delete_fenced=[])
+    summary = OfficePullSummary(
+        workspaces=[], refused=[], unknowable=[], delete_fenced=[], archive_outcomes=[]
+    )
     office_root = subtree / "store" / "office"
     if not office_root.exists():
         return summary
@@ -443,9 +507,25 @@ def apply_office_pull(realm_id: str, subtree: Path, *, event_log: EventLog | Non
                     continue
                 try:
                     store.remove_actor(workspace_id, actor_key, reason="remote_removed", updated_by="realm_sync")
-                    summary.archived += 1
-                except Exception:
-                    pass
+                except Exception as exc:  # noqa: BLE001 — accounted, never silent
+                    # The loop SURVIVES one bad file — a whole realm must not
+                    # stop converging because one actor would not archive — but
+                    # the outcome leaves with the summary, and the baseline entry
+                    # STAYS. Popping it here (which this arm did unconditionally
+                    # until C2) tells the next pull there is no baseline for a
+                    # row that is still live, and a row with no baseline reads as
+                    # a local ADD: the failed delete came back as something to
+                    # publish. Kept, the next pull re-decides ARCHIVE_LOCAL and
+                    # retries the archive, which is the repair.
+                    summary.archive_outcomes.append(
+                        OfficeArchiveOutcome.failed(workspace_id, actor_key, exc).as_dict()
+                    )
+                    continue
+                summary.archived += 1
+                summary.archive_outcomes.append(
+                    OfficeArchiveOutcome.archived(workspace_id, actor_key).as_dict()
+                )
+                # The baseline entry leaves WITH the row, and only with it.
                 baseline.pop(key, None)
                 continue
             if decision.action == PullAction.CONFLICT:

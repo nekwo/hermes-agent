@@ -759,6 +759,77 @@ def test_a_readable_remote_removal_still_archives_beside_a_fenced_one(tmp_path):
     assert not OfficeStore().actor_exists(ws, "edu_tutor")
 
 
+def test_a_successful_archive_names_itself_beside_the_fenced_ones(tmp_path):
+    """C2. ``archived`` was a bare count, so the arm could say HOW MANY desks it
+    removed and never WHICH — the fenced sibling beside it has named its keys
+    since the day it was written."""
+
+    realm_id, ws = _make_realm_workspace()
+    subtree = tmp_path / "subtree"
+    _write_remote_office(subtree, ws, [_remote_actor(ws, "dev"), _remote_actor(ws, "edu_tutor")])
+    apply_office_pull(realm_id, subtree)
+
+    _write_remote_office(subtree, ws, [_remote_actor(ws, "dev")])
+    summary = apply_office_pull(realm_id, subtree)
+    assert summary.archive_outcomes == [
+        {"workspace_id": ws, "actor_key": "edu_tutor", "outcome": "archived"}
+    ]
+    # The count stays the list's success count by construction.
+    assert summary.archived == 1
+    assert summary.as_dict()["archive_outcomes"] == summary.archive_outcomes
+
+
+def test_a_failed_archive_keeps_its_baseline_so_the_next_pull_retries(tmp_path, monkeypatch):
+    """C2 (M5). The arm was ``except Exception: pass`` with the ``baseline.pop``
+    OUTSIDE the ``try``, so a failed archive dropped the baseline entry for a row
+    that was still live — and ``_local_state`` reads a missing baseline as
+    ``new``, which made the next pull classify the surviving desk as a local ADD
+    (``KEEP_LOCAL``, ``new_local``). The delete this pull could not take became
+    something to publish back to the realm, and no count anywhere said so.
+
+    Two guarantees, one gesture: the outcome is NAMED, and the retry still
+    happens.
+    """
+
+    realm_id, ws = _make_realm_workspace()
+    subtree = tmp_path / "subtree"
+    _write_remote_office(subtree, ws, [_remote_actor(ws, "dev"), _remote_actor(ws, "edu_tutor")])
+    apply_office_pull(realm_id, subtree)
+
+    real_remove = OfficeStore.remove_actor
+
+    def _boom(self, workspace_id, actor_key, **kwargs):
+        raise PermissionError("share violation")
+
+    monkeypatch.setattr(OfficeStore, "remove_actor", _boom)
+    _write_remote_office(subtree, ws, [_remote_actor(ws, "dev")])
+    summary = apply_office_pull(realm_id, subtree)
+
+    assert summary.archived == 0
+    assert summary.archive_outcomes == [
+        {
+            "workspace_id": ws,
+            "actor_key": "edu_tutor",
+            # The exception CLASS, never its message — the disclosure rule this
+            # runtime's receipts follow.
+            "outcome": "archive_failed:PermissionError",
+        }
+    ]
+    # The desk is still live, and its baseline entry is still there to say so.
+    assert OfficeStore().actor_exists(ws, "edu_tutor")
+    assert f"{ws}:actor:edu_tutor" in read_office_baseline(realm_id)
+
+    # The repair: the very next pull re-decides ARCHIVE_LOCAL and takes it.
+    monkeypatch.setattr(OfficeStore, "remove_actor", real_remove)
+    retry = apply_office_pull(realm_id, subtree)
+    assert retry.archived == 1
+    assert retry.kept_local == 0, (
+        "the surviving row was re-classified as a local add — the baseline entry "
+        "left with a delete that never happened"
+    )
+    assert not OfficeStore().actor_exists(ws, "edu_tutor")
+
+
 def test_an_unreadable_remote_surface_is_counted_not_skipped(tmp_path):
     """The other half of the same read. A directory whose ``office.json`` will
     not decode names no workspace, so nothing in it can be attributed — but it

@@ -875,6 +875,51 @@
         "-q",
         "tests/agent_runtime/test_office_store.py::test_the_ledger_union_leads_with_the_peer_so_a_subset_rehashes_identically"
       ]
+    },
+    {
+      "id": "c2-a-failed-archive-wears-the-success-word",
+      "path": "agent_runtime/office_sync.py",
+      "symbol": "OfficeArchiveOutcome.failed",
+      "operator": "collapse-outcome-vocabulary",
+      "find": "            outcome=f\"archive_failed:{type(exc).__name__}\",",
+      "replace": "            outcome=ARCHIVE_OUTCOME_ARCHIVED,",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_sync.py::test_a_failed_archive_keeps_its_baseline_so_the_next_pull_retries"
+      ]
+    },
+    {
+      "id": "c2-pull-pops-the-baseline-for-a-delete-that-failed",
+      "path": "agent_runtime/office_sync.py",
+      "symbol": "apply_office_pull",
+      "operator": "pop-baseline-on-failed-archive",
+      "find": "                    summary.archive_outcomes.append(\n                        OfficeArchiveOutcome.failed(workspace_id, actor_key, exc).as_dict()\n                    )\n                    continue",
+      "replace": "                    summary.archive_outcomes.append(\n                        OfficeArchiveOutcome.failed(workspace_id, actor_key, exc).as_dict()\n                    )\n                    baseline.pop(key, None)\n                    continue",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_sync.py::test_a_failed_archive_keeps_its_baseline_so_the_next_pull_retries"
+      ]
+    },
+    {
+      "id": "c2-a-successful-archive-goes-unnamed",
+      "path": "agent_runtime/office_sync.py",
+      "symbol": "apply_office_pull",
+      "operator": "drop-success-outcome-row",
+      "find": "                summary.archive_outcomes.append(\n                    OfficeArchiveOutcome.archived(workspace_id, actor_key).as_dict()\n                )",
+      "replace": "                summary.archived += 0",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_sync.py::test_a_successful_archive_names_itself_beside_the_fenced_ones"
+      ]
     }
   ]
 }
