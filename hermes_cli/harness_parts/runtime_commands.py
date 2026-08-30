@@ -52,6 +52,91 @@ def _cmd_worktree_reap(args) -> int:
     return 0
 
 
+def _cmd_persona_instance_chat_bindings(args) -> int:
+    """READ-ONLY: which persona instances point at a chat session SessionDB lost.
+
+    H4 of ``docs/agent-runtime-harness/planned/realm-pull-live-projection.md``.
+    This is the ONE question behind Mission Control's amber
+    ``projection drops N`` chip when the reason code is ``session_not_in_db``:
+    ``persona_chat_history`` is a READ-ONLY projection, so it can only hide the
+    row and account a permanent parity drop, and until H3 the drop shipped with
+    no sample at all. Answering it used to mean a Python join over a saved
+    snapshot, or ``persona-instance reconcile --dry-run`` — a verb that DEFAULTS
+    TO APPLY and runs five phases that archive rows, prune flow graphs and append
+    events the moment the flag is forgotten.
+
+    So this verb has no write mode to forget. It is phase 4's probe and nothing
+    else, called with ``apply=False``, which the store method's own tests pin as
+    writing no row and emitting no event.
+
+    THE SKIP IS THE POINT, not an error path. ``repair_missing_chat_session_
+    bindings`` fails closed unless THIS process explicitly named the head home
+    (``HERMES_HEAD_HOME``, or a relay context): a maintenance verb run under a
+    profile home probes that profile's POPULATED database and reads every
+    operator chat as absent — the live 2026-07-25 incident cleared 10 healthy
+    bindings exactly that way. A read-only view built on a misrouted database
+    would not clear them, it would just NAME ten innocent instances, which is
+    the same lie one step earlier. So the guard stays, the skip reason is
+    printed with the way through, and the exit code says the question was not
+    answered rather than answering "nothing is stale".
+
+    Exit 0 = answered (whether or not anything is stale). Exit 1 = not answered.
+    A zero for "I could not tell" is the silent drop this runtime keeps refusing.
+    """
+
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    report = PersonaInstanceStore().repair_missing_chat_session_bindings(apply=False)
+    skipped = report.get("skipped")
+    # ``repaired`` is the report-only arm's list of CANDIDATES — nothing was
+    # repaired here and the word at this surface says so.
+    stale = list(report.get("repaired") or [])
+    held = list(report.get("held") or [])
+    data = {
+        "read_only": True,
+        "answered": skipped is None,
+        "skipped": skipped,
+        "stale": stale,
+        "stale_count": len(stale),
+        "held": held,
+        "held_count": len(held),
+    }
+    if getattr(args, "json", False):
+        print(emit_json(data))
+    elif skipped:
+        print(
+            f"chat bindings: NOT ANSWERED ({skipped}) — nothing was judged stale, "
+            "and nothing was written."
+        )
+        if skipped == "head_home_not_authoritative":
+            print(
+                "  this process did not name the head home, so the session "
+                "database it would probe is not provably the operator's. Re-run "
+                "with HERMES_HEAD_HOME=<the head home> set."
+            )
+    else:
+        print(
+            f"chat bindings (read-only): stale={len(stale)} held={len(held)}; "
+            "nothing was written"
+        )
+        for item in stale:
+            print(
+                f"  - stale: {item['persona_instance_id']} -> missing session "
+                f"{item['session_id']} ({', '.join(item.get('cleared_fields') or [])})"
+            )
+        for item in held:
+            print(
+                f"  - held ({item['reason']}): {item['persona_instance_id']} "
+                f"-> {item['session_id']}"
+            )
+        if stale:
+            print(
+                "  repair with: hermes harness persona-instance reconcile "
+                "(this verb never writes)"
+            )
+    return 1 if skipped else 0
+
+
 def _cmd_persona_instance_reconcile(args) -> int:
     from agent_runtime.persona_instance_identity import reconcile_persona_instances
 

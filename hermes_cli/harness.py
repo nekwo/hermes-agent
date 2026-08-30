@@ -1522,10 +1522,33 @@ def build_parser(parent_subparsers) -> None:
         ),
     )
     persona_instance_reconcile.add_argument(
-        "--dry-run", action="store_true", help="Report actions without mutating the store"
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Report actions without mutating the store. To ONLY ask which chat "
+            "bindings are stale, prefer `persona-instance chat-bindings`, which "
+            "has no write mode at all"
+        ),
     )
     persona_instance_reconcile.add_argument("--json", action="store_true")
     persona_instance_reconcile.set_defaults(func=_cmd_persona_instance_reconcile)
+
+    # H4 (plan realm-pull-live-projection). `reconcile` DEFAULTS TO APPLY and
+    # runs five phases; asking it "which instance is the amber chip" means
+    # remembering --dry-run on a verb that archives rows, prunes graphs and
+    # appends events when you forget. This verb has NO write mode to forget: it
+    # is the phase-4 probe alone, read-only by construction.
+    persona_instance_chat_bindings = persona_instance_subs.add_parser(
+        "chat-bindings",
+        help=(
+            "READ-ONLY: name every persona instance whose bound chat session "
+            "SessionDB no longer holds — the producer of the snapshot's "
+            "`session_not_in_db` parity drop. Never writes; `persona-instance "
+            "reconcile` is the repair"
+        ),
+    )
+    persona_instance_chat_bindings.add_argument("--json", action="store_true")
+    persona_instance_chat_bindings.set_defaults(func=_cmd_persona_instance_chat_bindings)
 
     persona_instance_detail = persona_instance_subs.add_parser(
         "detail",

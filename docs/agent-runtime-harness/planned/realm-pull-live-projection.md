@@ -647,3 +647,77 @@ no ``__main__`` guard, so ``-m`` imports it and stops. The verb runs through the
 
 **L3 is now unblocked** — the producer ships the sample, so the launcher half has
 something to render.
+
+### H4 — landed as a NEW read-only verb, and the plan's premise was half wrong
+
+**Measure before fixing.** Two of H4's assumptions did not survive contact.
+
+1. **The dry-run already existed, and already listed the stale bindings.**
+   ``harness persona-instance reconcile`` has carried ``--dry-run`` and
+   ``--json`` all along, and ``repair_missing_chat_session_bindings(apply=False)``
+   already returns a per-instance list with ``persona_instance_id``,
+   ``session_id`` and ``cleared_fields``. Its no-write contract is pinned by
+   ``test_repair_missing_chat_session_bindings_dry_run_writes_nothing``. So the
+   plan's step 1, read literally, was already shipped.
+2. **And it still could not answer the question on this machine.** Run
+   read-only against the live store it reports:
+
+   ```
+   {"skipped": "head_home_not_authoritative", "repaired": [], "repaired_count": 0}
+   ```
+
+   ``_session_presence_probe`` (``persona_assignments.py:182``) fails closed
+   unless THIS process explicitly named the head home. That guard is right and
+   must stay: a maintenance verb run under a profile home probes that profile's
+   POPULATED database and reads every operator chat as absent — the live
+   2026-07-25 incident cleared 10 healthy bindings exactly that way. A read-only
+   view built on a misrouted database would not clear them; it would NAME ten
+   innocent instances, which is the same lie one step earlier.
+
+So the real gap was neither "there is no dry run" nor "the dry run does not
+list". It was that **the only door to this answer is a verb that DEFAULTS TO
+APPLY** — five phases that archive rows, prune flow graphs and append events the
+moment ``--dry-run`` is forgotten — and that its skip reason is buried in a
+five-phase report with no way through printed beside it.
+
+**Shipped:** ``harness persona-instance chat-bindings [--json]``. Phase 4's
+probe alone, with NO write mode to forget (a test asserts ``--apply`` and
+``--dry-run`` are both rejected), asserting store-file mtimes and event-log
+length unchanged. ``reconcile``'s ``--dry-run`` help now points at it.
+
+**One contract decision the plan did not specify.** Exit 0 = answered (stale or
+clean); **exit 1 = NOT answered** (the probe was skipped). A zero for "I could
+not tell" is indistinguishable from "your store is clean", which is the silent
+drop this runtime keeps refusing everywhere else. The human render prints the
+skip reason AND the way through (``HERMES_HEAD_HOME=<head>``); the JSON carries
+``answered`` and ``skipped``.
+
+**Focused run:**
+``python -m pytest tests/agent_runtime/test_persona_instance_chat_bindings_verb.py -q``
+→ 5 passed. Neighbours: ``tests/agent_runtime/test_persona_instance_identity.py
+tests/hermes_cli/test_s28_reconcile_graph_render.py
+tests/hermes_cli/test_harness_parts_namespace.py -q`` → 29 passed.
+
+**Live proof TAKEN** (read-only, `X:\Eternia\.hermes\agent-runtime`):
+
+```
+$ hermes harness persona-instance chat-bindings            # exit 1
+chat bindings: NOT ANSWERED (head_home_not_authoritative) — …
+  … Re-run with HERMES_HEAD_HOME=<the head home> set.
+
+$ HERMES_HEAD_HOME=…\.hermes\profiles\base hermes harness persona-instance chat-bindings
+chat bindings (read-only): stale=1 held=0; nothing was written   # exit 0
+  - stale: personainst_chara_a2_7b31d0e4 -> missing session
+    persona_chat_personainst_chara_a2_7b31d0e4_6295f065380f
+    (default_chat_session_id, session_id)
+```
+
+**Two instruments, one answer.** H3's new drop sample and H4's verb were
+derived independently and name the SAME row —
+``personainst_chara_a2_7b31d0e4``, the second of §3's three hand-derived
+candidates. The other two (``personainst_backend_dev``,
+``personainst_profile_alice``) are the ``limit`` casualties §3 predicted.
+
+**The ``--apply`` half is the operator's**, per §3's own ruling: it is a WRITE.
+``harness persona-instance reconcile`` is the repair, and the chip should clear
+on the next frame after it runs.
