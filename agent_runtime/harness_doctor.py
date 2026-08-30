@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import re
 from typing import Any, Callable
 
 from hermes_time import now
@@ -630,10 +629,11 @@ DESK_LITTER_PERSONA_RETIRED = "persona_retired"
 
 #: The item is structurally an AGENT's that persisted with ``kind: "desk"``:
 #: it rides an actor whose ``persona_instance_id`` names a LIVE roster row, or
-#: its ``item_id`` carries an agent marker. This is the shape MEASURED on the
-#: live store 2026-08-30, and it is kept out of ``agent_missing`` by design —
-#: an operator reading "widowed desk" goes looking for a reap, when what this
-#: row wants is a re-place.
+#: the store recorded that it was MINTED as an agent (``minted_kind``, H-H12 —
+#: this used to read the ``item_id`` for launcher naming conventions instead).
+#: This is the shape MEASURED on the live store 2026-08-30, and it is kept out
+#: of ``agent_missing`` by design — an operator reading "widowed desk" goes
+#: looking for a reap, when what this row wants is a re-place.
 DESK_LITTER_DESK_KIND_AGENT_BINDING = "desk_kind_agent_binding"
 
 DESK_LITTER_REASONS = (
@@ -642,65 +642,6 @@ DESK_LITTER_REASONS = (
     DESK_LITTER_PERSONA_RETIRED,
     DESK_LITTER_DESK_KIND_AGENT_BINDING,
 )
-
-#: What an ``item_id`` says about the kind it was MINTED for. A tri-state, not a
-#: bool, because "carries no marker either way" is a real and common answer
-#: (operator-authored ids, peer ids from another client) and must never be
-#: silently folded into "not an agent" — see :func:`_office_item_id_shape`.
-ITEM_ID_SHAPE_AGENT = "agent"
-ITEM_ID_SHAPE_DESK = "desk"
-ITEM_ID_SHAPE_UNKNOWN = "unknown"
-
-
-def _office_item_id_shape(item_id: Any) -> str:
-    """Which kind the launcher MINTED this item id for, or ``unknown``.
-
-    The markers are the launcher's own minting conventions, and there are only
-    three sites:
-
-    * ``MissionOfficeLayout.addItem`` — ``<persona>_<kind>`` with a ``_<n>``
-      collision suffix (``qa_agent``, ``qa_agent_2``, ``qa_desk``);
-    * ``MissionOfficeLayout.materializeAgentDesk`` /
-      ``mission_office_authoring_policy`` — ``desk-<agentItemId>``;
-    * ``agent_create.placement_actor_payload`` — the item id IS the persona
-      instance id (``personainst_qa_agent_2``), which is why the bare
-      ``personainst`` head counts as an agent marker.
-
-    THE DESK MARKER WINS, and that ordering is load-bearing: ``desk-qa_agent``
-    carries both, and it is a desk. Reading it as an agent would file the one
-    id the desk-materializer mints under ``desk_kind_agent_binding`` — every
-    legitimately materialized desk on every store.
-
-    The agent test is POSITIVE — an id must carry an agent marker — never
-    "not desk-shaped". An id this function cannot read is ``unknown`` and falls
-    through to the absence buckets, where the desk is judged on whether its
-    agent actually exists rather than on how somebody spelled a string. Over-
-    claiming here is the expensive direction: it would fold widowed desks into
-    the mis-kinded bucket, which is the exact conflation §0 of the plan was
-    written to stop.
-
-    Pure, and the only thing in this section that reads a name rather than a
-    fact — which is why the classifier below consults it SECOND, after the live
-    instance binding, a fact no spelling can forge.
-    """
-
-    text = str(item_id or "").strip().lower()
-    if not text:
-        return ITEM_ID_SHAPE_UNKNOWN
-    tokens = [token for token in re.split(r"[-_]", text) if token]
-    if not tokens:
-        return ITEM_ID_SHAPE_UNKNOWN
-    tail = tokens[-1]
-    if len(tokens) > 1 and tail.isdigit():
-        # ``addItem``'s collision disambiguator, which is appended AFTER the
-        # kind token: ``qa_desk_2`` is a desk, not an id ending in a number.
-        tail = tokens[-2]
-    if tokens[0] == ITEM_ID_SHAPE_DESK or tail == ITEM_ID_SHAPE_DESK:
-        return ITEM_ID_SHAPE_DESK
-    if tail == ITEM_ID_SHAPE_AGENT or tokens[0] == "personainst":
-        return ITEM_ID_SHAPE_AGENT
-    return ITEM_ID_SHAPE_UNKNOWN
-
 
 #: The retire that archived this actor's roster row RECORDED that it could not
 #: archive this actor (H-H5's receipt names the key). This is the "row archived,
@@ -770,7 +711,7 @@ def _orphan_actor_reason(
 
 def _desk_litter_reason(
     *,
-    item_id: Any,
+    minted_kind: str | None,
     on_live_instance_actor: bool,
     agent_item_bindings: tuple[str, ...],
     live_instance_ids: frozenset[str],
@@ -782,6 +723,18 @@ def _desk_litter_reason(
     gated on a fully-read world, before this is called. That is deliberate: the
     partition is the part worth unit-testing, and it must not be reachable only
     through a filesystem fixture.
+
+    ``minted_kind`` is the STORE's record of what this item was written as
+    (H-H12). It replaced ``_office_item_id_shape``, which answered the same
+    question by parsing the ``item_id`` for launcher naming conventions — three
+    minting sites' worth of them, none enforced anywhere, so a launcher rename
+    would have silently reclassified every mis-kinded agent as a widowed desk.
+    The reader now asks the store what it recorded rather than asking a string
+    what it looks like. ``None`` means the item predates the field (or was
+    adopted from a peer that has not upgraded) and is "cannot say", never "no":
+    such a desk falls through to the absence buckets and is judged on whether
+    its agent actually exists, which is the softer and safer answer and the same
+    one an unreadable id used to get.
 
     ``agent_item_bindings`` is the instance binding of EVERY live
     ``kind: "agent"`` item that shares this desk's persona in this workspace,
@@ -808,7 +761,7 @@ def _desk_litter_reason(
     distinguishable from ``agent_missing`` — just not here.
     """
 
-    if on_live_instance_actor or _office_item_id_shape(item_id) == ITEM_ID_SHAPE_AGENT:
+    if on_live_instance_actor or minted_kind == "agent":
         return DESK_LITTER_DESK_KIND_AGENT_BINDING
     if agent_item_bindings:
         if all(
@@ -1131,7 +1084,7 @@ def _placement_census_report(_context: _DoctorProbeContext | None = None) -> dic
                     # artifacts" ruling would make the common one.
                     continue
                 reason = _desk_litter_reason(
-                    item_id=item.item_id,
+                    minted_kind=item.minted_kind,
                     on_live_instance_actor=bool(binding) and binding in live_instance_ids,
                     agent_item_bindings=tuple(agent_bindings.get(persona, ())),
                     live_instance_ids=live_instance_ids,

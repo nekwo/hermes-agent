@@ -435,11 +435,31 @@ the persona is bound to an instance no live roster row backs — the store-side
 shadow of the launcher's projection scope drop, deliberately overlapping
 `orphan_actors`), `persona_retired` (no live row and no retirement tombstone
 names the persona at all) and `desk_kind_agent_binding` (the item is
-structurally an agent's: it rides an actor with a LIVE instance binding, or its
-`item_id` carries an agent marker). The last is kept out of `agent_missing` by
-design — it wants a re-place, the other three want a reap, and conflating them
-is what the 2026-08-30 incident cost a day to. Litter raises the census to
-`notice` and never past it: nothing mis-renders, so `needs_fix` stays off.
+structurally an agent's: it rides an actor with a LIVE instance binding, or the
+store recorded that it was MINTED as an agent). The last is kept out of
+`agent_missing` by design — it wants a re-place, the other three want a reap,
+and conflating them is what the 2026-08-30 incident cost a day to. Litter raises
+the census to `notice` and never past it: nothing mis-renders, so `needs_fix`
+stays off.
+
+**The minted-kind clause asks the store, not the id (H-H12, 2026-08-30).** It
+used to parse the `item_id` for the launcher's three minting conventions
+(`<persona>_<kind>`, `desk-<agentItemId>`, the bare instance id) — none of which
+anything enforces, so a launcher rename would have silently reclassified every
+mis-kinded agent as a widowed desk. `OfficeItem.minted_kind` is now stamped by
+`OfficeStore.upsert_actor` at an item's FIRST write, keyed on `item_id` and
+sticky thereafter (a resurrection carries it forward from the archive, the same
+precedence `base_revision` uses), and it is never read off the payload — a value
+a client could send would be the self-declaration the field replaced a spelling
+with. `None` — every item written before the field, and every one adopted from a
+peer that has not upgraded — is CANNOT SAY: such a desk falls through to the
+absence buckets and is judged on whether its agent exists, which is the same
+softer answer an unreadable id used to get. The field is deliberately not on the
+wire; no client decides anything with it. One migration consequence, stated
+rather than discovered: it is inside `office_content_hash`, so the first status
+or publish after the upgrade sees every actor's hash move once and reports it as
+a local change. That is a self-healing blip in the publish direction, never a
+delete-shaped one.
 
 **`duplicate_placements`** (H-H8) is the same section's third sweep, and the
 reader the two write fences' known residual needed: an instance-keyed write

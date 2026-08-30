@@ -35,6 +35,30 @@ DEFAULT_FOLDERS = ("Agents", "Desks")
 # excluded revision lets a converged actor settle without a spurious diff.
 _HASH_EXCLUDE = frozenset({"revision", "created_at", "updated_at", "updated_by"})
 
+#: The same rule one level down, inside each entry of an actor's ``items`` —
+#: which ``_HASH_EXCLUDE`` cannot reach, because it filters the entity's own
+#: keys and an item field is nested.
+#:
+#: ``minted_kind`` (H-H12) is the store's record of what an item was FIRST
+#: written as. That is provenance the store keeps ABOUT the content, not
+#: content: it is never read off a payload, never rendered, and deliberately
+#: not on the wire (:func:`office_item_wire_row`), so no observer of this actor
+#: can tell whether it is set. Hashing it would therefore move a hash with no
+#: observable change behind it, twice over — once when a store that has just
+#: learned the field stamps every legacy item it rewrites (every actor reported
+#: as a local edit, on the one lane whose entire job is detecting real drift),
+#: and again for as long as any peer runs a store that decodes the field away,
+#: which would hold two converged installs in permanent disagreement.
+#:
+#: The KEY is dropped rather than nulled, and that is what makes the exclusion
+#: provable rather than merely plausible: the encoded payload is then
+#: byte-identical to the one this function produced before the field existed,
+#: so every hash on every existing store is unchanged. A re-kinding write still
+#: moves the hash — ``kind`` is content and is hashed — so nothing real hides
+#: here; ``minted_kind`` only ever differs from ``kind`` on an item whose
+#: ``kind`` already moved and was already hashed.
+_ITEM_HASH_EXCLUDE = frozenset({"minted_kind"})
+
 
 #: Why an office surface's workspace does not resolve. The discrimination lives
 #: in a FIELD; the parity warning's ``code`` stays ``orphaned_office`` for every
@@ -154,13 +178,22 @@ def normalize_scale(value) -> float:
 
 def office_content_hash(entity: OfficeSurface | OfficeActor) -> str:
     """Semantic content hash H(entity): a stable hash over every field EXCEPT
-    revision + timestamps + updated_by. Drives realm-sync change detection so
-    that timestamp-only diffs are never conflicts and the deterministic default
-    surface converges."""
+    revision + timestamps + updated_by, and — inside an actor's items — the
+    store's own provenance (:data:`_ITEM_HASH_EXCLUDE`). Drives realm-sync
+    change detection so that timestamp-only diffs are never conflicts and the
+    deterministic default surface converges."""
 
     payload = to_jsonable(entity)
     if isinstance(payload, dict):
         payload = {key: value for key, value in payload.items() if key not in _HASH_EXCLUDE}
+        items = payload.get("items")
+        if isinstance(items, list):
+            payload["items"] = [
+                {k: v for k, v in item.items() if k not in _ITEM_HASH_EXCLUDE}
+                if isinstance(item, dict)
+                else item
+                for item in items
+            ]
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 

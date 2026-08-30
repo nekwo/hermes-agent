@@ -1234,3 +1234,209 @@ def test_the_replays_evidence_read_refuses_a_short_answer():
     (paths.office_archive_dir(ws) / "broken.json").write_text("{not json", encoding="utf-8")
     with pytest.raises(ActorsUnreadable):
         store.archived_actor_keys_for_instance("persona_personainst_c4_ev")
+
+
+# ── H-H12: the store records what an item was minted as ──────────────────────
+
+
+def _one_item(persona_id: str, item_id: str, kind: str) -> dict:
+    return {
+        "persona_id": persona_id,
+        "items": [
+            {
+                "item_id": item_id,
+                "persona_id": persona_id,
+                "kind": kind,
+                "position": [1.0, 2.0],
+            }
+        ],
+    }
+
+
+def test_the_minted_kind_is_stamped_once_and_never_moves_again():
+    """H-H12. ``kind`` is mutable; what an item was MINTED as is not.
+
+    Every upsert re-sends the whole item list, so any later write may re-spell
+    an agent's item as a desk and the store accepts it — which left "was this
+    really an agent?" a question with no stored answer, and the doctor's
+    desk-litter classifier asking the ``item_id`` STRING for launcher naming
+    conventions that nothing enforces.
+
+    RED-FIRST against the arm this replaces: before it, ``minted_kind`` did not
+    exist and this reds on the attribute.
+
+    ANTI-VACUITY: the re-kinding write is a REAL store write, and ``kind`` is
+    asserted to have actually moved. A stamp that simply copied ``kind`` every
+    time would satisfy the first assertion and fail the second pair — which is
+    the whole difference between recording a mint and echoing the last write.
+
+    KILLING MUTATION: stamp from ``item.kind`` unconditionally (drop the
+    ``on_record`` lookup in ``_stamp_minted_kinds``) and the third assertion
+    reds.
+    """
+
+    ws = _make_workspace()
+    store = OfficeStore()
+
+    minted = store.upsert_actor(ws, _one_item("dev", "dev_thing", "agent"))
+    assert [(i.kind, i.minted_kind) for i in minted.items] == [("agent", "agent")]
+
+    rekinded = store.upsert_actor(ws, _one_item("dev", "dev_thing", "desk"))
+    assert rekinded.items[0].kind == "desk", "the re-kinding write did not land"
+    assert rekinded.items[0].minted_kind == "agent"
+    # And it is DURABLE, not an in-memory artefact of the returned object.
+    assert store.get_actor(ws, "dev").items[0].minted_kind == "agent"
+
+
+def test_a_new_item_id_is_minted_fresh_beside_a_sticky_one():
+    """Stickiness is per ITEM ID, not per actor.
+
+    An actor gains and loses items over its life. Carrying one item's recorded
+    mint onto another — or refusing to stamp a genuinely new item because the
+    actor already existed — would both be wrong, and the second is the easier
+    mistake to write.
+
+    KILLING MUTATION: key ``on_record`` on anything but ``item_id`` (the actor,
+    the kind, the index) and one of the two rows below reds.
+    """
+
+    ws = _make_workspace()
+    store = OfficeStore()
+    # Minted a DESK, so the two rows below cannot both be explained by one rule.
+    store.upsert_actor(ws, _one_item("dev", "dev_thing", "desk"))
+
+    grown = store.upsert_actor(
+        ws,
+        {
+            "persona_id": "dev",
+            "items": [
+                # Re-kinded: sticky, so it must still read ``desk``.
+                {
+                    "item_id": "dev_thing",
+                    "persona_id": "dev",
+                    "kind": "agent",
+                    "position": [1.0, 2.0],
+                },
+                # Never seen before: stamped from the kind it arrives with.
+                {
+                    "item_id": "dev_newcomer",
+                    "persona_id": "dev",
+                    "kind": "agent",
+                    "position": [3.0, 4.0],
+                },
+            ],
+        },
+    )
+
+    assert {i.item_id: i.minted_kind for i in grown.items} == {
+        "dev_thing": "desk",
+        "dev_newcomer": "agent",
+    }
+
+
+def test_a_client_cannot_declare_what_its_item_was_minted_as():
+    """The field is the STORE's record, never the caller's assertion.
+
+    A ``minted_kind`` a payload could set would be exactly the self-declaration
+    this field replaced an id-spelling with — the classifier would be right back
+    to trusting something the writer controls. ``_normalize_item`` does not read
+    the key, so it cannot ride in.
+
+    KILLING MUTATION: read ``minted_kind`` off ``raw`` in ``_normalize_item``
+    and this reds.
+    """
+
+    ws = _make_workspace()
+    store = OfficeStore()
+    payload = _one_item("dev", "dev_thing", "desk")
+    payload["items"][0]["minted_kind"] = "agent"
+
+    actor = store.upsert_actor(ws, payload)
+
+    assert actor.items[0].minted_kind == "desk"
+
+
+def test_a_re_added_key_carries_its_recorded_mint_forward_from_the_archive():
+    """A resurrection is the same item, not a second one.
+
+    The same precedence ``base_revision`` uses one line down, and for the same
+    reason: an actor re-added after a removal carries its history forward rather
+    than starting a fresh one. A mint that reset here would hand an operator a
+    clean-looking desk whose agent origin the store had just forgotten.
+
+    KILLING MUTATION: pass only ``existing`` to ``_stamp_minted_kinds`` and this
+    reds — ``existing`` is ``None`` on the re-add, which is precisely the arm
+    ``archived`` exists for.
+    """
+
+    ws = _make_workspace()
+    store = OfficeStore()
+    # Instance-keyed, so the class-key fence (a separate consent, deliberately
+    # not implied by ``resurrect``) is not what this test is about.
+    minted = _one_item("dev", "dev_thing", "agent")
+    minted["persona_instance_id"] = "personainst_dev_mint"
+    store.upsert_actor(ws, minted)
+    store.remove_actor(ws, "personainst_dev_mint")
+
+    re_added = _one_item("dev", "dev_thing", "desk")
+    re_added["persona_instance_id"] = "personainst_dev_mint"
+    restored = store.upsert_actor(ws, re_added, resurrect=True)
+
+    assert restored.items[0].minted_kind == "agent"
+
+
+def test_the_recorded_mint_is_not_content_and_never_moves_the_sync_hash():
+    """H-H12's blip, closed instead of accepted.
+
+    ``office_content_hash`` is what the realm-sync lane compares to decide that
+    an actor changed. ``minted_kind`` lives inside ``items``, which
+    ``_HASH_EXCLUDE`` cannot reach, so on the first write after the upgrade
+    every actor's hash would have moved once with nothing observable behind it —
+    an unmeasured drift spike on the one lane whose whole job is detecting real
+    drift — and any peer still decoding the field away would have disagreed with
+    this install for as long as it stayed unupgraded.
+
+    ANTI-VACUITY: the hash is asserted against the pre-field payload computed
+    HERE, from the same encoder, with the key absent — not against a golden
+    string that would rot, and not merely against itself. And ``kind`` is
+    asserted to still move it, so the exclusion is proved narrow: it hides the
+    provenance, never the content.
+
+    KILLING MUTATION: drop the ``items`` re-filter from ``office_content_hash``
+    and the first assertion reds.
+    """
+
+    import hashlib
+    import json
+
+    from agent_runtime.serde import to_jsonable
+
+    ws = _make_workspace()
+    store = OfficeStore()
+    stamped = store.upsert_actor(ws, _one_item("dev", "dev_thing", "agent"))
+    assert stamped.items[0].minted_kind == "agent", "fixture did not stamp"
+
+    # What this function encoded before the field existed: the same payload with
+    # the key simply absent.
+    payload = {
+        key: value
+        for key, value in to_jsonable(stamped).items()
+        if key not in office_models._HASH_EXCLUDE
+    }
+    payload["items"] = [
+        {k: v for k, v in item.items() if k != "minted_kind"} for item in payload["items"]
+    ]
+    pre_field = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+    assert office_models.office_content_hash(stamped) == pre_field, (
+        "stamping the mint moved the sync hash: every actor reports as a local edit once"
+    )
+
+    # ...and the exclusion is NARROW: ``kind`` is content and still moves it.
+    rekinded = store.upsert_actor(ws, _one_item("dev", "dev_thing", "desk"))
+    assert rekinded.items[0].minted_kind == "agent"
+    assert office_models.office_content_hash(rekinded) != pre_field

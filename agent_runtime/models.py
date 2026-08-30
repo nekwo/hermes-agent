@@ -259,6 +259,19 @@ class OfficeItem:
     display_name: str | None = None
     pet_slug: str | None = None
     scale: float = 1.0
+    #: What this item was minted AS, stamped by the store at its first write and
+    #: immutable thereafter (H-H5's sibling, H-H12). ``kind`` is mutable — any
+    #: later upsert may re-spell it — so a reader asking "was this really an
+    #: agent?" had nothing but the ``item_id`` STRING to consult, which is a
+    #: launcher naming convention nothing enforces. This is the store's own
+    #: record of the answer. ``None`` for every item written before it existed
+    #: and for every one adopted from a peer that has not upgraded; the readers
+    #: treat that as "cannot say", never as "no". Deliberately NOT on the wire
+    #: (``office_item_wire_row``): no client decides anything with it — and, for
+    #: the same reason, excluded from ``office_content_hash``
+    #: (``_ITEM_HASH_EXCLUDE``): a field no observer can see must not be able to
+    #: report an actor as changed.
+    minted_kind: str | None = None
 
 
 @dataclass(slots=True)

@@ -736,14 +736,22 @@ def test_a_short_world_is_unknown_rather_than_a_fabricated_orphan(
 # ── desk litter: the item-level sweep the join cannot see (plan DL-H1) ────────
 
 
-def _desk_actor(store, workspace_id: str, item_id: str, *, persona_id: str = "qa"):
-    """A CLASS-KEYED desk actor, written through the store's own verb.
+def _class_keyed_item(
+    store, workspace_id: str, item_id: str, *, kind: str = "desk", persona_id: str = "qa"
+):
+    """One CLASS-KEYED item, written through the store's own verb.
 
     The shape §1 of the plan measures: a desk minted by the launcher's
     ``materializeAgentDesk`` carries the persona CLASS id and no instance
     binding, so it lands in its own class-keyed actor file while the agent it
     belongs to lands in the instance-keyed one. Hand-writing the JSON would pin
-    the census against this fixture's idea of a desk rather than the store's.
+    the census against this fixture's idea of a desk rather than the store's —
+    and since H-H12 it would also skip ``minted_kind``, which only the store
+    stamps.
+
+    ``kind`` is a parameter so a fixture can RE-KIND an item under the same
+    ``item_id``: two calls, ``agent`` then ``desk``, are the mis-kinding the
+    minted-kind clause exists to catch.
     """
 
     return store.upsert_actor(
@@ -754,13 +762,17 @@ def _desk_actor(store, workspace_id: str, item_id: str, *, persona_id: str = "qa
                 {
                     "item_id": item_id,
                     "persona_id": persona_id,
-                    "kind": "desk",
+                    "kind": kind,
                     "position": [1.0, 1.4],
                 }
             ],
         },
         updated_by="desk litter fixture",
     )
+
+
+def _desk_actor(store, workspace_id: str, item_id: str, *, persona_id: str = "qa"):
+    return _class_keyed_item(store, workspace_id, item_id, persona_id=persona_id)
 
 
 def test_the_desk_litter_vocabulary_is_closed():
@@ -788,32 +800,57 @@ def test_the_desk_litter_vocabulary_is_closed():
     } == set(doctor.DESK_LITTER_REASONS)
 
 
-def test_the_item_id_shape_reads_the_launchers_minting_conventions():
-    """The desk marker WINS, and an unreadable id is ``unknown``, not "agent".
+def test_the_minted_kind_is_what_the_store_recorded_not_what_the_id_looks_like():
+    """H-H12: the mis-kinded test asks a stored FACT, and absence is not "no".
 
-    Pinned directly because both facts are load-bearing and neither is
-    reachable through a store fixture. ``desk-<agentItemId>`` is what
-    ``materializeAgentDesk`` mints for EVERY materialized desk on every store,
-    and it carries an ``_agent`` tail; reading the tail first would file all of
-    them as mis-kinded agents. And the agent test is POSITIVE — over-claiming
-    would fold widowed desks into ``desk_kind_agent_binding``, the exact
-    conflation the plan's §0 was written to stop.
+    This replaces ``_office_item_id_shape``, which answered the same question by
+    parsing the ``item_id`` for three launcher minting conventions — none of
+    them enforced anywhere, so a launcher rename would have silently
+    reclassified every mis-kinded agent as a widowed desk. It is the gate rule
+    of this repo applied to a classifier: a POSITIVE claim ("this was an
+    agent") may not rest on a spelling.
 
-    KILLING MUTATION: check the tail before the head, or return ``agent`` for
-    an id carrying no marker, and this reds.
+    THE TWO PROPERTIES THAT MATTER, and neither is reachable through a store
+    fixture, which is why they are pinned here:
+
+    * ``minted_kind == "agent"`` on a ``kind: "desk"`` item IS the mis-kinding,
+      with no live binding needed — that is the whole reason the field exists
+      for class-keyed actors, which have no binding to consult;
+    * ``minted_kind is None`` — every item written before the field, and every
+      one adopted from a peer that has not upgraded — is CANNOT SAY. It must
+      fall through to the absence buckets and be judged on whether its agent
+      exists, exactly as an unreadable id used to be. Over-claiming here folds
+      widowed desks into the mis-kinded bucket, which is the conflation the
+      plan's §0 was written to stop.
+
+    KILLING MUTATION: read ``minted_kind != "desk"`` instead of
+    ``== "agent"`` and the ``None`` row reds.
     """
 
-    from agent_runtime.harness_doctor import _office_item_id_shape
+    from agent_runtime import harness_doctor as doctor
 
-    assert _office_item_id_shape("desk-qa_agent") == "desk"
-    assert _office_item_id_shape("desk-personainst_qa_agent_2") == "desk"
-    assert _office_item_id_shape("qa_desk") == "desk"
-    assert _office_item_id_shape("qa_desk_2") == "desk"
-    assert _office_item_id_shape("qa_agent") == "agent"
-    assert _office_item_id_shape("qa_agent_2") == "agent"
-    assert _office_item_id_shape("personainst_neko_supervisor_agent_2a26ddcc") == "agent"
-    assert _office_item_id_shape("") == "unknown"
-    assert _office_item_id_shape("a_prop_somebody_named") == "unknown"
+    def _reason(minted_kind, **overrides):
+        kwargs = {
+            "minted_kind": minted_kind,
+            "on_live_instance_actor": False,
+            "agent_item_bindings": (),
+            "live_instance_ids": frozenset(),
+            "persona_known": True,
+        }
+        kwargs.update(overrides)
+        return doctor._desk_litter_reason(**kwargs)
+
+    assert _reason("agent") == doctor.DESK_LITTER_DESK_KIND_AGENT_BINDING
+    # Recorded as a desk, and no live binding: an ordinary widowed desk.
+    assert _reason("desk") == doctor.DESK_LITTER_AGENT_MISSING
+    # Cannot say — NOT "no", and NOT "yes".
+    assert _reason(None) == doctor.DESK_LITTER_AGENT_MISSING
+    # And a live instance binding still decides it on its own, whatever the
+    # store recorded: the fact no spelling could forge is still consulted FIRST.
+    assert (
+        _reason(None, on_live_instance_actor=True)
+        == doctor.DESK_LITTER_DESK_KIND_AGENT_BINDING
+    )
 
 
 def test_a_widowed_class_keyed_desk_is_agent_missing(isolate_agent_runtime_root):
@@ -907,15 +944,20 @@ def test_a_mis_kinded_agent_item_is_never_reported_as_a_widowed_desk(
       actor whose ``persona_instance_id`` names a live roster row. This is the
       shape measured on the operator's store on 2026-08-30. Its id is
       desk-shaped, so only the binding clause can fire.
-    * the AGENT-SHAPED ID clause — a ``kind: "desk"`` item on a class-keyed
-      actor whose ``item_id`` is an instance id, i.e. what
-      ``agent_create.placement_actor_payload`` mints for an AGENT.
+    * the MINTED-KIND clause (H-H12) — a ``kind: "desk"`` item on a CLASS-KEYED
+      actor that the store recorded as minted ``agent``. A class-keyed actor
+      has no binding to consult, so this clause is the only one that can fire
+      for it; before H-H12 the question was put to the ``item_id`` spelling
+      instead, which is a launcher convention nothing enforces.
 
     KILLING MUTATIONS: drop the binding clause and the first row vanishes (its
-    persona has a live agent item, so it reads healthy); drop the id clause and
-    the second vanishes for the same reason. Reorder the classifier so the
-    absence buckets are tested first and both come back as ``agent_missing`` —
-    the misreport that sends an operator to reap an agent.
+    persona has a live agent item, so it reads healthy); drop the minted-kind
+    clause and the second vanishes for the same reason; make ``minted_kind``
+    follow the payload's ``kind`` on every write instead of sticking at the
+    first, and the second vanishes too — which is the point of the re-kinding
+    write below. Reorder the classifier so the absence buckets are tested first
+    and both come back as ``agent_missing`` — the misreport that sends an
+    operator to reap an agent.
     """
 
     bound_ws = "ws_litter_miskinded_binding"
@@ -951,10 +993,14 @@ def test_a_mis_kinded_agent_item_is_never_reported_as_a_widowed_desk(
         updated_by="desk litter fixture",
     )
 
-    # Second workspace: a LIVE agent placement beside a class-keyed desk whose
-    # item id is an agent's. Without the id clause this row reads healthy.
+    # Second workspace: a LIVE agent placement beside a class-keyed actor whose
+    # item was MINTED as an agent and later re-spelled a desk. The re-kinding
+    # write is the whole fixture — it is the shape a spelling could only ever
+    # guess at, and the one the store can now answer from its own record.
+    # Without the minted-kind clause this row reads healthy.
     other = _create(id_ws, "qa_other_agent_2")
-    _desk_actor(store, id_ws, "personainst_qa_ghost_agent_9")
+    _class_keyed_item(store, id_ws, "qa_rekinded_item", kind="agent")
+    _class_keyed_item(store, id_ws, "qa_rekinded_item", kind="desk")
 
     report, census = _census()
 
@@ -963,13 +1009,16 @@ def test_a_mis_kinded_agent_item_is_never_reported_as_a_widowed_desk(
     }
     assert {row["item_id"] for row in census["desk_litter"]} == {
         "desk-qa_agent",
-        "personainst_qa_ghost_agent_9",
+        "qa_rekinded_item",
     }
     by_item = {row["item_id"]: row for row in census["desk_litter"]}
     assert by_item["desk-qa_agent"]["persona_instance_id"] == instance_id
     assert by_item["desk-qa_agent"]["workspace_id"] == bound_ws
-    assert by_item["personainst_qa_ghost_agent_9"]["persona_instance_id"] is None
-    assert by_item["personainst_qa_ghost_agent_9"]["workspace_id"] == id_ws
+    assert by_item["qa_rekinded_item"]["persona_instance_id"] is None
+    assert by_item["qa_rekinded_item"]["workspace_id"] == id_ws
+    # The store kept what it recorded, not what the last write said.
+    rekinded = store.get_actor(id_ws, "qa").items[0]
+    assert (rekinded.kind, rekinded.minted_kind) == ("desk", "agent")
     # Both personas are alive and placed — so ``agent_missing`` was never the
     # honest answer for either row.
     assert census["placed"] == 2

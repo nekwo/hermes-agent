@@ -33,6 +33,7 @@ Hard invariants this store upholds:
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -273,6 +274,11 @@ def _normalize_item(raw: Any, *, persona_id: str) -> OfficeItem:
     display_name = _safe_display_name(raw.get("display_name"))
     if display_name:
         _assert_display_name_publishable(display_name)
+    # ``minted_kind`` is deliberately NOT read off the payload and is left at
+    # ``None`` here: it is the STORE's record of what this item was minted as,
+    # and a value a client could send would be the self-declaration the field
+    # exists to replace. ``_stamp_minted_kinds`` decides it, inside the lock,
+    # against what the actor already holds.
     return OfficeItem(
         item_id=item_id,
         persona_id=item_persona,
@@ -283,6 +289,49 @@ def _normalize_item(raw: Any, *, persona_id: str) -> OfficeItem:
         pet_slug=safe_id(raw.get("pet_slug")),
         scale=office_models.normalize_scale(raw.get("scale", office_models.SCALE_DEFAULT)),
     )
+
+
+def _stamp_minted_kinds(
+    items: list[OfficeItem], prior: OfficeActor | None
+) -> list[OfficeItem]:
+    """Record what each item was MINTED as — once, at its first write (H-H12).
+
+    ``kind`` is mutable: every upsert re-sends the whole item list, so any later
+    write may re-spell an agent's item as a desk (or the reverse), and the store
+    accepts it. That made "was this really an agent?" a question with no stored
+    answer, and the desk-litter classifier had to ask the ``item_id`` STRING
+    instead — reading launcher minting conventions that nothing enforces, so a
+    launcher rename would silently reclassify mis-kinded agents as widowed
+    desks. The store now records the answer itself, and a spelling stops being
+    evidence.
+
+    STICKY BY ITEM ID, and that is the whole mechanism: an item already on
+    record keeps the ``minted_kind`` its first write gave it, and only an item
+    this actor has never held is stamped from the kind it arrives with. A write
+    can therefore change what an item IS and never what it was minted as, which
+    is the difference the classifier needs.
+
+    ``prior`` is the live row, or the ARCHIVED one when the key is being re-added
+    — the same precedence ``base_revision`` uses one line down, and for the same
+    reason: a resurrection carries its history forward rather than starting a
+    second one.
+
+    NOT retroactive. Items written before this existed carry ``None`` until
+    something rewrites them, and an actor adopted from a peer that has not
+    upgraded carries ``None`` too. Readers must treat that as "cannot say" and
+    never as "no" — over-claiming here is the expensive direction, exactly as it
+    was for the id-shape reader this replaces.
+    """
+
+    on_record = {
+        item.item_id: item.minted_kind
+        for item in (getattr(prior, "items", ()) or ())
+        if item.minted_kind
+    }
+    return [
+        replace(item, minted_kind=on_record.get(item.item_id) or item.kind)
+        for item in items
+    ]
 
 
 def _normalize_folders(values: Any) -> list[str]:
@@ -965,7 +1014,7 @@ class OfficeStore:
                 persona_id=persona_id,
                 persona_instance_id=_canonical_actor_key(persona_id, raw_instance) if raw_instance else None,
                 backing_profile=_normalize_persona_id(payload.get("backing_profile")),
-                items=items,
+                items=_stamp_minted_kinds(items, existing or archived),
                 state="active",
                 revision=base_revision + 1,
                 created_at=existing.created_at if existing else ts,

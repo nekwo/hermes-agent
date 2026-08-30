@@ -3334,6 +3334,24 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         "_STALE_SNAPSHOT_TMP_AGE_SECONDS",
         scope=("agent_runtime.snapshot",),
     ),
+    *rows(
+        "hh12",
+        "HEAD",
+        Form.ATTR,
+        "the desk-litter classifier's id-SPELLING reader, replaced by the "
+        "store's own record of what an item was minted as "
+        "(OfficeItem.minted_kind). It parsed three launcher minting "
+        "conventions that nothing enforces, so a launcher rename would have "
+        "silently reclassified every mis-kinded agent as a widowed desk — a "
+        "POSITIVE claim resting on a spelling, which this repo's gate rule "
+        "forbids. Production may not re-grow a reader that decides an item's "
+        "kind from its id",
+        "_office_item_id_shape",
+        "ITEM_ID_SHAPE_AGENT",
+        "ITEM_ID_SHAPE_DESK",
+        "ITEM_ID_SHAPE_UNKNOWN",
+        scope=("agent_runtime.harness_doctor",),
+    ),
 )
 
 
