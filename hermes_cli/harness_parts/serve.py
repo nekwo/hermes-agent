@@ -1588,6 +1588,68 @@ def _prewarm_persona_chat_actors() -> None:
         )
 
 
+def install_harness_skills_at_boot() -> str:
+    """Re-join the runtime's copy of every canonical skill to this repo's copy.
+
+    THE GAP THIS CLOSES (operator ruling 2026-08-30, plan
+    ``planned/skill-install-trigger-relocation.md``). A canonical shared skill
+    has two copies and only one is ever executed: a chat turn loads
+    ``<hermes root>/shared/skills/<id>/SKILL.md``, never the repo's
+    ``docs/agent-runtime-harness/harness-skills/<id>/SKILL.md``, because
+    ``agent.skill_utils`` refuses any candidate for a canonical id whose
+    ``source_kind`` is not ``shared_core``. Until this ran, the join was made by
+    exactly three triggers — an explicit CLI verb, a realm-sync pull, and a
+    pre-push hook — and every one of them fires when the machine PUBLISHES.
+    A machine that merely ``git pull``s and boots was repaired by nothing.
+
+    So it runs at the moment a CONSUMER acquires the drift instead: boot. It is
+    the strongest spot in the census because it is the only one with an
+    unambiguous home — the pre-push hook's whole refuse-to-guess-``HERMES_HOME``
+    contortion (``scripts/verify_harness_skill_install.py``, exit 2) exists
+    because a hook inherits an arbitrary pushing shell, while this process was
+    spawned with its home explicitly pinned and has already resolved it.
+
+    EXACTLY what a realm-sync pull runs (``agent_runtime/realm_sync.py:509-511``),
+    deliberately, rather than a second spelling of the same repair.
+
+    FAILURE POSTURE: loud, never fatal. The push gate blocked, because a push is
+    a one-shot event and an install that did not take had to stop it. A boot is
+    not: the next boot retries for free, and a chat runtime that refuses to start
+    because a skill package would not copy is a far worse outcome than one that
+    starts carrying a stale package and says so. Every failed result is named on
+    the caller's log lane.
+
+    Returns the one-line summary; raising is not part of the contract.
+    """
+
+    from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
+    from agent_runtime.skill_install import (
+        HARNESS_SKILLS,
+        install_harness_skills,
+        install_harness_skills_for_personas,
+    )
+
+    results = [
+        *install_harness_skills(skills=sorted(HARNESS_SKILLS)),
+        *install_harness_skills_for_personas(
+            ensure_persisted_personas(load_agent_runtime_config())
+        ),
+    ]
+    changed = [item.skill for item in results if item.changed]
+    failed = [item for item in results if not item.ok]
+    summary = (
+        f"harness serve: skill install — {len(results)} package(s), "
+        f"{len(changed)} refreshed, {len(failed)} failed"
+    )
+    if changed:
+        summary += f" | refreshed: {', '.join(sorted(set(changed)))}"
+    return summary + "".join(
+        f"\n  FAILED {item.skill}: {item.source} -> {item.destination}"
+        f" (repo {item.source_hash}, installed {item.installed_hash})"
+        for item in failed
+    )
+
+
 def _annotate_import_tax(timeline: Any) -> None:
     """Decompose ``interpreter_ms`` into named segments on the boot block (BW-0).
 
@@ -1633,6 +1695,7 @@ def serve_loop(
     provider_prewarm: Callable[[], None] | None = None,
     actor_prewarm: Callable[[], None] | None = None,
     root_anchor: Callable[[], Any] | None = None,
+    skill_install: Callable[[], str] | None = None,
     drain_deadline_seconds: float = DEFAULT_DRAIN_DEADLINE_SECONDS,
     drain_socket_minimum_deadline_seconds: float = (
         _DRAIN_SOCKET_MINIMUM_DEADLINE_SECONDS
@@ -1691,6 +1754,17 @@ def serve_loop(
     ``actor_prewarm`` is the persona-chat resident-actor pass and rides the same
     thread THIRD, on the same injection contract: it queues real agent
     constructions, so a loop unit test must never fire it by default.
+
+    ``skill_install`` re-joins the runtime's installed canonical skill packages
+    to this repo's copies (:func:`install_harness_skills_at_boot`) and takes the
+    SAME injection contract as ``root_anchor``, for the same reason and with more
+    at stake: it WRITES into the machine-global ``get_shared_skills_dir()``, so a
+    loop unit test that fired it by default would edit the operator's live
+    runtime. On, therefore, only where the real entry point turns it on. It runs
+    SYNCHRONOUSLY and before the pool exists — the whole point is that no request
+    is ever dispatched against a stale package — and it is bounded work (a hash
+    per canonical package; ``install_harness_skill`` writes nothing when they
+    match), unlike the prewarms it sits beside.
     """
 
     from agent_runtime.boot_timeline import BootTimeline
@@ -1865,6 +1939,37 @@ def serve_loop(
             }
         frames.emit(anchor_frame)
     timeline.mark("root_anchor_ms")
+    # ── The installed-skill join, at the moment a CONSUMER acquires drift ─────
+    #
+    # See :func:`install_harness_skills_at_boot` for what it repairs and why the
+    # pre-push hook was the wrong trigger for it. Three things about the PLACE:
+    #
+    # * AFTER ``booting``, so the frame a supervising launcher uses to tell a
+    #   live cold boot from a wedged child is already out. Nothing goes in front
+    #   of that frame (2026-07-26 kill-loop incident, above);
+    # * AFTER the root anchor, which is the call that declares this machine's
+    #   ``agent_runtime.head_home``. The install destination derives from the
+    #   resolved hermes home, so the declaration that names it is published
+    #   first — the same ordering the verify script's resolution ladder assumes;
+    # * BEFORE the stdout/stderr swap on the line below. ``sys.stderr`` is still
+    #   the inherited descriptor here — the serve log lane — so the summary
+    #   CANNOT reach the NDJSON stdout bridge even by accident. That is the
+    #   stdout discipline made structural instead of careful.
+    #
+    # Loud, never fatal: a chat runtime that refuses to boot because a package
+    # would not copy is worse than one that boots carrying a stale package and
+    # says so, and the next boot retries for free.
+    if skill_install is not None:
+        try:
+            print(skill_install(), file=sys.stderr, flush=True)
+        except Exception as exc:
+            print(
+                f"harness serve: skill install FAILED — {type(exc).__name__}: {exc}"
+                " (booting anyway; the installed packages may be stale)",
+                file=sys.stderr,
+                flush=True,
+            )
+    timeline.mark("skill_install_ms")
     stdout_proxy = _LineFrameProxy(frames, "line")
     stderr_proxy = _LineFrameProxy(frames, "stderr")
     read_cache = _PollResponseCache(read_cache_max_age)
@@ -4682,6 +4787,11 @@ def _cmd_serve(args) -> int:
             # must not construct a persona agent to observe a ready frame.
             actor_prewarm=_prewarm_persona_chat_actors,
             root_anchor=publish_store_root_anchor,
+            # The installed-skill join. ON here and nowhere else, the same
+            # contract as ``root_anchor`` beside it and for a sharper version of
+            # the same reason: this one WRITES into the machine's shared skills
+            # root, so a ``serve_loop`` unit test must never be able to fire it.
+            skill_install=install_harness_skills_at_boot,
             drain_wakeup=_wake_reader,
             # ``os._exit``, not ``sys.exit``: after a drain TIMEOUT the
             # interpreter cannot be trusted to come down at all — the
