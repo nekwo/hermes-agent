@@ -89,6 +89,29 @@ def merge_archived_ledgers(peer_keys, local_keys) -> list[str]:
     Deduplicated on first occurrence: ``_archive_actor_locked`` cannot produce a
     repeat locally, so a duplicate can only have arrived from a peer, and
     carrying it forward would spend cap budget on a key already guarded.
+
+    THE PROPAGATION DIRECTION, stated because the union is what makes it total:
+    a key that enters this ledger on ANY store travels — the union keeps it, the
+    next publish carries it into the realm, and every member that pulls
+    afterwards reads it as ``locally_archived`` and will archive that actor.
+    **Writing a key into this ledger is therefore REALM-WIDE intent, not a local
+    note**, and it is one-way: the ledger has no "un-tombstone" that syncs
+    (``restore_actor`` drops the key locally, and the next pull from any peer
+    that still holds it puts it back).
+
+    The consequence this store cannot currently see, recorded here rather than
+    guessed at: an archive taken as a RECEIVER-SIDE REPAIR — evicting a desk
+    whose instance never existed on this machine, the realm-pulled orphan — is
+    indistinguishable in this list from an AUTHORED delete, and the union
+    exports both. Live on 2026-08-30: the Mac store's ledger holds
+    ``personainst_neko_supervisor_agent_9682caf4`` from exactly such a repair
+    while the actor is alive and correctly linked at its ORIGIN, a Windows store
+    that has not yet pulled; the first pull after the Mac publishes will archive
+    it there. That case matches the operator's intent, so the union is right as
+    it stands and losing tombstones remains the worse failure. The TYPED SPLIT —
+    an authored tombstone versus a local eviction that mints no realm-visible
+    one — belongs with the delete lane that decides between the two verbs
+    (Track A1's hermes half), not with this merge.
     """
 
     merged: list[str] = []
