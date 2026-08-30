@@ -96,6 +96,26 @@ def _charsheet_skill_text() -> str:
     return (root / "harness-charsheet-authoring" / "SKILL.md").read_text(encoding="utf-8")
 
 
+def _charsheet_skill_package_text() -> str:
+    """The head PLUS every reference — the shape b981b8d87a left the skill in.
+
+    The 2026-08-28 restructure compressed SKILL.md 51.9k -> 19.7k chars and
+    moved the deep teachings into six ``references/*.md`` files, each with a
+    when-to-open pointer in the head. A teaching relocated there is still
+    taught; a test sweeping only the head reds against a package that is
+    perfectly correct. FIELD-NOTES.md is deliberately NOT here: it is the dated
+    historical record (the head's turn-zero card bans re-reading it), so it
+    legitimately quotes retired spellings the negative pins below must ban from
+    the taught surface.
+    """
+    root = Path(__file__).resolve().parents[2] / "docs" / "agent-runtime-harness" / "harness-skills"
+    package = root / "harness-charsheet-authoring"
+    parts = [(package / "SKILL.md").read_text(encoding="utf-8")]
+    for ref in sorted((package / "references").glob("*.md")):
+        parts.append(ref.read_text(encoding="utf-8"))
+    return "\n".join(parts)
+
+
 def _live_characters_verbs() -> set[str]:
     """The `harness characters` verbs argparse ACTUALLY registers, right now."""
     import argparse
@@ -161,8 +181,12 @@ def test_charsheet_skill_documents_exactly_the_characters_verbs_hermes_has():
 
 
 def test_charsheet_skill_teaches_the_looking_procedure_not_just_the_verbs():
-    text = _charsheet_skill_text()
+    text = _charsheet_skill_package_text()
 
+    # The looking procedure lives in references/looking-procedure.md since the
+    # b981b8d87a restructure; a reference nothing points to is unreachable, so
+    # the head must carry the pointer.
+    assert "references/looking-procedure.md" in _charsheet_skill_text()
     # The three field findings the verb list cannot carry: crop one FRAME, read
     # attempts side by side, and never trust an automated seam scan as a gate.
     assert "`--frame 0` is a default, not an answer" in text
@@ -185,8 +209,11 @@ def test_charsheet_skill_teaches_all_three_environment_traps():
     "report the image provider is unavailable in this home" — which sends the
     operator to check ``auth.json`` placement, correct for trap 1 and wrong here.
     """
-    text = _charsheet_skill_text()
+    text = _charsheet_skill_package_text()
 
+    # The traps live in references/homes-and-migration.md since b981b8d87a;
+    # the head must still point there or they are unreachable.
+    assert "references/homes-and-migration.md" in _charsheet_skill_text()
     # 1 — the plan-gated account that fails politely at HTTP 200.
     assert "`image_generation` tool silently stripped" in text
     # 2 — the stale token a plan change leaves behind.
@@ -230,8 +257,14 @@ def test_charsheet_skill_teaches_one_install_wide_library_and_no_home_scoping():
     echo stopped being how an agent proves it can see a draft and became how a
     mis-resolved root gets surfaced instead of assumed. Pinning it positively is
     what stops this test being passable by deletion.
+
+    Scope note (2026-08-30): swept over the PACKAGE (head + references), not
+    the head alone — b981b8d87a moved the home teachings into
+    ``references/homes-and-migration.md`` / ``console-and-costs.md``, and the
+    bans are stronger package-wide anyway: a reference still teaching the
+    retired mint would mislead exactly the agent the head sent there.
     """
-    text = _charsheet_skill_text()
+    text = _charsheet_skill_package_text()
     lowered = text.lower()
 
     # Still banned, and now for a second reason on top of the first: no field
