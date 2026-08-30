@@ -265,10 +265,23 @@ def _already_retired_ack(
     sweep = _sweep_live_placements(
         instance_id, reason="instance_reaped", correlation_id=correlation_id
     )
+    office_archive_failures = list(sweep["failures"])
     try:
         archived_actor_keys = OfficeStore().archived_actor_keys_for_instance(instance_id)
-    except Exception:  # noqa: BLE001 - the office projection is never authoritative here
+    except Exception as exc:  # noqa: BLE001 - the office projection is never authoritative here
+        # It is not authoritative, so the replay still answers — but the empty
+        # list it answers with is no longer allowed to look like the positive
+        # claim. The fault rides the SAME list the sweep's per-actor failures
+        # ride, with ``actor_key: None`` because the read that failed was about
+        # no single actor (C4).
         archived_actor_keys = []
+        office_archive_failures.append(
+            {
+                "actor_key": None,
+                "workspace_id": None,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        )
     return {
         "persona_instance_id": instance_id,
         "persona_id": persona_id,
@@ -286,7 +299,7 @@ def _already_retired_ack(
         # found — that claim was the first ack's to make, which is why losing
         # that ack costs a client the earlier failures only, never the
         # identities.
-        "office_archive_failures": sweep["failures"],
+        "office_archive_failures": office_archive_failures,
         "already_retired": True,
     }
 

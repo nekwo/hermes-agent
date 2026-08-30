@@ -821,7 +821,7 @@
       "path": "agent_runtime/agent_retire.py",
       "symbol": "_already_retired_ack",
       "operator": "swallow-reported-fault",
-      "find": "        \"office_archive_failures\": sweep[\"failures\"],",
+      "find": "        \"office_archive_failures\": office_archive_failures,",
       "replace": "        \"office_archive_failures\": [],",
       "test": [
         "{python}",
@@ -934,6 +934,51 @@
         "pytest",
         "-q",
         "tests/agent_runtime/test_office_sync.py::test_publish_names_exactly_the_scans_rows_and_nothing_else"
+      ]
+    },
+    {
+      "id": "c4-prune-swallows-its-directory-shortfall",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "OfficeStore.archive_actors_for_instance",
+      "operator": "drop-scan-shortfall-row",
+      "find": "            scan = self.scan_actors(wsid)\n            if scan.unreadable:\n                failures.append(_unreadable_scan_failure(wsid, scan))",
+      "replace": "            scan = self.scan_actors(wsid)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_a_prune_over_an_unreadable_directory_reports_the_shortfall"
+      ]
+    },
+    {
+      "id": "c4-replay-evidence-answers-over-a-short-world",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "OfficeStore.archived_actor_keys_for_instance",
+      "operator": "drop-completeness-refusal",
+      "find": "            if scan.unreadable:\n                raise ActorsUnreadable(\n                    f\"office actors unreadable in {wsid}: {scan.unreadable}\"\n                )",
+      "replace": "            pass",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_replays_evidence_read_refuses_a_short_answer"
+      ]
+    },
+    {
+      "id": "c4-replay-evidence-fault-never-reaches-the-ack",
+      "path": "agent_runtime/agent_retire.py",
+      "symbol": "_already_retired_ack",
+      "operator": "restore-silent-evidence-swallow",
+      "find": "        office_archive_failures.append(\n            {\n                \"actor_key\": None,\n                \"workspace_id\": None,\n                \"error\": f\"{type(exc).__name__}: {exc}\",\n            }\n        )",
+      "replace": "        pass",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_an_unreadable_evidence_read_on_the_replay_reaches_the_ack"
       ]
     }
   ]

@@ -1180,3 +1180,57 @@ def test_the_union_deduplicates_on_first_occurrence():
     spend cap budget on a key already guarded."""
 
     assert merge_archived_ledgers(["a", "a", "b"], ["b", "c", "c"]) == ["a", "b", "c"]
+
+
+# ── C4: the retire lane's reads join the completeness discipline (M8) ───────
+
+
+def test_a_prune_over_an_unreadable_directory_reports_the_shortfall():
+    """C4 (M8). The prune walked ``list_actors``, which drops what it could not
+    decode and reports the remainder as complete — so a bound desk whose file
+    would not open was neither archived nor counted, and ``failures: []`` claimed
+    every bound actor was off the level. That empty list is the retire ack's
+    positive claim (``agent_retire``'s own docstring), and it was a false one.
+
+    The loop still survives: the readable bound desk is archived in the same
+    call, which is what stops the opposite over-correction (refusing the whole
+    prune) from passing here.
+    """
+
+    ws = _make_workspace()
+    store = OfficeStore()
+    store.upsert_actor(ws, _actor_payload("qa", persona_instance_id="personainst_c4_qa"))
+    (paths.office_actors_dir(ws) / "broken.json").write_text("{not json", encoding="utf-8")
+
+    result = store.archive_actors_for_instance("persona_personainst_c4_qa")
+
+    assert result["archived"] == 1
+    assert result["archived_actor_keys"] == ["personainst_c4_qa"]
+    assert not store.actor_exists(ws, "personainst_c4_qa")
+    # ``actor_key: None`` — the key of the file that would not decode is exactly
+    # what could not be decoded, so naming one would be inventing it.
+    assert result["failures"] == [
+        {"actor_key": None, "workspace_id": ws, "error": "ActorsUnreadable: 1"}
+    ]
+    assert result["failed"] == 1
+
+
+def test_the_replays_evidence_read_refuses_a_short_answer():
+    """C4 (M8), the read-only half. ``archived_actor_keys_for_instance`` is the
+    replay's EVIDENCE — the answer to "which desks are off the level" — and it
+    was built from ``list_actors``. A bound desk whose archive copy will not
+    decode came back as "not archived by this instance", which is the one thing
+    an empty list is supposed to rule out. A short list here is not a smaller
+    truth, it is a different claim."""
+
+    ws = _make_workspace()
+    store = OfficeStore()
+    store.upsert_actor(ws, _actor_payload("qa", persona_instance_id="personainst_c4_ev"))
+    store.remove_actor(ws, "personainst_c4_ev")
+    assert store.archived_actor_keys_for_instance("persona_personainst_c4_ev") == [
+        "personainst_c4_ev"
+    ]
+
+    (paths.office_archive_dir(ws) / "broken.json").write_text("{not json", encoding="utf-8")
+    with pytest.raises(ActorsUnreadable):
+        store.archived_actor_keys_for_instance("persona_personainst_c4_ev")

@@ -161,6 +161,30 @@ class ActorScan(NamedTuple):
     unreadable: int
 
 
+def _unreadable_scan_failure(workspace_id: str, scan: ActorScan) -> dict:
+    """The archive lane's failure row for a shortfall that belongs to NO actor.
+
+    ``actor_key`` is ``None`` rather than a guess — the same shape
+    ``agent_retire`` already uses when the office projection itself will not
+    construct, and for the same reason: the value of this list is that it names
+    what it knows and nothing else. The unreadable file's own key is precisely
+    what could not be decoded, so naming one would be inventing it.
+
+    The COUNT is what the scan can honestly supply (``_read_actor_dir`` keeps a
+    per-class tally, not a path list), and the count is enough to do this row's
+    job: turn an empty ``failures`` list back into the positive claim
+    ``agent_retire``'s docstring says it is.
+    """
+
+    return {
+        "actor_key": None,
+        "workspace_id": workspace_id,
+        # Class + count, never a message or a path — the disclosure rule this
+        # list's other rows follow.
+        "error": f"ActorsUnreadable: {scan.unreadable}",
+    }
+
+
 def _safe_actor_ref(value: Any, *, fallback: str = "operator") -> str:
     return safe_id(value) or fallback
 
@@ -1505,7 +1529,18 @@ class OfficeStore:
         archived_keys: list[str] = []
         failures: list[dict] = []
         for wsid in self.list_workspaces():
-            for actor in self.list_actors(wsid):
+            # ``scan_actors``, not ``list_actors``: the thin view answers "these
+            # are the actors" for a directory it only partly read, and this loop
+            # spends that answer on a COMPLETENESS claim — an empty ``failures``
+            # is the retire ack's positive statement that every bound actor is
+            # off the level (``agent_retire`` says so at its own docstring). A
+            # bound desk whose file would not decode is not archived and is not
+            # visible either way, so the shortfall becomes a failure row of its
+            # own rather than a shorter loop nobody can see.
+            scan = self.scan_actors(wsid)
+            if scan.unreadable:
+                failures.append(_unreadable_scan_failure(wsid, scan))
+            for actor in scan.actors:
                 if not self._instance_bound_actor(actor, canonical):
                     continue
                 try:
@@ -1548,9 +1583,17 @@ class OfficeStore:
         to find — and a caller that reconstructed the list from a scene snapshot
         would be re-deriving a store fact from a render. This asks the archive.
 
-        Never raises for a storage fault: an unreadable archive dir is counted
-        and logged by ``_read_actor_dir`` and answers with the rows it COULD
-        read, which is the same posture the retirement tombstone probe takes.
+        RAISES :class:`ActorsUnreadable` when either directory it walks would not
+        fully decode, and that is the C4 correction rather than a new fragility.
+        This list is EVIDENCE — the replay's answer to "which desks are off the
+        level" — and it was built from ``list_actors``, which drops what it could
+        not read and reports the remainder as complete. A short list here is not
+        a smaller truth, it is a DIFFERENT claim: a bound desk whose archive copy
+        will not decode reads as "not archived by this instance", which is the
+        one thing an empty list is supposed to rule out. The caller
+        (``agent_retire``) turns the refusal into an ``office_archive_failures``
+        row, so the shortfall reaches the operator instead of a silently short
+        list of keys.
         """
 
         target = str(persona_instance_id or "").strip()
@@ -1561,8 +1604,19 @@ class OfficeStore:
         canonical = canonical_persona_instance_id(target) or target
         keys: list[str] = []
         for wsid in self.list_workspaces():
-            live = {actor.actor_key for actor in self.list_actors(wsid)}
-            for actor in self.list_actors(wsid, include_archived=True):
+            # Both reads gated, and gated on the WIDER one: the archive-inclusive
+            # scan covers the live directory and the archive together, so its
+            # count is the shortfall of everything this answer depends on. The
+            # live scan still supplies the re-added keys to skip, exactly as
+            # before — the discrimination stays "which DIRECTORY holds it".
+            live_scan = self.scan_actors(wsid)
+            scan = self.scan_actors(wsid, include_archived=True)
+            if scan.unreadable:
+                raise ActorsUnreadable(
+                    f"office actors unreadable in {wsid}: {scan.unreadable}"
+                )
+            live = {actor.actor_key for actor in live_scan.actors}
+            for actor in scan.actors:
                 if actor.actor_key in live:
                     continue
                 if not self._instance_bound_actor(actor, canonical):

@@ -687,6 +687,44 @@ def test_a_projection_fault_on_the_replay_is_not_blamed_on_an_actor(
     assert "office projection unreadable" in failures[0]["error"]
 
 
+def test_an_unreadable_evidence_read_on_the_replay_reaches_the_ack(
+    qa_persona, seeded_workspace, monkeypatch
+):
+    """C4. The replay's evidence read (``archived_actor_keys_for_instance``) was
+    wrapped in a bare ``except Exception: archived_actor_keys = []``. The office
+    projection is not authoritative here — so answering anyway is right — but the
+    empty list it answered with is the SAME list an all-clear answers with, and
+    nothing beside it said which one this was.
+
+    The fault now rides ``office_archive_failures`` with ``actor_key: None``, so
+    an empty failures list goes back to meaning what this module's docstring says
+    it means.
+    """
+
+    from agent_runtime.errors import ActorsUnreadable
+    from agent_runtime.office_store import OfficeStore
+
+    placed = _place(placement_id="qa_replay_evidence_agent_2")
+    perform_agent_retire({"persona_instance_id": placed["persona_instance_id"]})
+
+    def _unreadable(self, *args, **kwargs):
+        raise ActorsUnreadable("office actors unreadable in ws: 1")
+
+    monkeypatch.setattr(OfficeStore, "archived_actor_keys_for_instance", _unreadable)
+
+    second = perform_agent_retire(
+        {"persona_instance_id": placed["persona_instance_id"]}
+    ).result
+
+    # The replay still ANSWERS — the retirement is authoritative with or without
+    # the office projection.
+    assert second["already_retired"] is True
+    assert second["archived_actor_keys"] == []
+    failures = second["office_archive_failures"]
+    assert [f["actor_key"] for f in failures] == [None]
+    assert "ActorsUnreadable" in failures[0]["error"]
+
+
 def test_the_replay_sweeps_under_the_callers_gesture_token(
     qa_persona, seeded_workspace
 ):
