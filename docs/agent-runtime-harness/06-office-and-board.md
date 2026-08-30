@@ -39,7 +39,30 @@ line number is a guess about who edited above it.
 The last two are the only ones whose write crosses BOTH stores — the roster and
 the office — and they are each other's inverse. The four above them are office-only
 and remain the verbs for what a placement verb cannot reach: an authored desk, a
-class-keyed actor, a folder taxonomy, a realm-sync sidecar.
+class-keyed actor, a folder taxonomy, a realm-sync sidecar — and, since
+2026-08-30, **a realm-PULLED placement whose `persona_instances/` row this
+install never held**.
+
+That fifth case is not a variant of the others, it is the one the enumeration was
+missing. A pull adopts office ACTORS and never instances (`persona_instances/`
+has no family in `_destination_for_sync_path`), so a pulled placement is born
+with a placement-shaped actor key and no local row: `runtime.agent.retire` finds
+nothing to retire and refuses `not_found`, terminally by invariant 1.
+`runtime.office.remove` needs only the surface and the actor FILE, so it is the
+verb that can reach it, and the launcher now routes to it on that FACT rather
+than on the shape of the key (launcher plan
+`docs/mission_control/planned/realm-actor-lifecycle-refactor.md` A1, in the
+EterniaLauncher repo).
+
+**Intent semantics at this verb (ruled 2026-08-30).** A `runtime.office.remove`
+carrying an operator's click is AUTHORED intent: the tombstone it mints and that
+tombstone's realm-wide propagation are CORRECT, on whichever machine the click
+happened — that is what tombstones are for, and propagating one implements the
+delete the operator asked for. The launcher's delete lane is exactly that case
+and keeps both. What must never mint a realm-visible tombstone is a DIAGNOSTIC
+eviction — a doctor remediation, a dispatch step, a census cleanup aimed only at
+local projection; that lane gets its own local-only mode rather than borrowing
+this one.
 
 Three ack shapes are load-bearing and the handler docstrings say why. The remove
 returns the **post**-archive revision, because `_archive_actor_locked` bumps on
