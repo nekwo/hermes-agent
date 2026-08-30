@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import ast
+from dataclasses import dataclass
 from datetime import date
 import json
 from pathlib import Path
@@ -16,6 +18,23 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CLAIMS = REPO_ROOT / "tests" / "mutation_claims.json"
 DEFAULT_EXEMPTIONS = REPO_ROOT / "tool" / "test_quality" / "mutation_exemptions.yaml"
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+
+#: ``symbol`` spellings that mean "the whole module" rather than a definition
+#: inside it. Module-scope claims are legitimate (an import, a constant, a
+#: decorator argument) and there is no AST node to scope them to.
+WHOLE_MODULE_SYMBOLS = frozenset({"module", "module scope", "module-scope"})
+
+#: How far a claim's block is allowed to have been re-indented and still be the
+#: same claim. Four levels each way covers every dedent this repo has produced
+#: (an extraction out of a nested ``try`` is two); beyond it the block has more
+#: likely been rewritten than moved, and a configuration error is the honest
+#: answer.
+MAX_REINDENT_COLUMNS = 16
+
+#: Where ``_partition_claims`` parks the resolved :class:`ClaimAnchor` on the
+#: claim row. Not a claim FIELD — the schema check above rejects unknown-shaped
+#: rows on the way in, and this is added after that check, by us, on our copy.
+ANCHOR_KEY = "_anchor"
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -70,13 +89,271 @@ def _validate_exemptions(path: Path) -> None:
             raise RuntimeError(f"{path}: exemption expired: {row['id']} ({expiry})")
 
 
-def _claim_span(text: str, needle: str) -> tuple[int, set[int]]:
-    if text.count(needle) != 1:
-        raise RuntimeError(f"mutation source must occur exactly once; found {text.count(needle)}")
-    offset = text.index(needle)
-    start = text.count("\n", 0, offset) + 1
-    count = needle.count("\n") + 1
-    return offset, set(range(start, start + count))
+def _qualified_definitions(tree: ast.Module) -> dict[str, list[ast.AST]]:
+    """Every definition in the module, keyed by its dotted qualified name.
+
+    Values are LISTS because a name can legitimately occur more than once in one
+    module (a method spelled on two classes, a constant re-bound under a
+    ``try``). An anchor over an ambiguous name is refused rather than guessed —
+    guessing is how a claim ends up mutating a line in a symbol it does not
+    name, which is the whole defect this anchoring replaces.
+    """
+
+    found: dict[str, list[ast.AST]] = {}
+
+    def record(name: str, node: ast.AST) -> None:
+        found.setdefault(name, []).append(node)
+
+    def walk(node: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                qualified = prefix + child.name
+                record(qualified, child)
+                walk(child, qualified + ".")
+                continue
+            # Module- and class-level bindings are anchorable too: ``r1-
+            # discriminator-weakened-to-a-bare-marker`` anchors on the
+            # ``DELIBERATE_PLACEMENT_SUFFIX`` constant, which has no def line.
+            if isinstance(child, ast.Assign):
+                for target in child.targets:
+                    if isinstance(target, ast.Name):
+                        record(prefix + target.id, child)
+            elif isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name):
+                record(prefix + child.target.id, child)
+
+    walk(tree, "")
+    return found
+
+
+def _line_offsets(text: str) -> list[int]:
+    offsets = [0]
+    for line in text.splitlines(keepends=True):
+        offsets.append(offsets[-1] + len(line))
+    return offsets
+
+
+def _symbol_span(text: str, path: str, symbol: str) -> tuple[int, int]:
+    """The character span the claim's ``find`` is anchored INSIDE.
+
+    ``symbol`` is ``<dotted definition>`` optionally followed by ``/<label>`` —
+    the label is prose naming which line inside the definition the claim is
+    about (``build_parser/work_list``) and is not resolved. The dotted half is
+    resolved against the module's real definitions, and a bare method name is
+    accepted when it is unambiguous, because that is how the claims that
+    predate this anchoring are spelled.
+
+    Until 2026-08-30 ``symbol`` was decorative: the needle was matched against
+    the WHOLE FILE and nothing ever asked whether the named symbol existed.
+    ``r1-create-stops-fencing-the-supplied-placement`` had named a deleted
+    ``_parse_request`` for months while its guarantee was silently being
+    exercised inside ``normalize_agent_create``.
+    """
+
+    if symbol.split("/", 1)[0].strip().lower() in WHOLE_MODULE_SYMBOLS:
+        return 0, len(text)
+    head = symbol.split("/", 1)[0].strip()
+    try:
+        tree = ast.parse(text)
+    except SyntaxError as error:
+        raise RuntimeError(
+            f"symbol {head!r} cannot be resolved: {path} does not parse as Python "
+            f"({error}); use symbol \"module\" for a file with no definitions"
+        ) from error
+    definitions = _qualified_definitions(tree)
+    nodes = definitions.get(head, [])
+    if not nodes:
+        # A bare name, matched as a suffix of a qualified one: ``upsert_actor``
+        # resolves to ``OfficeStore.upsert_actor`` when that is the only one.
+        nodes = [
+            node
+            for qualified, candidates in definitions.items()
+            if qualified.endswith("." + head)
+            for node in candidates
+        ]
+    if not nodes:
+        raise RuntimeError(f"symbol not found in {path}: {head}")
+    if len(nodes) > 1:
+        raise RuntimeError(
+            f"symbol is ambiguous in {path}: {head} resolves {len(nodes)} times; "
+            "qualify it (Class.method)"
+        )
+    node = nodes[0]
+    offsets = _line_offsets(text)
+    end_lineno = getattr(node, "end_lineno", None) or node.lineno
+    return offsets[node.lineno - 1], offsets[min(end_lineno, len(offsets) - 1)]
+
+
+def _reindent(block: str, shift: int, *, shift_first_line: bool) -> str | None:
+    """``block`` with every line's own indentation moved by ``shift`` columns.
+
+    RELATIVE indentation is preserved by construction — every line moves by the
+    same amount — so this recognises a block that was dedented out of a ``try``
+    or indented into one, and does NOT recognise a block whose internal nesting
+    changed. That is the point: a re-indent is the same code in a new place, a
+    re-nest is different code.
+
+    ``None`` when the shift is not expressible: a tab-indented line (columns are
+    not a fact about tabs) or a line that would need negative indentation.
+    """
+
+    out: list[str] = []
+    for index, line in enumerate(block.split("\n")):
+        if not line.strip():
+            out.append(line)
+            continue
+        if index == 0 and not shift_first_line:
+            out.append(line)
+            continue
+        stripped = line.lstrip(" \t")
+        lead = line[: len(line) - len(stripped)]
+        if "\t" in lead:
+            return None
+        width = len(lead) + shift
+        if width < 0:
+            return None
+        out.append(" " * width + stripped)
+    return "\n".join(out)
+
+
+def _candidate_offsets(span: str, needle: str) -> dict[int, tuple[int, bool]]:
+    """Every place in ``span`` the claim's block could be, as ``offset → (shift, at_line_start)``.
+
+    TWO spellings, and the split between them is what keeps a re-indent from
+    swallowing a re-NEST:
+
+    * verbatim, and only at shift 0 — today's exact match, kept whole so a claim
+      that still reads byte-for-byte is never re-interpreted. It may land
+      mid-line, which is how a sub-line needle anchors at all.
+    * line-start, at any shift — the whole block re-indented by one constant,
+      matched only where a line begins. The first line moves WITH the rest,
+      which is precisely what makes relative nesting a fixed property: a block
+      whose inner line gained a level relative to its opener has no constant
+      shift and drops out.
+
+    Leaving the first line verbatim while shifting the others (the third
+    spelling, which the first draft had) is the bug both of those avoid — it
+    matches any re-nesting at all, and re-indents the replacement wrong.
+    """
+
+    found: dict[int, tuple[int, bool]] = {}
+    exact = needle
+    position = span.find(exact)
+    while position != -1:
+        found[position] = (0, False)
+        position = span.find(exact, position + 1)
+    if found:
+        return found
+    for size in range(1, MAX_REINDENT_COLUMNS + 1):
+        for shift in (-size, size):
+            moved = _reindent(needle, shift, shift_first_line=True)
+            if moved is None:
+                continue
+            position = span.find(moved)
+            while position != -1:
+                if position == 0 or span[position - 1] == "\n":
+                    found.setdefault(position, (shift, True))
+                position = span.find(moved, position + 1)
+        if found:
+            # The smallest shift that explains the block wins; a larger one that
+            # also matched would be a different block wearing the same shape.
+            break
+    return found
+
+
+@dataclass(frozen=True, slots=True)
+class ClaimAnchor:
+    """Where a claim's ``find`` actually sits in the file today.
+
+    ``find``/``replace`` are the claim's strings AS THE FILE SPELLS THEM — the
+    registered text re-indented onto the block's current column. The mutation is
+    spliced at ``offset`` rather than handed to ``str.replace``, because
+    uniqueness is now a property of the SYMBOL and a needle that also occurs
+    earlier in the file must not be the one that gets rewritten.
+    """
+
+    offset: int
+    lines: set[int]
+    find: str
+    replace: str
+    shift: int
+
+
+def _anchor_claim(text: str, claim: dict[str, Any]) -> ClaimAnchor:
+    path = str(claim["path"])
+    start, end = _symbol_span(text, path, str(claim["symbol"]))
+    span = text[start:end]
+    needle = str(claim["find"])
+
+    candidates = _candidate_offsets(span, needle)
+    if not candidates:
+        raise RuntimeError(
+            f"mutation source not found in {path}::{claim['symbol']}"
+            + _reanchor_hint(text, path, needle)
+        )
+    if len(candidates) > 1:
+        raise RuntimeError(
+            f"mutation source must occur exactly once in {path}::{claim['symbol']}; "
+            f"found {len(candidates)}"
+        )
+    position, (shift, shift_first_line) = next(iter(candidates.items()))
+    moved_find = _reindent(needle, shift, shift_first_line=shift_first_line)
+    moved_replace = _reindent(str(claim["replace"]), shift, shift_first_line=shift_first_line)
+    assert moved_find is not None
+    if moved_replace is None:
+        raise RuntimeError(
+            f"{claim['id']}: the replacement cannot follow the anchor's {shift:+d}-column shift"
+        )
+    offset = start + position
+    first = text.count("\n", 0, offset) + 1
+    return ClaimAnchor(
+        offset=offset,
+        lines=set(range(first, first + moved_find.count("\n") + 1)),
+        find=moved_find,
+        replace=moved_replace,
+        shift=shift,
+    )
+
+
+def _reanchor_hint(text: str, path: str, needle: str) -> str:
+    """Name the symbol the needle DID land in, when the claim's symbol missed.
+
+    A stale ``symbol`` is now fatal, so the error has to carry the repair: the
+    two ways a claim goes stale are a rename and an extraction, and both leave
+    the guarantee sitting in a symbol this can point at.
+    """
+
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return ""
+    offsets = _line_offsets(text)
+    holders: list[str] = []
+    for qualified, nodes in _qualified_definitions(tree).items():
+        for node in nodes:
+            # Definitions only. A binding that IS the needle would name itself
+            # back at the reader, and "re-anchor onto holder.limit" is not a
+            # repair anybody can act on.
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            end_lineno = getattr(node, "end_lineno", None) or node.lineno
+            body = text[offsets[node.lineno - 1] : offsets[min(end_lineno, len(offsets) - 1)]]
+            if _candidate_offsets(body, needle):
+                holders.append(qualified)
+    if not holders:
+        return ""
+    innermost = max(holders, key=lambda name: name.count("."))
+    return f"; it is in {innermost} — re-anchor the claim's symbol"
+
+
+def _anchor_or_raise(claim: dict[str, Any]) -> tuple[ClaimAnchor, str]:
+    target = REPO_ROOT / str(claim["path"])
+    if not target.is_file():
+        raise RuntimeError(f"{claim['id']}: target missing: {claim['path']}")
+    text = target.read_text(encoding="utf-8")
+    try:
+        return _anchor_claim(text, claim), text
+    except RuntimeError as error:
+        raise RuntimeError(f"{claim['id']}: {error}") from error
 
 
 def _partition_claims(
@@ -105,12 +382,12 @@ def _partition_claims(
         required = {"id", "path", "symbol", "operator", "find", "replace", "test"}
         if not required.issubset(claim):
             raise RuntimeError(f"{claims_path}: claim needs {sorted(required)}")
-        target = REPO_ROOT / str(claim["path"])
-        if not target.is_file():
-            raise RuntimeError(f"{claim['id']}: target missing: {claim['path']}")
-        text = target.read_text(encoding="utf-8")
-        _, span = _claim_span(text, str(claim["find"]))
-        if span & _changed_lines(base, str(claim["path"])):
+        anchor, _ = _anchor_or_raise(claim)
+        # Carried on the row so the mutate loop splices the anchor this
+        # selection was computed from, rather than re-deriving one and hoping
+        # the two agree.
+        claim[ANCHOR_KEY] = anchor
+        if anchor.lines & _changed_lines(base, str(claim["path"])):
             selected.append(claim)
         else:
             unselected.append(claim)
@@ -137,6 +414,17 @@ def run(base: str, claims_path: Path, exemptions_path: Path, max_candidates: int
     print(f"mutation candidates: {len(claims)} (cap {max_candidates})")
     for claim in claims:
         print(f"  {claim['id']}: {claim['path']}::{claim['symbol']} [{claim['operator']}]")
+    # AFTER the candidate line for the same reason the UNSELECTED rows are, and
+    # for BOTH halves: a claim re-anchored onto a re-indented block is a fact
+    # about this run whether or not the diff selected it, and a silent
+    # re-anchor is the same false all-clear as a silent skip.
+    for claim in (*claims, *unselected):
+        anchor = claim[ANCHOR_KEY]
+        if anchor.shift:
+            print(
+                f"RE-ANCHORED: {claim['id']} ({claim['path']}::{claim['symbol']} "
+                f"re-indented {anchor.shift:+d} columns)"
+            )
     if list_only:
         # Only under ``--list``, which is the inventory lane. A real run prints
         # what it is about to mutate and nothing else; this is for the reader
@@ -169,8 +457,15 @@ def run(base: str, claims_path: Path, exemptions_path: Path, max_candidates: int
         target = REPO_ROOT / str(claim["path"])
         original = target.read_bytes()
         text = original.decode("utf-8")
-        _claim_span(text, str(claim["find"]))
-        mutated = text.replace(str(claim["find"]), str(claim["replace"]), 1)
+        anchor = claim[ANCHOR_KEY]
+        if text[anchor.offset : anchor.offset + len(anchor.find)] != anchor.find:
+            # The baseline run moved the file under us. Refusing beats splicing
+            # at an offset that now points somewhere else.
+            raise RuntimeError(f"{claim['id']}: {claim['path']} changed after the anchor resolved")
+        # Spliced at the anchor's offset, never ``str.replace``: uniqueness is a
+        # property of the SYMBOL now, so an identical line earlier in the file
+        # is legal — and would be the one a first-occurrence replace rewrote.
+        mutated = text[: anchor.offset] + anchor.replace + text[anchor.offset + len(anchor.find) :]
         try:
             target.write_text(mutated, encoding="utf-8", newline="")
             print(f"MUTATE: {claim['id']}")

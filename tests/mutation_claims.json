@@ -684,7 +684,7 @@
     {
       "id": "r1-create-stops-fencing-the-supplied-placement",
       "path": "agent_runtime/agent_create.py",
-      "symbol": "_parse_request",
+      "symbol": "normalize_agent_create",
       "operator": "remove-guard",
       "find": "        if not looks_like_deliberate_placement(placement_id):\n            raise AgentCreateInvalid(\n                PLACEMENT_ID_NOT_DISCRIMINABLE_REASON,\n                placement_id_not_discriminable_message(placement_id),\n            )",
       "replace": "        pass",
@@ -994,6 +994,68 @@
         "pytest",
         "-q",
         "tests/agent_runtime/test_harness_doctor.py::test_the_orphan_remediation_names_the_verb_that_works_for_a_pulled_orphan"
+      ]
+    },
+    {
+      "id": "hh14-the-anchor-escapes-the-symbol-it-names",
+      "path": "scripts/changed_line_mutation_check.py",
+      "symbol": "_symbol_span",
+      "operator": "widen-span-to-whole-file",
+      "find": "    return offsets[node.lineno - 1], offsets[min(end_lineno, len(offsets) - 1)]",
+      "replace": "    return 0, len(text)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/scripts/test_mutation_claim_anchoring.py::test_the_anchor_is_scoped_to_the_symbol_the_claim_names",
+        "tests/scripts/test_mutation_claim_anchoring.py::test_the_decoy_copy_is_anchored_when_the_claim_names_the_decoy"
+      ]
+    },
+    {
+      "id": "hh14-a-stale-symbol-goes-back-to-passing-in-silence",
+      "path": "scripts/changed_line_mutation_check.py",
+      "symbol": "_symbol_span",
+      "operator": "degrade-missing-symbol-to-whole-file",
+      "find": "    if not nodes:\n        raise RuntimeError(f\"symbol not found in {path}: {head}\")",
+      "replace": "    if not nodes:\n        return 0, len(text)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/scripts/test_mutation_claim_anchoring.py::test_a_symbol_that_no_longer_exists_fails_and_names_the_one_that_holds_it"
+      ]
+    },
+    {
+      "id": "hh14-a-re-indented-block-goes-unanchored",
+      "path": "scripts/changed_line_mutation_check.py",
+      "symbol": "_candidate_offsets",
+      "operator": "drop-the-reindent-lane",
+      "find": "    if found:\n        return found",
+      "replace": "    return found",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/scripts/test_mutation_claim_anchoring.py::test_a_claim_registered_against_the_dedented_shape_still_anchors",
+        "tests/scripts/test_mutation_claim_anchoring.py::test_a_re_indented_claim_still_anchors_when_the_block_gains_levels"
+      ]
+    },
+    {
+      "id": "hh14-the-mutant-is-spliced-at-the-first-occurrence-again",
+      "path": "scripts/changed_line_mutation_check.py",
+      "symbol": "run",
+      "operator": "splice-by-first-occurrence",
+      "find": "        mutated = text[: anchor.offset] + anchor.replace + text[anchor.offset + len(anchor.find) :]",
+      "replace": "        mutated = text.replace(anchor.find, anchor.replace, 1)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/scripts/test_mutation_claim_anchoring.py::test_the_mutation_is_spliced_at_the_anchor_not_at_the_first_occurrence"
       ]
     }
   ]

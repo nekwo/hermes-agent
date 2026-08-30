@@ -216,7 +216,7 @@ def test_a_claim_whose_find_no_longer_resolves_is_still_a_configuration_error(
     )
     touched({})
 
-    with pytest.raises(RuntimeError, match="exactly once"):
+    with pytest.raises(RuntimeError, match="mutation source not found"):
         gate.run(
             "BASE",
             claims,
