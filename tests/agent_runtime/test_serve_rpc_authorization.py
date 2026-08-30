@@ -28,7 +28,10 @@ from __future__ import annotations
 import pytest
 
 from agent_runtime import serve_rpc
+from agent_runtime.agent_create import perform_agent_create
+from agent_runtime.agent_retire import perform_agent_retire
 from agent_runtime.call_authorization import (
+    CALLER_DEVICE,
     CALLER_LOCAL_CONSOLE,
     CALLER_STDIO_OWNER,
     CALLER_UNKNOWN,
@@ -39,6 +42,7 @@ from agent_runtime.call_authorization import (
     TIER_CONSOLE,
     TIER_READ,
     UNKNOWN_CALLER,
+    TRANSPORT_GATEWAY,
     RpcCaller,
     authorize_call,
 )
@@ -268,3 +272,159 @@ def test_the_gate_is_what_separates_the_two_and_it_is_actually_running():
     assert allowed.get("error", {}).get("data", {}).get("reason") != (
         REASON_SCOPE_DENIED
     )
+
+
+# ── Stage A6: the backstop at the service boundary ──────────────────────────
+
+
+def _device(tier: str) -> RpcCaller:
+    return RpcCaller(
+        kind=CALLER_DEVICE,
+        transport=TRANSPORT_GATEWAY,
+        device_id="dev-a6",
+        device_tier=tier,
+    )
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        pytest.param(
+            lambda caller: perform_agent_create(
+                {
+                    "persona_id": "qa",
+                    "workspace_id": "ws_a6",
+                    "idempotency_key": "a6",
+                },
+                caller=caller,
+            ),
+            id="create",
+        ),
+        pytest.param(
+            lambda caller: perform_agent_retire(
+                {"persona_instance_id": "personainst_qa_a6"}, caller=caller
+            ),
+            id="retire",
+        ),
+    ],
+)
+def test_the_service_refuses_a_read_tier_caller_with_no_dispatcher_involved(
+    call, isolate_agent_runtime_root
+):
+    """Stage A6. The console tier is a property of the VERB, not of the gate.
+
+    The front-door check is a property of ``handle_request``: it runs because
+    that function calls ``authorize_call`` before dispatch and because
+    ``@method`` recorded the right tier. Both are one edit away from being wrong
+    in a way no service test would have seen — a method re-registered at ``read``
+    by a typo, a future transport reaching a handler by another path, a refactor
+    that moves dispatch. Here the service is called DIRECTLY, with no dispatcher
+    in the picture at all, and it still refuses.
+
+    ANTI-VACUITY: the refusal must be the SCOPE one and nothing else. Both calls
+    below name a workspace and an instance that do not exist, so a service that
+    ignored ``caller`` would answer ``workspace_not_found`` /
+    ``persona_instance_id`` — a refusal, but the wrong one, and a test asserting
+    only "it refused" would pass on it.
+
+    KILLING MUTATION: delete the ``service_backstop`` call from either service
+    and its parameter reds on the reason.
+    """
+
+    outcome = call(_device(TIER_READ))
+
+    assert outcome.refusal is not None
+    assert outcome.refusal.data["reason"] == REASON_SCOPE_DENIED
+    assert outcome.refusal.data["tier"] == TIER_CONSOLE
+    assert outcome.refusal.data["caller"] == CALLER_DEVICE
+
+
+def test_the_backstop_grandfathers_a_call_that_named_no_caller():
+    """Omitting ``caller`` is the local console — a VALUE, not an absent check.
+
+    ~60 existing call sites are operators at this install's own shell or tests
+    standing in for them, and Ruling A's sentencing on option (c) named
+    rewriting all of them as the reason it was not taken. So the default is
+    spelled, and the answer to "what authority did this run under" is always a
+    caller kind rather than a shrug.
+
+    KILLING MUTATION: default to ``UNKNOWN_CALLER`` (``authorize_call``'s own
+    reading of ``None``) and every existing caller of both verbs is refused —
+    which is what makes this the load-bearing asymmetry between the two
+    functions rather than an inconsistency.
+    """
+
+    from agent_runtime.call_authorization import SERVICE_DEFAULT_CALLER, service_backstop
+
+    assert SERVICE_DEFAULT_CALLER.kind == CALLER_LOCAL_CONSOLE
+    assert service_backstop(None, method="runtime.agent.retire") is None
+    assert service_backstop(LOCAL_CONSOLE, method="runtime.agent.retire") is None
+    assert service_backstop(STDIO_OWNER, method="runtime.agent.create") is None
+
+
+def test_the_backstop_reads_the_caller_and_never_the_request(
+    isolate_agent_runtime_root,
+):
+    """A ``params`` key cannot become an identity.
+
+    The one way a second check could make things WORSE is by being
+    self-declared: a request that could name its own tier would put a hole at
+    the service that the front door does not have. ``caller`` is an
+    ``RpcCaller``, the services take their request as a dict, and no JSON a
+    client sends crosses that line.
+
+    KILLING MUTATION: read ``params`` for a caller-shaped key in either service
+    and this reds — the refused call below sends every spelling a hopeful client
+    might try.
+    """
+
+    outcome = perform_agent_retire(
+        {
+            "persona_instance_id": "personainst_qa_a6",
+            "caller": "local_console",
+            "tier": TIER_CONSOLE,
+            "device_tier": TIER_CONSOLE,
+            "requested_by": "local_console",
+        },
+        caller=_device(TIER_READ),
+    )
+
+    assert outcome.refusal is not None
+    assert outcome.refusal.data["reason"] == REASON_SCOPE_DENIED
+    assert outcome.refusal.data["caller"] == CALLER_DEVICE
+
+
+def test_the_handlers_hand_the_proven_caller_to_the_service():
+    """The wire lane's half: the backstop is USELESS unless the caller travels.
+
+    A backstop the dispatcher never feeds is a parameter with a default, which
+    is not a guarantee. This drives ``handle_request`` with the front-door gate
+    STUBBED TO ALLOW — the exact failure the backstop exists for, and the only
+    way to observe the second check on the wire lane — and the call is still
+    refused, by the service.
+
+    KILLING MUTATION: drop ``caller=context.caller`` from either handler and
+    this reds: the service grandfathers the call and the refusal that comes back
+    is the verb's own (a missing workspace / a missing instance), not a scope
+    one.
+    """
+
+    from agent_runtime.call_authorization import CallAuthorization
+
+    def _always_allow(tier, caller, *, method=None):
+        return CallAuthorization(
+            ok=True, reason="stubbed", tier=tier, caller_kind=getattr(caller, "kind", "?")
+        )
+
+    original = serve_rpc.authorize_call
+    serve_rpc.authorize_call = _always_allow
+    try:
+        for name in ("runtime.agent.create", "runtime.agent.retire"):
+            frame = serve_rpc.handle_request(
+                _request(name),
+                serve_rpc.RpcContext(caller=_device(TIER_READ)),
+            )
+            assert frame["error"]["data"]["reason"] == REASON_SCOPE_DENIED, name
+            assert frame["error"]["data"]["caller"] == CALLER_DEVICE, name
+    finally:
+        serve_rpc.authorize_call = original

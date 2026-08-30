@@ -77,6 +77,11 @@ from typing import Any
 ERR_INVALID_PARAMS = -32602
 ERR_NOT_FOUND = 4001
 ERR_CONFLICT = 4090
+#: The generic handler-failure code, spelled here because Stage A6's backstop
+#: answers in it — the SAME code and the same ``data`` block the RPC front door
+#: spends for a refused tier, so a client cannot tell which of the two layers
+#: refused it and does not have to.
+ERR_HANDLER_FAILED = -32000
 
 #: The ONE retire refusal that is not a store guard: the request never named a
 #: target. Spelled like ``agent_create``'s ``persona_id_required`` so the two
@@ -324,7 +329,9 @@ def _already_retired_ack(
     }
 
 
-def perform_agent_retire(params: dict[str, Any]) -> AgentRetireOutcome:
+def perform_agent_retire(
+    params: dict[str, Any], *, caller: Any | None = None
+) -> AgentRetireOutcome:
     """ONE call retires an agent: the roster row AND every actor bound to it.
 
     Params: ``persona_instance_id`` (required); ``reason`` and ``requested_by``
@@ -371,9 +378,30 @@ def perform_agent_retire(params: dict[str, Any]) -> AgentRetireOutcome:
     it mutates the level exactly as ``runtime.office.*`` does — and it is NOT on
     any peer-tier allowlist. An agent on one install never retires an agent on
     another; a remote OPERATOR (device tier) does.
+
+    ``caller`` is the BACKSTOP for that scope (Stage A6, plan H-H13): the
+    ``RpcCaller`` the transport minted, checked here as well as at the RPC front
+    door, so the console tier is a property of this FUNCTION and not only of the
+    dispatcher that usually calls it. It is not the gate and does not move it
+    (Ruling A picked (b)); it is the assertion that a decision was made. Omitted
+    means the local console, which is what every existing caller is
+    (:func:`call_authorization.service_backstop`).
     """
 
+    from .call_authorization import service_backstop
     from .persona_assignments import PersonaInstanceRetireError, PersonaInstanceStore
+
+    # FIRST — before the id is even normalised. This refusal reads nothing and
+    # writes nothing, which is the only honest place for a scope refusal to sit:
+    # a caller who may not retire must not learn from the error code whether the
+    # id they named exists.
+    denied = service_backstop(caller, method="runtime.agent.retire")
+    if denied is not None:
+        return _refused(
+            ERR_HANDLER_FAILED,
+            f"runtime.agent.retire requires the {denied.tier} tier",
+            denied.refusal_data(),
+        )
 
     raw_id = (params or {}).get("persona_instance_id")
     instance_id = _canonical_instance_id(raw_id)

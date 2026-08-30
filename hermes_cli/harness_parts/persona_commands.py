@@ -19,6 +19,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 
 from agent_runtime import paths
+from agent_runtime.call_authorization import CLI_CONSOLE
 from agent_runtime.chat_session_scope import is_canonical_session_persistence
 from agent_runtime.cli_format import emit_json
 from agent_runtime.config import (
@@ -555,7 +556,16 @@ def _cmd_agent_create(args) -> int:
         except PersonaRosterUnavailable as exc:
             outcome = roster_unavailable_outcome(exc)
         else:
-            outcome = perform_agent_create(params, persona=persona)
+            # ``CLI_CONSOLE`` travels INTO the service as well (Stage A6).
+            # The door's own gate above is this lane's front door — the mirror
+            # of ``handle_request``'s — and the backstop is the second,
+            # independent evaluation at the verb itself. Passing the identity
+            # rather than letting the service default to it is what makes the
+            # door's authority explicit at the call: the default is for callers
+            # that have no identity to give.
+            outcome = perform_agent_create(
+                params, persona=persona, caller=CLI_CONSOLE
+            )
 
     if outcome.refusal is not None:
         refusal = outcome.refusal
@@ -702,7 +712,11 @@ def _agent_retire_outcome(args):
             "reason": getattr(args, "reason", None),
             "requested_by": getattr(args, "requested_by", None),
             "correlation_id": getattr(args, "correlation_id", None),
-        }
+        },
+        # Stage A6's backstop gets this door's identity too — the SAME constant
+        # the gate above evaluated, minted in this one function so the two
+        # retire doors cannot drift apart a second time.
+        caller=CLI_CONSOLE,
     )
 
 

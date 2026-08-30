@@ -1258,6 +1258,7 @@ def perform_agent_create(
     *,
     updated_by: str = "operator",
     persona: Any | None = None,
+    caller: Any | None = None,
 ) -> AgentCreateOutcome:
     """ONE call places an agent: roster row, chat root and placement together.
 
@@ -1302,6 +1303,15 @@ def perform_agent_create(
     ``persona`` is the CLI's richer pre-resolved persona object, threaded to
     :func:`normalize_agent_create` so the argv lane's naming behaviour is
     preserved byte-for-byte; the RPC lane has no such object and passes ``None``.
+
+    ``caller`` is the authorization BACKSTOP (Stage A6, plan H-H13) — the
+    ``RpcCaller`` the transport minted, which ``params`` can never become. The
+    scope-aware gate is and stays the RPC front door (Ruling A picked (b), and
+    this does not move it); this is the assertion that a decision was made, so
+    the verb cannot be reached by a caller the policy refuses even from a lane
+    that forgot to ask. Omitted, the call is the local console — every existing
+    caller is an operator at this install's own shell — and that grandfather is
+    a VALUE, not an absent check (:func:`call_authorization.service_backstop`).
 
     Why one call and not two
     ------------------------
@@ -1348,6 +1358,22 @@ def perform_agent_create(
     """
 
     import time
+
+    from .call_authorization import service_backstop
+
+    # FIRST, and before ``normalize_agent_create``: a refusal here must be the
+    # emptiest one on the method, and it is — nothing is read, nothing is
+    # constructed, no reservation lock is taken. ``rolled_back: True`` is its
+    # literal reading, spelled for the same reason the eight validation arms
+    # below carry it (the launcher renders a missing stamp as "the placement
+    # could not be undone").
+    denied = service_backstop(caller, method="runtime.agent.create")
+    if denied is not None:
+        return _refused(
+            ERR_HANDLER_FAILED,
+            f"runtime.agent.create requires the {denied.tier} tier",
+            {**denied.refusal_data(), "rolled_back": True},
+        )
 
     from .agent_create_phases import (
         CreateSubphases,

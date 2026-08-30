@@ -99,6 +99,8 @@ __all__ = [
     "REASON_UNKNOWN_TIER",
     "CallAuthorization",
     "authorize_call",
+    "SERVICE_DEFAULT_CALLER",
+    "service_backstop",
 ]
 
 #: Anything that neither writes store state, emits an event, nor mints an id.
@@ -504,3 +506,63 @@ def authorize_call(
         tier=normalized,
         caller_kind=resolved.kind,
     )
+
+
+# ── the backstop (Stage A6) ──────────────────────────────────────────────────
+
+#: The grandfather clause for a service call that named no caller. Spelled as a
+#: value, and as the SAME value the CLI doors already mint, so "this call was
+#: not authorized by anything" is greppable rather than implicit in a default
+#: argument. Every existing caller of the two service functions is exactly this:
+#: an operator at the install's own shell, or a test standing in for one.
+SERVICE_DEFAULT_CALLER = CLI_CONSOLE
+
+
+def service_backstop(
+    caller: RpcCaller | None, *, method: str, tier: str = TIER_CONSOLE
+) -> CallAuthorization | None:
+    """The SERVICE-boundary check: ``None`` to proceed, the refusal otherwise.
+
+    Stage A6 of the authorization-chokepoint plan, built 2026-08-30 under the
+    wave's ruling. Ruling A picked (b) — the gate goes at the RPC front door,
+    where the transport's proof is — and this is NOT that gate and must not be
+    mistaken for it. It is option (c)'s second half: **a narrow, non-bypassable
+    assertion that a decision was made**, evaluated by the same predicate, at
+    the boundary the two write verbs actually live at.
+
+    WHAT IT BUYS, precisely, because a second check that buys nothing is worse
+    than no second check. The front-door gate is a property of the DISPATCHER:
+    it runs because ``handle_request`` calls :func:`authorize_call` before
+    dispatch, and because ``@method`` recorded the right tier. Both of those are
+    one edit away from being wrong in a way no service test would see — a method
+    re-registered at ``read`` by a typo, a future transport that reaches a
+    handler by another path, a refactor that moves dispatch. This check is a
+    property of the FUNCTION: it runs whoever called it and however they got
+    there, so the level-mutating verbs cannot be reached by a caller the policy
+    refuses, even from a lane that forgot to ask.
+
+    WHY IT IS NOT SELF-DECLARATION, which is the one way a second check could
+    make things worse. ``caller`` is an :class:`RpcCaller`, and the services take
+    their request as a ``params`` DICT. No JSON a client sends can become one:
+    the handlers pass ``context.caller``, which only the transport builder mints,
+    and the CLI doors pass the :data:`CLI_CONSOLE` constant, which takes no
+    arguments precisely so nothing on the invocation can steer it. The gate's
+    first rule — read the tier off the caller, never off the request — holds
+    here by the same mechanism it holds there.
+
+    ``caller is None`` is the GRANDFATHER, and it is the one place in this module
+    where absence is not a refusal. That is deliberate and it is bounded: the
+    services have ~60 existing call sites, every one of them an operator at this
+    install's own shell or a test standing in for one, and Ruling A's own
+    sentencing on option (c) named the alternative — rewriting all of them — as
+    the reason (c) was not taken. So the default is :data:`SERVICE_DEFAULT_CALLER`
+    and it is a VALUE, not an absent check: the answer to "what authority did
+    this call run under" is always a caller kind that appears in the refusal
+    data, never a shrug. Note the asymmetry with :func:`authorize_call`, where
+    ``None`` is ``unknown`` and refused — there, ``None`` means a transport
+    failed to place a caller it was answering for, which is a fact about a live
+    connection; here it means no wire was involved at all.
+    """
+
+    decision = authorize_call(tier, caller or SERVICE_DEFAULT_CALLER, method=method)
+    return None if decision.ok else decision

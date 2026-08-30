@@ -2256,7 +2256,16 @@ def _runtime_agent_create(
 
     from agent_runtime.agent_create import perform_agent_create
 
-    outcome = perform_agent_create(params)
+    # ``context.caller`` travels INTO the service (Stage A6): the front-door
+    # gate above has already refused a caller without the console tier, and the
+    # service checks the same predicate again with the same caller. That is the
+    # point of a backstop — the guarantee stops being a property of this
+    # dispatcher and becomes a property of the verb. Passing the caller rather
+    # than a "the gate already ran" flag is what keeps it non-bypassable: a flag
+    # is something a caller could eventually set.
+    outcome = perform_agent_create(
+        params, caller=context.caller if context is not None else None
+    )
     if outcome.refusal is not None:
         refusal = outcome.refusal
         return err(rid, refusal.code, refusal.message, refusal.data)
@@ -2322,7 +2331,10 @@ def _runtime_agent_retire(
 
     from agent_runtime.agent_retire import perform_agent_retire
 
-    outcome = perform_agent_retire(params)
+    # Stage A6's backstop, exactly as ``_runtime_agent_create`` threads it.
+    outcome = perform_agent_retire(
+        params, caller=context.caller if context is not None else None
+    )
     if outcome.refusal is not None:
         refusal = outcome.refusal
         return err(rid, refusal.code, refusal.message, refusal.data)
