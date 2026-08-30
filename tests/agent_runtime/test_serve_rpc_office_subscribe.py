@@ -708,6 +708,83 @@ def test_another_workspaces_uncovered_batch_is_not_this_subscribers_business(eve
     assert sent == []
 
 
+# ── H2: a realm sync touches every workspace ────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "event_type", ["realm.sync.pulled", "realm.sync.published"]
+)
+def test_a_realm_sync_watermark_resyncs_this_workspace(event_type):
+    """H2 (plan ``realm-pull-live-projection``): the ONE arm that answers True
+    without reading the payload, because the payload cannot answer.
+
+    ``realm.sync.pulled`` carries ``{realm_id, changed, artifacts}`` — no
+    workspace, no office scope — so before this arm it fell through the loop to
+    ``return False`` and the sink returned without pushing. The watermark event
+    whose own docstring says it exists "so stream / read-model consumers
+    refresh" refreshed every consumer EXCEPT the one that owns the office
+    canvas.
+
+    ``.published`` is the half that fires today: publish rewrites
+    ``office_baseline.json``, which flips every actor's DERIVED ``unpublished``
+    marker with no office event of its own, so a published canvas kept rendering
+    "unpublished" desks until something else moved.
+
+    Exactly one push, not one per event in the batch — the sink emits once per
+    frame and the arm returns on the first hit.
+
+    Kill-mutation: drop either member from ``_REALM_SYNC_EVENT_TYPES``.
+    """
+
+    sent, deliver = _sink()
+
+    deliver(
+        _delta_frame(
+            {"type": event_type, "payload": {"realm_id": "r1", "changed": True, "artifacts": 38}},
+            {"type": "persona_chat.projected", "payload": {"persona_instance_id": "p1"}},
+        )
+    )
+
+    assert [item["method"] for item in sent] == [OFFICE_RESYNC_METHOD]
+    assert sent[0]["params"]["workspace_id"] == WORKSPACE
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        pytest.param(
+            {"type": "realm.activated", "payload": {"realm_id": "r1"}},
+            id="a realm activation is not a sync",
+        ),
+        pytest.param(
+            {"type": "workspace.activated", "payload": {"workspace_id": OTHER}},
+            id="another workspace's activation",
+        ),
+        pytest.param(
+            {"type": "realm.sync.status", "payload": {"realm_id": "r1"}},
+            id="a realm event outside the declared sync set",
+        ),
+    ],
+)
+def test_the_realm_sync_arm_is_a_declared_set_and_not_a_prefix(event):
+    """O-H4's scoping must not regress into "anything with realm in the name".
+
+    The conservative arm is justified by what a SYNC does — rewrite store state
+    from outside this machine's write lane — not by the word ``realm``. A prefix
+    match would put every activation and every status probe back on the
+    unconditional-resync path this lane was scoped to leave.
+
+    Kill-mutation: replace the membership test with
+    ``event_type.startswith("realm.")``.
+    """
+
+    sent, deliver = _sink()
+
+    deliver(_delta_frame(event))
+
+    assert sent == []
+
+
 @pytest.mark.parametrize(
     "frame",
     [

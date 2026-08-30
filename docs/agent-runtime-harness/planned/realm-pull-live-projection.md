@@ -572,3 +572,32 @@ test_sync_admission.py test_office_class_key_guard.py -q`` → 97 passed.
 (§4) and were deliberately not restarted; the emission takes effect on the next
 serve restart. The office-canvas proof in H1 step 5 is owed and is the
 operator's to take.
+
+### H2 — landed
+
+Straight build, one correction to the plan's pointer.
+
+**The test file the plan names has no hand-built frames.** Step 3 says
+``tests/agent_runtime/test_serve_rpc_office_subscribe_live_hub.py`` "already
+hand-builds frames for this sink". It does not — that file drives a REAL hub and
+its one hand-built frame is a REPLAY of a frame the hub produced (the baseline
+boundary test). The fake-sink lane with the ``_delta_frame`` builder and the
+whole O-H4 scoping suite lives in the sibling
+``tests/agent_runtime/test_serve_rpc_office_subscribe.py``, which is where the
+two H2 tests went. Both files were run.
+
+**A second test the plan did not ask for, and the reason it earns its place.**
+The conservative arm is justified by what a SYNC does — rewrite store state from
+outside this machine's write lane — not by the word "realm". So the arm is a
+declared frozenset and there is a test that reds if someone relaxes it to
+``event_type.startswith("realm.")``: ``realm.activated`` and
+``workspace.activated`` both fire on every operator realm switch (they are in
+the live log at 04:43:50Z, §0), and a prefix match would put every one of them
+back on the unconditional-resync path O-H4 was written to leave.
+
+**Focused run:**
+``python -m pytest tests/agent_runtime/test_serve_rpc_office_subscribe.py -q``
+→ 81 passed; ``…_live_hub.py -q`` → 25 passed.
+
+**Live proof NOT taken** — same reason as H1: the change takes effect on the
+next serve restart, and the operator's two serve children were left running.

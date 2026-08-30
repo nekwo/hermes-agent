@@ -281,6 +281,12 @@ _FULL_CORE_FRAME_TYPES = frozenset({"hydrate", "delta"})
 #: everything", which is precisely the case that cannot be scoped.
 _ENUMERATED_FRAME_TYPE = "delta"
 
+#: Realm-sync watermarks. A sync is scoped to a REALM and rewrites store state
+#: from OUTSIDE this machine's own write lane; :func:`_delta_touches_workspace`
+#: is asked about a WORKSPACE. The payload cannot answer that question, so the
+#: answer is the conservative one — see the third arm's block comment.
+_REALM_SYNC_EVENT_TYPES = frozenset({"realm.sync.pulled", "realm.sync.published"})
+
 
 def _delta_touches_workspace(frame: dict[str, Any], workspace_id: str) -> bool | None:
     """Did this uncovered batch carry anything for ``workspace_id``?
@@ -307,6 +313,7 @@ def _delta_touches_workspace(frame: dict[str, Any], workspace_id: str) -> bool |
       happened to be saved for folder writes by the ``office.*`` arm above, "saved
       by its neighbour" is not an invariant — the twin that was NOT saved dropped
       the change outright (task #57).
+    * a REALM-SYNC watermark (:data:`_REALM_SYNC_EVENT_TYPES`) — see below.
 
     Everything else — an agent's turn, a board write, another workspace's
     office — moved nothing this subscriber holds.
@@ -326,6 +333,33 @@ def _delta_touches_workspace(frame: dict[str, Any], workspace_id: str) -> bool |
             return None
         payload = event.get("payload")
         payload = payload if isinstance(payload, dict) else {}
+        if event_type in _REALM_SYNC_EVENT_TYPES:
+            # THE THIRD ARM, and the only one that answers True without reading
+            # the payload — because the payload cannot answer the question.
+            # ``realm.sync.pulled`` carries ``{realm_id, changed, artifacts}``
+            # (``realm_sync._append_realm_sync_event``): no workspace, no office
+            # scope. A sync is scoped to a REALM and this function is asked about
+            # a WORKSPACE, so the honest answer is the same one the ``None``
+            # branches above already get — the module's stated rule for a
+            # question it cannot answer ("A resync is recoverable; a dropped
+            # change is not", see ``office_patch_sink``) — spelled as an explicit
+            # True so the reason is legible at the arm.
+            #
+            # WHY NOT WIDEN THE PAYLOAD instead. Adding ``workspace_ids`` to the
+            # sync events was considered and rejected: the EventLog has a 4 KB
+            # payload cap, a realm with many workspaces would blow it, and a
+            # TRUNCATED list is a silent drop — the exact failure class this arm
+            # exists to refuse. The conservative arm costs one refetch per realm
+            # sync, which is bounded by operator gestures.
+            #
+            # Both members earn their place. ``.pulled`` is the inbound half
+            # (a pull rewrites office rows through
+            # ``office_sync.apply_office_pull``); ``.published`` is the outbound
+            # half and fires TODAY — publish rewrites ``office_baseline.json``,
+            # which flips every actor's DERIVED ``unpublished`` marker with no
+            # office event of its own, so a published canvas keeps rendering
+            # "unpublished" desks until something else moves.
+            return True
         if event_type.startswith("office."):
             # An office event that does not name its workspace is unplaceable,
             # and unplaceable takes the conservative arm like every other
