@@ -894,10 +894,10 @@
     {
       "id": "c2-pull-pops-the-baseline-for-a-delete-that-failed",
       "path": "agent_runtime/office_sync.py",
-      "symbol": "apply_office_pull",
+      "symbol": "_reconcile_actors",
       "operator": "pop-baseline-on-failed-archive",
-      "find": "                    summary.archive_outcomes.append(\n                        OfficeArchiveOutcome.failed(workspace_id, actor_key, exc).as_dict()\n                    )\n                    continue",
-      "replace": "                    summary.archive_outcomes.append(\n                        OfficeArchiveOutcome.failed(workspace_id, actor_key, exc).as_dict()\n                    )\n                    baseline.pop(key, None)\n                    continue",
+      "find": "                summary.archive_outcomes.append(\n                    OfficeArchiveOutcome.failed(workspace_id, actor_key, exc).as_dict()\n                )\n                continue",
+      "replace": "                summary.archive_outcomes.append(\n                    OfficeArchiveOutcome.failed(workspace_id, actor_key, exc).as_dict()\n                )\n                baseline.pop(key, None)\n                continue",
       "test": [
         "{python}",
         "-m",
@@ -909,10 +909,10 @@
     {
       "id": "c2-a-successful-archive-goes-unnamed",
       "path": "agent_runtime/office_sync.py",
-      "symbol": "apply_office_pull",
+      "symbol": "_reconcile_actors",
       "operator": "drop-success-outcome-row",
-      "find": "                summary.archive_outcomes.append(\n                    OfficeArchiveOutcome.archived(workspace_id, actor_key).as_dict()\n                )",
-      "replace": "                summary.archived += 0",
+      "find": "            summary.archive_outcomes.append(\n                OfficeArchiveOutcome.archived(workspace_id, actor_key).as_dict()\n            )",
+      "replace": "            summary.archived += 0",
       "test": [
         "{python}",
         "-m",
