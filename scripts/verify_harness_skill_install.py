@@ -22,17 +22,27 @@ the drift did not merely age the text: it re-armed the exact regression
 
 Tests read the repo copy, which is why every test A0 shipped was green while
 this was true. A guarantee about what the runtime reads has to be pinned where
-that copy lives — on the machine, not in the tree — so this runs from the
-pre-push hook (``.githooks/pre-push``), where a repo-side edit and a machine
-meet.
+that copy lives — on the machine, not in the tree.
+
+WHO CALLS THIS, and why it is no longer a push gate. Until 2026-08-30 it ran
+from ``.githooks/pre-push``. That is the moment the PRODUCER publishes, and it
+repaired the machine whose repo copy was already the newest thing in the realm.
+The drift is acquired by a CONSUMER, so the callers are now the two moments a
+consumer acquires it: ``.githooks/post-merge`` (this script, after a pull) and
+``harness serve`` boot (``hermes_cli/harness_parts/serve.py``
+``install_harness_skills_at_boot``, which runs the installers directly rather
+than shelling out to this file — a boot has an explicitly pinned home and needs
+none of the resolution ladder below). Neither can block, and neither has to:
+a boot that finds drift repairs it, and the next boot retries for free.
 
 Two modes:
 
 * default — **repair, then verify.** Install every canonical package from the
   repo, then assert nothing diverges. This is what the hook runs: the drift is
   machine state, not a defect in the tree, and the correct response to it is to
-  fix it. The verify afterwards is what makes it a gate rather than a wish —
-  an install that silently did not take fails the push.
+  fix it. The verify afterwards is what turns a repair into a REPORT rather than
+  a wish — an install that silently did not take exits nonzero and says which
+  package.
 * ``--check`` — **verify only, write nothing.** For proving the gate fires, and
   for any caller that wants to know without changing anything.
 
@@ -76,6 +86,11 @@ answers from, in order:
 Failing loud is the hook's own stated principle (it already refuses to skip on
 a missing interpreter rather than pass quietly), and printing the resolved root
 would not have been enough: nobody reads a passing hook's output.
+
+(The serve-boot caller does not come through this ladder at all. It is inside a
+process whose home was pinned at spawn and already resolved, which is precisely
+the ambiguity the ladder exists to refuse — see the plan's note on why boot is
+the strongest of the trigger sites.)
 
 Exit 0 clean, 1 on divergence, 2 on a usage/environment error.
 """
@@ -140,7 +155,7 @@ def resolve_gate_hermes_home(env: dict[str, str] | None = None) -> tuple[str, st
         "your personas read. Repairing there would overwrite packages that "
         "are not this repo's and then verify the copy it had just written. "
         "Export the home the launcher spawns serve with "
-        "(HERMES_HOME=<hermes root>/profiles/base) and push again."
+        "(HERMES_HOME=<hermes root>/profiles/base) and run this again."
     )
 
 
@@ -288,7 +303,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "harness-skill-install: a chat turn loads the INSTALLED copy, never the repo "
             "one. Run `hermes harness install-harness-skills` (or this script without "
-            "--check) and push again.",
+            "--check), or restart `harness serve`, which installs at boot.",
             file=sys.stderr,
         )
         return 1

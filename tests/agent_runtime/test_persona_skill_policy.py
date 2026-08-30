@@ -290,7 +290,7 @@ def test_charsheet_qa_line_fixture_pins_the_key_set_the_skill_promises():
     by the skill body — and no code consumer in this repo either; the launcher's
     B2 card and P1 project creation read it. Which meant the only thing pinning
     its key set was prose inside a skill package the runtime loads from a copy
-    this repo does not control (see the pre-push gate). So the fixture is the
+    this repo does not control (see the install gate). So the fixture is the
     pin, and this test is the producer half of it: change what the skill
     promises and the fixture must move with it, in the same commit, or the
     launcher's twin fixture is parsing a shape nobody emits any more.
@@ -341,7 +341,7 @@ def _write_skill_package(root: Path, skill: str, body: str) -> Path:
     return path
 
 
-def test_installed_canonical_skill_drift_fails_the_pre_push_gate(tmp_path, monkeypatch, capsys):
+def test_installed_canonical_skill_drift_fails_the_install_verifier(tmp_path, monkeypatch, capsys):
     """The join A0 shipped without a gate: the repo copy vs the copy turns READ.
 
     ``docs/agent-runtime-harness/harness-skills/<id>/SKILL.md`` is the source;
@@ -352,10 +352,18 @@ def test_installed_canonical_skill_drift_fails_the_pre_push_gate(tmp_path, monke
     and reached no turn at all — and every test stayed green throughout, because
     every test reads the repo copy.
 
-    So this exercises the verifier the pre-push hook runs, at the level the
-    guarantee lives at: against an INSTALLED package. ``--check`` reports and
-    never repairs; the default mode repairs first, then still verifies, so an
-    install that did not take fails rather than passing quietly.
+    So this exercises the verifier, at the level the guarantee lives at:
+    against an INSTALLED package. ``--check`` reports and never repairs; the
+    default mode repairs first, then still verifies, so an install that did not
+    take fails rather than passing quietly.
+
+    The CALLER moved on 2026-08-30 (plan
+    ``planned/skill-install-trigger-relocation.md``) and this test did not need
+    to: it ran from ``.githooks/pre-push``, the moment the PRODUCER publishes,
+    and now runs from ``.githooks/post-merge`` — the moment a CONSUMER pulls the
+    drift in. ``harness serve`` boot is the other half and calls the installers
+    directly (``tests/agent_runtime/test_serve_boot_skill_install.py``). What is
+    covered here is the verifier's own behaviour, which is unchanged by either.
     """
     from scripts.verify_harness_skill_install import main
 

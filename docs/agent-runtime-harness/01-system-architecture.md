@@ -318,9 +318,9 @@ the constant for the count; this list is a gloss and went stale within a day of
 `harness-charsheet-authoring` joining it.
 
 **The two copies are joined by `install-harness-skills` and by nothing else,
-and the pre-push hook is what makes that reliable.** A turn loads the INSTALLED
-package — for a canonical id the resolver rejects every other candidate
-(`skill_utils._skill_resolution_status` → `invalid_source` for any
+and the join runs at the moments a machine ACQUIRES drift.** A turn loads the
+INSTALLED package — for a canonical id the resolver rejects every other
+candidate (`skill_utils._skill_resolution_status` → `invalid_source` for any
 `source_kind` but `shared_core`) — so a commit that edits the repo copy changes
 the documentation and changes nothing an agent reads. It happened: the
 `harness-charsheet-authoring` package was installed at `5504706978` and edited
@@ -330,12 +330,31 @@ Tests do not see this — they read the tree, which is correct by construction.
 So the check runs where the guarantee lives, on the machine:
 `scripts/verify_harness_skill_install.py` installs every canonical package and
 then fails if `harness_skill_hash_mismatches` is non-empty (`--check` verifies
-without writing), and `.githooks/pre-push` runs it on every push. **One command
-per clone arms it** — `git config core.hooksPath .githooks`, which git shares
-across every worktree of that clone. The runtime reports the same divergence
-passively as the `skill_hash_mismatch` readiness code
-(`agent_runtime/profile_readiness.py`), which is where to look when a persona
-is behaving like an older version of its own skill.
+without writing). The runtime reports the same divergence passively as the
+`skill_hash_mismatch` readiness code (`agent_runtime/profile_readiness.py`),
+which is where to look when a persona is behaving like an older version of its
+own skill.
+
+**Four triggers run the join, and the trigger set is the whole design**
+(operator ruling 2026-08-30; `planned/skill-install-trigger-relocation.md`):
+
+| Trigger | Where | Covers |
+|---|---|---|
+| explicit CLI | `harness install-harness-skills` | manual only |
+| realm-sync pull | `agent_runtime/realm_sync.py:509-511` | realm members, on realm pull |
+| `git pull` | `.githooks/post-merge` → the verify script | a consumer's merge pull |
+| `harness serve` boot | `harness_parts/serve.py` `install_harness_skills_at_boot` | every boot, every pull shape |
+
+The first three fire when a machine PUBLISHES or explicitly syncs. Boot is the
+one that fires when a machine merely *consumes*, and it is why the pre-push
+hook is gone: repairing at push fixed the machine whose repo copy was already
+the newest thing in the realm, and left every puller unrepaired until it
+happened to push. Boot is also the only site with an unambiguous home — the
+verify script's exit-2 refuse-to-guess ladder exists because a git hook
+inherits an arbitrary shell, whereas serve was spawned with `HERMES_HOME`
+pinned. **One command per clone arms the hook** — `git config core.hooksPath
+.githooks`, which git shares across every worktree of that clone — and it does
+not cover `git pull --rebase`, which fires no post-merge; serve boot does.
 
 Three adjacent lanes are live. `skill_promotion.py` is the one guarded door
 through which downloaded or authored packages become canonical: downloads land
