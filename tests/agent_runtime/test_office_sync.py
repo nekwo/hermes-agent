@@ -472,6 +472,70 @@ def test_office_artifacts_join_realm_sync_and_exclusions_hold(tmp_path):
     _assert_no_secret_artifacts([a for a in artifacts if a.kind in ("office", "office_actor")])
 
 
+def test_publish_ships_the_scan_it_gated_on_never_the_directory(tmp_path, monkeypatch):
+    """C3 (M6). ``_office_publish_scan`` computed ``scan_actors`` for the refusal
+    gate and then built the artifact list from a SECOND ``actors_dir.glob``. Two
+    authorities over one publish, and the glob is the one the gate cannot speak
+    for: it walks the directory again, later, and ships whatever is there.
+
+    The window is real — a create landing between the scan and the glob publishes
+    a file no local reader ever decoded, to peers who will render it — and it is
+    the only way the two can disagree without the gate having refused the whole
+    workspace first, which is why the divergence is injected here rather than
+    staged on disk. What is pinned is the invariant: the files that travel are
+    the rows the gate cleared.
+    """
+
+    realm_id, ws = _make_realm_workspace()
+    store = OfficeStore()
+    store.upsert_actor(ws, _payload("dev"))
+    store.upsert_actor(ws, _payload("latecomer"))
+    assert paths.office_actor_path(ws, "latecomer").exists()
+
+    real_scan = OfficeStore.scan_actors
+
+    def _scan_without_the_latecomer(self, workspace_id, **kwargs):
+        scan = real_scan(self, workspace_id, **kwargs)
+        return type(scan)(
+            [actor for actor in scan.actors if actor.actor_key != "latecomer"],
+            scan.unreadable,
+        )
+
+    monkeypatch.setattr(OfficeStore, "scan_actors", _scan_without_the_latecomer)
+    office_paths = [
+        a.relative_path
+        for a in resolve_realm_sync_artifacts(realm_id)
+        if a.kind == "office_actor"
+    ]
+    assert office_paths == [f"store/office/{ws}/actors/dev.json"], (
+        "a file the gated scan never admitted still travelled to every peer"
+    )
+
+
+def test_publish_names_exactly_the_scans_rows_and_nothing_else():
+    """The behaviour-preserving half of C3: on a store where the two authorities
+    agree — every store-written file is named by ``office_actor_path`` from the
+    key inside it — the artifact list is byte-identical to the glob's."""
+
+    realm_id, ws = _make_realm_workspace()
+    store = OfficeStore()
+    for persona in ("dev", "edu_tutor", "qa_lead"):
+        store.upsert_actor(ws, _payload(persona))
+    store.remove_actor(ws, "edu_tutor")
+
+    office_paths = sorted(
+        a.relative_path for a in resolve_realm_sync_artifacts(realm_id) if a.kind == "office_actor"
+    )
+    on_disk = sorted(
+        f"store/office/{ws}/actors/{path.name}"
+        for path in paths.office_actors_dir(ws).glob("*.json")
+    )
+    assert office_paths == on_disk == [
+        f"store/office/{ws}/actors/dev.json",
+        f"store/office/{ws}/actors/qa_lead.json",
+    ]
+
+
 def test_office_wanted_persona_union():
     realm_id, ws = _make_realm_workspace()
     store = OfficeStore()

@@ -920,6 +920,21 @@
         "-q",
         "tests/agent_runtime/test_office_sync.py::test_a_successful_archive_names_itself_beside_the_fenced_ones"
       ]
+    },
+    {
+      "id": "c3-publish-re-walks-the-directory-instead-of-the-scan",
+      "path": "agent_runtime/realm_sync.py",
+      "symbol": "_office_publish_scan",
+      "operator": "restore-second-authority-glob",
+      "find": "            actor_path = paths.office_actor_path(workspace_token, actor.actor_key)",
+      "replace": "            actor_path = sorted(paths.office_actors_dir(workspace_token).glob(\"*.json\"))[0]",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_sync.py::test_publish_names_exactly_the_scans_rows_and_nothing_else"
+      ]
     }
   ]
 }

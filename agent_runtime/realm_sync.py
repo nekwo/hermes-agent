@@ -1373,18 +1373,23 @@ def _office_publish_scan(workspaces: list[Workspace]) -> OfficePublishScan:
                     destination=surface_path,
                 )
             )
-        actors_dir = paths.office_actors_dir(workspace_token)
-        if actors_dir.exists():
-            for actor_path in sorted(actors_dir.glob("*.json")):
-                artifacts.append(
-                    RealmSyncArtifact(
-                        kind="office_actor",
-                        source=actor_path,
-                        relative_path=f"store/office/{ws_token}/actors/{actor_path.name}",
-                        destination=actor_path,
-                    )
-                )
+        # ONE walk of ``scan.actors`` for both facts. The artifact list used to
+        # come from a second ``actors_dir.glob("*.json")`` while the persona ids
+        # came from the scan — two authorities over one publish, and the glob was
+        # the one the refusal gate above cannot speak for. Whatever the gate let
+        # through, the gate SAW: a file it never decoded into a row is a file
+        # this publish has no reading of, and shipping it verbatim would put a
+        # row on every peer's canvas that no local reader ever admitted existed.
         for actor in scan.actors:
+            actor_path = paths.office_actor_path(workspace_token, actor.actor_key)
+            artifacts.append(
+                RealmSyncArtifact(
+                    kind="office_actor",
+                    source=actor_path,
+                    relative_path=f"store/office/{ws_token}/actors/{actor_path.name}",
+                    destination=actor_path,
+                )
+            )
             if actor.persona_id and actor.persona_id not in persona_ids:
                 persona_ids.append(actor.persona_id)
     return OfficePublishScan(artifacts=artifacts, persona_ids=persona_ids, refused=refused)
