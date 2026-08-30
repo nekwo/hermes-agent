@@ -189,7 +189,7 @@ def test_profile_readiness_reports_runtime_dependency_missing_before_auth(monkey
 def test_profile_readiness_requires_explicit_mcp_declaration_for_visual_scope(monkeypatch):
     from agent_runtime import profile_readiness
 
-    monkeypatch.setattr(profile_readiness, "harness_skill_hash_mismatches", lambda _skills, hermes_home=None: [])
+    monkeypatch.setattr(profile_readiness, "_skill_hash_split", lambda _skills, hermes_home=None: ([], []))
     monkeypatch.setattr(profile_readiness, "_runtime_dependency_issue", lambda _persona: None)
     monkeypatch.setattr(profile_readiness, "_provider_issue", lambda _persona: None)
 

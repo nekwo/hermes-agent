@@ -13,7 +13,7 @@ from .machine_roots import (
 )
 from .parse_cache import cached_yaml_file
 from .profile_context import persona_profile_scope, resolve_persona_profile
-from .skill_install import harness_skill_hash_mismatches
+from .skill_install import SKILL_HASH_MISMATCH, harness_skill_hash_states
 
 READINESS_READY = "ready"
 READINESS_MISSING_PROFILE = "missing_profile"
@@ -40,6 +40,21 @@ _SEVERITY = {
     READINESS_MISSING_SKILL: 10,
     READINESS_READY: 0,
 }
+
+
+def _skill_hash_split(skills: list[str], *, hermes_home=None) -> tuple[list[str], list[str]]:
+    """The persona's canonical skills, split into ``differs`` and ``never read``.
+
+    ONE walk for both halves — the read is a content hash over every package, so
+    asking twice would double the most expensive term in the readiness walk
+    (770 ms cold; see the memo refusal below).
+    """
+
+    states = harness_skill_hash_states(skills, hermes_home=hermes_home)
+    return (
+        [state.skill for state in states if state.state == SKILL_HASH_MISMATCH],
+        [state.skill for state in states if not state.compared],
+    )
 
 
 # WHY THERE IS NO PER-PERSONA MEMO OVER THIS WALK (W2-H2, refused 2026-08-22).
@@ -95,6 +110,7 @@ def profile_readiness_for_persona(
     missing_mcp: list[str] = []
     missing_skills: list[str] = []
     skill_hash_mismatches: list[str] = []
+    skill_hash_absent: list[str] = []
     skill_resolutions: list[dict[str, Any]] = []
     machine_root_issues: list[dict[str, Any]] = []
     effective_required_mcp = _effective_required_mcp_servers(persona)
@@ -126,7 +142,9 @@ def profile_readiness_for_persona(
                     list(persona.skills), skill_resolver=skill_resolver
                 )
                 missing_skills = _missing_skill_ids(skill_resolutions)
-                skill_hash_mismatches = harness_skill_hash_mismatches(list(persona.skills), hermes_home=binding.profile_home)
+                skill_hash_mismatches, skill_hash_absent = _skill_hash_split(
+                    list(persona.skills), hermes_home=binding.profile_home
+                )
                 cfg_path = binding.profile_home / "config.yaml"
                 raw = cached_yaml_file(cfg_path, default={}) or {}
                 configured_mcp = _configured_mcp_server_names(raw or {})
@@ -174,7 +192,7 @@ def profile_readiness_for_persona(
             list(persona.skills), skill_resolver=skill_resolver
         )
         missing_skills = _missing_skill_ids(skill_resolutions)
-        skill_hash_mismatches = harness_skill_hash_mismatches(list(persona.skills))
+        skill_hash_mismatches, skill_hash_absent = _skill_hash_split(list(persona.skills))
         if effective_required_mcp:
             missing_mcp = list(effective_required_mcp)
         runtime_issue = _runtime_dependency_issue(persona)
@@ -222,6 +240,16 @@ def profile_readiness_for_persona(
         "skills": list(persona.skills),
         "missing_skills": missing_skills,
         "skill_hash_mismatches": skill_hash_mismatches,
+        # The companion that makes the line above a positive claim: without
+        # it an empty mismatch list reads identically for "both packages
+        # were read and agreed" and "there was no installed package to
+        # read". DATA, deliberately not a new readiness CODE — a canonical
+        # skill with no shared package already reaches the ladder as
+        # ``missing_skill`` (nothing resolves the id) or
+        # ``skill_invalid_source`` (something outside shared_core does), and
+        # a third code answering the same question is the duplicate
+        # authority this file has no room for.
+        "skill_hash_absent": skill_hash_absent,
         "skill_resolutions": skill_resolutions,
         "required_mcp_servers": list(persona.required_mcp_servers),
         "effective_required_mcp_servers": list(effective_required_mcp),

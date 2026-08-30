@@ -818,12 +818,14 @@ def test_a_copy_that_never_lands_is_a_divergence_and_not_a_clean_bill(
     reds — the refusal is absent and the create completes, handing the agent a
     skill whose package was never written.
 
-    ANTI-VACUITY, and this is the case the obvious gate misses.
-    ``harness_skill_hash_mismatches`` ``continue``s past a destination that does
-    not EXIST, so on a fresh root a failed copy produces an EMPTY mismatch list —
-    a false all-clear. That is why ``install_and_verify_harness_skill`` asks
-    three questions and not one, and why the fault injected here is a copy that
-    raises rather than a copy that writes the wrong bytes.
+    ANTI-VACUITY, and this is the case the obvious gate misses. The obvious gate
+    is the mismatch LIST, and a destination that does not exist was never in it
+    — so on a fresh root a failed copy produced an EMPTY list, a false
+    all-clear. That absence is a named state now
+    (``SKILL_HASH_NOT_INSTALLED``), which is why the verifier can ask for
+    ``matches`` rather than compensating with a third question; the fault
+    injected here is still a copy that RAISES rather than one that writes the
+    wrong bytes, because that is the shape this arm is about.
     """
 
     from agent_runtime import skill_install
@@ -854,7 +856,7 @@ def test_an_install_that_REPORTS_success_is_still_re_read_before_it_is_trusted(
 ):
     """The install's own receipt is not the witness. The re-read is.
 
-    KILLING MUTATION: drop the ``harness_skill_hash_mismatches`` re-read from
+    KILLING MUTATION: drop the ``harness_skill_hash_states`` re-read from
     ``install_and_verify_harness_skill`` and this reds — the create completes and
     the agent is handed the stale package.
 

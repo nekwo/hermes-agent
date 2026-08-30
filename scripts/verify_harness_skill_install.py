@@ -228,18 +228,22 @@ def _report(skills: list[str]) -> list[str]:
     return lines
 
 
-def _uninstalled(skills: list[str]) -> list[str]:
-    """Canonical ids with no installed package at all.
+def _by_state(skills: list[str]) -> dict[str, list[str]]:
+    """Every canonical id bucketed by what the hash read established.
 
-    ``harness_skill_hash_mismatches`` skips a destination that does not exist —
-    correctly, because "not installed" is not "installed wrong". For a gate the
-    distinction still matters: an id nobody ever installed resolves to nothing
-    and the persona that requires it reports ``missing_skill``, so name it
-    separately rather than letting it pass as clean.
+    This used to be a ``harness_skill_hash_mismatches`` call beside a hand-rolled
+    ``harness_skill_destination(...).exists()`` walk, because the mismatch list
+    dropped the absent case on the floor and the gate had to re-derive it. The
+    detector states it now, so there is one authority and the third bucket —
+    a canonical id with no package IN THE REPO, which used to pass this gate in
+    silence whenever something was installed under its name — is named too.
     """
-    from agent_runtime.skill_install import harness_skill_destination
+    from agent_runtime.skill_install import harness_skill_hash_states
 
-    return [skill for skill in skills if not harness_skill_destination(skill).exists()]
+    buckets: dict[str, list[str]] = {}
+    for row in harness_skill_hash_states(skills):
+        buckets.setdefault(row.state, []).append(row.skill)
+    return buckets
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -264,8 +268,10 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         from agent_runtime.skill_install import (
+            SKILL_HASH_MISMATCH,
+            SKILL_HASH_NO_SOURCE,
+            SKILL_HASH_NOT_INSTALLED,
             get_shared_skills_dir,
-            harness_skill_hash_mismatches,
             harness_skill_source_root,
             install_harness_skills,
         )
@@ -284,9 +290,11 @@ def main(argv: list[str] | None = None) -> int:
         if refreshed:
             print(f"  refreshed from the repo: {', '.join(refreshed)}")
 
-    mismatches = harness_skill_hash_mismatches(skills)
-    missing = _uninstalled(skills)
-    if mismatches or missing:
+    buckets = _by_state(skills)
+    mismatches = buckets.get(SKILL_HASH_MISMATCH, [])
+    missing = buckets.get(SKILL_HASH_NOT_INSTALLED, [])
+    sourceless = buckets.get(SKILL_HASH_NO_SOURCE, [])
+    if mismatches or missing or sourceless:
         print("\n".join(_report(skills)))
         if mismatches:
             print(
@@ -298,6 +306,12 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 "harness-skill-install: FAILED — never installed on this machine: "
                 f"{', '.join(missing)}",
+                file=sys.stderr,
+            )
+        if sourceless:
+            print(
+                "harness-skill-install: FAILED — canonical id with no package in this "
+                f"repo: {', '.join(sourceless)}",
                 file=sys.stderr,
             )
         print(

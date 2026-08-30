@@ -215,7 +215,7 @@
       "path": "agent_runtime/skill_install.py",
       "symbol": "install_and_verify_harness_skill",
       "operator": "drop-post-install-verification",
-      "find": "    result = install_harness_skill(skill)\n    if result.installed and result.ok and not harness_skill_hash_mismatches([skill]):\n        return result",
+      "find": "    result = install_harness_skill(skill)\n    states = harness_skill_hash_states([skill])\n    if result.ok and states and states[0].state == SKILL_HASH_MATCHES:\n        return result",
       "replace": "    result = install_harness_skill(skill)\n    return result",
       "test": [
         "{python}",
@@ -994,6 +994,38 @@
         "pytest",
         "-q",
         "tests/agent_runtime/test_harness_doctor.py::test_the_orphan_remediation_names_the_verb_that_works_for_a_pulled_orphan"
+      ]
+    },
+    {
+      "id": "hh7-an-absent-package-goes-back-to-being-skipped",
+      "path": "agent_runtime/skill_install.py",
+      "symbol": "harness_skill_hash_states",
+      "operator": "skip-the-absent-case",
+      "find": "        if not source.exists():\n            states.append(HarnessSkillHashState(name, SKILL_HASH_NO_SOURCE))\n        elif not destination.exists():\n            states.append(HarnessSkillHashState(name, SKILL_HASH_NOT_INSTALLED))",
+      "replace": "        if not source.exists() or not destination.exists():\n            continue",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_harness_skill_hash_states.py::test_a_package_that_was_never_installed_is_absent_and_not_matching",
+        "tests/agent_runtime/test_harness_skill_hash_states.py::test_a_canonical_id_with_no_repo_package_is_named_rather_than_skipped"
+      ]
+    },
+    {
+      "id": "hh7-readiness-drops-the-half-that-makes-the-other-a-claim",
+      "path": "agent_runtime/profile_readiness.py",
+      "symbol": "_skill_hash_split",
+      "operator": "empty-the-absent-projection",
+      "find": "        [state.skill for state in states if not state.compared],",
+      "replace": "        [],",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_harness_skill_hash_states.py::test_readiness_carries_the_absent_half_beside_the_mismatch_half",
+        "tests/agent_runtime/test_harness_skill_hash_states.py::test_readiness_reports_no_absence_once_the_package_is_installed"
       ]
     },
     {

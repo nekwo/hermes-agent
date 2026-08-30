@@ -202,24 +202,26 @@ def install_and_verify_harness_skill(skill: str) -> SkillInstallResult:
     ASSIGNS a skill is the one place where "the copy is stale" has an answer that
     is not a warning, so this is where it is asked.
 
-    Why the three conditions and not just the mismatch list. Both of the
-    obvious probes are silent on the case that matters most:
+    Why two conditions and not just one. ``SkillInstallResult.ok`` is computed
+    from the hash read at the end of the install call, so it cannot see a copy
+    displaced between that read and now; and the install having RUN is not the
+    same fact as the bytes being right. So both are asked: the install's own
+    receipt is ``ok``, and an INDEPENDENT re-read of both packages says
+    ``SKILL_HASH_MATCHES``.
 
-    * ``harness_skill_hash_mismatches`` ``continue``s past a destination that
-      does NOT EXIST, so a copy that never landed produces an EMPTY mismatch
-      list — a false all-clear, which is exactly the shape of an unrun gate.
-    * ``SkillInstallResult.ok`` is computed from the hash read at the end of the
-      install call, so it cannot see a copy displaced between that read and now.
-
-    So all three are asked: the destination exists, the install's own receipt is
-    ``ok``, and the mismatch detector — an INDEPENDENT re-read of both packages
-    — is empty. Raising :class:`HarnessSkillInstallDiverged` rather than
-    returning a flag is deliberate: a caller that forgets to read a flag ships
-    the stale copy, which is the defect.
+    That second condition used to be three, because the only projection was the
+    mismatch LIST and an absent destination fell out of it — a copy that never
+    landed produced an empty list, the false all-clear this verb exists to
+    refuse — so the destination's existence had to be asked separately. It no
+    longer does: ``matches`` is a positive claim, and ``not_installed`` is one
+    of the states it is not. Raising :class:`HarnessSkillInstallDiverged` rather
+    than returning a flag is deliberate: a caller that forgets to read a flag
+    ships the stale copy, which is the defect.
     """
 
     result = install_harness_skill(skill)
-    if result.installed and result.ok and not harness_skill_hash_mismatches([skill]):
+    states = harness_skill_hash_states([skill])
+    if result.ok and states and states[0].state == SKILL_HASH_MATCHES:
         return result
     raise HarnessSkillInstallDiverged(
         skill,
@@ -228,22 +230,105 @@ def install_and_verify_harness_skill(skill: str) -> SkillInstallResult:
     )
 
 
-def harness_skill_hash_mismatches(skill_names: list[str], *, hermes_home: Path | None = None) -> list[str]:
+#: The four answers to "does the installed package match the repo package".
+#: ABSENT IS NOT MATCHING — the distinction this vocabulary exists for.
+SKILL_HASH_MATCHES = "matches"
+SKILL_HASH_MISMATCH = "mismatch"
+#: No installed package: nothing was compared. Distinct from ``matches``
+#: because a persona pointed at nothing is not a persona pointed at the right
+#: thing, and distinct from ``mismatch`` because "not installed" is a different
+#: repair from "installed wrong".
+SKILL_HASH_NOT_INSTALLED = "not_installed"
+#: No repo package for a canonical id — the source side of the same absence.
+SKILL_HASH_NO_SOURCE = "no_source"
+
+#: The states in which NO comparison happened, whatever the caller was hoping.
+SKILL_HASH_UNCOMPARED = frozenset({SKILL_HASH_NOT_INSTALLED, SKILL_HASH_NO_SOURCE})
+
+
+@dataclass(frozen=True, slots=True)
+class HarnessSkillHashState:
+    """One canonical skill id and what the hash read actually established."""
+
+    skill: str
+    state: str
+
+    @property
+    def compared(self) -> bool:
+        return self.state not in SKILL_HASH_UNCOMPARED
+
+
+def harness_skill_hash_states(
+    skill_names: list[str], *, hermes_home: Path | None = None
+) -> list[HarnessSkillHashState]:
+    """Per canonical skill, whether the two packages were compared and agreed.
+
+    THE read every advisory surface makes, with the absent case named instead of
+    dropped. Until 2026-08-30 the only projection was the mismatch LIST, and a
+    skill with no installed package simply did not appear in it — so every
+    reader saw the same empty list for "compared and identical" and for "there
+    was nothing to compare", which is the false-all-clear shape of an unrun
+    gate. Non-canonical ids are not in the result at all: they are not this
+    function's subject and never were.
+    """
+
     from agent.skill_utils import skill_package_content_hash
 
-    mismatches: list[str] = []
+    states: list[HarnessSkillHashState] = []
     for name in skill_names:
         if name not in HARNESS_SKILLS:
             continue
         source = harness_skill_source(name)
         destination = harness_skill_destination(name, hermes_home=hermes_home)
-        if not source.exists() or not destination.exists():
-            continue
-        if skill_package_content_hash(source.parent, source) != skill_package_content_hash(
+        if not source.exists():
+            states.append(HarnessSkillHashState(name, SKILL_HASH_NO_SOURCE))
+        elif not destination.exists():
+            states.append(HarnessSkillHashState(name, SKILL_HASH_NOT_INSTALLED))
+        elif skill_package_content_hash(source.parent, source) != skill_package_content_hash(
             destination.parent, destination
         ):
-            mismatches.append(name)
-    return mismatches
+            states.append(HarnessSkillHashState(name, SKILL_HASH_MISMATCH))
+        else:
+            states.append(HarnessSkillHashState(name, SKILL_HASH_MATCHES))
+    return states
+
+
+def harness_skill_hash_mismatches(skill_names: list[str], *, hermes_home: Path | None = None) -> list[str]:
+    """The ids whose installed package DIFFERS from the repo package.
+
+    A projection of :func:`harness_skill_hash_states`, unchanged in meaning: a
+    skill that was never installed is still not a mismatch. Callers that need
+    to tell that apart from a clean compare ask for the states, or for
+    :func:`harness_skill_hash_absences` beside this list.
+
+    ``prompt_observability._accessible_skills_context`` is a legitimate caller
+    of the LIST alone, and the reason is worth recording rather than
+    re-derived: a canonical id's ``source_kind`` is ``shared_core`` only for a
+    package under :func:`harness_skill_destination`'s own directory
+    (``skill_utils:770``), and a canonical id that resolves anywhere else is
+    refused (``:898``). So on that surface "resolved" already entails
+    "installed", the resolution status is checked first, and an absence reaches
+    the HUD as ``missing`` / ``invalid_source`` before this list is consulted.
+    """
+
+    return [
+        state.skill
+        for state in harness_skill_hash_states(skill_names, hermes_home=hermes_home)
+        if state.state == SKILL_HASH_MISMATCH
+    ]
+
+
+def harness_skill_hash_absences(skill_names: list[str], *, hermes_home: Path | None = None) -> list[str]:
+    """The ids whose hash could not be read at all — one side of the pair is gone.
+
+    The companion an empty mismatch list needs to be a positive claim.
+    """
+
+    return [
+        state.skill
+        for state in harness_skill_hash_states(skill_names, hermes_home=hermes_home)
+        if not state.compared
+    ]
 
 
 def file_sha256(path: Path) -> str:
