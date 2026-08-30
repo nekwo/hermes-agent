@@ -117,7 +117,7 @@ hermes harness mission-chat message --persona <persona_id> `
 
 The serve bridge **shipped and was live-verified 2026-07-08**: Mission Control app boot
 spawns one persistent `hermes harness serve --ndjson` child that dispatches harness argv
-requests in a warm process, plus a `_ReadModelCache` slice for `status --json` /
+requests in a warm process, plus a `_PollResponseCache` slice for `status --json` /
 `snapshot --json` (20s TTL, replays stamp `served_from_cache` + `cache_age_ms`). Measured:
 poll lane first poll ~2.7s (build) → repeat poll ~0.19s (cached, byte-identical), versus
 ~6.65s for a cold one-shot CLI call. A bare `python -m hermes_cli.main` invocation from a
