@@ -7,7 +7,7 @@ import shutil
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -29,7 +29,15 @@ from .models import AgentPersona, Event, Realm, Workspace
 from .profile_context import active_profile_name, resolve_persona_profile
 from .redaction import SECRET_ASSIGNMENT_RE
 from .skill_install import HARNESS_SKILLS, install_harness_skills, install_harness_skills_for_personas
-from .store import RealmStore, WorkspaceStore, skill_tombstoned
+from .store import (
+    DELETED_WORKSPACE_LEDGER_CAP,
+    SKILL_TOMBSTONE_LEDGER_CAP,
+    RealmStore,
+    WorkspaceStore,
+    active_skill_tombstones,
+    prune_settled_ledger,
+    skill_tombstoned,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -704,6 +712,11 @@ def skill_tombstone_rows(realm: Realm) -> list[dict[str, Any]]:
     Public because ``hermes harness realm skills show`` renders the SAME rows
     (plan §4): a second rendering in the CLI is how one ledger ends up with two
     receipt shapes that drift.
+
+    ACTIVE entries only, and the row shape is unchanged by RD-11: the register's
+    restored entries are bookkeeping the merge needs, not deletes an operator
+    can act on, and a "deleted from realm" sheet that listed them would offer a
+    restore affordance for a skill that is not blocked.
     """
 
     return [
@@ -712,9 +725,7 @@ def skill_tombstone_rows(realm: Realm) -> list[dict[str, Any]]:
             "deleted_at": entry.deleted_at.astimezone(timezone.utc).isoformat(),
             "deleted_hash": entry.deleted_hash,
         }
-        for entry in sorted(
-            getattr(realm, "skill_tombstones", None) or [], key=lambda item: item.slug
-        )
+        for entry in sorted(active_skill_tombstones(realm), key=lambda item: item.slug)
     ]
 
 
@@ -1748,15 +1759,194 @@ def _artifacts_from_subtree(subtree: Path) -> list[RealmSyncArtifact]:
     return artifacts
 
 
-def _pulled_artifact_bytes(artifact: RealmSyncArtifact, *, realm: Realm) -> bytes:
-    """Preserve backend-owned realm identity during a Git pull.
+#: Fields a server-bound realm owns from backend adoption. An older repo
+#: snapshot must never roll one of these back.
+_REALM_AUTHORITY_FIELDS = (
+    "id",
+    "name",
+    "slug",
+    "server_id",
+    "default_workspace_id",
+    "default_workspace_name",
+    "default_workspace_version",
+    "sync_manifest_ref",
+)
 
-    The realm JSON is shared so workspace membership can travel through Git,
-    but a server-bound realm's identity/default pointer is authoritative from
-    backend adoption. An older repo snapshot must never roll that pointer back.
+#: The realm-JSON lists that are RESURRECTION-GUARD LEDGERS rather than realm
+#: truth, and so are UNIONED on pull instead of last-writer-wins-adopted
+#: (RD-11). Each names its merge; both are keyed and bounded by their own rule.
+#: Every other realm field keeps the LWW posture ``skill_selection`` documents.
+_UNIONED_REALM_LEDGERS = ("skill_tombstones", "deleted_workspace_ids")
+
+
+def _ledger_time(value: Any) -> "datetime | None":
+    """A ledger stamp as an aware datetime, or ``None`` when it will not parse.
+
+    Deliberately tolerant, and deliberately NOT ``serde.from_jsonable``: this
+    runs over a PEER's bytes at pull time, where an unparseable stamp must cost
+    that one entry its rank in the merge and nothing more. A naive stamp is read
+    as UTC — that is the only timezone any writer in this lane mints.
+    """
+
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _tombstone_transition_at(row: dict[str, Any]) -> "datetime | None":
+    """When this entry last CHANGED STATE — the union merge's comparison key.
+
+    Not ``deleted_at``: after RD-11 an entry is a per-slug state register, and a
+    restore is a NEWER fact about the same ``deleted_at``. Ranking by the later
+    of the two stamps is what makes "restore beats a stale delete" and "a fresh
+    re-delete beats an older restore" the same comparison rather than two rules.
+    """
+
+    stamps = [
+        stamp
+        for stamp in (_ledger_time(row.get("restored_at")), _ledger_time(row.get("deleted_at")))
+        if stamp is not None
+    ]
+    return max(stamps) if stamps else None
+
+
+def _newer_tombstone_row(held: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
+    """Pick the entry that describes the more recent state of one slug.
+
+    ``held`` is seeded from the LOCAL ledger, so every tie resolves to this
+    member's own record. Two ties are decided deliberately:
+
+    - An entry whose stamps do not parse cannot out-rank one that has a
+      readable stamp; it only wins when nothing else is readable either.
+    - Equal transition times with DIFFERENT states resolve to the DELETE. This
+      ledger exists to stop a silent resurrection; a restore that loses a
+      microsecond tie is one explicit verb away from being re-run, while a
+      block that loses one is a deleted skill quietly publishable again.
+    """
+
+    held_at = _tombstone_transition_at(held)
+    candidate_at = _tombstone_transition_at(candidate)
+    if candidate_at is None:
+        return held
+    if held_at is None or candidate_at > held_at:
+        return candidate
+    if candidate_at < held_at:
+        return held
+    held_blocks = _ledger_time(held.get("restored_at")) is None
+    candidate_blocks = _ledger_time(candidate.get("restored_at")) is None
+    if candidate_blocks and not held_blocks:
+        return candidate
+    return held
+
+
+def merge_skill_tombstone_ledgers(
+    local: Any, incoming: Any
+) -> list[dict[str, Any]]:
+    """Per-slug newest-transition-wins UNION of two skill-tombstone ledgers.
+
+    The gap this closes (RD-11, upgrading R-D from "LWW acceptable"): the realm
+    JSON used to be adopted wholesale on pull, so two members publishing
+    concurrently silently dropped each other's tombstone entries and a deleted
+    skill became publishable again. A union cannot drop an entry — the worst a
+    concurrent publish can now do is delay one.
+
+    Keyed on the EXACT slug, because that is the key ``tombstone_skill`` dedupes
+    on; the bare-name-covers-categorized rule is a MATCH rule
+    (``store.skill_tombstoned``) and applying it here would silently fold two
+    distinct entries into one. Rows that are not dicts, or carry no usable slug,
+    are dropped: ``skill_tombstoned`` reads ``entry.slug``, so such a row blocks
+    nothing, and carrying it forward only risks breaking the next realm load.
+
+    Output is oldest-transition-first (the append order every ledger chokepoint
+    keeps) and bounded by the shared settled-first rule.
+    """
+
+    merged: dict[str, dict[str, Any]] = {}
+    for rows in (local, incoming):
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            slug = str(row.get("slug") or "").strip()
+            if not slug:
+                continue
+            held = merged.get(slug)
+            merged[slug] = dict(row) if held is None else _newer_tombstone_row(held, dict(row))
+    ordered = sorted(
+        merged.values(),
+        key=lambda row: (
+            _tombstone_transition_at(row) or datetime.min.replace(tzinfo=timezone.utc),
+            str(row.get("slug") or ""),
+        ),
+    )
+    return prune_settled_ledger(
+        ordered,
+        cap=SKILL_TOMBSTONE_LEDGER_CAP,
+        settled=lambda row: _ledger_time(row.get("restored_at")) is not None,
+    )
+
+
+def merge_deleted_workspace_ledgers(local: Any, incoming: Any) -> list[str]:
+    """Set-union of two ``deleted_workspace_ids`` ledgers, local order first.
+
+    A plain union with no state register, unlike the skill ledger above: these
+    are freshly-minted ids, never re-creatable names, so an id that stays on the
+    ledger forever can never block a legitimate re-creation (``models``
+    :class:`SkillTombstone` spells the asymmetry out).
+
+    MEASURED BOUNDARY (2026-08-31, W2-H5): the plan called this safe because the
+    ledger has "no restore verb", and that is not literally true —
+    ``default_scope.ensure_default_scope`` and the fixed-id reconcile path both
+    LIFT an id when the reserved local-default workspace turns up on the ledger.
+    Those two sites act on the local default scope (which refuses a server
+    binding), so they are not the shared-realm lane; what the union changes for
+    them is only PROPAGATION — under LWW a lift travelled to other members on
+    the next publish, under a union it stays local until the id ages out of the
+    cap. Recorded here rather than in a commit message because a future reader
+    of this function is the person who needs it.
+    """
+
+    merged: list[str] = []
+    seen: set[str] = set()
+    for rows in (local, incoming):
+        for raw in rows if isinstance(rows, list) else []:
+            value = str(raw or "").strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            merged.append(value)
+    return merged[-DELETED_WORKSPACE_LEDGER_CAP:]
+
+
+def _pulled_artifact_bytes(artifact: RealmSyncArtifact, *, realm: Realm) -> bytes:
+    """Reconcile the incoming realm JSON with local truth during a Git pull.
+
+    Two reconciliations, deliberately scoped differently:
+
+    1. **Authority fields** (server-bound realms only). The realm JSON is shared
+       so workspace membership can travel through Git, but a server-bound
+       realm's identity/default pointer is authoritative from backend adoption.
+       An older repo snapshot must never roll that pointer back.
+    2. **Resurrection-guard ledgers** (every realm). ``skill_tombstones`` and
+       ``deleted_workspace_ids`` are UNIONED rather than adopted, so a
+       concurrent publish cannot drop a delete another member recorded (RD-11).
+       Not gated on ``server_id``: a local-only realm with a sync repo loses a
+       tombstone exactly the same way, and the guard is not about identity.
+
+    Returns the source bytes UNTOUCHED when neither reconciliation changes
+    anything, so a pull that reconciles nothing cannot report ``changed`` on
+    re-serialization alone.
     """
     data = artifact.source.read_bytes()
-    if artifact.kind != "realm" or not realm.server_id or not artifact.destination.exists():
+    if artifact.kind != "realm" or not artifact.destination.exists():
         return data
     try:
         incoming = json.loads(data.decode("utf-8"))
@@ -1765,20 +1955,24 @@ def _pulled_artifact_bytes(artifact: RealmSyncArtifact, *, realm: Realm) -> byte
         return data
     if not isinstance(incoming, dict) or not isinstance(current, dict):
         return data
-    authority_fields = {
-        "id",
-        "name",
-        "slug",
-        "server_id",
-        "default_workspace_id",
-        "default_workspace_name",
-        "default_workspace_version",
-        "sync_manifest_ref",
+    merged = dict(incoming)
+    if realm.server_id:
+        for field in _REALM_AUTHORITY_FIELDS:
+            if field in current:
+                merged[field] = current[field]
+    mergers = {
+        "skill_tombstones": merge_skill_tombstone_ledgers,
+        "deleted_workspace_ids": merge_deleted_workspace_ledgers,
     }
-    for field in authority_fields:
-        if field in current:
-            incoming[field] = current[field]
-    return json.dumps(incoming, indent=2, sort_keys=True, default=str).encode("utf-8")
+    for field in _UNIONED_REALM_LEDGERS:
+        if not (current.get(field) or incoming.get(field)):
+            # Both empty or absent: nothing to union, and inventing the key
+            # would rewrite an old member's record for no gain.
+            continue
+        merged[field] = mergers[field](current.get(field), incoming.get(field))
+    if merged == incoming:
+        return data
+    return json.dumps(merged, indent=2, sort_keys=True, default=str).encode("utf-8")
 
 
 def _destination_for_sync_path(rel: str) -> Path | None:

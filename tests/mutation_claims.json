@@ -1838,6 +1838,111 @@
         "-q",
         "tests/agent_runtime/test_workspace_lifecycle.py::test_a_fully_readable_source_adds_no_unreadable_warning"
       ]
+    },
+    {
+      "id": "s4-the-tombstone-union-keeps-the-local-only-entry",
+      "path": "agent_runtime/realm_sync.py",
+      "symbol": "merge_skill_tombstone_ledgers",
+      "operator": "adopt-incoming-instead-of-union",
+      "find": "    for rows in (local, incoming):\n",
+      "replace": "    for rows in (incoming,):\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_realm_sync_ledger_union.py::test_local_only_entry_survives_an_incoming_ledger_that_lacks_it"
+      ]
+    },
+    {
+      "id": "s4-the-merge-ranks-by-the-later-of-the-two-stamps",
+      "path": "agent_runtime/realm_sync.py",
+      "symbol": "_tombstone_transition_at",
+      "operator": "rank-by-the-delete-stamp-only",
+      "find": "        for stamp in (_ledger_time(row.get(\"restored_at\")), _ledger_time(row.get(\"deleted_at\")))\n",
+      "replace": "        for stamp in (_ledger_time(row.get(\"deleted_at\")),)\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_realm_sync_ledger_union.py::test_a_restore_beats_a_stale_delete_from_either_side"
+      ]
+    },
+    {
+      "id": "s4-an-equal-stamp-tie-resolves-to-the-delete",
+      "path": "agent_runtime/realm_sync.py",
+      "symbol": "_newer_tombstone_row",
+      "operator": "resolve-the-tie-to-the-local-side",
+      "find": "    if candidate_blocks and not held_blocks:\n        return candidate\n    return held",
+      "replace": "    return held",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_realm_sync_ledger_union.py::test_an_equal_stamp_tie_resolves_to_the_delete"
+      ]
+    },
+    {
+      "id": "s4-the-workspace-ledger-is-unioned-not-adopted",
+      "path": "agent_runtime/realm_sync.py",
+      "symbol": "merge_deleted_workspace_ledgers",
+      "operator": "adopt-incoming-instead-of-union",
+      "find": "    for rows in (local, incoming):\n",
+      "replace": "    for rows in (incoming,):\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_realm_sync_ledger_union.py::test_a_pull_unions_the_deleted_workspace_ledger"
+      ]
+    },
+    {
+      "id": "s4-the-ledger-union-is-not-gated-on-server-id",
+      "path": "agent_runtime/realm_sync.py",
+      "symbol": "_pulled_artifact_bytes",
+      "operator": "re-gate-the-union-behind-a-server-binding",
+      "find": "    if artifact.kind != \"realm\" or not artifact.destination.exists():\n",
+      "replace": "    if artifact.kind != \"realm\" or not realm.server_id or not artifact.destination.exists():\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_realm_sync_ledger_union.py::test_a_pull_keeps_this_members_tombstone_the_publisher_never_had"
+      ]
+    },
+    {
+      "id": "s4-a-restored-entry-blocks-nothing",
+      "path": "agent_runtime/store.py",
+      "symbol": "active_skill_tombstones",
+      "operator": "count-restored-entries-as-live-blocks",
+      "find": "    return [\n        entry\n        for entry in (getattr(realm, \"skill_tombstones\", None) or [])\n        if getattr(entry, \"restored_at\", None) is None\n    ]",
+      "replace": "    return list(getattr(realm, \"skill_tombstones\", None) or [])",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_realm_skill_tombstones.py::test_restore_lifts_the_entry_and_is_idempotent"
+      ]
+    },
+    {
+      "id": "s4-the-cap-evicts-settled-history-before-a-live-block",
+      "path": "agent_runtime/store.py",
+      "symbol": "prune_settled_ledger",
+      "operator": "bound-oldest-first-ignoring-settled",
+      "find": "    over = len(items) - cap\n    dropped: set[int] = set()\n    for index, item in enumerate(items):\n        if len(dropped) >= over:\n            break\n        if settled(item):\n            dropped.add(index)\n    kept = [item for index, item in enumerate(items) if index not in dropped]\n    return kept[-cap:]",
+      "replace": "    return list(items)[-cap:]",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_realm_skill_tombstones.py::test_the_ledger_cap_evicts_settled_history_before_a_live_block"
+      ]
     }
   ]
 }

@@ -2653,7 +2653,7 @@ def _cmd_skills_delete(args) -> int:
     from agent.skill_utils import skill_package_content_hash
     from agent_runtime.errors import SkillTombstoneRefused
     from agent_runtime.skill_promotion import _archive_package, validate_skill_slug
-    from agent_runtime.store import skill_tombstoned
+    from agent_runtime.store import active_skill_tombstones, skill_tombstoned
     from hermes_constants import CANONICAL_SHARED_SKILL_IDS
 
     slug = str(getattr(args, "skill", "") or "").strip()
@@ -2733,10 +2733,11 @@ def _cmd_skills_delete(args) -> int:
         before = set(realm.skill_selection or [])
         # ``refreshed`` asks for the EXACT entry, because that is the entry
         # ``tombstone_skill`` dedupes against (a bare-name entry that merely
-        # COVERS this slug is a different record and is not replaced).
-        refreshed = any(
-            entry.slug == slug for entry in (realm.skill_tombstones or [])
-        )
+        # COVERS this slug is a different record and is not replaced). It asks
+        # the ACTIVE ledger: since RD-11 a restored entry stays on the register,
+        # and re-deleting a slug someone lifted is a fresh delete, not a refresh
+        # of a block that was standing.
+        refreshed = any(entry.slug == slug for entry in active_skill_tombstones(realm))
         try:
             updated = store.tombstone_skill(
                 realm.id, slug, deleted_hash=deleted_hash, dry_run=dry_run
@@ -2856,12 +2857,13 @@ def _cmd_skills_restore(args) -> int:
     """Lift ONE realm's skill tombstone. Un-tombstone only (R-C).
 
     The store returns the realm, not a ``restored`` flag, so the answer is taken
-    BEFORE the write: an entry with exactly this slug is what ``restore_skill``
-    removes, and an idempotent no-op must report ``restored: false`` rather than
-    claim a change it did not make.
+    BEFORE the write: an ACTIVE entry with exactly this slug is what
+    ``restore_skill`` lifts, and an idempotent no-op — an absent entry, or one
+    already lifted — must report ``restored: false`` rather than claim a change
+    it did not make.
     """
 
-    from agent_runtime.store import skill_tombstoned
+    from agent_runtime.store import active_skill_tombstones, skill_tombstoned
 
     slug = str(getattr(args, "skill", "") or "").strip()
     realm_id = str(getattr(args, "realm", "") or "").strip()
@@ -2878,7 +2880,7 @@ def _cmd_skills_restore(args) -> int:
     except NotFound as exc:
         return emit_harness_error(exc, args=args, code="not_found")
 
-    had_entry = any(entry.slug == slug for entry in (realm.skill_tombstones or []))
+    had_entry = any(entry.slug == slug for entry in active_skill_tombstones(realm))
     updated = store.restore_skill(realm_id, slug)
 
     warnings: list[dict] = []

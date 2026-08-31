@@ -27,7 +27,7 @@ import pytest
 
 from agent.skill_utils import _content_hash_cache_clear
 from agent_runtime import paths
-from agent_runtime.store import RealmStore
+from agent_runtime.store import RealmStore, active_skill_tombstones
 from hermes_constants import CANONICAL_SHARED_SKILL_IDS, get_shared_skills_dir
 
 
@@ -114,7 +114,15 @@ def _realm(name: str, *, mode: str = "all", selection: list[str] | None = None):
 
 
 def _ledger(realm_id: str) -> list[str]:
-    return [entry.slug for entry in RealmStore().get(realm_id).skill_tombstones]
+    """Which slugs this realm currently BLOCKS.
+
+    The ACTIVE ledger, not the raw register: since RD-11 a restored entry stays
+    on ``skill_tombstones`` carrying ``restored_at`` so the pull-time union
+    merge can see the lift, and every case in this file is asserting about
+    blocks, not about the register's bookkeeping.
+    """
+
+    return [entry.slug for entry in active_skill_tombstones(RealmStore().get(realm_id))]
 
 
 # ── parser shape ─────────────────────────────────────────────────────────────

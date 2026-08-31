@@ -23,7 +23,7 @@ from agent_runtime import store as store_module
 from agent_runtime.errors import SkillTombstoneRefused
 from agent_runtime.models import Realm, SkillTombstone
 from agent_runtime.serde import from_jsonable, to_jsonable
-from agent_runtime.store import RealmStore, skill_tombstoned
+from agent_runtime.store import RealmStore, active_skill_tombstones, skill_tombstoned
 from hermes_constants import CANONICAL_SHARED_SKILL_IDS
 
 
@@ -189,7 +189,9 @@ def test_restore_does_not_re_add_the_selection_entry():
 
     stored = RealmStore().restore_skill(realm.id, "doomed")
 
-    assert stored.skill_tombstones == []
+    # RD-11: the lift stamps the entry instead of removing it, so what "no
+    # tombstone" means here is the ACTIVE ledger, not the register.
+    assert active_skill_tombstones(stored) == []
     assert stored.skill_selection == ["keeper"]
 
 
@@ -202,13 +204,61 @@ def test_restore_lifts_the_entry_and_is_idempotent():
     RealmStore().tombstone_skill(realm.id, "other")
 
     stored = RealmStore().restore_skill(realm.id, "doomed")
-    assert [entry.slug for entry in stored.skill_tombstones] == ["other"]
+    # RD-11: the entry SURVIVES the lift carrying ``restored_at`` — the register
+    # keeps a restore representable, which is what the union merge needs — but
+    # it stops blocking the moment it is stamped.
+    assert [entry.slug for entry in stored.skill_tombstones] == ["doomed", "other"]
+    assert [entry.slug for entry in active_skill_tombstones(stored)] == ["other"]
+    assert stored.skill_tombstones[0].restored_at is not None
     assert skill_tombstoned(stored, "doomed") is None
 
-    # Absent entry: not an error, no write.
+    # Already-lifted entry: not an error, no second write (the stamp is the
+    # first lift's, so an idempotent re-run cannot move the merge's clock).
+    lifted_at = stored.skill_tombstones[0].restored_at
     again = RealmStore().restore_skill(realm.id, "doomed")
-    assert [entry.slug for entry in again.skill_tombstones] == ["other"]
+    assert [entry.slug for entry in again.skill_tombstones] == ["doomed", "other"]
+    assert again.skill_tombstones[0].restored_at == lifted_at
+    # Absent entry: not an error, no write.
     assert RealmStore().restore_skill(realm.id, "never-tombstoned").id == realm.id
+
+
+def test_a_re_delete_after_a_restore_replaces_the_register_entry():
+    # RD-11: the register records the CURRENT state of a slug. A delete that
+    # landed while a restore stamp was standing must not leave both stamps on
+    # one entry — the merge ranks by the LATER stamp, so a stale ``restored_at``
+    # riding a fresh delete would let an old restore win a comparison it lost.
+    realm = _realm()
+    RealmStore().tombstone_skill(realm.id, "doomed")
+    RealmStore().restore_skill(realm.id, "doomed")
+
+    stored = RealmStore().tombstone_skill(realm.id, "doomed", deleted_hash="def456")
+
+    assert [entry.slug for entry in stored.skill_tombstones] == ["doomed"]
+    assert stored.skill_tombstones[0].restored_at is None
+    assert stored.skill_tombstones[0].deleted_hash == "def456"
+    assert skill_tombstoned(stored, "doomed") is not None
+
+
+def test_the_ledger_cap_evicts_settled_history_before_a_live_block():
+    # RD-11's cost: restored entries linger, so the bound must not let inert
+    # history push a LIVE block off the front — an evicted block is a
+    # resurrected skill, which is the one thing this ledger exists to prevent.
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(store_module, "SKILL_TOMBSTONE_LEDGER_CAP", 2)
+    try:
+        realm = _realm()
+        # The settled entry sits BETWEEN the two live blocks, so a plain
+        # oldest-first ``[-cap:]`` would keep it and evict ``live-old`` — the
+        # case that makes this test discriminating rather than incidentally
+        # agreeing with the ordinary bound.
+        RealmStore().tombstone_skill(realm.id, "live-old")
+        RealmStore().tombstone_skill(realm.id, "settled")
+        RealmStore().restore_skill(realm.id, "settled")
+        stored = RealmStore().tombstone_skill(realm.id, "live-new")
+    finally:
+        monkey.undo()
+
+    assert [entry.slug for entry in stored.skill_tombstones] == ["live-old", "live-new"]
 
 
 def test_restore_names_a_ledger_entry_not_a_package():
@@ -251,6 +301,10 @@ def test_tombstone_round_trips_through_the_realm_record():
             "slug": "category/doomed",
             "deleted_at": raw["skill_tombstones"][0]["deleted_at"],
             "deleted_hash": "sha256:ab",
+            # RD-11 added this key to the record. Still no schema_version bump:
+            # additive at v1, so an older member drops it on load exactly like
+            # the field below — the same compat argument, one field deeper.
+            "restored_at": None,
         }
     ]
 

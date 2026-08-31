@@ -5,8 +5,9 @@ import logging
 import re
 import shutil
 import uuid
+from collections.abc import Callable
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from hermes_time import now
 from utils import atomic_json_write
@@ -480,19 +481,78 @@ def skill_tombstone_matches(entry_slug: str, slug: str) -> bool:
 _tombstone_blocks = skill_tombstone_matches
 
 
+def active_skill_tombstones(realm: Realm) -> list[SkillTombstone]:
+    """The ledger entries that currently BLOCK — the ONE spelling of "active".
+
+    Since RD-11 the ledger is a per-slug state register: a restored entry stays
+    on it (carrying ``restored_at``) so the union merge can see the restore, but
+    it blocks nothing. Every reader that used to mean "is there an entry for
+    this slug" — the match rule below, the receipt rows, the two CLI verbs'
+    before-the-write questions — asks through here instead, so "active" cannot
+    acquire a second, drifting definition the way an open-coded
+    ``entry.slug == slug`` scan would.
+    """
+
+    return [
+        entry
+        for entry in (getattr(realm, "skill_tombstones", None) or [])
+        if getattr(entry, "restored_at", None) is None
+    ]
+
+
+def prune_settled_ledger(items: list[T], *, cap: int, settled: Callable[[Any], bool]) -> list[T]:
+    """Bound a per-key state register, dropping SETTLED history first.
+
+    ``items`` is oldest-first (the append order every ledger chokepoint keeps).
+    A plain ``items[-cap:]`` would let restored — i.e. inert — entries push
+    LIVE blocks off the front, which is the one eviction this ledger must never
+    make: an evicted block is a resurrected skill. So settled entries are
+    dropped oldest-first until the list fits, and only then does the ordinary
+    oldest-first bound apply.
+
+    Shape-agnostic (``settled`` is supplied by the caller) because the same rule
+    runs twice: over :class:`SkillTombstone` records at the store chokepoints,
+    and over raw JSON rows in ``realm_sync``'s pull-time union merge, which must
+    stay tolerant of a peer's unparseable stamps. One rule, two shapes.
+    """
+
+    if cap <= 0 or len(items) <= cap:
+        return list(items)
+    over = len(items) - cap
+    dropped: set[int] = set()
+    for index, item in enumerate(items):
+        if len(dropped) >= over:
+            break
+        if settled(item):
+            dropped.add(index)
+    kept = [item for index, item in enumerate(items) if index not in dropped]
+    return kept[-cap:]
+
+
+def _prune_skill_tombstones(entries: list[SkillTombstone]) -> list[SkillTombstone]:
+    """The record-shaped half of :func:`prune_settled_ledger`."""
+
+    return prune_settled_ledger(
+        entries,
+        cap=SKILL_TOMBSTONE_LEDGER_CAP,
+        settled=lambda entry: getattr(entry, "restored_at", None) is not None,
+    )
+
+
 def skill_tombstoned(realm: Realm, slug: str) -> SkillTombstone | None:
     """The ONE spelling of "is this skill deleted in this realm".
 
     Every enforcement point (the pull's inbox mirror and canonical archive, the
     publish artifact filter, the operator surfaces) asks through here, so a
     second, drifting copy of the match rule cannot exist. Returns the blocking
-    entry (evidence for the refusal message) or ``None``.
+    entry (evidence for the refusal message) or ``None`` — a RESTORED entry is
+    not a blocking one, so the scan runs over the active ledger.
     """
 
     clean = str(slug or "").strip()
     if not clean:
         return None
-    for entry in getattr(realm, "skill_tombstones", None) or []:
+    for entry in active_skill_tombstones(realm):
         if _tombstone_blocks(entry.slug, clean):
             return entry
     return None
@@ -672,8 +732,12 @@ class RealmStore:
           would lose that argument forever, so the door names the real delete
           lane instead of minting a tombstone that does nothing.
 
-        Re-tombstoning an already-listed slug REFRESHES ``deleted_at`` (one
-        entry per slug). The slug is also pruned from ``skill_selection`` at the
+        Re-tombstoning an already-listed slug REPLACES the entry (one entry per
+        slug), which refreshes ``deleted_at`` and clears any ``restored_at``
+        from an earlier lift — the register records the CURRENT state, never a
+        delete stamp sitting beside a stale restore stamp. The list is bounded
+        through :func:`prune_settled_ledger`, so settled (restored) history is
+        evicted before any live block. The slug is also pruned from ``skill_selection`` at the
         same write — a selection naming a tombstoned slug is a standing
         contradiction — using the ``skill_tombstoned`` match rule, so a
         categorized ``<cat>/<child>`` selection entry blocked by a bare-name
@@ -712,7 +776,7 @@ class RealmStore:
             entry for entry in (item.skill_tombstones or []) if entry.slug != clean
         ]
         ledger.append(SkillTombstone(slug=clean, deleted_at=now(), deleted_hash=deleted_hash))
-        item.skill_tombstones = ledger[-SKILL_TOMBSTONE_LEDGER_CAP:]
+        item.skill_tombstones = _prune_skill_tombstones(ledger)
         item.skill_selection = [
             value
             for value in (item.skill_selection or [])
@@ -734,25 +798,36 @@ class RealmStore:
         """Lift ONE ledger entry — the explicit door out of a skill tombstone.
 
         Names a LEDGER ENTRY, not a package: the entry whose ``slug`` matches
-        exactly is removed, which is what ``realm skills show`` lists. (A
+        exactly is lifted, which is what ``realm skills show`` lists. (A
         categorized package blocked by a bare-name tombstone is restored by
         naming that bare name.) Restoring content is the separate, existing
         lane — ``skills promote --from-path shared/skills/.archive/<ts>/<slug>``,
         or a fresh publish from a member who still holds it.
 
-        Idempotent: an absent entry is not an error and writes nothing (a
-        no-op mutation must not emit an event either — the watermark advances
-        only for real writes). Callers report ``restored`` by asking
-        :func:`skill_tombstoned` first.
+        The lift STAMPS ``restored_at`` rather than removing the entry (RD-11).
+        A removal is an absence, and the pull-time union merge cannot tell an
+        absence that means "restored here" from one that means "this member
+        never heard about the delete" — so under a union every restore would be
+        undone by the next pull from a member who still held the tombstone. The
+        marker is a fact that can win the merge on its own timestamp. The entry
+        stops blocking the moment it is stamped (:func:`active_skill_tombstones`),
+        which is what every enforcement point and receipt reads.
+
+        Idempotent: an absent entry — or one already lifted — is not an error
+        and writes nothing (a no-op mutation must not emit an event either — the
+        watermark advances only for real writes). Callers report ``restored`` by
+        asking the ACTIVE ledger first.
         """
         clean = str(slug or "").strip()
         item = self.get(realm_id)
-        remaining = [
-            entry for entry in (item.skill_tombstones or []) if entry.slug != clean
-        ]
-        if len(remaining) == len(item.skill_tombstones or []):
+        lifted = next(
+            (entry for entry in active_skill_tombstones(item) if entry.slug == clean),
+            None,
+        )
+        if lifted is None:
             return item
-        item.skill_tombstones = remaining
+        lifted.restored_at = now()
+        item.skill_tombstones = _prune_skill_tombstones(item.skill_tombstones or [])
         if dry_run:
             return item
         item = self.save(item, emit_event=False)

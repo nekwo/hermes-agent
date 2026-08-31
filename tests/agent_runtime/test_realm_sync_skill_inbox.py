@@ -471,11 +471,15 @@ def test_dry_run_pull_writes_nothing(tmp_path):
 
 # ── S2: the skill-delete ledger enforced on pull and publish ─────────────────
 #
-# Every case below runs against ``_local_realm`` — ``server_id`` is None, the
-# asymmetry §5 of the plan names: ``_pulled_artifact_bytes``'s authority-field
-# merge only runs for a SERVER-bound realm, so a local realm's pulled realm JSON
-# (ledger included) overwrites wholesale, one fewer guard, same LWW posture.
-# ``test_pull_adopts_an_arriving_ledger_on_a_local_realm`` pins that directly.
+# Every case below runs against ``_local_realm`` — ``server_id`` is None. The
+# §5 asymmetry that used to make that interesting was: ``_pulled_artifact_bytes``
+# only ran for a SERVER-bound realm, so a local realm's pulled realm JSON
+# (ledger included) overwrote wholesale, LWW. RD-11 (2026-08-31) ENDED the
+# asymmetry for the two resurrection-guard ledgers — they are unioned on every
+# realm, bound or not, because a local-only realm loses a tombstone exactly the
+# same way — while the authority-field half stays server-bound.
+# ``test_pull_adopts_an_arriving_ledger_on_a_local_realm`` pins the arriving
+# half; ``tests/agent_runtime/test_realm_sync_ledger_union.py`` owns the matrix.
 
 
 def _archived_package_names() -> list[str]:
@@ -566,13 +570,19 @@ def test_pull_adopts_an_arriving_ledger_on_a_local_realm(tmp_path):
 
     RealmStore().tombstone_skill(realm.id, "doomed", deleted_hash="sha256:ab")
     _publish_subtree_realm_record(repo, realm)
-    RealmStore().restore_skill(realm.id, "doomed")
-    assert RealmStore().get(realm.id).skill_tombstones == []
+    # Back to a member who never heard about the delete. Cleared on the RECORD
+    # rather than through ``restore_skill``: since RD-11 a lift leaves a
+    # ``restored_at`` marker that BEATS this delete in the union merge (its own
+    # case, in the union suite), which is the opposite of what this test is
+    # about — an EMPTY ledger meeting an arriving one.
+    empty = RealmStore().get(realm.id)
+    empty.skill_tombstones = []
+    RealmStore().save(empty)
 
     result = pull_realm_sync(realm.id)
 
-    # Wholesale overwrite (no server_id → no authority-field merge): the ledger
-    # lands, and the same pull enforces it.
+    # An empty local ledger unioned with an arriving one IS the arriving one:
+    # the ledger lands, and the same pull enforces it.
     assert [entry.slug for entry in RealmStore().get(realm.id).skill_tombstones] == ["doomed"]
     assert result["skill_tombstones"]["archived"] == ["doomed"]
     assert not _canonical("doomed").exists()

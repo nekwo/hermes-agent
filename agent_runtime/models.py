@@ -115,11 +115,24 @@ class SkillTombstone:
     restoring is/isn't the bytes you deleted") and is NEVER consulted to admit a
     package: an auto-supersede would let any member authoring a same-name skill
     silently override a realm-wide delete.
+
+    ``restored_at`` makes this a per-slug STATE REGISTER rather than a bare
+    delete record (RD-11, 2026-08-31). Before the union merge, ``restore_skill``
+    removed the entry — an absence, which a union of two ledgers cannot tell
+    apart from "the other member never heard about this delete", so every
+    restore would have been silently undone by the next pull from a member who
+    still held the tombstone. A restore is therefore a POSITIVE marker that can
+    win a merge on its own timestamp. An entry with ``restored_at`` set blocks
+    nothing (see ``store.active_skill_tombstones``) and is settled history the
+    ledger cap prunes first; a later delete of the same slug REPLACES the whole
+    entry, so ``restored_at`` returns to ``None`` rather than lingering beside a
+    newer ``deleted_at``.
     """
 
     slug: str
     deleted_at: datetime
     deleted_hash: str | None = None
+    restored_at: datetime | None = None
 
 
 @dataclass(slots=True)
