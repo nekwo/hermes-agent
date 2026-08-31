@@ -229,17 +229,35 @@ def test_update_never_parks_a_gateway_resume_on_atexit(monkeypatch):
     )
 
     monkeypatch.setattr(cli_main, "_is_windows", lambda: True)
-    token = cli_main._pause_windows_gateways_for_update()
-
-    assert token is None, (
-        "the autouse _no_windows_gateway_pause_token fixture is not covering "
-        "this test — _cmd_update_impl would park a resume on atexit"
-    )
+    assert cli_main._pause_windows_gateways_for_update() is None
     assert registered == []
 
 
 def test_the_pause_seam_is_defaulted_for_every_test_in_this_directory():
-    """The fixture must be autouse: five files here call cmd_update."""
-    from hermes_cli import main as cli_main
+    """The seam itself, not just its answer on this host.
 
-    assert cli_main._pause_windows_gateways_for_update() is None
+    Checking the RETURN VALUE alone is not a fence test, and measuring proved
+    it: with the conftest default reverted, the production function still
+    answered ``None`` here, because under a hermetic HERMES_HOME
+    ``_profile_suffix()`` is empty, the task name resolves to the default
+    ``Hermes_Gateway``, and this operator has only ``Hermes_Gateway_alice``
+    registered. The escape depends on which task name the process happens to
+    resolve — which is exactly the host-shaped fact a test must not rest on.
+    (Reverted, ``test_update_autostash.py`` DOES bring the atexit registration
+    and a real ``schtasks /Query /TN Hermes_Gateway_alice`` straight back;
+    proof recorded in the field notes.)
+
+    So the claim is the seam: for every test in this directory, the callable
+    bound at ``hermes_cli.main`` is the conftest's default and not
+    production's. That is red the moment the default is removed, on any host.
+    """
+    from hermes_cli import main as cli_main
+    from hermes_cli import update_cmd
+
+    bound = cli_main._pause_windows_gateways_for_update
+    assert bound is not update_cmd._pause_windows_gateways_for_update, (
+        "the autouse _no_windows_gateway_pause_token default is not installed — "
+        "_cmd_update_impl would read this machine's live gateway table and "
+        "Scheduled Task, and park a resume on atexit"
+    )
+    assert bound() is None
