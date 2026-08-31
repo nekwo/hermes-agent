@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 from pathlib import Path
 import time
@@ -8,11 +9,57 @@ from typing import Iterator
 
 from . import paths
 
+#: How long the retry loop sleeps between two non-blocking attempts. One value
+#: for both platforms: the deadline is the contract, this is only how finely it
+#: is sampled.
+_RETRY_SLEEP_SECONDS = 0.05
+
 if os.name == "nt":
-    import errno
     import msvcrt
+
+    #: What ``msvcrt.locking`` answers when somebody else holds the byte. The
+    #: raw 13/36 sit beside the named constants because Windows reports the
+    #: values without always mapping them onto the errno names.
+    _CONTENDED_ERRNOS = frozenset({errno.EACCES, errno.EDEADLK, 13, 36})
+
+    def _prepare(handle) -> None:
+        # ``msvcrt.locking`` locks a BYTE RANGE, so an empty file has nothing to
+        # lock. Seed one byte the first time, then rewind: every acquisition
+        # locks byte 0 of the same file.
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+
+    def _try_acquire(handle) -> None:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+
+    def _release(handle) -> None:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
 else:
     import fcntl
+
+    #: What ``flock(..., LOCK_NB)`` answers when somebody else holds the file.
+    #: ``EAGAIN`` and ``EWOULDBLOCK`` are the same number on Linux and macOS but
+    #: are spelled separately because POSIX does not require that, and
+    #: ``EACCES`` is what some network filesystems answer instead.
+    _CONTENDED_ERRNOS = frozenset({errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK})
+
+    def _prepare(handle) -> None:
+        # ``flock`` locks the whole open file description, so there is no byte
+        # to seed and nothing to do. Present so the acquire loop below has one
+        # shape on both platforms rather than a conditional inside it.
+        return None
+
+    def _try_acquire(handle) -> None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def _release(handle) -> None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 class HarnessLockUnavailable(RuntimeError):
@@ -21,37 +68,56 @@ class HarnessLockUnavailable(RuntimeError):
 
 @contextlib.contextmanager
 def _file_lock(path: Path, *, timeout_seconds: float | None = None) -> Iterator[None]:
+    """Hold an exclusive cross-process lock on ``path``, or refuse by deadline.
+
+    ONE retry loop, on every platform. It used to be two arms: Windows polled
+    ``LK_NBLCK`` against the deadline and refused :class:`HarnessLockUnavailable`
+    when it ran out, while POSIX took a bare blocking ``flock(..., LOCK_EX)``
+    that read the deadline it had just computed and then ignored it. So the same
+    call had two contracts — bounded on one host, unbounded on the other — and
+    ``timeout_seconds`` was a parameter that did nothing off Windows. Every
+    caller that turns this refusal into a typed answer (``agent create``'s
+    ``creation_in_progress``, the chat-turn reservation's ``turn_in_progress``,
+    the persona chat mint) was therefore Windows-only behaviour that read as
+    portable, and a stuck holder hung the process everywhere else.
+
+    Now the platform supplies only its three primitives — seed, non-blocking
+    acquire, release — and the deadline logic is shared. That is the whole of
+    the change: contention is polled at :data:`_RETRY_SLEEP_SECONDS`, an errno
+    outside :data:`_CONTENDED_ERRNOS` is a real fault and is re-raised
+    unwrapped, and running out of time raises the refusal naming the budget it
+    spent.
+
+    NOT reentrant, and now uniformly so: a second acquisition from this same
+    process opens a fresh handle — a fresh open file description under
+    ``flock``, a second byte-range request under ``msvcrt`` — and contends with
+    the first, so it refuses at the deadline rather than deadlocking forever.
+    :meth:`OfficeStore.upsert_actor`'s ``position_policy`` hook exists because
+    of that property: work that must see the locked state runs INSIDE the lock
+    that already holds it, never by taking it again.
+    """
+
     timeout_seconds = _lock_timeout_seconds(timeout_seconds)
     deadline = time.monotonic() + timeout_seconds
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a+b") as handle:
-        if os.name == "nt":
-            handle.seek(0, os.SEEK_END)
-            if handle.tell() == 0:
-                handle.write(b"0")
-                handle.flush()
-            handle.seek(0)
-            while True:
-                try:
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-                    break
-                except OSError as exc:
-                    if exc.errno not in {errno.EACCES, errno.EDEADLK, 13, 36}:
-                        raise
-                    if time.monotonic() >= deadline:
-                        raise HarnessLockUnavailable(f"lock unavailable after {timeout_seconds:g}s: {path}") from exc
-                    time.sleep(0.05)
+        _prepare(handle)
+        while True:
             try:
-                yield
-            finally:
-                handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                _try_acquire(handle)
+                break
+            except OSError as exc:
+                if exc.errno not in _CONTENDED_ERRNOS:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise HarnessLockUnavailable(
+                        f"lock unavailable after {timeout_seconds:g}s: {path}"
+                    ) from exc
+                time.sleep(_RETRY_SLEEP_SECONDS)
+        try:
+            yield
+        finally:
+            _release(handle)
 
 
 # S54 removed ``tick_lock``: the ticker it guarded went with the mission lane.

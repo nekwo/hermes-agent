@@ -1445,6 +1445,51 @@
         "-q",
         "tests/agent_runtime/test_office_store.py::test_the_recorded_mint_is_not_content_and_never_moves_the_sync_hash"
       ]
+    },
+    {
+      "id": "hh6-posix-file-lock-ignores-its-deadline",
+      "path": "agent_runtime/locks.py",
+      "symbol": "module/_try_acquire (POSIX arm)",
+      "operator": "restore-blocking-flock",
+      "find": "        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)",
+      "replace": "        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_locks.py::test_a_contended_lock_refuses_at_its_deadline_instead_of_blocking"
+      ]
+    },
+    {
+      "id": "hh6-the-deadline-is-a-budget-not-a-single-attempt",
+      "path": "agent_runtime/locks.py",
+      "symbol": "_file_lock",
+      "operator": "refuse-on-first-contended-attempt",
+      "find": "                if time.monotonic() >= deadline:",
+      "replace": "                if True:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_locks.py::test_the_deadline_is_a_budget_and_not_a_single_attempt"
+      ]
+    },
+    {
+      "id": "hh6-a-real-fault-is-not-reported-as-contention",
+      "path": "agent_runtime/locks.py",
+      "symbol": "_file_lock",
+      "operator": "drop-non-contended-errno-reraise",
+      "find": "                if exc.errno not in _CONTENDED_ERRNOS:\n                    raise\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_locks.py::test_a_fault_that_is_not_contention_is_raised_unwrapped"
+      ]
     }
   ]
 }

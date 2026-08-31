@@ -313,20 +313,22 @@ unaimed desks off the agent lattice and there are no unaimed desks on this lane.
 `office_lock`, immediately before `OfficeStore.upsert_actor`, which takes that
 lock itself. That is forced rather than preferred: `locks._file_lock` is a real
 file lock (`msvcrt.locking` / `flock`) acquired through a fresh handle, so it is
-**not reentrant** (on Windows the second acquisition retries against a deadline
-and refuses `HarnessLockUnavailable` after the configured 15 s — measured; on
-POSIX `_file_lock` takes a bare blocking `fcntl.flock(…, LOCK_EX)` that never
-reads the deadline, so it blocks indefinitely and that refusal is unreachable —
-either way the read cannot live inside the lock) — wrapping the read and the
-write in one `office_lock` would
-deadlock the write it is meant to protect, and moving the policy INSIDE
-`upsert_actor` is the honest close and a store change S2 does not carry. The
-window: two creates that both omit a position and race between the read and
-their writes can compute the same slot, and the second lands on top of the
-first. Bounded to one slot, visible on the canvas, fixed by a drag — and no
-worse than the prediction the launcher has always sent, which reads a snapshot
-already a round trip stale. `resolve_placement_position`'s docstring is the
-long form; the row is filed in the launcher's Mission Control queue.
+**not reentrant** — the second acquisition contends with the first, retries
+against the deadline and refuses `HarnessLockUnavailable` after the configured
+15 s, on **every** platform since H-H6 (until then the POSIX arm took a bare
+blocking `fcntl.flock(…, LOCK_EX)` that never read the deadline it had just
+computed, so it blocked indefinitely and that refusal was unreachable off
+Windows — `timeout_seconds` was a parameter that did nothing, and every typed
+refusal built on it was Windows-only behaviour wearing a portable name).
+Wrapping the read and the write in one `office_lock` would therefore deadlock
+the write it is meant to protect, and moving the policy INSIDE `upsert_actor` is
+the honest close and a store change S2 does not carry. The window: two creates
+that both omit a position and race between the read and their writes can compute
+the same slot, and the second lands on top of the first. Bounded to one slot,
+visible on the canvas, fixed by a drag — and no worse than the prediction the
+launcher has always sent, which reads a snapshot already a round trip stale.
+`resolve_placement_position`'s docstring is the long form; the row is filed in
+the launcher's Mission Control queue.
 
 **The ack gains `position` and `actor`, both additive.** `position` is what was
 written — policy or verbatim — so a client that sent none learns where its agent
