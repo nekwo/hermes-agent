@@ -20,6 +20,52 @@ _gateway_fence.install()
 
 
 @pytest.fixture(autouse=True)
+def _sys_modules_identity_is_restored():
+    """A test may IMPORT modules; it may not REPLACE or DROP one.
+
+    The largest cross-test pollution class in this directory, measured
+    2026-08-31. ``test_skills_subparser.py`` deletes ``hermes_cli.main`` from
+    ``sys.modules`` and re-imports it to prove the parser still builds -- and
+    never puts the original back. Python then holds TWO ``hermes_cli.main``
+    module objects with two separate namespaces:
+
+      * every test file that did ``from hermes_cli.main import _build_web_ui``
+        at COLLECTION time holds a function whose ``__globals__`` is the FIRST
+        namespace, now orphaned;
+      * ``sys.modules["hermes_cli.main"]`` is the SECOND, which is what
+        ``patch("hermes_cli.main._run_with_idle_timeout")`` and
+        ``monkeypatch.setattr(cli_main, ...)`` reach.
+
+    So the patch lands in a namespace the function under test never reads, and
+    the test runs production for real. Measured: ``test_web_ui_build`` shelled
+    out to a genuine ``npm run build`` (the ``npm error code EJSONPARSE`` in
+    the baseline output is that build, not a mock), and the ``_cmd_update_impl``
+    helper stubs in ``test_update_venv_health`` silently did nothing. It is
+    also why these reds are green in isolation yet perfectly deterministic in a
+    full run: they depend on running after ONE file, not on timing.
+    Alphabetical order does the rest -- one file, 16 reds.
+
+    Restoring identity fixes the class rather than the caller, and keeps
+    working when the next test reaches for the same trick. Note the asymmetry:
+    newly imported modules are LEFT alone (lazy imports are normal, and
+    un-importing them would be its own pollution). Only a module the session
+    already had, and which the test replaced or removed, is put back.
+
+    ``importlib.reload`` is deliberately NOT covered: it mutates the existing
+    module object in place, so identity -- and therefore every binding --
+    survives. Reload is a different question, and this guard would answer it
+    dishonestly by appearing to.
+    """
+    before = sys.modules.copy()
+    try:
+        yield
+    finally:
+        for name, module in before.items():
+            if sys.modules.get(name) is not module:
+                sys.modules[name] = module
+
+
+@pytest.fixture(autouse=True)
 def _no_windows_gateway_pause_token(request, monkeypatch):
     """L1 of the gateway fence: no test drives the REAL Windows gateway pause.
 
