@@ -370,7 +370,7 @@ only `section_health`'s key set pinned, so a section added to three of the four
 was counted and verdicted while rendering no operator line at all. Adding a
 section is now one table row; a missing roster entry is unspellable.
 
-The sections, each contributing one health value (`schema_version: 7`):
+The sections, each contributing one health value (`schema_version: 8`):
 
 | Section | What it observes | Verdict weight |
 |---|---|---|
@@ -455,11 +455,19 @@ with. `None` — every item written before the field, and every one adopted from
 peer that has not upgraded — is CANNOT SAY: such a desk falls through to the
 absence buckets and is judged on whether its agent exists, which is the same
 softer answer an unreadable id used to get. The field is deliberately not on the
-wire; no client decides anything with it. One migration consequence, stated
-rather than discovered: it is inside `office_content_hash`, so the first status
-or publish after the upgrade sees every actor's hash move once and reports it as
-a local change. That is a self-healing blip in the publish direction, never a
-delete-shaped one.
+wire; no client decides anything with it — and it is excluded from
+`office_content_hash` for the same reason (`office_models._ITEM_HASH_EXCLUDE`).
+That exclusion was the ruling on this stage's one open migration question. As
+first built, the field rode inside the hash, so the first status or publish
+after the upgrade would have seen every actor's hash move once and reported it
+as a local change: an unmeasured drift spike on the lane whose whole job is
+detecting real drift, and — for as long as any peer ran a store that decoded the
+field away — a disagreement between two installs holding identical content. The
+hash filter drops the KEY rather than nulling it, which is what makes the fix
+provable instead of plausible: the encoded payload is byte-identical to the one
+the function produced before the field existed, so no hash on any existing store
+moves at all. Nothing real hides there, because `kind` IS content and is still
+hashed.
 
 **`duplicate_placements`** (H-H8) is the same section's third sweep, and the
 reader the two write fences' known residual needed: an instance-keyed write

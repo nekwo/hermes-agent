@@ -593,7 +593,10 @@ list), `instance_retired` (a tombstone, no recorded failure for this key — whe
 an absent or unreadable receipt also degrades, the softer of two statements
 about one absence), or `instance_unknown` (no tombstone: the realm-pulled
 placement, whose instance stayed on the peer). Report `schema_version` moved to
-7. Until this, "row archived, desk still live" was visible on one ack and then
+8 — 7 is H-H8's `duplicate_placements`; the two additions were authored
+concurrently on two branches, both shipped claiming 7, and the merge numbered
+them in landing order rather than letting one number mean two contracts. Until
+this, "row archived, desk still live" was visible on one ack and then
 gone — the census could still see the wreckage but reported it under the same
 token as a pulled placement, two very different repairs behind one word. The
 repair remains the operator's: re-run the retire (its replay sweeps) or
