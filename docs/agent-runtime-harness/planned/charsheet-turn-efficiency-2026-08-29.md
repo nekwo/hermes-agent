@@ -15,8 +15,16 @@ list is unchanged and is what every stage was priced against.
 | 3b — `process notify`: fire the verb, end the turn, get the receipt on exit | SHIPPED | `29b8ecda4`, + `aa31cef44` (an evicted notify promise is logged, never silent) |
 | 4a — `thumb --square` | SHIPPED | `0a75a0b9a`, + `8a606d465` (square crops keep the sprite's transparency) |
 | 4b — payloads carry a machine `next` hint | SHIPPED | `cc519e638` |
-| **5 — `characters auto`, the one-shot autopilot verb** | **OPEN** | gated on owner ruling **R-3**, unmoved |
-| **6 — element `summary`/`tool_input` cross-pairing on concurrent tool starts** | **OPEN** | independent of everything else; land whenever |
+| **5 — `characters auto`, the one-shot autopilot verb** | **IN BUILD** | **R-3 RULED YES 2026-08-31** (decision-close wave RD-10); built by W2-H4 |
+| **6 — element `summary`/`tool_input` cross-pairing on concurrent tool starts** | **IN BUILD** | built by W2-H4 in the same branch |
+
+**R-3 — RULED YES, 2026-08-31.** The one-shot autopilot ships. The ruling is
+RD-10 of `EterniaLauncher/docs/mission_control/planned/decision-close-wave-2026-08-31.md`
+("it is the one-shot-autonomy north star in miniature"), and it adopts the
+Stage-5 text's own three conditions unchanged: the verb is documented as being
+for an operator's explicit "drive it all the way" ask ONLY, it stops rather
+than overrides on a handedness refusal, and it writes the same per-attempt
+history the interactive verbs write so `reopen` repair still works.
 
 Stage 1's other option (**1a**, adding the skill to the persona's assignment)
 was not the one taken; 1b is the shipped posture. Where a stage's text below and
@@ -366,7 +374,7 @@ regression on the reply contract.
   no consumer breaks. Value: zero `--help` probing even for a skill-less
   caller, and the hints double as the autopilot spine for Stage 5.
 
-### Stage 5 — one-shot autopilot verb (GATED, owner ruling R-3)
+### Stage 5 — one-shot autopilot verb (RULED IN 2026-08-31, R-3 → YES)
 
 `hermes harness characters auto --draft <id> [--through compose] [--json]`:
 one CLI process that drives `turnaround → approve-direction --all → rows →
