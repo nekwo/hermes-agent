@@ -1700,6 +1700,21 @@
         "-q",
         "tests/agent_runtime/test_office_sync.py::test_a_pulled_actor_that_decodes_with_NO_key_is_the_same_absence"
       ]
+    },
+    {
+      "id": "ax2-the-conflict-vocabulary-regrows-a-retired-guard",
+      "path": "agent_runtime/agent_retire.py",
+      "symbol": "CONFLICT_REASONS",
+      "operator": "readd-retired-refusal-reason",
+      "find": "    \"instance_active\",\n)",
+      "replace": "    \"instance_active\",\n    \"assignment_active\",\n)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_the_conflict_vocabulary_is_the_stores_own_raise_sites"
+      ]
     }
   ]
 }
