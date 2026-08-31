@@ -36,6 +36,14 @@ MAX_REINDENT_COLUMNS = 16
 #: rows on the way in, and this is added after that check, by us, on our copy.
 ANCHOR_KEY = "_anchor"
 
+#: Where ``_partition_claims`` parks WHY a claim was selected — ``"lines"``
+#: (the diff touched the anchored needle) or ``"symbol"`` (it touched the
+#: definition around it). Same non-field status as :data:`ANCHOR_KEY`. It is
+#: reported rather than kept private: symbol selection is a deliberate
+#: widening, and a widening nobody can see in the output is indistinguishable
+#: from the gate having gone vague.
+SELECTION_KEY = "_selected_by"
+
 
 def _load_json(path: Path) -> dict[str, Any]:
     try:
@@ -64,6 +72,21 @@ def _changed_lines(base: str, relative_path: str) -> set[int]:
             continue
         start = int(match.group(1))
         count = int(match.group(2) or "1")
+        if count == 0:
+            # A DELETION-ONLY hunk (`@@ -32 +31,0 @@`): nothing was added, so
+            # `range(31, 31)` is empty and this hunk used to contribute no
+            # changed line at all. Every retirement wave therefore reported
+            # `candidates: 0` and shipped with zero mutation coverage BY
+            # CONSTRUCTION — measured on the Z1 landing (`4bf4387760`), filed
+            # the same day.
+            #
+            # The two new-file lines the removed text sat between are what is
+            # left of it, and they are what a claim anchored beside the
+            # deletion overlaps. Paired with symbol-scoped selection below,
+            # this is also how a deletion INSIDE a symbol reaches that symbol's
+            # claims, which is the case the row actually cared about.
+            changed.update({max(start, 1), start + 1})
+            continue
         changed.update(range(start, start + count))
     return changed
 
@@ -132,6 +155,10 @@ def _line_offsets(text: str) -> list[int]:
     return offsets
 
 
+def _is_whole_module(symbol: str) -> bool:
+    return symbol.split("/", 1)[0].strip().lower() in WHOLE_MODULE_SYMBOLS
+
+
 def _symbol_span(text: str, path: str, symbol: str) -> tuple[int, int]:
     """The character span the claim's ``find`` is anchored INSIDE.
 
@@ -149,7 +176,7 @@ def _symbol_span(text: str, path: str, symbol: str) -> tuple[int, int]:
     exercised inside ``normalize_agent_create``.
     """
 
-    if symbol.split("/", 1)[0].strip().lower() in WHOLE_MODULE_SYMBOLS:
+    if _is_whole_module(symbol):
         return 0, len(text)
     head = symbol.split("/", 1)[0].strip()
     try:
@@ -269,6 +296,10 @@ class ClaimAnchor:
     spliced at ``offset`` rather than handed to ``str.replace``, because
     uniqueness is now a property of the SYMBOL and a needle that also occurs
     earlier in the file must not be the one that gets rewritten.
+
+    ``symbol_lines`` is the whole span of the definition the claim names —
+    what SELECTION reads. Empty for a ``module``-scope claim, where the span is
+    the file and "this diff touched the file" is not a claim about anything.
     """
 
     offset: int
@@ -276,11 +307,13 @@ class ClaimAnchor:
     find: str
     replace: str
     shift: int
+    symbol_lines: frozenset[int] = frozenset()
 
 
 def _anchor_claim(text: str, claim: dict[str, Any]) -> ClaimAnchor:
     path = str(claim["path"])
-    start, end = _symbol_span(text, path, str(claim["symbol"]))
+    symbol = str(claim["symbol"])
+    start, end = _symbol_span(text, path, symbol)
     span = text[start:end]
     needle = str(claim["find"])
 
@@ -305,12 +338,19 @@ def _anchor_claim(text: str, claim: dict[str, Any]) -> ClaimAnchor:
         )
     offset = start + position
     first = text.count("\n", 0, offset) + 1
+    if _is_whole_module(symbol):
+        symbol_lines: frozenset[int] = frozenset()
+    else:
+        symbol_lines = frozenset(
+            range(text.count("\n", 0, start) + 1, text.count("\n", 0, end) + 2)
+        )
     return ClaimAnchor(
         offset=offset,
         lines=set(range(first, first + moved_find.count("\n") + 1)),
         find=moved_find,
         replace=moved_replace,
         shift=shift,
+        symbol_lines=symbol_lines,
     )
 
 
@@ -392,6 +432,20 @@ def _partition_claims(
     written. Measured on the S4 landing, where
     ``s4-a-pre-plan-done-receipt-re-enters-the-skills-phase`` anchors a line the
     slice did not change and therefore never appeared in any output at all.
+
+    Selection is by SYMBOL, not by the anchor's own two lines. The measured
+    miss (H-H2, `0ecb921b9d`): that landing rewrote 82 lines of
+    ``agent_create.py``, 41 of them inside ``_reply``, and rendered the exact
+    two lines ``hh2-the-one-reply-builder-stops-observing-the-revision``
+    anchors on (1170-1171) as unchanged CONTEXT. The claim registered FOR that
+    slice was not selected by its own landing diff, and the gate said so with a
+    green run. A guarantee is about a symbol's behaviour, so a diff that
+    rewrote the symbol has to put it on the hook whether or not the two lines
+    carrying the needle happened to survive the rewrite verbatim.
+
+    ``module``-scope claims keep line selection: their span is the whole file,
+    and "this diff touched this file" would select them on every run — which is
+    not a symbol claim, it is no claim at all.
     """
 
     rows = _load_json(claims_path).get("claims", [])
@@ -410,7 +464,12 @@ def _partition_claims(
         # selection was computed from, rather than re-deriving one and hoping
         # the two agree.
         claim[ANCHOR_KEY] = anchor
-        if anchor.lines & _changed_lines(base, str(claim["path"])):
+        changed = _changed_lines(base, str(claim["path"]))
+        if anchor.lines & changed:
+            claim[SELECTION_KEY] = "lines"
+            selected.append(claim)
+        elif anchor.symbol_lines & changed:
+            claim[SELECTION_KEY] = "symbol"
             selected.append(claim)
         else:
             unselected.append(claim)
@@ -519,7 +578,11 @@ def run(base: str, claims_path: Path, exemptions_path: Path, max_candidates: int
     claims, unselected = _partition_claims(base, claims_path)
     print(f"mutation candidates: {len(claims)} (cap {max_candidates})")
     for claim in claims:
-        print(f"  {claim['id']}: {claim['path']}::{claim['symbol']} [{claim['operator']}]")
+        via = " (selected by symbol)" if claim.get(SELECTION_KEY) == "symbol" else ""
+        print(
+            f"  {claim['id']}: {claim['path']}::{claim['symbol']} "
+            f"[{claim['operator']}]{via}"
+        )
     # AFTER the candidate line for the same reason the UNSELECTED rows are, and
     # for BOTH halves: a claim re-anchored onto a re-indented block is a fact
     # about this run whether or not the diff selected it, and a silent
