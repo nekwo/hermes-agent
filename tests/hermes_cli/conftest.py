@@ -19,13 +19,14 @@ from tests.hermes_cli import _gateway_fence
 _gateway_fence.install()
 
 
-#: Pristine ``web_server.app.state`` as it stood the first time a test in this
-#: directory saw the module — the value every later test is reset to.
-_APP_STATE_BASELINE: dict = {}
+#: Pristine ``web_server.app`` state — ``app.state`` and the router's merged
+#: lifespan — as they stood the first time a test in this directory saw the
+#: module. Every later test is reset to this.
+_APP_BASELINE: dict = {}
 
 
 @pytest.fixture(autouse=True)
-def _web_server_app_state_is_pristine():
+def _web_server_app_is_pristine():
     """``hermes_cli.web_server.app`` is ONE object for the whole session.
 
     ``app`` is a module-level FastAPI instance, so ``app.state`` is a single
@@ -59,18 +60,41 @@ def _web_server_app_state_is_pristine():
     fix: a future flag stashed on app.state is covered without a second
     fixture. Tests that mean to change it still can — the change just does not
     outlive them.
+
+    The router's merged lifespan is the SECOND thing this app accumulates, and
+    it is the same shape of problem. ``app.include_router(r)`` does not only
+    append routes — FastAPI wraps ``app.router.lifespan_context`` in a
+    ``merged_lifespan`` that also enters ``r``'s. Tests that remount plugin
+    API routes mid-session (test_web_server.py's example-plugin fixture,
+    test_project_plugin_rce_bypass.py) restore ``app.router.routes`` and
+    nothing else, so the wrappers stack up for the rest of the run. When one
+    of those routers is a MagicMock, its lifespan yields an AsyncMock, and the
+    NEXT test to start the app dies in FastAPI's
+    ``{**(maybe_nested_state or {})}`` with ``AsyncMock.keys() returned a
+    non-iterable (type coroutine)`` — a message that names nothing involved.
+    Measured: test_project_plugin_rce_bypass.py alone reds
+    test_web_server_boot_handshake.py::test_lifespan_warmup_is_synchronous.
+
+    Routes are deliberately NOT restored here: the fixtures that append them
+    already put the list back, and resetting the list on the way in would also
+    drop a router legitimately mounted by a later import.
     """
     module = sys.modules.get("hermes_cli.web_server")
-    state = getattr(getattr(module, "app", None), "state", None)
+    app = getattr(module, "app", None)
+    state = getattr(app, "state", None)
+    router = getattr(app, "router", None)
     # Starlette keeps State's mapping in ``_state``; if that ever changes
     # shape, do nothing rather than guess — the reds come back honestly.
     if state is None or not hasattr(state, "_state"):
         return
-    if not _APP_STATE_BASELINE:
-        _APP_STATE_BASELINE["pristine"] = dict(state._state)
+    if not _APP_BASELINE:
+        _APP_BASELINE["state"] = dict(state._state)
+        _APP_BASELINE["lifespan"] = getattr(router, "lifespan_context", None)
         return
     state._state.clear()
-    state._state.update(_APP_STATE_BASELINE["pristine"])
+    state._state.update(_APP_BASELINE["state"])
+    if router is not None and _APP_BASELINE["lifespan"] is not None:
+        router.lifespan_context = _APP_BASELINE["lifespan"]
 
 
 @pytest.fixture(autouse=True)
