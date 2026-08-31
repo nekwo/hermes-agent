@@ -10,10 +10,8 @@ from .observability import build_observability
 from .operator_channels import operator_channel_summary
 from .parity import ProjectionAccountant
 from .persona_assignments import (
-    PersonaAssignmentStore,
     PersonaInstanceStore,
     active_persona_instance_agent_summaries,
-    persona_assignment_summary,
     persona_instance_summary,
 )
 from .persona_chat_history import DEFAULT_PERSONA_CHAT_MESSAGE_TAIL, persona_chat_history_summary, persona_chat_trace_summary
@@ -126,10 +124,7 @@ def _build_status_in_runtime_scope(run_store: RunStore | None = None, incident_s
         *data["agents"],
         *active_persona_instance_agent_summaries(instances, personas_by_id),
     ]
-    data["persona_instance_runtime"] = {
-        "enabled": True,
-        "assignment_store_enabled": True,
-    }
+    data["persona_instance_runtime"] = {"enabled": True}
     data["persona_instances"] = [persona_instance_summary(instance) for instance in instances]
     # ADDITIVE, and accounting only: "what did the serve delivery drain last do,
     # and which gate bounced a completion". Imported lazily and wrapped, because
@@ -150,7 +145,6 @@ def _build_status_in_runtime_scope(run_store: RunStore | None = None, incident_s
         data["delivery_drain"] = delivery_drain_status()
     except Exception:
         data["delivery_drain"] = {"live": False, "source": "absent"}
-    assignments = PersonaAssignmentStore(event_log=event_log).list_all()
     history_accountant = ProjectionAccountant("persona_chat_history")
     trace_accountant = ProjectionAccountant("persona_chat_trace")
     data["persona_chat_history"] = persona_chat_history_summary(
@@ -158,7 +152,6 @@ def _build_status_in_runtime_scope(run_store: RunStore | None = None, incident_s
         session_db=session_db,
         message_tail=DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
         accountant=history_accountant,
-        persona_assignments=assignments,
     )
     data["persona_chat_trace"] = persona_chat_trace_summary(
         persona_instances=instances,
@@ -176,10 +169,12 @@ def _build_status_in_runtime_scope(run_store: RunStore | None = None, incident_s
         "persona_chat_trace": trace_accountant.summary(),
     }
     drop_samples = history_accountant.drop_samples() + trace_accountant.drop_samples()
-    data["persona_assignments"] = {
-        "active": [persona_assignment_summary(item) for item in assignments if item.state in {"queued", "assigned", "running", "waiting_on_tool", "waiting_on_proof", "needs_input"}],
-        "recent": [persona_assignment_summary(item) for item in assignments[-25:]],
-    }
+    # AX2 (2026-08-31): the ``persona_assignments`` block left this verb with
+    # the snapshot's. `harness status` was never the launcher's contract
+    # boundary — the two consumers read `runtime_health` / `agents` by name —
+    # and this block was a second projection of a store nothing reads,
+    # re-listing every row on every status call. `harness persona assignments
+    # --json` is the reader that survives.
     data["parity"] = _parity_envelope(
         data,
         build_started=_build_started,

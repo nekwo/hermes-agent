@@ -12,6 +12,21 @@ and parses them through its real decode + read-model pipeline
 split is structural, not an oversight, and the script names both halves
 (`GENERATED_FRAME_FILES` / `PINNED_ONLY_FILES`).
 
+> **CROSS-STACK COPY STATUS (AX2, 2026-08-31) — OPEN, launcher mirror OWED.**
+> Seven generated hydrate/delta goldens lost three core keys with the writerless
+> assignment lane: `persona_assignments` (the whole block, with its `recent_ref`
+> eviction pointer), `persona_instance_runtime.assignment_store_enabled`, and
+> `warnings` (whose only producer emitted only `agent_already_assigned`, a code
+> the launcher had already tombstoned). No file was added or removed, so this
+> manifest's MEMBERSHIP and LINE ORDER are unchanged and
+> `check_producer_contracts.py` compares those clean; seven HASHES moved.
+> **`SNAPSHOT_CONTRACT_VERSION` deliberately did NOT move** — the ruling and its
+> argument are written at `snapshot._parity_envelope`'s version history, under
+> "54 KEPT (AX2)". The launcher must mirror these bytes into
+> `test/fixtures/harness_stream/` and update its own `MANIFEST.sha256`; until it
+> does, both repos are green while they disagree, which is exactly the drift the
+> notes below exist to prevent.
+
 > **CROSS-STACK COPY STATUS (placement verb S0, settled 2026-08-26).**
 > `patch_agent_create.json` and `delta_agent_create_narrow_profile.json` were
 > added and mirrored byte-for-byte into the launcher's

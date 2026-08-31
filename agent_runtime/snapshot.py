@@ -35,11 +35,8 @@ from .office_models import (
 )
 from .operator_channels import operator_channel_summary
 from .persona_assignments import (
-    ACTIVE_ASSIGNMENT_STATES,
-    PersonaAssignmentStore,
     PersonaInstanceStore,
     active_persona_instance_agent_summaries,
-    persona_assignment_summary,
     persona_instance_summary,
     persona_instance_visibility_ref,
 )
@@ -875,7 +872,6 @@ def _build_snapshot_in_runtime_scope(
             persona_instances, personas_by_id, readiness_by_persona_id
         ),
     ]
-    persona_assignments = PersonaAssignmentStore(event_log=event_log).list_all()
     migration = migration_status()
     # Hoisted out of the ``data`` literal so their cost is attributable in
     # ``sections_ms`` (both were profiled hot: prompt_observability ~5s, the
@@ -967,15 +963,11 @@ def _build_snapshot_in_runtime_scope(
         "running_work": running_work_section,
         "active_workspace_id": workspace_store.active_id(),
         "active_realm_id": realm_store.active_id(),
-        "warnings": _snapshot_warnings(persona_assignments),
         "agents": agent_summaries,
         "available_personas": available_personas,
         "runtime_paths_diagnostic": _runtime_paths_diagnostic(available_personas),
     }
-    data["persona_instance_runtime"] = {
-        "enabled": True,
-        "assignment_store_enabled": True,
-    }
+    data["persona_instance_runtime"] = {"enabled": True}
     # S4: persona_instances ships as an id-keyed map (the identity substrate
     # the whole roster keys on — the store is already keyed on disk). The
     # ROW LIST is built first because the identity_map alias resolver derives
@@ -1008,7 +1000,6 @@ def _build_snapshot_in_runtime_scope(
         session_db=session_db,
         message_tail=DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
         accountant=history_accountant,
-        persona_assignments=persona_assignments,
         omitted_session_ids=omitted_history_session_ids,
     )
     data["persona_chat_history"] = _persona_chat_history_frame(persona_chat_history_full)
@@ -1034,28 +1025,15 @@ def _build_snapshot_in_runtime_scope(
     # live channels are the whole input; ``_keyed`` still keeps the first
     # occurrence on a duplicate id rather than silently overwriting.
     data["operator_channels"] = _keyed(live_operator_channels, "channel_id")
-    # S8: the ``recent`` lane (last 50 assignments, ~86 KB of old residue)
-    # leaves the frame — the launcher roster only needs the ACTIVE
-    # assignments (a live instance's current assignment is always active).
-    # ``recent`` stays an (empty) list so the launcher fold that concatenates
-    # ``active`` + ``recent`` never trips; the eviction is accounted by
-    # ``recent_ref`` and served on demand by ``harness persona assignments``.
-    active_assignments = [
-        persona_assignment_summary(item)
-        for item in persona_assignments
-        if item.state in ACTIVE_ASSIGNMENT_STATES
-    ]
-    recent_count = len(persona_assignments[-50:])
-    data["persona_assignments"] = {
-        "active": active_assignments,
-        "recent": [],
-        "recent_ref": {
-            "evicted": True,
-            "count": recent_count,
-            "active_count": len(active_assignments),
-            "fetch": "harness persona assignments --json",
-        },
-    }
+    # AX2 (2026-08-31): the ``persona_assignments`` block LEFT the frame, and
+    # with it the only reason this builder opened the assignment store. S8 had
+    # already evicted ``recent`` to a pointer and kept ``active`` for "the
+    # launcher roster"; the launcher then deleted every read of the block
+    # (``6bf48ba26``) and keeps a test asserting that a payload still carrying
+    # it puts nothing on an instance. A projection whose sole consumer pins its
+    # own indifference is not a contract, it is a cost — and the store read was
+    # a directory walk on every build. ``harness persona assignments --json`` is
+    # the surviving reader for residual rows.
     completeness = {
         "persona_chat_history": history_accountant.summary(),
         "persona_chat_trace": trace_accountant.summary(),
@@ -1364,6 +1342,43 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         # ``health()`` already maps to ``MissionSnapshotHealth.stale``. So the
         # honesty half of EG-3.1 needs no launcher change and no bump — an
         # unvalidated projection reads as stale on a pinned-54 launcher today.
+        #
+        # 54 KEPT (AX2, the writerless assignment lane, 2026-08-31) — THE FIRST
+        # KEPT RULING OVER A DEPARTURE, written at length because rule (a)
+        # recorded at 46 ("anything that LEAVES the wire bumps") is unconditional
+        # on its face and this entry does not pretend otherwise. Three things
+        # leave: the whole ``persona_assignments`` block (with S8's
+        # ``recent_ref`` eviction pointer), ``persona_instance_runtime
+        # .assignment_store_enabled`` (constant ``true`` since it was written),
+        # and top-level ``warnings``.
+        #
+        # Rule (a) exists to stop ONE failure: a consumer that modelled a key
+        # keeps parsing, silently receives nothing, and a real surface goes blank
+        # with no signal. Here that failure is not merely unlikely — it is PINNED
+        # ABSENT IN THE CONSUMER'S OWN SUITE. The launcher deleted every read of
+        # the block in the same wave (``6bf48ba26``: the model, the decoder, the
+        # roster-fold parameter and five always-null fields) and keeps
+        # ``mission_agent_instance_test.dart`` feeding a payload that still
+        # CARRIES the block while asserting nothing in it reaches the instance.
+        # ``warnings`` never had a launcher reader at all — the bridge mapper's
+        # forward list does not carry it, so it never reached
+        # ``MissionControlSnapshot.fromJson``, and its one code
+        # (``agent_already_assigned``) is already a launcher tombstone row.
+        #
+        # And the bump is the RISKIER move here, which is what settles it.
+        # ``MissionSnapshotEnvelope.health()`` requires EXACT equality, so 55
+        # against a pinned-54 launcher is ``newerContract`` — and
+        # ``MissionFrameTrust`` maps that to ``mayWrite == false``: an operator
+        # who cannot delete or place anything until the launcher's own pin lands.
+        # Moving the number would spend a live operator write-gate to defend a
+        # read that provably does not exist; keeping it means neither repo has to
+        # move in lockstep at all.
+        #
+        # What this entry does NOT license: a departure whose consumer-side
+        # absence is believed rather than measured and pinned. The evidence
+        # standard is the launcher's test, not the removal's tidiness. The
+        # goldens still move and still have to be mirrored — see
+        # ``tests/fixtures/stream_frames/README.md``.
         #
         # The number itself lives at module scope as
         # :data:`SNAPSHOT_CONTRACT_VERSION` so that consumers derive it instead
@@ -2480,29 +2495,6 @@ def _realm_summary(realm, *, workspaces, active_id: str | None = None) -> dict:
         "active": realm.id == active_id,
         "updated_at": realm.updated_at,
     }
-
-
-def _snapshot_warnings(persona_assignments) -> list[dict]:
-    warnings: list[dict] = []
-    active = [item for item in persona_assignments or [] if getattr(item, "state", None) in ACTIVE_ASSIGNMENT_STATES]
-    for assignment in active:
-        goal_id = getattr(assignment, "goal_id", None) or getattr(assignment, "task_id", None)
-        for other in active:
-            if other is assignment:
-                continue
-            other_goal = getattr(other, "goal_id", None) or getattr(other, "task_id", None)
-            if assignment.persona_id == other.persona_id and goal_id and other_goal and goal_id != other_goal:
-                warnings.append(
-                    {
-                        "code": "agent_already_assigned",
-                        "persona_id": assignment.persona_id,
-                        "goal_id": goal_id,
-                        "other_goal_id": other_goal,
-                        "assignment_id": assignment.id,
-                    }
-                )
-                break
-    return warnings
 
 
 def _agent_summary(agent, *, include_tool_details: bool = False, readiness=None):

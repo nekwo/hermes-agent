@@ -287,10 +287,21 @@ def persona_chat_history_summary(
     bounded redaction-safe message tail and never starts/ticks a model turn. The
     optional ``session_db`` parameter keeps tests hermetic and lets production
     use the normal ``hermes_state.SessionDB`` lazily. ``persona_assignments``
-    is the already-loaded assignment list the snapshot/status builders hold —
-    synthetic live-mission rows anchor their timestamps to the bound
-    assignment's persisted ``created_at`` (R3); this helper never scans the
-    assignment store itself.
+    is an already-loaded assignment list — synthetic live-mission rows anchor
+    their timestamps to the bound assignment's persisted ``created_at`` (R3);
+    this helper never scans the assignment store itself.
+
+    NO PRODUCTION CALLER SUPPLIES IT since AX2 (2026-08-31): the snapshot and
+    status builders were the two, and both stopped opening the assignment store
+    when the ``persona_assignments`` wire block left the frame. The parameter and
+    the R3 anchor are exercised by tests only, and they are kept rather than cut
+    because they belong to the ``task_bound`` synthetic-mission-row lane BELOW
+    them, not to the assignment lane: that whole arm — the ``task_bound`` mode
+    check, the synthetic row, this anchor — retires together under
+    ``planned/task-bound-vocabulary-retirement.md``. Cutting the anchor here
+    would leave the row it dates still being emitted, with its timestamps
+    silently degraded to ``null``, which is a worse tree than the one this note
+    describes.
     """
 
     bound_by_session: dict[str, PersonaInstance] = {}

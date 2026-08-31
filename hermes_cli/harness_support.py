@@ -128,7 +128,11 @@ ERROR_EXIT_CODES = {
     "duplicate_desk": 4,
     "already_exists": 4,
     "stale_revision": 4,
-    "agent_already_assigned": 4,
+    # ``agent_already_assigned`` left this table with AX2 (2026-08-31). It was
+    # the snapshot ``warnings`` lane's only code, that lane's only input was the
+    # writerless assignment store, and the launcher had already tombstoned the
+    # spelling with the retired bridge-error vocabulary — so no producer on
+    # either side of the wire could reach this row.
     "spawn_scope_exhausted": 4,
     "sync_conflict": 4,
     "sync_behind": 4,

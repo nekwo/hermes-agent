@@ -245,9 +245,28 @@ Executed history stays archived. The duplicate-implementation retirement's rows
 
 **From [`19-deferred-debt-ledger.md`](archive/2026-08-22-pre-consolidation/19-deferred-debt-ledger.md):**
 
-- Full `PersonaAssignmentStore` retirement is blocked on Launcher wire consumers (a
+- ~~Full `PersonaAssignmentStore` retirement is blocked on Launcher wire consumers (a
   wire-block drop is a snapshot contract bump) and on residual rows whose only settle
-  path is close/archive; the module has 6 production importers.
+  path is close/archive; the module has 6 production importers.~~ **SETTLED 2026-08-31
+  (§AX AX2), and the row was wrong on both halves.** The Launcher wire consumers were
+  not a block, they were a STAGE: the launcher deleted every read of the
+  `persona_assignments` block (`6bf48ba26`) and keeps a test feeding a payload that
+  still carries it while asserting nothing in it reaches the instance, so hermes
+  dropped the block, `persona_instance_runtime.assignment_store_enabled` and the
+  `warnings` lane it fed. The contract-bump claim is also not what the removal rule
+  says — see `snapshot._parity_envelope`'s "54 KEPT (AX2)" entry for the first KEPT
+  ruling over a departure and the reason a bump was the riskier move here (an
+  exact-equality launcher pin turns a bump into `mayWrite == false`). The retire's two
+  assignment guards went in the same wave (tombstone wave `s76`).
+
+  What the row got RIGHT is the half that is deliberately not built: residual rows
+  whose only settle path is close/archive. `PersonaAssignmentStore`'s read/close
+  surface and `harness persona assignments` / `persona instance close`/`archive`
+  SURVIVE, because retiring them would strand residue on live stores with no verb
+  that can reach it — the same reason the launcher's installer keeps its
+  `persona_assignments` preserved-path rows. Read paths retire; stored bytes do not.
+  Full store retirement is now gated on one thing only: a census showing zero
+  residual rows on every store, and that census does not exist yet.
 - Launcher-side handoff (not this repo): the `close`/`archive` bridge lanes have registry
   rows and argv builders but no dispatcher. (The `allowedArgs` half of this row is
   CLOSED: `auto_run`/`max_actions`/`max_seconds` are gone from both create specs, and

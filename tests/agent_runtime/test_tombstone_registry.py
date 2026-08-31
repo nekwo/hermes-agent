@@ -3405,6 +3405,34 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         "assignments_unknowable",
         scope=_AR,
     ),
+    *rows(
+        "s76",
+        "HEAD",
+        Form.ATTR,
+        "the snapshot's warnings producer, whose only input was the writerless "
+        "assignment list and whose only code was agent_already_assigned. The "
+        "top-level `warnings` key it fed never reached the launcher at all — "
+        "the bridge mapper's forward allowlist does not carry it, so "
+        "MissionControlSnapshot.fromJson never saw one — and the launcher had "
+        "already tombstoned the code with the retired bridge-error vocabulary. "
+        "The KEY's absence is pinned where the registry's own rule says a "
+        "wire-key cut has to be pinned, on the built frame: "
+        "test_s76_assignment_wire_prune",
+        "_snapshot_warnings",
+        scope=("agent_runtime.snapshot",),
+    ),
+    *rows(
+        "s76",
+        "HEAD",
+        Form.CODE,
+        "the refusal CODE the retired warnings lane was the only producer of. "
+        "Rowed as vocabulary and not merely as a deleted function because a "
+        "reason code is invoked by name across a wire: it also left the CLI's "
+        "ERROR_EXIT_CODES family table, where it had outlived every producer "
+        "that could reach it",
+        "agent_already_assigned",
+        scope=("agent_runtime", "hermes_cli"),
+    ),
 )
 
 

@@ -480,11 +480,11 @@ def test_status_and_snapshot_expose_persona_instances_unconditionally(monkeypatc
     status = build_status()
     snapshot = build_snapshot()
 
-    # The wire block survives as a fixed True/True pair for stale readers.
-    assert status["persona_instance_runtime"] == {
-        "enabled": True,
-        "assignment_store_enabled": True,
-    }
+    # The wire block survives — its ``enabled`` half is S56's statement that the
+    # roster is no longer gated. AX2 (2026-08-31) took the second half:
+    # ``assignment_store_enabled`` was the writerless assignment lane's own flag
+    # and was constant ``true`` from the day it was written.
+    assert status["persona_instance_runtime"] == {"enabled": True}
     # S56 retired these build_status rows with the worker/bundle/envelope lanes.
     for retired in (
         "worker_sessions",
