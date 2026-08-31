@@ -243,9 +243,8 @@ def test_the_ledger_cap_evicts_settled_history_before_a_live_block():
     # RD-11's cost: restored entries linger, so the bound must not let inert
     # history push a LIVE block off the front — an evicted block is a
     # resurrected skill, which is the one thing this ledger exists to prevent.
-    monkey = pytest.MonkeyPatch()
-    monkey.setattr(store_module, "SKILL_TOMBSTONE_LEDGER_CAP", 2)
-    try:
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(store_module, "SKILL_TOMBSTONE_LEDGER_CAP", 2)
         realm = _realm()
         # The settled entry sits BETWEEN the two live blocks, so a plain
         # oldest-first ``[-cap:]`` would keep it and evict ``live-old`` — the
@@ -255,8 +254,6 @@ def test_the_ledger_cap_evicts_settled_history_before_a_live_block():
         RealmStore().tombstone_skill(realm.id, "settled")
         RealmStore().restore_skill(realm.id, "settled")
         stored = RealmStore().tombstone_skill(realm.id, "live-new")
-    finally:
-        monkey.undo()
 
     assert [entry.slug for entry in stored.skill_tombstones] == ["live-old", "live-new"]
 
