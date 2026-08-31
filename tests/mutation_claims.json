@@ -1715,6 +1715,126 @@
         "-q",
         "tests/agent_runtime/test_agent_retire_service.py::test_the_conflict_vocabulary_is_the_stores_own_raise_sites"
       ]
+    },
+    {
+      "id": "dcw-h1-the-conflict-scan-calls-every-key-a-guess",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "ConflictScan.guessed_keys",
+      "operator": "return-the-whole-key-list",
+      "find": "        return [key for key, outcome in zip(self.keys, self.outcomes) if not outcome.succeeded]",
+      "replace": "        return list(self.keys)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_scan_separates_guessed_conflict_keys_from_read_ones"
+      ]
+    },
+    {
+      "id": "dcw-h1-the-snapshot-drops-the-conflict-provenance-again",
+      "path": "agent_runtime/snapshot.py",
+      "symbol": "_offices_summary",
+      "operator": "pass-an-empty-guess-list",
+      "find": "                conflict_guessed_keys=conflicts.guessed_keys,",
+      "replace": "                conflict_guessed_keys=(),",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_snapshot_office_row_and_its_warning_mark_a_guessed_conflict_key"
+      ]
+    },
+    {
+      "id": "dcw-h1-the-conflict-warning-goes-blind-to-the-guess-list",
+      "path": "agent_runtime/snapshot.py",
+      "symbol": "_office_parity_warnings",
+      "operator": "never-read-the-rows-guess-list",
+      "find": "        guessed = set(office.get(\"conflict_guessed_keys\") or ())",
+      "replace": "        guessed = set()",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_snapshot_office_row_and_its_warning_mark_a_guessed_conflict_key"
+      ]
+    },
+    {
+      "id": "dcw-h1-an-older-office-row-takes-the-parity-section-down",
+      "path": "agent_runtime/snapshot.py",
+      "symbol": "_office_parity_warnings",
+      "operator": "index-the-additive-key",
+      "find": "        guessed = set(office.get(\"conflict_guessed_keys\") or ())",
+      "replace": "        guessed = set(office[\"conflict_guessed_keys\"])",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_an_office_row_with_no_guess_list_still_warns_and_claims_nothing"
+      ]
+    },
+    {
+      "id": "dcw-h1-the-row-builder-defaults-the-guess-list",
+      "path": "agent_runtime/snapshot.py",
+      "symbol": "office_summary_row",
+      "operator": "default-the-required-keyword",
+      "find": "    conflict_guessed_keys,\n",
+      "replace": "    conflict_guessed_keys=(),\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_row_builder_refuses_to_default_the_guess_list"
+      ]
+    },
+    {
+      "id": "dcw-h1-the-cli-full-row-drops-the-guess-list",
+      "path": "hermes_cli/harness_parts/office.py",
+      "symbol": "_office_surface_row",
+      "operator": "print-the-conflict-keys-without-their-provenance",
+      "find": "        row[\"conflict_guessed_keys\"] = summary[\"conflict_guessed_keys\"]\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_entity_row_characterization.py::test_office_surface_row_marks_which_conflict_keys_are_filename_guesses"
+      ]
+    },
+    {
+      "id": "dcw-h1-a-template-clone-drops-unreadable-actors-in-silence",
+      "path": "agent_runtime/workspace_template.py",
+      "symbol": "_copy_office",
+      "operator": "drop-the-unreadable-warning-arm",
+      "find": "    if scan.unreadable:\n        warnings.append(\n            {\n                \"code\": \"office_actors_unreadable\",\n                \"workspace_id\": source_workspace_id,\n                \"unreadable\": scan.unreadable,\n                \"message\": (\n                    f\"{scan.unreadable} office actor file(s) in source workspace \"\n                    f\"'{source_workspace_id}' would not decode and were not copied\"\n                ),\n            }\n        )\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_workspace_lifecycle.py::test_a_source_actor_that_will_not_decode_is_a_named_warning_not_a_short_count"
+      ]
+    },
+    {
+      "id": "dcw-h1-every-template-clone-reports-an-unreadable-actor",
+      "path": "agent_runtime/workspace_template.py",
+      "symbol": "_copy_office",
+      "operator": "append-the-row-unconditionally",
+      "find": "    if scan.unreadable:\n",
+      "replace": "    if True:\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_workspace_lifecycle.py::test_a_fully_readable_source_adds_no_unreadable_warning"
+      ]
     }
   ]
 }

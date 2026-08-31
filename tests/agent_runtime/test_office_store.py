@@ -1805,3 +1805,125 @@ def test_the_written_folder_is_the_one_the_layout_policy_would_have_inferred():
         # property that makes the read-side compensation harmless rather than a
         # second opinion.
         assert item_folder(written) == written.folder
+
+
+# ── WHICH conflict keys are guesses reaches the operator (RD-5) ─────────────
+
+
+def test_the_scan_separates_guessed_conflict_keys_from_read_ones():
+    """RD-5. ``keys`` was complete and ``outcomes`` already said which entries
+    were invented from a filename — but every reader took ``.keys`` alone, so
+    the provenance existed and reached nobody.
+
+    ``guessed_keys`` is that projection, derived from ``outcomes`` rather than
+    tallied beside them (two parallel lists are two things free to drift), and
+    it is what both readers now carry.
+
+    *Mutation:* return ``self.keys``. Every key reads as a guess, and the
+    surfaces that mark guesses mark all of them — the mirror image of the
+    silence this replaces, and just as wrong.
+    """
+
+    ws = _make_workspace()
+    store = OfficeStore()
+    paths.office_conflict_path(ws, "dev").parent.mkdir(parents=True, exist_ok=True)
+    paths.office_conflict_path(ws, "dev").write_text(
+        '{"actor_key": "dev"}', encoding="utf-8"
+    )
+    # Both routes to a guess: a sidecar that would not decode, and one that
+    # decoded and did not say. They must land in the same list.
+    (paths.office_conflicts_dir(ws) / "broken.json").write_text("{not json", encoding="utf-8")
+    (paths.office_conflicts_dir(ws) / "silent.json").write_text("{}", encoding="utf-8")
+
+    scan = store.scan_conflicts(ws)
+    assert scan.keys == ["broken", "dev", "silent"]
+    # NOT the key that came out of a payload, which is the whole distinction.
+    assert scan.guessed_keys == ["broken", "silent"]
+    # The two projections of one outcome list cannot disagree about how many.
+    assert len(scan.guessed_keys) == scan.unreadable
+
+
+def test_the_snapshot_office_row_and_its_warning_mark_a_guessed_conflict_key():
+    """The point of the separation: an operator is never handed a token
+    ``office resolve-conflict --actor <it>`` cannot find without being told so.
+
+    Both keys ride ONE row and ONE warning code — the discrimination is a field
+    and a sentence, never a second code, or every existing census of
+    ``office_actor_conflict`` zeroes.
+
+    *Mutation:* pass ``conflict_guessed_keys=()`` at the snapshot call site (or
+    drop the marking arm). The row is silent again and both keys read as
+    actionable.
+    """
+
+    ws = _make_workspace()
+    store = OfficeStore()
+    store.upsert_actor(ws, _actor_payload("dev"))
+    sidecar = paths.office_conflict_path(ws, "dev")
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text(
+        '{"actor_key": "dev", "kind": "both_changed", "remote_actor": null}',
+        encoding="utf-8",
+    )
+    (paths.office_conflicts_dir(ws) / "broken.json").write_text("{not json", encoding="utf-8")
+
+    snap = build_snapshot(event_log=EventLog())
+    row = snap["offices"][ws]
+    assert row["conflict_actor_keys"] == ["broken", "dev"]
+    assert row["conflict_guessed_keys"] == ["broken"]
+
+    conflicts = {
+        w["entity_id"]: w
+        for w in snap["parity"]["warnings"]
+        if w.get("code") == "office_actor_conflict"
+    }
+    assert set(conflicts) == {"broken", "dev"}
+    assert conflicts["broken"]["guessed"] is True
+    assert "filename guess" in conflicts["broken"]["detail"]
+    # The real key keeps the unqualified sentence: a warning that hedged on
+    # every key would teach an operator to ignore the hedge.
+    assert conflicts["dev"]["guessed"] is False
+    assert "filename guess" not in conflicts["dev"]["detail"]
+
+
+def test_an_office_row_with_no_guess_list_still_warns_and_claims_nothing():
+    """Additive means additive. ``conflict_guessed_keys`` is absent from every
+    office row a core built before RD-5 landed, and from any caller that built
+    the row without it, so the warning builder reads its absence as "this row
+    cannot say" — it neither raises nor marks everything.
+
+    *Mutation:* index ``office["conflict_guessed_keys"]``. A folded older core
+    then takes the whole parity section down with a ``KeyError`` at the one
+    place whose job is to report trouble.
+    """
+
+    from agent_runtime.snapshot import _office_parity_warnings
+
+    warnings = _office_parity_warnings(
+        {"offices": {"w1": {"workspace_id": "w1", "conflict_actor_keys": ["a1"]}}}
+    )
+    assert [w["code"] for w in warnings] == ["office_actor_conflict"]
+    assert warnings[0]["guessed"] is False
+    assert "filename guess" not in warnings[0]["detail"]
+
+
+def test_the_row_builder_refuses_to_default_the_guess_list():
+    """The same "never silently zero" rule ``actors_unreadable`` is declared
+    under, applied to the list beside it: a caller that genuinely holds no
+    conflict scan has to say ``conflict_guessed_keys=()`` out loud.
+
+    *Mutation:* give the parameter a ``()`` default. Every caller that forgets
+    it then silently claims none of its keys are guesses — which is precisely
+    the claim the bare ``.keys`` list used to make, back where it belongs and
+    impossible to notice.
+    """
+
+    import inspect
+
+    from agent_runtime.snapshot import office_summary_row
+
+    param = inspect.signature(office_summary_row).parameters["conflict_guessed_keys"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert param.default is inspect.Parameter.empty
+    with pytest.raises(TypeError):
+        office_summary_row(object(), [], actors_unreadable=0)

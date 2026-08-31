@@ -173,6 +173,58 @@ def test_copy_workspace_content_copies_office_and_board():
     assert len(BoardStore().list_cards(board_models.default_board_id(source.id))) == 2
 
 
+def test_a_source_actor_that_will_not_decode_is_a_named_warning_not_a_short_count():
+    """AX5 remainder. ``read_actor_dir`` skips a source actor file it cannot
+    decode and returns the rest, so the copy simply produced fewer desks — and
+    ``copied`` is the operator's whole evidence of what a template did. A short
+    count with nothing beside it reads as "the source had fewer desks", not
+    "this machine could not open one of its files", while EVERY other office
+    fault in this lane already degrades to a named ``warnings`` row.
+
+    The count is what the scan can honestly supply (``read_actor_dir`` keeps a
+    per-class tally, not a path list), and the row names the SOURCE workspace,
+    which is where an operator has to go.
+
+    *Mutation:* drop the ``if scan.unreadable`` arm. The copy still succeeds,
+    the counts are still short, and nothing says so — the state this closes.
+    """
+
+    source = WorkspaceStore().create(name="Half-Readable Source")
+    dest = WorkspaceStore().create(name="Copy Of It")
+    _seed_office_actor(source.id, persona_id="dev")
+    (paths.office_actors_dir(source.id) / "broken.json").write_text("{not json", encoding="utf-8")
+
+    outcome = copy_workspace_content(source.id, dest.id, scopes=("office",))
+
+    # The readable actor still copied — one bad file must not abort a template.
+    assert outcome["copied"]["office_actors"] == 1
+    assert [w["code"] for w in outcome["warnings"]] == ["office_actors_unreadable"]
+    warning = outcome["warnings"][0]
+    assert warning["unreadable"] == 1
+    assert warning["workspace_id"] == source.id
+    assert source.id in warning["message"]
+    assert {actor.actor_key for actor in OfficeStore().scan_actors(dest.id).actors} == {"dev"}
+
+
+def test_a_fully_readable_source_adds_no_unreadable_warning():
+    """The arm is conditional, so a clean template stays warning-free — the
+    ``warnings == []`` contract the create envelope carries.
+
+    *Mutation:* append the row unconditionally. Every template create then
+    reports a fault it does not have, which is how a warning list stops being
+    read at all.
+    """
+
+    source = WorkspaceStore().create(name="Clean Source")
+    dest = WorkspaceStore().create(name="Clean Copy")
+    _seed_office_actor(source.id, persona_id="dev")
+
+    outcome = copy_workspace_content(source.id, dest.id, scopes=("office",))
+
+    assert outcome["warnings"] == []
+    assert outcome["copied"]["office_actors"] == 1
+
+
 def test_cli_create_from_workspace_copies_scoped_content_and_settings():
     realm = RealmStore().create(name="Template Realm")
     source = WorkspaceStore().create(
