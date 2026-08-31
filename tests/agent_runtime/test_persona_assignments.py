@@ -4846,22 +4846,36 @@ def test_retire_refuses_active_run_binding(isolate_agent_runtime_root):
     assert paths.persona_instance_path(instance.id).exists()
 
 
-def test_retire_refuses_active_assignment(isolate_agent_runtime_root):
+def test_a_residual_active_assignment_no_longer_blocks_a_retire(isolate_agent_runtime_root):
+    """AX2: the ``assignment_active`` guard is GONE, and its row is left alone.
+
+    Two facts, and the second is why this is not simply "a guard was deleted".
+    The retire now completes over a residual active assignment — nothing can
+    mint one (S70 took the store's mint side) and nothing consumes one (the
+    2026-07-30 chat-only purge took the lane that did), so the guard fenced an
+    orphaning with no runtime left to orphan while making a placement
+    undeletable on any store still carrying legacy residue.
+
+    And the row SURVIVES on disk. Read paths retire; stored bytes do not. A
+    retire that swept the assignment away would be the silent data loss the
+    launcher's preserved-path installer rows exist to prevent, and the operator's
+    settle verbs (``harness persona assignments``, ``persona instance close``)
+    still have to be able to see it.
+    """
+
     from agent_runtime import paths
-    from agent_runtime.persona_assignments import PersonaInstanceRetireError
 
     store = PersonaInstanceStore()
     instance = _placement_instance()
-    # S70: residual active rows can still exist on disk even though nothing can
-    # mint one any more — the guard must keep refusing for them.
     assignment = _seed_assignment(persona_id="dev", persona_instance_id=instance.id)
     assert assignment.state in ACTIVE_ASSIGNMENT_STATES
 
-    with pytest.raises(PersonaInstanceRetireError) as excinfo:
-        store.retire(instance.id)
-    assert excinfo.value.code == "assignment_active"
-    assert assignment.id in excinfo.value.detail["active_assignment_ids"]
-    assert paths.persona_instance_path(instance.id).exists()
+    result = store.retire(instance.id)
+
+    assert result["persona_instance_id"] == instance.id
+    assert not paths.persona_instance_path(instance.id).exists()
+    assert paths.persona_assignment_path(assignment.id).exists()
+    assert PersonaAssignmentStore().get(assignment.id).state == assignment.state
 
 
 def test_retire_refuses_missing_instance(isolate_agent_runtime_root):

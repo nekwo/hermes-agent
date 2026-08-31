@@ -17,26 +17,20 @@ silent skip it replaced.
 from __future__ import annotations
 
 import json
-import uuid
 from pathlib import Path
 
 import pytest
 
 pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
 
-from hermes_time import now
-
 from agent_runtime import paths
 from agent_runtime.errors import PersonaInstancesUnreadable, WorkspaceDeleteBlocked
 from agent_runtime.persona_assignments import (
     PERSONA_ROWS_UNREADABLE,
     PersonaAssignmentStore,
-    PersonaInstanceRetireError,
     PersonaInstanceStore,
     persona_instance_id_for,
 )
-from agent_runtime.serde import to_jsonable
-from utils import atomic_json_write
 
 
 # --- fixtures ------------------------------------------------------------
@@ -78,31 +72,6 @@ def _corrupt_assignment_rows(count: int) -> list[str]:
         path.write_text("{not json at all", encoding="utf-8")
         written.append(path.name)
     return written
-
-
-def _seed_assignment(persona_id: str, *, persona_instance_id: str, state: str = "queued"):
-    from agent_runtime.models import PersonaAssignment
-
-    ts = now()
-    assignment = PersonaAssignment(
-        id=f"assign_{uuid.uuid4().hex[:12]}",
-        persona_instance_id=persona_instance_id,
-        persona_id=persona_id,
-        kind="free_floating_message",
-        state=state,
-        title=f"{persona_id} residual assignment",
-        message="historical row",
-        created_by="test",
-        created_at=ts,
-        updated_at=ts,
-    )
-    atomic_json_write(
-        paths.persona_assignment_path(assignment.id),
-        to_jsonable(assignment),
-        indent=2,
-        sort_keys=True,
-    )
-    return assignment
 
 
 def _instance_row_bytes() -> dict[str, bytes]:
@@ -225,57 +194,45 @@ def test_steering_repair_still_strips_a_genuinely_dangling_parent(
     assert PersonaInstanceStore().get(child.id).steered_by == []
 
 
-# --- site 2: the retire guard -------------------------------------------
+# --- site 2: the retire's ASSIGNMENT arms, RETIRED (AX2, 2026-08-31) -----
+#
+# This site used to hold four gates over two refusals: ``assignments_unknowable``
+# (a row that will not decode makes "none active" unprovable) and the
+# ``assignment_active`` guard whose negative it was protecting. Both are gone,
+# and the ML-15 argument is exactly why they could go TOGETHER rather than one
+# at a time: the unknowable arm was never a fact about the retire, it was a fact
+# about the OTHER arm's enumeration. Once the guard it defends stops existing,
+# an unreadable assignment row is a display problem for the settle verbs and
+# nothing a retire has any business refusing over.
+#
+# What survives here is the ONE gate that outlived the pair — a retire over a
+# store whose assignment directory is unreadable must not become a NEW way to
+# fail. The positive behaviour (the retire completes, the assignment row is left
+# on disk) is pinned where the guard lived, in
+# ``test_persona_assignments.py::test_a_residual_active_assignment_no_longer_blocks_a_retire``.
 
 
 @pytest.mark.parametrize("corrupt_count", [1, 2])
-def test_retire_refuses_typed_when_an_assignment_row_will_not_decode(
+def test_an_undecodable_assignment_row_is_no_longer_a_retire_refusal(
     isolate_agent_runtime_root, corrupt_count
 ):
-    """The guard's own docstring: a retire must never orphan a live assignment.
+    """The retire completes over rows it cannot read, and does not touch them.
 
-    It answers by SEARCHING, so its negative is worth what its enumeration is
-    worth. An unreadable assignment row made it answer "none active" and the
-    retire proceeded.
+    Two values for the same reason ML-15 drives every count twice: an arm that
+    re-grew a fence keyed on "any unreadable row at all" would be caught by
+    either, but an arm keyed on a count would not.
     """
 
     store = PersonaInstanceStore()
     instance = _instance("retire_me")
-    _corrupt_assignment_rows(corrupt_count)
+    corrupt = _corrupt_assignment_rows(corrupt_count)
 
-    with pytest.raises(PersonaInstanceRetireError) as excinfo:
-        store.retire(instance.id, reason="placement deleted")
+    result = store.retire(instance.id, reason="placement deleted")
 
-    error = excinfo.value
-    assert error.code == "assignments_unknowable"
-    assert error.detail["unreadable"] == corrupt_count
-    assert error.detail["reason"] == PERSONA_ROWS_UNREADABLE
-    assert error.detail["scope"] == "persona_assignments"
-
-    # The retire did not happen: the row is still live and was never archived.
-    assert paths.persona_instance_path(instance.id).exists()
-    archive_root = paths.persona_instances_archive_dir()
-    assert not list(archive_root.glob("*_retire/*.json")) if archive_root.exists() else True
-
-
-def test_retire_still_refuses_a_genuinely_active_assignment(isolate_agent_runtime_root):
-    """The pre-existing guard is intact and keeps its OWN word.
-
-    C16: the new refusal must not have swallowed the old one. ``assignment_active``
-    and ``assignments_unknowable`` describe different conditions — "I looked and
-    found one" versus "I could not look" — and an operator acts differently on
-    each, so they may never collapse into one sentence.
-    """
-
-    store = PersonaInstanceStore()
-    instance = _instance("retire_blocked")
-    _seed_assignment("dev", persona_instance_id=instance.id, state="queued")
-
-    with pytest.raises(PersonaInstanceRetireError) as excinfo:
-        store.retire(instance.id, reason="placement deleted")
-
-    assert excinfo.value.code == "assignment_active"
-    assert paths.persona_instance_path(instance.id).exists()
+    assert result["persona_instance_id"] == instance.id
+    assert not paths.persona_instance_path(instance.id).exists()
+    directory = paths.persona_assignments_dir()
+    assert sorted(p.name for p in directory.glob("*.json")) == sorted(corrupt)
 
 
 def test_retire_succeeds_on_a_clean_store(isolate_agent_runtime_root):
@@ -288,29 +245,29 @@ def test_retire_succeeds_on_a_clean_store(isolate_agent_runtime_root):
     assert not paths.persona_instance_path(instance.id).exists()
 
 
-def test_a_store_wide_assignment_fault_no_longer_reads_as_none_active(
+def test_a_retire_no_longer_reads_the_assignment_store_at_all(
     isolate_agent_runtime_root, monkeypatch
 ):
-    """The blanket ``except Exception: return []`` is gone.
+    """The strongest form of the removal: the read is GONE, not merely tolerated.
 
-    It made the guard DOUBLY fail-open: on top of the lister dropping rows it
-    could not decode, any store-wide failure was converted into the same
-    confident "none active" the clean path returns. A fault now travels as a
-    fault instead of borrowing the success arm's sentence.
+    A retire that still scanned and swallowed the fault would pass the gate
+    above and would have quietly re-acquired the fail-open arm ML-15 removed.
+    Exploding the scan proves the call site left rather than grew an
+    ``except``.
     """
 
     store = PersonaInstanceStore()
     instance = _instance("retire_faulted")
 
     def _explode(self):
-        raise OSError("the assignments directory is unreadable")
+        raise AssertionError("the retire must not scan the assignment store")
 
     monkeypatch.setattr(PersonaAssignmentStore, "scan_all", _explode)
 
-    with pytest.raises(OSError):
-        store.retire(instance.id, reason="placement deleted")
+    result = store.retire(instance.id, reason="placement deleted")
 
-    assert paths.persona_instance_path(instance.id).exists()
+    assert result["persona_instance_id"] == instance.id
+    assert not paths.persona_instance_path(instance.id).exists()
 
 
 # --- site 2b: the backlink release (a different fact, its own chokepoint) --

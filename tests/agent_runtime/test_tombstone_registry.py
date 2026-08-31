@@ -3355,6 +3355,56 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         "ITEM_ID_SHAPE_UNKNOWN",
         scope=("agent_runtime.harness_doctor",),
     ),
+    *rows(
+        # ``s76`` and not ``ax2``: the sNN spelling is the table's, and the plan
+        # stage (§AX AX2 of the realm-sync × actor-lifecycle wave) lives in the
+        # reason, where a row's provenance belongs.
+        "s76",
+        "HEAD",
+        Form.CLASS_ATTR,
+        "the retire's two ASSIGNMENT guards and the scan that fed them. "
+        "assignment_active fenced 'this retire would orphan a live "
+        "assignment'; S70 deleted the store's mint side and the 2026-07-30 "
+        "chat-only purge deleted the lane that consumed assignments, so no row "
+        "it could orphan can be minted and no surviving row is bound to "
+        "anything that runs — while the guard made a placement undeletable on "
+        "any store still carrying legacy residue. assignments_unknowable was "
+        "never a fact about the retire at all: it existed only to keep the "
+        "first guard's NEGATIVE honest, so it left with what it was protecting "
+        "rather than surviving as a fence over nothing. "
+        "PersonaAssignmentStore.scan_all deliberately SURVIVES — the operator's "
+        "settle verbs still read it — but no WRITE decides on its count any "
+        "more",
+        "persona_assignments.PersonaInstanceStore._scan_active_assignments_for_instance",
+        scope=_AR,
+    ),
+    *rows(
+        "s76",
+        "HEAD",
+        Form.ATTR,
+        "the retire guard's answer type, whose whole purpose was carrying "
+        "'could not look' beside 'looked and found none' for a guard that no "
+        "longer exists",
+        "ActiveAssignmentScan",
+        scope=("agent_runtime.persona_assignments",),
+    ),
+    *rows(
+        "s76",
+        "HEAD",
+        Form.CODE,
+        "the two retire refusal REASONS, retired as wire vocabulary and not "
+        "only as code: the launcher decodes data.reason before the numeric "
+        "code, so re-minting either spelling would put a refusal back on a lane "
+        "whose decode leaves with this landing (launcher 6bf48ba26 kept "
+        "MissionAgentRetireReason.assignmentActive / .assignmentsUnknowable "
+        "expressly until these guards went). One measurement worth carrying: "
+        "the launcher's note that assignments_unknowable 'does not even need a "
+        "legacy row' is not quite right — scan_all only counts rows it opened, "
+        "so both arms needed residue on disk, one active and one corrupt",
+        "assignment_active",
+        "assignments_unknowable",
+        scope=_AR,
+    ),
 )
 
 

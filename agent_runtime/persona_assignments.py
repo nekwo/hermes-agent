@@ -126,28 +126,15 @@ class PersonaInstanceScan(NamedTuple):
 class PersonaAssignmentScan(NamedTuple):
     """What a persona-assignment scan FOUND, beside what it could not read.
 
-    The assignment twin of :class:`PersonaInstanceScan`. The retire guard
-    (:meth:`PersonaInstanceStore._scan_active_assignments_for_instance`) is the
-    reader that makes this a fault rather than a wrong number: its own docstring
-    says a retire must never orphan a live assignment, and it answered that
-    question from this list.
+    The assignment twin of :class:`PersonaInstanceScan`. Its one reader that
+    ACTED on the count — the retire guard — left with AX2; what remains reads
+    the count to report it, so ``unreadable`` is display evidence rather than a
+    write fence here.
     """
 
     assignments: list[PersonaAssignment]
     #: How many ``*.json`` rows in the assignments directory existed and did not
     #: decode. NEVER folded into ``assignments`` and never silently zero.
-    unreadable: int
-
-
-class ActiveAssignmentScan(NamedTuple):
-    """The retire guard's answer, and whether it could actually look.
-
-    ``assignment_ids`` empty means one of two opposite things — "searched and
-    found none" or "could not search" — and the guard acts on the negative, so
-    the second field is what keeps those two apart.
-    """
-
-    assignment_ids: list[str]
     unreadable: int
 
 
@@ -287,12 +274,17 @@ class PersonaInstanceRetireError(AgentRuntimeError):
       Its retirement is the queued workspace-scoping redesign, not this verb.
     - ``instance_active`` — a live run/worker still resolves for the instance;
       never archive a working agent.
-    - ``assignment_active`` — an active persona assignment is bound to the
-      instance; complete/close it first.
-    - ``assignments_unknowable`` — one or more assignment rows will not decode,
-      so ``assignment_active``'s NEGATIVE cannot be established. A guard that
-      cannot see its evidence refuses rather than reading "could not search" as
-      "searched and found none"; ``detail`` carries the count and the scope.
+
+    AX2 (2026-08-31) retired the two ASSIGNMENT arms — ``assignment_active`` and
+    ``assignments_unknowable``. The first fenced "a live assignment would be
+    orphaned"; S70 deleted the store's mint side and the 2026-07-30 chat-only
+    purge deleted the lane that consumed assignments, so no row it could orphan
+    can be created and none that survives is bound to anything that runs. The
+    second existed only to keep the first's NEGATIVE honest — "I could not look"
+    must not read as "I looked and found none" — so it had nothing left to
+    protect once the first went, and the pair leaves as one decision rather than
+    two. Both are rowed in the tombstone registry; the launcher's decodes for
+    them leave with this landing.
     """
 
     def __init__(
@@ -1598,9 +1590,10 @@ class PersonaInstanceStore:
         Refuses with a typed :class:`PersonaInstanceRetireError` (never a silent
         no-op) when the row is the canonical persona/profile channel
         (``canonical_persona_channel`` — the global-singleton retirement is the
-        queued workspace-scoping redesign), when a live run/worker still
-        resolves (``instance_active`` — never archive a working agent), or when
-        an active persona assignment is bound (``assignment_active``)."""
+        queued workspace-scoping redesign), or when a live run/worker still
+        resolves (``instance_active`` — never archive a working agent). The two
+        ASSIGNMENT guards this method used to carry left with AX2; the class
+        docstring above carries the argument."""
         try:
             instance = self.get(persona_instance_id)
         except Exception as exc:
@@ -1631,40 +1624,6 @@ class PersonaInstanceStore:
                 detail={
                     "active_run_id": safe_optional_token(instance.active_run_id),
                 },
-            )
-
-        assignment_scan = self._scan_active_assignments_for_instance(instance.id)
-        if assignment_scan.unreadable:
-            # The guard below answers "is a live assignment bound to this
-            # instance?" by SEARCHING the assignment store, so its negative is
-            # only as good as its enumeration: an unreadable row answers "none
-            # active" and the retire proceeds to orphan exactly the assignment
-            # the guard exists to protect. A guard that cannot see its evidence
-            # refuses.
-            raise PersonaInstanceRetireError(
-                "assignments_unknowable",
-                (
-                    f"{instance.id}: {assignment_scan.unreadable} persona assignment row(s) "
-                    "will not decode, so 'no active assignment' cannot be established; "
-                    "repair or remove them before retiring"
-                ),
-                persona_instance_id=instance.id,
-                detail={
-                    "reason": PERSONA_ROWS_UNREADABLE,
-                    "scope": "persona_assignments",
-                    "unreadable": assignment_scan.unreadable,
-                },
-            )
-        active_assignment_ids = assignment_scan.assignment_ids
-        if active_assignment_ids:
-            raise PersonaInstanceRetireError(
-                "assignment_active",
-                (
-                    f"{instance.id} has {len(active_assignment_ids)} active assignment(s); "
-                    "complete or close them before retiring"
-                ),
-                persona_instance_id=instance.id,
-                detail={"active_assignment_ids": active_assignment_ids},
             )
 
         archive_dir = paths.persona_instances_archive_dir() / f"{now().strftime('%Y%m%dT%H%M%SZ')}_retire"
@@ -1810,34 +1769,6 @@ class PersonaInstanceStore:
         except Exception:  # noqa: BLE001 - absent, unreadable, or not JSON
             return None
         return raw if isinstance(raw, dict) else None
-
-    def _scan_active_assignments_for_instance(self, instance_id: str) -> ActiveAssignmentScan:
-        """Ids of active persona assignments bound to this instance, beside how
-        many assignment rows could not be read at all (guard input for
-        :meth:`retire`). A retire must never orphan a live assignment.
-
-        The count travels because the ids alone cannot express the difference
-        between "searched the store and found none" and "could not search the
-        store" — and this guard's whole job is a negative answer.
-
-        NO blanket ``except Exception: return []`` any more. That arm made the
-        guard doubly fail-open: on top of the lister silently dropping rows it
-        could not decode, a store-wide failure was converted into the same
-        confident "none active" the clean path returns, which is C16's defect
-        exactly — one arm reusing another arm's sentence for a condition it does
-        not describe. A fault now travels as a fault, and :meth:`retire` turns it
-        into a typed refusal that names it.
-        """
-        scan = PersonaAssignmentStore(event_log=self.event_log).scan_all()
-        return ActiveAssignmentScan(
-            assignment_ids=[
-                assignment.id
-                for assignment in scan.assignments
-                if assignment.persona_instance_id == instance_id
-                and assignment.state in ACTIVE_ASSIGNMENT_STATES
-            ],
-            unreadable=scan.unreadable,
-        )
 
     def _archive_instance_row(self, instance: PersonaInstance, archive_dir) -> Any:
         """Move the instance's row file into ``archive_dir`` (archive-never-delete).
@@ -2606,13 +2537,17 @@ class PersonaAssignmentStore:
     display-name-less branch and ``persona instance message``), whose queued
     rows had no consumer since the 2026-07-30 chat-only purge removed ticking.
 
-    What remains is deliberately kept: residual rows exist on live runtime
-    roots, the Launcher parses the snapshot/status ``persona_assignments`` wire
-    block (``_personaAssignmentsFromJson`` feeds the roster fold), the retire
-    guard refuses to archive an instance with an active assignment, and the
-    ``persona instance close``/``archive`` maintenance verbs settle residual
-    rows through :meth:`complete`. Full store retirement is a parked contract
-    decision (deferred-debt ledger, S70)."""
+    AX2 (2026-08-31) took the READ side's two remaining consumers with it: the
+    launcher deleted every read of the ``persona_assignments`` wire block
+    (launcher ``6bf48ba26``) and hermes stopped projecting it, and the two
+    retire guards that keyed on an active assignment are gone with their
+    argument. What is deliberately KEPT is the OPERATOR's settle path: residual
+    rows exist on live runtime roots, and ``harness persona assignments``,
+    ``persona instance close``/``archive`` and the chat-delete unbind are the
+    only ways to see and terminate them through :meth:`complete`. Retiring those
+    too would strand residue with no verb that can reach it — the same reason
+    the launcher's installer keeps its ``persona_assignments`` preserved-path
+    rows. Read paths retire; stored bytes do not."""
 
     def __init__(self, event_log: EventLog | None = None):
         self.event_log = event_log or EventLog()
@@ -2631,8 +2566,11 @@ class PersonaAssignmentStore:
 
         THE chokepoint, the assignment twin of
         :meth:`PersonaInstanceStore.scan_all`. ``list_all`` is the thin list
-        view over it; the retire guard — which must never orphan a live
-        assignment — asks the fuller question.
+        view over it, and since AX2 it is the only view anything asks for: the
+        retire guard that consumed the ``unreadable`` count as a write fence is
+        gone. The count still travels rather than being folded away, because a
+        settle verb that showed the operator a SHORT list as if it were the
+        whole store is the same silent-skip defect one layer up.
         """
 
         directory = paths.persona_assignments_dir()

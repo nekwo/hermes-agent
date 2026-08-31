@@ -56,10 +56,16 @@ The refusal vocabulary is the store's, one-to-one
 -------------------------------------------------
 ``PersonaInstanceRetireError.code`` is not re-spelled here. ``not_found`` maps to
 ``ERR_NOT_FOUND`` and every other code — ``canonical_persona_channel``,
-``instance_active``, ``assignment_active``, ``assignments_unknowable`` — to
+``instance_active`` — to
 ``ERR_CONFLICT`` with ``data.reason`` carrying the code verbatim, because the
 launcher decodes ``data.reason`` first and the numeric code second. A refusal
 this lane invented would be a second vocabulary for one set of guards.
+
+AX2 (2026-08-31) removed the store's two ASSIGNMENT guards, so
+``assignment_active`` and ``assignments_unknowable`` left this vocabulary with
+them — see :class:`persona_assignments.PersonaInstanceRetireError` for the
+argument. Nothing here re-spelled them, which is why the change is one tuple and
+one sentence.
 """
 
 from __future__ import annotations
@@ -95,8 +101,6 @@ REASON_INSTANCE_ID_REQUIRED = "persona_instance_id_required"
 CONFLICT_REASONS = (
     "canonical_persona_channel",
     "instance_active",
-    "assignment_active",
-    "assignments_unknowable",
 )
 
 

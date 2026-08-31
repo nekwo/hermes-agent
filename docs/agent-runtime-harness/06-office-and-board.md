@@ -617,10 +617,25 @@ when the RPC lane is degraded — the lane on which a grep over the event log is
 the only join an operator has left.
 
 **Refusals are `PersonaInstanceRetireError`'s codes one-to-one**: `not_found` →
-`ERR_NOT_FOUND` (4001); `canonical_persona_channel` / `instance_active` /
-`assignment_active` / `assignments_unknowable` → `ERR_CONFLICT` (4090) with
+`ERR_NOT_FOUND` (4001); `canonical_persona_channel` / `instance_active` →
+`ERR_CONFLICT` (4090) with
 `data.reason` carrying the code verbatim, because the launcher decodes
 `data.reason` first and the numeric code second.
+
+**Two of those refusals LEFT on 2026-08-31 (§AX AX2).** `assignment_active` and
+`assignments_unknowable` are retired, rowed in the hermes tombstone registry as
+wave `s76`. The argument, in the order it has to be read: nothing can mint a
+persona assignment (S70 deleted the store's mint side) and nothing consumes one
+(the 2026-07-30 chat-only purge deleted the lane that did), so the first guard
+fenced an orphaning with no runtime left to orphan — while making a placement
+undeletable on any store still carrying legacy residue, which is the same
+operator-facing shape §0 of the actor-lifecycle wave was opened about. The second
+was never a fact about the retire: it existed only so the first guard's NEGATIVE
+could not be read off an enumeration that had silently skipped a row, so it
+retires with what it was protecting rather than surviving as a fence over
+nothing. The residual rows are UNTOUCHED — read paths retire, stored bytes do not
+— and `harness persona assignments` / `harness persona instance close` remain the
+settle path.
 
 **Retiring the same id twice is an ANSWER, not an error — and idempotent is not
 INERT (D2, 2026-08-27).** The second call replays the ack with `already_retired:

@@ -2312,8 +2312,9 @@ def _runtime_agent_retire(
 
     Refusals are ``PersonaInstanceRetireError``'s codes one-to-one:
     ``not_found`` → ``ERR_NOT_FOUND``; ``canonical_persona_channel`` /
-    ``instance_active`` / ``assignment_active`` / ``assignments_unknowable`` →
-    ``ERR_CONFLICT`` with ``data.reason`` carrying the code verbatim.
+    ``instance_active`` → ``ERR_CONFLICT`` with ``data.reason`` carrying the
+    code verbatim. (The two assignment refusals this list carried until AX2 left
+    with the store guards that raised them, 2026-08-31.)
 
     **Authorization scope (placement plan §A.11, owner decision D10-iv):
     ``console``.** It mutates the level exactly as ``runtime.office.*`` does, and
