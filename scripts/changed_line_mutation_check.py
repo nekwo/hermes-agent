@@ -394,6 +394,89 @@ def _partition_claims(
     return selected, unselected
 
 
+def _symbol_head(claim: dict[str, Any]) -> str:
+    """The dotted half of ``symbol`` — the part that resolves to a definition."""
+
+    return str(claim["symbol"]).split("/", 1)[0].strip()
+
+
+def _path_matches(path: str, wanted: str) -> bool:
+    """``wanted`` names ``path``: as itself, as a directory over it, or as a tail.
+
+    The tail spelling (``agent_create.py`` for
+    ``agent_runtime/agent_create.py``) is here because it is what a person
+    about to rewrite a function actually types, and the alternative is a
+    pre-flight nobody runs. Segment-aligned, so ``create.py`` does not match
+    ``agent_create.py``.
+    """
+
+    if path == wanted:
+        return True
+    if path.startswith(wanted.rstrip("/") + "/"):
+        return True
+    return path.endswith("/" + wanted)
+
+
+def _symbol_matches(head: str, wanted: str) -> bool:
+    """``wanted`` names the symbol ``head``, its owner, or one of its members.
+
+    Three directions on purpose: the exact name, the bare name of a qualified
+    one (``upsert_actor`` for ``OfficeStore.upsert_actor``, which is how the
+    older claims are spelled), and a class naming everything anchored inside
+    it — "I am about to rewrite ``OfficeStore``" is a real question and the
+    answer is every method's claims.
+    """
+
+    return head == wanted or head.endswith("." + wanted) or head.startswith(wanted + ".")
+
+
+def _claims_for(claims_path: Path, query: str) -> int:
+    """Print every claim anchored at ``query``. A REPORT, never a refusal.
+
+    The gap this closes, measured on the 2026-08-30 lifecycle merge: two claims
+    anchored inside one function's remediation string, the handoff named only
+    one, and the second was found by the selector's configuration error rather
+    than by review. "Which claims anchor in the symbol I am about to rewrite?"
+    was answerable only by reading 113 rows by eye.
+
+    Anchors are resolved but a failure to resolve is REPORTED, not raised: the
+    moment this command is most useful is mid-rewrite, when some anchors have
+    already stopped resolving, and a pre-flight that dies on the first rotted
+    row would be useless exactly then.
+    """
+
+    rows = _load_json(claims_path).get("claims", [])
+    if not isinstance(rows, list):
+        raise RuntimeError(f"{claims_path}: claims must be a list")
+    wanted_path, separator, wanted_symbol = query.replace("\\", "/").partition("::")
+    matched: list[dict[str, Any]] = []
+    for claim in rows:
+        if not isinstance(claim, dict):
+            raise RuntimeError(f"{claims_path}: claim rows must be objects")
+        path = str(claim.get("path", "")).replace("\\", "/")
+        head = _symbol_head(claim)
+        if separator:
+            if _path_matches(path, wanted_path) and _symbol_matches(head, wanted_symbol):
+                matched.append(claim)
+            continue
+        if _path_matches(path, wanted_path) or _symbol_matches(head, wanted_path):
+            matched.append(claim)
+
+    print(f"claims anchored at {query}: {len(matched)}")
+    for claim in matched:
+        try:
+            anchor, _ = _anchor_or_raise(claim)
+            where = f"lines {min(anchor.lines)}-{max(anchor.lines)}"
+            if anchor.shift:
+                where += f", re-indented {anchor.shift:+d}"
+        except RuntimeError as error:
+            where = f"ANCHOR DOES NOT RESOLVE TODAY: {error}"
+        print(f"  {claim['id']}: {claim['path']}::{claim['symbol']} [{claim['operator']}] {where}")
+    if not matched:
+        print("  (nothing anchored there — a rewrite here moves no registered guarantee)")
+    return 0
+
+
 def _command(claim: dict[str, Any]) -> list[str]:
     raw = claim["test"]
     if not isinstance(raw, list) or not raw or not all(isinstance(item, str) for item in raw):
@@ -483,12 +566,28 @@ def run(base: str, claims_path: Path, exemptions_path: Path, max_candidates: int
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--base", required=True)
+    # Not `required=True` any more: `--claims-for` is an inventory question
+    # about the registry, and there is no base to diff against when the answer
+    # is wanted BEFORE the rewrite that would produce one.
+    parser.add_argument("--base")
     parser.add_argument("--claims", type=Path, default=DEFAULT_CLAIMS)
     parser.add_argument("--exemptions", type=Path, default=DEFAULT_EXEMPTIONS)
     parser.add_argument("--max-candidates", type=int, default=12)
     parser.add_argument("--list", action="store_true", dest="list_only")
+    parser.add_argument(
+        "--claims-for",
+        metavar="SYMBOL|PATH|PATH::SYMBOL",
+        help="list the claims anchored there and exit; a pre-flight, not a gate",
+    )
     args = parser.parse_args(argv)
+    if args.claims_for is not None:
+        try:
+            return _claims_for(args.claims.resolve(), args.claims_for)
+        except RuntimeError as error:
+            print(f"mutation-check configuration error: {error}", file=sys.stderr)
+            return 2
+    if args.base is None:
+        parser.error("--base is required unless --claims-for is given")
     try:
         return run(
             args.base,
