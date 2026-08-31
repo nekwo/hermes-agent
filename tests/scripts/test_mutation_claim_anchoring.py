@@ -290,6 +290,53 @@ def test_the_mutation_is_spliced_at_the_anchor_not_at_the_first_occurrence(
     assert target.read_text(encoding="utf-8") == TWO_HOLDERS
 
 
+def test_a_crlf_committed_target_anchors_and_splices_and_keeps_its_bytes(
+    tmp_path, touched, capsys
+):
+    """The offsets and the file agree about line endings — they used not to.
+
+    Measured red on pristine `main` (`0c744aa586`) on a Windows host, where
+    `pathlib.write_text` gives the sibling cases above CRLF on disk: the
+    anchor was resolved through `read_text` (universal newlines, CRLF decodes
+    as LF) and the splice through `read_bytes().decode()` (raw), so the offset
+    was one byte short per preceding line and every run refused with "changed
+    after the anchor resolved". Not a Windows-only reach: 25 tracked `.py`
+    blobs carried CRLF at that sha, and a Linux checkout of one of those is
+    CRLF too.
+
+    The restore is asserted at the BYTE level, because the mutant is written
+    LF and a run that left a deliberately-CRLF file normalized would be this
+    gate silently editing the tree it is measuring.
+    """
+
+    target = tmp_path / "holders.py"
+    crlf = TWO_HOLDERS.replace("\n", "\r\n").encode("utf-8")
+    target.write_bytes(crlf)
+    claims = _claims_file(
+        tmp_path,
+        [
+            _claim(
+                "crlf-target",
+                target,
+                "target",
+                "    limit = 5",
+                "    limit = 99",
+                _line_probe(target, 6, "    limit = 5"),
+            )
+        ],
+    )
+    touched({target: {7}})
+
+    code = gate.run(
+        "BASE", claims, _exemptions_file(tmp_path), max_candidates=12, list_only=False
+    )
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "KILLED: crlf-target" in out
+    assert target.read_bytes() == crlf
+
+
 def test_a_re_anchored_claim_says_so_after_the_candidate_line(tmp_path, touched, capsys):
     """A silent re-anchor is the same false all-clear as a silent skip, so the
     run accounts for it — and AFTER `mutation candidates:`, which CI greps at

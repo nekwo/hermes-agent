@@ -345,11 +345,34 @@ def _reanchor_hint(text: str, path: str, needle: str) -> str:
     return f"; it is in {innermost} — re-anchor the claim's symbol"
 
 
+def _read_source(target: Path) -> tuple[bytes, str]:
+    """The file's raw bytes, and THE text every offset in this module means.
+
+    One reader, because the two that existed disagreed about line endings and
+    the disagreement was silent until it wasn't. ``_anchor_or_raise`` used
+    ``read_text`` (universal newlines: a CRLF file decodes with LF) while the
+    mutate loop used ``read_bytes().decode()`` (raw, CRLF kept), so against a
+    CRLF-committed file every anchor offset was one byte short per preceding
+    line and the splice refused with "changed after the anchor resolved" —
+    measured red on pristine `main` (`0c744aa586`) on a Windows host, and
+    reachable on Linux too, since 25 tracked `.py` blobs carried CRLF and a
+    checkout of those is CRLF everywhere.
+
+    LF is the normal form on both sides: claims register their ``find`` with
+    LF, so anchoring a CRLF file at all requires it. The mutant is written LF
+    and the original bytes are restored in ``finally`` regardless, so a
+    deliberately-CRLF file is never left rewritten by a run.
+    """
+
+    raw = target.read_bytes()
+    return raw, raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _anchor_or_raise(claim: dict[str, Any]) -> tuple[ClaimAnchor, str]:
     target = REPO_ROOT / str(claim["path"])
     if not target.is_file():
         raise RuntimeError(f"{claim['id']}: target missing: {claim['path']}")
-    text = target.read_text(encoding="utf-8")
+    _, text = _read_source(target)
     try:
         return _anchor_claim(text, claim), text
     except RuntimeError as error:
@@ -538,8 +561,7 @@ def run(base: str, claims_path: Path, exemptions_path: Path, max_candidates: int
     survivors: list[str] = []
     for claim in claims:
         target = REPO_ROOT / str(claim["path"])
-        original = target.read_bytes()
-        text = original.decode("utf-8")
+        original, text = _read_source(target)
         anchor = claim[ANCHOR_KEY]
         if text[anchor.offset : anchor.offset + len(anchor.find)] != anchor.find:
             # The baseline run moved the file under us. Refusing beats splicing
