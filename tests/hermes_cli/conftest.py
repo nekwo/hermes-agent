@@ -99,6 +99,41 @@ def _web_server_app_is_pristine():
 
 
 @pytest.fixture(autouse=True)
+def _pairing_dir_follows_the_test_home(monkeypatch):
+    """``gateway.pairing.PAIRING_DIR`` is bound once, at import, and never again.
+
+    ``PAIRING_DIR = get_hermes_dir("platforms/pairing", "pairing")`` runs at
+    module scope, and a bare ``PairingStore()`` reads it. Every test that
+    builds one therefore shares a single directory: whichever HERMES_HOME
+    happened to be current the FIRST time some test imported the module —
+    typically another test's tmp home, long since deleted, and (if the module
+    is ever first imported outside a hermetic test) the live store's own
+    ``platforms/pairing`` directory, which ``__init__`` will
+    happily ``mkdir`` and write pending/approved JSON into.
+
+    Measured 2026-08-31: run test_pairing.py and test_gateway_pairing_verbs.py
+    ahead of test_dashboard_admin_endpoints.py and two of its pairing tests
+    red, because ``data["pending"][0]`` is another file's leftover request
+    (``assert 'global-1' == 'user1'``). Reversed, all 54 pass. The reds only
+    surfaced once the auth-mode leak was fixed — while every dashboard pairing
+    request 401ed, the polluting rows were never written.
+
+    Re-pinned per test, which is the treatment ``tests/conftest.py`` already
+    gives ``hermes_state.DEFAULT_DB_PATH`` for exactly this reason: a path
+    constant frozen at import cannot follow a per-test home, so the fixture
+    has to move it.
+    """
+    module = sys.modules.get("gateway.pairing")
+    if module is None or not hasattr(module, "PAIRING_DIR"):
+        return
+    from hermes_constants import get_hermes_home
+
+    monkeypatch.setattr(
+        module, "PAIRING_DIR", get_hermes_home() / "platforms" / "pairing"
+    )
+
+
+@pytest.fixture(autouse=True)
 def _sys_modules_identity_is_restored():
     """A test may IMPORT modules; it may not REPLACE or DROP one.
 
