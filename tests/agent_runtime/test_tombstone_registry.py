@@ -3433,6 +3433,25 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         "agent_already_assigned",
         scope=("agent_runtime", "hermes_cli"),
     ),
+    *rows(
+        # Track Z1's closing sweep. Two names, and the interesting one is the
+        # FIRST: it was born unreferenced INSIDE this wave, which is the exact
+        # failure Z1 exists to catch ("a wave that adds net dead public surface
+        # has failed this stage").
+        "s76",
+        "HEAD",
+        Form.ATTR,
+        "aggregates with no reader. DUPLICATE_PLACEMENT_REASONS was minted by "
+        "this wave's own census landing and never read by anything, production "
+        "or test — its three members are each used, so the tuple restated them "
+        "and nothing else; it carried no comment claiming to publish a complete "
+        "wire vocabulary ahead of a consumer, which is the one argument that "
+        "keeps an unread aggregate alive here. _is_relative_to lost its last "
+        "caller in the mission-lane removal waves and had been dead since",
+        "DUPLICATE_PLACEMENT_REASONS",
+        "_is_relative_to",
+        scope=_AR,
+    ),
 )
 
 

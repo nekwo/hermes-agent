@@ -892,3 +892,79 @@ def test_the_receipt_is_not_read_as_a_retirement_tombstone(
     perform_agent_retire({"persona_instance_id": instance_id})
 
     assert retired_persona_instance_ids() == {instance_id}
+
+
+def test_the_conflict_vocabulary_is_the_stores_own_raise_sites():
+    """``CONFLICT_REASONS`` stops being prose and becomes a gate (Z1).
+
+    The tuple was written as documentation — "recorded so the 1:1 claim in the
+    docstring is readable beside the code it describes" — and nothing read it,
+    which made it a second authority over one list with no way to notice the two
+    disagreeing. AX2 is the proof that the risk was real: it removed two store
+    guards, and had this tuple not been edited by hand in the same commit,
+    nothing would have failed.
+
+    So the tuple now answers to the STORE. Every ``PersonaInstanceRetireError``
+    the store's ``retire`` raises is read off its source, ``not_found`` (the one
+    code this service maps to ``ERR_NOT_FOUND``) is removed, and what is left
+    must be exactly ``CONFLICT_REASONS``. Adding a guard without listing it, or
+    listing a guard that no longer exists, is now a red.
+    """
+
+    import ast
+    import inspect
+    import textwrap
+
+    from agent_runtime.agent_retire import CONFLICT_REASONS
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(PersonaInstanceStore.retire)))
+    raised = {
+        node.exc.args[0].value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Raise)
+        and isinstance(node.exc, ast.Call)
+        and getattr(node.exc.func, "id", None) == "PersonaInstanceRetireError"
+        and node.exc.args
+        and isinstance(node.exc.args[0], ast.Constant)
+    }
+
+    assert raised, "the raise sites moved out of retire(); re-anchor this gate"
+    assert raised - {"not_found"} == set(CONFLICT_REASONS)
+
+
+@pytest.mark.parametrize("reason", ["canonical_persona_channel", "instance_active"])
+def test_every_conflict_reason_reaches_the_caller_as_4090_and_its_own_word(
+    qa_persona, seeded_workspace, monkeypatch, reason
+):
+    """The other half of the 1:1 claim, driven rather than read.
+
+    The gate above proves the tuple names the right codes; this proves the
+    service does not re-spell any of them on the way out — the launcher decodes
+    ``data.reason`` before the numeric code, so a re-spelling here renders a real
+    refusal as ``unknown``.
+    """
+
+    from agent_runtime.agent_retire import ERR_CONFLICT
+    from agent_runtime.persona_assignments import (
+        PersonaInstanceRetireError,
+        PersonaInstanceStore,
+    )
+
+    placed = _place(placement_id=f"qa_conflict_{reason}_agent_3")
+    instance_id = placed["persona_instance_id"]
+
+    def _refuse(self, persona_instance_id, **kwargs):
+        raise PersonaInstanceRetireError(
+            reason,
+            f"refused: {reason}",
+            persona_instance_id=persona_instance_id,
+        )
+
+    monkeypatch.setattr(PersonaInstanceStore, "retire", _refuse)
+
+    outcome = perform_agent_retire({"persona_instance_id": instance_id})
+
+    assert outcome.result is None
+    assert outcome.refusal.code == ERR_CONFLICT
+    assert outcome.refusal.data["reason"] == reason

@@ -773,14 +773,6 @@ def _is_detached_head(workdir: Path) -> bool:
     return _git_output(workdir, ["git", "rev-parse", "--abbrev-ref", "HEAD"], single=True) == "HEAD"
 
 
-def _is_relative_to(path: Path, root: Path) -> bool:
-    try:
-        path.resolve().relative_to(root.resolve())
-        return True
-    except ValueError:
-        return False
-
-
 def _log_worktree_event(event_type: str, payload: dict[str, Any]) -> None:
     try:
         path = paths.store_root() / "worktree_events.jsonl"

@@ -55,7 +55,17 @@ CUT_KEYS = (
 KEPT_KEYS = {
     "token_budget_used": "Launcher token-total fallback (totalTokens ?? tokenBudgetUsed)",
     "last_heartbeat_at": "Launcher roster recency + Agent Gateway state frame + orphan heartbeat HOLD",
-    "current_assignment_id": "Launcher roster fold against the persona_assignments block",
+    # The REASON changed on 2026-08-31 (AX2) and the verdict did not, which is
+    # why this row is edited rather than dropped: the roster fold it was kept
+    # for went with the persona_assignments block, but the launcher parses
+    # `current_assignment_id` straight onto MissionAgentInstance
+    # .currentAssignmentId, and hermes' assignment settle verbs write it. A KEPT
+    # row whose named reader has quietly left is the silent-decay shape this
+    # file's own header argues against.
+    "current_assignment_id": (
+        "Launcher MissionAgentInstance.currentAssignmentId (parsed live); "
+        "written by the assignment settle verbs"
+    ),
 }
 
 

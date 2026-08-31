@@ -92,8 +92,8 @@ usually is not, and that changes what the chat-binding verbs are allowed to conc
 skip below is the fence working, not the runtime broken.
 
 Anything that could call a live chat binding STALE fails closed unless **this process** named
-the head home, by `HERMES_HEAD_HOME` or a relay context (`persona_assignments.py:224-228`,
-`_session_presence_probe`). The recorded head pointer for the shared runtime root is enough to
+the head home, by `HERMES_HEAD_HOME` or a relay context
+(`persona_assignments._session_presence_probe`). The recorded head pointer for the shared runtime root is enough to
 read or mint a transcript and deliberately not enough to clear a binding: without the rule, a
 verb run under a profile home probes THAT profile's populated database and reads every operator
 chat as absent — which is not hypothetical, it is the 2026-07-25 incident, where a reconcile

@@ -49,9 +49,14 @@ the create receipt (`agent_create_phases.py:23-24`) then inherited verbatim.
    time before BO-3 and UTC after; turn records were always UTC, and two lanes
    misread across that boundary in one day. The keys are `turn_id`
    (`agent-chat-send-<uuid4>`, echoed byte-equal by hermes as both
-   `client_message_id` and `turn_id`), `pid` for the boot families
-   (`stream.py:108-117`), and `correlation_id` for the gesture chain
-   (`office_store.py:173-196`). See `mission_chat_latency_audit.dart:23-40`.
+   `client_message_id` and `turn_id`), `pid` for the boot families (the BO-3
+   join key, argued in `stream.py`'s boot-receipt docstring), and
+   `correlation_id` for the gesture chain (`OfficeStore._emit`, which normalizes
+   the token and threads it onto the event and the `state.patched` row). See
+   `mission_chat_latency_audit.dart:23-40` in the launcher. (Symbols, not lines:
+   the `office_store.py:173-196` cite this row carried had drifted onto the
+   position-policy alias and the `ActorScan` docstring — a range about actor
+   completeness, with no `correlation_id` in it.)
 7. **A span boundary is a fact about bytes, not intent.** The "provider
    first_byte" span opened before `run_conversation` had begun and so wore the
    provider's name over hermes assembly; `request_assembled` (`:84`, marked

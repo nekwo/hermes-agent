@@ -63,13 +63,13 @@ administrative catalog but never let it acquire a live instance
 prefixed `personainst_` (`models.py:15`), and there are exactly two derivations:
 
 - the **canonical operator channel** — `persona_instance_id_for(persona_id)`
-  (`persona_assignments.py:2501`), e.g. `personainst_profile_alice`;
+  (in `persona_assignments.py`), e.g. `personainst_profile_alice`;
 - a **placement-backed** row — `persona_instance_id_for_placement(placement_id)`
-  (`:2505`), whose tail is the scene `itemId`.
+  (its neighbour there), whose tail is the scene `itemId`.
 
-`is_canonical_persona_channel` (`:2509`) is the live discriminator between them.
+`is_canonical_persona_channel` is the live discriminator between them.
 Every id arriving from outside the store passes the single derivation authority
-`canonical_persona_instance_id` (`:2525`), which folds the two structurally
+`canonical_persona_instance_id` (both in the same file), which folds the two structurally
 recognizable drift schemes; ids predating that chokepoint are folded by
 `persona_instance_identity.py`, whose `identity_aliases_for_rows` ships as
 `identity_map` on the snapshot. Per-call UUID instances cannot be minted —
@@ -79,20 +79,23 @@ recognizable drift schemes; ids predating that chokepoint are folded by
 **3 — The chat root (swappable).** `PersonaInstance.default_chat_session_id`
 (`models.py:360`) is a durable pointer, deliberately independent of everything
 else on the row. Ids are minted `persona_chat_<instance>_<hex>` by
-`persona_chat_session_id_for` (`persona_assignments.py:2556`), and made
+`persona_assignments.persona_chat_session_id_for`, and made
 **durable at the bind argument**, not beside it, so a pointer cannot be stored
-before the transcript row exists (`_durable_chat_root`, `:2561` — the failure it
+before the transcript row exists (`_durable_chat_root` beside it — the failure it
 fixed was a dragged-in agent whose every send was refused with
 `unknown_chat_session`). `chat_head_home` (`models.py:379`) records *where* that
 pointer dereferences: which profile DB holds a transcript is a per-conversation
 fact no machine-level pointer can answer.
 
-**4 — The scene placement.** `OfficeActor` (`models.py:179`) with its
-`OfficeItem`s (`:157`), one file per actor under `office/<workspace>/actors/`.
-The `actor_key` is minted only by `OfficeStore` — `canonical_persona_instance_id`
-for instance-bound actors, else the persona id (`office_store.py:113`
-`_canonical_actor_key`). Actor granularity, not item granularity, is the merge
-unit, so an agent and its coupled desk travel together.
+**4 — The scene placement.** `OfficeActor` with its `OfficeItem`s (both in
+`models.py`), one file per actor under `office/<workspace>/actors/`. The
+`actor_key` is minted only by `OfficeStore` — `canonical_persona_instance_id`
+for instance-bound actors, else the persona id
+(`office_store._canonical_actor_key`). Actor granularity, not item granularity,
+is the merge unit, so an agent and its coupled desk travel together. (Symbols
+only: the three line cites this paragraph carried — `models.py:179` / `:157` and
+`office_store.py:113` — had all drifted by 2026-08-31, the last of them onto an
+unrelated constant, and a name is the cheapest thing in this repo to re-find.)
 
 **One call creates all of it.** `agent_create.perform_agent_create` writes the
 roster row, the durable chat root and the placement inside one function. The
@@ -100,9 +103,11 @@ order is instance-first and that is not arbitrary: a placement written first
 would be a half-state naming an instance the runtime never minted, and the
 launcher's codec refuses on principle to derive a binding for an actor that has
 none — the function's own docstring is the long form. (This paragraph carried
-`agent_create.py:692` from consolidation until 2026-08-27, by which time the
-function was at `:1205` and the second citation, `:726-732`, landed inside an
-unrelated constant block. Symbols only here, for that reason.)
+`agent_create.py:692` from consolidation until 2026-08-27, when the correction
+recorded that the function "was at `:1205`". By 2026-08-31 it was at `:1271`:
+the correction rotted the same way the citation it corrected did, which is the
+whole case for naming symbols instead of lines and is why this note no longer
+states either number as current.)
 
 **And it chooses WHERE, when the caller did not.** `position` is optional on
 both doors (plan S2): absent, the slot comes from
@@ -184,9 +189,10 @@ gone; see [the removal section](#what-the-mission-lane-removal-deleted-and-why).
 ### `mode` is stored, not derived
 
 The archived entity model called `PersonaInstance.mode` derived. It is not:
-`open_chat` writes `instance.mode = "chat"` (`persona_assignments.py:1847`),
-unbinding the last chat pointer reverts it to `"configured"` (`:856-862`), and
-`create_free_floating` mints `"free_floating"` (`:426-444`). The vocabulary also
+`PersonaInstanceStore.open_chat` writes `instance.mode = "chat"`,
+`clear_chat_session_binding` reverts the last unbind to `"configured"`, and
+`create_free_floating` minted `"free_floating"` (all in
+`persona_assignments.py`). The vocabulary also
 still contains `"task_bound"`, which is still written — see
 [Open rows](#open-rows).
 
@@ -210,19 +216,24 @@ other (`flow_graph.py:19-31`). Non-owner edges drawn on a lead's canvas are
 reported, never applied.
 
 The persisted truth is `PersonaInstance.steered_by` — an ordered **set** of
-parent instance ids (`models.py:337`), written through the single declarative
-chokepoint `PersonaInstanceStore.set_parents` (`persona_assignments.py:517`;
-an empty set detaches the child). `spawned_by` (`models.py:333`) is
-PROVENANCE, not steering: two live writers outside the store stamp it with a
-principal — `agent_create.py:1037` sets `"operator"`, and
-`_maybe_stamp_spawned_by` (`persona_commands.py:1499-1504`) stamps
-`coordinator_id or "operator"`. (The comment at `models.py:330-332` calling it
-a store-written mirror of `steered_by[0]` is stale against its own file's
-writers.) Steering itself admits only instance-shaped tokens — read-side
-filters apply `looks_like_persona_instance_id` (`models.py:18`;
-`snapshot.py:2037`, `runtime_hud.py:639`) so a principal such as "operator" is
-provenance, never a parent, which is what keeps the historical "steered by
-operator" phantom edge unrepresentable in the graph.
+parent instance ids (`models.PersonaInstance`), written through the single
+declarative chokepoint `PersonaInstanceStore.set_parents` (in
+`persona_assignments.py`; an empty set detaches the child).
+`PersonaInstance.spawned_by` is PROVENANCE, not steering: two live writers
+outside the store stamp it with a principal — `agent_create` sets `"operator"`,
+and `_maybe_stamp_spawned_by` (`persona_commands.py`) stamps `coordinator_id or
+"operator"`. Steering itself admits only instance-shaped tokens — read-side
+filters apply `models.looks_like_persona_instance_id` (in the `spawned_by` arm
+of `snapshot`'s graph projection and in `runtime_hud`) so a principal such as
+"operator" is provenance, never a parent, which is what keeps the historical
+"steered by operator" phantom edge unrepresentable in the graph.
+
+(Symbols only, and this paragraph is why the rule exists. Every one of its seven
+line cites had drifted by 2026-08-31 — and one of them was a CORRECTION that had
+itself gone stale: it said the comment at `models.py:330-332` still called
+`spawned_by` a store-written mirror of `steered_by[0]`, when that comment had
+already been rewritten to say the opposite. A rotted citation misdirects a
+reader; a rotted correction tells them the code is wrong when it is right.)
 
 Because graph identity is the owner's id, a stored doc outlives its owner. The
 persona-instance reconciler's last phase archives owner-less canvases into
@@ -493,10 +504,10 @@ and the final acceptance are in
   is why level multiplicity is attributed rather than orphaned.
 - **The chat root is independent of everything else on the row.** Opening
   another chat must not cancel or rebind other work
-  (`persona_assignments.py:1807-1810`), and a bind is refused for a
-  sibling-steal or a retired instance (`assert_bindable`, `:1654`).
+  (`PersonaInstanceStore.open_chat`'s docstring), and a bind is refused for a
+  sibling-steal or a retired instance (`PersonaInstanceStore.assert_bindable`).
 - **A chat pointer is never stored before its transcript exists**
-  (`_durable_chat_root`, `:2561`). The ordering is structural — the pointer
+  (`persona_assignments._durable_chat_root`). The ordering is structural — the pointer
   cannot be bound without the durability call having returned.
 - **Graph ingest never creates, starts, or deletes an instance**
   (`flow_graph.py:9-17`). A map states who steers whom, and only its own owner's
@@ -535,7 +546,7 @@ Each links to a `planned/` file carrying its evidence and the gate to open it.
   Charter's four questions are unanswered for every candidate →
   [planned/graph-node-taxonomy-and-subgraphs.md](planned/graph-node-taxonomy-and-subgraphs.md)
 - Queued — **the global-singleton persona-instance redesign**, cited at
-  `persona_assignments.py:2518` →
+  `persona_assignments.persona_instance_id_for` →
   [planned/global-singleton-persona-instances.md](planned/global-singleton-persona-instances.md)
 - 2026-08-24 — **a character's state vocabulary is fixed at `start`**: there is
   no `characters add-state`, so adding a strip to an installed sheet means

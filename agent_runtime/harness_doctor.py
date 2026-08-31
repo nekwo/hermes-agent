@@ -816,13 +816,6 @@ DUPLICATE_PLACEMENT_CROSS_INSTANCE = "cross_instance"
 #: move a placement.
 DUPLICATE_PLACEMENT_UNBOUND_HOLDER = "unbound_holder"
 
-DUPLICATE_PLACEMENT_REASONS = (
-    DUPLICATE_PLACEMENT_SAME_INSTANCE,
-    DUPLICATE_PLACEMENT_CROSS_INSTANCE,
-    DUPLICATE_PLACEMENT_UNBOUND_HOLDER,
-)
-
-
 def _duplicate_placement_reason(bindings: tuple[str, ...]) -> str:
     """Which duplicate this is, from the holders' instance bindings alone.
 
