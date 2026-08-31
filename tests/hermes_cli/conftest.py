@@ -10,6 +10,54 @@ import sys
 import pytest
 
 from tests._env_gap_fence import EnvGapSkipRegistry, apply_skips
+from tests.hermes_cli import _gateway_fence
+
+# L2/L3 of the gateway fence: process-wide, installed at conftest IMPORT — the
+# earliest moment this directory owns — rather than inside a fixture, because
+# the measured escape ran from an ``atexit`` handler, a window no fixture can
+# cover. See tests/hermes_cli/_gateway_fence.py for the full reproduction.
+_gateway_fence.install()
+
+
+@pytest.fixture(autouse=True)
+def _no_windows_gateway_pause_token(request, monkeypatch):
+    """L1 of the gateway fence: no test drives the REAL Windows gateway pause.
+
+    ``_cmd_update_impl`` opens with
+    ``_pause_windows_gateways_for_update()``. On a real Windows host that
+    function walks this machine's live gateway process table and, finding
+    nothing running, asks ``gateway_windows.is_installed()`` — a ``schtasks
+    /Query`` against the operator's registered ``Hermes_Gateway_alice`` task.
+    When that answers yes it returns a ``cold_start_if_installed`` token, and
+    ``_cmd_update_impl`` parks the resume on ``atexit``. The handler then fires
+    at INTERPRETER EXIT, after every monkeypatch has been undone, and starts a
+    real gateway against the operator's real profile. Measured 2026-08-31;
+    ``test_update_autostash.py`` alone reproduces it.
+
+    Five files here call ``cmd_update`` / ``_cmd_update_impl`` and only
+    ``test_update_venv_health.py`` patches this seam, so the default belongs in
+    the directory's conftest — the same shape, and the same reasoning, as
+    ``_suppress_concurrent_hermes_gate`` above: a Windows-only production guard
+    that reads the developer's live machine has no defined answer in a test.
+
+    ``None`` is production's own "nothing to pause" answer, so the code under
+    test takes its normal path; nothing is registered and nothing is resumed.
+    Tests that are ABOUT the pause/resume path opt out with
+    ``@pytest.mark.real_windows_gateway_pause`` and bring their own mocks —
+    L2/L3 still stand behind them.
+    """
+    if request.node.get_closest_marker(_gateway_fence.REAL_PAUSE_MARK):
+        return
+    try:
+        from hermes_cli import main as _cli_main
+    except Exception:
+        return
+    monkeypatch.setattr(
+        _cli_main,
+        "_pause_windows_gateways_for_update",
+        lambda *_a, **_k: None,
+        raising=False,
+    )
 
 
 @pytest.fixture
@@ -779,6 +827,13 @@ _ENV_GAP_SKIPS: EnvGapSkipRegistry = {
 
 def pytest_configure(config):  # noqa: D401 — pytest hook
     """Register the environment-gap marks (see the block comment above)."""
+    config.addinivalue_line(
+        "markers",
+        f"{_gateway_fence.REAL_PAUSE_MARK}: let this test drive the REAL "
+        "_pause_windows_gateways_for_update (it reads this machine's live "
+        "gateway table and Scheduled Task). The test must mock the spawn "
+        "itself; the process-wide gateway fence still stands behind it.",
+    )
     config.addinivalue_line(
         "markers",
         f"{_WINDOWS}: pre-existing failure caused by POSIX-only test "
