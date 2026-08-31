@@ -459,6 +459,62 @@ def test_the_snapshot_office_lane_carries_the_same_binding_field():
     assert rpc_bindings == set(snapshot_bindings.values())
 
 
+def test_the_snapshot_office_item_row_is_pinned_byte_for_byte_and_its_gap_to_the_wire_row_named():
+    """The SNAPSHOT lane's item shape, pinned as bytes, and the exact distance
+    from it to ``office_models.office_item_wire_row`` — the shared projection the
+    RPC lane already flattens through.
+
+    Written for §AX1 ("one office-actor wire projection"), which proposes that
+    ``snapshot._office_actor_summary_row`` stop re-spelling the item dict inline
+    and call the shared function instead. The unification is BEHAVIOUR-PRESERVING
+    only if the two shapes already agree, and they do not: this test states the
+    disagreement in the two forms a refactor can break it in, so the change can
+    never land unannounced.
+
+    * **The bytes.** ``json.dumps`` of the projected items, not a key set: a key
+      set survives a reorder and a ``12`` → ``12.0`` coercion, and both of those
+      are wire changes a golden or a strict decoder can see. The shared function
+      coerces (``float(item.position[0])``, ``float(item.scale)``); this lane
+      copies (``list(item.position)``, ``item.scale``) and therefore re-emits
+      whatever the store file held — ``from_jsonable`` does not widen an int, and
+      an actor ADOPTED from a peer (``adopt_remote_surface``) never passes through
+      ``_normalize_item``'s float boundary.
+    * **The keys.** The shared row carries two ACTOR-level fields repeated onto
+      every item (``persona_instance_id``, ``revision``) that this lane states
+      once, on the actor. That is the whole delta, and it is asserted as an exact
+      pair so a third field appearing on either side reds here.
+
+    ``minted_kind`` (H-H12) is on neither side and must stay on neither: it is
+    deliberately off the wire and out of ``office_content_hash``, so a projection
+    that started carrying it would make a field no observer can see suddenly
+    observable. The assertion below is what holds that.
+    """
+
+    from agent_runtime.office_models import office_item_wire_row
+    from agent_runtime.snapshot import _office_actor_summary_row
+
+    store = _seed_office()
+    actors = {a.actor_key: a for a in store.scan_actors(WORKSPACE).actors}
+    actor = actors["personainst_qa_agent_9c8a382f"]
+
+    row = _office_actor_summary_row(actor, unpublished=None)
+
+    assert json.dumps(row["items"]) == (
+        '[{"item_id": "personainst_qa_agent_9c8a382f", "persona_id": "qa", "kind": "agent", '
+        '"position": [-8.0, -2.0], "folder": "Agents", "display_name": "QA Agent", '
+        '"pet_slug": null, "scale": 1.0}, '
+        '{"item_id": "qa_desk", "persona_id": "qa", "kind": "desk", '
+        '"position": [-8.25, 0.5], "folder": "Desks", "display_name": null, '
+        '"pet_slug": null, "scale": 1.0}]'
+    )
+
+    for item, projected in zip(actor.items, row["items"]):
+        shared = office_item_wire_row(actor, item)
+        assert sorted(set(shared) - set(projected)) == ["persona_instance_id", "revision"]
+        assert sorted(set(projected) - set(shared)) == []
+        assert "minted_kind" not in shared and "minted_kind" not in projected
+
+
 # ── typed failures, asserted as whole frames ────────────────────────────────
 
 
