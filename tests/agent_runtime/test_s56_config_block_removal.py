@@ -251,9 +251,15 @@ def test_the_roster_section_is_emitted_unconditionally(
 def test_the_wire_block_survives_and_reports_the_truth():
     """The Launcher bridge reads ``persona_instance_runtime``
     (``mission_control_bridge.dart``), so the KEY stays — it now reports what is
-    actually true rather than echoing a flag."""
+    actually true rather than echoing a flag.
+
+    AX2 (2026-08-31) took the block's SECOND field. ``assignment_store_enabled``
+    belonged to the writerless persona-assignment lane, not to S56's roster
+    ungating, and it had been constant ``true`` from the day it was written.
+    The exact-dict form is kept deliberately: it is what makes a re-added field
+    a red rather than an unnoticed addition."""
     data = status.build_status()
-    assert data["persona_instance_runtime"] == {"enabled": True, "assignment_store_enabled": True}
+    assert data["persona_instance_runtime"] == {"enabled": True}
     assert isinstance(data["persona_instances"], list)
 
 
