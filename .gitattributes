@@ -1,6 +1,25 @@
 # Auto-generated files — collapse diffs and exclude from language stats
 web/package-lock.json linguist-generated=true
 
+# LF is this repo's line ending, everywhere, in the object store and on disk.
+# Stated as a rule on 2026-08-31, not introduced as one: it was already the
+# convention by 8862 blobs to 33, and the 38 blobs that carried CR were
+# normalized in the same commit as this line. None of them was deliberate —
+# each was a minority outlier in its own directory (2 CRLF against 64 LF in
+# `docs/.../archive/`, 2 against 125 at the root), and every Windows-only
+# script in the tree (`*.ps1`, `*.cmd`) was already LF and runs fine.
+#
+# `text=auto` leaves genuine binaries alone (git detects them), so the PNGs and
+# icons below are untouched; the `-text` pins later in this file override this
+# line, because a later rule wins.
+#
+# The enforcement is `tests/test_line_endings.py`, not this file: attributes
+# govern conversion on checkout and check-in, and say nothing about blobs that
+# are already committed. A deliberate CRLF file is declarable — add a `-text`
+# rule here AND the path to that gate's keeper set, with the reason. The set is
+# empty on purpose.
+* text=auto eol=lf
+
 # Enforce LF for scripts that run inside Linux containers.
 # Without this, Windows checkout converts to CRLF and breaks `exec` in the
 # container entrypoint with "no such file or directory".
