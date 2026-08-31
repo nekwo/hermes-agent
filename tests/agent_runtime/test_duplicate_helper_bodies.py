@@ -110,17 +110,16 @@ _GRANDFATHERED: dict[tuple[str, ...], str] = {
         "agent_runtime/mission_chat_turns.py::_unlock_fd",
         "agent_runtime/persona_chat_continuity.py::_unlock",
     ): "the release half of the pair above; same refusal",
-    (
-        "agent_runtime/board_models.py::board_content_hash",
-        "agent_runtime/office_models.py::office_content_hash",
-    ): (
-        "NEW at this gate's first run — neither the audit nor any name-based "
-        "sweep saw it, because the two names are correct for their own "
-        "modules. Same digest algorithm over two different row shapes. "
-        "Foldable onto one `content_hash(payload)`, but these feed sync "
-        "conflict detection on both the board and the office lanes, so it "
-        "wants its own stage with a golden-compare, not a rename commit"
-    ),
+    # ``board_content_hash == office_content_hash`` was grandfathered here at
+    # this gate's first run and its row is GONE, per this file's own rule that a
+    # pair which stops being duplicate loses its row in the same commit. They
+    # stopped being duplicate for a reason, not by a rename: H-H12 gave the
+    # office hash a second filter (``_ITEM_HASH_EXCLUDE``) over an actor's
+    # ``items``, which a board row does not have. That is also the answer to the
+    # row's own deferral — it wanted "its own stage with a golden-compare" before
+    # folding the two onto one ``content_hash(payload)``, and the fold is now
+    # further away rather than nearer, because the office lane has an exclusion
+    # rule the board lane must not inherit silently.
     (
         "agent_runtime/default_scope.py::_get_realm",
         "agent_runtime/default_scope.py::_get_workspace",

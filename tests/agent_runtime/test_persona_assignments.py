@@ -4511,7 +4511,23 @@ def test_retire_archives_placement_row_and_emits_event(isolate_agent_runtime_roo
     assert not paths.persona_instance_path(instance.id).exists()
     assert instance.id not in {row.id for row in store.list_all()}
     # ... and landed in the archive (never deleted); its session pointer survives.
-    archived = list(paths.persona_instances_archive_dir().rglob(f"{instance.id}.json"))
+    # The receipts subdirectory is excluded, because it does not hold ROWS. H-H5
+    # writes the retire's own outcome to ``<ts>_retire/receipts/<id>.json`` —
+    # the same basename, one directory down — so this recursive glob began
+    # answering 2 for a single archived row. The guarantee here was always "the
+    # row landed exactly once and was never deleted", and a receipt is not a
+    # row; the repair is to say which files count, not to loosen the count.
+    # Every PRODUCTION reader of this archive already excludes it structurally,
+    # by exact child path (``_retired_persona_instance_archive_path``) or by a
+    # non-recursive ``*.json`` glob inside the batch
+    # (``retired_persona_instance_ids``) — which is the whole reason the receipt
+    # lives in a subdirectory rather than beside the row, where it would have
+    # minted a phantom retirement tombstone.
+    archived = [
+        path
+        for path in paths.persona_instances_archive_dir().rglob(f"{instance.id}.json")
+        if path.parent.name != "receipts"
+    ]
     assert len(archived) == 1
     archived_payload = json.loads(archived[0].read_text(encoding="utf-8"))
     assert archived_payload["session_id"] == session_id
