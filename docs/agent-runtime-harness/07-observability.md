@@ -535,11 +535,19 @@ not by trusting the audit's own status.**
 | `office_surface` could never satisfy the office scope gate, so every folder-only patch frame was dropped with no patch and no resync | `entity == OFFICE_ACTOR_ENTITY` and a slash-prefixed id | one predicate: `office_patch_scope(patch) == workspace_id` — `agent_runtime/serve_office_subscriptions.py:486` |
 | `_usage_lane_detected` — a credential fault DELETED the lane from the Limits panel, and an empty envelope rendered as a positive claim that no provider is signed in | `except Exception: return False` | three outcomes, not two: true / false / **raise**, with the raise caught per provider and the lane emitted `unavailable` naming the exception class — `hermes_cli/harness.py:3704-3721`, `:3952-3955` |
 
-The highest-value read-side swallow also closed: `_read_actor_dir` skipped
-undecodable files and returned a shorter list that described itself as complete,
-so `actors_truncated` computed 0 over it. It now returns a typed
+The highest-value read-side swallow also closed: the actor-directory read
+skipped undecodable files and returned a shorter list that described itself as
+complete, so `actors_truncated` computed 0 over it. It now returns a typed
 `ActorScan(actors, unreadable)` so the two facts travel together
-(`agent_runtime/office_store.py:60-79`, `:542-552`).
+(`agent_runtime/office_store.py` — `ActorScan` at `:187`, `read_actor_dir` at
+`:362`, `OfficeStore.scan_actors` at `:1110`). Since AX5 that scan is the ONLY
+actor read: the `list_actors` thin view that returned `.actors` and dropped
+`.unreadable` is deleted, so dropping the count is now something a call site
+WROTE rather than a default it inherited. Since AX6 the reader is module-level
+and the realm pull's read of a PEER's actor directory
+(`office_sync._read_remote_office`) delegates to it, so the one place where the
+two spellings disagreeing produces a DELETION rather than a wrong number cannot
+drift.
 
 ## Invariants
 
