@@ -23,7 +23,7 @@ from hermes_time import now
 from . import core_cache, paths, snapshot_build_ledger
 from .board_store import BoardStore
 from .office_store import OfficeStore
-from .config import load_agent_runtime_config, load_root_runtime_config
+from .config import load_agent_runtime_config
 from .decision_contract_registry import CONTRACT_SCHEMA_VERSION, contract_hash
 from .events import CachedEventLog, event_summary_missing
 from .migrations import effective_config_summary, migration_status

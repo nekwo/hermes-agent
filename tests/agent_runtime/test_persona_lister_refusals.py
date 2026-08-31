@@ -29,7 +29,6 @@ from agent_runtime.persona_assignments import (
     PERSONA_ROWS_UNREADABLE,
     PersonaAssignmentStore,
     PersonaInstanceStore,
-    persona_instance_id_for,
 )
 
 
