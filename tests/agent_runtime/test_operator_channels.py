@@ -1680,6 +1680,51 @@ def test_duplicate_instances_warning_fires_only_on_true_canonical_collision():
     )
 
 
+def test_history_row_attributed_to_sibling_placement_does_not_warn_duplicate():
+    # Live evidence 2026-08-31: the neko_supervisor canonical channel carried a
+    # 2026-07-20 history row — written before sessions were per-instance — whose
+    # persona_instance_id named the placement-backed sibling that answered it.
+    # ONE live instance row plus row-only attribution to a same-persona sibling
+    # is historical fact, not a projection collision: nothing mints that shape
+    # anymore, and the canonical singleton cannot be retired, so warning on it
+    # is permanent and operator-unactionable. The guard stays for two live
+    # instance rows on one channel (the test above).
+    session_id = "qa::personainst_qa"
+    channels = operator_channel_summary(
+        persona_instances=[
+            _qa_instance(
+                "personainst_qa",
+                session_id=session_id,
+                display_name="QA Agent",
+                updated_at="2026-07-20T13:20:54Z",
+            ),
+        ],
+        persona_chat_history=[
+            {
+                "session_id": session_id,
+                "persona_id": "qa",
+                "persona_instance_id": "personainst_qa_agent_2",
+                "title": "QA Agent chat",
+                "message_count": 1,
+                "messages": [{"role": "operator", "text": "hello from July"}],
+                "updated_at": "2026-07-20T13:20:54Z",
+            }
+        ],
+        persona_chat_trace=[],
+    )
+
+    assert len(channels) == 1
+    channel = channels[0]
+    assert set(channel["source_instance_ids"]) == {
+        "personainst_qa",
+        "personainst_qa_agent_2",
+    }
+    assert not any(
+        warning["code"] == "duplicate_instances_same_channel"
+        for warning in channel["warnings"]
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Relayed-message conversation projection (sender attribution)                  #
 # --------------------------------------------------------------------------- #

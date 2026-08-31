@@ -1552,7 +1552,23 @@ def _source_instance_ids_conflict(
         return True
     if any(item.startswith("personainst_operator_") for item in source_instance_ids):
         return False
-    return True
+    # Reaching here means one persona and at most one session. Within that,
+    # id multiplicity contributed ONLY by history/trace row attribution is not
+    # a projection collision: a pre-per-instance-session chat row can sit on
+    # the persona's canonical session while naming the placement-backed sibling
+    # that answered it (live evidence 2026-08-31: the neko_supervisor canonical
+    # channel carried a 2026-07-20 history row attributed to
+    # personainst_neko_supervisor_agent_47a47348). Nothing mints that shape
+    # anymore — sessions are per-instance — so warning on it is a permanent,
+    # operator-unactionable false positive (the canonical singleton cannot be
+    # retired). Two live instance ROWS folding onto one channel remain the
+    # genuine collision.
+    instance_ids = {
+        instance_id
+        for instance_id in (_safe_instance_id(instance) for instance in instances)
+        if instance_id
+    }
+    return len(instance_ids) > 1
 
 
 def _instance_recency(instance: PersonaInstance) -> tuple[int, str]:
