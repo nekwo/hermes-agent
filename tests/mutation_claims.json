@@ -1943,6 +1943,96 @@
         "-q",
         "tests/agent_runtime/test_realm_skill_tombstones.py::test_the_ledger_cap_evicts_settled_history_before_a_live_block"
       ]
+    },
+    {
+      "id": "dcw-h4-the-autopilot-regenerates-rows-that-already-landed",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_characters_auto_plan",
+      "operator": "drop-the-pending-rows-skip",
+      "find": "        elif step == \"rows\" and not status[\"pending\"][\"rows\"]:\n            reason = \"every authored row already has an approved strip\"\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_characters_cli.py::test_the_autopilot_resumes_a_reopened_draft_instead_of_regenerating_it"
+      ]
+    },
+    {
+      "id": "dcw-h4-the-autopilot-skips-a-turnaround-it-has-not-generated",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_characters_auto_plan",
+      "operator": "invert-the-missing-turnaround-test",
+      "find": "        elif step == \"turnaround\" and not status[\"missing\"][\"turnaround\"]:\n",
+      "replace": "        elif step == \"turnaround\" and status[\"missing\"][\"turnaround\"]:\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_characters_cli.py::test_the_autopilot_drives_the_whole_pipeline_and_receipts_every_stage"
+      ]
+    },
+    {
+      "id": "dcw-h4-a-stopped-autopilot-never-writes-its-summary",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_cmd_characters_auto",
+      "operator": "return-instead-of-breaking",
+      "find": "            stopped_at, error = step, str(exc)\n            break\n",
+      "replace": "            return 2\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_characters_cli.py::test_a_stage_that_refuses_stops_the_autopilot_and_still_summarizes"
+      ]
+    },
+    {
+      "id": "dcw-h4-an-autopilot-with-nothing-to-do-reports-success",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_cmd_characters_auto",
+      "operator": "swallow-the-empty-plan-refusal",
+      "find": "        stopped_at, error = \"plan\", message\n",
+      "replace": "        pass\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_characters_cli.py::test_the_autopilot_refuses_a_composed_draft_and_names_reopen"
+      ]
+    },
+    {
+      "id": "dcw-h4-the-autopilot-receipts-arrive-only-at-exit",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_characters_auto_write",
+      "operator": "drop-the-flush",
+      "find": "    sys.stdout.flush()\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_characters_cli.py::test_the_autopilot_flushes_each_receipt_as_its_stage_lands"
+      ]
+    },
+    {
+      "id": "dcw-h4-the-autopilot-stream-is-framed-in-indented-blocks",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_characters_auto_write",
+      "operator": "use-the-indenting-encoder",
+      "find": "emit_json_line(data)",
+      "replace": "emit_json(data)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_characters_cli.py::test_every_autopilot_receipt_is_exactly_one_line"
+      ]
     }
   ]
 }

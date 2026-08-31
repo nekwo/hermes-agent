@@ -57,3 +57,34 @@ to FIFO (not LIFO) when a call carries no input record.
    newline cannot emit one multi-line block for a bad `--draft`. Every line
    `auto` writes — receipts, the refusal, the summary — goes through the same
    NDJSON writer, and the LAST line is always the summary.
+4. **`--through` takes a STEP name, not a stage name.** The stage text writes
+   `[--through compose]`; `compose` is both a step and (as `composed`) a stage,
+   and `approve-direction` is a step with no stage of its own. The flag's
+   choices are the four step names, which is the vocabulary the receipts and
+   the `skipped` reasons already speak.
+
+## §3 The measured shape of an autopilot run (fixture-driven, not live)
+
+Measured on the CLI suite's own fixture — a 4-way sheet, 3 authored directions,
+6 authored rows, the `FakeProvider` draftsman, `HERMES_HOME` a tempdir. Both
+lanes drive the identical draft to `composed`; the only difference is who
+sequences the steps.
+
+| | interactive verbs | `characters auto` |
+|---|---|---|
+| CLI processes after `start` | 4 | **1** |
+| generation calls | 7 | 7 (identical work) |
+| stdout the agent reads back | 8419 B | **6814 B** (−19%) |
+| lines of output to parse | 231 | **5** |
+| generation-bearing verbs needing a wake-up | 2 (`turnaround`, `rows`) | **1** |
+
+The API-call arithmetic follows from the last row, which is the one that costs
+whole prompts: with 3b delivery, each generation-bearing verb costs a fire and
+a delivery turn. The interactive one-shot is start → fire turnaround →
+delivery → approve+fire rows → delivery → compose → reply; the autopilot is
+start → fire `auto` → delivery → reply. **4 API calls against the plan's
+projected ~10–12 for Stages 1–3a, and against the 27 measured on the live
+fire-imp run.** The 5-to-2 tool-call drop and the −19% bytes are measured here;
+the API-call count is arithmetic over them plus the shipped 3b delivery, and is
+not claimed as a live measurement.
+

@@ -2875,6 +2875,60 @@ round-trip.
   time because that is the only moment the run knows who is asking — the same reason the
   dispatch lane records a sender before its target starts working.
 
+## 2026-08-31 — one command drives the whole pipeline: `characters auto` (Stage 5 slice)
+
+R-3 was the last open ruling on the turn-efficiency plan and it is ruled YES (decision-close
+wave, RD-10). The verb exists. What follows is what it does, what it deliberately does NOT
+do, and the two readings of the stage text that would have made it destructive.
+
+- **[DO] Use it only when the operator asked for the whole thing in one go.** `auto` approves
+  the turnaround itself, and approving the turnaround is the last moment a reference can
+  change. A staged ask ("make the turnaround, show me") still gets the staged verbs. This is
+  a rule about the ASK, not about your confidence.
+
+- **[DO] Fire it in the background, `notify`, end your turn.** One process, 10–20 minutes,
+  and every receipt is flushed the moment its stage lands — so `process log` mid-run shows
+  real progress, not silence. That pairing is the whole point: the measured 27-call fire-imp
+  turn spent twelve calls asking a blocked pipeline whether it was done.
+
+- **[READ] The output is a STREAM, and it is the only `characters` verb that is.** With
+  `--json` every line is ONE compact object — `emit_json`'s indented block would make the
+  newline framing meaningless — and the LAST line is always the summary
+  (`"step": "auto"`), carrying `ran`, `skipped` (each with its reason), `through`, and on a
+  failure `stopped_at` and `error`. Every other line is the payload its own verb prints
+  today plus a `step` key naming the verb. Read the last line for the verdict; read the rest
+  for the images.
+
+- **[DO] Emit a `CHARSHEET-QA:` line for every receipt line.** One command is still three or
+  four stage changes, and the reply contract is per stage change, not per command. An `auto`
+  run reported as a single "done" is the same invisible turn the contract exists to prevent —
+  and it is now easier to write, because every stage handed you its payload on its own line.
+
+- **[READ] It resumes; it does not restart.** The stage text reads like a flat script, and a
+  flat script here is destructive twice: `run_turnaround` re-rolls every direction reference
+  AND clears the approvals, and `rows` with no `--only` regenerates every approved strip. So
+  the plan comes off the draft's own state — `status --json`'s `missing.turnaround` and
+  `pending.rows`, the same two lists the `next` resume hint reads. A reopened, complete draft
+  costs ONE step (compose), generates nothing, and says on the summary why it skipped the
+  other three. This is what makes `auto` the one-command repair after `reopen`.
+
+- **[READ] It cannot override a handedness refusal, and it will not suggest one.** There is
+  no `--accept-handedness` on this verb, and its compose refusal carries no `next` hint —
+  the only hint available would be the override itself, and an autopilot nudging an operator
+  to waive the mirrored-art gate unseen is exactly why the stage was gated. When compose
+  refuses, look at the rows it named, then run `compose --accept-handedness` yourself, by
+  hand, per row.
+
+- **[READ] Refusals stay inside the stream.** A bad `--draft`, a composed draft, a row batch
+  that dies mid-flight: each writes a refusal LINE (flat `ok`/`error`/`draft`/`step`, plus
+  the 4b `next` hints where an honest one exists) and the summary still follows it, so the
+  last line is the verdict even when the run failed. Exit code 2, like every other refusing
+  charsheet verb.
+
+- **[READ] `--through` stops it early** at `turnaround`, `approve-direction`, `rows` or
+  `compose` (default). Useful when the operator wants the references drawn but reserves the
+  approval for themselves: `--through turnaround` generates and stops, approving nothing.
+
 <!-- A2, A3, R1 and any slice standing in the HERMES repo: append your entries above this
      line, under the matching heading, or add a heading if none fits. Then say in your
      slice report that you did.

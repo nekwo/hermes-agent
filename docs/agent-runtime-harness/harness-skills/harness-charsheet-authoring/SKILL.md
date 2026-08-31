@@ -59,7 +59,10 @@ ask one question per decision, and hand back an installed sheet.
   `status: "unavailable"`, fall back to blocking: pass `timeout: 600` and never
   less — every expiry is a full API round-trip that re-sends the whole prompt.
   Between waits do QA that is already available — thumb the rows that already
-  landed — rather than polling empty-handed.
+  landed — rather than polling empty-handed. When the operator asked for the
+  WHOLE thing in one go, `characters auto` is that same shape as one process:
+  fire it in the background, `notify`, end your turn, and report every receipt
+  line it printed.
 - **Batch: many verbs, one tool call.** Ten thumbs in one command —
 
   ```
@@ -85,7 +88,7 @@ retire, and the next `compose` overwrites any hand edit to the sheet anyway.
 
 ## The verbs
 
-Sixteen, flat, all with `--json`. Every draft verb takes `--draft <id>` as a
+Seventeen, flat, all with `--json`. Every draft verb takes `--draft <id>` as a
 **required flag**; only `sprite` takes a positional `<slug>`. **The draft id is
 not the slug** (`20260824-140756-cd645a` vs `anime-girl`).
 
@@ -104,6 +107,7 @@ not the slug** (`20260824-140756-cd645a` vs `anime-girl`).
 | `reroll-row --draft <id> --row <key> [--note …]` | Re-draws one strip. **Auto-approved, and there is no undo.** | `rows` |
 | `thumb --draft <id> --row <key> [--attempt n] [--frame n] [--scale n]` | Writes a card-size QA crop of ONE frame. | **any** |
 | `compose --draft <id> [--accept-handedness <row>:<basis>,…]` | Composes, validates, installs; advances to `composed`. | `rows` |
+| `auto --draft <id> [--through turnaround\|approve-direction\|rows\|compose]` | **The whole pipeline in ONE process**: turnaround → approve every direction → generate the rows that are missing → compose and install, printing a receipt as each stage lands (`--json` = one compact object per LINE; the last line is always the summary). **Only for an operator's explicit "drive it all the way" ask** — it auto-approves the turnaround, which is the last moment a reference can change. It stops on a handedness refusal and has no way to override one; it resumes rather than restarts (a stage whose work already exists is skipped, with the reason on the summary), so it is also the one-command repair after `reopen`; and it writes the same per-attempt history, so crops and `reopen` behave exactly as after a hand-driven run. **One command is still many stage changes: emit a `CHARSHEET-QA:` line for every receipt line it printed**, plus the `MEDIA:` lines. | `turnaround` or `rows` |
 | `reopen --draft <id>` | Back to `rows` for fixes. Installed sheet untouched. | `composed` |
 | `add-state --draft <id> --state <name>:<frames>[:fixed]` | Adds ONE state; seeds its rows un-generated, touches no approved attempt. | `rows` |
 | `sprite <slug>` | The installed payload the launcher reads. **Never pipe it into a turn** — see above. | — |

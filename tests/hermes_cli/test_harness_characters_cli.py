@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -216,6 +217,8 @@ def start_draft(capsys, *extra):
         (["thumb", "--draft", "d", "--row", "walk-e"], "thumb"),
         (["reroll-row", "--draft", "d", "--row", "walk-e"], "reroll-row"),
         (["compose", "--draft", "d"], "compose"),
+        (["auto", "--draft", "d"], "auto"),
+        (["auto", "--draft", "d", "--through", "rows"], "auto"),
         (["reopen", "--draft", "d"], "reopen"),
         (["add-state", "--draft", "d", "--state", "jump:3"], "add-state"),
         (["sprite", "arrow-knight"], "sprite"),
@@ -1811,3 +1814,359 @@ def test_a_clean_character_lists_an_empty_acceptance_rather_than_no_key(
     _code, listed = run(["harness", "characters", "list", "--json"], capsys)
 
     assert listed["characters"][0]["handednessAccepted"] == []
+
+
+# ───────────────────────── the autopilot (`characters auto`) ─────────────────────────
+#
+# Stage 5 of the turn-efficiency plan (R-3 ruled YES 2026-08-31, wave ruling
+# RD-10). One process drives the four pipeline steps and prints a receipt as
+# each lands, so a "drive it all the way" ask costs a fire and a delivery
+# instead of twenty-seven API calls, twelve of them asking "done yet?".
+
+
+def auto_lines(argv, capsys):
+    """Parse `auto`'s stdout as a STREAM: one JSON object per line, in order."""
+    args = parser().parse_args(argv)
+    code = args.func(args)
+    out = capsys.readouterr().out
+    lines = [line for line in out.split("\n") if line.strip()]
+    return code, [json.loads(line) for line in lines]
+
+
+def test_the_autopilot_drives_the_whole_pipeline_and_receipts_every_stage(
+    fake, base_image, capsys
+):
+    """The one-shot shape: one process, four receipts, an installed sheet.
+
+    Each receipt is the payload its own verb prints, plus the `step` key saying
+    which verb produced it — without that key a reader has to infer the verb
+    from the payload's shape, which costs exactly the round-trip this whole
+    stage exists to remove. The summary is LAST, always, so a consumer that
+    reads one line reads the verdict.
+    """
+    draft_id = start_draft(capsys, "--base-image", str(base_image))
+
+    code, lines = auto_lines(
+        ["harness", "characters", "auto", "--draft", draft_id, "--json"], capsys
+    )
+
+    assert code == 0
+    assert [line["step"] for line in lines] == [
+        "turnaround", "approve-direction", "rows", "compose", "auto",
+    ]
+    assert all(line["ok"] is True for line in lines)
+    assert all(line["draft"] == draft_id for line in lines)
+
+    summary = lines[-1]
+    assert summary["ran"] == ["turnaround", "approve-direction", "rows", "compose"]
+    assert summary["skipped"] == []
+    assert summary["stage"] == "composed"
+    assert summary["through"] == "compose"
+    assert "error" not in summary and "stopped_at" not in summary
+
+    # The receipts carry the verbs' own content, not a re-description of it.
+    turnaround, approve, rows, compose = lines[:4]
+    assert sorted(turnaround["turnaround"]) == sorted(FOUR_WAY.authored)
+    assert approve["advanced"] is True
+    assert approve["next"]["verb"] == "rows"
+    assert sorted(rows["rows"]) == sorted(row.key for row in SPEC.authored_rows())
+    assert compose["validation"]["ok"] is True
+
+    # And the sheet is installed, by the same door a hand-driven run installs it.
+    _code, listed = run(["harness", "characters", "list", "--json"], capsys)
+    assert [row["slug"] for row in listed["characters"]] == ["arrow-knight"]
+    assert listed["characters"][0]["installed"] is True
+
+
+def test_every_autopilot_receipt_is_exactly_one_line(fake, base_image, capsys):
+    """The framing IS the newline, so no payload may ever contain one.
+
+    `emit_json` — what every other `--json` verb prints — is `indent=2`, so
+    reusing it here would make each receipt a multi-line block and the stream
+    unparseable line by line. `compose` is the proof case: its payload carries
+    validation text with embedded newlines, which `json.dumps` escapes rather
+    than emits.
+    """
+    draft_id = start_draft(capsys, "--base-image", str(base_image))
+    args = parser().parse_args(
+        ["harness", "characters", "auto", "--draft", draft_id, "--json"]
+    )
+    assert args.func(args) == 0
+
+    out = capsys.readouterr().out
+    assert out.endswith("\n")
+    lines = out.rstrip("\n").split("\n")
+    assert len(lines) == 5
+    for line in lines:
+        payload = json.loads(line)  # each line stands alone
+        assert isinstance(payload, dict)
+
+    # And a payload value that DOES carry a newline — a compose refusal spells
+    # its findings in blocks — is escaped rather than emitted, which is what
+    # makes framing this stream on the newline safe at all.
+    from agent_runtime.cli_format import emit_json_line
+
+    framed = emit_json_line({"error": "first line\n\nsecond block"})
+    assert "\n" not in framed
+    assert json.loads(framed)["error"] == "first line\n\nsecond block"
+
+
+def test_the_autopilot_flushes_each_receipt_as_its_stage_lands(
+    fake, base_image, capsys, monkeypatch
+):
+    """Unflushed, every receipt arrives at once — at exit, twenty minutes late.
+
+    The turn that fires this verb backgrounds it and reads its log while it
+    runs; Python block-buffers stdout to a pipe. A run that prints nothing until
+    it finishes is the "frozen" reading the plan measured on the live fire-imp
+    turn, reproduced by the very verb meant to cure it.
+    """
+    draft_id = start_draft(capsys, "--base-image", str(base_image))
+
+    class _Recorder:
+        def __init__(self):
+            self.events: list[tuple[str, str]] = []
+
+        def write(self, text):
+            self.events.append(("write", text))
+            return len(text)
+
+        def flush(self):
+            self.events.append(("flush", ""))
+
+    recorder = _Recorder()
+    args = parser().parse_args(
+        ["harness", "characters", "auto", "--draft", draft_id,
+         "--through", "turnaround", "--json"]
+    )
+    # A SCOPED patch: `monkeypatch.undo()` would unwind the shared stack this
+    # suite's isolation guards ride on (tests/conftest.py says so, loudly).
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(sys, "stdout", recorder)
+        code = args.func(args)
+
+    assert code == 0
+    kinds = [kind for kind, _text in recorder.events]
+    assert kinds == ["write", "flush", "write", "flush"]
+    assert all(text.endswith("\n") for kind, text in recorder.events if kind == "write")
+
+
+def test_an_autopilot_receipt_carries_the_same_keys_the_verb_prints(
+    fake, base_image, capsys
+):
+    """The plan's promise — "the same payloads the verbs print today" — kept structurally.
+
+    The autopilot calls the verbs' own bodies rather than a copy of them, so the
+    only difference between a receipt and the interactive payload is the `step`
+    key that says which verb produced it. Two drafts, one driven each way.
+    """
+    hand = start_draft(capsys, "--base-image", str(base_image))
+    _code, interactive = run(
+        ["harness", "characters", "turnaround", "--draft", hand, "--json"], capsys
+    )
+
+    auto = start_draft(capsys, "--base-image", str(base_image))
+    _code, lines = auto_lines(
+        ["harness", "characters", "auto", "--draft", auto,
+         "--through", "turnaround", "--json"],
+        capsys,
+    )
+
+    receipt = lines[0]
+    assert receipt["step"] == "turnaround"
+    assert set(receipt) - {"step"} == set(interactive)
+
+
+def test_through_stops_the_autopilot_where_it_is_told_and_says_what_it_skipped(
+    fake, base_image, capsys
+):
+    """`--through` truncates the plan, and the skips are REPORTED.
+
+    An autopilot that quietly does one of four steps and exits 0 is
+    indistinguishable from one that did all four — and the caller has ended its
+    turn, so it cannot see the difference any other way.
+    """
+    draft_id = start_draft(capsys, "--base-image", str(base_image))
+
+    code, lines = auto_lines(
+        ["harness", "characters", "auto", "--draft", draft_id,
+         "--through", "turnaround", "--json"],
+        capsys,
+    )
+
+    assert code == 0
+    assert [line["step"] for line in lines] == ["turnaround", "auto"]
+    summary = lines[-1]
+    assert summary["ran"] == ["turnaround"]
+    assert summary["stage"] == "turnaround", "the directions are still unapproved"
+    assert summary["skipped"] == [
+        {"step": "approve-direction", "reason": "past --through turnaround"},
+        {"step": "rows", "reason": "past --through turnaround"},
+        {"step": "compose", "reason": "past --through turnaround"},
+    ]
+
+    # Nothing was approved: the last moment a reference can change is intact.
+    _code, status = run(
+        ["harness", "characters", "status", "--draft", draft_id, "--json"], capsys
+    )
+    assert sorted(status["status"]["pending"]["turnaround"]) == sorted(FOUR_WAY.authored)
+
+
+def test_the_autopilot_resumes_a_reopened_draft_instead_of_regenerating_it(
+    fake, base_image, capsys
+):
+    """The destructive reading of the stage text, refused.
+
+    Driven as a flat script `auto` would re-roll every direction reference (and
+    `run_turnaround` CLEARS the approvals) and regenerate every approved row.
+    After a `reopen` that discards the QA the operator just did and spends ten
+    to twenty minutes of generation doing it. The plan is read off the draft's
+    own `missing.turnaround` / `pending.rows` instead — the same two lists the
+    4b resume hint reads — so a reopened, complete draft costs ONE step.
+    """
+    draft_id = _compose_ready(capsys, base_image)
+    run(["harness", "characters", "compose", "--draft", draft_id, "--json"], capsys)
+    run(["harness", "characters", "reopen", "--draft", draft_id, "--json"], capsys)
+    generations_before = len(fake.calls)
+
+    code, lines = auto_lines(
+        ["harness", "characters", "auto", "--draft", draft_id, "--json"], capsys
+    )
+
+    assert code == 0
+    assert [line["step"] for line in lines] == ["compose", "auto"]
+    assert lines[-1]["skipped"] == [
+        {"step": "turnaround", "reason": "draft is at stage 'rows'"},
+        {"step": "approve-direction", "reason": "draft is at stage 'rows'"},
+        {"step": "rows", "reason": "every authored row already has an approved strip"},
+    ]
+    assert len(fake.calls) == generations_before, "the autopilot generated nothing"
+
+
+def test_the_autopilot_generates_only_the_rows_that_never_landed(
+    fake, base_image, capsys
+):
+    """A half-generated draft resumes; it does not start over.
+
+    `run_rows` re-generates and re-approves whatever it is handed, so the rows
+    step must ask for the pending list and nothing else. One row generated by
+    hand, the rest by the autopilot, and no row generated twice.
+    """
+    draft_id = to_rows(capsys, base_image)
+    run(
+        ["harness", "characters", "rows", "--draft", draft_id, "--only", "walk-e", "--json"],
+        capsys,
+    )
+    authored = [row.key for row in SPEC.authored_rows()]
+
+    _code, lines = auto_lines(
+        ["harness", "characters", "auto", "--draft", draft_id, "--json"], capsys
+    )
+
+    rows_receipt = next(line for line in lines if line["step"] == "rows")
+    assert sorted(rows_receipt["rows"]) == sorted(key for key in authored if key != "walk-e")
+
+    _code, status = run(
+        ["harness", "characters", "status", "--draft", draft_id, "--json"], capsys
+    )
+    rows_status = status["status"]["rows"]
+    assert [rows_status[key]["attempts"] for key in authored] == [1] * len(authored)
+
+
+def test_the_autopilot_refuses_a_composed_draft_and_names_reopen(
+    fake, base_image, capsys
+):
+    """Nothing to drive is a REFUSAL, not a quiet success.
+
+    The caller ended its turn expecting a character. "Ok, did nothing" is the
+    one answer it cannot act on, so an empty plan exits 2 — and the one command
+    that opens the draft back up rides on the refusal.
+    """
+    draft_id = _compose_ready(capsys, base_image)
+    run(["harness", "characters", "compose", "--draft", draft_id, "--json"], capsys)
+
+    code, lines = auto_lines(
+        ["harness", "characters", "auto", "--draft", draft_id, "--json"], capsys
+    )
+
+    assert code == 2
+    refusal, summary = lines
+    assert refusal["ok"] is False
+    assert refusal["step"] == "plan"
+    assert "stage 'composed'" in refusal["error"]
+    assert refusal["next"] == {
+        "verb": "reopen",
+        "cmd": f"hermes harness characters reopen --draft {draft_id} --json",
+    }
+    assert (summary["ok"], summary["step"], summary["stopped_at"]) == (False, "auto", "plan")
+    assert summary["ran"] == []
+
+
+def test_a_dead_draft_id_refuses_in_the_stream_shape_not_a_json_block(capsys):
+    """Even the earliest refusal keeps ONE framing.
+
+    `_characters_error` prints the indented `emit_json` block every other verb
+    uses; one such block in the middle of a newline-framed stream is
+    unparseable by the consumer the framing exists for. So `auto` never calls
+    it — and the summary follows even a failure that happened before any stage.
+    """
+    code, lines = auto_lines(
+        ["harness", "characters", "auto", "--draft", "no-such-draft", "--json"], capsys
+    )
+
+    assert code == 2
+    assert [line["step"] for line in lines] == ["load", "auto"]
+    assert lines[0]["ok"] is False and lines[0]["draft"] == "no-such-draft"
+    assert lines[-1]["stopped_at"] == "load"
+
+
+def test_a_stage_that_refuses_stops_the_autopilot_and_still_summarizes(
+    fake_unsliceable_walk_e, base_image, capsys
+):
+    """A batch dying mid-flight is the expensive moment, and the stream stays honest.
+
+    The receipts for the stages that DID land are already out (they were
+    flushed as they landed), the refusal carries the 4b resume hints so the
+    caller's next turn is one command, and the summary is still the last line —
+    naming the step that stopped it.
+    """
+    draft_id = start_draft(capsys, "--base-image", str(base_image))
+
+    code, lines = auto_lines(
+        ["harness", "characters", "auto", "--draft", draft_id, "--json"], capsys
+    )
+
+    assert code == 2
+    assert [line["step"] for line in lines] == [
+        "turnaround", "approve-direction", "rows", "auto",
+    ]
+    refusal = lines[2]
+    assert refusal["ok"] is False
+    assert "walk-e" in refusal["error"]
+    assert refusal["next"]["verb"] == "reroll-row"
+    assert refusal["next"]["alternatives"][0]["verb"] == "rows"
+
+    summary = lines[-1]
+    assert (summary["ok"], summary["stopped_at"]) == (False, "rows")
+    assert summary["ran"] == ["turnaround", "approve-direction"]
+    assert summary["stage"] == "rows"
+
+
+def test_the_autopilot_has_no_door_for_overriding_a_handedness_refusal():
+    """R-3's second condition, pinned at the parser.
+
+    `auto` stops on a handedness refusal and never overrides one. There is no
+    `--accept-handedness` on this verb, and its compose refusal carries no
+    `next` — the only hint available would BE the override, and an autopilot
+    that nudges an operator toward waiving the mirrored-art gate unseen is the
+    reason the stage was gated in the first place.
+    """
+    from hermes_cli import harness
+
+    with pytest.raises(SystemExit):
+        parser().parse_args(
+            ["harness", "characters", "auto", "--draft", "d",
+             "--accept-handedness", "idle-ne:rotation+states"]
+        )
+
+    assert harness._characters_auto_next("compose", object()) is None

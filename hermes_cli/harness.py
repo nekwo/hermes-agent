@@ -19,7 +19,7 @@ from hermes_time import now
 from hermes_constants import get_hermes_home
 from hermes_cli.profiles import list_profiles
 
-from agent_runtime.cli_format import emit_json
+from agent_runtime.cli_format import emit_json, emit_json_line
 from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config, mission_chat_clarify_token_binding, resolve_mission_chat_max_seconds
 from agent_runtime.continuity import return_summary_to_parent_session
 from agent_runtime.dispatch_session_policy import (
@@ -1848,6 +1848,11 @@ def build_parser(parent_subparsers) -> None:
     characters_compose.add_argument("--accept-handedness", default="", help="Mirrored-art REFUSALS you have looked at and are overriding, spelled '<row>:<basis>' — take the spelling from the refusal. Per row, never blanket. TWO shapes refuse and both can be accepted: a row BOTH passes agree about ('idle-e:rotation+states'), and a row carried by a whole mirrored STATE, where every judged row of that state reads as a mirror ('jumping-e:states') — that one is accepted row by row like any other. A single-basis finding about a single row is a warning and there is nothing to accept. The basis is named on purpose: a bare row key waived a second, independent body of evidence at once. Naming a row that was not flagged is itself refused, and the honoured list rides on the installed manifest, 'characters list' and the sprite payload as {row, gain, basis}")
     characters_compose.add_argument("--json", action="store_true")
     characters_compose.set_defaults(func=_cmd_characters_compose)
+    characters_auto = characters_subs.add_parser("auto", help="Drive the whole pipeline in ONE process — turnaround, approve every direction, generate the missing rows, compose and install — printing a receipt line as each stage lands. For an operator's EXPLICIT 'drive it all the way' ask and nothing else: it auto-approves the turnaround, which is the last moment a reference can change. It never overrides a handedness refusal (there is no --accept-handedness here) and it writes the same per-attempt history the interactive verbs write, so `reopen` repair and every QA crop work exactly as they do after a hand-driven run. It resumes rather than restarts: a stage whose work already exists is skipped, with the reason on the summary line, so running it after `reopen` regenerates the missing rows instead of discarding the approved ones. Output is newline-delimited — with --json every line is ONE compact object, and the LAST line is always the summary")
+    characters_auto.add_argument("--draft", required=True)
+    characters_auto.add_argument("--through", default="compose", choices=list(_CHARACTERS_AUTO_STEPS), help="Last step to run (default: compose, the whole pipeline). Steps before it that the draft already carries are skipped and reported")
+    characters_auto.add_argument("--json", action="store_true")
+    characters_auto.set_defaults(func=_cmd_characters_auto)
     characters_reopen = characters_subs.add_parser("reopen", help="Reopen a composed draft for fixes (stage 'composed' → 'rows'); the installed sheet stays until the next compose")
     characters_reopen.add_argument("--draft", required=True)
     characters_reopen.add_argument("--json", action="store_true")
@@ -4423,13 +4428,117 @@ def _cmd_characters_base(args) -> int:
     return _characters_verb(args, call)
 
 
-def _cmd_characters_turnaround(args) -> int:
-    def call(draft):
-        result = draft.run_turnaround()
-        directions = ", ".join(sorted(result.get("turnaround", {})))
-        return result, f"Draft {draft.id}: proposed turnaround references for {directions} (awaiting approval)"
+# ── the four pipeline steps, as callables both doors share ──────────────────
+#
+# `turnaround → approve-direction --all → rows → compose` is driven from two
+# places now: one verb per call (the interactive lane) and `characters auto`
+# (the one-shot lane, Stage 5). The plan's promise for `auto` is that each stage
+# receipt is "the same payload the verb prints today" — a promise a copy of the
+# body could not keep for longer than the next edit to one of them. So the body
+# lives once, here, and both doors call it.
 
-    return _characters_verb(args, call)
+
+def _characters_step_turnaround(draft):
+    result = draft.run_turnaround()
+    directions = ", ".join(sorted(result.get("turnaround", {})))
+    return result, f"Draft {draft.id}: proposed turnaround references for {directions} (awaiting approval)"
+
+
+def _characters_step_approve_all(draft):
+    result = draft.approve_all_directions()
+    human = (
+        f"Draft {draft.id}: approved {len(result['approved'])} direction(s); "
+        f"stage is now '{draft.stage}'"
+    )
+    # Only when the approval ADVANCED the stage. `rows` refuses at stage
+    # `turnaround`, and the payload already says `advanced: false` — a hint
+    # disagreeing with the key beside it is a payload arguing with itself.
+    if result.get("advanced"):
+        result["next"] = _characters_next("rows", "--draft", draft.id)
+    return result, human
+
+
+def _characters_step_rows(draft, only: list[str] | None):
+    result = draft.run_rows(only=only)
+    return result, f"Draft {draft.id}: generated {len(result.get('rows', {}))} row strip(s)"
+
+
+def _characters_step_compose(draft, accept: list[str]):
+    from agent.charsheet import pipeline
+
+    result = draft.compose(accept_handedness=accept)
+    validation = result["validation"]
+    # The handedness accounting rides on the SUCCESS line too. A clean
+    # `composed → 1536x3120` told an operator nothing about the six of
+    # fifteen rows the check could not answer for, and a clean pass has never
+    # been a certificate.
+    #
+    # The WARNINGS ride on it as well, and that is not cosmetic. A
+    # single-basis handedness finding no longer blocks, and an accepted one
+    # never did: both are warnings, `validation["warnings"]` needs `--json`,
+    # and a successful `--accept-handedness` therefore used to print a row
+    # count and nothing else — no gain, no basis, no reason. A warning
+    # nobody prints is the shape of the failure this whole lane exists to
+    # retire.
+    lines = [
+        f"Draft {draft.id} composed → {result['slug']} "
+        f"({validation['width']}x{validation['height']}) at {result['sheet']}; "
+        + pipeline.handedness_summary(validation["handedness"])
+    ]
+    # A warning is a BLOCK now, not a sentence, so its continuation lines
+    # are pushed under the same indent rather than falling back to column
+    # zero and reading as separate output.
+    lines += [
+        "  warning: " + text.replace("\n", "\n  ")
+        for text in validation["warnings"]
+    ]
+    return result, "\n".join(lines)
+
+
+def _characters_rows_next(draft, only: list[str] | None) -> dict | None:
+    """A batch that died mid-flight is the expensive moment to be lost in.
+
+    `run_rows` generates and approves row by row, so a refusal leaves some
+    rows landed and the rest not — and the two moves from here are re-roll
+    the row that died (a `--note` is what changes the prompt) or resume the
+    batch with the ones that never landed.
+
+    The rows come off the draft's OWN pending list rather than off the error
+    text, intersected with what this call ASKED for: a caller who ran
+    `--only walk-e` must not be handed a resume naming eleven rows they
+    never wanted. Order is the spec's, so the first pending requested row is
+    the one the loop stopped on.
+
+    Returns ``None`` when there is no honest hint to give.
+    """
+    # ONLY a refusal that happened while generating. `rows` also refuses for
+    # being out of order, and at stage `turnaround` every row is "pending"
+    # while `reroll-row` is just as illegal as `rows` was — a hint there
+    # sends the caller at a second refusal. Caught by the existing
+    # out-of-order test, which asserts the flat shape exactly.
+    if draft.stage != "rows":
+        return None
+    # A hint may never cost the caller the refusal it rides on: if reading
+    # the draft's state fails here, the flat error shape still travels.
+    try:
+        pending = draft.status_payload()["pending"]["rows"]
+    except Exception:  # noqa: BLE001 - a missing hint beats a lost refusal
+        return None
+    if only is not None:
+        wanted = set(only)
+        pending = [key for key in pending if key in wanted]
+    if not pending:
+        return None
+    return _characters_next(
+        "reroll-row", "--draft", draft.id, "--row", pending[0],
+        alternatives=[
+            _characters_next("rows", "--draft", draft.id, "--only", ",".join(pending))
+        ],
+    )
+
+
+def _cmd_characters_turnaround(args) -> int:
+    return _characters_verb(args, _characters_step_turnaround)
 
 
 def _cmd_characters_reroll_direction(args) -> int:
@@ -4453,20 +4562,14 @@ def _cmd_characters_approve_direction(args) -> int:
 
     def call(draft):
         if approve_all:
-            result = draft.approve_all_directions()
-            human = (
-                f"Draft {draft.id}: approved {len(result['approved'])} direction(s); "
-                f"stage is now '{draft.stage}'"
-            )
-        else:
-            result = draft.approve_direction(direction, attempt=attempt)
-            human = (
-                f"Draft {draft.id}: approved {result['direction']} "
-                f"{_attempt_label(result['approved'])}; stage is now '{draft.stage}'"
-            )
-        # Only when the approval ADVANCED the stage. `rows` refuses at stage
-        # `turnaround`, and the payload already says `advanced: false` — a hint
-        # disagreeing with the key beside it is a payload arguing with itself.
+            return _characters_step_approve_all(draft)
+        result = draft.approve_direction(direction, attempt=attempt)
+        human = (
+            f"Draft {draft.id}: approved {result['direction']} "
+            f"{_attempt_label(result['approved'])}; stage is now '{draft.stage}'"
+        )
+        # Only when the approval ADVANCED the stage — same rule the `--all` arm
+        # states at its own site.
         if result.get("advanced"):
             result["next"] = _characters_next("rows", "--draft", draft.id)
         return result, human
@@ -4479,51 +4582,11 @@ def _cmd_characters_rows(args) -> int:
     only = [part.strip() for part in only_text.split(",") if part.strip()] if only_text else None
 
     def call(draft):
-        result = draft.run_rows(only=only)
-        return result, f"Draft {draft.id}: generated {len(result.get('rows', {}))} row strip(s)"
+        return _characters_step_rows(draft, only)
 
     def on_error(draft, exc):
-        """A batch that died mid-flight is the expensive moment to be lost in.
-
-        `run_rows` generates and approves row by row, so a refusal leaves some
-        rows landed and the rest not — and the two moves from here are re-roll
-        the row that died (a `--note` is what changes the prompt) or resume the
-        batch with the ones that never landed.
-
-        The rows come off the draft's OWN pending list rather than off the error
-        text, intersected with what this call ASKED for: a caller who ran
-        `--only walk-e` must not be handed a resume naming eleven rows they
-        never wanted. Order is the spec's, so the first pending requested row is
-        the one the loop stopped on.
-        """
-        # ONLY a refusal that happened while generating. `rows` also refuses for
-        # being out of order, and at stage `turnaround` every row is "pending"
-        # while `reroll-row` is just as illegal as `rows` was — a hint there
-        # sends the caller at a second refusal. Caught by the existing
-        # out-of-order test, which asserts the flat shape exactly.
-        if draft.stage != "rows":
-            return None
-        # A hint may never cost the caller the refusal it rides on: if reading
-        # the draft's state fails here, the flat error shape still travels.
-        try:
-            pending = draft.status_payload()["pending"]["rows"]
-        except Exception:  # noqa: BLE001 - a missing hint beats a lost refusal
-            return None
-        if only is not None:
-            wanted = set(only)
-            pending = [key for key in pending if key in wanted]
-        if not pending:
-            return None
-        return {
-            "next": _characters_next(
-                "reroll-row", "--draft", draft.id, "--row", pending[0],
-                alternatives=[
-                    _characters_next(
-                        "rows", "--draft", draft.id, "--only", ",".join(pending)
-                    )
-                ],
-            )
-        }
+        hint = _characters_rows_next(draft, only)
+        return {"next": hint} if hint is not None else None
 
     return _characters_verb(args, call, on_error=on_error)
 
@@ -4543,41 +4606,231 @@ def _cmd_characters_reroll_row(args) -> int:
 
 
 def _cmd_characters_compose(args) -> int:
-    from agent.charsheet import pipeline
-
     accept_text = str(getattr(args, "accept_handedness", "") or "").strip()
     accept = [part.strip() for part in accept_text.split(",") if part.strip()]
 
     def call(draft):
-        result = draft.compose(accept_handedness=accept)
-        validation = result["validation"]
-        # The handedness accounting rides on the SUCCESS line too. A clean
-        # `composed → 1536x3120` told an operator nothing about the six of
-        # fifteen rows the check could not answer for, and a clean pass has never
-        # been a certificate.
-        #
-        # The WARNINGS ride on it as well, and that is not cosmetic. A
-        # single-basis handedness finding no longer blocks, and an accepted one
-        # never did: both are warnings, `validation["warnings"]` needs `--json`,
-        # and a successful `--accept-handedness` therefore used to print a row
-        # count and nothing else — no gain, no basis, no reason. A warning
-        # nobody prints is the shape of the failure this whole lane exists to
-        # retire.
-        lines = [
-            f"Draft {draft.id} composed → {result['slug']} "
-            f"({validation['width']}x{validation['height']}) at {result['sheet']}; "
-            + pipeline.handedness_summary(validation["handedness"])
-        ]
-        # A warning is a BLOCK now, not a sentence, so its continuation lines
-        # are pushed under the same indent rather than falling back to column
-        # zero and reading as separate output.
-        lines += [
-            "  warning: " + text.replace("\n", "\n  ")
-            for text in validation["warnings"]
-        ]
-        return result, "\n".join(lines)
+        return _characters_step_compose(draft, accept)
 
     return _characters_verb(args, call)
+
+
+# ───────────────────────────── the autopilot ─────────────────────────────
+#
+# Stage 5 of the turn-efficiency plan, ruled in 2026-08-31 (R-3 → YES, wave
+# ruling RD-10). The measured problem: a one-message "make me a character and
+# drive it all the way" ask cost 27 API calls and 1.556M cumulative prompt
+# tokens, and twelve of those calls were the agent asking a blocked pipeline
+# "done yet?". This verb is ONE process that runs the four pipeline steps and
+# prints a receipt as each lands, so the same ask costs a fire and a delivery.
+#
+# Three conditions the ruling adopted from the stage text, each load-bearing:
+#
+#   * it is for an operator's EXPLICIT "drive it all the way" ask only — it
+#     auto-approves the turnaround, which is the last moment a reference can
+#     change;
+#   * it STOPS on a handedness refusal and never overrides one (no
+#     `--accept-handedness` reaches this door, and the compose refusal it prints
+#     carries no `next` hint, because the only hint available would be the
+#     override itself);
+#   * it writes the SAME per-attempt history the interactive verbs write — it
+#     calls their bodies, so `reopen` repair, `status --json` history and every
+#     QA crop work identically afterwards.
+
+_CHARACTERS_AUTO_STEPS: tuple[str, ...] = (
+    "turnaround",
+    "approve-direction",
+    "rows",
+    "compose",
+)
+
+
+def _characters_auto_write(args, data: dict, human: str) -> None:
+    """One receipt line, written and FLUSHED the moment its stage lands.
+
+    Flushed on purpose. The turn that fires this verb backgrounds it and reads
+    its log while it runs — a 10-20 minute `rows` batch is the whole reason the
+    verb exists — and Python block-buffers stdout when it is a pipe. Without the
+    flush every receipt arrives at once, at exit, and the operator watches a
+    silent process for twenty minutes: exactly the "frozen" reading the plan
+    measured on the live fire-imp run.
+
+    `--json` frames with `emit_json_line`, never `emit_json`: the indenting
+    encoder every other verb uses would break the newline framing this stream
+    IS. Human mode prints the verb's own line, which for `compose` is a block.
+    """
+    sys.stdout.write((emit_json_line(data) if getattr(args, "json", False) else human) + "\n")
+    sys.stdout.flush()
+
+
+def _characters_auto_plan(draft, status: dict, through: str) -> tuple[list[str], list[dict]]:
+    """Which steps this run will attempt, and the reason it skips each of the rest.
+
+    Read the draft's STATE, never a fixed script. Driven as a flat script the
+    autopilot is destructive twice over: `run_turnaround` re-rolls every
+    direction reference AND clears the approvals, and `run_rows` with no
+    `--only` regenerates every authored row — including the ones an operator
+    kept. On the `reopen`-repair path that discards the QA work the operator
+    just did and spends ten to twenty minutes of generation doing it. So the
+    turnaround step runs only when some direction has NO attempt at all (the
+    strip is generated whole, so there is no partial resume), and the rows step
+    runs only over the rows with no approved strip — the same two lists the 4b
+    resume hint reads, `missing.turnaround` and `pending.rows`.
+
+    Every skip is REPORTED. An autopilot that quietly does three of four steps
+    and exits 0 is indistinguishable from one that did all four, which is the
+    one thing a caller who ended its turn cannot afford to be wrong about.
+    """
+    limit = _CHARACTERS_AUTO_STEPS.index(through)
+    stage = draft.stage
+    plan: list[str] = []
+    skipped: list[dict] = []
+    for index, step in enumerate(_CHARACTERS_AUTO_STEPS):
+        if index > limit:
+            reason = f"past --through {through}"
+        elif step in ("turnaround", "approve-direction") and stage != "turnaround":
+            reason = f"draft is at stage {stage!r}"
+        elif step in ("rows", "compose") and stage not in ("turnaround", "rows"):
+            reason = f"draft is at stage {stage!r}"
+        elif step == "turnaround" and not status["missing"]["turnaround"]:
+            reason = "every authored direction already has a reference"
+        elif step == "rows" and not status["pending"]["rows"]:
+            reason = "every authored row already has an approved strip"
+        else:
+            plan.append(step)
+            continue
+        skipped.append({"step": step, "reason": reason})
+    return plan, skipped
+
+
+def _characters_auto_next(step: str, draft) -> dict | None:
+    """The `next` hint for a step that refused — or nothing, honestly.
+
+    `compose` is deliberately absent. Its refusing shape is the handedness
+    gate, and the only command that answers it is
+    `compose --accept-handedness <row>:<basis>` — the override R-3 forbids this
+    verb from nudging anyone toward. The refusal text already names every
+    flagged row and its basis; an autopilot adds nothing to that but pressure.
+    """
+    if step == "turnaround" and draft.base_image is None:
+        # Same arm `start` takes for an anchorless draft: `turnaround` refuses
+        # without the anchor, and `<image>` is the one thing the runtime cannot
+        # know.
+        return _characters_next("base", "--draft", draft.id, "--image", "<image>")
+    if step == "rows":
+        return _characters_rows_next(draft, None)
+    return None
+
+
+def _cmd_characters_auto(args) -> int:
+    from agent.charsheet.draft import CharacterDraft
+
+    draft_id = str(getattr(args, "draft", "") or "").strip()
+    through = str(getattr(args, "through", "compose") or "compose")
+
+    def refuse(message: str, *, step: str, draft=None, hint: dict | None = None) -> int:
+        """A refusal is a LINE, and the summary still follows it.
+
+        `_characters_error` is not used anywhere in this verb: it emits the
+        indented `emit_json` block, and one multi-line block in the middle of a
+        newline-framed stream is unparseable by the consumer the framing exists
+        for. Every line this verb writes — receipts, refusals, summary — has
+        one shape, and the LAST line is always the summary.
+        """
+        line = {"ok": False, "error": message, "draft": draft_id, "step": step}
+        if draft is not None:
+            line["stage"] = draft.stage
+        if hint is not None:
+            line["next"] = hint
+        _characters_auto_write(args, line, message)
+        return 2
+
+    try:
+        draft = CharacterDraft.load(draft_id)
+    except _CHARACTERS_EXPECTED as exc:
+        refuse(str(exc), step="load")
+        _characters_auto_write(
+            args,
+            {
+                "ok": False,
+                "draft": draft_id,
+                "step": "auto",
+                "through": through,
+                "ran": [],
+                "skipped": [],
+                "stopped_at": "load",
+                "error": str(exc),
+            },
+            f"Autopilot ran nothing: {exc}",
+        )
+        return 2
+
+    plan, skipped = _characters_auto_plan(draft, draft.status_payload(), through)
+    ran: list[str] = []
+    stopped_at: str | None = None
+    error: str | None = None
+
+    if not plan:
+        # Nothing to drive is a REFUSAL, not a quiet success. The caller of this
+        # verb ended its turn expecting a character; "ok, did nothing" twenty
+        # minutes later is the reply it cannot act on.
+        message = (
+            f"nothing for the autopilot to run: draft {draft.id} is at stage "
+            f"{draft.stage!r} and --through is {through!r}"
+        )
+        hint = (
+            _characters_next("reopen", "--draft", draft.id)
+            if draft.stage == "composed"
+            else None
+        )
+        refuse(message, step="plan", draft=draft, hint=hint)
+        stopped_at, error = "plan", message
+
+    for step in plan:
+        try:
+            if step == "turnaround":
+                result, human = _characters_step_turnaround(draft)
+            elif step == "approve-direction":
+                result, human = _characters_step_approve_all(draft)
+            elif step == "rows":
+                # The pending list is re-read HERE rather than reused from the
+                # plan: the steps before this one can fail a row, and the batch
+                # must ask for what is missing now.
+                result, human = _characters_step_rows(
+                    draft, draft.status_payload()["pending"]["rows"]
+                )
+            else:
+                result, human = _characters_step_compose(draft, [])
+        except _CHARACTERS_EXPECTED as exc:
+            refuse(str(exc), step=step, draft=draft, hint=_characters_auto_next(step, draft))
+            stopped_at, error = step, str(exc)
+            break
+        line = {"ok": True, "draft": draft.id, "stage": draft.stage, "step": step}
+        line.update(result)
+        _characters_auto_write(args, line, human)
+        ran.append(step)
+
+    summary = {
+        "ok": error is None,
+        "draft": draft.id,
+        "stage": draft.stage,
+        "step": "auto",
+        "through": through,
+        "ran": ran,
+        "skipped": skipped,
+    }
+    if error is not None:
+        summary["error"] = error
+        summary["stopped_at"] = stopped_at
+    _characters_auto_write(
+        args,
+        summary,
+        f"Draft {draft.id}: autopilot ran {len(ran)} step(s)"
+        + (f" ({', '.join(ran)})" if ran else "")
+        + f"; stage is now '{draft.stage}'"
+        + (f" — stopped at {stopped_at}" if error is not None else ""),
+    )
+    return 0 if error is None else 2
 
 
 def _cmd_characters_reopen(args) -> int:
