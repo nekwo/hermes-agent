@@ -88,9 +88,16 @@ def test_has_any_provider_configured_with_export_prefix(tmp_path, monkeypatch):
         "export OPENAI_API_KEY=sk-export-only-123\n", encoding="utf-8"
     )
 
+    # NOT reloaded. Reloading hermes_cli.main re-executes its module body,
+    # which mints a fresh object for every class and function in it while
+    # keeping the module identity -- so `from hermes_cli.main import X` taken
+    # at collection becomes a DIFFERENT object from the one production then
+    # uses, and `isinstance` starts answering False. Measured 2026-08-31: this
+    # line alone red test_update_hangup_protection's
+    # `isinstance(sys.stdout, _UpdateOutputStream)`. The reload was also
+    # redundant -- get_env_path() derives from HERMES_HOME at CALL time, which
+    # is the very reason the comment below gives for not patching anything.
     import hermes_cli.main as hmain
-
-    importlib.reload(hmain)
     # get_env_path() derives from HERMES_HOME (set above) → tmp_path/.env, so
     # no patching is needed. Re-clear os.environ provider keys that
     # load_hermes_dotenv may have populated at import/reload time, forcing the
