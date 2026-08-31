@@ -410,7 +410,7 @@
       "path": "agent_runtime/office_store.py",
       "symbol": "OfficeStore.archive_actors_for_instance",
       "operator": "drop-the-identity-keep-the-count",
-      "find": "                archived_keys.append(actor.actor_key)",
+      "find": "                outcomes.append(OfficeActorOutcome.archived(wsid, actor.actor_key))",
       "replace": "                pass",
       "test": [
         "{python}",
@@ -941,7 +941,7 @@
       "path": "agent_runtime/office_store.py",
       "symbol": "OfficeStore.archive_actors_for_instance",
       "operator": "drop-scan-shortfall-row",
-      "find": "            scan = self.scan_actors(wsid)\n            if scan.unreadable:\n                failures.append(_unreadable_scan_failure(wsid, scan))",
+      "find": "            scan = self.scan_actors(wsid)\n            if scan.unreadable:\n                outcomes.append(OfficeActorOutcome.scan_unreadable(wsid, scan))",
       "replace": "            scan = self.scan_actors(wsid)",
       "test": [
         "{python}",
@@ -1564,6 +1564,66 @@
         "pytest",
         "-q",
         "tests/agent_runtime/test_office_store.py::test_the_policy_sees_the_actor_set_the_write_lands_beside"
+      ]
+    },
+    {
+      "id": "hh3-an-unreadable-conflict-sidecar-passes-for-a-read-key",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "scan_conflicts",
+      "operator": "mint-read-outcome-in-the-except-arm",
+      "find": "                outcomes.append(\n                    OfficeActorOutcome.conflict_key_from_filename(\n                        workspace_id, path.stem, exc\n                    )\n                )\n                keys.append(path.stem)",
+      "replace": "                outcomes.append(OfficeActorOutcome.conflict_read(workspace_id, path.stem))\n                keys.append(path.stem)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_a_conflict_sidecar_that_would_not_decode_is_named_as_a_guess"
+      ]
+    },
+    {
+      "id": "hh3-a-sidecar-with-no-actor-key-passes-for-a-read-key",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "scan_conflicts",
+      "operator": "drop-the-empty-key-guess-arm",
+      "find": "            if not key:\n                outcomes.append(\n                    OfficeActorOutcome.conflict_key_from_filename(\n                        workspace_id, path.stem, ValueError(\"actor_key missing\")\n                    )\n                )\n                keys.append(path.stem)\n                continue\n",
+      "replace": "            key = key or path.stem\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_a_readable_sidecar_with_no_actor_key_is_the_same_guess"
+      ]
+    },
+    {
+      "id": "hh3-a-resolved-sidecar-reads-as-a-live-conflict",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "scan_conflicts",
+      "operator": "drop-resolved-sidecar-skip",
+      "find": "            if path.name.endswith(\".resolved.json\"):\n                continue\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_a_resolved_sidecar_is_not_a_conflict_and_is_never_read"
+      ]
+    },
+    {
+      "id": "hh3-the-prune-ack-keeps-its-own-tally-again",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "archive_actors_for_instance",
+      "operator": "hand-keep-the-archived-count",
+      "find": "            \"archived\": len(archived_keys),",
+      "replace": "            \"archived\": len(outcomes),",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_prunes_ack_is_derived_from_its_outcomes_and_cannot_disagree"
       ]
     }
   ]

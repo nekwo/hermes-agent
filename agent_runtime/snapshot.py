@@ -1852,7 +1852,12 @@ def _offices_summary(office_store, workspaces, realms=()) -> OfficesProjection:
                 surface,
                 actors,
                 actors_unreadable=scan.unreadable,
-                conflict_actor_keys=office_store.conflict_actor_keys(workspace_token),
+                # ``.keys`` spelled out: ``scan_conflicts`` also knows which of
+                # these came from a sidecar that would not decode (a filename
+                # token, not an actor key). The office row has no field for that
+                # shortfall yet, so dropping it is a visible choice here rather
+                # than a thin view's default.
+                conflict_actor_keys=office_store.scan_conflicts(workspace_token).keys,
                 actor_unpublished=_actor_unpublished,
                 orphaned=orphaned,
                 orphan_reason=(

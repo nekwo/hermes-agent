@@ -109,7 +109,12 @@ def _office_surface_row(store, workspace_id: str, *, full: bool = False, surface
     # re-open the hole at this seam.
     scan = store.scan_actors(workspace_id)
     actors = scan.actors
-    conflict_actor_keys = store.conflict_actor_keys(workspace_id)
+    # ``.keys`` spelled out, not handed over by a thin view: ``scan_conflicts``
+    # also reports which of those keys came from a sidecar that would not decode
+    # and is therefore a FILENAME token rather than an actor key. This row does
+    # not carry that yet — the office summary row has no field for it — so the
+    # drop is a choice made here, in the open, and filed rather than hidden.
+    conflict_actor_keys = store.scan_conflicts(workspace_id).keys
     summary = office_summary_row(
         surface,
         actors,

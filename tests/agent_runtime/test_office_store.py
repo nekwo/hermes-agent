@@ -1608,3 +1608,100 @@ def test_a_multi_item_payload_is_refused_rather_than_guessed_at():
     with pytest.raises(ValueError, match="position_policy resolves ONE item"):
         store.upsert_actor(ws, payload, position_policy=lambda scan: (0.0, 0.0))
     assert store.scan_actors(ws).actors == []
+
+
+# ── typed per-key outcomes at the best-effort loops (H-H3) ──────────────────
+
+
+def test_a_conflict_sidecar_that_would_not_decode_is_named_as_a_guess():
+    """H-H3. The substitution stays; the silence goes.
+
+    ``conflict_actor_keys`` answered a decode failure with ``path.stem`` and
+    said nothing. The stem is ``actor_file_token(actor_key)`` — sanitised and,
+    past 64 characters, truncated with a hash suffix — so for a long key it is
+    not the actor key, and ``office resolve-conflict --actor <it>`` finds
+    nothing. Both readers present these to an operator as keys to act on.
+
+    *Mutation:* mint ``conflict_read`` in the ``except`` arm too. Every entry
+    then claims to have been read out of a payload and ``unreadable`` answers 0.
+    """
+
+    ws = _make_workspace()
+    store = OfficeStore()
+    paths.office_conflict_path(ws, "dev").parent.mkdir(parents=True, exist_ok=True)
+    paths.office_conflict_path(ws, "dev").write_text(
+        '{"actor_key": "dev"}', encoding="utf-8"
+    )
+    (paths.office_conflicts_dir(ws) / "broken.json").write_text("{not json", encoding="utf-8")
+
+    scan = store.scan_conflicts(ws)
+    assert scan.keys == ["broken", "dev"]
+    assert scan.unreadable == 1
+    guessed = [o for o in scan.outcomes if not o.succeeded]
+    assert [o.actor_key for o in guessed] == ["broken"]
+    assert guessed[0].outcome.startswith("conflict_unreadable:")
+    # The CLASS, never the message, in the token a program branches on.
+    assert ":" in guessed[0].outcome and " " not in guessed[0].outcome
+
+
+def test_a_readable_sidecar_with_no_actor_key_is_the_same_guess():
+    """A payload that decoded fine and simply did not say is still a filename
+    guess, and must not pass for a read key just because the JSON parsed.
+
+    *Mutation:* fall through to ``conflict_read(workspace_id, key or path.stem)``.
+    The keys list is identical, so only the outcome convicts — which is the
+    point of having one.
+    """
+
+    ws = _make_workspace()
+    store = OfficeStore()
+    paths.office_conflicts_dir(ws).mkdir(parents=True, exist_ok=True)
+    (paths.office_conflicts_dir(ws) / "silent.json").write_text("{}", encoding="utf-8")
+
+    scan = store.scan_conflicts(ws)
+    assert scan.keys == ["silent"]
+    assert scan.unreadable == 1
+
+
+def test_a_resolved_sidecar_is_not_a_conflict_and_is_never_read():
+    """The skip is before the read, so a resolved sidecar cannot contribute an
+    outcome of any kind — including a failure if it happened to be corrupt.
+
+    *Mutation:* drop the ``.resolved.json`` skip. The resolved record shows up
+    as a live conflict and the parity warning fires for work already done.
+    """
+
+    ws = _make_workspace()
+    store = OfficeStore()
+    paths.office_conflicts_dir(ws).mkdir(parents=True, exist_ok=True)
+    (paths.office_conflicts_dir(ws) / "dev.resolved.json").write_text(
+        "{not json", encoding="utf-8"
+    )
+    assert store.scan_conflicts(ws) == ([], [])
+
+
+def test_the_prunes_ack_is_derived_from_its_outcomes_and_cannot_disagree():
+    """H-H3. The four ack keys were two lists and two tallies kept in parallel;
+    any one of them could drift from the others in silence. They are one typed
+    list's projections now, and the counts are its lengths.
+
+    Both arms in one workspace so the derivation is exercised across a mixed
+    outcome set, which is the case a per-arm tally gets wrong.
+
+    *Mutation:* return a hand-kept ``"archived": len(outcomes)``. The
+    unreadable-scan row is not an archive, so the count over-reports by one.
+    """
+
+    ws = _make_workspace()
+    store = OfficeStore()
+    store.upsert_actor(ws, _actor_payload("qa", persona_instance_id="personainst_hh3_a"))
+    (paths.office_actors_dir(ws) / "broken.json").write_text("{not json", encoding="utf-8")
+
+    result = store.archive_actors_for_instance("persona_personainst_hh3_a")
+
+    assert result["archived"] == len(result["archived_actor_keys"]) == 1
+    assert result["failed"] == len(result["failures"]) == 1
+    assert result["archived_actor_keys"] == ["personainst_hh3_a"]
+    assert result["failures"] == [
+        {"actor_key": None, "workspace_id": ws, "error": "ActorsUnreadable: 1"}
+    ]

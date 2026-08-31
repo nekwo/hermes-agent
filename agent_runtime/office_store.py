@@ -33,7 +33,7 @@ Hard invariants this store upholds:
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
@@ -205,28 +205,158 @@ class ActorScan(NamedTuple):
     unreadable: int
 
 
-def _unreadable_scan_failure(workspace_id: str, scan: ActorScan) -> dict:
-    """The archive lane's failure row for a shortfall that belongs to NO actor.
+#: The one word an outcome that simply WORKED is spelled with. Failures are
+#: ``<verb>_failed:<ExceptionClass>`` — the class, never the message, the same
+#: disclosure rule the rest of this runtime's receipts follow and the same
+#: vocabulary ``office_sync.OfficeArchiveOutcome`` mints on the pull side.
+OUTCOME_OK = "ok"
 
-    ``actor_key`` is ``None`` rather than a guess — the same shape
-    ``agent_retire`` already uses when the office projection itself will not
-    construct, and for the same reason: the value of this list is that it names
-    what it knows and nothing else. The unreadable file's own key is precisely
-    what could not be decoded, so naming one would be inventing it.
 
-    The COUNT is what the scan can honestly supply (``_read_actor_dir`` keeps a
-    per-class tally, not a path list), and the count is enough to do this row's
-    job: turn an empty ``failures`` list back into the positive claim
-    ``agent_retire``'s docstring says it is.
+@dataclass(frozen=True, slots=True)
+class OfficeActorOutcome:
+    """What one of this store's best-effort loops actually DID to one key.
+
+    THE class fix (H-H3), and the local twin of ``office_sync``'s pull-side
+    ``OfficeArchiveOutcome``. This store's loops all share one hazard: they
+    survive a single bad file on purpose — a prune must not die because one
+    actor will not decode, and a whole office must not vanish because one
+    conflict sidecar is mid-write — and for a long time each one paid for that
+    survival in a different, ad-hoc currency. The prune kept two parallel raw
+    dicts; the conflict read kept nothing at all and quietly substituted a
+    filename. Three shapes for one question is three places the answer can be
+    wrong differently.
+
+    ONE outcome per key the loop REACHED, successes included. A list of only
+    failures cannot answer "did this loop reach this key at all", which is the
+    question an operator asks after a retire says a desk is gone and the canvas
+    still shows it.
+
+    TWO fields carry the verdict, and the split is deliberate:
+
+    * ``outcome`` is what a PROGRAM branches on. It is a token, and a failed one
+      names the exception CLASS and never its message — a message can carry a
+      path, a display name or a secret-shaped fragment, and these rows ride an
+      operator ack and a launcher decode.
+    * ``error`` is what a HUMAN reads: the ``class: message`` string this
+      store's retire ack has carried to the launcher since before this type
+      existed. ``None`` on success. It is kept rather than dropped to satisfy
+      the rule above because deleting it would take information away from the
+      operator, which is the opposite of what typing the outcome is for; the
+      rule it bends is about the TOKEN, and the token stays clean.
+
+    ``actor_key`` is ``None`` for a shortfall that belongs to no actor — the
+    same shape ``agent_retire`` already uses when the office projection itself
+    will not construct. The unreadable file's own key is precisely what could
+    not be decoded, so naming one would be inventing it.
     """
 
-    return {
-        "actor_key": None,
-        "workspace_id": workspace_id,
-        # Class + count, never a message or a path — the disclosure rule this
-        # list's other rows follow.
-        "error": f"ActorsUnreadable: {scan.unreadable}",
-    }
+    workspace_id: str
+    actor_key: str | None
+    outcome: str
+    error: str | None = None
+
+    @classmethod
+    def archived(cls, workspace_id: str, actor_key: str) -> "OfficeActorOutcome":
+        return cls(workspace_id=workspace_id, actor_key=actor_key, outcome=OUTCOME_OK)
+
+    @classmethod
+    def archive_failed(
+        cls, workspace_id: str, actor_key: str, exc: BaseException
+    ) -> "OfficeActorOutcome":
+        return cls(
+            workspace_id=workspace_id,
+            actor_key=actor_key,
+            outcome=f"archive_failed:{type(exc).__name__}",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+
+    @classmethod
+    def scan_unreadable(cls, workspace_id: str, scan: ActorScan) -> "OfficeActorOutcome":
+        """The shortfall row for a workspace whose actor directory read short.
+
+        The COUNT is what the scan can honestly supply (``_read_actor_dir``
+        keeps a per-class tally, not a path list), and the count is enough to do
+        this row's job: turn an empty failure list back into the positive claim
+        ``agent_retire``'s docstring says it is.
+        """
+
+        return cls(
+            workspace_id=workspace_id,
+            actor_key=None,
+            outcome=f"scan_unreadable:{scan.unreadable}",
+            error=f"ActorsUnreadable: {scan.unreadable}",
+        )
+
+    @classmethod
+    def conflict_read(cls, workspace_id: str, actor_key: str) -> "OfficeActorOutcome":
+        return cls(workspace_id=workspace_id, actor_key=actor_key, outcome=OUTCOME_OK)
+
+    @classmethod
+    def conflict_key_from_filename(
+        cls, workspace_id: str, token: str, exc: BaseException
+    ) -> "OfficeActorOutcome":
+        """A conflict sidecar that would not decode, named by its FILENAME.
+
+        The substitution stays — a conflict the operator can half-name beats a
+        conflict they cannot see at all — but it stops being silent. The
+        filename is ``office_models.actor_file_token(actor_key)``, which is
+        sanitised and truncated at 64 characters with a hash suffix, so for a
+        long key it is NOT the actor key and ``office resolve-conflict --actor
+        <it>`` will not find anything. A caller handed a bare list could not
+        tell that entry from a real one.
+        """
+
+        return cls(
+            workspace_id=workspace_id,
+            actor_key=token,
+            outcome=f"conflict_unreadable:{type(exc).__name__}",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+
+    @property
+    def succeeded(self) -> bool:
+        return self.outcome == OUTCOME_OK
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "workspace_id": self.workspace_id,
+            "actor_key": self.actor_key,
+            "outcome": self.outcome,
+        }
+
+    def as_failure_row(self) -> dict[str, Any]:
+        """The ``{actor_key, workspace_id, error}`` shape the retire ack carries
+        and the launcher decodes (``MissionAgentOfficeArchiveFailure``).
+
+        Derived rather than built beside the outcome, so the ack and the typed
+        record cannot disagree about which keys failed — which is the whole
+        reason the counts below became lengths instead of their own tallies.
+        """
+
+        return {
+            "actor_key": self.actor_key,
+            "workspace_id": self.workspace_id,
+            "error": self.error,
+        }
+
+
+class ConflictScan(NamedTuple):
+    """The conflict sidecars a workspace HAS, beside what they cost to read.
+
+    ``ActorScan``'s shape, deliberately, for the same question one directory
+    over: what did this read find, and what did it have to guess at. ``keys``
+    is complete — every sidecar contributes exactly one entry whether or not it
+    decoded — so this is NOT the ``list_actors``-shaped hazard of a list that is
+    short and says it is whole. What was silent is WHICH entries are guesses,
+    and that lives in ``outcomes``.
+    """
+
+    keys: list[str]
+    outcomes: list[OfficeActorOutcome]
+
+    @property
+    def unreadable(self) -> int:
+        return sum(1 for outcome in self.outcomes if not outcome.succeeded)
 
 
 def _safe_actor_ref(value: Any, *, fallback: str = "operator") -> str:
@@ -907,21 +1037,62 @@ class OfficeStore:
     def list_actors(self, workspace_id: str, *, include_archived: bool = False) -> list[OfficeActor]:
         return self.scan_actors(workspace_id, include_archived=include_archived).actors
 
-    def conflict_actor_keys(self, workspace_id: str) -> list[str]:
+    def scan_conflicts(self, workspace_id: str) -> ConflictScan:
+        """Every unresolved conflict sidecar, and how each key was ARRIVED at.
+
+        Replaces ``conflict_actor_keys``, which returned the bare list and
+        answered a decode failure by substituting ``path.stem`` — silently. The
+        filename is a TOKEN (``office_models.actor_file_token``: sanitised,
+        truncated at 64 with a hash suffix), so for a long key the substitute is
+        not the actor key at all, and ``office resolve-conflict --actor <it>``
+        finds nothing. A caller handed a bare list could not tell that entry
+        from a real one, and both readers of this — the snapshot's parity
+        warning and the CLI's surface row — present these as keys an operator
+        can act on.
+
+        The substitution STAYS: a conflict the operator can half-name beats a
+        conflict they cannot see. What is gone is the silence. Callers that only
+        want the keys spell ``.keys``, which makes dropping the provenance a
+        visible choice rather than the default.
+
+        ``*.resolved.json`` sidecars are skipped before any read: they are the
+        record of a conflict that was already dealt with, not a conflict.
+        """
+
         conflicts_dir = paths.office_conflicts_dir(workspace_id)
         if not conflicts_dir.exists():
-            return []
+            return ConflictScan([], [])
         keys: list[str] = []
+        outcomes: list[OfficeActorOutcome] = []
         for path in sorted(conflicts_dir.glob("*.json")):
             if path.name.endswith(".resolved.json"):
                 continue
             try:
                 payload = _read_json(path)
                 key = str(payload.get("actor_key") or "").strip()
-            except Exception:
-                key = ""
-            keys.append(key or path.stem)
-        return keys
+            except Exception as exc:  # noqa: BLE001 — the scan survives one bad file
+                outcomes.append(
+                    OfficeActorOutcome.conflict_key_from_filename(
+                        workspace_id, path.stem, exc
+                    )
+                )
+                keys.append(path.stem)
+                continue
+            # An EMPTY ``actor_key`` in a sidecar that decoded fine is the same
+            # guess by a different route — the payload was readable and simply
+            # did not say — so it is recorded the same way rather than passing
+            # for a read key.
+            if not key:
+                outcomes.append(
+                    OfficeActorOutcome.conflict_key_from_filename(
+                        workspace_id, path.stem, ValueError("actor_key missing")
+                    )
+                )
+                keys.append(path.stem)
+                continue
+            outcomes.append(OfficeActorOutcome.conflict_read(workspace_id, key))
+            keys.append(key)
+        return ConflictScan(keys, outcomes)
 
     # --- actor writes -----------------------------------------------------
 
@@ -1706,7 +1877,13 @@ class OfficeStore:
         Persona-id-keyed placements survive instance churn by design.
 
         Returns ``{"archived": N, "failed": M, "archived_actor_keys": [...],
-        "failures": [{actor_key, workspace_id, error}]}``.
+        "failures": [{actor_key, workspace_id, error}]}`` — byte-identical to
+        what it has always returned, and now DERIVED from one typed
+        :class:`OfficeActorOutcome` per key this loop reached (H-H3). The four
+        keys were three tallies and two lists kept in parallel; three of them
+        could disagree with the fourth and nothing would have said so. They are
+        one list's projections now, and the counts are its lengths by
+        construction.
 
         The per-actor swallow KEEPS the loop — a prune must not die on one bad
         file, and the retirement it serves is authoritative with or without the
@@ -1738,8 +1915,7 @@ class OfficeStore:
         from .persona_assignments import canonical_persona_instance_id
 
         canonical = canonical_persona_instance_id(target) or target
-        archived_keys: list[str] = []
-        failures: list[dict] = []
+        outcomes: list[OfficeActorOutcome] = []
         for wsid in self.list_workspaces():
             # ``scan_actors``, not ``list_actors``: the thin view answers "these
             # are the actors" for a directory it only partly read, and this loop
@@ -1751,7 +1927,7 @@ class OfficeStore:
             # own rather than a shorter loop nobody can see.
             scan = self.scan_actors(wsid)
             if scan.unreadable:
-                failures.append(_unreadable_scan_failure(wsid, scan))
+                outcomes.append(OfficeActorOutcome.scan_unreadable(wsid, scan))
             for actor in scan.actors:
                 if not self._instance_bound_actor(actor, canonical):
                     continue
@@ -1764,17 +1940,13 @@ class OfficeStore:
                         correlation_id=correlation_id,
                     )
                 except Exception as exc:  # noqa: BLE001 — the loop survives one bad file
-                    failures.append(
-                        {
-                            "actor_key": actor.actor_key,
-                            "workspace_id": wsid,
-                            # Class + message, never the traceback: this string
-                            # rides an operator ack and a launcher decode.
-                            "error": f"{type(exc).__name__}: {exc}",
-                        }
+                    outcomes.append(
+                        OfficeActorOutcome.archive_failed(wsid, actor.actor_key, exc)
                     )
                     continue
-                archived_keys.append(actor.actor_key)
+                outcomes.append(OfficeActorOutcome.archived(wsid, actor.actor_key))
+        archived_keys = [o.actor_key for o in outcomes if o.succeeded]
+        failures = [o.as_failure_row() for o in outcomes if not o.succeeded]
         return {
             "archived": len(archived_keys),
             "failed": len(failures),
