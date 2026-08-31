@@ -63,6 +63,19 @@ to FIFO (not LIFO) when a call carries no input record.
    choices are the four step names, which is the vocabulary the receipts and
    the `skipped` reasons already speak.
 
+5. **Stage 6 keys on the INVOCATION, because there is no call id.** The plan
+   says "key by tool-call id". The progress-callback contract
+   (`_progress_payload_from_callback`) is `(event, tool_name, invocation,
+   result)` — no identifier reaches this sink, and inventing one means changing
+   the runner's callback signature and every producer of it, which is a
+   different and much larger change than the "small observability bug" the plan
+   filed. The identity that DOES reach both events is the invocation, rendered
+   by `_attach_tool_io` to `tool_input` for most tools and to
+   `command_full`/`command_label` for the terminal class (whose `tool_input` is
+   deliberately suppressed against the 4 KB event cap). The match is on those
+   two, in that order, and the fallback for a call with neither is FIFO rather
+   than the old LIFO.
+
 ## §3 The measured shape of an autopilot run (fixture-driven, not live)
 
 Measured on the CLI suite's own fixture — a 4-way sheet, 3 authored directions,

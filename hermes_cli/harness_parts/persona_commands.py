@@ -6064,10 +6064,54 @@ class _ChatProtocolV2Emitter:
             }
         )
 
+    def _match_started_tool(self, name: str, payload: dict[str, object]) -> dict[str, object] | None:
+        """Which STARTED element this finished event belongs to.
+
+        Measured defect (turn-efficiency plan bucket f, Stage 6): two tools of
+        the same name started concurrently and this matched by NAME alone, then
+        `pop()`ed — LIFO. So finish-A landed on the element started SECOND and
+        finish-B on the element started first, and because a finished payload's
+        `tool_input` overrides the started one, the elements came out crossed:
+        `[0]`'s summary naming one skill while its `tool_input` named the other,
+        and `[1]` the reverse. Two `skill_view` calls, two `read_file` calls and
+        two more `read_file` calls all landed that way in one live turn record.
+
+        The plan said "key by tool-call id". **There is no tool-call id here**:
+        the runner's progress contract is `(event, tool_name, invocation,
+        result)` (`agent_runtime/profile_runner.py`
+        `_progress_payload_from_callback`) and carries no identifier at all. The
+        identity that DOES reach both events is the invocation itself — rendered
+        to the `tool_input` block for most tools, and to `command_full` /
+        `command_label` for the terminal class, whose `tool_input` is
+        deliberately suppressed against the event cap. So the match is on those,
+        in that order.
+
+        The fallback when neither side carries an identity is FIFO, not the old
+        LIFO: concurrent starts of one tool finish in start order often enough
+        that arrival order is the better guess, and it is the guess that was
+        measurably wrong before.
+        """
+        pending = self._active_tools.get(name) or []
+        if not pending:
+            return None
+        finished_command = _safe_stream_text(payload.get("command_full")) or _safe_stream_text(
+            payload.get("command_label")
+        )
+        identities = (
+            ("tool_input", _safe_stream_block(payload.get("tool_input"), limit=1200)),
+            ("command", finished_command),
+        )
+        for field, value in identities:
+            if not value:
+                continue
+            for index, candidate in enumerate(pending):
+                if candidate.get(field) == value:
+                    return pending.pop(index)
+        return pending.pop(0)
+
     def _tool_finished(self, payload: dict[str, object]) -> None:
         name = _tool_name_from_progress(payload)
-        stack = self._active_tools.get(name) or []
-        tool = stack.pop() if stack else None
+        tool = self._match_started_tool(name, payload)
         if tool is None:
             self._seq += 1
             self._tool_count += 1

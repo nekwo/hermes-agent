@@ -2033,6 +2033,66 @@
         "-q",
         "tests/hermes_cli/test_harness_characters_cli.py::test_every_autopilot_receipt_is_exactly_one_line"
       ]
+    },
+    {
+      "id": "dcw-h4-concurrent-tool-elements-pair-by-arrival-again",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_ChatProtocolV2Emitter._match_started_tool",
+      "operator": "drop-the-identity-match",
+      "find": "        for field, value in identities:\n            if not value:\n                continue\n            for index, candidate in enumerate(pending):\n                if candidate.get(field) == value:\n                    return pending.pop(index)\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_chat_element_pairing.py::test_a_finish_out_of_start_order_still_finds_its_own_element"
+      ]
+    },
+    {
+      "id": "dcw-h4-an-identity-free-finish-settles-the-newest-start",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_ChatProtocolV2Emitter._match_started_tool",
+      "operator": "restore-the-lifo-fallback",
+      "find": "        return pending.pop(0)\n",
+      "replace": "        return pending.pop()\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_chat_element_pairing.py::test_identity_free_calls_pair_in_arrival_order"
+      ]
+    },
+    {
+      "id": "dcw-h4-a-matched-start-stays-pending-and-can-be-settled-twice",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_ChatProtocolV2Emitter._match_started_tool",
+      "operator": "read-the-match-without-removing-it",
+      "find": "                    return pending.pop(index)\n",
+      "replace": "                    return pending[index]\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_chat_element_pairing.py::test_a_matched_element_leaves_the_pending_set[tool_input]"
+      ]
+    },
+    {
+      "id": "dcw-h4-a-terminal-finish-has-no-identity-to-match-on",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_ChatProtocolV2Emitter._match_started_tool",
+      "operator": "drop-the-command-identity",
+      "find": "            (\"command\", finished_command),\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_chat_element_pairing.py::test_a_terminal_call_is_matched_on_its_command"
+      ]
     }
   ]
 }
