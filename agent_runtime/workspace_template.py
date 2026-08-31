@@ -104,13 +104,31 @@ def _copy_office(
     # ``scan_actors`` sorts by actor_key, which would otherwise put the bare
     # class key first purely because "dev" < "personainst_dev_…".
     #
-    # ``.actors``, shortfall dropped, and the drop is ACCOUNTED one level up:
-    # this function already degrades every office fault to a ``warnings`` row
-    # rather than failing the clone, and an actor whose source file will not
-    # decode simply does not copy. Naming it here so the choice is visible
-    # (AX5); widening ``warnings`` with a ``office_actors_unreadable`` row is
-    # the honest next step and is filed, not smuggled in.
+    # AX5 remainder, BUILT: an actor whose source file will not decode is
+    # skipped by ``read_actor_dir`` and simply does not copy, and this was the
+    # one office fault in this module that produced no ``warnings`` row — every
+    # other one (a broken surface, a folder write, a refused class key, a failed
+    # upsert) degrades to a named row rather than failing the clone. The silence
+    # was worse here than elsewhere: the operator's evidence of what a template
+    # produced is the ``copied`` counts, and a short count with nothing beside it
+    # reads as "the source had fewer desks", not "this machine could not open
+    # two of its files". The COUNT is what the scan can honestly supply
+    # (``read_actor_dir`` keeps a per-class tally, not a path list) and it is
+    # enough to send an operator back to the SOURCE workspace, which is why the
+    # row names that id rather than the one being created.
     scan = store.scan_actors(source_workspace_id)
+    if scan.unreadable:
+        warnings.append(
+            {
+                "code": "office_actors_unreadable",
+                "workspace_id": source_workspace_id,
+                "unreadable": scan.unreadable,
+                "message": (
+                    f"{scan.unreadable} office actor file(s) in source workspace "
+                    f"'{source_workspace_id}' would not decode and were not copied"
+                ),
+            }
+        )
     source_actors = sorted(scan.actors, key=lambda a: not a.persona_instance_id)
     for actor in source_actors:
         payload = {
