@@ -1,6 +1,11 @@
 # Skill-tombstone ledger union merge (was realm-skill-delete S4)
 
-**Status: IN BUILD (W2-H5, decision-close wave 2026-08-31).** The gate is open:
+**Status: SHIPPED 2026-08-31** (W2-H5, decision-close wave) as `4a8d398268`
+(implementation + tests + 7 mutation claims) with the stage's running record in
+`657a4c670c` — branch `feat/dcw-h5-tombstone-union`, landed by the
+orchestrator. Built WHOLE: union merge, `restored_at` markers, and the
+`deleted_workspace_ids` set-union in the one commit. Read §Corrections below
+before citing anything above it. The gate was open:
 **R-D UPGRADED TO UNION 2026-08-31** by RD-11 of the launcher repo's
 `docs/mission_control/planned/decision-close-wave-2026-08-31.md`, which rules
 this document buildable whole — union merge, `restored_at` markers, and the
