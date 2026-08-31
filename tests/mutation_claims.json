@@ -1625,6 +1625,81 @@
         "-q",
         "tests/agent_runtime/test_office_store.py::test_the_prunes_ack_is_derived_from_its_outcomes_and_cannot_disagree"
       ]
+    },
+    {
+      "id": "hh9-a-blank-folder-is-persisted-as-blank-again",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "_normalize_item",
+      "operator": "drop-the-kind-default-fallback",
+      "find": "    folder = _safe_folder(raw.get(\"folder\")) or office_layout_policy.folder_for_kind(kind)",
+      "replace": "    folder = _safe_folder(raw.get(\"folder\"))",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_a_blank_folder_is_filled_with_the_kinds_default_when_it_is_written"
+      ]
+    },
+    {
+      "id": "hh9-an-explicit-folder-is-refiled-under-the-default",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "_normalize_item",
+      "operator": "fill-the-folder-unconditionally",
+      "find": "    folder = _safe_folder(raw.get(\"folder\")) or office_layout_policy.folder_for_kind(kind)",
+      "replace": "    folder = office_layout_policy.folder_for_kind(kind)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_an_explicit_folder_is_never_overwritten_by_the_default"
+      ]
+    },
+    {
+      "id": "hh9-the-filled-folder-stops-asking-the-items-kind",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "_normalize_item",
+      "operator": "ignore-the-kind-when-filling",
+      "find": "    folder = _safe_folder(raw.get(\"folder\")) or office_layout_policy.folder_for_kind(kind)",
+      "replace": "    folder = _safe_folder(raw.get(\"folder\")) or office_layout_policy.folder_for_kind(\"agent\")",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_written_folder_is_the_one_the_layout_policy_would_have_inferred"
+      ]
+    },
+    {
+      "id": "ax5-the-projection-guard-goes-blind-to-a-short-read",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "_emit_actor_patch",
+      "operator": "demote-only-on-truncation",
+      "find": "            if scan.unreadable or len(scan.actors) > MAX_OFFICE_ACTORS_PROJECTED:",
+      "replace": "            if len(scan.actors) > MAX_OFFICE_ACTORS_PROJECTED:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_state_patches.py::test_a_workspace_that_reads_SHORT_keeps_the_honest_refresh_too"
+      ]
+    },
+    {
+      "id": "ax6-an-unkeyed-remote-payload-leaves-no-trace",
+      "path": "agent_runtime/office_sync.py",
+      "symbol": "_read_remote_office",
+      "operator": "count-only-parse-failures",
+      "find": "        unreadable=scan.unreadable + unkeyed,",
+      "replace": "        unreadable=scan.unreadable,",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_sync.py::test_a_pulled_actor_that_decodes_with_NO_key_is_the_same_absence"
+      ]
     }
   ]
 }

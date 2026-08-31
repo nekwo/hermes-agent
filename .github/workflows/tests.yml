@@ -75,12 +75,22 @@ jobs:
       # it would have made four of its guarantees unregistered, which is the
       # failure this gate exists to prevent. Raise it again the same way — with
       # the reason written down — rather than dropping claims to fit.
+      #
+      # 20 since 2026-08-30, and for exactly that reason again. The realm-actor
+      # lifecycle wave's store batch is FOUR stages that cannot be split by
+      # pathspec — they rewrite one function apiece inside `office_store.py`
+      # (H-H6's lock loop, H-H10's in-lock placement, H-H3's typed outcomes,
+      # H-H9's folder fill) plus AX5/AX6's single actor-directory reader — and
+      # they select 17 together. Splitting the diff, the cap's other cure, is
+      # not available to a batch whose whole argument is that the four touch the
+      # same lines; dropping four claims to fit would leave the in-lock
+      # placement race and the pull's delete fence unregistered.
       - name: Require every selected mutant to turn its claimed test red
         if: steps.select.outputs.run == 'true'
         run: >-
           uv run python scripts/changed_line_mutation_check.py
           --base "${{ steps.select.outputs.base }}"
-          --max-candidates 16
+          --max-candidates 20
 
   generate:
     name: "Generate slices"

@@ -779,6 +779,80 @@ def test_a_workspace_over_the_projection_cap_keeps_the_honest_refresh(
     assert patch["op"] == PATCH_OP_UPSERT, patch
 
 
+def test_a_workspace_that_reads_SHORT_keeps_the_honest_refresh_too(
+    seeded_office, set_delta_patches
+):
+    """AX5. Truncation is only ONE of the two ways the projection can be short.
+
+    ``serve_rpc._office_projection`` names the other beside its own cut —
+    ``actors_unreadable``, "rows the platform took", against
+    ``actors_truncated``'s "a cut WE chose". That number rides the office ROW
+    and no ``office_actor`` patch can express it, so a client folding one keeps
+    whatever it last heard about a workspace that has since stopped being
+    fully readable. This guard read the rows alone and could not see it — the
+    worst site in the set, because its whole purpose is to notice
+    incompleteness.
+
+    The cost this pins is real and deliberate: a workspace holding one
+    permanently-undecodable file demotes EVERY write in it to a full core. That
+    is the degrade this lane already names as its floor, paid on a store that is
+    in an abnormal state.
+
+    *Mutation:* drop ``scan.unreadable or`` from the guard in
+    ``_emit_actor_patch``. The write folds as an ordinary upsert and the first
+    assertion reds.
+    """
+
+    from agent_runtime import paths
+
+    def _agent_only(x: float) -> dict:
+        # DESK-LESS on purpose. ``_guard_duplicate_desk`` already refuses a
+        # desk-carrying write outright over an unreadable directory (it cannot
+        # prove the persona holds no desk), so a payload with a desk never
+        # reaches the patch lane at all and could not observe this demote. The
+        # agent-only write is the case that DOES get written and therefore the
+        # only one where "which patch did it emit" is a question.
+        return {
+            "persona_id": "qa",
+            "persona_instance_id": "personainst_qa_agent_0001",
+            "items": [
+                {
+                    "item_id": "personainst_qa_agent_0001",
+                    "kind": "agent",
+                    "persona_id": "qa",
+                    "position": [x, x],
+                    "folder": "Agents",
+                }
+            ],
+        }
+
+    set_delta_patches(True)
+    broken = paths.office_actors_dir(WORKSPACE) / "not-an-actor.json"
+    broken.write_text("{truncated", encoding="utf-8")
+
+    before = _log_end()
+    seeded_office.upsert_actor(WORKSPACE, _agent_only(6.0))
+    patch = [
+        e.payload
+        for _, e in EventLog().iter_from_offset(before)
+        if e.type == STATE_PATCHED_EVENT_TYPE
+    ][0]
+    assert patch["op"] == PATCH_OP_REFRESH, patch
+
+    # Anti-vacuity, the same shape the cap's test uses: repair the directory and
+    # the SAME write is a foldable upsert again, so this cannot be green because
+    # the patch lane went dark or because the fixture never emits.
+    broken.unlink()
+    before = _log_end()
+    seeded_office.upsert_actor(WORKSPACE, _agent_only(7.0))
+    patch = [
+        e.payload
+        for _, e in EventLog().iter_from_offset(before)
+        if e.type == STATE_PATCHED_EVENT_TYPE
+    ][0]
+    assert patch["op"] == PATCH_OP_UPSERT, patch
+
+
 def test_an_undeclared_client_is_never_promoted_a_lifecycle_row_and_a_declared_one_is(
     seeded_office, set_delta_patches
 ):

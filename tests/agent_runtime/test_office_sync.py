@@ -7,6 +7,8 @@ conftest fixtures isolate the runtime root.
 
 from __future__ import annotations
 
+import json as _json
+
 from utils import atomic_json_write
 
 from agent_runtime import office_models, paths
@@ -800,6 +802,63 @@ def test_an_unreadable_pulled_actor_cannot_read_as_a_peer_delete(tmp_path):
         assert f"{ws}:actor:dev" in read_office_baseline(realm_id)
     # The bystander that WAS readable and unchanged is untouched throughout.
     assert store.actor_exists(ws, "qa_lead")
+
+
+def test_a_pulled_actor_that_decodes_with_NO_key_is_the_same_absence(tmp_path):
+    """AX6. The outcome the remote reader had and the store did not, now folded.
+
+    A payload that decodes FINE and carries no ``actor_key`` cannot enter the
+    remote map — there is nothing to key it by, and the filename is routing
+    only (plan §4.3), so it cannot be rescued by the file it arrived in. Before
+    this it left with no trace at all, which put it in the SAME silent absence a
+    corrupt file used to occupy: an actor key missing from ``actors`` is exactly
+    how the pull infers "the peer removed this desk". It counts as unreadable,
+    which is the safe direction, because ``unreadable`` is what fences this
+    workspace's delete-shaped decisions.
+
+    *Probed:* ``unreadable_remote`` carries the unkeyed row, and BOTH locally
+    live desks are fenced rather than archived — ``edu_tutor``, which the peer
+    really did remove, and ``dev``, whose own key left the remote map when the
+    payload lost it. That second one is the fence working as intended: this
+    side cannot tell the two apart, which is precisely why it must decide
+    neither.
+
+    *Mutation:* drop ``+ unkeyed`` from ``RemoteOffice``'s ``unreadable``. The
+    count reads 0, the fence never engages, and both desks are archived on the
+    strength of a row this side could not route.
+    """
+
+    realm_id, ws = _make_realm_workspace()
+    subtree = tmp_path / "subtree"
+    _write_remote_office(subtree, ws, [_remote_actor(ws, "dev"), _remote_actor(ws, "edu_tutor")])
+    adopted = apply_office_pull(realm_id, subtree)
+    assert adopted.adopted == 2 and adopted.unreadable_remote == 0
+
+    # The peer republishes: ``edu_tutor`` is genuinely gone, and ``dev``'s file
+    # now decodes to a row with an empty key. A reader that only counted PARSE
+    # failures would call this a complete remote office and archive edu_tutor.
+    _write_remote_office(subtree, ws, [_remote_actor(ws, "dev")])
+    dev_path = subtree / "store" / "office" / ws / "actors" / f"{office_models.actor_file_token('dev')}.json"
+    payload = _json.loads(dev_path.read_text(encoding="utf-8"))
+    payload["actor_key"] = ""
+    dev_path.write_text(_json.dumps(payload), encoding="utf-8")
+
+    summary = apply_office_pull(realm_id, subtree)
+    assert summary.unreadable_remote == 1, summary.as_dict()
+    assert summary.archived == 0, summary.as_dict()
+    assert summary.delete_fenced == [
+        {
+            "workspace_id": ws,
+            "actor_key": key,
+            "reason": "unreadable_remote",
+            "unreadable_remote": 1,
+        }
+        for key in ("dev", "edu_tutor")
+    ], summary.as_dict()
+    store = OfficeStore()
+    for key in ("dev", "edu_tutor"):
+        assert store.actor_exists(ws, key), key
+        assert key not in store.get_surface(ws).archived_actor_keys
 
 
 def test_a_readable_remote_removal_still_archives_beside_a_fenced_one(tmp_path):
