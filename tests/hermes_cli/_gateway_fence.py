@@ -137,17 +137,20 @@ def _basename(token: str) -> str:
     return str(token).replace("\\", "/").rsplit("/", 1)[-1].lower()
 
 
-def _backend_subcommand(tokens: list[str]) -> str | None:
-    """Which backend this argv would START, or ``None``."""
-    entry = None
+def _hermes_entry_index(tokens: list[str]) -> int | None:
+    """Position of the hermes entry point in this argv, or ``None``."""
     for index, token in enumerate(tokens):
         normalized = str(token).replace("\\", "/").lower()
         if normalized.rsplit("/", 1)[-1] in _HERMES_ENTRYPOINT_BASENAMES:
-            entry = index
-            break
+            return index
         if normalized == "hermes_cli.main" or normalized.endswith("hermes_cli/main.py"):
-            entry = index
-            break
+            return index
+    return None
+
+
+def _backend_subcommand(tokens: list[str]) -> str | None:
+    """Which backend this argv would START, or ``None``."""
+    entry = _hermes_entry_index(tokens)
     if entry is None:
         return None
     # Scan every non-flag token after the entry point: flag arity is unknowable
@@ -209,9 +212,19 @@ def classify(cmd, env=None) -> str | None:
                     "Task Scheduler"
                 )
 
-    if _names_real_root(text, env):
+    # The real-store arm is scoped to argv that would boot OUR OWN runtime.
+    # A blanket "names the real root" refusal was measured over-wide: it also
+    # caught ``X:\...\.hermes\profiles\alice\node\agent-browser.CMD --version``,
+    # a read-only capability probe reached from ``hermes doctor`` through an
+    # import-time-resolved path -- 44 reds across 8 files in the 2026-08-31
+    # measurement run, not one of them the hazard this fence is for. That probe
+    # IS a real find (the suite resolves a tool out of the operator's live
+    # profile) but it is a separate lane, and a ``--version`` call starts
+    # nothing. What this arm must catch is a hermes process coming up on the
+    # operator's store: the second half of the measured escape.
+    if _hermes_entry_index(tokens) is not None and _names_real_root(text, env):
         return (
-            f"it resolves the operator's REAL hermes store ({_REAL_ROOT}). "
+            f"it would run hermes against the operator's REAL store ({_REAL_ROOT}). "
             "Tests run against the hermetic home that tests/conftest.py's "
             "_hermetic_environment fixture provides"
         )

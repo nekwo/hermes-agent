@@ -79,16 +79,33 @@ def test_classifier_allows_ordinary_commands(cmd):
     assert _gateway_fence.classify(cmd) is None
 
 
-def test_classifier_refuses_a_spawn_pointed_at_the_real_store():
+def test_classifier_refuses_a_hermes_run_pointed_at_the_real_store():
     """The second half of the escape: not just *a* gateway, the operator's."""
     real_root = _gateway_fence.real_root()
     if real_root is None:
         pytest.skip("no default hermes root resolvable on this host")
     reason = _gateway_fence.classify(
-        ["python", "-c", "pass"], env={"HERMES_HOME": str(real_root / "profiles" / "alice")}
+        ["hermes", "config", "get", "model"],
+        env={"HERMES_HOME": str(real_root / "profiles" / "alice")},
     )
     assert reason is not None
-    assert "REAL hermes store" in reason
+    assert "REAL store" in reason
+
+
+def test_a_third_party_tool_under_the_real_root_is_not_refused():
+    """The over-refusal this arm was narrowed away from, pinned so it stays gone.
+
+    ``hermes doctor`` probes an agent-browser shim whose path was resolved at
+    import time out of the operator's live profile. That IS a finding -- the
+    suite reads a tool out of a real profile home -- but it is a ``--version``
+    call that starts nothing, and refusing it turned 44 tests across 8 files
+    red for a hazard this fence is not about.
+    """
+    real_root = _gateway_fence.real_root()
+    if real_root is None:
+        pytest.skip("no default hermes root resolvable on this host")
+    probe = str(real_root / "profiles" / "alice" / "node" / "agent-browser.CMD")
+    assert _gateway_fence.classify([probe, "--version"]) is None
 
 
 # ── L3: the primitives actually refuse ─────────────────────────────────────
