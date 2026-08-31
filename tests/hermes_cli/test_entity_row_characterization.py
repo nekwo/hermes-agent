@@ -443,6 +443,11 @@ def test_office_surface_row_key_sets_are_unchanged(fixture_store):
         "actors_unreadable",
         "archived_actor_keys",
         "conflict_actor_keys",
+        # ...and, since RD-5, which of those conflict keys is a FILENAME guess
+        # rather than a key read out of a sidecar. It rides ``--full`` for the
+        # same reason the keys do: the skinny row hands over a COUNT, and only
+        # this tier can hand an operator a token to type.
+        "conflict_guessed_keys",
         "conflicts",
         "folders",
         "revision",
@@ -451,6 +456,44 @@ def test_office_surface_row_key_sets_are_unchanged(fixture_store):
     ]
     assert skinny["folders"] == ["Agents", "Desks"]
     assert skinny["conflicts"] == 0
+
+
+def test_office_surface_row_marks_which_conflict_keys_are_filename_guesses(fixture_store):
+    """RD-5, at the tier that actually prints tokens.
+
+    ``--full`` is the only office surface that hands an operator conflict KEYS
+    to type, and a key the scan guessed from a filename is
+    ``actor_file_token(actor_key)`` — sanitised, truncated at 64 with a hash
+    suffix — so for a long key ``office resolve-conflict --actor <it>`` finds
+    nothing. The row now says which ones those are, from the SAME
+    ``scan_conflicts`` that produced the key list.
+
+    *Mutation:* drop the ``conflict_guessed_keys`` line from the ``full`` block
+    (or call ``scan_conflicts`` a second time for it). The keys print exactly as
+    before, indistinguishable, which is the defect.
+    """
+
+    from agent_runtime import paths
+
+    workspace = fixture_store["workspace"]
+    paths.office_conflicts_dir(workspace.id).mkdir(parents=True, exist_ok=True)
+    paths.office_conflict_path(workspace.id, "neko").write_text(
+        '{"actor_key": "neko"}', encoding="utf-8"
+    )
+    (paths.office_conflicts_dir(workspace.id) / "broken.json").write_text(
+        "{not json", encoding="utf-8"
+    )
+
+    office = fixture_store["office"]
+    skinny = harness._office_surface_row(office, workspace.id)
+    full = harness._office_surface_row(office, workspace.id, full=True)
+
+    # The skinny row is a COUNT and no tokens, so it cannot mislead — and it
+    # counts both, because both are conflicts.
+    assert skinny["conflicts"] == 2
+    assert "conflict_guessed_keys" not in skinny
+    assert full["conflict_actor_keys"] == ["broken", "neko"]
+    assert full["conflict_guessed_keys"] == ["broken"]
 
 
 # ── The consolidation itself: each row is a re-key of the builder's row ──────

@@ -109,17 +109,20 @@ def _office_surface_row(store, workspace_id: str, *, full: bool = False, surface
     # would re-open the hole at this seam.
     scan = store.scan_actors(workspace_id)
     actors = scan.actors
-    # ``.keys`` spelled out, not handed over by a thin view: ``scan_conflicts``
-    # also reports which of those keys came from a sidecar that would not decode
-    # and is therefore a FILENAME token rather than an actor key. This row does
-    # not carry that yet — the office summary row has no field for it — so the
-    # drop is a choice made here, in the open, and filed rather than hidden.
-    conflict_actor_keys = store.scan_conflicts(workspace_id).keys
+    # ONE scan, both lists (RD-5). ``scan_conflicts`` reports which of those
+    # keys came from a sidecar that would not decode and is therefore a FILENAME
+    # token rather than an actor key — for a long key not the actor key at all,
+    # so ``office resolve-conflict --actor <it>`` finds nothing. This tier prints
+    # the keys under ``--full``, so it prints the guess list beside them; a
+    # second ``scan_conflicts`` for the second list would be two reads of one
+    # directory, free to disagree.
+    conflicts = store.scan_conflicts(workspace_id)
     summary = office_summary_row(
         surface,
         actors,
         actors_unreadable=scan.unreadable,
-        conflict_actor_keys=conflict_actor_keys,
+        conflict_actor_keys=conflicts.keys,
+        conflict_guessed_keys=conflicts.guessed_keys,
     )
     row = {
         "workspace_id": summary["workspace_id"],
@@ -139,6 +142,11 @@ def _office_surface_row(store, workspace_id: str, *, full: bool = False, surface
         row["actors_unreadable"] = summary["actors_unreadable"]
         row["archived_actor_keys"] = summary["archived_actor_keys"]
         row["conflict_actor_keys"] = summary["conflict_actor_keys"]
+        # Rides ``--full`` beside the keys it qualifies, and only there: the
+        # skinny row hands over a COUNT and no tokens, so it cannot hand an
+        # operator a token ``resolve-conflict`` will not find. Printing the keys
+        # without this list is exactly what did (RD-5).
+        row["conflict_guessed_keys"] = summary["conflict_guessed_keys"]
     return row
 
 

@@ -1715,6 +1715,7 @@ def office_summary_row(
     *,
     actors_unreadable: int,
     conflict_actor_keys=(),
+    conflict_guessed_keys,
     actor_unpublished=None,
     orphaned: bool = False,
     orphan_reason: str | None = None,
@@ -1739,6 +1740,20 @@ def office_summary_row(
     rather than get it by default, which is the same "never silently zero" rule
     ``ActorScan.unreadable`` is declared under.
 
+    ``conflict_guessed_keys`` is REQUIRED by keyword under that same rule, and
+    for the conflict list's version of the same defect (RD-5): a conflict
+    sidecar that will not decode — or one that decodes and does not name its
+    actor — still contributes a key, but the key is
+    ``office_models.actor_file_token(actor_key)``, sanitised and truncated at 64
+    characters with a hash suffix. For a long key it is NOT the actor key, so
+    ``office resolve-conflict --actor <it>`` finds nothing, and both readers of
+    this row present these to an operator as keys to act on. The subset that is
+    a guess rides the ROW rather than being re-derived at each reader, for the
+    reason ``orphan_reason`` does: one scan decides it, and a second derivation
+    with its own inputs is free to disagree with the list it explains. A caller
+    with no conflicts still says ``conflict_guessed_keys=()`` out loud rather
+    than getting "none of these are guesses" by default.
+
     This matters twice over for the persisted core (EG-3.1): a core is written
     back after every build, so a projection that under-reported its own
     completeness would be persisted as fingerprint-blessed truth and served to
@@ -1761,6 +1776,11 @@ def office_summary_row(
         # Additive — an old launcher ignores the key.
         "actors_unreadable": int(actors_unreadable),
         "conflict_actor_keys": list(conflict_actor_keys),
+        # WHICH of those keys the scan had to GUESS from a filename. Additive —
+        # an old launcher ignores the key, and a row from an older core has no
+        # such list, which reads as the claim the bare list used to make
+        # silently: every key came out of a payload.
+        "conflict_guessed_keys": list(conflict_guessed_keys),
         "archived_actor_keys": list(surface.archived_actor_keys),
         "revision": surface.revision,
         "updated_at": to_jsonable(surface.updated_at),
@@ -1863,17 +1883,20 @@ def _offices_summary(office_store, workspaces, realms=()) -> OfficesProjection:
             return baseline.get(f"{surface.workspace_id}:actor:{actor.actor_key}") != office_content_hash(actor)
 
         orphaned = surface.workspace_id not in workspace_ids
+        # ONE scan, both lists. ``scan_conflicts`` knows which of these keys came
+        # from a sidecar that would not decode (a filename token, not an actor
+        # key) and which were read out of a payload; taking ``.keys`` here and
+        # re-deriving the guesses at the warning would be two reads of one
+        # directory, free to disagree between the row and the sentence that
+        # explains it. The row carries both (RD-5).
+        conflicts = office_store.scan_conflicts(workspace_token)
         offices.append(
             office_summary_row(
                 surface,
                 actors,
                 actors_unreadable=scan.unreadable,
-                # ``.keys`` spelled out: ``scan_conflicts`` also knows which of
-                # these came from a sidecar that would not decode (a filename
-                # token, not an actor key). The office row has no field for that
-                # shortfall yet, so dropping it is a visible choice here rather
-                # than a thin view's default.
-                conflict_actor_keys=office_store.scan_conflicts(workspace_token).keys,
+                conflict_actor_keys=conflicts.keys,
+                conflict_guessed_keys=conflicts.guessed_keys,
                 actor_unpublished=_actor_unpublished,
                 orphaned=orphaned,
                 orphan_reason=(
@@ -1939,15 +1962,34 @@ def _office_parity_warnings(data) -> list[dict]:
                     ),
                 }
             )
+        # WHICH of the conflict keys below the scan had to guess from a
+        # filename (RD-5). Decided by the row, from the one ``scan_conflicts``
+        # that produced the keys — see ``office_summary_row``. Absent on a row
+        # from an older core, and an empty set is then the honest reading: this
+        # builder cannot know, and every key is presented the way the bare list
+        # always presented it.
+        guessed = set(office.get("conflict_guessed_keys") or ())
         for actor_key in office.get("conflict_actor_keys") or []:
+            is_guess = actor_key in guessed
             warnings.append(
                 {
                     "code": "office_actor_conflict",
                     "entity_id": actor_key,
                     "workspace_id": office.get("workspace_id"),
+                    # The code stays ONE token (the ``orphaned_office`` rule:
+                    # discrimination in a FIELD, never in the code, or every
+                    # existing census of this condition zeroes). This is the
+                    # field, and it is what a program branches on; the sentence
+                    # below is for the human reading the console.
+                    "guessed": is_guess,
                     "detail": (
                         f"office actor '{actor_key}' has an unresolved realm-sync conflict; "
                         "resolve with `harness office resolve-conflict --actor <key> --take local|remote`"
+                        + (
+                            " (filename guess — resolve-conflict will not find this key)"
+                            if is_guess
+                            else ""
+                        )
                     ),
                 }
             )

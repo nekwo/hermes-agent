@@ -442,7 +442,10 @@ def test_the_snapshot_office_lane_carries_the_same_binding_field():
 
     store = _seed_office()
     row = office_summary_row(
-        store.get_surface(WORKSPACE), store.scan_actors(WORKSPACE).actors, actors_unreadable=0
+        store.get_surface(WORKSPACE),
+        store.scan_actors(WORKSPACE).actors,
+        actors_unreadable=0,
+        conflict_guessed_keys=(),
     )
     snapshot_bindings = {a["actor_key"]: a["persona_instance_id"] for a in row["actors"]}
     assert snapshot_bindings == {

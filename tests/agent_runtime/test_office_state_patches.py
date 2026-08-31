@@ -280,7 +280,10 @@ def test_office_actor_patch_is_small_against_the_office_row(seeded_office, set_d
 
     surface = seeded_office.get_surface(WORKSPACE)
     whole_office_row = office_summary_row(
-        surface, seeded_office.scan_actors(WORKSPACE).actors, actors_unreadable=0
+        surface,
+        seeded_office.scan_actors(WORKSPACE).actors,
+        actors_unreadable=0,
+        conflict_guessed_keys=(),
     )
 
     assert size(patch) < EVENT_PAYLOAD_LIMIT_BYTES
@@ -1477,6 +1480,7 @@ def test_the_surface_patch_carries_exactly_what_a_full_rebuild_would(
         seeded_office.get_surface(WORKSPACE),
         seeded_office.scan_actors(WORKSPACE).actors,
         actors_unreadable=0,
+        conflict_guessed_keys=(),
     )
     for field in OFFICE_SURFACE_PATCH_FIELDS:
         assert payload["changed"][field] == rebuilt[field], field

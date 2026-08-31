@@ -348,7 +348,8 @@ class ConflictScan(NamedTuple):
     is complete — every sidecar contributes exactly one entry whether or not it
     decoded — so this is NOT the hazard of a list that is short and says it is
     whole. What was silent is WHICH entries are guesses,
-    and that lives in ``outcomes``.
+    and that lives in ``outcomes`` — projected by :attr:`guessed_keys` for the
+    two readers that hand these keys to an operator.
     """
 
     keys: list[str]
@@ -357,6 +358,25 @@ class ConflictScan(NamedTuple):
     @property
     def unreadable(self) -> int:
         return sum(1 for outcome in self.outcomes if not outcome.succeeded)
+
+    @property
+    def guessed_keys(self) -> list[str]:
+        """The subset of ``keys`` that is a FILENAME token, not a key read out
+        of a sidecar payload — the entries ``office resolve-conflict --actor
+        <it>`` may not find (RD-5).
+
+        THE derivation, so the snapshot lane and the CLI lane cannot answer
+        differently about which of one scan's keys are guesses: both call
+        ``scan_conflicts`` ONCE and take both lists off the same result. Derived
+        from ``outcomes`` rather than tallied beside them for the reason
+        ``as_failure_row`` is derived — two parallel lists are two things free
+        to drift.
+
+        ``keys`` and ``outcomes`` are appended in lockstep — exactly one entry
+        per sidecar, in every arm — so the pairing is positional and total.
+        """
+
+        return [key for key, outcome in zip(self.keys, self.outcomes) if not outcome.succeeded]
 
 
 def read_actor_dir(directory) -> ActorScan:
