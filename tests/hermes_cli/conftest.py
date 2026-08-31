@@ -19,43 +19,58 @@ from tests.hermes_cli import _gateway_fence
 _gateway_fence.install()
 
 
+#: Pristine ``web_server.app.state`` as it stood the first time a test in this
+#: directory saw the module — the value every later test is reset to.
+_APP_STATE_BASELINE: dict = {}
+
+
 @pytest.fixture(autouse=True)
-def _web_server_app_state_is_restored():
+def _web_server_app_state_is_pristine():
     """``hermes_cli.web_server.app`` is ONE object for the whole session.
 
     ``app`` is a module-level FastAPI instance, so ``app.state`` is a single
-    mutable dict shared by every test in the run — and the auth middleware
+    mutable mapping shared by every test in the run — and the auth middleware
     branches on ``app.state.auth_required``. Several files here set it
     (test_dashboard_auth_gate, test_dashboard_auth_401_reauth,
     test_cron_fire_dashboard) and the gate tests deliberately leave it True:
-    they assert that a fail-closed public bind records the flag, and the
-    assertion IS the last statement.
+    they assert that a fail-closed public bind RECORDS the flag, and the
+    assertion is the last statement.
 
-    Everything downstream then gets 401ed. In gated mode the legacy session
-    token is not honoured, so the whole `HEADERS = {"X-Hermes-Session-Token":
-    _SESSION_TOKEN}` idiom — module-level in a dozen files here — stops
+    Everything downstream is then 401ed. In gated mode the legacy session
+    token is not honoured, so the ``HEADERS = {"X-Hermes-Session-Token":
+    _SESSION_TOKEN}`` idiom — module-level in a dozen files here — stops
     working, and the test reads as "the endpoint broke" rather than "the
-    process is still in OAuth mode from three files ago". Measured
-    2026-08-31: test_dashboard_auth_gate.py alone turns 4 tests in
-    test_env_custom_keys.py + test_env_export_line_lifecycle.py red, and
-    that is exactly what they do in the full run.
+    process has been in OAuth mode since three files ago". Measured
+    2026-08-31: test_dashboard_auth_gate.py alone reds 4 tests across
+    test_env_custom_keys.py and test_env_export_line_lifecycle.py, which is
+    exactly what the full run reports.
 
-    Restoring the whole ``_state`` mapping rather than the one key keeps this
-    a class fix: any future flag stashed on app.state is covered without a
-    second fixture. Tests that mean to change it still can — the change just
-    ends with the test that made it.
+    The reset happens at SETUP, not teardown, and that is the load-bearing
+    detail. ``monkeypatch`` is instantiated by the root conftest's first
+    autouse fixture, so it tears down AFTER anything declared here — and
+    ``monkeypatch.setattr(app.state, "bound_port", 9119, raising=False)``
+    undoes itself with a ``delattr``. A teardown-time restore removes that key
+    first and monkeypatch's undo then dies with ``KeyError: 'bound_port'``
+    (measured while building this). Resetting on the way IN leaves every
+    pending undo intact and still guarantees no test starts on another test's
+    state.
+
+    Restoring the whole mapping rather than the one key keeps this a class
+    fix: a future flag stashed on app.state is covered without a second
+    fixture. Tests that mean to change it still can — the change just does not
+    outlive them.
     """
     module = sys.modules.get("hermes_cli.web_server")
     state = getattr(getattr(module, "app", None), "state", None)
-    # Starlette's State keeps its mapping in ``_state``; if that ever changes
-    # shape, do nothing rather than guess (and the reds come back honestly).
-    before = dict(state._state) if state is not None and hasattr(state, "_state") else None
-    try:
-        yield
-    finally:
-        if before is not None:
-            state._state.clear()
-            state._state.update(before)
+    # Starlette keeps State's mapping in ``_state``; if that ever changes
+    # shape, do nothing rather than guess — the reds come back honestly.
+    if state is None or not hasattr(state, "_state"):
+        return
+    if not _APP_STATE_BASELINE:
+        _APP_STATE_BASELINE["pristine"] = dict(state._state)
+        return
+    state._state.clear()
+    state._state.update(_APP_STATE_BASELINE["pristine"])
 
 
 @pytest.fixture(autouse=True)
