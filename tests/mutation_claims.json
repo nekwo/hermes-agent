@@ -1490,6 +1490,81 @@
         "-q",
         "tests/agent_runtime/test_locks.py::test_a_fault_that_is_not_contention_is_raised_unwrapped"
       ]
+    },
+    {
+      "id": "hh10-a-positionless-item-defaults-to-the-origin",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "_item_point",
+      "operator": "default-missing-point-to-origin",
+      "find": "    if not isinstance(value, (list, tuple)) or len(value) < 2:\n        raise ValueError(\"invalid_request: item position must be [x, y]\")",
+      "replace": "    if not isinstance(value, (list, tuple)) or len(value) < 2:\n        return (0.0, 0.0)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_a_positionless_item_is_refused_when_no_policy_came_with_it"
+      ]
+    },
+    {
+      "id": "hh10-the-policys-answer-is-discarded",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "upsert_actor",
+      "operator": "discard-resolved-slot",
+      "find": "                        position=position_policy(self.scan_actors(wsid)),",
+      "replace": "                        position=(position_policy(self.scan_actors(wsid)) and (0.0, 0.0)),",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_policy_answers_from_inside_the_lock_and_its_point_is_what_is_written"
+      ]
+    },
+    {
+      "id": "hh10-the-policy-is-handed-a-bare-list",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "upsert_actor",
+      "operator": "unwrap-scan-at-the-seam",
+      "find": "position=position_policy(self.scan_actors(wsid)),",
+      "replace": "position=position_policy(self.scan_actors(wsid).actors),",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_policy_is_handed_the_scan_and_not_a_bare_list"
+      ]
+    },
+    {
+      "id": "hh10-a-multi-item-payload-is-guessed-at",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "upsert_actor",
+      "operator": "drop-multi-item-refusal",
+      "find": "            if len(raw_items) != 1:\n                raise ValueError(\n                    \"invalid_request: position_policy resolves ONE item's slot; \"\n                    f\"payload carries {len(raw_items)}\"\n                )\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_a_multi_item_payload_is_refused_rather_than_guessed_at"
+      ]
+    },
+    {
+      "id": "hh10-the-placement-read-leaves-the-lock-again",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "upsert_actor",
+      "operator": "resolve-slot-outside-office-lock",
+      "find": "            items = []\n\n        if not dry_run:\n            self.ensure_surface(wsid, created_by=updated_by)\n        with office_lock(wsid):",
+      "replace": "            items = [\n                _normalize_item(\n                    raw_items[0],\n                    persona_id=persona_id,\n                    position=position_policy(self.scan_actors(wsid)),\n                )\n            ]\n            position_policy = None\n\n        if not dry_run:\n            self.ensure_surface(wsid, created_by=updated_by)\n        with office_lock(wsid):",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_policy_sees_the_actor_set_the_write_lands_beside"
+      ]
     }
   ]
 }

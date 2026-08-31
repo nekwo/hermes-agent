@@ -99,8 +99,9 @@ class AgentCreateRequest:
     workspace_id: str
     #: ``None`` means the client did not aim — the layout policy chooses (D2).
     #: It is NOT a missing value to be defaulted somewhere later: the ONE site
-    #: that resolves it is :func:`resolve_placement_position`, and it runs where
-    #: the actor set it reads is the set the write lands beside.
+    #: that resolves it is :func:`placement_position_policy`, and since H-H10 it
+    #: runs INSIDE ``office_lock``, so the actor set it reads IS the set the
+    #: write lands beside rather than the closest this lane could get to it.
     position: tuple[float, float] | None
     #: ``None`` means the client sent no ``skills`` key at all, and the new
     #: instance's ``skill_overrides`` stays ``None`` (inherit the persona's,
@@ -605,11 +606,17 @@ def placement_actor_payload(
 ) -> dict[str, Any]:
     """The actor payload for a freshly minted placement.
 
-    ``position`` is the RESOLVED one — the operator's aim when they had one, the
-    layout policy's slot when they did not (D2). It is a parameter rather than a
-    read of ``request.position`` because by the time this is called the policy
-    may already have answered, and a payload builder that re-derived the
-    position would be a second place the answer could come from.
+    ``position`` is the operator's AIM, and ``None`` means they had none. A
+    payload built without one carries no ``position`` key at all, and the store
+    is then required to receive :func:`placement_position_policy` beside it —
+    ``OfficeStore.upsert_actor`` resolves the slot under its own lock (M10) and
+    refuses a positionless item outright when no policy came with it, so the
+    pairing is enforced by the store rather than by convention here.
+
+    Deliberately NOT filled with a stand-in when the aim is absent. A payload
+    with a made-up origin would place an agent at ``(0, 0)`` and read as a
+    deliberate placement forever, and once such a value exists it only has to
+    survive one refactor to escape; a MISSING key cannot.
 
     Deliberately the SAME shape ``harness office actor-upsert`` takes on
     ``--actor-json`` and the launcher's ``officeActorPayloadsFromLayout``
@@ -619,72 +626,44 @@ def placement_actor_payload(
     collision the office fence exists to refuse unreachable from this method.
     """
 
-    resolved = position if position is not None else request.position
-    if resolved is None:
-        # Not reachable from ``perform_agent_create`` (it resolves first), and
-        # loud rather than silent for anyone who calls this directly: a payload
-        # with a made-up origin would place an agent at (0, 0) and read as a
-        # deliberate placement forever.
-        raise ValueError(
-            "placement_actor_payload: no position — resolve one with "
-            "resolve_placement_position() before building the payload"
-        )
-    x, y = resolved
+    item: dict[str, Any] = {
+        "item_id": request.persona_instance_id,
+        "persona_id": request.persona_id,
+        "kind": "agent",
+        "folder": request.folder,
+        "display_name": display_name,
+    }
+    if position is not None:
+        x, y = position
+        item["position"] = [x, y]
     return {
         "persona_id": request.persona_id,
         "persona_instance_id": request.persona_instance_id,
-        "items": [
-            {
-                "item_id": request.persona_instance_id,
-                "persona_id": request.persona_id,
-                "kind": "agent",
-                "position": [x, y],
-                "folder": request.folder,
-                "display_name": display_name,
-            }
-        ],
+        "items": [item],
     }
 
 
-def resolve_placement_position(
-    store: Any, request: AgentCreateRequest
+def placement_slot_for(
+    actors: Any, request: AgentCreateRequest
 ) -> tuple[float, float]:
-    """The slot an UNAIMED create lands on (plan D2). The only caller of the
-    layout policy on this lane.
+    """The slot an UNAIMED create lands on (plan D2), given the floor it lands on.
 
-    Scans the workspace's live actors in the REQUEST's folder and returns the
-    first free lattice slot. The lane is the AGENT lane whatever the folder is
-    called, because this verb writes exactly one ``kind: "agent"`` item and
-    nothing else (D6) — the desk lane's diagonal nudge exists to keep unaimed
-    desks off the agent lattice, and there are no unaimed desks on this lane.
+    PURE — ``actors`` in, point out, no store and no clock — so the decision
+    table is unit-testable directly and the caller decides which actor set to
+    feed it. The store-facing half is :func:`placement_position_policy`.
 
-    The actor this create is about to write is excluded from the scan. A resumed
-    attempt (``instance_minted`` receipt, placement already landed, ``mark_done``
-    never reached) would otherwise read its OWN previous item as a blocker and
-    move the agent one slot along on every retry — an idempotent replay that
-    walks.
+    Scans the actors in the REQUEST's folder and returns the first free lattice
+    slot. The lane is the AGENT lane whatever the folder is called, because this
+    verb writes exactly one ``kind: "agent"`` item and nothing else (D6) — the
+    desk lane's diagonal nudge exists to keep unaimed desks off the agent
+    lattice, and there are no unaimed desks on this lane.
 
-    WHERE THIS READ SITS RELATIVE TO ``office_lock``, AND WHY
-    --------------------------------------------------------
-    OUTSIDE it, immediately before ``OfficeStore.upsert_actor``, which takes
-    ``office_lock(workspace_id)`` itself.
-
-    That is forced, not preferred. ``locks._file_lock`` is a real file lock —
-    ``msvcrt.locking`` on Windows, ``flock`` elsewhere — held through a fresh
-    ``open()`` per acquisition, so it is NOT reentrant: a second acquisition
-    from this same process would block against the first and time out
-    ``HarnessLockUnavailable`` after the configured 15 s. Wrapping the read and
-    the write in one ``office_lock`` therefore deadlocks the write it is meant
-    to protect. Moving the policy INTO ``upsert_actor`` would close the window
-    honestly, and that is a store change this slice's strip does not carry.
-
-    The window it leaves, stated rather than implied: two creates that both
-    omit a position and race between this read and their writes can compute the
-    same free slot, and the second lands on top of the first. Bounded — one
-    slot, visible on the canvas, fixed by a drag — and no worse than the
-    prediction the launcher has always sent, which reads a snapshot that is
-    already a round trip stale. It is filed as a queue row rather than left for
-    the next reader to discover.
+    The actor this create is about to write is excluded here rather than by the
+    store. A resumed attempt (``instance_minted`` receipt, placement already
+    landed, ``mark_done`` never reached) would otherwise read its OWN previous
+    item as a blocker and move the agent one slot along on every retry — an
+    idempotent replay that walks. The store hands over the whole live set
+    because it cannot know which row is "mine"; this lane can, and does.
     """
 
     from .office_layout_policy import (
@@ -694,15 +673,51 @@ def resolve_placement_position(
     )
 
     mine = request.persona_instance_id
-    actors = [
+    others = [
         actor
-        for actor in store.list_actors(request.workspace_id)
+        for actor in actors or ()
         if getattr(actor, "persona_instance_id", None) != mine
     ]
     return next_free_slot(
-        occupied_positions(actors, folder=request.folder),
+        occupied_positions(others, folder=request.folder),
         lane_offset=lane_offset_for_kind("agent"),
     )
+
+
+def placement_position_policy(request: AgentCreateRequest):
+    """The hook ``OfficeStore.upsert_actor`` calls INSIDE ``office_lock``.
+
+    WHERE THIS READ SITS RELATIVE TO ``office_lock``, AND WHY
+    --------------------------------------------------------
+    INSIDE it, as of H-H10. The store takes ``office_lock(workspace_id)``,
+    scans the workspace, calls this, and writes — one acquisition across the
+    read and the write, which is what closes M10: two creates that both omit a
+    position can no longer compute the same free slot, because the second
+    cannot scan until the first has written.
+
+    It used to sit OUTSIDE, resolved by the caller and sent as an ordinary
+    position, and that was forced rather than preferred: ``locks._file_lock`` is
+    a real file lock held through a fresh ``open()`` per acquisition, so it is
+    NOT reentrant, and wrapping the caller's read in a second ``office_lock``
+    would have deadlocked the write it was meant to protect. The honest close
+    was always "move the policy into the store", and that is what this is — the
+    store supplies the SET and the lock, this supplies the arithmetic
+    (:func:`placement_slot_for`) and the exclusion rule.
+
+    THE SHORTFALL, named because the parameter type makes it askable. The store
+    hands over the whole :class:`ActorScan`, so an incomplete floor is visible
+    here. This lane proceeds on ``scan.actors`` anyway: an unreadable neighbour
+    can at worst cost this placement one slot of overlap, which is the bounded,
+    draggable, canvas-visible outcome the old cross-process race had — while
+    refusing the create would cost the operator their agent over a file that has
+    nothing to do with it. That is a choice this policy makes and states, not a
+    fact the seam hides.
+    """
+
+    def _policy(scan) -> tuple[float, float]:
+        return placement_slot_for(scan.actors, request)
+
+    return _policy
 
 
 # ── the shared create sequence (UC-H1) ───────────────────────────────────────
@@ -1268,7 +1283,7 @@ def perform_agent_create(
     optional).
 
     ``position`` ABSENT means the client did not aim, and the layout policy
-    chooses the slot (D2 — :func:`resolve_placement_position`, which documents
+    chooses the slot (D2 — :func:`placement_position_policy`, which documents
     where that read sits relative to ``office_lock``). Present, it is taken
     verbatim, exactly as it always was.
 
@@ -1764,18 +1779,16 @@ def perform_agent_create(
                 )
 
             placement_started = time.monotonic()
-            # D2: the aim if there was one, the policy's slot if there was not.
-            # Read here — after the mint, immediately before the write — so the
-            # actor set the policy sees is as close as this lane can get to the
-            # set the write lands beside. See ``resolve_placement_position`` for
-            # why "as close as it can get" and not "the same set".
-            position = (
-                request.position
-                if request.position is not None
-                else resolve_placement_position(store, request)
-            )
+            # D2/M10: the aim if there was one, otherwise the policy — resolved
+            # by the STORE, inside the office lock, against the exact actor set
+            # this write lands beside. The two travel together on purpose: a
+            # payload with no point and no policy is refused by the store, so
+            # the pairing cannot come apart. See ``placement_position_policy``.
             payload = placement_actor_payload(
-                request, display_name=instance.display_name, position=position
+                request, display_name=instance.display_name, position=request.position
+            )
+            position_policy = (
+                None if request.position is not None else placement_position_policy(request)
             )
             try:
                 # CI-4's FREE half (EG-2.3): this method already reserved
@@ -1796,6 +1809,7 @@ def perform_agent_create(
                     payload,
                     updated_by=updated_by,
                     correlation_id=request.correlation_id,
+                    position_policy=position_policy,
                 )
             except ClassKeyedPlacementRefused as exc:
                 # ``placement_actor_payload`` is instance-keyed by construction,

@@ -112,8 +112,9 @@ fixture; present, it is written verbatim. The ack returns `position` (what was
 written) and `actor` (the row as stored, in `runtime.office.get`'s own item
 shape), so a caller with no canvas — the CLI, a cron, a remote connector over
 `call` — needs neither a guess going in nor a second read coming out. Where that
-policy read sits relative to `office_lock`, and the one-slot race it leaves, is
-stated at `resolve_placement_position` and in
+policy read sits relative to `office_lock` — INSIDE it since H-H10, which is
+what retired the one-slot race it used to leave — is stated at
+`placement_position_policy` and in
 [06 — The office surface](06-office-and-board.md#the-placement-verb--where-an-unaimed-create-lands-and-what-it-hands-back).
 
 **And it can hand the new agent its SKILLS — but that phase is outside the

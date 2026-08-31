@@ -1440,3 +1440,171 @@ def test_the_recorded_mint_is_not_content_and_never_moves_the_sync_hash():
     rekinded = store.upsert_actor(ws, _one_item("dev", "dev_thing", "desk"))
     assert rekinded.items[0].minted_kind == "agent"
     assert office_models.office_content_hash(rekinded) != pre_field
+
+
+# ── the unaimed placement's slot, resolved under the lock (H-H10 / M10) ──────
+
+
+def _unaimed_payload(persona_id: str, *, instance: str, folder: str = "Agents") -> dict:
+    """A payload with NO ``position`` key — the shape ``placement_actor_payload``
+    builds when the client did not aim."""
+
+    return {
+        "persona_id": persona_id,
+        "persona_instance_id": instance,
+        "items": [
+            {
+                "item_id": instance,
+                "persona_id": persona_id,
+                "kind": "agent",
+                "folder": folder,
+            }
+        ],
+    }
+
+
+def test_a_positionless_item_is_refused_when_no_policy_came_with_it():
+    """The pairing is enforced by the STORE, not by convention at the caller.
+
+    ``placement_actor_payload`` omits the key rather than inventing an origin,
+    so this refusal is the only thing standing between "the caller forgot the
+    policy" and an agent silently placed at (0, 0) forever.
+
+    *Mutation:* default the missing point to ``(0.0, 0.0)`` inside
+    ``_item_point``. The mutant writes the actor and this raises nothing.
+    """
+
+    ws = _make_workspace()
+    store = OfficeStore()
+    with pytest.raises(ValueError, match="item position must be"):
+        store.upsert_actor(ws, _unaimed_payload("qa", instance="personainst_m10_a"))
+    assert store.scan_actors(ws).actors == []
+
+
+def test_the_policy_answers_from_inside_the_lock_and_its_point_is_what_is_written():
+    """The hook's answer reaches the FILE, and it reaches it having seen the
+    floor the write lands beside.
+
+    *Mutation:* ignore ``position_policy`` and read ``raw.get("position")``
+    anyway — the write then refuses (no key), so the surviving mutant is the
+    subtler one: call the policy but discard its answer. Both are caught by the
+    stored coordinates, which is why this asserts the file rather than the
+    return value.
+    """
+
+    ws = _make_workspace()
+    store = OfficeStore()
+    seen: list = []
+
+    def _policy(scan):
+        seen.append(scan)
+        return (7.25, -3.5)
+
+    actor = store.upsert_actor(
+        ws,
+        _unaimed_payload("qa", instance="personainst_m10_b"),
+        position_policy=_policy,
+    )
+    assert [float(v) for v in actor.items[0].position] == [7.25, -3.5]
+    stored = store.get_actor(ws, actor.actor_key)
+    assert [float(v) for v in stored.items[0].position] == [7.25, -3.5]
+    assert len(seen) == 1
+
+
+def test_the_policy_is_handed_the_scan_and_not_a_bare_list():
+    """The completeness question stays ASKABLE at the seam that can answer it.
+
+    A store that unwrapped ``scan.actors`` here would drop the unreadable count
+    on the floor at exactly the boundary the whole ``ActorScan`` shape exists to
+    stop dropping it at — the policy could then never tell a floor it read whole
+    from one it read half of.
+
+    *Mutation:* pass ``self.scan_actors(wsid).actors``. ``scan.unreadable``
+    raises ``AttributeError`` on a list and the mutant convicts.
+    """
+
+    ws = _make_workspace()
+    store = OfficeStore()
+    store.upsert_actor(ws, _actor_payload("dev"))
+    (paths.office_actors_dir(ws) / "broken.json").write_text("{not json", encoding="utf-8")
+    seen: list = []
+
+    def _policy(scan):
+        seen.append((len(scan.actors), scan.unreadable))
+        return (0.0, 0.0)
+
+    store.upsert_actor(
+        ws,
+        _unaimed_payload("qa", instance="personainst_m10_c"),
+        position_policy=_policy,
+    )
+    assert seen == [(1, 1)]
+
+
+def test_the_policy_sees_the_actor_set_the_write_lands_beside(monkeypatch):
+    """M10's property, at the level it lives at: the scan the policy reads and
+    the write that follows it are under ONE ``office_lock`` acquisition, so
+    nothing can land in between.
+
+    Proved by contending FROM INSIDE the policy: a second writer attempted while
+    the hook is running must not be able to take the lock. Before H-H10 the
+    equivalent read ran with the lock unheld, and that second writer landed —
+    which is exactly how two unaimed creates came to share a slot.
+
+    The deadline is shortened because the claim is "it could not get in", and
+    the configured 15 s of proving that is 15 s of nothing happening. It also
+    only refuses at all because H-H6 made the POSIX deadline reachable; on the
+    old blocking ``flock`` this test would have deadlocked rather than passed
+    or failed, which is why the two stages ship in that order.
+
+    *Mutation:* resolve the policy BEFORE ``with office_lock(wsid)``. The
+    contending write then succeeds inside the hook and ``blocked`` is False.
+    """
+
+    from agent_runtime import locks
+    from agent_runtime.locks import HarnessLockUnavailable
+
+    monkeypatch.setattr(locks, "_lock_timeout_seconds", lambda value: 0.2)
+
+    ws = _make_workspace()
+    store = OfficeStore()
+    blocked: list = []
+
+    def _policy(scan):
+        try:
+            OfficeStore().upsert_actor(
+                ws,
+                _actor_payload("rival", persona_instance_id="personainst_m10_rival"),
+            )
+            blocked.append(False)
+        except HarnessLockUnavailable:
+            blocked.append(True)
+        return (1.0, 1.0)
+
+    store.upsert_actor(
+        ws,
+        _unaimed_payload("qa", instance="personainst_m10_d"),
+        position_policy=_policy,
+    )
+    assert blocked == [True], "a concurrent write reached the store mid-policy"
+
+
+def test_a_multi_item_payload_is_refused_rather_than_guessed_at():
+    """One point cannot answer for several items, and a store that picked one of
+    them would be inventing a rule its caller never stated. Refused BEFORE
+    ``ensure_surface``, so a refused call leaves the store as it found it.
+
+    *Mutation:* apply the resolved point to ``raw_items[0]`` and leave the rest
+    to their own keys. The mutant accepts a payload whose placement is half
+    policy-chosen and half caller-chosen, with nothing saying which.
+    """
+
+    ws = _make_workspace()
+    store = OfficeStore()
+    payload = _unaimed_payload("qa", instance="personainst_m10_e")
+    payload["items"].append(
+        {"item_id": "second", "persona_id": "qa", "kind": "agent", "folder": "Agents"}
+    )
+    with pytest.raises(ValueError, match="position_policy resolves ONE item"):
+        store.upsert_actor(ws, payload, position_policy=lambda scan: (0.0, 0.0))
+    assert store.scan_actors(ws).actors == []

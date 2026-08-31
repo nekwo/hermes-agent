@@ -309,26 +309,41 @@ the policy resolves that fallback when it scans.
 whatever the folder is called; the desk lane's diagonal nudge exists to keep
 unaimed desks off the agent lattice and there are no unaimed desks on this lane.
 
-**Where the policy READ sits, and the window that leaves.** Outside
-`office_lock`, immediately before `OfficeStore.upsert_actor`, which takes that
-lock itself. That is forced rather than preferred: `locks._file_lock` is a real
-file lock (`msvcrt.locking` / `flock`) acquired through a fresh handle, so it is
-**not reentrant** — the second acquisition contends with the first, retries
-against the deadline and refuses `HarnessLockUnavailable` after the configured
-15 s, on **every** platform since H-H6 (until then the POSIX arm took a bare
-blocking `fcntl.flock(…, LOCK_EX)` that never read the deadline it had just
-computed, so it blocked indefinitely and that refusal was unreachable off
-Windows — `timeout_seconds` was a parameter that did nothing, and every typed
-refusal built on it was Windows-only behaviour wearing a portable name).
-Wrapping the read and the write in one `office_lock` would therefore deadlock
-the write it is meant to protect, and moving the policy INSIDE `upsert_actor` is
-the honest close and a store change S2 does not carry. The window: two creates
-that both omit a position and race between the read and their writes can compute
-the same slot, and the second lands on top of the first. Bounded to one slot,
-visible on the canvas, fixed by a drag — and no worse than the prediction the
-launcher has always sent, which reads a snapshot already a round trip stale.
-`resolve_placement_position`'s docstring is the long form; the row is filed in
-the launcher's Mission Control queue.
+**Where the policy READ sits: INSIDE the lock, since H-H10.** The unaimed
+create's slot is chosen by `OfficeStore.upsert_actor` itself, under the one
+`office_lock(workspace_id)` acquisition that also writes the actor file. The
+caller no longer resolves anything: `placement_actor_payload` builds an item
+with **no `position` key at all** when the client sent no aim, and passes
+`agent_create.placement_position_policy(request)` beside it as the store's
+`position_policy` hook. A positionless item with no policy is refused by the
+store, so the two cannot come apart; a payload with a stand-in origin is never
+constructed, so it can never escape. The store supplies the SET (the workspace's
+live `ActorScan`) and the lock; the policy supplies the arithmetic
+(`office_layout_policy`, still pure and store-free) and the exclusion rule —
+skip the actor this create is about to write, without which an idempotent replay
+WALKS one slot per retry.
+
+That closes M10. **The window it retired**: two creates that both omitted a
+position and raced between the caller's read and their writes could compute the
+same free slot, and the second landed on top of the first. Bounded to one slot,
+canvas-visible, drag-fixable — but real, and it existed only because the read
+could not be wrapped in a second `office_lock`: `locks._file_lock` is a real
+file lock (`msvcrt.locking` / `flock`) acquired through a fresh handle and is
+**not reentrant**, so a second acquisition contends with the first and, since
+H-H6, refuses `HarnessLockUnavailable` at the deadline on every platform rather
+than deadlocking. H-H6 is the prerequisite: while POSIX took a bare blocking
+`fcntl.flock(…, LOCK_EX)` that ignored the deadline it had just computed, a
+reentrancy mistake here hung the process instead of refusing it, and moving
+work inside the lock was not a change anyone could take safely.
+
+**The residual, stated rather than hidden.** The hook receives the whole
+`ActorScan`, so an incompletely-readable floor is visible to it; the placement
+lane proceeds on `scan.actors` anyway, because an unreadable neighbour can at
+worst cost one slot of overlap while refusing would cost the operator their
+agent over a file that has nothing to do with it. `placement_position_policy`'s
+docstring is the long form. Multi-item payloads are refused by the hook rather
+than served: one point cannot answer for several items, and a store that picked
+one of them would be inventing a rule its caller never stated.
 
 **The ack gains `position` and `actor`, both additive.** `position` is what was
 written — policy or verbatim — so a client that sent none learns where its agent

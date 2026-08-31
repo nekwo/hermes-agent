@@ -721,16 +721,20 @@ def test_the_policy_excludes_the_actor_it_is_about_to_write(
     """A resumed attempt whose placement already landed must recompute the SAME
     slot, not step one along.
 
-    Proved at the pure seam (``resolve_placement_position``) rather than by
-    arranging a crashed reservation, because the property is about which actor
-    set the scan sees and that is exactly what this function decides. Without
-    the exclusion an idempotent replay WALKS: every retry reads its own item as
-    a blocker and moves the agent one column.
+    Proved at the pure seam (``placement_slot_for``) rather than by arranging a
+    crashed reservation, because the property is about which actor set the scan
+    sees and that is exactly what this function decides. Without the exclusion
+    an idempotent replay WALKS: every retry reads its own item as a blocker and
+    moves the agent one column.
+
+    The seam is now PURE — actors in, point out — because H-H10 moved the store
+    read into ``upsert_actor``'s lock; the exclusion stayed here, with the lane
+    that knows which row is "mine".
     """
 
     from agent_runtime.agent_create import (
         normalize_agent_create,
-        resolve_placement_position,
+        placement_slot_for,
     )
     from agent_runtime.office_store import OfficeStore
 
@@ -755,7 +759,9 @@ def test_the_policy_excludes_the_actor_it_is_about_to_write(
         },
     )
 
-    assert list(resolve_placement_position(OfficeStore(), request)) == _policy_slot(0, 0)
+    actors = OfficeStore().scan_actors(WORKSPACE).actors
+    assert actors, "the seeded blocker must be visible, or this proves nothing"
+    assert list(placement_slot_for(actors, request)) == _policy_slot(0, 0)
 
 
 def test_the_ack_carries_the_position_that_was_written(

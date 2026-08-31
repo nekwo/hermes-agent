@@ -35,7 +35,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, Callable, NamedTuple
 
 from hermes_time import now
 from utils import atomic_json_write
@@ -168,6 +168,22 @@ class DuplicateDeskRefused(AgentRuntimeError):
         self.safe_details = dict(safe_details or {})
 
 
+#: The hook :meth:`OfficeStore.upsert_actor` calls INSIDE ``office_lock`` to
+#: answer "where does this unaimed placement go".
+#:
+#: Takes the workspace's live :class:`ActorScan` — the scan itself and not its
+#: ``actors`` list, so the policy sees whether the floor it is deciding against
+#: was fully readable and can refuse or proceed on its own terms; a store that
+#: unwrapped the list here would take that choice away silently, which is the
+#: shape ``scan_actors`` exists to end. Returns the point the single item in the
+#: payload is written at.
+#:
+#: The store supplies the SET and the lock; the policy supplies the ARITHMETIC.
+#: Neither half is the other's authority — ``office_layout_policy`` stays pure
+#: and store-free, and this store stays ignorant of lattices.
+OfficePositionPolicy = Callable[["ActorScan"], tuple[float, float]]
+
+
 class ActorScan(NamedTuple):
     """What an actor-directory scan FOUND, beside what it could not read.
 
@@ -254,23 +270,46 @@ def _canonical_actor_key(persona_id: str, persona_instance_id: str | None) -> st
     return persona_id
 
 
-def _normalize_item(raw: Any, *, persona_id: str) -> OfficeItem:
+def _item_point(value: Any) -> tuple[float, float]:
+    """The ``[x, y]`` a raw item carries, validated.
+
+    Lifted out of :func:`_normalize_item` so the ONE caller that does not have a
+    point yet — an unaimed placement, whose slot :meth:`OfficeStore.upsert_actor`
+    resolves under its own lock — can hand the resolved one in without a second
+    copy of these checks.
+    """
+
+    if not isinstance(value, (list, tuple)) or len(value) < 2:
+        raise ValueError("invalid_request: item position must be [x, y]")
+    try:
+        x = float(value[0])
+        y = float(value[1])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid_request: item position must be numeric") from exc
+    if x != x or y != y or abs(x) == float("inf") or abs(y) == float("inf"):
+        raise ValueError("invalid_request: item position must be finite")
+    return (x, y)
+
+
+def _normalize_item(
+    raw: Any, *, persona_id: str, position: tuple[float, float] | None = None
+) -> OfficeItem:
+    """One raw item dict as the store will persist it.
+
+    ``position``, when supplied, is the RESOLVED point and OVERRIDES whatever
+    the raw item carried — the unaimed lane's answer, computed inside
+    ``office_lock`` by :meth:`OfficeStore.upsert_actor`'s ``position_policy``.
+    Absent, the raw item must carry its own and :func:`_item_point` validates
+    it, which is every other lane unchanged.
+    """
+
     if not isinstance(raw, dict):
         raise ValueError("invalid_request: item must be an object")
     item_id = safe_id(raw.get("item_id"))
     if not item_id:
         raise ValueError("invalid_request: item_id required")
     item_persona = _normalize_persona_id(raw.get("persona_id")) or persona_id
-    position = raw.get("position")
-    if not isinstance(position, (list, tuple)) or len(position) < 2:
-        raise ValueError("invalid_request: item position must be [x, y]")
-    try:
-        x = float(position[0])
-        y = float(position[1])
-    except (TypeError, ValueError) as exc:
-        raise ValueError("invalid_request: item position must be numeric") from exc
-    if x != x or y != y or abs(x) == float("inf") or abs(y) == float("inf"):
-        raise ValueError("invalid_request: item position must be finite")
+    x, y = position if position is not None else _item_point(raw.get("position"))
     display_name = _safe_display_name(raw.get("display_name"))
     if display_name:
         _assert_display_name_publishable(display_name)
@@ -897,6 +936,7 @@ class OfficeStore:
         resurrect: bool = False,
         correlation_id: str | None = None,
         dry_run: bool = False,
+        position_policy: OfficePositionPolicy | None = None,
     ) -> OfficeActor:
         """Write ONE actor placement, creating the surface if it does not exist.
 
@@ -920,6 +960,27 @@ class OfficeStore:
         the first was never asked the second. Only ``harness office
         actor-upsert --resurrect`` passes it; the wire lane again has no
         equivalent, for the reason spelled out there.
+
+        ``position_policy`` is the UNAIMED lane (M10, plan D2), and it is what
+        closes the placement race. It applies to a single-item payload that
+        carries no point of its own: the caller had no aim, so the store asks the
+        policy for one INSIDE ``office_lock``, against the actor set this very
+        write is about to land beside. Before this parameter existed the only
+        way to place unaimed was to resolve the slot OUTSIDE the lock and send
+        the answer as an ordinary position, which left a window — two creates
+        that both omit a position and race between their reads and their writes
+        computed the same free slot, and the second landed on top of the first.
+        The read could not simply be wrapped in ``office_lock`` because the lock
+        is not reentrant (``locks._file_lock``), so the resolution had to move
+        INTO the write. That is this hook.
+
+        The store supplies the SET and the lock and nothing else: the arithmetic
+        stays in ``office_layout_policy``, which is pure and knows no store, and
+        the exclusion rule ("skip the actor I am about to write") stays with the
+        caller that knows which actor that is. Refused rather than guessed for a
+        multi-item payload — one point cannot answer for several items, and a
+        store that picked one of them would be inventing a rule its caller never
+        stated.
         """
 
         wsid = safe_id(workspace_id)
@@ -937,7 +998,22 @@ class OfficeStore:
             raise ValueError("invalid_request: items required")
         if len(raw_items) > MAX_ITEMS_PER_ACTOR:
             raise ValueError("invalid_request: too many items")
-        items = [_normalize_item(item, persona_id=persona_id) for item in raw_items]
+        if position_policy is None:
+            items = [_normalize_item(item, persona_id=persona_id) for item in raw_items]
+        else:
+            # The unaimed lane defers ONE field and refuses up front on the one
+            # shape it cannot serve. Everything else about the item — id,
+            # persona, kind, folder, display name, scale — is validated below,
+            # inside the lock, by the same ``_normalize_item`` call the aimed
+            # lane makes; nothing here is normalized twice and no placeholder
+            # point is ever constructed, which is the property that keeps a
+            # made-up origin from escaping if this arm is later edited.
+            if len(raw_items) != 1:
+                raise ValueError(
+                    "invalid_request: position_policy resolves ONE item's slot; "
+                    f"payload carries {len(raw_items)}"
+                )
+            items = []
 
         if not dry_run:
             self.ensure_surface(wsid, created_by=updated_by)
@@ -949,6 +1025,20 @@ class OfficeStore:
             # concurrent writer can move between a caller's read and this write.
             self._guard_class_keyed_write(wsid, payload, allow_class_key=allow_class_key)
             self._guard_no_conflict(wsid, actor_key)
+            if position_policy is not None:
+                # M10, closed. The scan and the write are now under ONE
+                # acquisition of ``office_lock``, so no concurrent create can
+                # land between them and take the slot this one is about to
+                # choose. The policy is handed the scan rather than its rows so
+                # the completeness question stays visible at the seam that can
+                # answer it.
+                items = [
+                    _normalize_item(
+                        raw_items[0],
+                        persona_id=persona_id,
+                        position=position_policy(self.scan_actors(wsid)),
+                    )
+                ]
             # THE desk fence (D6), inside the same lock and before any write.
             # After the class-key fence and the conflict guard on purpose: those
             # two refuse writes that are illegitimate whatever they carry, and a
