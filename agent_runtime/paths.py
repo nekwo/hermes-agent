@@ -233,7 +233,7 @@ def office_conflict_path(workspace_id: str, actor_key: str) -> Path:
 #: **Do not confuse it with :func:`office_archive_dir`**, whose name is one
 #: underscore away and whose tree is a different thing entirely: that one is
 #: ``office/<ws>/archive/``, per-workspace, holding archived ACTOR placements,
-#: and it is READ by ``OfficeStore`` (``_read_actor_dir`` on the actor-listing
+#: and it is READ by ``OfficeStore`` (``read_actor_dir`` on the actor-listing
 #: seam, ``office_archived_actor_path`` on the archived-actor lookups). It is a
 #: projection INPUT and stays inside the fingerprint. This constant names only the
 #: store-root sibling below.

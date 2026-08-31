@@ -551,7 +551,7 @@ def test_generic_pull_loop_never_touches_office_paths():
 
 # ── ML-8b/1: the sync arms refuse rather than decide on a short list ───────
 #
-# ``OfficeStore._read_actor_dir`` skips a file it cannot decode. Publish copies
+# ``office_store.read_actor_dir`` skips a file it cannot decode. Publish copies
 # actor FILES verbatim, so the undecodable one travels, and "removals propagate
 # as absences" then turns every peer's pull into a desk removal for an actor
 # whose file merely would not open here. These witnesses drive the count with
@@ -561,7 +561,8 @@ def test_generic_pull_loop_never_touches_office_paths():
 def _blind_one_actor(ws: str, actor_key: str):
     """Make one live actor file undecodable — an AV quarantine stub, a
     half-flushed write, a disk error. The row is still THERE; it just cannot be
-    read, which is the state ``list_actors`` reports as "absent"."""
+    read, which is the state a reader spending only ``scan.actors`` reports as
+    "absent"."""
 
     path = paths.office_actor_path(ws, actor_key)
     assert path.exists()
@@ -590,8 +591,8 @@ def test_a_workspace_with_an_unreadable_actor_file_refuses_realm_publish_typed()
     workspace contributes ZERO published office artifacts, and that the baseline
     recorder was called and carried no key for that workspace.
 
-    *Mutation:* swap the arms back to the thin ``list_actors`` view
-    (``ActorScan(store.list_actors(ws), 0)``). The mutant cannot mint a reason
+    *Mutation:* swap the arms back to a rows-only view
+    (``ActorScan(store.scan_actors(ws).actors, 0)``). The mutant cannot mint a reason
     from a count it never took, and it publishes the workspace's artifacts —
     the recorder convicts it on both.
     """
@@ -690,7 +691,7 @@ def test_a_refused_workspace_pins_no_persona_definitions():
     # All three answers have to move TOGETHER or the coherence claim is empty:
     # the workspace is refused, so neither its artifacts nor its persona pins
     # travel. Asserting only the empty persona list would pass under the
-    # ``list_actors`` mutant as well — that loses the row either way.
+    # rows-only mutant as well — that loses the row either way.
     assert [row["workspace_id"] for row in _resolve_office_refusals(realm_id)] == [ws]
     assert _office_wanted_persona_ids(workspaces) == []
     assert _office_relative_paths(realm_id) == []
@@ -704,7 +705,7 @@ def test_a_workspace_with_an_unreadable_actor_file_converges_nothing_on_pull(tmp
     that the pull took no decision at all for that workspace — the remote actor
     is neither adopted nor is the local one archived.
 
-    *Mutation:* restore ``store.list_actors(workspace_id)`` for the local read.
+    *Mutation:* restore ``store.scan_actors(workspace_id).actors`` for the local read.
     The mutant classifies ``dev`` as locally absent, adopts the remote copy over
     the file it could not read, and reports it as adopted — the counts red.
     """

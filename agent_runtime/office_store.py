@@ -40,7 +40,7 @@ from typing import Any, Callable, NamedTuple
 from hermes_time import now
 from utils import atomic_json_write
 
-from . import office_models, paths
+from . import office_layout_policy, office_models, paths
 from .errors import (
     ActorArchived,
     ActorsUnreadable,
@@ -187,7 +187,7 @@ OfficePositionPolicy = Callable[["ActorScan"], tuple[float, float]]
 class ActorScan(NamedTuple):
     """What an actor-directory scan FOUND, beside what it could not read.
 
-    The second field is the whole point. ``_read_actor_dir`` has always skipped
+    The second field is the whole point. ``read_actor_dir`` has always skipped
     a file it could not decode and returned the rest, so every reader downstream
     received a SHORTER list that described itself as complete — and the office
     projection then computed ``actors_truncated`` from the already-shortened
@@ -274,7 +274,7 @@ class OfficeActorOutcome:
     def scan_unreadable(cls, workspace_id: str, scan: ActorScan) -> "OfficeActorOutcome":
         """The shortfall row for a workspace whose actor directory read short.
 
-        The COUNT is what the scan can honestly supply (``_read_actor_dir``
+        The COUNT is what the scan can honestly supply (``read_actor_dir``
         keeps a per-class tally, not a path list), and the count is enough to do
         this row's job: turn an empty failure list back into the positive claim
         ``agent_retire``'s docstring says it is.
@@ -346,8 +346,8 @@ class ConflictScan(NamedTuple):
     ``ActorScan``'s shape, deliberately, for the same question one directory
     over: what did this read find, and what did it have to guess at. ``keys``
     is complete — every sidecar contributes exactly one entry whether or not it
-    decoded — so this is NOT the ``list_actors``-shaped hazard of a list that is
-    short and says it is whole. What was silent is WHICH entries are guesses,
+    decoded — so this is NOT the hazard of a list that is short and says it is
+    whole. What was silent is WHICH entries are guesses,
     and that lives in ``outcomes``.
     """
 
@@ -357,6 +357,57 @@ class ConflictScan(NamedTuple):
     @property
     def unreadable(self) -> int:
         return sum(1 for outcome in self.outcomes if not outcome.succeeded)
+
+
+def read_actor_dir(directory) -> ActorScan:
+    """One directory of actor files, COUNTING the ones that would not open.
+
+    THE decoder for an actor directory, wherever the directory came from. It
+    was a private method on the store until AX6, which meant the pull's reader
+    of a PEER's ``office/<ws>/actors`` (``office_sync._read_remote_office``)
+    had to spell the same walk, the same swallow and the same count a second
+    time — two spellings of one discipline, free to drift, in the two places
+    whose disagreement produces a DELETION (a remote key that reads as absent
+    is how the pull infers "the peer removed this desk"). It takes no ``self``
+    and never did, so the extraction is a move rather than a redesign.
+
+    The skip stays — a whole office must not vanish because one file is
+    mid-write or held by an AV scanner — but ``continue`` alone made the skip
+    invisible, and an invisible skip is a shortened projection that reports
+    itself complete. The count leaves with the rows.
+
+    Logged once per scan, aggregated by exception CLASS: an operator needs to
+    know whether they are looking at a share violation or a half-written JSON
+    file, and per-file lines would turn a directory of stale files into a log
+    flood on every read of the office. Class only, never the message — the same
+    disclosure rule the rest of this runtime's receipts follow. The location is
+    ``<parent>/<name>`` rather than the bare directory name, because every one
+    of these directories is called ``actors`` and the line now has two possible
+    origins: a local workspace and a pulled peer's copy of one.
+    """
+
+    actors: list[OfficeActor] = []
+    if not directory.exists():
+        return ActorScan(actors, 0)
+    unreadable = 0
+    classes: dict[str, int] = {}
+    for path in sorted(directory.glob("*.json")):
+        try:
+            actors.append(from_jsonable(OfficeActor, _read_json(path)))
+        except Exception as exc:  # noqa: BLE001 — the scan survives one bad file
+            unreadable += 1
+            name = type(exc).__name__
+            classes[name] = classes.get(name, 0) + 1
+    if classes:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "office actor files unreadable in %s: %d (%s)",
+            f"{directory.parent.name}/{directory.name}",
+            unreadable,
+            ", ".join(f"{name} x{count}" for name, count in sorted(classes.items())),
+        )
+    return ActorScan(actors, unreadable)
 
 
 def _safe_actor_ref(value: Any, *, fallback: str = "operator") -> str:
@@ -431,6 +482,23 @@ def _normalize_item(
     ``office_lock`` by :meth:`OfficeStore.upsert_actor`'s ``position_policy``.
     Absent, the raw item must carry its own and :func:`_item_point` validates
     it, which is every other lane unchanged.
+
+    A BLANK ``folder`` is filled with the kind's default HERE, at the write
+    boundary (M9 / H-H9). It used to persist as ``""``, and one stored value
+    then meant two things: three separate readers compensated for it
+    independently — ``office_layout_policy.item_folder`` resolves it before
+    scanning, the launcher's ``MissionOfficeSceneItem`` substitutes the default
+    at decode, and a third reader compensated again — so "which folder is this
+    item in" had three answers derived three ways from a value that said
+    nothing. Filling it once, where the row is written, makes one stored row
+    mean one thing.
+
+    The READ-side fallbacks stay, and are not now redundant: rows written before
+    this landed still hold ``""`` on disk, and ``office_sync.apply_office_pull``
+    adopts a peer's actor files WITHOUT passing through this function, so a peer
+    on an older hermes can still deliver one. The cross-repo fixture case
+    ``blank_folder_falls_back_to_kind`` pins exactly that residue and is
+    unchanged by this — what changes is that this store stops MINTING the shape.
     """
 
     if not isinstance(raw, dict):
@@ -443,6 +511,13 @@ def _normalize_item(
     display_name = _safe_display_name(raw.get("display_name"))
     if display_name:
         _assert_display_name_publishable(display_name)
+    kind = office_models.normalize_item_kind(raw.get("kind"))
+    # ``folder_for_kind``, not a local pair of constants: it is the SAME
+    # authority the layout policy's own fallback spends, so the folder this
+    # write persists and the folder that policy would have inferred cannot
+    # disagree — which they could the moment a second spelling of "Agents"
+    # existed.
+    folder = _safe_folder(raw.get("folder")) or office_layout_policy.folder_for_kind(kind)
     # ``minted_kind`` is deliberately NOT read off the payload and is left at
     # ``None`` here: it is the STORE's record of what this item was minted as,
     # and a value a client could send would be the self-declaration the field
@@ -451,9 +526,9 @@ def _normalize_item(
     return OfficeItem(
         item_id=item_id,
         persona_id=item_persona,
-        kind=office_models.normalize_item_kind(raw.get("kind")),
+        kind=kind,
         position=[x, y],
-        folder=_safe_folder(raw.get("folder")),
+        folder=folder,
         display_name=display_name,
         pet_slug=safe_id(raw.get("pet_slug")),
         scale=office_models.normalize_scale(raw.get("scale", office_models.SCALE_DEFAULT)),
@@ -732,13 +807,32 @@ class OfficeStore:
         taken post-write, under the lock that is already held, and a workspace
         over the bound keeps the honest ``refresh``.
 
-        Cost of that count, named rather than discovered: ``list_actors`` is a
+        UNREADABILITY DEMOTES TOO, and that is AX5's correction here. This
+        guard's job, in its own words, is to know when the projection is no
+        longer complete — and truncation is only ONE of the two ways it can be
+        short. ``serve_rpc._office_projection`` says the other out loud beside
+        its own cut: ``actors_unreadable`` counts "rows the platform took",
+        against ``actors_truncated``'s "a cut WE chose". That number rides the
+        office ROW, and no ``office_actor`` patch can express it, so a client
+        folding one keeps whatever it last heard. This guard read
+        ``list_actors``, which had already dropped the count before the
+        comparison — the worst site in the set, because it is the one whose
+        whole purpose was to notice incompleteness.
+
+        A short scan therefore takes the same ``refresh`` a truncation takes.
+        The cost, stated: an office holding one permanently-undecodable file
+        demotes every write in that workspace to a full core. That is the
+        degrade this lane's own contract already names as its floor — "a missing
+        patch is a missing PROMOTION" — paid on a store that is in an abnormal
+        state and should be loud about it, rather than a fold that quietly
+        serves a number nobody can correct.
+
+        Cost of the count itself, named rather than discovered: the scan is a
         directory glob plus a JSON parse per actor, on a mutation path. It is
         bounded by the same 200-actor projection cap it is checking, and it runs
         under a lock that already serializes office writes — the alternative (a
         filename glob) would count unparseable files as members, which is the
-        wrong direction for a guard whose job is to know when the projection is
-        no longer complete.
+        wrong direction for this guard in the other direction.
 
         Best-effort like ``_emit`` beside it: a patch-lane fault must never take
         an office write down, and a missing patch is a missing PROMOTION — the
@@ -750,7 +844,8 @@ class OfficeStore:
             from .snapshot import MAX_OFFICE_ACTORS_PROJECTED
             from .state_patches import emit_office_actor_patch, emit_office_actor_refresh
 
-            if len(self.list_actors(actor.workspace_id)) > MAX_OFFICE_ACTORS_PROJECTED:
+            scan = self.scan_actors(actor.workspace_id)
+            if scan.unreadable or len(scan.actors) > MAX_OFFICE_ACTORS_PROJECTED:
                 emit_office_actor_refresh(
                     self.event_log,
                     actor.workspace_id,
@@ -1015,27 +1110,36 @@ class OfficeStore:
     def scan_actors(self, workspace_id: str, *, include_archived: bool = False) -> ActorScan:
         """Every actor this workspace HAS, plus how many files did not decode.
 
-        THE chokepoint. ``list_actors`` is the thin list view over it, so the
-        sixteen callers that only want rows keep their signature while the one
-        caller that must not lie about completeness — the office projection both
-        ``runtime.office.get`` and ``runtime.office.subscribe`` answer from — can
-        ask the fuller question. Forking those two readers is the failure this
-        shape forbids: a count that reached ``get`` and not the subscribe
-        baseline would put the two back in the silent-disagreement state
-        ``_office_projection`` was extracted to end.
+        THE chokepoint, and since AX5 the ONLY one. There was a thin
+        ``list_actors`` view over it that returned ``.actors`` and dropped
+        ``.unreadable``, so a caller who only wanted rows kept a short
+        signature — and the arms that most needed the count were the ones that
+        never had to ask for it. The discipline then lived in PROSE: five
+        separate comments across ``realm_sync``, ``office_sync``,
+        ``office_class_key_guard``, ``snapshot`` and this file, each explaining
+        to the next reader why THIS site spends ``scan_actors`` and not the
+        cheap one. A rule that has to be re-argued at every call site is a rule
+        the API is not carrying.
+
+        So the thin view is gone and every caller spells ``.actors``. Dropping
+        the unreadable count is still allowed and still usually right — it is
+        now a thing someone WROTE rather than a default they inherited, which
+        is the whole of the change.
+
+        Forking readers is the failure this shape forbids: a count that reached
+        ``runtime.office.get`` and not the ``subscribe`` baseline would put the
+        two back in the silent-disagreement state ``_office_projection`` was
+        extracted to end.
         """
 
-        scan = self._read_actor_dir(paths.office_actors_dir(workspace_id))
+        scan = read_actor_dir(paths.office_actors_dir(workspace_id))
         actors = scan.actors
         unreadable = scan.unreadable
         if include_archived:
-            archived = self._read_actor_dir(paths.office_archive_dir(workspace_id))
+            archived = read_actor_dir(paths.office_archive_dir(workspace_id))
             actors = [*actors, *archived.actors]
             unreadable += archived.unreadable
         return ActorScan(sorted(actors, key=lambda a: a.actor_key), unreadable)
-
-    def list_actors(self, workspace_id: str, *, include_archived: bool = False) -> list[OfficeActor]:
-        return self.scan_actors(workspace_id, include_archived=include_archived).actors
 
     def scan_conflicts(self, workspace_id: str) -> ConflictScan:
         """Every unresolved conflict sidecar, and how each key was ARRIVED at.
@@ -1770,8 +1874,15 @@ class OfficeStore:
         self._guard_surface_is_orphaned(wsid)
 
         surface = self.get_surface(wsid)
-        active = self.list_actors(wsid)
-        archived = self.list_actors(wsid, include_archived=True)
+        # ``.actors`` on both, and the shortfall deliberately dropped: this
+        # verb MOVES the directory, so every file leaves whether or not it
+        # decoded, and these two numbers are a report of what could be counted
+        # rather than of what moved. A count that refused on an undecodable file
+        # would block the one verb an operator has for clearing an orphaned
+        # surface — which is usually orphaned BECAUSE something about it is
+        # broken. Written out rather than inherited from a thin view (AX5).
+        active = self.scan_actors(wsid).actors
+        archived = self.scan_actors(wsid, include_archived=True).actors
         destination = _free_surface_archive_dir(wsid)
         result = {
             "workspace_id": surface.workspace_id,
@@ -1917,9 +2028,10 @@ class OfficeStore:
         canonical = canonical_persona_instance_id(target) or target
         outcomes: list[OfficeActorOutcome] = []
         for wsid in self.list_workspaces():
-            # ``scan_actors``, not ``list_actors``: the thin view answers "these
-            # are the actors" for a directory it only partly read, and this loop
-            # spends that answer on a COMPLETENESS claim — an empty ``failures``
+            # The scan's ``unreadable`` is SPENT here, not dropped: the rows
+            # alone answer "these are the actors" for a directory this read may
+            # only have partly decoded, and this loop turns that answer into a
+            # COMPLETENESS claim — an empty ``failures``
             # is the retire ack's positive statement that every bound actor is
             # off the level (``agent_retire`` says so at its own docstring). A
             # bound desk whose file would not decode is not archived and is not
@@ -1970,8 +2082,8 @@ class OfficeStore:
         RAISES :class:`ActorsUnreadable` when either directory it walks would not
         fully decode, and that is the C4 correction rather than a new fragility.
         This list is EVIDENCE — the replay's answer to "which desks are off the
-        level" — and it was built from ``list_actors``, which drops what it could
-        not read and reports the remainder as complete. A short list here is not
+        level" — and it was built from the rows alone, which drop what could not
+        be read and report the remainder as complete. A short list here is not
         a smaller truth, it is a DIFFERENT claim: a bound desk whose archive copy
         will not decode reads as "not archived by this instance", which is the
         one thing an empty list is supposed to rule out. The caller
@@ -2009,44 +2121,6 @@ class OfficeStore:
         return keys
 
     # --- internal helpers ---------------------------------------------------
-
-    def _read_actor_dir(self, directory) -> ActorScan:
-        """One directory of actor files, COUNTING the ones that would not open.
-
-        The skip stays — a whole office must not vanish because one file is
-        mid-write or held by an AV scanner — but ``continue`` alone made the skip
-        invisible, and an invisible skip is a shortened projection that reports
-        itself complete. The count leaves with the rows.
-
-        Logged once per scan, aggregated by exception CLASS: an operator needs to
-        know whether they are looking at a share violation or a half-written JSON
-        file, and per-file lines would turn a directory of stale files into a log
-        flood on every read of the office. Class only, never the message — the
-        same disclosure rule the rest of this runtime's receipts follow.
-        """
-
-        actors: list[OfficeActor] = []
-        if not directory.exists():
-            return ActorScan(actors, 0)
-        unreadable = 0
-        classes: dict[str, int] = {}
-        for path in sorted(directory.glob("*.json")):
-            try:
-                actors.append(from_jsonable(OfficeActor, _read_json(path)))
-            except Exception as exc:
-                unreadable += 1
-                name = type(exc).__name__
-                classes[name] = classes.get(name, 0) + 1
-        if classes:
-            import logging
-
-            logging.getLogger(__name__).warning(
-                "office actor files unreadable in %s: %d (%s)",
-                directory.name,
-                unreadable,
-                ", ".join(f"{name} x{count}" for name, count in sorted(classes.items())),
-            )
-        return ActorScan(actors, unreadable)
 
     def _archive_actor_locked(
         self,

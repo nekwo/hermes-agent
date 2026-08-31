@@ -109,7 +109,7 @@ def test_the_refusal_leaves_the_archive_copy_and_the_ledger_intact(deleted):
     assert QA_INSTANCE in deleted.get_surface(WORKSPACE).archived_actor_keys
     # And no live row was authored behind the refusal.
     assert not paths.office_actor_path(WORKSPACE, QA_INSTANCE).exists()
-    assert deleted.list_actors(WORKSPACE) == []
+    assert deleted.scan_actors(WORKSPACE).actors == []
 
 
 def test_a_ledger_entry_alone_is_enough_to_refuse(deleted):
@@ -158,7 +158,7 @@ def test_the_explicit_resurrect_still_re_adds_and_clears_both_witnesses(deleted)
     assert actor.actor_key == QA_INSTANCE
     assert QA_INSTANCE not in deleted.get_surface(WORKSPACE).archived_actor_keys
     assert not paths.office_archived_actor_path(WORKSPACE, QA_INSTANCE).exists()
-    assert [a.actor_key for a in deleted.list_actors(WORKSPACE)] == [QA_INSTANCE]
+    assert [a.actor_key for a in deleted.scan_actors(WORKSPACE).actors] == [QA_INSTANCE]
 
 
 def test_the_resurrected_row_carries_its_history_forward(deleted):

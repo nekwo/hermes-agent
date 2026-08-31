@@ -100,7 +100,7 @@ def _create(capsys, *extra: str, persona: str = "qa", workspace: str = WORKSPACE
 def _actors(workspace_id: str = WORKSPACE) -> dict:
     from agent_runtime.office_store import OfficeStore
 
-    return {actor.actor_key: actor for actor in OfficeStore().list_actors(workspace_id)}
+    return {actor.actor_key: actor for actor in OfficeStore().scan_actors(workspace_id).actors}
 
 
 # ── the verb places an agent ─────────────────────────────────────────────────

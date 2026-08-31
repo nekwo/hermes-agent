@@ -595,7 +595,7 @@ _EXCLUDED_STORE_ENTRIES = frozenset(
 #: **THE NEAR-NAME TRAP, FIRST, because getting it wrong inverts the argument.**
 #: ``paths.office_archive_dir(workspace_id)`` is ``office/<ws>/archive/``: a
 #: DIFFERENT tree, per-workspace, holding archived ACTOR placements, and READ by
-#: ``OfficeStore`` — ``_read_actor_dir`` on the actor-listing seam
+#: ``OfficeStore`` — ``read_actor_dir`` on the actor-listing seam
 #: (``scan_actors(include_archived=True)``), and ``office_archived_actor_path`` on
 #: the archived-actor lookups that ``upsert_actor`` / ``remove_actor`` /
 #: ``restore_actor`` and the class-key fence depend on. That tree is a projection

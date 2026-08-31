@@ -216,7 +216,7 @@ def test_the_placement_is_gone_from_both_stores_after_one_call(
     assert "error" not in reply, reply
     assert not paths.persona_instance_path(placed["persona_instance_id"]).exists()
     assert placed["actor_key"] not in {
-        actor.actor_key for actor in OfficeStore().list_actors(WORKSPACE)
+        actor.actor_key for actor in OfficeStore().scan_actors(WORKSPACE).actors
     }
 
 

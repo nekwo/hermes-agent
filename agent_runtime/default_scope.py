@@ -264,7 +264,12 @@ def preview_default_scope_migration() -> dict:
                 board.board_id
                 for board in boards.list_for_workspace(workspace.id, include_archived=True)
             ]
-            actors = offices.list_actors(workspace.id, include_archived=True)
+            # ``.actors``, shortfall dropped on purpose: this row DESCRIBES a
+            # workspace for an operator choosing between duplicate scopes, and
+            # a scope listing that refused because one actor file would not
+            # decode would hide the very workspace the operator is trying to
+            # reconcile. Spelled out rather than inherited (AX5).
+            actors = offices.scan_actors(workspace.id, include_archived=True).actors
             workspace_rows.append(
                 {
                     "id": workspace.id,
@@ -479,7 +484,14 @@ def reconcile_default_scope_to_legacy(
             loser_workspace.id, include_archived=True
         )
         offices = OfficeStore()
-        actors = offices.list_actors(loser_workspace.id, include_archived=True)
+        # ``.actors``, and here the drop is SAFE IN THE RIGHT DIRECTION: the
+        # list is spent below only as a truthiness test for "does the loser hold
+        # live scoped data", and an undecodable actor file is still a file in
+        # that directory. It can make the check answer "empty" only if the
+        # directory holds nothing BUT undecodable files — in which case the
+        # sibling ``surface_exists`` check in the same condition still refuses
+        # the merge. Spelled out rather than inherited (AX5).
+        actors = offices.scan_actors(loser_workspace.id, include_archived=True).actors
         instances = exact_scoped_instance_ids(
             PersonaInstanceStore().list_all(), workspace_id=loser_workspace.id
         )

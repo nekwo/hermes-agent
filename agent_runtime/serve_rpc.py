@@ -636,11 +636,11 @@ def _runtime_office_get(
     genuinely unbounded field in this domain), and the actors' ``updated_by`` /
     ``created_at`` / ``state`` / ``backing_profile``. None of it is renderable
     and the first three are provenance for a different surface. Archived actors
-    are excluded outright: ``list_actors`` without ``include_archived`` is the
+    are excluded outright: ``scan_actors`` without ``include_archived`` is the
     placement set the canvas draws.
 
     Items are flattened out of their actor files in ``(actor_key, file order)``
-    — ``list_actors`` sorts by ``actor_key`` — so the same store state produces
+    — ``scan_actors`` sorts by ``actor_key`` — so the same store state produces
     the same bytes on every call, which is what makes a caching client able to
     compare them.
     """
@@ -689,10 +689,10 @@ def _office_projection(workspace_id: str) -> dict | None:
         return None
 
     surface = store.get_surface(workspace_id)
-    # ``scan_actors``, not ``list_actors``: the cut below is measured against the
-    # scan's own length, and a list that had already dropped its unreadable files
-    # made that subtraction answer 0 — a projection shortened by the platform,
-    # describing itself as complete.
+    # The cut below is measured against the scan's OWN length, and
+    # ``scan.unreadable`` rides the projection beside it: a list that had already
+    # dropped its unreadable files made that subtraction answer 0 — a projection
+    # shortened by the platform, describing itself as complete.
     scan = store.scan_actors(workspace_id)
     actors = scan.actors
     projected = actors[:MAX_OFFICE_ACTORS_PROJECTED]

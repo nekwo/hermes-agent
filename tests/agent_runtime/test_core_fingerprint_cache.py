@@ -1984,7 +1984,7 @@ def test_the_persisted_core_reports_the_actor_files_it_could_not_read(
 ):
     """A persisted core must not fingerprint-bless a silently-shortened office.
 
-    ``_read_actor_dir`` skips a file it cannot decode and returns the rest, so
+    ``read_actor_dir`` skips a file it cannot decode and returns the rest, so
     the snapshot's office row arrived already SHORTENED and computed its own
     truncation from the shortened length — answering 0. EG-1.5 fixed that one
     seam over in ``serve_rpc._office_projection``; this is the snapshot's copy of
@@ -1992,7 +1992,7 @@ def test_the_persisted_core_reports_the_actor_files_it_could_not_read(
     a projection that under-reported its completeness would be written back as
     fingerprint-blessed truth and served to every later boot.
 
-    *Mutation:* hand ``office_summary_row`` a bare ``list_actors`` list (or
+    *Mutation:* hand ``office_summary_row`` a bare ``scan.actors`` list (or
     hardcode ``actors_unreadable=0``).
     """
 

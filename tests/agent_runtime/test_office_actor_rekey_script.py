@@ -112,7 +112,7 @@ def test_apply_rekeys_the_actor_and_archives_the_old_class_key():
     assert main(["--apply"]) == 0
 
     new_key = "personainst_backend_dev_agent_29fdd71a"
-    assert [a.actor_key for a in store.list_actors(WORKSPACE)] == [new_key]
+    assert [a.actor_key for a in store.scan_actors(WORKSPACE).actors] == [new_key]
     actor = store.get_actor(WORKSPACE, new_key)
     assert actor.persona_instance_id == new_key
     assert actor.persona_id == "backend_dev"
@@ -290,7 +290,7 @@ def test_the_new_key_is_written_before_the_old_one_is_archived(monkeypatch, caps
         main(["--apply"])
     capsys.readouterr()
 
-    assert [a.actor_key for a in _store().list_actors(WORKSPACE)] == ["backend_dev"]
+    assert [a.actor_key for a in _store().scan_actors(WORKSPACE).actors] == ["backend_dev"]
     assert _store().get_surface(WORKSPACE).archived_actor_keys == []
 
 
@@ -348,7 +348,7 @@ def test_an_instance_bound_actor_is_left_alone_even_if_its_item_points_elsewhere
 
     assert main(["--apply"]) == 0
     assert _office_tree() == before
-    assert [a.actor_key for a in store.list_actors(WORKSPACE)] == ["personainst_dev_agent_3ebfce41"]
+    assert [a.actor_key for a in store.scan_actors(WORKSPACE).actors] == ["personainst_dev_agent_3ebfce41"]
 
 
 def test_the_rekeyed_actor_is_what_the_office_rpc_lane_then_publishes():
@@ -371,4 +371,4 @@ def test_the_rekeyed_actor_is_what_the_office_rpc_lane_then_publishes():
         ("desk-backend_dev", "personainst_backend_dev_agent_29fdd71a"),
         ("personainst_backend_dev_agent_29fdd71a", "personainst_backend_dev_agent_29fdd71a"),
     ]
-    assert store.list_actors(WORKSPACE)  # the store, not just the projection
+    assert store.scan_actors(WORKSPACE).actors  # the store, not just the projection

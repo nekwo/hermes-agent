@@ -128,7 +128,7 @@ def _migrate(workspace_id: str) -> None:
 
 
 def _keys(workspace_id: str) -> set[str]:
-    return {actor.actor_key for actor in OfficeStore().list_actors(workspace_id)}
+    return {actor.actor_key for actor in OfficeStore().scan_actors(workspace_id).actors}
 
 
 # ── writer 1: workspace_template ──────────────────────────────────────────
@@ -221,7 +221,7 @@ def test_template_copy_refuses_a_class_key_the_destination_has_archived():
 
 def test_template_copy_orders_bound_source_actors_first():
     """A source that itself carries a bound AND an unbound placement of one
-    persona lands as the bound copy plus a named refusal. ``list_actors`` sorts
+    persona lands as the bound copy plus a named refusal. ``scan_actors`` sorts
     by actor_key, which would otherwise copy the bare class key first (because
     "backend_dev" < "personainst_…") and let both through."""
 
@@ -402,7 +402,7 @@ def test_cli_class_keyed_write_is_allowed_once_the_instance_sibling_is_archived(
     class-keyed write must go through.
 
     Found by mutation: switching the guard's scan to
-    ``list_actors(include_archived=True)`` left every other test green.
+    ``scan_actors(include_archived=True).actors`` left every other test green.
     """
 
     workspace = _workspace("Emptied Office")

@@ -301,8 +301,12 @@ launcher's `test/fixtures/harness_office_layout/cases.json`, each under a
 `MANIFEST.sha256` its own side hashes). Read that directory's README before
 touching any constant: it lands in both repos or in neither. Two cases exist
 only because the repos are asymmetric — `hidden` is launcher-only view state
-this store has never had, and a blank `folder` is hermes-only (`_normalize_item`
-persists `""` where the launcher's decoder substitutes the kind's default), so
+this store has never had, and a blank `folder` is a LEGACY row on both sides
+(`_normalize_item` used to persist `""` where the launcher's decoder
+substitutes the kind's default; since H-H9 the write boundary fills it through
+`office_layout_policy.folder_for_kind`, so this store no longer mints the shape
+— but rows older than that landing, and actor files adopted verbatim by
+`apply_office_pull` from a peer on an older hermes, still carry it), so
 the policy resolves that fallback when it scans.
 
 **The verb authors no desk**, so the lane it scans is always the AGENT lattice

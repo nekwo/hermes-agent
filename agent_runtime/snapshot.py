@@ -1714,7 +1714,7 @@ def office_summary_row(
 
     ``actors_unreadable`` is REQUIRED, and required by keyword, because this row
     had exactly the defect RD-H4 / EG-1.5 fixed one seam over in
-    ``serve_rpc._office_projection``: ``OfficeStore._read_actor_dir`` skips a
+    ``serve_rpc._office_projection``: ``office_store.read_actor_dir`` skips a
     file it cannot decode and returns the rest, so ``actors`` arrives already
     SHORTENED, and computing ``actors_truncated`` from that shortened length
     answers 0. A launcher rendering that row cannot tell a desk that was removed
@@ -1821,11 +1821,12 @@ def _offices_summary(office_store, workspaces, realms=()) -> OfficesProjection:
             # absence from ``offices`` may not be the only trace it leaves.
             unreadable += 1
             continue
-        # ``scan_actors``, not ``list_actors``: the thin list view drops the
-        # files it could not decode and the row below must not describe itself as
-        # complete when it is not. Same chokepoint the RPC office projection
-        # reads through, so ``runtime.office.get`` and the snapshot cannot
-        # disagree about how complete the office they just handed over was.
+        # ``scan.unreadable`` reaches the row below rather than being dropped:
+        # the rows alone lose the files that would not decode, and the row must
+        # not describe itself as complete when it is not. Same chokepoint the
+        # RPC office projection reads through, so ``runtime.office.get`` and the
+        # snapshot cannot disagree about how complete the office they just
+        # handed over was.
         scan = office_store.scan_actors(workspace_token)
         actors = scan.actors
         realm_id = realm_by_workspace.get(surface.workspace_id)

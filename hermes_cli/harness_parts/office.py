@@ -102,11 +102,11 @@ def _office_surface_row(store, workspace_id: str, *, full: bool = False, surface
 
     if surface is None:
         surface = store.get_surface(workspace_id)
-    # ``scan_actors``, not ``list_actors``: the row this feeds accounts BOTH ways
-    # the actor list can be short — the cut we chose and the files the platform
-    # would not open (RD-H4 / EG-1.5). The CLI tier is the other reader of the
-    # snapshot's row builder, and a reader that passed a shortened list would
-    # re-open the hole at this seam.
+    # ``scan.unreadable`` is passed on, not dropped: the row this feeds accounts
+    # BOTH ways the actor list can be short — the cut we chose and the files the
+    # platform would not open (RD-H4 / EG-1.5). The CLI tier is the other reader
+    # of the snapshot's row builder, and a reader that passed a shortened list
+    # would re-open the hole at this seam.
     scan = store.scan_actors(workspace_id)
     actors = scan.actors
     # ``.keys`` spelled out, not handed over by a thin view: ``scan_conflicts``

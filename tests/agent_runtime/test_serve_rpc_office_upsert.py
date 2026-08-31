@@ -101,7 +101,7 @@ def _positions(workspace_id: str = WORKSPACE) -> dict[str, list[float]]:
 
     return {
         item.item_id: [float(item.position[0]), float(item.position[1])]
-        for actor in _store().list_actors(workspace_id)
+        for actor in _store().scan_actors(workspace_id).actors
         for item in actor.items
     }
 
@@ -171,7 +171,7 @@ def test_the_acked_actor_key_is_canonical_and_is_not_what_the_client_sent():
     assert acked == "personainst_dev_agent_3ebfce41"
     assert acked != "persona_personainst_dev_agent_3ebfce41"
     # The store agrees, so the ack is truth and not a re-derivation beside it.
-    assert [a.actor_key for a in _store().list_actors(WORKSPACE)] == [acked]
+    assert [a.actor_key for a in _store().scan_actors(WORKSPACE).actors] == [acked]
 
 
 def test_an_upsert_of_an_existing_actor_updates_it_and_never_forks_a_second_file():
@@ -184,7 +184,7 @@ def test_an_upsert_of_an_existing_actor_updates_it_and_never_forks_a_second_file
 
     assert first["result"] == {"actor_key": QA_INSTANCE, "revision": 2}
     assert second["result"] == {"actor_key": QA_INSTANCE, "revision": 3}
-    assert [a.actor_key for a in _store().list_actors(WORKSPACE)] == [QA_INSTANCE]
+    assert [a.actor_key for a in _store().scan_actors(WORKSPACE).actors] == [QA_INSTANCE]
 
 
 # ── the desk fence, on this lane (D6) ───────────────────────────────────────
@@ -250,7 +250,7 @@ def test_a_second_desk_for_one_persona_is_refused_as_a_whole_frame():
     }
     # A typed refusal in front of a store that took the write is the worst
     # outcome: the client rolls its prediction back and the server keeps it.
-    assert [a.actor_key for a in _store().list_actors(WORKSPACE)] == [QA_INSTANCE]
+    assert [a.actor_key for a in _store().scan_actors(WORKSPACE).actors] == [QA_INSTANCE]
     assert _positions() == {QA_INSTANCE: [-8.0, -2.0], "qa_desk": [-8.0, -4.5]}
 
 
@@ -287,7 +287,7 @@ def test_the_write_honours_the_instance_binding_and_the_fence_refuses_the_rekey(
     _seed()
     bound = _upsert("bound", {"workspace_id": WORKSPACE, "actor": _actor_payload(1.0, 1.0)})
     assert bound["result"]["actor_key"] == QA_INSTANCE
-    assert [a.actor_key for a in _store().list_actors(WORKSPACE)] == [QA_INSTANCE]
+    assert [a.actor_key for a in _store().scan_actors(WORKSPACE).actors] == [QA_INSTANCE]
 
     unbound = _upsert(
         "unbound",
@@ -295,7 +295,7 @@ def test_the_write_honours_the_instance_binding_and_the_fence_refuses_the_rekey(
     )
     assert unbound["error"]["data"]["reason"] == "class_key_collision"
     # No second actor file, which is the harm the reason names.
-    assert [a.actor_key for a in _store().list_actors(WORKSPACE)] == [QA_INSTANCE]
+    assert [a.actor_key for a in _store().scan_actors(WORKSPACE).actors] == [QA_INSTANCE]
 
 
 def test_a_class_keyed_write_that_would_duplicate_a_placement_is_a_typed_refusal():
@@ -407,7 +407,7 @@ def test_a_class_keyed_write_on_a_clean_canvas_still_goes_through():
     )
 
     assert reply["result"] == {"actor_key": "archivist", "revision": 1}
-    assert sorted(a.actor_key for a in _store().list_actors(WORKSPACE)) == [
+    assert sorted(a.actor_key for a in _store().scan_actors(WORKSPACE).actors) == [
         "archivist",
         QA_INSTANCE,
     ]
@@ -446,7 +446,7 @@ def test_no_wire_parameter_can_force_a_class_keyed_write_past_the_fence():
         )
         assert reply["error"]["data"]["reason"] == "class_key_collision", rid
 
-    assert [a.actor_key for a in _store().list_actors(WORKSPACE)] == [QA_INSTANCE]
+    assert [a.actor_key for a in _store().scan_actors(WORKSPACE).actors] == [QA_INSTANCE]
 
 
 def test_the_binding_survives_the_round_trip_onto_the_read_projection():
@@ -611,7 +611,7 @@ def test_expect_revision_cannot_guard_a_create_and_says_so_rather_than_writing()
 
     assert reply["error"]["code"] == 4090
     assert reply["error"]["data"]["reason"] == "stale_revision"
-    assert _store().list_actors(WORKSPACE) == []
+    assert _store().scan_actors(WORKSPACE).actors == []
 
 
 def test_the_write_records_WHO_made_it_and_defaults_to_the_argv_lanes_operator():
@@ -902,7 +902,7 @@ def test_a_malformed_actor_payload_is_invalid_params_and_never_a_handler_error()
         assert error["data"] == {"reason": "actor_invalid", "workspace_id": WORKSPACE}, rid
         assert error["message"].startswith("invalid_request:"), (rid, error["message"])
 
-    assert [a.actor_key for a in _store().list_actors(WORKSPACE)] == [QA_INSTANCE]
+    assert [a.actor_key for a in _store().scan_actors(WORKSPACE).actors] == [QA_INSTANCE]
     assert _positions()[QA_INSTANCE] == [-8.0, -2.0]
 
 

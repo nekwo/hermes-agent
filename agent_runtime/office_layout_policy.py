@@ -166,7 +166,7 @@ def occupied_positions(
 
     ``actors`` is an iterable of :class:`~agent_runtime.models.OfficeActor`
     (or of any object/mapping exposing ``items``) — the ACTOR is the unit
-    ``OfficeStore.list_actors`` hands back, and flattening happens here so no
+    ``OfficeStore.scan_actors`` hands back, and flattening happens here so no
     caller has to know that one actor file holds several scene items.
 
     Every item counts, including ones the launcher is currently hiding.

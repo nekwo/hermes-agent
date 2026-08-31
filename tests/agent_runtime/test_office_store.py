@@ -235,7 +235,7 @@ def test_a_corrupt_actor_file_is_counted_not_vanished(corrupt_count, caplog):
     """``continue`` alone made a shortened office indistinguishable from a
     smaller one.
 
-    ``_read_actor_dir`` has always skipped an actor file it could not decode, and
+    ``read_actor_dir`` has always skipped an actor file it could not decode, and
     the skip has to stay — a whole office must not vanish because one file is
     mid-write or held by an AV scanner. What could not stay is the SILENCE: every
     reader downstream got a shorter list that described itself as complete.
@@ -276,9 +276,9 @@ def test_a_corrupt_actor_file_is_counted_not_vanished(corrupt_count, caplog):
     assert len(unreadable_lines) == 1
     assert f": {corrupt_count} (" in unreadable_lines[0]
     assert "JSONDecodeError" in unreadable_lines[0]
-    # The list view keeps its old signature and its old answer, so the sixteen
-    # callers that only want rows are untouched by this stage.
-    assert [actor.actor_key for actor in store.list_actors(ws)] == ["dev", "qa"]
+    # ``.actors`` still answers exactly what it always did; AX5 removed the thin
+    # view, not the rows.
+    assert [actor.actor_key for actor in store.scan_actors(ws).actors] == ["dev", "qa"]
 
 
 def test_an_unreadable_archive_refuses_the_re_add_instead_of_minting_revision_1():
@@ -427,7 +427,7 @@ def test_a_second_actor_desking_one_persona_is_refused_naming_the_holder():
     assert excinfo.value.code == "duplicate_desk"
     assert "'dev' already holds 'desk-dev'" in str(excinfo.value)
     # Nothing was written: one actor, one desk, and no event for the refusal.
-    assert [a.actor_key for a in store.list_actors(ws)] == ["dev"]
+    assert [a.actor_key for a in store.scan_actors(ws).actors] == ["dev"]
     assert _event_types().count("office.actor.upserted") == 1
 
 
@@ -513,7 +513,7 @@ def test_two_desks_for_one_persona_in_a_single_payload_are_refused():
             },
         )
     assert excinfo.value.safe_details["holding_item_id"] == "desk-a"
-    assert store.list_actors(ws) == []
+    assert store.scan_actors(ws).actors == []
 
 
 def test_the_desk_fence_refuses_on_dry_run_too():
@@ -611,11 +611,11 @@ def test_one_desk_claimed_by_two_rows_is_not_two_desks():
         ws, _desk_only_payload("dev", "desk-dev", instance="personainst_dev_agent_1")
     )
     assert minted.actor_key == "personainst_dev_agent_1"
-    assert {a.actor_key for a in store.list_actors(ws)} == {"dev", "personainst_dev_agent_1"}
+    assert {a.actor_key for a in store.scan_actors(ws).actors} == {"dev", "personainst_dev_agent_1"}
 
     # …and the migration's second half still runs, leaving exactly one holder.
     store.remove_actor(ws, "dev")
-    assert [a.actor_key for a in store.list_actors(ws)] == ["personainst_dev_agent_1"]
+    assert [a.actor_key for a in store.scan_actors(ws).actors] == ["personainst_dev_agent_1"]
 
 
 def test_the_cli_door_translates_the_refusal_into_exit_4_naming_the_holder():
@@ -673,7 +673,7 @@ def test_the_cli_door_translates_the_refusal_into_exit_4_naming_the_holder():
     assert envelope["error"]["code"] == "duplicate_desk"
     assert "'dev' already holds 'desk-dev'" in envelope["error"]["message"]
     # And it wrote nothing.
-    assert [a.actor_key for a in store.list_actors(ws)] == ["dev"]
+    assert [a.actor_key for a in store.scan_actors(ws).actors] == ["dev"]
 
 
 # ── prune lane (plan §4.3) ─────────────────────────────────────────────────
@@ -1186,7 +1186,7 @@ def test_the_union_deduplicates_on_first_occurrence():
 
 
 def test_a_prune_over_an_unreadable_directory_reports_the_shortfall():
-    """C4 (M8). The prune walked ``list_actors``, which drops what it could not
+    """C4 (M8). The prune walked the actor ROWS alone, which drop what could not
     decode and reports the remainder as complete — so a bound desk whose file
     would not open was neither archived nor counted, and ``failures: []`` claimed
     every bound actor was off the level. That empty list is the retire ack's
@@ -1218,7 +1218,7 @@ def test_a_prune_over_an_unreadable_directory_reports_the_shortfall():
 def test_the_replays_evidence_read_refuses_a_short_answer():
     """C4 (M8), the read-only half. ``archived_actor_keys_for_instance`` is the
     replay's EVIDENCE — the answer to "which desks are off the level" — and it
-    was built from ``list_actors``. A bound desk whose archive copy will not
+    was built from the actor ROWS alone. A bound desk whose archive copy will not
     decode came back as "not archived by this instance", which is the one thing
     an empty list is supposed to rule out. A short list here is not a smaller
     truth, it is a different claim."""
@@ -1705,3 +1705,103 @@ def test_the_prunes_ack_is_derived_from_its_outcomes_and_cannot_disagree():
     assert result["failures"] == [
         {"actor_key": None, "workspace_id": ws, "error": "ActorsUnreadable: 1"}
     ]
+
+
+# ── the blank folder is filled at the WRITE boundary (H-H9 / M9) ────────────
+
+
+@pytest.mark.parametrize(
+    "kind,expected", [("agent", "Agents"), ("desk", "Desks"), (None, "Agents")]
+)
+def test_a_blank_folder_is_filled_with_the_kinds_default_when_it_is_written(kind, expected):
+    """M9. One stored row means one thing.
+
+    ``folder: ""`` persisted, and three readers then compensated for it
+    independently — the layout policy before scanning, the launcher's decoder at
+    decode, and a third reader again. "Which folder is this item in" had three
+    answers derived three ways from a value that said nothing.
+
+    The unknown-kind case is in the table on purpose: ``normalize_item_kind``
+    maps every unrecognised spelling to ``agent``, so the folder must follow it
+    rather than inventing a fourth folder at write time.
+
+    *Mutation:* drop the ``or folder_for_kind(kind)`` fallback. The stored
+    folder is ``""`` again and every arm of the table fails.
+    """
+
+    ws = _make_workspace()
+    store = OfficeStore()
+    item = {"item_id": "solo", "persona_id": "qa", "position": [1.0, 2.0]}
+    if kind is not None:
+        item["kind"] = kind
+    actor = store.upsert_actor(
+        ws, {"persona_id": "qa", "persona_instance_id": "personainst_hh9", "items": [item]}
+    )
+    assert actor.items[0].folder == expected
+    # From the FILE, not the returned object: the claim is about what was
+    # persisted, and a fill applied only on the way out would leave the disk
+    # ambiguous exactly as before.
+    assert store.get_actor(ws, actor.actor_key).items[0].folder == expected
+
+
+def test_an_explicit_folder_is_never_overwritten_by_the_default():
+    """The fill is for ABSENCE only. An operator who filed an agent under "Ops"
+    must not have it silently re-filed under "Agents".
+
+    *Mutation:* fill unconditionally (``folder = folder_for_kind(kind)``). Every
+    non-default folder in the store collapses into two.
+    """
+
+    ws = _make_workspace()
+    store = OfficeStore()
+    actor = store.upsert_actor(
+        ws,
+        {
+            "persona_id": "qa",
+            "persona_instance_id": "personainst_hh9_ops",
+            "items": [
+                {
+                    "item_id": "solo",
+                    "persona_id": "qa",
+                    "kind": "agent",
+                    "position": [1.0, 2.0],
+                    "folder": "Ops",
+                }
+            ],
+        },
+    )
+    assert actor.items[0].folder == "Ops"
+
+
+def test_the_written_folder_is_the_one_the_layout_policy_would_have_inferred():
+    """The fill and the scan's fallback are the SAME authority, so a row this
+    store writes and a row the policy compensates for cannot land in different
+    folders.
+
+    *Mutation:* spell the pair locally (``"Desks" if kind == "desk" else
+    "Agents"``). Green today and free to drift the moment either side's
+    vocabulary moves — which is why the assertion is against
+    ``folder_for_kind`` itself rather than against the literals.
+    """
+
+    from agent_runtime.office_layout_policy import folder_for_kind, item_folder
+
+    ws = _make_workspace()
+    store = OfficeStore()
+    for kind in ("agent", "desk"):
+        actor = store.upsert_actor(
+            ws,
+            {
+                "persona_id": kind,
+                "persona_instance_id": f"personainst_hh9_{kind}",
+                "items": [
+                    {"item_id": kind, "persona_id": kind, "kind": kind, "position": [0.0, 0.0]}
+                ],
+            },
+        )
+        written = actor.items[0]
+        assert written.folder == folder_for_kind(kind)
+        # And the scan's own fallback agrees about the filled row, which is the
+        # property that makes the read-side compensation harmless rather than a
+        # second opinion.
+        assert item_folder(written) == written.folder

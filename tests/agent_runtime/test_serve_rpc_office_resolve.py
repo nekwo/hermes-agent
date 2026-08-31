@@ -176,7 +176,7 @@ def _seed_conflict(
 
 
 def _live_keys(workspace_id: str = WORKSPACE) -> list[str]:
-    return [a.actor_key for a in _store().list_actors(workspace_id)]
+    return [a.actor_key for a in _store().scan_actors(workspace_id).actors]
 
 
 def _actor_bytes(workspace_id: str = WORKSPACE, actor_key: str = QA_INSTANCE):

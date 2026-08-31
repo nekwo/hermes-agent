@@ -330,7 +330,7 @@ def test_the_occupancy_radius_cannot_swallow_an_adjacent_slot():
 
 
 def test_occupied_positions_flattens_actors_the_way_the_store_hands_them_over():
-    """``OfficeStore.list_actors`` returns ACTORS, and one actor file holds
+    """``OfficeStore.scan_actors`` returns ACTORS, and one actor file holds
     several scene items (an agent placement plus its coupled desk). The
     flattening lives in the policy so no caller has to know that — and so no
     caller can flatten it differently.

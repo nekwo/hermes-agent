@@ -32,7 +32,7 @@ none:
    its fence disposition, so a FOURTH writer reds by enumeration instead of
    shipping.
 4. **The fence cannot be blinded** — its ``duplicate_item_placement`` half
-   consulted ``list_actors``, which drops files that will not decode, so one
+   consulted the actor ROWS alone, which drop files that will not decode, so one
    unreadable instance-keyed sibling turned "unknown" into "no conflict" for
    every writer at once. It now refuses typed instead of guessing.
 
@@ -708,15 +708,16 @@ def _duplicate_only_workspace(name: str) -> str:
 def _blind_the_sibling(workspace_id: str) -> pathlib.Path:
     """Make the instance-keyed sibling undecodable — an AV quarantine stub, a
     half-flushed write, a disk error. The row is still THERE; it just cannot be
-    read, which is the state ``list_actors`` reports as "absent"."""
+    read, which is the state a reader spending only ``scan.actors`` reports as
+    "absent"."""
 
     from agent_runtime import paths
 
     path = paths.office_actor_path(workspace_id, INSTANCE)
     assert path.exists()
     path.write_text("{truncated", encoding="utf-8")
-    assert OfficeStore().list_actors(workspace_id) == [], (
-        "the list view is supposed to be the blind one — fixture no longer bites"
+    assert OfficeStore().scan_actors(workspace_id).actors == [], (
+        "the rows-only read is supposed to be the blind one — fixture no longer bites"
     )
     return path
 
@@ -724,9 +725,9 @@ def _blind_the_sibling(workspace_id: str) -> pathlib.Path:
 def test_an_unreadable_sibling_makes_the_fence_refuse_typed_instead_of_guessing():
     """THE killing test for the fence's blind spot.
 
-    ``class_key_collision``'s duplicate half asked ``list_actors`` whether a live
-    sibling already holds these item ids. ``list_actors`` drops files that will
-    not decode (``_read_actor_dir`` counts them and moves on), so the honest
+    ``class_key_collision``'s duplicate half asked the actor ROWS alone whether a
+    live sibling already holds these item ids. The rows drop files that will
+    not decode (``read_actor_dir`` counts them and moves on), so the honest
     answer "I cannot tell" came back as "no" — for EVERY writer at once, through
     the one predicate — and the class-keyed write landed beside a sibling nobody
     could read. That is the stage's named defect class reached THROUGH the fence:
@@ -737,7 +738,7 @@ def test_an_unreadable_sibling_makes_the_fence_refuse_typed_instead_of_guessing(
     class-keyed actor file exists afterwards, AND that the unreadable file is
     left exactly as found for an operator to repair.
 
-    *Mutation:* point the fence back at ``list_actors``. The scan reports nothing,
+    *Mutation:* point the fence back at ``scan.actors`` alone. It reports nothing,
     no collision is found, the write LANDS — and the first two probes go red
     together. The fixture is duplicate-only on purpose so no surface-level reason
     can rescue the mutant.

@@ -438,7 +438,7 @@ def test_the_prewarm_writes_no_store_state_and_emits_no_event(
 
     events_before = len(EventLog().tail(400))
     instances_before = {i.id for i in PersonaInstanceStore().list_all()}
-    actors_before = {a.actor_key for a in OfficeStore().list_actors(WORKSPACE)}
+    actors_before = {a.actor_key for a in OfficeStore().scan_actors(WORKSPACE).actors}
 
     _prewarm({"persona_id": "prewarm_no_writes"})
     _drained()
@@ -446,7 +446,7 @@ def test_the_prewarm_writes_no_store_state_and_emits_no_event(
     assert len(EventLog().tail(400)) == events_before
     assert {i.id for i in PersonaInstanceStore().list_all()} == instances_before
     assert {
-        a.actor_key for a in OfficeStore().list_actors(WORKSPACE)
+        a.actor_key for a in OfficeStore().scan_actors(WORKSPACE).actors
     } == actors_before
 
 

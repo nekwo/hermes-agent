@@ -141,13 +141,13 @@ def class_key_collision(store: Any, workspace_id: str, payload: dict) -> dict | 
         if item_id
     }
     if incoming_items:
-        # ``scan_actors``, never ``list_actors`` (EG-1.5's chokepoint, EG-6.6's
-        # close). The list view drops files that will not decode, so a single
-        # unreadable instance-keyed sibling turned "I cannot tell" into "no
-        # conflict" — for EVERY writer through this one predicate — and the
-        # duplicate placement landed under the actor nobody could read. There is
-        # no honest partial answer here: an item id can only be proven ABSENT by
-        # reading every actor that might hold it.
+        # The scan, and its ``unreadable`` REFUSED on rather than dropped
+        # (EG-1.5's chokepoint, EG-6.6's close). The rows alone lose files that
+        # will not decode, so a single unreadable instance-keyed sibling turned
+        # "I cannot tell" into "no conflict" — for EVERY writer through this one
+        # predicate — and the duplicate placement landed under the actor nobody
+        # could read. There is no honest partial answer here: an item id can only
+        # be proven ABSENT by reading every actor that might hold it.
         scan = store.scan_actors(workspace_id)
         if scan.unreadable:
             raise ActorsUnreadable(

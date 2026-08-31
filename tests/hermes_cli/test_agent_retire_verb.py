@@ -108,7 +108,7 @@ def _retire(capsys, instance_id: str, *extra: str) -> tuple[int, dict]:
 def _live_actor_keys() -> set:
     from agent_runtime.office_store import OfficeStore
 
-    return {actor.actor_key for actor in OfficeStore().list_actors(WORKSPACE)}
+    return {actor.actor_key for actor in OfficeStore().scan_actors(WORKSPACE).actors}
 
 
 # ── the verb retires a placement ─────────────────────────────────────────────
@@ -543,4 +543,4 @@ def test_the_delete_spelling_actually_retires_an_agent(
         placed["persona_instance_id"]
     )
     # Both halves left, which is what makes Delete an honest word for it.
-    assert OfficeStore().list_actors(WORKSPACE) == []
+    assert OfficeStore().scan_actors(WORKSPACE).actors == []

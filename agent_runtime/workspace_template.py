@@ -101,9 +101,17 @@ def _copy_office(
     # order-independent: a source that itself carries a bound and an unbound
     # placement of one persona (a pre-existing double placement) then lands as
     # the bound copy plus a named refusal, not as a faithfully duplicated mess.
-    # ``list_actors`` sorts by actor_key, which would otherwise put the bare
+    # ``scan_actors`` sorts by actor_key, which would otherwise put the bare
     # class key first purely because "dev" < "personainst_dev_…".
-    source_actors = sorted(store.list_actors(source_workspace_id), key=lambda a: not a.persona_instance_id)
+    #
+    # ``.actors``, shortfall dropped, and the drop is ACCOUNTED one level up:
+    # this function already degrades every office fault to a ``warnings`` row
+    # rather than failing the clone, and an actor whose source file will not
+    # decode simply does not copy. Naming it here so the choice is visible
+    # (AX5); widening ``warnings`` with a ``office_actors_unreadable`` row is
+    # the honest next step and is filed, not smuggled in.
+    scan = store.scan_actors(source_workspace_id)
+    source_actors = sorted(scan.actors, key=lambda a: not a.persona_instance_id)
     for actor in source_actors:
         payload = {
             "persona_id": actor.persona_id,

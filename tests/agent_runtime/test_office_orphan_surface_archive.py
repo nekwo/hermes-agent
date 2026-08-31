@@ -283,7 +283,7 @@ def test_a_surface_whose_workspace_still_resolves_is_refused(capsys):
     assert paths.office_surface_path(workspace.id).exists()
     assert not paths.office_surface_archive_root().exists()
     assert [row["workspace_id"] for row in _offices()] == [workspace.id]
-    assert store.list_actors(workspace.id)[0].actor_key == "personainst_qa_agent_0001"
+    assert store.scan_actors(workspace.id).actors[0].actor_key == "personainst_qa_agent_0001"
 
 
 def test_an_archived_workspace_still_resolves_and_is_refused(capsys):

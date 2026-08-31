@@ -102,7 +102,7 @@ def _seed(workspace_id: str = WORKSPACE):
 
 
 def _live_keys(workspace_id: str = WORKSPACE) -> list[str]:
-    return [a.actor_key for a in _store().list_actors(workspace_id)]
+    return [a.actor_key for a in _store().scan_actors(workspace_id).actors]
 
 
 def _archive_bytes(workspace_id: str = WORKSPACE, actor_key: str = QA_INSTANCE):
@@ -159,7 +159,7 @@ def test_the_remove_archives_the_actor_and_acks_the_post_archive_revision():
     # happen to agree on.
     archived = [
         a
-        for a in store.list_actors(WORKSPACE, include_archived=True)
+        for a in store.scan_actors(WORKSPACE, include_archived=True).actors
         if a.actor_key == QA_INSTANCE
     ]
     assert [a.revision for a in archived] == [3]

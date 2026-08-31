@@ -219,7 +219,7 @@ def test_agent_create_refuses_before_writing_anything(
     _agent_create(
         capsys, "--idempotency-key", "r1-create-clean", "--placement-id", INCIDENT_ID
     )
-    assert OfficeStore().list_actors(WORKSPACE) == []
+    assert OfficeStore().scan_actors(WORKSPACE).actors == []
     assert not [
         row for row in PersonaInstanceStore().list_all() if INCIDENT_ID in row.id
     ]

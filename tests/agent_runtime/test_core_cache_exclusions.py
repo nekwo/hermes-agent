@@ -819,7 +819,7 @@ def test_the_per_workspace_actor_archive_is_STILL_in_the_closure(
     """THE NEAR-NAME TRAP, pinned. One underscore, and the opposite answer.
 
     ``paths.office_archive_dir(ws)`` — ``office/<ws>/archive/`` — holds archived
-    ACTOR placements and is READ by ``OfficeStore``: ``_read_actor_dir`` on the
+    ACTOR placements and is READ by ``OfficeStore``: ``read_actor_dir`` on the
     actor-listing seam (``scan_actors(include_archived=True)``), and
     ``office_archived_actor_path`` on the archived-actor lookups that
     ``upsert_actor`` / ``remove_actor`` / ``restore_actor`` and the class-key

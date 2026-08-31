@@ -162,7 +162,7 @@ def test_copy_workspace_content_copies_office_and_board():
 
     assert outcome["warnings"] == []
     assert outcome["copied"] == {"office_actors": 2, "office_folders": 3, "board_cards": 2}
-    dest_actors = OfficeStore().list_actors(dest.id)
+    dest_actors = OfficeStore().scan_actors(dest.id).actors
     assert {actor.actor_key for actor in dest_actors} == {"dev", "qa"}
     dev = next(actor for actor in dest_actors if actor.actor_key == "dev")
     assert [item.position for item in dev.items] == [[1.5, -2.0], [1.5, -1.0]]
@@ -194,7 +194,7 @@ def test_cli_create_from_workspace_copies_scoped_content_and_settings():
     created_ws = WorkspaceStore().get(row["id"])
     assert created_ws.isolation == "hard"
     assert created_ws.max_concurrent_lanes == 3
-    assert OfficeStore().list_actors(created_ws.id)
+    assert OfficeStore().scan_actors(created_ws.id).actors
     assert BoardStore().list_cards(board_models.default_board_id(created_ws.id))
 
 

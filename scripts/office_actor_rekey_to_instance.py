@@ -224,7 +224,10 @@ def main(argv: list[str] | None = None) -> int:
         if not store.surface_exists(workspace_id):
             print(f"[{workspace_id}] no office surface — skipped")
             continue
-        actors = store.list_actors(workspace_id)
+        # ``.actors``: this is a DRY-RUN-first operator script that prints what
+        # it would do, and a file it cannot decode is a file it cannot re-key
+        # either. Spelled out rather than inherited from a thin view (AX5).
+        actors = store.scan_actors(workspace_id).actors
         surface = store.get_surface(workspace_id)
         print(f"[{workspace_id}] {len(actors)} active actor(s); archived_actor_keys={surface.archived_actor_keys}")
         for actor in actors:

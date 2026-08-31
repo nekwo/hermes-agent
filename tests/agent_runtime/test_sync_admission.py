@@ -202,4 +202,4 @@ def test_office_pull_refuses_a_machine_shaped_actor(isolate_agent_runtime_root, 
 
     assert [row["code"] for row in summary.refused] == ["nonportable_path"]
     assert summary.adopted == 0
-    assert store.list_actors(workspace.id) == []
+    assert store.scan_actors(workspace.id).actors == []

@@ -1064,7 +1064,7 @@ def test_a_healthy_split_agent_and_desk_pair_reports_nothing(
     # with no desks in it and proves nothing.
     assert any(
         item.kind == "desk"
-        for actor in store.list_actors(workspace)
+        for actor in store.scan_actors(workspace).actors
         for item in actor.items
     )
 
@@ -1350,7 +1350,7 @@ def test_distinct_ids_on_two_actors_are_not_a_duplicate(isolate_agent_runtime_ro
     assert report["summary"]["finding_counts"]["duplicate_placements"] == 0
     # Two live actors DO hold items here — otherwise the empty list is
     # satisfied by a store with nothing in it.
-    assert len(store.list_actors(workspace)) == 2
+    assert len(store.scan_actors(workspace).actors) == 2
 
 
 @pytest.mark.parametrize(

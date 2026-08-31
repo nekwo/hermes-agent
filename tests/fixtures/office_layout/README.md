@@ -57,11 +57,18 @@ kind→lane mapping produces for `kind`, and the scan over `items` returns
   state never enters `OfficeSurface` — so `hidden_item_blocks` passes on one
   side by honouring the flag and on the other by never having had it. Both must
   count the item as occupying its slot.
-* **A blank `folder` is hermes-only.** `office_store._normalize_item` persists
-  `folder: ""` for an item written without one; the launcher's decoder
-  substitutes the kind's default at read time. `blank_folder_falls_back_to_kind`
-  pins that hermes applies the same fallback when it SCANS, or a legacy item
-  would block the lattice on one repo and be invisible on the other.
+* **A blank `folder` is LEGACY on both sides now.** `office_store
+  ._normalize_item` used to persist `folder: ""` for an item written without
+  one, while the launcher's decoder substituted the kind's default at read
+  time — one stored value meaning two things, compensated for independently by
+  three readers. H-H9 fills it at the hermes WRITE boundary (through
+  `office_layout_policy.folder_for_kind`, the same authority the scan's
+  fallback spends), so this store no longer MINTS the shape. The fallback is
+  still load-bearing and this case still pins it: rows written before H-H9 hold
+  `""` on disk, and `office_sync.apply_office_pull` adopts a peer's actor files
+  without passing through `_normalize_item`, so a peer on an older hermes can
+  still deliver one. A legacy item must not block the lattice on one repo and
+  be invisible on the other.
 
 ## Tolerance is not slack
 

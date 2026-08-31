@@ -1233,12 +1233,11 @@ def _office_store_drift(realm_id: str, workspaces: list[Workspace]) -> dict[str,
     Two under-count guards, both preferring silence to a delete-shaped lie:
 
     * an actor directory that does not fully READ (``scan.unreadable``) skips
-      that workspace's ENTIRE actor accounting. ``scan_actors`` is the
-      chokepoint that carries the shortfall precisely so this arm can ask; the
-      thin ``list_actors`` view would hand back a short list and the baseline
-      diff would then report N removals for actors whose files merely would not
-      open here — the same lie ``update_office_baseline_after_sync`` refuses to
-      write.
+      that workspace's ENTIRE actor accounting. ``scan_actors`` carries the
+      shortfall precisely so this arm can ask; spending only its rows would hand
+      back a short list and the baseline diff would then report N removals for
+      actors whose files merely would not open here — the same lie
+      ``update_office_baseline_after_sync`` refuses to write.
     * a workspace with no office directory contributes nothing, and a
       missing/unreadable surface only skips its own ``offices_changed`` row (the
       actor accounting still runs when the listing is readable).
@@ -1355,8 +1354,9 @@ def _office_publish_scan(workspaces: list[Workspace]) -> OfficePublishScan:
             continue
         if surface.workspace_id not in workspace_ids:
             continue
-        # ``scan_actors``, not ``list_actors``: the thin view answers "these are
-        # the actors" for a directory it only partly read.
+        # ``scan.unreadable`` is what the refusal below is minted from: the rows
+        # alone answer "these are the actors" for a directory this read may only
+        # have partly decoded.
         scan = store.scan_actors(workspace_token)
         refusal = OfficeSyncRefusal.for_scan(surface.workspace_id, scan)
         if refusal is not None:

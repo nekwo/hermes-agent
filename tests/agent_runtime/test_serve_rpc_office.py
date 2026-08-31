@@ -209,7 +209,7 @@ def test_the_office_method_answers_one_workspace_with_the_canvas_projection():
     assert result["actors_truncated"] == 0
     assert result["actors_unreadable"] == 0
 
-    # Flattened across actors, in ``list_actors`` order (actor_key ascending),
+    # Flattened across actors, in ``scan_actors`` order (actor_key ascending),
     # file order within an actor. Deterministic on purpose: a client that
     # caches the last result compares it against the next one.
     assert [(item["item_id"], item["kind"]) for item in result["items"]] == [
@@ -442,7 +442,7 @@ def test_the_snapshot_office_lane_carries_the_same_binding_field():
 
     store = _seed_office()
     row = office_summary_row(
-        store.get_surface(WORKSPACE), store.list_actors(WORKSPACE), actors_unreadable=0
+        store.get_surface(WORKSPACE), store.scan_actors(WORKSPACE).actors, actors_unreadable=0
     )
     snapshot_bindings = {a["actor_key"]: a["persona_instance_id"] for a in row["actors"]}
     assert snapshot_bindings == {

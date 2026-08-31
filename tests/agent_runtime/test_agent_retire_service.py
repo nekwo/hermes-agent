@@ -81,7 +81,7 @@ def _place(placement_id: str = "qa_retire_1_agent_2", persona_id: str = "qa") ->
 def _live_actor_keys(workspace_id: str = WORKSPACE) -> set:
     from agent_runtime.office_store import OfficeStore
 
-    return {actor.actor_key for actor in OfficeStore().list_actors(workspace_id)}
+    return {actor.actor_key for actor in OfficeStore().scan_actors(workspace_id).actors}
 
 
 # ── both halves leave, and the ack names the actors ──────────────────────────
@@ -553,7 +553,7 @@ def _resurrect(actor_key: str, placed: dict) -> None:
         updated_by="operator",
         resurrect=True,
     )
-    assert actor_key in {a.actor_key for a in OfficeStore().list_actors(WORKSPACE)}
+    assert actor_key in {a.actor_key for a in OfficeStore().scan_actors(WORKSPACE).actors}
 
 
 def test_a_replay_re_archives_an_actor_that_came_back(qa_persona, seeded_workspace):
@@ -598,7 +598,7 @@ def test_a_replay_re_archives_an_actor_that_came_back(qa_persona, seeded_workspa
     assert second["archived_actor_keys"] == [placed["actor_key"]]
     assert second["office_archive_failures"] == []
     # The level is clean: the fact the ack is claiming, measured at the store.
-    assert OfficeStore().list_actors(WORKSPACE) == []
+    assert OfficeStore().scan_actors(WORKSPACE).actors == []
 
 
 def test_a_replay_with_nothing_to_heal_still_answers_the_same_way(

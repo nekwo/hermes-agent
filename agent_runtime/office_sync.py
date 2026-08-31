@@ -42,10 +42,10 @@ SYNC_UNKNOWABLE = "sync_unknowable"
 class OfficeSyncRefusal:
     """One workspace's sync arm refusing rather than deciding on a short list.
 
-    ``OfficeStore._read_actor_dir`` skips a file it cannot decode and returns
-    the rest, so every arm reading ``list_actors`` received a SHORTER world that
-    described itself as complete. For a reader that is a wrong number; for these
-    two arms it is worse, because both of them are writers:
+    ``office_store.read_actor_dir`` skips a file it cannot decode and returns
+    the rest, so every arm that reads only the ROWS receives a SHORTER world
+    that describes itself as complete. For a reader that is a wrong number; for
+    these two arms it is worse, because both of them are writers:
 
     * publish copies the actor FILES verbatim, so the undecodable file travels —
       and every peer's :func:`apply_office_pull` then finds an actor key present
@@ -210,9 +210,10 @@ def update_office_baseline_after_sync(realm_id: str, workspace_ids: list[str]) -
     summary = OfficeBaselineSummary(recorded=[], refused=[])
     for workspace_id in workspace_ids:
         exists = store.surface_exists(workspace_id)
-        # ``scan_actors``, not ``list_actors``: the thin list view drops the
-        # files it could not decode, which is precisely the fact this arm has to
-        # know before it writes a completeness claim.
+        # The SCAN, and its ``unreadable`` spent rather than dropped: the rows
+        # alone describe a directory this read may only have half-decoded, which
+        # is precisely the fact this arm has to know before it writes a
+        # completeness claim.
         scan = store.scan_actors(workspace_id) if exists else ActorScan([], 0)
         refusal = OfficeSyncRefusal.for_scan(workspace_id, scan)
         if refusal is not None:
@@ -305,6 +306,31 @@ class RemoteOffice(NamedTuple):
 
 
 def _read_remote_office(office_dir: Path) -> RemoteOffice:
+    """One PULLED office directory, decoded through the same reader the local
+    store uses (AX6).
+
+    This was the THIRD actor-directory reader in the runtime and it spelled the
+    walk, the swallow and the unreadable count itself — a second spelling of
+    ``OfficeStore``'s discipline, sitting in the one place where the two
+    disagreeing produces a DELETION rather than a wrong number: an actor key
+    absent from ``actors`` is exactly how the pull infers "the peer removed this
+    desk". It now calls ``office_store.read_actor_dir``, which was lifted out of
+    the store for this (it never took ``self``), so the two cannot drift and the
+    pulled directory gains the per-class warning line the local ones have had.
+
+    ONE decode outcome this reader used to have and the store did not, now
+    folded rather than dropped: a payload that decoded FINE and carries no
+    ``actor_key``. There is nothing to key it by, so it cannot enter the map —
+    and it used to leave with no trace at all, which put it in the same silent
+    absence a corrupt file used to occupy. It counts as unreadable, which is the
+    safe direction: ``unreadable`` is what fences this workspace's delete-shaped
+    decisions (``_reconcile_actors``' ``deletes_fenced``), and a remote office
+    holding a row nobody can route is not a remote office this pull should be
+    inferring removals from.
+    """
+
+    from .office_store import read_actor_dir
+
     surface_path = office_dir / "office.json"
     surface: OfficeSurface | None = None
     surface_unreadable = False
@@ -314,25 +340,20 @@ def _read_remote_office(office_dir: Path) -> RemoteOffice:
         except Exception:
             surface = None
             surface_unreadable = True
+    scan = read_actor_dir(office_dir / "actors")
     actors: dict[str, OfficeActor] = {}
-    unreadable = 0
-    actors_dir = office_dir / "actors"
-    if actors_dir.exists():
-        for actor_path in sorted(actors_dir.glob("*.json")):
-            try:
-                actor = from_jsonable(OfficeActor, _read_json(actor_path))
-            except Exception:
-                # COUNTED, not dropped. See ``RemoteOffice``: this absence is
-                # the pull's delete signal, so it may not be silent.
-                unreadable += 1
-                continue
-            # Payload is truth; the filename is routing only (plan §4.3).
-            if actor.actor_key:
-                actors[actor.actor_key] = actor
+    unkeyed = 0
+    for actor in scan.actors:
+        # Payload is truth; the filename is routing only (plan §4.3) — which is
+        # why a payload with no key cannot be rescued by the file it arrived in.
+        if not actor.actor_key:
+            unkeyed += 1
+            continue
+        actors[actor.actor_key] = actor
     return RemoteOffice(
         surface=surface,
         actors=actors,
-        unreadable=unreadable,
+        unreadable=scan.unreadable + unkeyed,
         surface_unreadable=surface_unreadable,
     )
 
@@ -533,11 +554,11 @@ def apply_office_pull(realm_id: str, subtree: Path, *, event_log: EventLog | Non
             continue
         workspace_id = remote_surface.workspace_id
         # The LOCAL half has to be knowable before any decision is taken about
-        # it. ``scan_actors`` rather than ``list_actors``: an actor whose file
-        # will not decode is dropped by the thin view, reaches the classifier
-        # below as ``local_hash=None``, and is then indistinguishable from an
-        # actor the member deleted — so the pull would either adopt over it or
-        # archive it. Refuse the workspace, keep the count, judge nothing.
+        # it, so ``scan.unreadable`` is READ here and not discarded: an actor
+        # whose file will not decode is absent from the rows, reaches the
+        # classifier below as ``local_hash=None``, and is then indistinguishable
+        # from an actor the member deleted — so the pull would either adopt over
+        # it or archive it. Refuse the workspace, keep the count, judge nothing.
         local_scan = store.scan_actors(workspace_id) if store.surface_exists(workspace_id) else ActorScan([], 0)
         unknowable = OfficeSyncRefusal.for_scan(workspace_id, local_scan)
         if unknowable is not None:

@@ -68,9 +68,9 @@ class ActorsUnreadable(ArchiveUnreadable):
     """Raised when the class-key fence cannot see the WHOLE actor directory.
 
     The fence's ``duplicate_item_placement`` half answers "does a live sibling
-    already hold one of these item ids?", and it answered that from
-    ``list_actors``, which drops undecodable files on the floor
-    (``OfficeStore._read_actor_dir`` counts them and moves on). So ONE
+    already hold one of these item ids?", and it answered that from the actor
+    ROWS alone, which drop undecodable files on the floor
+    (``office_store.read_actor_dir`` counts them and moves on). So ONE
     unreadable instance-keyed actor file made the honest answer "unknown" while
     the fence read it as "no" — for every writer at once — and the class-keyed
     write it was built to refuse landed beside the sibling nobody could decode.
