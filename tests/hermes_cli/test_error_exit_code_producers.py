@@ -69,13 +69,6 @@ _SKIP = {"__pycache__", ".venv", "venvs", "node_modules", ".git"}
 
 #: Codes hermes cannot spend, kept deliberately. Each row says who reads it.
 _KEPT_UNSPENDABLE: dict[str, str] = {
-    "runtime_unavailable": (
-        "the LAUNCHER mints this one, not hermes: mission_control_bridge.dart "
-        "maps a failed CLI process to `exitCode == 124 ? 'timeout' : "
-        "'runtime_unavailable'`. The row is the hermes-side half of a shared "
-        "spelling; deleting it would leave the launcher inventing a code the "
-        "taxonomy does not name"
-    ),
     "wrong_runtime_root": (
         "kept although `RuntimeRootMismatch` was never raised and its mapping "
         "row went with it. The launcher spells this same word as a live "
