@@ -7,6 +7,7 @@ import ast
 from dataclasses import dataclass
 from datetime import date
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -22,7 +23,26 @@ HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 #: ``symbol`` spellings that mean "the whole module" rather than a definition
 #: inside it. Module-scope claims are legitimate (an import, a constant, a
 #: decorator argument) and there is no AST node to scope them to.
+#:
+#: A FOURTH legitimate case, and the honest answer to the queue row that asked
+#: for one: a definition inside a module-level platform fork.
+#: ``agent_runtime/locks.py`` defines ``_try_acquire``/``_prepare``/
+#: ``_release`` twice, once per arm of ``if os.name == "nt"``.
+#: ``_qualified_definitions`` walks only a module's direct children, so neither
+#: copy is reachable — and teaching it to descend the branches would not help,
+#: because the two copies then collide and an ambiguous symbol is refused by
+#: design. There IS no unambiguous node, so
+#: ``hh6-posix-file-lock-ignores-its-deadline`` anchors at ``module`` and says
+#: which arm it means in its label (``module/_try_acquire (POSIX arm)``). Its
+#: selection is therefore line-based, which is what has been selecting and
+#: killing it on `ubuntu-latest` all along; ``platforms`` is what keeps it from
+#: reporting SURVIVED off POSIX.
 WHOLE_MODULE_SYMBOLS = frozenset({"module", "module scope", "module-scope"})
+
+#: The hosts a claim can declare itself bound to. Two, because two is what the
+#: tree distinguishes: ``agent_runtime/locks.py`` is the only module with a
+#: platform fork and it forks on ``os.name == "nt"``.
+PLATFORMS = frozenset({"posix", "windows"})
 
 #: How far a claim's block is allowed to have been re-indented and still be the
 #: same claim. Four levels each way covers every dedent this repo has produced
@@ -110,6 +130,33 @@ def _validate_exemptions(path: Path) -> None:
             raise RuntimeError(f"{path}: invalid expiry for {row['id']}") from error
         if expiry < date.today():
             raise RuntimeError(f"{path}: exemption expired: {row['id']} ({expiry})")
+
+
+def _current_platform() -> str:
+    return "windows" if os.name == "nt" else "posix"
+
+
+def _declared_platforms(claim: dict[str, Any]) -> frozenset[str] | None:
+    """The hosts this claim is about, or ``None`` for "every host".
+
+    Optional and absent from 112 of 113 rows, which is the right default: a
+    claim that does not say otherwise is a claim about behaviour, and
+    behaviour is not supposed to have a platform.
+    """
+
+    raw = claim.get("platforms")
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or not raw or not all(isinstance(row, str) for row in raw):
+        raise RuntimeError(
+            f"{claim['id']}: platforms must be a non-empty list of strings"
+        )
+    unknown = sorted(set(raw) - PLATFORMS)
+    if unknown:
+        raise RuntimeError(
+            f"{claim['id']}: unknown platforms {unknown}; known: {sorted(PLATFORMS)}"
+        )
+    return frozenset(raw)
 
 
 def _qualified_definitions(tree: ast.Module) -> dict[str, list[ast.AST]]:
@@ -459,6 +506,14 @@ def _partition_claims(
         required = {"id", "path", "symbol", "operator", "find", "replace", "test"}
         if not required.issubset(claim):
             raise RuntimeError(f"{claims_path}: claim needs {sorted(required)}")
+        # Unknown fields are refused, not ignored. `platform: "posix"` for
+        # `platforms: ["posix"]` is the typo this schema invites, and an
+        # ignored field would mean the claim runs on every host while its
+        # author believes it is scoped — a silent SURVIVED waiting to happen.
+        unknown = sorted(set(claim) - required - {"platforms"})
+        if unknown:
+            raise RuntimeError(f"{claims_path}: {claim['id']}: unknown claim fields: {unknown}")
+        _declared_platforms(claim)
         anchor, _ = _anchor_or_raise(claim)
         # Carried on the row so the mutate loop splices the anchor this
         # selection was computed from, rather than re-deriving one and hoping
@@ -605,14 +660,35 @@ def run(base: str, claims_path: Path, exemptions_path: Path, max_candidates: int
         # its meaning.
         for claim in unselected:
             print(f"UNSELECTED (0 changed lines): {claim['id']}")
+    # Reported for BOTH lanes and always by name, because the whole point is
+    # that this claim is accounted for on a host that cannot run it. The
+    # alternative is what the queue row measured: a hand-run on this host is
+    # permanently one known SURVIVED away from green, which is exactly the
+    # "silence looks like success" state the gate exists to prevent — except
+    # here the noise looks like failure and gets learned as background.
+    here = _current_platform()
+    runnable: list[dict[str, Any]] = []
+    for claim in claims:
+        declared = _declared_platforms(claim)
+        if declared is not None and here not in declared:
+            print(
+                f"SKIPPED (platform): {claim['id']} "
+                f"(declared {'/'.join(sorted(declared))}; this host is {here})"
+            )
+        else:
+            runnable.append(claim)
+    # The cap counts SELECTED claims, not runnable ones, so the number a diff
+    # has to answer for is the same on every host. A Windows run that squeaked
+    # under the cap only because half its claims were platform-skipped would
+    # hand CI a refusal nobody local could reproduce.
     if len(claims) > max_candidates:
         print("candidate cap exceeded; split the diff or raise the cap visibly", file=sys.stderr)
         return 2
-    if list_only or not claims:
+    if list_only or not runnable:
         return 0
 
     commands: dict[tuple[str, ...], list[str]] = {}
-    for claim in claims:
+    for claim in runnable:
         command = _command(claim)
         commands.setdefault(tuple(command), command)
     for command in commands.values():
@@ -622,7 +698,7 @@ def run(base: str, claims_path: Path, exemptions_path: Path, max_candidates: int
             return 2
 
     survivors: list[str] = []
-    for claim in claims:
+    for claim in runnable:
         target = REPO_ROOT / str(claim["path"])
         original, text = _read_source(target)
         anchor = claim[ANCHOR_KEY]

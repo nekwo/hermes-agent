@@ -1450,6 +1450,9 @@
       "id": "hh6-posix-file-lock-ignores-its-deadline",
       "path": "agent_runtime/locks.py",
       "symbol": "module/_try_acquire (POSIX arm)",
+      "platforms": [
+        "posix"
+      ],
       "operator": "restore-blocking-flock",
       "find": "        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)",
       "replace": "        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)",
