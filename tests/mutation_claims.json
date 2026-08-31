@@ -1127,8 +1127,8 @@
       "path": "agent_runtime/harness_doctor.py",
       "symbol": "_placement_census_report",
       "operator": "drop-the-diagnostic-qualifier",
-      "find": "            \"--actor <key> --local-only` (drop --local-only only if you mean to \"\n            \"delete the placement realm-wide, which is what the launcher's own \"\n            \"delete does); an unplaced row is either awaiting a \"",
-      "replace": "            \"--actor <key>`; an unplaced row is either awaiting a \"",
+      "find": "            \"nothing to retire and is cleared with actor-remove --local-only \"\n            \"or `runtime.office.remove` alone (drop --local-only only if you \"\n            \"mean to delete the placement realm-wide, which is what the \"\n            \"launcher's own delete does); an unplaced row is either awaiting a \"",
+      "replace": "            \"nothing to retire and is cleared with actor-remove \"\n            \"or `runtime.office.remove` alone; an unplaced row is either awaiting a \"",
       "test": [
         "{python}",
         "-m",
@@ -1429,6 +1429,21 @@
         "pytest",
         "-q",
         "tests/agent_runtime/test_serve_rpc_authorization.py::test_the_service_refuses_a_read_tier_caller_with_no_dispatcher_involved"
+      ]
+    },
+    {
+      "id": "hh12-the-recorded-mint-rides-the-sync-hash",
+      "path": "agent_runtime/office_models.py",
+      "symbol": "office_content_hash",
+      "operator": "hash-the-nested-provenance",
+      "find": "        items = payload.get(\"items\")\n        if isinstance(items, list):\n            payload[\"items\"] = [\n                {k: v for k, v in item.items() if k not in _ITEM_HASH_EXCLUDE}\n                if isinstance(item, dict)\n                else item\n                for item in items\n            ]",
+      "replace": "        items = payload.get(\"items\")\n        if isinstance(items, list):\n            payload[\"items\"] = list(items)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_recorded_mint_is_not_content_and_never_moves_the_sync_hash"
       ]
     }
   ]
