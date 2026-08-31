@@ -215,7 +215,7 @@
       "path": "agent_runtime/skill_install.py",
       "symbol": "install_and_verify_harness_skill",
       "operator": "drop-post-install-verification",
-      "find": "    result = install_harness_skill(skill)\n    if result.installed and result.ok and not harness_skill_hash_mismatches([skill]):\n        return result",
+      "find": "    result = install_harness_skill(skill)\n    states = harness_skill_hash_states([skill])\n    if result.ok and states and states[0].state == SKILL_HASH_MATCHES:\n        return result",
       "replace": "    result = install_harness_skill(skill)\n    return result",
       "test": [
         "{python}",
@@ -684,7 +684,7 @@
     {
       "id": "r1-create-stops-fencing-the-supplied-placement",
       "path": "agent_runtime/agent_create.py",
-      "symbol": "_parse_request",
+      "symbol": "normalize_agent_create",
       "operator": "remove-guard",
       "find": "        if not looks_like_deliberate_placement(placement_id):\n            raise AgentCreateInvalid(\n                PLACEMENT_ID_NOT_DISCRIMINABLE_REASON,\n                placement_id_not_discriminable_message(placement_id),\n            )",
       "replace": "        pass",
@@ -986,8 +986,8 @@
       "path": "agent_runtime/harness_doctor.py",
       "symbol": "_placement_census_report",
       "operator": "drop-pulled-orphan-repair",
-      "find": "            \"install never held — a realm-pulled placement, whose instance \"\n            \"stayed on the peer — has nothing to retire, and is cleared with \"\n            \"`harness office actor-remove --workspace <ws> --actor <key>` or \"\n            \"`runtime.office.remove`; an unplaced row is either awaiting a \"",
-      "replace": "            \"install never held is cleared the same way; an unplaced row is either awaiting a \"",
+      "find": "            \"by retiring or re-creating its agent; one whose instance this \"\n            \"install never held — a realm-pulled placement, whose instance \"\n            \"stayed on the peer — has nothing to retire, and is evicted from \"\n            \"this install with `harness office actor-remove --workspace <ws> \"\n            \"--actor <key> --local-only` (drop --local-only only if you mean to \"\n            \"delete the placement realm-wide, which is what the launcher's own \"\n            \"delete does); an unplaced row is either awaiting a \"",
+      "replace": "            \"by retiring or re-creating its agent; an unplaced row is either awaiting a \"",
       "test": [
         "{python}",
         "-m",
