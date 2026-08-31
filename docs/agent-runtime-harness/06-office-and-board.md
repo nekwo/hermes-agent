@@ -225,6 +225,55 @@ predating or bypassing this fence. The placement verb authors no desk at all
 `agent create` and no canvas drop pays for the fence's directory scan — pinned
 by `test_agent_create_service.py::test_verb_authors_no_desk`.
 
+**ADDITION 2026-08-30 — the same D6, now ruled on the MODEL and not only on the
+keying.** This is not a second D6 and does not reverse the one above; the
+2026-08-27 direction stands unchanged, including its last instruction: do not
+"fix" `_guard_duplicate_desk` toward instance keying. What that ruling left
+parked was the model itself — it said what not to do and deferred the rest to
+"revisit when artifacts are actually built". The operator ruled the model on
+2026-08-30: **one item, one kind, nothing pairs them.** A desk is a standalone
+scene object and an agent is a standalone scene object; there is no "an agent's
+desk" relation for any reader to hold, infer, or repair. The pairing model — the
+one the store's as-is behaviour still documents, where an actor file may hold an
+agent item and a desk item that belong together — is superseded as of that date.
+
+Three things follow, and only the third is a change to this tree:
+
+1. **Nothing new is fenced.** Invariant 12 is unchanged and no third fence
+   appears. Under a standalone model the duplicate-desk invariant does not move
+   to a better key, it stops having a premise — which is exactly what the
+   2026-08-27 block predicted, so the persona-keyed fence stays as the
+   scaffolding it was already described as.
+2. **The mint side already agrees.** `agent_create.placement_actor_payload`
+   writes exactly one `kind: "agent"` item, and this fence's own note above says
+   the placement verb authors no desk at all. Under the ruling that is the model
+   rather than a coincidence: a mixed-kind actor file is an ERA shape, minted by
+   nothing this runtime still runs.
+3. **Enforcement is a REAP, reported before it is written.** Era desk actors are
+   archived by the desk-litter reap, and a mis-kinded agent-binding is REPORTED
+   for archive and re-place — never auto-converted, because converting a row in
+   place would make the store guess which of two models an old file was written
+   under. That reap is NOT BUILT, deliberately: every store ever measured
+   reports zero candidates (the 2026-08-30 Windows census: `orphan_actors: 0`,
+   `desk_litter: 0` in all four buckets), and building a verb with no possible
+   input is the placeholder-architecture class the same wave is deleting. The
+   standing detector is the live census this repo already ships — `harness
+   doctor`'s `desk_litter` buckets, doc 07 — and the reap gets built the first
+   time a census reports a nonzero one.
+
+Cited in prose rather than linked, because both documents are LAUNCHER-side and
+a cross-repo link is a dead link the pre-push gate takes: the reap's staged
+design is §DL-H2 of the launcher's `office-desk-litter-cleanup.md`, and the
+decision record is §Decisions D5/D6 of its `realm-actor-lifecycle-refactor.md`,
+both under `docs/mission_control/planned/`.
+
+One narrowing that rides the same ruling does NOT apply here, stated so a reader
+does not go looking for it: DL-L2's `desk_without_agent` warning shrinks to
+persona-labeled era desks only. That warning is a launcher render-side proxy and
+has no counterpart in this tree — hermes carries no `desk_without_agent` code or
+claim anywhere — so nothing in this doc narrows with it. Hermes's half of the
+same fact is the census bucket named above.
+
 Launcher side, all four are RPC-first through one writer
 (`office/mission_office_rpc_writer.dart`: `upsertActor:76`, `removeActor:167`,
 `updateSurface:257`, `resolveConflict:352`), each gated per-method on the serve
@@ -1075,7 +1124,9 @@ omit it — the office's revision guard lives on the RPC lane only.
     breath by the direction it was ruled inside: desks are a placeholder for
     artifacts, artifacts are standalone, and the fence should then key on neither
     persona nor instance. See the fence section above for why re-keying now would
-    be the wrong move.
+    be the wrong move — and, in the same place, the dated 2026-08-30 ADDITION in
+    which the operator ruled the model that ruling was waiting on: one item, one
+    kind, nothing pairs them. Still one D6; the keying direction is unchanged.
   - **D10(iii) — RULED and SHIPPED 2026-08-27.** Un-aimed adds still omit
     `position` (the server decides), and the server's answer is now the world
     origin with a full-grid-step climb on collision. Both repos and the
