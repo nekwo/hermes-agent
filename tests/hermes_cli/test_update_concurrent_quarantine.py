@@ -199,6 +199,13 @@ def test_quarantine_falls_back_to_reboot_schedule(_winp, tmp_path, capsys, monke
 # ---------------------------------------------------------------------------
 
 
+# The one test in this directory that is ABOUT _pause_windows_gateways_for_update
+# rather than merely downstream of it, so it opts out of the conftest default
+# that returns None. Safe to run for real: find_gateway_pids,
+# find_profile_gateway_processes, _capture_gateway_argv and terminate_pid are
+# all replaced below, so nothing here reads or signals this machine — and the
+# process-wide gateway fence still stands behind it either way.
+@pytest.mark.real_windows_gateway_pause
 @patch.object(cli_main, "_is_windows", return_value=True)
 def test_pause_windows_gateways_for_update_stops_profile_and_unmapped_pids(
     _winp,
