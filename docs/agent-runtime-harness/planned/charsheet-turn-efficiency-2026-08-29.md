@@ -15,8 +15,14 @@ list is unchanged and is what every stage was priced against.
 | 3b — `process notify`: fire the verb, end the turn, get the receipt on exit | SHIPPED | `29b8ecda4`, + `aa31cef44` (an evicted notify promise is logged, never silent) |
 | 4a — `thumb --square` | SHIPPED | `0a75a0b9a`, + `8a606d465` (square crops keep the sprite's transparency) |
 | 4b — payloads carry a machine `next` hint | SHIPPED | `cc519e638` |
-| **5 — `characters auto`, the one-shot autopilot verb** | **IN BUILD** | **R-3 RULED YES 2026-08-31** (decision-close wave RD-10); built by W2-H4 |
-| **6 — element `summary`/`tool_input` cross-pairing on concurrent tool starts** | **IN BUILD** | built by W2-H4 in the same branch |
+| 5 — `characters auto`, the one-shot autopilot verb | SHIPPED | `2321a2a9c3` (**R-3 RULED YES 2026-08-31**, decision-close wave RD-10) |
+| 6 — element `summary`/`tool_input` cross-pairing on concurrent tool starts | SHIPPED | `bb7ab164d6` |
+
+**Every stage of this plan is now shipped.** The file is a ledger; move it out
+of `planned/` at the next docs pass. The W2-H4 running record — the premise
+re-measurement, the four deliberate corrections to the stage text below, and
+the fixture-measured call shape of an autopilot run — is
+`planned/dcw-h4-field-notes-2026-08-31.md`.
 
 **R-3 — RULED YES, 2026-08-31.** The one-shot autopilot ships. The ruling is
 RD-10 of `EterniaLauncher/docs/mission_control/planned/decision-close-wave-2026-08-31.md`
@@ -390,12 +396,36 @@ Stages 1–4 already deliver most of the win: the fire-imp shape re-run with
 Stages 1–3a lands at a projected ~10–12 API calls (from 27) and ~600–700k
 cumulative prompt tokens (from 1.556M).
 
+**SHIPPED `2321a2a9c3`.** Four corrections were made to the text above while
+building it, each argued in the W2-H4 field notes: the verb plans from the
+draft's STATE rather than driving the four steps as a flat script (a flat drive
+re-rolls approved references and regenerates approved rows — destructive on the
+`reopen` path the stage itself asks it to support); a compose refusal carries
+no `next` hint, because the only available hint is the override R-3 forbids;
+"newline-delimited" required a compact encoder that did not exist, now
+`emit_json_line` beside `emit_json`; and `--through` takes a STEP name, since
+`approve-direction` is a step with no stage of its own. Measured on the CLI
+suite's fixture: 4 CLI processes → 1, 231 output lines → 5, 8419 B → 6814 B,
+and two generation-bearing verbs needing a wake-up → one, which is the row that
+makes the projected 4 API calls arithmetic rather than hope.
+
 ### Stage 6 — small observability fix
 
 Fix the element `summary`/`tool_input` cross-pairing on concurrent tool starts
 (bucket f; evidence: fire-imp elements [0]–[6]). Locate where the turn
 recorder zips started tools to element rows and key by tool-call id, not
 arrival order. Independent of everything above; land whenever.
+
+**SHIPPED `bb7ab164d6`**, with one correction: there IS no tool-call id at that
+sink. The zip is `_ChatProtocolV2Emitter._tool_finished`
+(`hermes_cli/harness_parts/persona_commands.py`), the callback contract behind
+it is `(event, tool_name, invocation, result)`, and no identifier exists in it
+— minting one means changing the runner's signature and every producer, which
+is not the small fix this section filed. The identity that reaches both events
+is the INVOCATION (`tool_input`, or `command_full`/`command_label` for the
+terminal class, whose input record is suppressed against the event cap), so the
+match is on those, and the fallback for a call with neither is FIFO rather than
+the LIFO `pop()` that produced the crossing.
 
 ## Non-goals
 

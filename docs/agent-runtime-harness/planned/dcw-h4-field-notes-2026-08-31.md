@@ -1,9 +1,17 @@
 # W2-H4 field notes — charsheet autopilot (Stage 5) + element pairing (Stage 6)
 
 Running record of the decision-close wave's W2-H4 agent, hermes side. Branch
-`feat/dcw-h4-charsheet-autopilot`, based on `origin/main` at `301946bc57`.
+`feat/dcw-h4-charsheet-autopilot`, built on `origin/main` at `301946bc57` and
+rebased onto `25dfcb897a` (W2-H5's landing) before push; Stage 5 is
+`2321a2a9c3`, Stage 6 is `bb7ab164d6`.
 Build spec: `planned/charsheet-turn-efficiency-2026-08-29.md` Stages 5 and 6.
 Ruling: RD-10 of the launcher's `decision-close-wave-2026-08-31.md` — R-3 YES.
+
+The one rebase conflict was `tests/mutation_claims.json`, resolved as a UNION
+of both agents' new claims — the merge-BY-CLAIM-ID rule, applied by hand: take
+`origin/main`'s list, append every id this branch added that is not already in
+it. 138 claims, no duplicate ids, and the gate re-run green against the new
+base afterwards rather than trusting the merge.
 
 ## §1 Premises re-measured before writing a line
 
