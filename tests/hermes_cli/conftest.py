@@ -115,6 +115,16 @@ def _sys_modules_identity_is_restored():
         yield
     finally:
         for name, module in before.items():
+            # sys.modules can hold a non-str key: production does
+            # ``sys.modules[spec.name] = module`` and a test that mocks
+            # ``importlib.util.spec_from_file_location`` hands it a MagicMock
+            # whose ``.name`` is another MagicMock (measured:
+            # test_setup_openclaw_migration.py). Such a key has no package to
+            # repair and unpacking its ``rpartition`` yields nothing, so skip
+            # it rather than crash — policing junk keys is not this guard's
+            # question.
+            if not isinstance(name, str):
+                continue
             if sys.modules.get(name) is not module:
                 sys.modules[name] = module
                 # The parent package attribute is the OTHER half, and on its
