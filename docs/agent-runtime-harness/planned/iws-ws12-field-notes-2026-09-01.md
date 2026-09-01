@@ -167,7 +167,29 @@ here.
 fold-entities negotiation: a client that does not declare `scope` gets exactly
 today's demoted core, per-subscriber, through S5's promotion.
 
-## 7. Open
+## 7. Gate results
+
+- `python -m pytest tests/agent_runtime/` — **7262 passed, 2 skipped, 1 failed →
+  fixed**. The one failure was
+  `test_persona_instance_pull.py::test_the_mint_emits_a_delta_patch_on_the_event_log`,
+  and it was a POSITIONAL assumption rather than a defect: that file's fixture
+  calls `WorkspaceStore.set_active` during setup, so the log's first
+  `state.patched` is now the `scope` row and the test took `[0]`. Its claim was
+  never "the mint's patch is first" — it is "the mint emitted one" — so the row
+  is selected by entity now. Landed as `2e607c376e`.
+- Focused: `test_scope_patch_coverage.py` (13), plus stream/patch/fold/negotiation
+  and the contract-fixture suites — 153 + 84 green.
+- **Mutation gate** (`--base c894c2b159 --max-candidates 40`, run in a SEPARATE
+  detached worktree because the gate rewrites source in place): 4 candidates, and
+  the first run reported **1 SURVIVED** —
+  `iws-ws1-a-cleared-pointer-leaves-the-row-as-an-absent-key`. It was right about
+  why: the null-pointer assertion sat on `build_state_patch`, the layer BELOW the
+  one that decides what goes into `changed`, so a producer filtering its nulls
+  out on the way in was invisible to it. The assertion moved up a layer (through
+  `emit_scope_patch`, plus the half-clear case) and the re-run is **4/4 KILLED**.
+  A found hole, not a formality.
+
+## 8. Open
 
 - **WS5 stays gated** (R-W3): `active_workspace_path()` is still in
   `stream._scope_fingerprint` and is now double-covered. Not touched — it needs
