@@ -132,18 +132,47 @@ All with the system `python -m pytest`.
 | `test_scope_patch_coverage.py` (lane A's, unedited) | 13 passed against this refactor |
 | `test_scope_use_serve_acceptance.py` (new) | 5 passed |
 | authorization + gateway + office-rpc + row-consolidation focused set | 151 passed |
-| `tests/agent_runtime` + `tests/hermes_cli` | see the closing report's count |
+| every suite carrying a full-manifest literal (8 files, enumerated by grep) | 214 passed |
+| `tests/agent_runtime` + `tests/hermes_cli` | **11,716 passed**, 102 skipped, 1 xfailed, 3 failed in 41m58s — all three the manifest pins below, fixed in `65bde72691` and re-run green (the run had collected the pre-fix files) |
 | mutation gate, `--max-candidates 40` | 6 candidates, **6 KILLED, 0 survived** — run TWICE: `--base c894c2b159` before the rebase, `--base cf9abaac4b` after |
 
 The mutation gate ran in its OWN worktree (`hermes-agent-ws4-mut`, detached at
 the branch head, removed afterwards) — it rewrites source in place and must
 never share a tree with a pytest run.
 
+### There were FIVE full-manifest pins, not three — and how the last two were found
+
+The first pass grew the three literals in `test_serve_rpc_office.py` and
+declared the job done. Two more existed and stayed red:
+
+- `test_serve_rpc_office_subscribe.py::test_the_reclaim_pair_joins_the_manifest_without_moving_the_contract_version`
+- `test_serve_rpc_office_upsert.py` — **twice**, once for the stdio
+  `ready`/`version` frames and once for the socket `hello_ok`.
+
+They were found by enumeration rather than by guessing which files hold a
+literal: **every full method list contains `runtime.persona.prewarm`**, because
+it sorts last before the two new names, so
+`grep -rl "runtime.persona.prewarm" tests/` names all eight files that carry
+one. Running that set is now the cheap check anyone adding a method should do
+FIRST — the alternative is discovering the remainder from a 42-minute run.
+
+Both pins' own comments already recorded that they had each been red once
+before for exactly this reason ("the literal here predated it and was never
+grown"), which is the third time this shape has cost a cycle.
+
 `tests/acp/*` and `tests/test_run_tests_parallel.py` fail to COLLECT in a
 worktree (`ModuleNotFoundError: No module named 'acp'` — the editable install
 resolves against the primary checkout). Pre-existing environment condition,
 nothing to do with WS4; the `agent_runtime` + `hermes_cli` roots cover
 everything this lane touched.
+
+`tests/test_no_source_grep_assertions.py::test_no_new_positive_source_grep_assertion`
+is RED, and it is **not this lane's**: run in a throwaway worktree at the
+baseline `cf9abaac4b` with no WS4 code present, it fails identically, and the
+offender lists match exactly — 11 at baseline, 11 with WS4, **zero added**. All
+eleven sit in `test_agent_create_service.py`,
+`test_office_class_key_one_fence.py`, `test_persona_assignments.py` and
+`test_s29_*`. It wants its own row against whoever landed them.
 
 ### The acceptance transcript (real serve, both listeners, real paired device)
 
