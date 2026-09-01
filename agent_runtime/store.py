@@ -86,6 +86,49 @@ def _append_store_event(event_log: EventLog, event_type: str, **payload) -> None
         )
 
 
+def _emit_active_scope_patch(event_log: EventLog) -> None:
+    """Append the ``scope`` ``state.patched`` row beside an activation event.
+
+    WS1 (instant-workspace-switching plan §1.1). Both ``set_active`` writes call
+    this from inside the write, immediately after the pointer file lands and
+    before the paired ``workspace.activated`` / ``realm.activated`` domain event —
+    same chokepoint, same drain, so the two coalesce into ONE batch and the event
+    free-rides on this row's fold gate instead of demoting the batch to a full
+    O(world) core.
+
+    **Both pointers are re-read from the store**, not taken from the caller's
+    local variable, and that is deliberate: a realm activate can re-park the
+    workspace through a second write, and the patch's contract is that it carries
+    the pair as it stands ON DISK when the event is appended. Reading is two small
+    JSON files that the write path has just touched.
+
+    Best effort, exactly like :func:`_append_store_event` beside it — a broken
+    event log must not fail an activation. The empty-frame hazard a silent skip
+    would otherwise open (the covered domain event riding alone and shipping a
+    patch frame with no rows) is closed one level up by
+    ``stream.batch_carries_patch_rows``, which demotes a batch carrying no
+    ``state.patched`` at all; this function does not have to hold that invariant
+    by itself.
+
+    The function-local import mirrors every other ``state_patches`` reach in the
+    store layer: this module is imported very early and ``state_patches`` pulls
+    the config graph.
+    """
+
+    try:
+        from .state_patches import emit_scope_patch
+
+        emit_scope_patch(
+            event_log,
+            active_workspace_id=WorkspaceStore(event_log=event_log).active_id(),
+            active_realm_id=RealmStore(event_log=event_log).active_id(),
+        )
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "active-scope patch emit failed", exc_info=True
+        )
+
+
 def _parse_intent_basis(value):
     """Parse an ISO-8601 UTC intent basis into a datetime; None when absent or
     unparseable (fail-open — a malformed basis must never block a scope
@@ -256,6 +299,10 @@ class WorkspaceStore:
             paths.active_workspace_path(),
             {"workspace_id": value, "updated_at": now(), "intent_issued_at": basis},
         )
+        # WS1: the patch FIRST, then the event it pairs with. The order is the
+        # one direction worth guaranteeing — an activate event in the log is
+        # preceded by the row that expresses it.
+        _emit_active_scope_patch(self.event_log)
         if value:
             _append_store_event(self.event_log, "workspace.activated", workspace_id=value, name=name)
         else:
@@ -881,6 +928,10 @@ class RealmStore:
             paths.active_realm_path(),
             {"realm_id": value, "updated_at": now(), "intent_issued_at": basis},
         )
+        # WS1: the patch FIRST, then the event it pairs with — see the workspace
+        # twin. Both pointers ride every row, so a realm activate that also
+        # re-parks the workspace can never ship half a pair.
+        _emit_active_scope_patch(self.event_log)
         if value:
             _append_store_event(self.event_log, "realm.activated", realm_id=value, name=name)
         else:

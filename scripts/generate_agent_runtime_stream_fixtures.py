@@ -310,6 +310,25 @@ PINNED_ONLY_FILES = (
     # Pinned rather than generated for the same reason its siblings are: the
     # generator's seeded isolated root holds no office surface.
     "patch_office_surface.json",
+    # The instant-workspace-switching milestone (WS1, 2026-09-01): a WORKSPACE
+    # SWITCH as one patch frame — a single ``scope`` upsert carrying BOTH
+    # pointers, ``coalesced_count`` 2 because the paired ``workspace.activated``
+    # rides the batch and folds to nothing.
+    #
+    # Worth pinning across both repos because ``scope`` is the first entity that
+    # is not a keyed table row: it writes two TOP-LEVEL core scalars, and every
+    # per-row ``active`` flag the launcher renders is DERIVED from them at parse
+    # time rather than sent. The bytes pinned here are what makes "the patch and
+    # the core flip the same flags" a checkable claim on both sides instead of a
+    # shared intention. The second pointer is the one a reader will want to argue
+    # about: a plain workspace switch does not move the realm, and the row
+    # carries it anyway — that is the contract (both, always), and this fixture
+    # is where it is stated in bytes.
+    #
+    # Pinned rather than generated for the same reason its siblings are: the
+    # generator's seeded isolated root holds no realm and no second workspace to
+    # switch between.
+    "patch_scope.json",
     "patch_coverage_manifest.json",
 )
 

@@ -80,7 +80,7 @@ from .config import AgentRuntimeConfig, load_root_runtime_config
 from .events import EVENT_PAYLOAD_LIMIT_BYTES, EventLog
 from .models import Event
 from .runtime_config import FALLBACK_DELTA_PATCHES, SHIPPED_DELTA_PATCHES
-from .serde import to_jsonable
+from .serde import safe_id, to_jsonable
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +107,39 @@ FOLDABLE_PATCH_OPS: frozenset[str] = frozenset({PATCH_OP_UPSERT, PATCH_OP_REMOVE
 #: entity a THIRD reader (the create gate in ``patch_coverage``), which is the
 #: point at which a literal starts drifting silently.
 PERSONA_INSTANCE_ENTITY = "persona_instance"
+
+#: The ACTIVE-SCOPE entity (WS1, instant-workspace-switching plan §1.1) — the
+#: runtime's two pointers, ``active_workspace_id`` and ``active_realm_id``, as a
+#: foldable row.
+#:
+#: It is the only entity here that is not a keyed table row: the core carries the
+#: pointers as two TOP-LEVEL scalars (``snapshot.py``'s ``active_workspace_id`` /
+#: ``active_realm_id``), and every per-row ``active`` flag the launcher renders is
+#: DERIVED from them at parse time, not sent. So the fold's job is to write the
+#: two scalars and let the client re-run its own derivation — one derivation, two
+#: callers, which is why a patch and a core cannot disagree about what ``active``
+#: means.
+#:
+#: The row therefore has exactly one instance, and :data:`SCOPE_PATCH_ID` names
+#: it. A singleton id is not decoration: the wire shape is
+#: ``{entity, id, op, changed}`` and a fold keyed on ``id`` needs a stable one, or
+#: two switches in one batch would look like two different rows.
+SCOPE_ENTITY = "scope"
+
+#: The singleton id of the :data:`SCOPE_ENTITY` row. ``runtime`` rather than a
+#: workspace id: the row IS the runtime's pointer pair, and keying it by the value
+#: it carries would make every switch look like a create of a new row.
+SCOPE_PATCH_ID = "runtime"
+
+#: Exactly the keys a ``scope`` patch carries — both pointers, ALWAYS, even when
+#: only one of them moved.
+#:
+#: Why both and not just the one that changed: a realm activate can move the
+#: workspace pointer too, so two half-patches would be two chances for a client to
+#: hold a pair that never existed on the server. The payload is two scalars; there
+#: is no size argument for splitting it, and the entity exists precisely because
+#: the pair is ONE fact.
+SCOPE_PATCH_FIELDS: tuple[str, ...] = ("active_workspace_id", "active_realm_id")
 
 # Headroom reserved for the ``{entity, id, op, changed:{...}}`` scaffold plus the
 # field keys, so a patch assembled from within-budget values still clears the
@@ -1254,6 +1287,54 @@ def emit_office_actor_refresh(
         entity=OFFICE_ACTOR_ENTITY,
         entity_id=office_actor_patch_id(workspace_id, actor_key),
         op=PATCH_OP_REFRESH,
+        correlation_id=correlation_id,
+        config=config,
+    )
+
+
+def emit_scope_patch(
+    event_log: EventLog,
+    *,
+    active_workspace_id: Any,
+    active_realm_id: Any,
+    correlation_id: str | None = None,
+    config: AgentRuntimeConfig | None = None,
+) -> bool:
+    """The ACTIVE-SCOPE patch: both pointers, always (WS1, plan §1.1).
+
+    Emitted from inside ``WorkspaceStore.set_active`` / ``RealmStore.set_active``
+    beside the ``workspace.activated`` / ``realm.activated`` domain event those
+    writes already append — same chokepoint, same drain, so the two land in one
+    coalesced batch and the event free-rides on this row's gate.
+
+    **Op ``upsert``, not ``replace``.** The plan's stage row says ``replace``, and
+    that op does not exist on this wire: :data:`FOLDABLE_PATCH_OPS` is
+    ``{upsert, remove}`` and anything else demotes the batch it rides in — a
+    ``replace`` would have shipped a patch nobody folds. What ``replace`` names is
+    the SEMANTICS, and those are preserved without a new op because ``changed``
+    always carries the complete row (:data:`SCOPE_PATCH_FIELDS`, both keys): a
+    merge of every field of a two-field row IS a replace. Recorded here rather
+    than silently corrected, because the plan's word is the one a reader will
+    look for.
+
+    ``None`` is a real value on both keys — "no workspace is active" is a state
+    the store can be in (``harness workspace use --clear``), and it must reach the
+    client as ``null`` rather than as an absent key, or a fold that skips missing
+    keys would leave the departed pointer standing forever.
+    """
+
+    if not delta_patches_enabled(config):
+        return False
+    changed: dict[str, Any] = {
+        "active_workspace_id": safe_id(active_workspace_id),
+        "active_realm_id": safe_id(active_realm_id),
+    }
+    return emit_state_patch(
+        event_log,
+        entity=SCOPE_ENTITY,
+        entity_id=SCOPE_PATCH_ID,
+        op=PATCH_OP_UPSERT,
+        changed=changed,
         correlation_id=correlation_id,
         config=config,
     )

@@ -7,10 +7,33 @@ and parses them through its real decode + read-model pipeline
 
 ## Which files are generated, and which are hand-maintained
 
-`MANIFEST.sha256` pins **sixteen** files, but
+`MANIFEST.sha256` pins **seventeen** files, but
 `scripts/generate_agent_runtime_stream_fixtures.py` writes only **nine**. The
 split is structural, not an oversight, and the script names both halves
 (`GENERATED_FRAME_FILES` / `PINNED_ONLY_FILES`).
+
+> **CROSS-STACK COPY STATUS (WS1, 2026-09-01) — settled in the same landing.**
+> The instant-workspace-switching wave's `scope` fold entity adds
+> `patch_scope.json` (a workspace switch as ONE patch frame: a single `scope`
+> upsert carrying both pointers, `coalesced_count` 2 because the paired
+> `workspace.activated` rides the batch and folds to nothing) and moves
+> `patch_coverage_manifest.json` again — `workspace.activated` and
+> `realm.activated` join `covered_domain_events`, with two new `scope` cases.
+> The new file sits between `patch_office_surface.json` and
+> `patch_coverage_manifest.json`, because
+> `tool/test_quality/check_producer_contracts.py` compares manifest line ORDER
+> before it hashes anything.
+>
+> **Seven generated goldens moved bytes in the same regeneration, and NOT
+> because of WS1.** Their `core.decision_contract_hash` was stale: the committed
+> value was `b941dae…` while the live event registry has produced `b6985ac…`
+> since some earlier landing regenerated nothing. The byte pin could not see it
+> — `test_stream_contract_fixture.py` compares each golden against
+> `MANIFEST.sha256`, and both sides of that comparison were equally stale, which
+> is the same "green while they disagree" shape this file's notes exist to
+> prevent, one level in. Regenerating in WS1's landing is what makes the goldens
+> reproducible from the generator again; the launcher mirror moves with them.
+
 
 > **CROSS-STACK COPY STATUS (AX2, 2026-08-31) — OPEN, launcher mirror OWED.**
 > Seven generated hydrate/delta goldens lost three core keys with the writerless
@@ -84,6 +107,7 @@ split is structural, not an oversight, and the script names both halves
 | `patch.json`, `patch_upsert_profile.json`, `patch_remove.json` | **Hand-maintained.** S6 v2 field-patch frames carrying real wall-clock stamps (`2026-07-17T04:22:55.149761Z`, not the generator's `FIXED_TIME`) and hand-chosen `base_offset`/`seq` pairs demonstrating specific fold semantics over entities the seeded root does not contain. `patch_remove.json` is additionally **un-emittable today**: it is the `incident.closed` remove fold, and S65 de-registered that event with its last writer (`agent_runtime/patch_coverage.py` keeps it in `HISTORICAL_COVERED_DOMAIN_EVENT_TYPES` so an old replayed batch still classifies the way the launcher folded it). Regenerating it would mean resurrecting a retired lane. |
 | `patch_delete_gesture.json` | **Hand-maintained.** The office fold-promotion milestone (O-H3, 2026-08-16): the DELETE gesture's coalesced batch as one patch frame — a `persona_instance` remove beside an `office_actor` remove, `coalesced_count` 4 because the two paired domain events ride the batch and fold to nothing. Pinned rather than generated for its siblings' reason (the seeded isolated root has no office surface and no retired placement), and it carries the MIXED batch on purpose: one frame, one watermark, both removes, which is the pairing the office sink's old filtered forwarding broke. |
 | `patch_office_surface.json` | **Hand-maintained.** The office write-verbs milestone (WV-H3, 2026-08-16): a FOLDER change as one patch frame — a single `office_surface` **subset** upsert carrying the three fields `update_surface` moves, `coalesced_count` 2 because the paired `office.surface.updated` rides the batch and folds to nothing. Worth a cross-repo pin because it is the row whose shape the two sides could most easily disagree about in silence: it MERGES onto the office row, unlike its `office_actor` sibling's complete-row replace, so a launcher folding it as a replace would drop the actor list on every folder rename with nothing on the producer side able to see it. |
+| `patch_scope.json` | **Hand-maintained.** The instant-workspace-switching milestone (WS1, 2026-09-01): a WORKSPACE SWITCH as one patch frame — a single `scope` **upsert** carrying BOTH pointers, `coalesced_count` 2 because the paired `workspace.activated` rides the batch and folds to nothing. `scope` is the first entity here that is not a keyed table row: it writes two TOP-LEVEL core scalars (`active_workspace_id` / `active_realm_id`), and every per-row `active` flag the launcher renders is DERIVED from them at parse time rather than sent — so these bytes are what make "the patch and the core flip the same flags" checkable on both sides instead of a shared intention. The second pointer is the one a reader will want to argue about: a plain workspace switch does not move the realm, and the row carries it anyway. That is the contract (both, always), and this fixture states it in bytes. Pinned rather than generated for its siblings' reason — the seeded isolated root has no realm and no second workspace to switch between. |
 | `patch_coverage_manifest.json` | **Hand-maintained.** Not a frame at all — the S7-A coverage table. |
 
 The hand-maintained ones are validated by **shape + live-classifier agreement**

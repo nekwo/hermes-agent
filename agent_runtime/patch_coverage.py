@@ -96,6 +96,7 @@ from .state_patches import (
     PATCH_OP_REMOVE,
     PATCH_OP_UPSERT,
     PERSONA_INSTANCE_ENTITY,
+    SCOPE_ENTITY,
     STATE_PATCHED_EVENT_TYPE,
 )
 
@@ -323,6 +324,54 @@ LIVE_COVERED_DOMAIN_EVENT_TYPES: frozenset[str] = frozenset(
         "office.actor.removed",
         "office.actor.upserted",
         "office.surface.updated",
+        # The ACTIVE-SCOPE half (WS1, instant-workspace-switching plan §1.1,
+        # 2026-09-01). A workspace switch is the cheapest state change this
+        # runtime has — two scalars in a pointer file — and it was among the most
+        # expensive on the wire: neither activate event was covered, so a switch
+        # demoted its whole batch to an O(world) core (~842 KB–2.2 MB, ``build_ms``
+        # median 3,083) and the launcher's per-row ``active`` flags flipped at a
+        # measured p50 of 8.76 s.
+        #
+        # Both pair with the ``scope`` ``upsert`` that ``set_active`` now emits
+        # from inside the same write (:func:`state_patches.emit_scope_patch`),
+        # carrying BOTH pointers every time — a realm activate can re-park the
+        # workspace, and two half-patches would be two chances to disagree.
+        #
+        # THE DERIVABILITY AUDIT (this module's honesty rule). ``snapshot.py``
+        # reads ``active_id()`` in exactly SEVEN places, pinned by
+        # ``test_scope_patch_coverage.py``'s reader census so an eighth reader
+        # demotes honestly instead of lying:
+        #   * the two top-level pointers — the patch IS them;
+        #   * the per-row ``active`` flags in the workspace/realm summaries —
+        #     pure functions of a pointer and a row id, and the launcher derives
+        #     them at PARSE time from the same two scalars rather than reading
+        #     them off the wire, so one derivation serves patch and core alike;
+        #   * the active workspace/realm NAME resolutions — a lookup into the full
+        #     workspace/realm lists the client already holds;
+        #   * the ``active_workspace_id`` kwarg into
+        #     ``snapshot_prompt_observability``.
+        #
+        # The last three are INDIRECT, and the residue they leave is named here
+        # rather than waved through: those names and that kwarg feed the
+        # ``prompt_observability`` section — the per-lane ``situational_hud``
+        # realm/workspace strings, and the addressable-roster scoping for
+        # RUNTIME-GLOBAL instances only (``workspace_scope.effective_workspace_id``
+        # takes an instance's OWN pointer first, so every placed instance is
+        # unaffected). A ``scope`` patch does not carry that section, so a client
+        # folding one holds a ``prompt_observability`` whose recorded scope
+        # strings are one switch stale until any core arrives.
+        #
+        # Accounted, not hidden, and accepted for three reasons: the section is
+        # per-turn TELEMETRY regenerated on every chat turn (it RECORDS what a
+        # prompt contained; it is not the value the next turn resolves — that one
+        # re-resolves live through the HUD wrapper); its only launcher reader is
+        # the injected-context JSON diagnostic dialog; and the next uncovered
+        # event in any batch restores it. The plan's §1.1 claim that "nothing
+        # else in the core varies with the pointer" is FALSE as written and true
+        # of everything the switch surfaces render — the correction is filed in
+        # ``planned/iws-ws12-field-notes-2026-09-01.md``.
+        "workspace.activated",
+        "realm.activated",
     }
 )
 
@@ -341,8 +390,21 @@ LIVE_COVERED_DOMAIN_EVENT_TYPES: frozenset[str] = frozenset(
 #: So an event paired with a newly-introduced entity rides that entity's token
 #: here. Read this table as "the event is only free-riding once the client has
 #: said it can carry the paired row".
+#:
+#: WS1's two entries take the ENTITY NAME itself as the token rather than minting
+#: a fourth capability string, and that is a real choice, not a shortcut. The
+#: three tokens above exist because their events pair with a WIDENED OP on an
+#: entity a fielded client already declares — a distinction the per-entity
+#: vocabulary cannot make, so it needed a word of its own. ``scope`` has no such
+#: problem: it is a brand-new entity with exactly one op, so "can you fold the
+#: paired row" and "may this event free-ride" are the SAME question, and the
+#: entity name already answers it. A separate token would be a second string that
+#: can only ever agree with the first — and, per R-W0, a second thing to get
+#: wrong for no compatibility gained.
 TOKEN_GATED_DOMAIN_EVENT_TYPES: dict[str, str] = {
     "office.surface.updated": OFFICE_SURFACE_FOLD_CAPABILITY,
+    "workspace.activated": SCOPE_ENTITY,
+    "realm.activated": SCOPE_ENTITY,
 }
 
 COVERED_DOMAIN_EVENT_TYPES: frozenset[str] = (

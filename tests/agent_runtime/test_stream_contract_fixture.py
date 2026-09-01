@@ -286,6 +286,11 @@ def test_manifest_pins_fixture_bytes():
         # The office write-verbs milestone's cross-stack pin (WV-H3,
         # 2026-08-16): a FOLDER change as one ``office_surface`` SUBSET upsert.
         "patch_office_surface.json",
+        # The instant-workspace-switching milestone's cross-stack pin (WS1,
+        # 2026-09-01): a WORKSPACE SWITCH as one ``scope`` upsert carrying BOTH
+        # pointers — the first entity here whose fold writes top-level core
+        # scalars rather than a keyed row.
+        "patch_scope.json",
         "patch_coverage_manifest.json",
     }
     for name, digest in entries.items():
