@@ -334,3 +334,97 @@ agent nobody published now lights "unpublished changes" — the honest answer, a
 the same reason the office family was added on 2026-08-29); `store_drift.items`
 gains rows with `family: "persona_instance"`; the pull ack's summary gains
 `retired`, `retire_held`, `desk_archived`.
+
+## Closing record
+
+### Base moved mid-build — rebased, not merged
+
+`origin/main` advanced from the recorded `51b96505f0` to `2b5810c819`
+("docs(canon): the decision-close wave lands in the canon, and the never-sync
+posture is stamped superseded") while H4 was being written. That commit is
+docs-only — four files under `docs/agent-runtime-harness/`, no code — so **no
+plan cite this branch touches moved**, and every file:line premise re-measured
+at the top of these notes still holds. The branch was REBASED onto it (never
+merged) so the orchestrator's landing stays ff-only. Stage shas below are the
+post-rebase ones.
+
+### Landed stages
+
+| Stage | sha |
+|---|---|
+| H1 — the record split | `a08116cd8a` |
+| H2 — the publish arm | `209bff7004` |
+| H3 — the mint door | `9716ad2be0` |
+| H4 — drift, revert, retire-follows-the-desk | `69c6595df2` |
+
+Branch `feat/instance-replication-hermes`, tip `69c6595df2`, pushed.
+`2b5810c819` is an ancestor of the tip (ff-able).
+
+### THE landed wire contract
+
+The launcher pins to this, not to the plan's spelling.
+
+**1. The pull ack — `result["persona_instance_sync"]`.** Emitted
+UNCONDITIONALLY on every pull, including against a peer that publishes no
+projection, because L1/L2's version-skew rule has to tell "this peer runs an
+older hermes" (`source: null`) apart from "this ack came from an older hermes"
+(key absent) — and an omitted key cannot say the first.
+
+```
+persona_instance_sync: {
+  replicated:      [instance_id]   # minted here; the desk arrived and the agent did not exist
+  adopted:         [instance_id]   # travelling surface moved forward onto an existing row
+  converged:       [instance_id]   # local already equals remote; no write
+  kept_local:      [instance_id]   # this machine edited it, the realm did not
+  held:            [instance_id]   # BOTH moved; local untouched, remote body parked
+  upstream_absent: [instance_id]   # realm stopped carrying it — NOT a delete
+  retired:         [instance_id]   # the DESK left, so the replica followed it
+  desk_archived:   [instance_id]   # realm publishes it, but its desk is archived here
+  refused:         [{key, code, message}]
+  retire_held:     [{key, code}]           # code is typically "instance_active"
+  steering_dropped:[{key, parent, reason}] # reason: parent_absent | self_edge | <ExcClass>
+  source:          "projection" | "unreadable" | null
+}
+```
+
+Every list is sorted and de-duplicated. `held` and every `refused_*` must never
+render as a green checkmark (L1's rule). `source: null` is the ONLY signal that
+means "older peer".
+
+**2. The projection artifact.** `store/persona_instances.yaml`,
+`kind: realm_persona_instances`, `schema_version: 1`, body map under
+`instances`. Deterministic (sorted keys, LF); no artifact at all when the realm
+has no instance-backed desks. Key set (14, and exactly these):
+`api_mode`, `display_name`, `id`, `mode`, `model`, `model_override_issued_at`,
+`persona_id`, `provider`, `realm_id`, `reasoning_effort`, `skill_overrides`,
+`spawned_by`, `steered_by`, `workspace_id`.
+`_kind_for_sync_path` → `persona_instance_config`.
+
+**3. The drift family token.** `persona_instance`. Items appear in
+`store_drift.items` as `{family, container, item_key, kind}` where `container`
+is the workspace id and `item_key` the instance id; the revert selector is
+`persona_instance:<workspace_id>:<instance_id>`. New counts group
+`store_drift.persona_instances` = `{instances_added, instances_changed,
+instances_removed}`.
+
+### Numbers
+
+* Focused suites, post-rebase: **427 passed** (the fourteen-suite combined run)
+  and **259 passed** (realm/office/assignments), zero failures. New suites:
+  `test_persona_instance_sync.py` 30, `test_persona_instance_publish.py` 13,
+  `test_persona_instance_pull.py` 20, `test_persona_instance_drift.py` 18 = 81.
+* Mutation: 28 new claims (`ir-h1-*` 6, `ir-h2-*` 4, `ir-h3-*` 10, `ir-h4-*` 8).
+  30 candidates select, **30 killed, exit 0** — with `--max-candidates 40`; the
+  script's DEFAULT cap of 12 exits 2 on a change this size.
+* All-LF: every blob this branch adds or touches is 0 CR (checked with
+  `git cat-file blob`, not `git show`, which applies checkout conversion);
+  `tests/test_line_endings.py` green.
+
+### One process lesson worth carrying
+
+Running the mutation gate in the BACKGROUND while running pytest in the same
+worktree produced a phantom red: the gate rewrites source files in place, so a
+suite that ran mid-gate read a sabotaged `is_canonical_persona_channel` and
+failed a test that passes in isolation. Ten minutes went into "test pollution"
+before the cause was the concurrency. **The gate and the suites cannot share a
+worktree at the same time.**
