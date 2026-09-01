@@ -122,11 +122,57 @@ Stage-42's printer (`emit_json` → `to_jsonable`); the method lane calls
 through one serializer. Without it the method would answer a frame `json.dumps`
 refuses — caught by the acceptance run, not by reasoning.
 
-## 3. Suites
+## 3. Suites and receipts
 
-Recorded in §4 of the closing summary; commands and counts below as they ran.
+All with the system `python -m pytest`.
 
-## 4. Open / owed
+| suite | result |
+|---|---|
+| `test_scope_use_methods.py` (new) | 26 passed |
+| `test_scope_use_serve_acceptance.py` (new) | 5 passed |
+| authorization + gateway + office-rpc + row-consolidation focused set | 151 passed |
+| `tests/agent_runtime` + `tests/hermes_cli` | see the closing report's count |
+| mutation gate (`--base c894c2b159 --max-candidates 40`) | 6 candidates, **6 KILLED, 0 survived** |
+
+The mutation gate ran in its OWN worktree (`hermes-agent-ws4-mut`, detached at
+the branch head, removed afterwards) — it rewrites source in place and must
+never share a tree with a pytest run.
+
+`tests/acp/*` and `tests/test_run_tests_parallel.py` fail to COLLECT in a
+worktree (`ModuleNotFoundError: No module named 'acp'` — the editable install
+resolves against the primary checkout). Pre-existing environment condition,
+nothing to do with WS4; the `agent_runtime` + `hermes_cli` roots cover
+everything this lane touched.
+
+### The acceptance transcript (real serve, both listeners, real paired device)
+
+```
+ready.rpc.tiers.scope: {"runtime.realm.use": "console", "runtime.workspace.use": "console"}
+local_console applied:   result {... "applied": true}
+local_console duplicate: result {... "applied": false, "reason": "duplicate"}
+device[read]    hello: "hello_ok"
+device[read]    refusal: error -32000 data {"reason":"scope_denied","tier":"console","caller":"device"}
+device[console] hello: "hello_ok"
+device[console] refusal: error -32000 data {"reason":"scope_denied","tier":"console","caller":"device"}
+pointer after device attempts: ws_transcript-a_…   (unmoved — the device wrote nothing)
+```
+
+The `device[console]` line is the one the stage exists for. The first
+transcript also exposed a wording bug: the dispatcher's generic sentence told a
+console-tier device it *"requires the console tier"*, which it holds.
+`CallAuthorization` now carries an optional `detail` the policy sets and the
+dispatcher renders; the wire contract (`reason` / `tier` / `caller`) is
+untouched, because that is what the launcher's decoders branch on.
+
+## 4. Landing mechanics
+
+Rebased onto lane A's hermes head `cf9abaac4b` (WS1+WS2) on the orchestrator's
+instruction. ONE conflict: `tests/mutation_claims.json`, where both lanes
+appended to the same array tail. Resolved as a **union** — lane A's four
+`iws-ws1-*` claims and this lane's six `ws4-*` claims all present, 178 total —
+never a pick. Every affected suite re-run green after the rebase.
+
+## 5. Open / owed
 
 - WS4's measured acceptance (`gesture_to_accept` p50) is an OPERATOR span
   capture (WS0's instrument), not something this lane can produce headless.
