@@ -54,6 +54,19 @@ than on the shape of the key (launcher plan
 `docs/mission_control/planned/realm-actor-lifecycle-refactor.md` A1, in the
 EterniaLauncher repo).
 
+> **"A pull adopts office ACTORS and never instances" is the LIVE behaviour and
+> a SUPERSEDED destination (operator ruling 2026-08-31).** Instance replication
+> is RULED — one shared instance id realm-wide, no machine namespace, and
+> placement-backed rows RECREATED on pull — but it is **not built**: nothing in
+> `realm_sync.py` names `persona_instances/` today, and everything this section
+> describes is exactly what runs. Read the paragraph above as current fact, not
+> as the design. The ruling's authority is the launcher plan
+> `docs/mission_control/planned/instance-replication.md` (audited) and ADR 0027
+> in `Launcher_Brain`'s Decisions, both in the EterniaLauncher repo; the build
+> is in flight on a branch and will land with its own canon fold. Until then,
+> do not describe replication machinery as existing, and do not cite
+> "instances never sync" as a rule that will hold.
+
 **Intent semantics at this verb (ruled 2026-08-30).** A `runtime.office.remove`
 carrying an operator's click is AUTHORED intent: the tombstone it mints and that
 tombstone's realm-wide propagation are CORRECT, on whichever machine the click
@@ -339,6 +352,21 @@ canonicalizes, because the flag exists to PREDICT the actor key and a rewritten
 id breaks the prediction. The unknown-persona question is asked before the shape
 question at every door, so "that agent does not exist" never hides behind a
 spelling complaint.
+
+**The server's own version of that census stopped crying wolf on 2026-08-31**
+(`671ae4f9a7`). `operator_channels`' `duplicate_instances_same_channel` warning
+("multiple persona instances projected to one operator channel") counted ids
+contributed by history/trace ROW ATTRIBUTION the same as ids from live instance
+rows. A pre-per-instance-session chat row sitting on a persona's canonical
+session while NAMING the placement-backed sibling that answered it therefore
+warned permanently and un-actionably — the canonical singleton refuses retire by
+design, and nothing mints that row shape any more (live evidence: the
+`neko_supervisor` canonical channel against its 2026-07-20 history row
+attributed to `personainst_neko_supervisor_agent_47a47348`). The predicate
+(`_source_instance_ids_conflict`, `operator_channels.py:1517`) now fires on
+divergent sessions, divergent personas, or **two or more distinct LIVE instance
+rows** on one channel — the genuine collision, which the pre-existing
+true-collision test still pins.
 
 **The policy is hermes', and the launcher's copy is a prediction.** The launcher
 needs a world position for the pending chip and the staged scene node before the

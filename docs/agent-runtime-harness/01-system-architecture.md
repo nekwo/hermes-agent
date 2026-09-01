@@ -256,9 +256,27 @@ the honest "standalone" answer (`runtime_hud.py:721-725`).
 travels with it, so a member holding a stale local copy neither republishes nor
 re-adopts a deleted workspace. Since 2026-08-28 the same idea guards skill
 packages: `skill_tombstones` (`SkillTombstone`, `models.py:104`), a per-realm
-ledger capped at `SKILL_TOMBSTONE_LEDGER_CAP = 200` (`store.py:33`), serialized
+ledger capped at `SKILL_TOMBSTONE_LEDGER_CAP = 200` (`store.py:34`), serialized
 additively at the existing schema version — the delete lane it powers is
-documented under [Skills](#skills). Realms own what publishes: `skill_publish_mode`
+documented under [Skills](#skills).
+
+**Both of those ledgers are UNIONED on pull, not adopted** (RD-11, 2026-08-31,
+`4a8d398268`). `_UNIONED_REALM_LEDGERS` (`realm_sync.py:1980`) names them and
+`_pulled_artifact_bytes` merges each by its own rule — set-union for
+`deleted_workspace_ids`, per-slug newest-stamp-wins for `skill_tombstones` — so
+a concurrent publish can no longer drop a delete another member recorded. It is
+not gated on `server_id`: a local-only realm with a sync repo loses a guard
+entry the same way. Every OTHER realm field keeps the last-writer-wins posture
+`skill_selection` documents. The `skill_tombstones` half is what makes the
+ledger a per-slug **state register** rather than a delete list: an entry
+lifted by `skills restore` stays on the ledger carrying `restored_at`
+(`models.py:119-135`), because an absence cannot be told apart from "this
+member never heard about the delete" and a union would undo every restore on
+the next pull. A stamped entry blocks nothing (`store.active_skill_tombstones`)
+and is the settled history the cap prunes first (`store.prune_settled_ledger`),
+so an inert restore can never evict a live block.
+
+Realms own what publishes: `skill_publish_mode`
 (`all` | `selected`) and `agent_publish_mode` (`workspace` | `selected`), with
 personas required by a roster or an Office placement pinned regardless, so a
 pulled workspace can never point at an absent persona definition. Stores:
@@ -266,6 +284,20 @@ pulled workspace can never point at an absent persona definition. Stores:
 single files (`paths.active_workspace_path()` / `active_realm_path()`).
 Server-bound realms authorize every sync action against the Eternia backend and
 **fail closed** (`realm_membership.py:1-12`).
+
+**Unpublished local drift has two exits, not one, since 2026-08-31**
+(`3e6d8c06f3`). Pull deliberately never clobbers local state, which used to
+leave an operator holding drift they never meant to publish with Publish as the
+only door. `_board_store_drift` / `_office_store_drift` now build per-item rows
+(`StoreDriftItem`: family, container, item_key, kind — `realm_sync.py:1178`) and
+the four existing counts are DERIVED from those rows, so the count shapes the
+launcher parses are byte-identical and `store_drift.items` is additive beside
+them. `hermes harness realm sync revert <realm> [--item FAMILY:CONTAINER:KEY]…
+[--all] [--dry-run]` (`harness.py:616`, `agent_runtime/realm_revert.py`)
+realigns those exact rows to the last-pulled upstream already on disk:
+`--yes`-gated like publish/resolve because it is destructive of LOCAL state,
+archive-never-delete so it is recoverable, and **local-only** — no git, no
+network, no `--credential-file`, and it never mints a realm-visible tombstone.
 
 Workspace scoping is its own authority, and it governs **advertising and
 bare-persona resolution only** (`agent_runtime/workspace_scope.py`):
@@ -406,17 +438,22 @@ malformed slug refuses with `skill_slug_invalid`; both are exit-code family 2.
 An unknown slug is a warning (`skill_unknown`, exit 0), as is
 `skill_no_local_package` ("nothing archived" and "nothing written at all" are
 different answers). The only resurrection door is the explicit
-`skills restore <slug> --realm <id>` (R-C), which removes the ledger entry and
-hands back the archive path plus the promote command — it does NOT re-add the
-slug to `skill_selection`. The launcher seam reads identical
+`skills restore <slug> --realm <id>` (R-C), which STAMPS `restored_at` on the
+ledger entry (RD-11, 2026-08-31 — it used to remove it; see
+[Realms and workspaces](#realms-and-workspaces) for why an absence could not
+survive the union) and hands back the archive path plus the promote command —
+it does NOT re-add the slug to `skill_selection`. The launcher seam reads identical
 `{slug, deleted_at, deleted_hash}` rows in three places: the sidecar,
 `realm_sync_status`, and the additive `tombstones` array on
 `realm skills show`. Both verbs route their success envelopes through
 `attach_root_observability` — a delete aimed at the wrong shared root would
 otherwise report a well-formed `skill_unknown` and read as "already gone."
-Conflict posture is last-writer-wins v1 (R-D): two members publishing
-concurrently can drop a ledger entry; the union merge is designed and gated →
-[planned/realm-skill-tombstone-merge.md](planned/realm-skill-tombstone-merge.md).
+**Conflict posture is UNION, since 2026-08-31** (`4a8d398268`, plan stamped
+SHIPPED at `25dfcb897a`): R-D's last-writer-wins v1 — under which two members
+publishing concurrently could silently drop a ledger entry — was upgraded and
+built. The merge is described under
+[Realms and workspaces](#realms-and-workspaces). Do not re-quote LWW for this
+ledger; it now holds only for the realm's ordinary fields.
 
 ## Persona identity
 
@@ -456,7 +493,18 @@ preload — rides the operator's *user* turn instead (`:496-511`,
 Visual identity is a separate live lane: `agent/charsheet/` generates
 directional character sheets behind `hermes harness` verbs
 (`hermes_cli/harness.py:3001+`), and a placement carries its sprite as
-`OfficeItem.pet_slug` (`models.py:174`).
+`OfficeItem.pet_slug` (`models.py:174`). Since 2026-08-31 the interactive
+per-verb lane has a one-shot sibling: `harness characters auto`
+(`harness.py:1873`, `_cmd_characters_auto` at `:4776`, shipped `2321a2a9c3`,
+plan stamped a ledger at `8e0617a458`) drives turnaround → approve → generate →
+compose → install in ONE process, printing a receipt line per stage. It is for
+an operator's explicit "drive it all the way" ask and nothing else, because it
+auto-approves the turnaround — the last moment a reference can change. It never
+overrides a handedness refusal (there is no `--accept-handedness` on it), it
+writes the same per-attempt history the interactive verbs write so `reopen`
+repair and the QA crops behave identically, and it RESUMES rather than restarts:
+a stage whose work already exists is skipped with the reason on its summary
+line.
 
 ## What the mission-lane removal deleted, and why
 
@@ -552,10 +600,11 @@ Each links to a `planned/` file carrying its evidence and the gate to open it.
   no `characters add-state`, so adding a strip to an installed sheet means
   re-authoring the character →
   [archive/charsheet-add-state.md](archive/charsheet-add-state.md)
-- 2026-08-28 — **the skill-tombstone ledger merges last-writer-wins**: two
-  members publishing concurrently can silently drop a tombstone entry (R-D
-  ruled LWW acceptable for v1; nothing fences the loss window) →
-  [planned/realm-skill-tombstone-merge.md](planned/realm-skill-tombstone-merge.md)
+- ~~2026-08-28 — the skill-tombstone ledger merges last-writer-wins~~ —
+  **CLOSED 2026-08-31**: R-D was upgraded LWW → UNION and built
+  (`4a8d398268`); the merge is canon under
+  [Realms and workspaces](#realms-and-workspaces) and
+  [Skills](#skills). The plan is stamped SHIPPED at `25dfcb897a`.
 
 ## Unverified carry-forward
 

@@ -333,11 +333,61 @@ plan at the canon fold; lane shipped as `45abf82803` + `32f41be19f` +
   `_skill_artifacts`). Pre-existing; reproduced in both the S1/S2 round-trip
   and the S3 smoke, and precisely why ruling R-B refuses tombstones on
   canonical ids.
-- **Three pre-existing reds in the full `tests/hermes_cli` floor**, verified
+- ~~**Three pre-existing reds in the full `tests/hermes_cli` floor**~~, verified
   failing identically at `32f41be19f` with the S3 change stashed:
   `test_error_exit_code_producers` (`runtime_unavailable` gained a producer —
   deleting the spelling is a cross-stack call the launcher owns),
   `test_completion::test_valid_bash_syntax`, and `test_xai_provider_labels`.
+  **All three CLOSED**: the first two by `00fa94dd75` (2026-08-30 — the
+  `runtime_unavailable` premise fell once the gateway lane minted it at five
+  sites), and all three re-run green at `51b96505f0` on 2026-08-31. The
+  unrun-gate CLASS the row belongs to is not closed by that, only these
+  instances.
+
+**From the 2026-08-31 decision-close wave (11 stages; field notes in
+`planned/dcw-*-field-notes-2026-08-31.md`):**
+
+- **The repo is ALL-LF, and zero is the ratchet** (`301946bc57`). The census at
+  `0c744aa586` was 8862 LF blobs against 33 CRLF and 5 mixed; the 38
+  CR-carrying blobs were normalized in one commit and **there are no deliberate
+  keepers** — that is the finding, not an omission. Every one was a minority
+  outlier in its own directory, and every Windows-only script (`*.ps1`,
+  `*.cmd`) was already LF. The enforcement is `tests/test_line_endings.py`, not
+  `.gitattributes`: attributes govern conversion, and say nothing about blobs
+  already committed. A deliberate CRLF file is declarable — a `-text` rule plus
+  a row in that gate's keeper set, with the reason; the set is empty on
+  purpose. (Unrelated to the `_ensure_repo_gitattributes` row above, which is
+  about the realm-sync CLONE's managed file.) The debt this repays is
+  attribution: a Mac-side edit of a CRLF file turned a +149-line stage into a
+  2513-line whole-file rewrite nobody could review.
+- **The mutation gate selects by SYMBOL as well as by line**
+  (`scripts/changed_line_mutation_check.py`, `301946bc57`). A claim is now also
+  selected when the diff touched the DEFINITION around its needle rather than
+  the needle itself, and `SELECTION_KEY` reports which reason fired, because a
+  widening nobody can see in the output is indistinguishable from the gate
+  having gone vague. Two additions ride with it: `--claims-for
+  SYMBOL|PATH|PATH::SYMBOL` is a pre-flight REPORT — "which claims anchor in
+  the symbol I am about to rewrite", answerable before there is a base to diff
+  against, and it reports unresolvable anchors rather than dying on the first
+  one, because mid-rewrite is exactly when it is most useful; and a `platforms`
+  claim field (`{posix, windows}`) exists for the one module with a
+  module-level platform fork, `agent_runtime/locks.py`, whose duplicate
+  definitions have no unambiguous AST node and so anchor at `module`.
+- **No test under `tests/hermes_cli` can start a live gateway**
+  (`tests/hermes_cli/_gateway_fence.py`, `a35144d584` + `2a0cd784cf`). Measured
+  on this workstation: `_cmd_update_impl` parks
+  `_resume_windows_gateways_after_update` on `atexit`, which runs AFTER every
+  fixture has torn down and every `monkeypatch` has been undone — so
+  `HERMES_HOME` is back to the operator's real store and the spawn starts the
+  OPERATOR's gateway, silently, because the cold-start path swallows its own
+  exceptions by design. `tests/conftest.py::_live_system_guard` is an autouse
+  FIXTURE and provably cannot cover that window. The fence is three layers at
+  the three levels the escape used. The follow-up correction matters as much as
+  the fence: it was first installed process-wide at conftest import and refused
+  another directory's honest work, so it is now armed only for the duration of
+  this directory's tests (`_gateway_fence_is_armed_for_this_test`) — and the
+  original red-proof could not have caught that, which is the lesson the second
+  commit records.
 
 **From [`REFACTOR_DEBT_AUDIT_2026-08-17.md`](archive/2026-08-22-pre-consolidation/REFACTOR_DEBT_AUDIT_2026-08-17.md):**
 

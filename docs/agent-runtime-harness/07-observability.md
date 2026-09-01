@@ -71,6 +71,36 @@ the create receipt (`agent_create_phases.py:23-24`) then inherited verbatim.
    `waited_ms=` (`stream.py:142-145`); `agent_create_phases` repeats
    `instance_ms` from the RPC result (`agent_create_phases.py:83-87`).
 
+**Rule 1 has a LIST form, and 2026-08-31 closed three instances of it** (H1,
+`2638504f9b`). A list that was shortened is as much a silent zero as a phase
+that defaulted, so the office row builder states both ways its actor list can be
+short — `actors_truncated` (the cut WE chose) and `actors_unreadable` (files the
+platform would not open) — and both are REQUIRED keyword arguments of
+`office_summary_row` (`snapshot.py:1718+`), so a caller holding a bare list has
+to say `0` out loud rather than get it by default. The same rule now runs over
+the conflict list: `conflict_guessed_keys` rides the row beside
+`conflict_actor_keys` and names the subset the scan had to GUESS from a
+filename, because a sidecar that will not decode still contributes a key and
+that key is `office_models.actor_file_token(actor_key)` — for a long key NOT the
+actor key, so `harness office resolve-conflict --actor <it>` finds nothing. It
+rides the ROW rather than being re-derived at each reader, for the reason
+`orphan_reason` does: one scan decides it, and a second derivation is free to
+disagree with the list it explains. Both readers act on it — the parity warning
+`office_actor_conflict` carries a `guessed` boolean FIELD (the `orphaned_office`
+rule: discrimination in a field, never in the code, or every existing census of
+the condition zeroes) and appends "filename guess — resolve-conflict will not
+find this key" to the operator sentence; the CLI prints the guess list under
+`--full` beside the keys it qualifies and only there, because the skinny row
+hands over a count and no tokens. Both keys are additive — a row from an older
+core has no such list, which reads as exactly the claim the bare list used to
+make silently. Third instance, same commit and same shape:
+`copy_workspace_content` skipped an undecodable source actor and emitted
+NOTHING, while every other fault in that module (a broken surface, a folder
+write, a refused class key, a failed upsert) degraded to a named row. It now
+warns `office_actors_unreadable` with the count and the SOURCE workspace id
+(`workspace_template.py:123`) — the id an operator has to go back to, not the
+one being created.
+
 ## Wire safety: receipts ride the LOG, never the envelope
 
 **Observability never adds a key to the parity envelope.** Parity rides the
