@@ -280,3 +280,69 @@ an internal `agent_runtime` dataclass carrying argparse namespaces and store
 handles — it is not projected onto any wire — and the field is the declared way
 to pass a fact from the plan phase to the commit phase, which is the alternative
 to smuggling it on an `args._*` attribute.
+
+---
+
+## 8. Verification taken on this branch
+
+**Focused suites** (all green, `HERMES_TEST_TMP_ROOT=X:\Eternia\test-tmp`):
+
+| suite set | result |
+|---|---|
+| the three new/touched files + `test_progress` + both phase suites | **145 passed** |
+| stream + demote + bundle + turn-context neighbours | **101 passed** |
+| `test_turn_context` + `test_persona_tool_policy` + `test_memory_provider` + `test_cli_shutdown_memory_messages` | **72 passed** |
+| the three `serve_stream_*` lane suites | **45 passed** |
+| every `tests/hermes_cli/ -k mission_chat` suite | **167 passed, 4 skipped** |
+
+No full-suite run was taken from this worktree, by the brief's instruction.
+
+**Mutation gate** —
+`python scripts/changed_line_mutation_check.py --base 98d43d0c8604 --max-candidates 40`:
+**18 claims selected, 18 KILLED, exit 0**, and the tree was verified byte-clean
+afterwards (the gate rewrites source in place; nothing but
+`tests/mutation_claims.json` was modified). No pytest run overlapped it.
+
+Every claim was proven red by an apply → run → revert → verify-bytes → re-run
+round trip BEFORE it was registered. Two claims were re-anchored **by the gate**
+rather than by review (a symbol naming `run_conversation` where the body is
+`_run_conversation`; a `find` reaching past the end of `_clear_tool_defs_cache`),
+and one round trip convicted a TEST rather than the code — see §6 item 6 and the
+claims commit.
+
+**Cross-stack producer surface: CLEAN, and checked against this branch, not only
+against the primary.** From the launcher primary, read-only:
+
+```
+tool/hermes_serve_frames/generate.py --check --hermes-root X:/wt/prep35   -> 23 serve-frame fixtures match a fresh capture
+tool/test_quality/check_producer_contracts.py --hermes-root X:/wt/prep35  -> producer contract fixtures match Hermes
+```
+
+Both also pass against `X:/Eternia/hermes-agent` (the pre-existing-drift read the
+brief asked for), and the launcher working tree was clean before and after.
+
+## 9. Owed to the operator — the live re-take
+
+Nothing here can be closed from a worktree; these are the reads to take on the
+next serve restart, in order:
+
+1. **Stage 3.** On a warm turn: is `profile_conversation_turn_context_ms` most of
+   `request_assembled − provider_request_started`? If yes, the plan's §5 Stage 3
+   should be rewritten to target `build_turn_context` and the residue named there
+   — and a new stage proposed against whatever inside it actually bills.
+2. **Stage 3.** Does `profile_conversation_system_prompt_restore_ms` appear on
+   turn 2+ of one chat, or does `..._system_prompt_build_ms`? A build on every
+   turn means the prefix cache is missing every turn, which is a defect worth its
+   own row and is invisible today.
+3. **Stage 3.** On a first turn of a fresh chat, is
+   `profile_agent_init_tool_defs_build_ms` present (the memo missed) or
+   `..._cached_ms`? A miss on every first turn names the registry churn §7.4
+   describes and bounds what a prewarm can actually save.
+4. **Stage 4.** `session_db_open_ms` median across a week. >100 ms warm reopens
+   the pooling decision; ~6 ms confirms the bench and closes it.
+5. **Stage 5.** `builds_overlapped` on warm turns, and
+   `grep snapshot_build_deferred` in `profiles/base/logs/agent.log`. Deferrals
+   whose `waited_ms` clusters AT the 1,000 ms bound would mean turns are running
+   back to back and the cadence is being pushed to its ceiling — the bound is
+   holding, but the HUD is paying for it, and that is the signal to revisit the
+   constant with a number rather than a guess.
