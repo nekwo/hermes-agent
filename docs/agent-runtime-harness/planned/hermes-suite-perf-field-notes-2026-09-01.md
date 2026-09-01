@@ -390,7 +390,8 @@ rebase resolved the conftest overlap in main's favor and dropped the
 basetemp/pytest_configure variant. Kept from this branch: the O(1) counter
 `tmp_path`, the credential regex, the lazy psutil walk. Verified merged:
 their 12 Stage 7 tests green; probe lands its dirs under
-`X:\Eternia	est-tmpun-*`. Coordination closed by message — that session
+`X:\Eternia	est-tmp
+un-*`. Coordination closed by message — that session
 confirmed it is building no further stages.
 
 Peer also claimed canon `08-performance-and-debt-ledger.md` carries the
@@ -443,5 +444,26 @@ worktree, tmp root set:
   (the runner docstring's ~250 ms assumption is a Linux-era number).
 * **Pass 2 (R3's second pass, doubling as the Stage 4 probe):**
 
-<!-- PASS2 -->
+* **Pass 2, 12-worker Stage 4 probe first: WORSE.** 1,435.5 s (23:55),
+  12,484 passed / **2 failed**, CPU-wall 14,887 s — oversubscription past 8
+  workers inflates per-file overhead faster than the extra workers divide it.
+  The 2 failures (`test_serve_rpc_office_subscribe_live_hub.py`'s re-baseline
+  pair) are the KNOWN load-sensitivity class (mc-hygiene precedent: compare
+  SETS with serial confirmation) — serially confirmed green (25 passed,
+  17.46 s) immediately after. **Stage 4 verdict: 8 workers stands; the
+  12-worker config is rejected on both wall and stability.**
+* **Pass 2 at the recommended 8 workers (R3's second pass): 1,089 files,
+  12,494 passed, 0 failed, 1,056.2 s (17:36)**, CPU-wall 8,396.5 s. Repo
+  integrity across both passes: worktree list and branch refs show ONLY
+  additions made by other, disjoint sessions (two new branches/worktrees);
+  nothing removed, no ref reset, `main` untouched, no stray
+  `%TEMP%\hermes-agent-wt` registrations.
+* **R3 outcome: parity + integrity verified twice at 8 workers (18:16 and
+  17:36, 0 failed both). The parallel lane is RECOMMENDED as the full-suite
+  default on this machine; the actual doc/default flip is left to the
+  operator, per the ruling.** Serial same-lane ≈ 30 min → parallel ≈ 17:36
+  (1.7×); the remaining gap is per-file overhead (~6 s/file under 8-way,
+  measured both passes), which is the R6/batching conversation the plan
+  deliberately deferred.
+
 

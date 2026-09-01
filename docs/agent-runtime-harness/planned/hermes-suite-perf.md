@@ -12,6 +12,23 @@ per-batch isolation.
 **Evidence:** [`hermes-suite-perf-field-notes-2026-09-01.md`](hermes-suite-perf-field-notes-2026-09-01.md)
 (all § references below point there).
 
+## EXECUTED — 2026-09-01, the same day (ledger)
+
+| stage | what landed | sha(s) | measured outcome |
+|---|---|---|---|
+| 1 — psutil off the floor | lazy children-snapshot in `_live_system_guard`; refusal semantics unchanged | `29ae6a2b3c` | probe floor 28 ms → ~8 ms/test fresh (with Stage 2); guard tests identical result set (2 pre-existing win32 termios/pty fails, proven baseline) |
+| 2 — aging floor | O(1) counter `tmp_path` override + credential regex; attribution: real `make_numbered_dir` 2.69→23.94 ms/call, 150.8 s per 11 k calls | `29ae6a2b3c` | aged probe 77 ms → 36 ms mean; setup phase 410→150 s (agent_runtime), 326→186 s (hermes_cli). Residual aging (36 vs 8 ms, gen-2-GC suspect) OPEN |
+| 3 — parallel lane verified | no code; two full-lane passes from a worktree | — | 12,492/0 in 18:16 and 12,494/0 in 17:36 (8 workers); integrity byte-identical both times. **Recommended default; flip left to operator (R3)** |
+| 4 — worker sweep | no code; 12-worker probe | — | REJECTED: 23:55, 2 load-flaked fails (serially green). 8 workers stands |
+| 5 — gate parse sharing | `_tree_index` + 9 gate ports + module-teardown cache lifetime (785 MB retention lesson) | `29ae6a2b3c` + `adb17621db` | 9-file set 125.9→70.5 s same-command; 9 sabotage round-trips red-for-the-right-reason |
+| 6 — CLI children in-process | `_harness_cli.run_harness_in_process` over production `dispatch_argv`; realm_sync + office_class_key helpers swapped | `29ae6a2b3c` | **PROVISIONAL pending R5 strike pass** (field notes §12; one-helper revert per file). realm_sync 82.5→23.7 s, office 18.8→2.8 s; seam sabotage proves non-vacuity |
+| 7 — excluded tmp root | superseded by `hermes-agent-6b`'s TMP/TEMP/tempfile redirect landed on main; my basetemp variant dropped on rebase | `98d43d0c86` (theirs) | churn 0.25 s excluded vs 0.76 s `%TEMP%`; merged design verified (their 12 tests + probe under `X:\Eternia	est-tmp`) |
+
+Headline walls: serial `tests/agent_runtime` 21:27 → **16:39**, serial
+`tests/hermes_cli` 14:50 → **11:47** (identical result sets); parallel full
+lane (agent_runtime+hermes_cli+cli+state) **17:36, 0 failed, twice**.
+Full verification detail: field notes §§8–14.
+
 **Question this answers** (operator, 2026-09-01): *why is the suite slow on
 this machine — is it hangs?* — **No. There are no happy-path hangs** (§4: every
 ≥10 s sleep literal is a kill-target child or a "never responds" thread stub;
