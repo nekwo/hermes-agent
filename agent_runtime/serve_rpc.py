@@ -490,10 +490,16 @@ def handle_request(req: Any, context: RpcContext | None = None) -> dict:
     # retire.
     decision = authorize_call(method_tier(name), context.caller, method=name)
     if not decision.ok:
+        # ``detail`` when the policy supplied one, the tier sentence otherwise.
+        # The dispatcher still does not KNOW any policy — it renders whichever
+        # sentence the decision carried — and the fallback is unchanged, so no
+        # existing refusal's wording moves. WS4 is the one arm that sets it,
+        # because "requires the console tier" is false for a caller that holds
+        # console and is refused on its KIND.
         return err(
             rid,
             ERR_HANDLER_FAILED,
-            f"{name} requires the {decision.tier} tier",
+            decision.detail or f"{name} requires the {decision.tier} tier",
             decision.refusal_data(),
         )
     try:

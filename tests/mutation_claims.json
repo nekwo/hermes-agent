@@ -2603,6 +2603,97 @@
         "-q",
         "tests/agent_runtime/test_scope_patch_coverage.py::test_set_active_emits_the_scope_row_beside_its_domain_event"
       ]
+    },
+    {
+      "id": "ws4-local-console-arm-runs-before-the-device-equality",
+      "path": "agent_runtime/call_authorization.py",
+      "symbol": "authorize_call",
+      "operator": "drop-the-kind-restriction",
+      "find": "    if name and name in LOCAL_CONSOLE_METHODS and resolved.kind not in _CONSOLE_KINDS:",
+      "replace": "    if False and name in LOCAL_CONSOLE_METHODS and resolved.kind not in _CONSOLE_KINDS:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_use_methods.py::test_a_device_is_refused_at_every_tier_it_can_hold"
+      ]
+    },
+    {
+      "id": "ws4-the-restriction-is-a-membership-not-a-blanket",
+      "path": "agent_runtime/call_authorization.py",
+      "symbol": "authorize_call",
+      "operator": "widen-the-restriction-to-every-method",
+      "find": "    if name and name in LOCAL_CONSOLE_METHODS and resolved.kind not in _CONSOLE_KINDS:",
+      "replace": "    if name and resolved.kind not in _CONSOLE_KINDS:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_use_methods.py::test_the_restriction_does_not_leak_onto_other_console_verbs"
+      ]
+    },
+    {
+      "id": "ws4-a-declined-activation-is-a-result-not-a-refusal",
+      "path": "agent_runtime/scope_activation.py",
+      "symbol": "activate_workspace",
+      "operator": "collapse-the-declined-arm",
+      "find": "    if not outcome.get(\"applied\", True):\n        return activation_outcome_row(store, workspace_row, outcome, \"workspace_id\")\n    row = workspace_row(store.get(workspace_id))",
+      "replace": "    row = workspace_row(store.get(workspace_id))",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_use_methods.py::test_a_duplicate_send_is_an_idempotent_RESULT_not_an_error",
+        "tests/agent_runtime/test_scope_use_methods.py::test_a_stale_intent_is_superseded_and_the_newer_pointer_stands"
+      ]
+    },
+    {
+      "id": "ws4-a-realm-switch-reconciles-the-workspace",
+      "path": "agent_runtime/scope_activation.py",
+      "symbol": "activate_realm",
+      "operator": "drop-the-reconcile",
+      "find": "    item = store.get(realm_id)\n    reconcile_active_workspace_to_realm(item, issued_at=issued_at)",
+      "replace": "    item = store.get(realm_id)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_use_methods.py::test_a_realm_switch_reconciles_the_workspace_under_it"
+      ]
+    },
+    {
+      "id": "ws4-the-supersede-basis-reaches-the-store",
+      "path": "agent_runtime/scope_activation.py",
+      "symbol": "perform_scope_activation",
+      "operator": "drop-the-issued-at",
+      "find": "        row = perform(scope_id, issued_at=issued_at)",
+      "replace": "        row = perform(scope_id, issued_at=None)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_use_methods.py::test_a_stale_intent_is_superseded_and_the_newer_pointer_stands"
+      ]
+    },
+    {
+      "id": "ws4-the-method-result-goes-through-one-serializer",
+      "path": "agent_runtime/scope_activation.py",
+      "symbol": "perform_scope_activation",
+      "operator": "skip-the-serialization",
+      "find": "    result = dict(to_jsonable(row))",
+      "replace": "    result = dict(row)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_use_methods.py::test_the_result_is_json_serializable"
+      ]
     }
   ]
 }

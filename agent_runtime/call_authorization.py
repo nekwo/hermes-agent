@@ -410,6 +410,17 @@ class CallAuthorization:
     reason: str
     tier: str
     caller_kind: str
+    #: The operator-facing sentence, when the dispatcher's default one would be
+    #: WRONG rather than merely terse. It is set by exactly one arm — the
+    #: machine-owner restriction (WS4) — because that is the one refusal where
+    #: "requires the console tier" is false: the caller may well HOLD console
+    #: and be refused anyway. Prose only, and deliberately not on
+    #: :meth:`refusal_data`: a message is for an operator's eyes and is free to
+    #: change, while ``reason`` is the contract a client branches on.
+    #:
+    #: ``None`` everywhere else, so the dispatcher's own sentence stays the
+    #: default and no existing refusal's wording moves.
+    detail: str | None = None
 
     def refusal_data(self) -> dict[str, Any]:
         """The ``data`` block of the typed refusal. ``reason`` leads because
@@ -515,6 +526,10 @@ def authorize_call(
             reason=REASON_SCOPE_DENIED,
             tier=normalized,
             caller_kind=resolved.kind,
+            detail=(
+                f"{name} is answerable only to this install's own console; "
+                f"a {resolved.kind} caller is refused however it is paired"
+            ),
         )
     if resolved.kind == CALLER_PEER:
         if name and name in PEER_METHOD_ALLOWLIST:
