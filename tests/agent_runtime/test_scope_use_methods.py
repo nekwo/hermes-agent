@@ -465,3 +465,97 @@ def test_activate_realm_is_the_only_place_the_reconcile_is_spelled(scope):
 
     assert row["applied"] is True
     assert WorkspaceStore().active_id() == scope["ws_b"].id
+
+
+def test_a_STAMPED_realm_switch_still_reconciles_the_workspace_under_it(scope):
+    """The FIELDED shape, and the one the tests above did not run.
+
+    ``mission_scope_use_client`` stamps every switch (``_scopeIntentIssuedAt``),
+    so on the live lane ``activate_realm`` threads ONE basis into TWO
+    ``set_active`` writes — the realm pointer's, then the reconcile's on the
+    workspace pointer. The realm write leaves that basis stored; the reconcile
+    then presents the SAME instant to a different pointer file. If the
+    compare-and-set arms were keyed on anything shared between the two files,
+    the second write would decline as ``duplicate``/``superseded`` and the
+    active workspace would be left pointing into the realm the operator just
+    left — the launcher would then be told a scope hermes is not parked in.
+
+    (Investigated on 2026-09-01 as a candidate cause of the realm-switch field
+    defect. It is NOT the cause — the pointers land correctly, as the live store
+    showed — and this test is what makes that a fact rather than a reading.)
+    """
+
+    stamp = "2026-09-01T12:45:44.052220+00:00"
+    WorkspaceStore().set_active(scope["ws_a"].id, issued_at=stamp)
+
+    reply = _call(
+        REALM_USE_METHOD, {"realm_id": scope["realm_b"].id, "issued_at": stamp}
+    )
+
+    assert reply["result"]["applied"] is True
+    assert RealmStore().active_id() == scope["realm_b"].id
+    assert WorkspaceStore().active_id() == scope["ws_b"].id
+
+
+def test_a_realm_switch_emits_a_scope_patch_whose_LAST_row_carries_both_new_pointers(
+    scope, monkeypatch
+):
+    """The wire shape the launcher's fold consumes, pinned at the producer.
+
+    A realm switch is TWO store writes, so it emits TWO ``scope`` rows in one
+    coalesced batch — the field receipt reads ``fold_applied 2 of 2 rows
+    (scope x2)``. The first is mid-reconcile: the realm pointer has moved and
+    the workspace pointer has not, so it names a workspace in the realm the
+    operator just LEFT. Only the second is the settled pair.
+
+    The launcher folds them in order and the last one wins, so the claim that
+    matters is about ORDER and about the final row's contents — a producer that
+    emitted them the other way round, or that omitted the second, would leave
+    every fielded client holding a straddled scope with no receipt anywhere.
+    """
+
+    from agent_runtime import state_patches as sp
+    from agent_runtime.config import load_agent_runtime_config
+    from agent_runtime.events import EventLog
+    from agent_runtime.state_patches import SCOPE_ENTITY, STATE_PATCHED_EVENT_TYPE
+
+    def _loader(*args, **kwargs):
+        cfg = load_agent_runtime_config(*args, **kwargs)
+        cfg.read_model.delta_patches = True
+        return cfg
+
+    monkeypatch.setattr(sp, "load_root_runtime_config", _loader)
+
+    WorkspaceStore().set_active(scope["ws_a"].id)
+    log = EventLog()
+    before = len(log.tail(200))
+
+    reply = _call(REALM_USE_METHOD, {"realm_id": scope["realm_b"].id})
+
+    emitted = [
+        {"type": event.type, "payload": dict(event.payload or {})}
+        for event in log.tail(200)
+    ][before:]
+    assert reply["result"]["applied"] is True
+    assert [event["type"] for event in emitted] == [
+        STATE_PATCHED_EVENT_TYPE,
+        "realm.activated",
+        STATE_PATCHED_EVENT_TYPE,
+        "workspace.activated",
+    ]
+    scope_rows = [
+        event["payload"]
+        for event in emitted
+        if event["payload"].get("entity") == SCOPE_ENTITY
+    ]
+    assert len(scope_rows) == 2
+    # Non-vacuity: the two rows genuinely differ, so "the last one wins" is a
+    # claim with something behind it.
+    assert scope_rows[0]["changed"] == {
+        "active_workspace_id": scope["ws_a"].id,
+        "active_realm_id": scope["realm_b"].id,
+    }
+    assert scope_rows[-1]["changed"] == {
+        "active_workspace_id": scope["ws_b"].id,
+        "active_realm_id": scope["realm_b"].id,
+    }
