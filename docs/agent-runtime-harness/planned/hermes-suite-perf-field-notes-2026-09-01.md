@@ -348,14 +348,23 @@ Stage 6 (its cost was CLI children, not walks).
   roster red; planted `os.environ.get("HERMES_HEAD_HOME")` → env-gate red;
   planted `stream_frames` call → stream gate red.
 
-## 12. Stage 6 — CLI-child spawns (CONVERTED **PROVISIONALLY** — R5's strike pass is still the operator's)
+## 12. Stage 6 — CLI-child spawns (CONVERTED — R5 strike pass RULED: upheld, no strikes)
 
-**R5 status: the conversions below are landed PROVISIONAL.** The plan's R5
-mechanic is table-first, operator strikes rows, only unstruck rows convert;
-the operator's blanket go-ahead ("implement this all") predates this table,
-so the two converted files ship with the table and revert per-file on a
-strike — each conversion lives in ONE helper (`_run_harness`), so a strike
-is a two-line revert restoring the original subprocess body.
+**R5 status: RULED 2026-09-01 by delegated fresh-context review (operator's
+delegation), all 37 sites upheld, zero struck.** The reviewer read every
+converted call site's assertions against the seam: each claims verb behavior
+only — exit code, stdout envelope, store effect under the hermetic home —
+and none claims the process boundary (no signal, child-lifetime, fresh-import
+or stderr-content assertion anywhere; the two env-credential sites claim the
+fallback LOGIC, which reads `os.environ` at handler time identically on both
+paths). The seam is production end-to-end — `dispatch_argv` builds the same
+`hermes_cli.harness.build_parser` tree `main.py` registers and maps errors
+through the same `emit_harness_error`/`ERROR_EXIT_CODES` — and non-vacuity
+holds structurally (nearly every site `json.loads(proc.stdout)`, so an
+undispatched call reds on empty stdout) on top of the recorded sabotage
+round-trip below. Both files re-verified green post-ruling: 89 passed.
+The one-helper-per-file revert mechanic below remains available if a future
+test genuinely needs the boundary.
 
 The seam: `hermes_cli.harness_parts.serve.dispatch_argv` — production's own
 in-process dispatcher ("exactly as `hermes <argv…>` would, including the
@@ -465,5 +474,16 @@ worktree, tmp root set:
   (1.7×); the remaining gap is per-file overhead (~6 s/file under 8-way,
   measured both passes), which is the R6/batching conversation the plan
   deliberately deferred.
+* **R3 RULED 2026-09-01 by delegated fresh-context review: the parallel
+  runner (8 workers) IS the documented full-suite default on this machine;
+  serial pytest is demoted to the exception** (single-file debugging, and
+  the integration/e2e/docker lanes the runner deliberately skips). The two
+  passes above satisfy the ruling condition as written, and the runner's
+  code was verified to provide the documented guarantees (per-file fresh
+  interpreter, loud FLAKY policy, 1-worker straggler retry, nothing-ran
+  guard). **12 workers stays REJECTED** — slower (23:55) and 2 load-flaked
+  failures, per the Pass-2 probe. Doc home: `AGENTS.md` §Testing (amended
+  same commit); `run_tests.sh` now forwards `HERMES_TEST_TMP_ROOT` through
+  its `env -i` so the Stage 7 tmp root survives the canonical entry point.
 
 

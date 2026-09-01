@@ -6,9 +6,10 @@ R2 and reshaped Stage 7 into landed opt-in wiring). Stages 1, 2, 5, 6, 7
 landed with acceptance measurements and sabotage round-trips; Stage 3 parity +
 integrity verification and Stage 4's worker sweep measured the same session.
 Per-stage results: field notes §§8–14. R5's classification table: field notes
-§12 — the operator may still strike rows (conversions live in one helper per
-file and are trivially reversible). R1/R6 stand as recommended: no xdist, no
-per-batch isolation.
+§12 — strike pass RULED 2026-09-01 (delegated review): all 37 sites upheld,
+zero struck. R3 RULED 2026-09-01 (delegated review): parallel runner is the
+documented full-suite default on this machine. R1/R6 stand as recommended:
+no xdist, no per-batch isolation.
 **Evidence:** [`hermes-suite-perf-field-notes-2026-09-01.md`](hermes-suite-perf-field-notes-2026-09-01.md)
 (all § references below point there).
 
@@ -18,10 +19,10 @@ per-batch isolation.
 |---|---|---|---|
 | 1 — psutil off the floor | lazy children-snapshot in `_live_system_guard`; refusal semantics unchanged | `29ae6a2b3c` | probe floor 28 ms → ~8 ms/test fresh (with Stage 2); guard tests identical result set (2 pre-existing win32 termios/pty fails, proven baseline) |
 | 2 — aging floor | O(1) counter `tmp_path` override + credential regex; attribution: real `make_numbered_dir` 2.69→23.94 ms/call, 150.8 s per 11 k calls | `29ae6a2b3c` | aged probe 77 ms → 36 ms mean; setup phase 410→150 s (agent_runtime), 326→186 s (hermes_cli). Residual aging (36 vs 8 ms, gen-2-GC suspect) OPEN |
-| 3 — parallel lane verified | no code; two full-lane passes from a worktree | — | 12,492/0 in 18:16 and 12,494/0 in 17:36 (8 workers); integrity byte-identical both times. **Recommended default; flip left to operator (R3)** |
+| 3 — parallel lane verified | no code; two full-lane passes from a worktree | — | 12,492/0 in 18:16 and 12,494/0 in 17:36 (8 workers); integrity byte-identical both times. **R3 RULED: default** (2026-09-01, delegated review — §14; AGENTS.md §Testing amended, `run_tests.sh` forwards `HERMES_TEST_TMP_ROOT`) |
 | 4 — worker sweep | no code; 12-worker probe | — | REJECTED: 23:55, 2 load-flaked fails (serially green). 8 workers stands |
 | 5 — gate parse sharing | `_tree_index` + 9 gate ports + module-teardown cache lifetime (785 MB retention lesson) | `29ae6a2b3c` + `adb17621db` | 9-file set 125.9→70.5 s same-command; 9 sabotage round-trips red-for-the-right-reason |
-| 6 — CLI children in-process | `_harness_cli.run_harness_in_process` over production `dispatch_argv`; realm_sync + office_class_key helpers swapped | `29ae6a2b3c` | **PROVISIONAL pending R5 strike pass** (field notes §12; one-helper revert per file). realm_sync 82.5→23.7 s, office 18.8→2.8 s; seam sabotage proves non-vacuity |
+| 6 — CLI children in-process | `_harness_cli.run_harness_in_process` over production `dispatch_argv`; realm_sync + office_class_key helpers swapped | `29ae6a2b3c` | **R5 RULED: upheld, no strikes** (2026-09-01, delegated review — field notes §12; every site claims verb wiring, none the process boundary; one-helper revert stays available). realm_sync 82.5→23.7 s, office 18.8→2.8 s; seam sabotage proves non-vacuity |
 | 7 — excluded tmp root | superseded by `hermes-agent-6b`'s TMP/TEMP/tempfile redirect landed on main; my basetemp variant dropped on rebase | `98d43d0c86` (theirs) | churn 0.25 s excluded vs 0.76 s `%TEMP%`; merged design verified (their 12 tests + probe under `X:\Eternia	est-tmp`) |
 
 Headline walls: serial `tests/agent_runtime` 21:27 → **16:39**, serial
@@ -280,8 +281,11 @@ needed — Stage 7's temp root is `X:\Eternia\test-tmp` (created), inside the
 existing exclusion, and the ruling's "operator-only system setting" clause is
 DISCHARGED as not-needed. R3's condition stands as ruled: the parallel lane
 becomes the documented default only after parity + repo-integrity gates pass
-twice from a worktree. R5's classification table still comes to the operator
-for row-striking before any conversion. R6 stays not-now.
+twice from a worktree — **condition met and R3 CLOSED as "default" on
+2026-09-01 by delegated fresh-context review** (field notes §14; 12 workers
+rejected on both wall and stability). **R5's strike pass is CLOSED the same
+day by the same review: all 37 converted sites upheld, zero struck** (field
+notes §12 carries the reasoning). R6 stays not-now.
 **Execution order (operator, same exchange): "only to the exclusion now" —
 Stage 7 builds immediately; every other stage HOLDS for the operator's go.**
 
@@ -289,9 +293,9 @@ Stage 7 builds immediately; every other stage HOLDS for the operator's go.**
 |---|---|---|---|
 | R1 | **pytest-xdist**: adopt for parallelism? | speed vs the per-file isolation design (persistent xdist workers carry cross-file module state; the runner docstring records dropping it for exactly that) | **No.** The serve one-owner locks would NOT forbid it (per-root, §5) and the fence arms per-test — the objection is state leakage by design, not locks. The in-repo per-file runner is the sanctioned lane (Stage 3); formalize that and close the question. |
 | R2 | **Defender exclusion** for a dedicated test-temp root (system setting — operator-only) | scan coverage on one throwaway directory vs a 2.3–2.9× tax on every test file-op (§5 churn table) | Recommend: create `X:\test-tmp`, exclude it, land Stage 7's opt-in wiring. Bounded win: minutes across serial and parallel lanes; zero effect on non-test paths. |
-| R3 | **Parallel lane as the documented default** for full-suite runs on this machine | July 2026 precedent (338 spurious failures, destroyed worktree) vs 15 idle cores | Adopt AFTER Stage 3's parity + repo-integrity gates pass twice from a worktree. Until then serial stays the default. |
+| R3 | **Parallel lane as the documented default** for full-suite runs on this machine | July 2026 precedent (338 spurious failures, destroyed worktree) vs 15 idle cores | **RULED: default** (2026-09-01, delegated review). Condition met — parity + integrity passed twice at 8 workers (§14). Serial pytest is the exception (single-file debugging; integration/e2e/docker lanes). 12 workers rejected. Doc: AGENTS.md §Testing. |
 | R4 | **Source-walk gate caching** (Stage 5): may gate tests consume a shared session-scoped materialization of the same walk? | per-test independent enumeration vs ~190 s/run; vault ruling "enumerate from the thing itself" must not be diluted into a second authority | Allow, with the sabotage round-trip acceptance per ported file; gates whose walk is genuinely distinct (git-history reads) keep their own. |
-| R5 | **CLI-child conversion list** (Stage 6): which `_run_harness`-class call sites are deliberate process-boundary acceptances? | test fidelity vs ~100 s/run | Classification table lands first; operator strikes rows; only unstruck class-(b) rows convert. |
+| R5 | **CLI-child conversion list** (Stage 6): which `_run_harness`-class call sites are deliberate process-boundary acceptances? | test fidelity vs ~100 s/run | **RULED: upheld, no strikes** (2026-09-01, delegated review). All 37 sites claim verb wiring (envelope/exit/store), none the process boundary; the three class-(a) files stay byte-identical children. §12 carries the per-site reasoning. |
 | R6 | **Batching multiple small files per runner child** (possible Stage 4 extension): weaken per-FILE isolation to per-BATCH to amortize the 1.9–4.2 s/file overhead? | isolation granularity (the repo's chosen boundary) vs the single biggest parallel-lane cost | **Not recommended now** — take Stages 3–4 first and re-measure; only bring this back with data showing the remaining overhead still dominates. |
 
 ## Follow-ups this diagnosis surfaced (not perf, filed here for routing)

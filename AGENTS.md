@@ -1296,6 +1296,24 @@ scripts/run_tests.sh tests/agent/test_foo.py -k test_x  # one test (file + -k; t
 scripts/run_tests.sh -v --tb=long                     # pass-through pytest flags
 ```
 
+**Full-suite default (ruled 2026-09-01, hermes-suite-perf R3):** the per-file
+parallel runner at its adaptive default of **8 workers** IS the full-suite
+lane; plain serial `python -m pytest <dirs>` is the exception, kept for
+single-file debugging and for the `tests/integration` / `tests/e2e` /
+`tests/docker` suites the runner deliberately skips (they need real external
+services and run in their own dedicated jobs — name them explicitly, e.g.
+`run_tests_parallel.py tests/e2e`, when you do want them). Do NOT raise
+`HERMES_TEST_WORKERS` past 8: the 12-worker probe measured slower (23:55 vs
+17:36) AND load-flaked 2 tests that are serially green (field notes §14 of
+`docs/agent-runtime-harness/planned/hermes-suite-perf-field-notes-2026-09-01.md`).
+Any parallel-only failure is compared as a SET against a serial confirmation
+run of just that file before it is believed. Two knobs worth knowing:
+`HERMES_TEST_TMP_ROOT` (point it at a dedicated, Defender-excluded throwaway
+dir — the suite's temp moves under it; forwarded through `run_tests.sh`'s
+hermetic env) and the fact that `tests/acp` cannot collect from a git
+worktree (`No module named 'acp'`; the editable install resolves to the
+primary checkout — run it from the primary, or name your lanes explicitly).
+
 **Flake policy:** the runner auto-retries a failing test FILE once in a fresh
 subprocess (`--file-retries`, default 1; `HERMES_TEST_FILE_RETRIES=0` to
 disable). Pass-on-retry counts as green but is printed in a `⚠ FLAKY` summary
