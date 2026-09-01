@@ -77,13 +77,17 @@ EterniaLauncher repo).
 > reason it always was. What is no longer true is that this is the *only* way a
 > pulled placement can end up; the ordinary case now has an agent.
 >
-> **The two-machine live proof (plan stage L3) has NOT been run.** Every
-> guarantee here is measured against one store. Until an operator pulls a
-> Windows-authored desk onto the Mac and opens a chat on it, "a realm pull
-> delivers a working agent" is a property this repo's suites assert and no live
-> realm has demonstrated. Authority for the stage list and the landed wire
-> contract: `docs/mission_control/planned/instance-replication.md` in the
-> EterniaLauncher repo, stamped EXECUTED-through-L2.
+> **The two-machine live proof (plan stage L3) RAN and PASSED, 2026-09-01.**
+> The operator did exactly the sentence above: Windows deleted and re-added the
+> Neko agent (fresh identity, through the tombstone + resurrection-guard path)
+> and published; the Mac's fresh serve pulled, minted
+> `personainst_neko_supervisor_agent_2e94fab3` through
+> `PersonaInstanceStore.replicate_instance` (`persona_instance.replicated` at
+> `2026-09-01T05:42:04Z`, `source: "realm_sync"`), the badge cleared, and a
+> chat with the replica produced a real turn record — a working agent, not a
+> reference. Authority for the stage list, the landed wire contract, and the
+> proof receipts: `docs/mission_control/planned/instance-replication.md` in the
+> EterniaLauncher repo, stamped EXECUTED AND PROVEN LIVE.
 
 **Intent semantics at this verb (ruled 2026-08-30).** A `runtime.office.remove`
 carrying an operator's click is AUTHORED intent: the tombstone it mints and that

@@ -765,12 +765,20 @@ authority, so in-process tool relay, CLI and serve transport get the same depth
   `runtime.agent.create` carry the token, the remaining argv capability lanes do
   not, and the one-grep acceptance was never scripted
   ([planned/correlation-id-coverage.md](planned/correlation-id-coverage.md)).
-- **The remote gateway is planned and unstarted** — the socket lane is the contract
-  a future device/peer tier makes bindable beyond loopback (install identity,
-  `gateway.listen`, pairing, cross-install `agent_chat_send`); gated on the primary
-  plan's rulings R1–R13, zero answered as of 2026-08-27, with Stage 1 additionally
-  blocked on the authorization chokepoint (doc 06's Open row)
-  ([planned/remote-gateway.md](planned/remote-gateway.md)).
+- **The remote gateway SHIPPED (stages 0–8, 2026-08-27/28) — this row said
+  "planned and unstarted" until 2026-09-01, which §1.1 of this same doc already
+  contradicted.** The socket lane became the gateway lane: `gateway.listen`,
+  install identity, TLS-only bind beyond loopback, device pairing, the peer
+  ceremony, cross-install `agent_chat_send`, and the two-verb media family.
+  What remains is the primary plan's live remainder, not unbuilt stages: R12/R13
+  unruled, the backend-broker connector unstaged, and the standing live gaps —
+  no physical second machine has exercised the LAN bind, no cross-install
+  media, and the remote fullscreen viewer still reads `File(path)`. That
+  remainder is the same-account multi-machine program's ground. Authority:
+  `planned/universal-remote-gateway.md` in the EterniaLauncher repo (status
+  corrected 2026-08-30: BUILT, remainder live);
+  [planned/remote-gateway.md](planned/remote-gateway.md) is the hermes-half
+  pointer.
 - **`serve.py:105` says the RPC registry holds "currently eight" methods; ten
   are registered.** That same docstring warns "a docstring that copies a
   register starts lying the first time the register moves" — it has.

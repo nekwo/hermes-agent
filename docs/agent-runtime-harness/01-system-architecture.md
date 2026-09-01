@@ -359,8 +359,17 @@ the queued global-singleton redesign. The ack is
 `result["persona_instance_sync"]`, emitted unconditionally with
 `source: "projection" | "unreadable" | null` — an omitted key cannot tell an
 older PEER apart from an older local hermes, and the launcher has to tell them
-apart. **The two-machine live proof is not run**: every guarantee above is
-measured against one store.
+apart. **The two-machine live proof RAN and PASSED, 2026-09-01** (plan stage
+L3, operator-run): Windows deleted and re-added the Neko agent — exercising
+the tombstone and resurrection-guard path rather than dodging it — and
+published; the Mac's freshly booted serve pulled and minted
+`personainst_neko_supervisor_agent_2e94fab3` through the store door
+(`persona_instance.replicated` at `2026-09-01T05:42:04Z`,
+`source: "realm_sync"`), the launcher's "Not linked here" badge cleared, and
+the operator's chat with the replica produced a real turn record. A realm pull
+delivers a working agent, demonstrated live across two machines — the receipt
+ledger is `docs/mission_control/planned/instance-replication.md` in the
+EterniaLauncher repo.
 
 Workspace scoping is its own authority, and it governs **advertising and
 bare-persona resolution only** (`agent_runtime/workspace_scope.py`):

@@ -1,5 +1,13 @@
 # Planned — Remote Gateway (hermes half)
 
+**Status correction 2026-09-01, mirroring the primary plan's own 2026-08-30
+correction: BUILT — every numbered stage shipped 2026-08-27/28.** The
+paragraph below is the pre-build gating history, kept as the record of how the
+rulings fell; the primary plan
+(`docs/mission_control/planned/universal-remote-gateway.md`, EterniaLauncher)
+carries the per-stage shas and the live remainder (R12/R13, the broker
+appendix, the no-second-machine gap).
+
 **Status:** surveyed + staged 2026-08-24, **GATED on the operator rulings R1–R13 in the
 primary plan — no stage builds before its ruling.** 2026-08-27: R1 RULED (encrypt;
 self-signed pinned baseline + launcher-reuse survey) and the authorization
