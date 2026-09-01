@@ -712,7 +712,7 @@ def test_another_workspaces_uncovered_batch_is_not_this_subscribers_business(eve
 
 
 @pytest.mark.parametrize(
-    "event_type", ["realm.sync.pulled", "realm.sync.published"]
+    "event_type", ["realm.sync.pulled", "realm.sync.published", "realm.sync.reverted"]
 )
 def test_a_realm_sync_watermark_resyncs_this_workspace(event_type):
     """H2 (plan ``realm-pull-live-projection``): the ONE arm that answers True
@@ -724,6 +724,11 @@ def test_a_realm_sync_watermark_resyncs_this_workspace(event_type):
     whose own docstring says it exists "so stream / read-model consumers
     refresh" refreshed every consumer EXCEPT the one that owns the office
     canvas.
+
+    ``.reverted`` (2026-08-31) is the same fact from the third lane: a revert
+    rewrites actor rows and the office baseline with no office event for the
+    board families at all, so a canvas that never heard would keep rendering
+    rows the store no longer has.
 
     ``.published`` is the half that fires today: publish rewrites
     ``office_baseline.json``, which flips every actor's DERIVED ``unpublished``

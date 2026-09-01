@@ -450,12 +450,37 @@ class BoardStore:
             self._record_idempotency(board_id, idempotency_key, card.card_id)
         return self.get_card(card_id, board_id=board_id)
 
-    def archive_card(self, card_id: str, *, board_id: str | None = None, reason: str = "operator", updated_by: str = "operator") -> BoardCard:
+    def archive_card(
+        self,
+        card_id: str,
+        *,
+        board_id: str | None = None,
+        reason: str = "operator",
+        updated_by: str = "operator",
+        record_tombstone: bool = True,
+    ) -> BoardCard:
+        """Archive one card — the board's delete.
+
+        ``record_tombstone`` is the AUTHORED-vs-DIAGNOSTIC split, the office
+        twin's parameter for the office twin's reason (``OfficeStore.
+        remove_actor``, operator ruling 2026-08-30 / AX7). Defaulted true, which
+        is every caller that carries an operator's intent to delete. ``False``
+        is for a repair aimed only at THIS install's projection — the realm-sync
+        REVERT lane's ``added`` arm, where the operator is saying "my
+        unpublished local row is noise", not "delete this card realm-wide":
+        ``archived_card_ids`` rides the PUBLISHED board def, so a tombstone
+        minted from a local-only revert would archive the row on every machine
+        in the realm. The archive copy is written either way — archive-never-
+        delete is not what is being traded, and ``restore_card`` still works.
+        """
+
         board_id, _ = self._locate_card(card_id, board_id=board_id)
         with board_lock(board_id):
             board = self.get(board_id)
             card = self.get_card(card_id, board_id=board_id)
-            self._archive_card_locked(board, card, reason=reason, updated_by=updated_by)
+            self._archive_card_locked(
+                board, card, reason=reason, updated_by=updated_by, record_tombstone=record_tombstone
+            )
             archived = from_jsonable(BoardCard, _read_json(paths.board_archived_card_path(board_id, card_id)))
         return archived
 
@@ -587,7 +612,16 @@ class BoardStore:
             )
         return scan.cards
 
-    def _archive_card_locked(self, board: Board, card: BoardCard, *, reason: str, updated_by: str, emit: bool = True) -> None:
+    def _archive_card_locked(
+        self,
+        board: Board,
+        card: BoardCard,
+        *,
+        reason: str,
+        updated_by: str,
+        emit: bool = True,
+        record_tombstone: bool = True,
+    ) -> None:
         card.state = "archived"
         card.revision += 1
         card.updated_at = now()
@@ -595,7 +629,12 @@ class BoardStore:
         atomic_json_write(paths.board_archived_card_path(board.board_id, card.card_id), to_jsonable(card), indent=2, sort_keys=True)
         active_path = paths.board_card_path(board.board_id, card.card_id)
         active_path.unlink(missing_ok=True)
-        if card.card_id not in board.archived_card_ids:
+        # The ONE line the diagnostic mode skips — see ``archive_card``'s
+        # ``record_tombstone``. The archive copy above is written
+        # unconditionally; only the realm-visible ledger entry is withheld,
+        # because only that entry rides the published board def and is therefore
+        # an assertion about the REALM rather than about this projection.
+        if record_tombstone and card.card_id not in board.archived_card_ids:
             board.archived_card_ids = [*board.archived_card_ids, card.card_id][-ARCHIVED_LEDGER_CAP:]
             board.updated_at = now()
             _write_board(board)

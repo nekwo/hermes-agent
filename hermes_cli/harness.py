@@ -613,6 +613,28 @@ def build_parser(parent_subparsers) -> None:
         realm_sync_resolve, controls=frozenset({"dry_run", "yes"})
     )
     realm_sync_resolve.set_defaults(func=_cmd_realm_sync_resolve)
+    realm_sync_revert = realm_sync_subs.add_parser(
+        "revert",
+        help="Revert drifted local store rows to the last-pulled upstream (local-only: no git, no network, no credential — and never mints a realm-visible tombstone)",
+    )
+    realm_sync_revert.add_argument("realm_id")
+    realm_sync_revert.add_argument(
+        "--item",
+        dest="items",
+        action="append",
+        default=None,
+        help="FAMILY:CONTAINER:KEY from `realm sync status` store_drift.items (e.g. office_actor:ws_x:dev_agent_1234); repeatable",
+    )
+    realm_sync_revert.add_argument(
+        "--all",
+        dest="revert_all",
+        action="store_true",
+        help="Revert every drifted item in this realm",
+    )
+    _add_stage42_global_args(
+        realm_sync_revert, controls=frozenset({"dry_run", "yes"})
+    )
+    realm_sync_revert.set_defaults(func=_cmd_realm_sync_revert)
 
     realm_skills = realm_subs.add_parser("skills", help="Per-realm selection of which shared skills publish to a realm")
     realm_skills_subs = realm_skills.add_subparsers(dest="realm_skills_command", required=True)
@@ -3524,6 +3546,35 @@ def _cmd_realm_sync_resolve(args) -> int:
     envelope = _object_envelope("profile_artifact_hold", {"id": row["key"], **row})
     if dry_run:
         envelope["dry_run"] = True
+    _print_stage42(envelope, args=args, default_output="json")
+    return 0
+
+
+def _cmd_realm_sync_revert(args) -> int:
+    """`realm sync revert` — the SECOND exit from unpublished local changes.
+
+    Gated on ``--yes`` like publish/resolve: it is destructive of LOCAL state
+    (archive-never-delete, so recoverable, but the operator still has to mean
+    it). Local-only — it takes no ``--credential-file``, because it never
+    reaches the remote; the upstream it reverts to is the subtree the last pull
+    already put on disk.
+    """
+
+    from agent_runtime.realm_revert import revert_realm_sync
+
+    if not _require_yes(args):
+        return 8
+    dry_run = bool(getattr(args, "dry_run", False))
+    try:
+        data = revert_realm_sync(
+            args.realm_id,
+            item_specs=list(getattr(args, "items", None) or []),
+            revert_all=bool(getattr(args, "revert_all", False)),
+            dry_run=dry_run,
+        )
+    except RealmSyncError as exc:
+        return emit_harness_error(exc, args=args)
+    envelope = attach_root_observability(_object_envelope("realm_sync_revert", data))
     _print_stage42(envelope, args=args, default_output="json")
     return 0
 

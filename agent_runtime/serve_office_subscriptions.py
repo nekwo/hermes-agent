@@ -285,7 +285,9 @@ _ENUMERATED_FRAME_TYPE = "delta"
 #: from OUTSIDE this machine's own write lane; :func:`_delta_touches_workspace`
 #: is asked about a WORKSPACE. The payload cannot answer that question, so the
 #: answer is the conservative one — see the third arm's block comment.
-_REALM_SYNC_EVENT_TYPES = frozenset({"realm.sync.pulled", "realm.sync.published"})
+_REALM_SYNC_EVENT_TYPES = frozenset(
+    {"realm.sync.pulled", "realm.sync.published", "realm.sync.reverted"}
+)
 
 
 def _delta_touches_workspace(frame: dict[str, Any], workspace_id: str) -> bool | None:

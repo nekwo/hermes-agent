@@ -2093,6 +2093,36 @@
         "-q",
         "tests/hermes_cli/test_chat_element_pairing.py::test_a_terminal_call_is_matched_on_its_command"
       ]
+    },
+    {
+      "id": "realm-revert-never-mints-an-office-tombstone",
+      "path": "agent_runtime/realm_revert.py",
+      "symbol": "_archive_local_only",
+      "operator": "record-the-realm-visible-tombstone-anyway",
+      "find": "            reason=\"revert_local_only\",\n            updated_by=REVERT_ACTOR_REF,\n            record_tombstone=False,\n",
+      "replace": "            reason=\"revert_local_only\",\n            updated_by=REVERT_ACTOR_REF,\n            record_tombstone=True,\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_realm_revert.py::test_reverting_a_local_only_actor_archives_without_a_tombstone"
+      ]
+    },
+    {
+      "id": "board-archive-card-honours-the-diagnostic-lane",
+      "path": "agent_runtime/board_store.py",
+      "symbol": "BoardStore._archive_card_locked",
+      "operator": "ignore-record-tombstone",
+      "find": "        if record_tombstone and card.card_id not in board.archived_card_ids:\n",
+      "replace": "        if card.card_id not in board.archived_card_ids:\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_realm_revert.py::test_reverting_a_local_only_card_archives_without_a_tombstone"
+      ]
     }
   ]
 }

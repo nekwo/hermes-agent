@@ -205,8 +205,16 @@ def realm_sync_status(
     # leaves git ``in_sync`` while real unpublished changes sit in the store.
     # This surfaces that honestly (pure hash/baseline compare — no extra
     # git/network on the status path).
-    board_drift = _board_store_drift(realm.id, workspaces)
-    store_drift = {"boards": board_drift, "office": _office_store_drift(realm.id, workspaces)}
+    # ONE walk per family, and the counts derived from its rows. ``items`` is
+    # ADDITIVE (absent-tolerant on the launcher side): the counts keep their
+    # exact shape, and the rows are what makes a per-item revert addressable at
+    # all — a count nothing can name is a change with no exit but Publish.
+    drift_items = store_drift_items(realm.id, workspaces)
+    store_drift = {
+        "boards": _drift_counts(drift_items, _BOARD_DRIFT_COUNTS),
+        "office": _drift_counts(drift_items, _OFFICE_DRIFT_COUNTS),
+        "items": [item.as_dict() for item in drift_items],
+    }
     profile_artifacts_held = _held_profile_artifacts(realm, repo)
     _write_sync_sidecar(
         realm,
@@ -1166,6 +1174,179 @@ def _board_publish_scan(workspaces: list[Workspace]) -> BoardPublishScan:
     return BoardPublishScan(artifacts=artifacts, refused=refused)
 
 
+#: The four itemizable store-drift families. A family is the pair (store, row
+#: granularity) — never the layer — because it is what a per-item revert has to
+#: address: ``board``/``office_surface`` are the CONTAINER definitions,
+#: ``board_card``/``office_actor`` the rows inside them.
+DRIFT_FAMILY_BOARD = "board"
+DRIFT_FAMILY_BOARD_CARD = "board_card"
+DRIFT_FAMILY_OFFICE_SURFACE = "office_surface"
+DRIFT_FAMILY_OFFICE_ACTOR = "office_actor"
+
+DRIFT_KIND_ADDED = "added"
+DRIFT_KIND_CHANGED = "changed"
+DRIFT_KIND_REMOVED = "removed"
+
+#: The item_key a CONTAINER definition row carries. The container itself is
+#: already named by ``container``, so this is the same suffix its baseline key
+#: has always used (``<board_id>:board`` / ``<workspace_id>:office``) rather
+#: than a second spelling invented for the wire.
+DRIFT_KEY_BOARD_DEF = "board"
+DRIFT_KEY_OFFICE_SURFACE = "office"
+
+
+@dataclass(frozen=True, slots=True)
+class StoreDriftItem:
+    """ONE drifted store row, and the only thing the counts are made of.
+
+    The counts below used to be four ``+= 1`` accumulators inside the walk, so
+    the sheet could say "1 actor removed" and nothing in the runtime could say
+    WHICH — the operator's only exit from unpublished changes was Publish, for
+    an item the product would not name (measured 2026-08-31 on the Mac store:
+    ``offices_changed 1, actors_removed 1``). Itemizing first and deriving the
+    counts keeps ONE walk and ONE authority: a row that is counted is a row that
+    can be reverted, by construction rather than by two loops agreeing.
+    """
+
+    family: str
+    container: str  # workspace_id (office families) or board_id (board families)
+    item_key: str
+    kind: str  # added | changed | removed
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "family": self.family,
+            "container": self.container,
+            "item_key": self.item_key,
+            "kind": self.kind,
+        }
+
+    @property
+    def spec(self) -> str:
+        """The ``FAMILY:CONTAINER:KEY`` token ``realm sync revert --item`` takes."""
+
+        return f"{self.family}:{self.container}:{self.item_key}"
+
+    def baseline_key(self) -> str:
+        """This row's key in its family's baseline sidecar.
+
+        Delegated to the sidecar owners' own key helpers rather than respelled:
+        the revert lane realigns these exact entries, and a second spelling of a
+        key is free to disagree with the first.
+        """
+
+        from .board_sync import _board_key, _card_key
+        from .office_sync import _actor_key, _surface_key
+
+        if self.family == DRIFT_FAMILY_BOARD:
+            return _board_key(self.container)
+        if self.family == DRIFT_FAMILY_BOARD_CARD:
+            return _card_key(self.container, self.item_key)
+        if self.family == DRIFT_FAMILY_OFFICE_SURFACE:
+            return _surface_key(self.container)
+        return _actor_key(self.container, self.item_key)
+
+
+#: (count name, family, kind or None for "every row of this family"). The
+#: existing four-key count shapes are DERIVED through these tables — the
+#: launcher parses them today, so they are additive-only contracts.
+_BOARD_DRIFT_COUNTS = (
+    ("boards_changed", DRIFT_FAMILY_BOARD, None),
+    ("cards_changed", DRIFT_FAMILY_BOARD_CARD, DRIFT_KIND_CHANGED),
+    ("cards_added", DRIFT_FAMILY_BOARD_CARD, DRIFT_KIND_ADDED),
+    ("cards_removed", DRIFT_FAMILY_BOARD_CARD, DRIFT_KIND_REMOVED),
+)
+_OFFICE_DRIFT_COUNTS = (
+    ("offices_changed", DRIFT_FAMILY_OFFICE_SURFACE, None),
+    ("actors_changed", DRIFT_FAMILY_OFFICE_ACTOR, DRIFT_KIND_CHANGED),
+    ("actors_added", DRIFT_FAMILY_OFFICE_ACTOR, DRIFT_KIND_ADDED),
+    ("actors_removed", DRIFT_FAMILY_OFFICE_ACTOR, DRIFT_KIND_REMOVED),
+)
+
+
+def _drift_counts(
+    items: list[StoreDriftItem], spec: tuple[tuple[str, str, str | None], ...]
+) -> dict[str, int]:
+    """The counts, DERIVED from the rows. Every row of a family lands in exactly
+    one counter and every counter counts rows, so ``any count > 0`` and
+    ``items != []`` cannot disagree."""
+
+    return {
+        name: sum(
+            1
+            for item in items
+            if item.family == family and (kind is None or item.kind == kind)
+        )
+        for name, family, kind in spec
+    }
+
+
+def store_drift_items(realm_id: str, workspaces: list[Workspace]) -> list[StoreDriftItem]:
+    """Every drifted store row for this realm, board families first."""
+
+    return [
+        *_board_store_drift_items(realm_id, workspaces),
+        *_office_store_drift_items(realm_id, workspaces),
+    ]
+
+
+def _board_store_drift_items(realm_id: str, workspaces: list[Workspace]) -> list[StoreDriftItem]:
+    """The per-row half of :func:`_board_store_drift` — see that docstring for
+    the semantics; this function IS the walk it counts."""
+
+    from . import board_models
+    from .board_store import BoardStore
+    from .board_sync import read_board_baseline
+
+    workspace_ids = {ws.id for ws in workspaces}
+    baseline = read_board_baseline(realm_id)
+    store = BoardStore()
+    items: list[StoreDriftItem] = []
+    for board in store.list_all():
+        if board.workspace_id not in workspace_ids:
+            continue
+        board_base = baseline.get(f"{board.board_id}:board")
+        if board_base != board_models.board_content_hash(board):
+            items.append(
+                StoreDriftItem(
+                    family=DRIFT_FAMILY_BOARD,
+                    container=board.board_id,
+                    item_key=DRIFT_KEY_BOARD_DEF,
+                    kind=DRIFT_KIND_CHANGED if board_base is not None else DRIFT_KIND_ADDED,
+                )
+            )
+        card_prefix = f"{board.board_id}:card:"
+        baseline_card_ids = {key[len(card_prefix):] for key in baseline if key.startswith(card_prefix)}
+        current_card_ids: set[str] = set()
+        for card in store.list_cards(board.board_id):
+            current_card_ids.add(card.card_id)
+            base_hash = baseline.get(f"{card_prefix}{card.card_id}")
+            if base_hash is None:
+                kind = DRIFT_KIND_ADDED
+            elif base_hash != board_models.board_content_hash(card):
+                kind = DRIFT_KIND_CHANGED
+            else:
+                continue
+            items.append(
+                StoreDriftItem(
+                    family=DRIFT_FAMILY_BOARD_CARD,
+                    container=board.board_id,
+                    item_key=card.card_id,
+                    kind=kind,
+                )
+            )
+        for card_id in sorted(baseline_card_ids - current_card_ids):
+            items.append(
+                StoreDriftItem(
+                    family=DRIFT_FAMILY_BOARD_CARD,
+                    container=board.board_id,
+                    item_key=card_id,
+                    kind=DRIFT_KIND_REMOVED,
+                )
+            )
+    return items
+
+
 def _board_store_drift(realm_id: str, workspaces: list[Workspace]) -> dict[str, int]:
     """Board content drift vs the never-synced baseline sidecar, for boards whose
     ``workspace_id`` belongs to this realm's workspaces.
@@ -1182,38 +1363,83 @@ def _board_store_drift(realm_id: str, workspaces: list[Workspace]) -> dict[str, 
     baseline; ``cards_added`` counts active cards with no baseline entry; and
     ``cards_removed`` counts baseline cards no longer active locally (archived /
     deleted since the last publish).
+
+    DERIVED from :func:`_board_store_drift_items` since 2026-08-31 — one walk,
+    one authority. The four keys and their exact meanings are unchanged (the
+    launcher parses them); what changed is that each one is now the size of a
+    NAMED set of rows rather than an accumulator nothing else can see.
     """
 
-    from . import board_models
-    from .board_store import BoardStore
-    from .board_sync import read_board_baseline
+    return _drift_counts(_board_store_drift_items(realm_id, workspaces), _BOARD_DRIFT_COUNTS)
 
-    workspace_ids = {ws.id for ws in workspaces}
-    baseline = read_board_baseline(realm_id)
-    store = BoardStore()
-    boards_changed = cards_changed = cards_added = cards_removed = 0
-    for board in store.list_all():
-        if board.workspace_id not in workspace_ids:
+
+def _office_store_drift_items(realm_id: str, workspaces: list[Workspace]) -> list[StoreDriftItem]:
+    """The per-row half of :func:`_office_store_drift` — see that docstring for
+    the semantics and for both under-count guards; this function IS the walk it
+    counts, guards included."""
+
+    from . import office_models
+    from .office_store import OfficeStore
+    from .office_sync import _actor_key, _surface_key, read_office_baseline
+
+    baseline = read_office_baseline(realm_id)
+    store = OfficeStore()
+    items: list[StoreDriftItem] = []
+    for workspace in workspaces:
+        workspace_id = workspace.id
+        if not paths.office_dir(workspace_id).exists():
             continue
-        if baseline.get(f"{board.board_id}:board") != board_models.board_content_hash(board):
-            boards_changed += 1
-        card_prefix = f"{board.board_id}:card:"
-        baseline_card_ids = {key[len(card_prefix):] for key in baseline if key.startswith(card_prefix)}
-        current_card_ids: set[str] = set()
-        for card in store.list_cards(board.board_id):
-            current_card_ids.add(card.card_id)
-            base_hash = baseline.get(f"{card_prefix}{card.card_id}")
+        try:
+            surface = store.get_surface(workspace_id)
+        except Exception:  # noqa: BLE001 — missing or unreadable: skip the row, never guess
+            surface = None
+        if surface is not None:
+            surface_base = baseline.get(_surface_key(workspace_id))
+            if surface_base != office_models.office_content_hash(surface):
+                items.append(
+                    StoreDriftItem(
+                        family=DRIFT_FAMILY_OFFICE_SURFACE,
+                        container=workspace_id,
+                        item_key=DRIFT_KEY_OFFICE_SURFACE,
+                        kind=DRIFT_KIND_CHANGED if surface_base is not None else DRIFT_KIND_ADDED,
+                    )
+                )
+        try:
+            scan = store.scan_actors(workspace_id)
+        except Exception:  # noqa: BLE001 — unreadable listing is not evidence of removal
+            continue
+        if scan.unreadable:
+            continue
+        actor_prefix = _actor_key(workspace_id, "")
+        baseline_actor_keys = {key[len(actor_prefix):] for key in baseline if key.startswith(actor_prefix)}
+        current_actor_keys: set[str] = set()
+        for actor in scan.actors:
+            current_actor_keys.add(actor.actor_key)
+            base_hash = baseline.get(_actor_key(workspace_id, actor.actor_key))
             if base_hash is None:
-                cards_added += 1
-            elif base_hash != board_models.board_content_hash(card):
-                cards_changed += 1
-        cards_removed += len(baseline_card_ids - current_card_ids)
-    return {
-        "boards_changed": boards_changed,
-        "cards_changed": cards_changed,
-        "cards_added": cards_added,
-        "cards_removed": cards_removed,
-    }
+                kind = DRIFT_KIND_ADDED
+            elif base_hash != office_models.office_content_hash(actor):
+                kind = DRIFT_KIND_CHANGED
+            else:
+                continue
+            items.append(
+                StoreDriftItem(
+                    family=DRIFT_FAMILY_OFFICE_ACTOR,
+                    container=workspace_id,
+                    item_key=actor.actor_key,
+                    kind=kind,
+                )
+            )
+        for actor_key in sorted(baseline_actor_keys - current_actor_keys):
+            items.append(
+                StoreDriftItem(
+                    family=DRIFT_FAMILY_OFFICE_ACTOR,
+                    container=workspace_id,
+                    item_key=actor_key,
+                    kind=DRIFT_KIND_REMOVED,
+                )
+            )
+    return items
 
 
 def _office_store_drift(realm_id: str, workspaces: list[Workspace]) -> dict[str, int]:
@@ -1252,57 +1478,32 @@ def _office_store_drift(realm_id: str, workspaces: list[Workspace]) -> dict[str,
     * a workspace with no office directory contributes nothing, and a
       missing/unreadable surface only skips its own ``offices_changed`` row (the
       actor accounting still runs when the listing is readable).
+
+    DERIVED from :func:`_office_store_drift_items` since 2026-08-31 — one walk,
+    one authority, the board twin's change for the board twin's reason. The four
+    keys and their meanings are unchanged.
     """
 
-    from . import office_models
-    from .office_store import OfficeStore
-    from .office_sync import _actor_key, _surface_key, read_office_baseline
-
-    baseline = read_office_baseline(realm_id)
-    store = OfficeStore()
-    offices_changed = actors_changed = actors_added = actors_removed = 0
-    for workspace in workspaces:
-        workspace_id = workspace.id
-        if not paths.office_dir(workspace_id).exists():
-            continue
-        try:
-            surface = store.get_surface(workspace_id)
-        except Exception:  # noqa: BLE001 — missing or unreadable: skip the row, never guess
-            surface = None
-        if surface is not None and baseline.get(_surface_key(workspace_id)) != office_models.office_content_hash(
-            surface
-        ):
-            offices_changed += 1
-        try:
-            scan = store.scan_actors(workspace_id)
-        except Exception:  # noqa: BLE001 — unreadable listing is not evidence of removal
-            continue
-        if scan.unreadable:
-            continue
-        actor_prefix = _actor_key(workspace_id, "")
-        baseline_actor_keys = {key[len(actor_prefix):] for key in baseline if key.startswith(actor_prefix)}
-        current_actor_keys: set[str] = set()
-        for actor in scan.actors:
-            current_actor_keys.add(actor.actor_key)
-            base_hash = baseline.get(_actor_key(workspace_id, actor.actor_key))
-            if base_hash is None:
-                actors_added += 1
-            elif base_hash != office_models.office_content_hash(actor):
-                actors_changed += 1
-        actors_removed += len(baseline_actor_keys - current_actor_keys)
-    return {
-        "offices_changed": offices_changed,
-        "actors_changed": actors_changed,
-        "actors_added": actors_added,
-        "actors_removed": actors_removed,
-    }
+    return _drift_counts(_office_store_drift_items(realm_id, workspaces), _OFFICE_DRIFT_COUNTS)
 
 
-def _any_store_drift(store_drift: dict[str, dict[str, int]]) -> bool:
+def _any_store_drift(store_drift: dict[str, Any]) -> bool:
     """True iff any drift family reports a nonzero count (drives the additive
-    ``unpublished_changes`` status flag)."""
+    ``unpublished_changes`` status flag).
 
-    return any(count for family in store_drift.values() for count in family.values())
+    Only the COUNT families are asked. ``store_drift`` also carries the additive
+    ``items`` list, and a list has no counts to sum — the two can never disagree
+    anyway (every row lands in exactly one counter, see :func:`_drift_counts`),
+    so this reads the halves it was written for rather than growing a second
+    answer for the same question.
+    """
+
+    return any(
+        count
+        for family in store_drift.values()
+        if isinstance(family, dict)
+        for count in family.values()
+    )
 
 
 class OfficePublishScan(NamedTuple):

@@ -147,6 +147,13 @@ ERROR_EXIT_CODES = {
     "proof_missing": 6,
     "needs_operator_confirm": 6,
     "default_scope_reconciliation_required": 6,
+    # `harness realm sync revert` with no local clone (or no subtree for this
+    # realm inside one). Family 6 and not 4: nothing conflicts and nothing is
+    # broken — the local picture of upstream simply is not there yet, and the
+    # operator's next MOVE is `realm sync pull`. It refuses rather than reading
+    # the absence as "upstream has nothing", which is the one misreading that
+    # would archive an operator's whole local office.
+    "sync_repo_missing": 6,
     # Skills / readiness (6)
     "skill_hash_mismatch": 6,
     "missing_skill": 6,
@@ -326,6 +333,7 @@ def _error_hint(code: str) -> str:
         "default_scope_reconciliation_required": "Run `hermes harness realm default-scope --dry-run --json`; no identities will change without explicit approval.",
         "sync_conflict": "Resolve conflicts in the realm sync git repo, then retry.",
         "sync_behind": "Run `hermes harness realm sync pull <realm> --json` before publishing.",
+        "sync_repo_missing": "Run `hermes harness realm sync pull <realm> --json` first — a revert reconciles against the last-pulled subtree.",
         "sync_secret_excluded": "Remove secrets/state from the realm sync allowlist source before retrying.",
         "sync_remote_unreachable": "Check network/git remote availability and retry.",
         "sync_auth_failed": "Provide a fresh launcher-brokered credential via --credential-file or HERMES_REALM_SYNC_CREDENTIAL.",
