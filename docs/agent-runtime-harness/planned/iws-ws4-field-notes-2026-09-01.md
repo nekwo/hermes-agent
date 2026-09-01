@@ -133,7 +133,7 @@ All with the system `python -m pytest`.
 | `test_scope_use_serve_acceptance.py` (new) | 5 passed |
 | authorization + gateway + office-rpc + row-consolidation focused set | 151 passed |
 | `tests/agent_runtime` + `tests/hermes_cli` | see the closing report's count |
-| mutation gate (`--base c894c2b159 --max-candidates 40`) | 6 candidates, **6 KILLED, 0 survived** |
+| mutation gate, `--max-candidates 40` | 6 candidates, **6 KILLED, 0 survived** — run TWICE: `--base c894c2b159` before the rebase, `--base cf9abaac4b` after |
 
 The mutation gate ran in its OWN worktree (`hermes-agent-ws4-mut`, detached at
 the branch head, removed afterwards) — it rewrites source in place and must
