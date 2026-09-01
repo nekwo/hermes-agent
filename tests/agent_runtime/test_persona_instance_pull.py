@@ -331,8 +331,16 @@ def test_the_mint_emits_a_delta_patch_on_the_event_log(tmp_path):
     assert replicated[0]["payload"]["persona_instance_id"] == INSTANCE_ID
     assert replicated[0]["payload"]["action"] == "replicated"
 
-    patch = [row for row in _events("state.patched")][0]
-    assert patch["payload"]["entity"] == "persona_instance"
+    # Selected by ENTITY rather than taken as the first row. WS1 (2026-09-01)
+    # gave the active-scope pointer a patch of its own, and this file's fixture
+    # activates a workspace before it pulls — so the log's first ``state.patched``
+    # is now that setup's ``scope`` row. The claim here was never "the mint's
+    # patch is first"; it is "the mint emitted one", and saying so by name is
+    # what makes it stay true when another chokepoint starts emitting too.
+    patches = [row for row in _events("state.patched")]
+    patch = next(
+        row for row in patches if row["payload"]["entity"] == "persona_instance"
+    )
     assert patch["payload"]["id"] == INSTANCE_ID
     # A complete-row insert, not a merge onto a target the client does not hold:
     # a replicated agent is a row nobody downstream has ever seen.
