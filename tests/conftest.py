@@ -58,6 +58,45 @@ if str(PROJECT_ROOT) not in sys.path:
 # would silently stop protecting the operator's actual ~/.hermes (#69385).
 _PRE_SANDBOX_KANBAN_OVERRIDE = os.environ.get("HERMES_KANBAN_HOME", "").strip()
 _PRE_SANDBOX_HERMES_HOME = os.environ.get("HERMES_HOME", "")
+
+
+# ── Opt-in test-temp root (suite-perf Stage 7, ruled 2026-09-01) ─────────────
+# Defender real-time scanning taxes every test file-op 2.3–2.9× on
+# non-excluded paths, and %TEMP% — where every tmp_path and hermetic
+# HERMES_HOME otherwise lands — is not excluded on the operator's machine
+# (the plan's §5 churn table). `HERMES_TEST_TMP_ROOT` names a DEDICATED,
+# scan-excluded, throwaway directory (the operator's is `X:\Eternia\test-tmp`,
+# inside their existing `X:\Eternia\` exclusion). When it names a real
+# directory, the whole session's temp — this process AND every spawned child,
+# which inherits the env — moves under a fresh per-run subdir there. Absent or
+# missing, NOTHING changes: the opt-in degrades to today's behavior, never to
+# an error. `tempfile.tempdir` is set as well as the env because the module
+# caches its answer on first use, and pytest has usually asked before conftest
+# imports. Prior run-dirs older than 7 days are pruned best-effort — an
+# unbounded pile in a scan-excluded directory is its own small hazard.
+def _maybe_redirect_test_tmp(environ: dict = os.environ) -> str | None:
+    root = (environ.get("HERMES_TEST_TMP_ROOT") or "").strip()
+    if not root or not os.path.isdir(root):
+        return None
+    import time
+
+    cutoff = time.time() - 7 * 24 * 3600
+    for entry in os.scandir(root):
+        try:
+            if entry.is_dir() and entry.stat().st_mtime < cutoff:
+                shutil.rmtree(entry.path, ignore_errors=True)
+        except OSError:
+            pass
+    run_dir = tempfile.mkdtemp(prefix="run-", dir=root)
+    for key in ("TMP", "TEMP", "TMPDIR"):
+        environ[key] = run_dir
+    if environ is os.environ:
+        tempfile.tempdir = run_dir
+    return run_dir
+
+
+_TEST_TMP_RUN_DIR = _maybe_redirect_test_tmp()
+
 if not os.environ.get("HERMES_HOME"):
     _SESSION_HERMES_HOME = tempfile.mkdtemp(prefix="hermes-test-home-")
     os.environ["HERMES_HOME"] = _SESSION_HERMES_HOME

@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """Per-file parallel test runner.
 
+Opt-in fast temp (suite-perf Stage 7, ruled 2026-09-01): set
+``HERMES_TEST_TMP_ROOT`` to a DEDICATED, Defender-excluded, throwaway
+directory (the operator's is ``X:\\Eternia\\test-tmp``) and every child this
+runner spawns inherits it — ``tests/conftest.py`` moves each session's temp
+(tmp_path, hermetic HERMES_HOME, tempfile) under a per-run subdir there,
+escaping the measured 2.3-2.9x real-time-scan tax on ``%TEMP%``. Absent or
+missing, behavior is byte-identical to before the knob existed.
+
 The minimum-viable replacement for pytest-xdist + a subprocess-isolation
 plugin. Discovers test files under ``tests/`` (excluding integration/e2e
 unless explicitly requested), then runs one ``python -m pytest <file>``

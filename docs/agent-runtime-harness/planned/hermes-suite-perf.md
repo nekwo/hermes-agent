@@ -249,6 +249,18 @@ nothing else; the operator owns the trade.
 
 ## Rulings needed (operator decisions — none pre-empted by this plan)
 
+**ALL SIX RULED 2026-09-01 at the recommendation (operator: "do the
+recommended"), with ONE amendment to R2:** the operator has `X:\Eternia\`
+excluded already (confirmed in-session), so NO new Defender exclusion is
+needed — Stage 7's temp root is `X:\Eternia\test-tmp` (created), inside the
+existing exclusion, and the ruling's "operator-only system setting" clause is
+DISCHARGED as not-needed. R3's condition stands as ruled: the parallel lane
+becomes the documented default only after parity + repo-integrity gates pass
+twice from a worktree. R5's classification table still comes to the operator
+for row-striking before any conversion. R6 stays not-now.
+**Execution order (operator, same exchange): "only to the exclusion now" —
+Stage 7 builds immediately; every other stage HOLDS for the operator's go.**
+
 | # | question | trade | plan's recommendation, with numbers |
 |---|---|---|---|
 | R1 | **pytest-xdist**: adopt for parallelism? | speed vs the per-file isolation design (persistent xdist workers carry cross-file module state; the runner docstring records dropping it for exactly that) | **No.** The serve one-owner locks would NOT forbid it (per-root, §5) and the fence arms per-test — the objection is state leakage by design, not locks. The in-repo per-file runner is the sanctioned lane (Stage 3); formalize that and close the question. |
