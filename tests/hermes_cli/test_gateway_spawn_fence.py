@@ -261,3 +261,84 @@ def test_the_pause_seam_is_defaulted_for_every_test_in_this_directory():
         "Scheduled Task, and park a resume on atexit"
     )
     assert bound() is None
+
+
+# ── Scoping: armed here, transparent everywhere else ───────────────────────
+#
+# The fence's first shape installed and refused in one act, and that reds
+# another directory's honest work: importing this conftest at COLLECTION time
+# armed a process-global refusal, and tests/agent_runtime's e2e tests spawn
+# real `python -m hermes_cli.main harness serve` children on purpose. Measured
+# 2026-08-31 on 671ae4f9a7 —
+#
+#   pytest tests/hermes_cli/test_env_export_prefix.py \
+#          tests/agent_runtime/test_serve_socket_child_e2e.py -q
+#   -> 2 failed, GatewayFenceViolation on a legitimate serve child
+#
+# — and 6 failed / 5 errors in the wave-close combined run. The claims below
+# pin both halves of the fix: still refusing in here, transparent out there.
+
+
+@pytest.mark.live_system_guard_bypass
+def test_the_fence_is_armed_while_a_test_in_this_directory_runs():
+    """The autouse arming fixture is what makes every L3 claim above true."""
+    assert _gateway_fence.is_installed()
+    assert _gateway_fence.is_armed()
+
+
+@pytest.mark.live_system_guard_bypass
+def test_a_disarmed_fence_passes_a_backend_argv_straight_through():
+    """Out-of-directory spawns must reach production untouched.
+
+    Disarming is what tests/agent_runtime gets for the whole of its run. The
+    classifier still RECOGNISES the argv — that is deliberate, the fence has
+    not forgotten what a backend looks like — but the wrapper must not act on
+    it, or a real serve child never starts.
+
+    Nothing is spawned here: the command is a hermes backend argv that would
+    otherwise be refused, and it is only ever handed to the classifier and to
+    a stand-in that records instead of executing.
+    """
+    argv = [sys.executable, "-m", "hermes_cli.main", "harness", "serve", "--ndjson"]
+    assert _gateway_fence.classify(argv) is not None, (
+        "the classifier should still recognise a backend argv while disarmed"
+    )
+
+    recorded: list[object] = []
+    real_popen = subprocess.Popen
+    try:
+        _gateway_fence.disarm()
+        assert not _gateway_fence.is_armed()
+        # Stand in for the OS call so the pass-through is observable without
+        # starting anything: if the fence still refused, this never runs.
+        subprocess.Popen = lambda cmd, *a, **k: recorded.append(cmd)
+        real_popen.__init__  # noqa: B018 — keep the reference obviously live
+        subprocess.Popen(argv)
+    finally:
+        subprocess.Popen = real_popen
+        _gateway_fence.arm()
+
+    assert recorded == [argv], "a disarmed fence refused a spawn it should pass"
+    assert _gateway_fence.is_armed(), "the fixture's arming must be restored"
+
+
+@pytest.mark.live_system_guard_bypass
+def test_disarming_cannot_lift_the_session_finish_latch():
+    """Once latched, ``disarm()`` is a no-op — the atexit window stays covered.
+
+    ``pytest_sessionfinish`` latches the refusal on for whatever the process
+    does next. Nothing runs after that point that could legitimately want it
+    off, and a stray ``disarm()`` from a lingering fixture teardown must not be
+    able to reopen the window the escape used. Proven directly rather than
+    trusted, then wound back so the rest of the run is unaffected.
+    """
+    from tests.hermes_cli import _gateway_fence as fence
+
+    latched_before = fence._LATCHED
+    try:
+        fence.arm_permanently()
+        fence.disarm()
+        assert fence.is_armed()
+    finally:
+        fence._LATCHED = latched_before
+        fence.arm()
