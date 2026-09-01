@@ -328,3 +328,116 @@ Worth a third row if the orchestrator wants it: `gateway/pairing.py`'s
 module-scope `PAIRING_DIR` is the same import-time-frozen-path shape as
 `hermes_state.DEFAULT_DB_PATH`, and both are now re-pinned by test fixtures
 rather than resolved at call time in production.
+
+
+---
+
+## 6. Follow-up: the fence was suite-scoped in name only (`feat/dcw-h2b-fence-scope`)
+
+Filed by the orchestrator against the landed W1-H2 fence, and it was right.
+The module docstring says "nothing under `tests/hermes_cli` starts a live
+gateway"; the implementation refused for the whole PROCESS.
+
+### What broke
+
+`_gateway_fence.install()` ran at conftest IMPORT, and a directory conftest is
+imported as soon as pytest COLLECTS anything under it. In a combined run that
+is the same process that later runs `tests/agent_runtime` — whose e2e tests
+spawn real `python -m hermes_cli.main harness serve` children ON PURPOSE,
+against roots they sandbox themselves. Measured on `671ae4f9a7`:
+
+```
+python -m pytest tests/hermes_cli/test_env_export_prefix.py \
+                 tests/agent_runtime/test_serve_socket_child_e2e.py -q
+-> 2 failed  (GatewayFenceViolation blocking
+              'python -m hermes_cli.main harness serve --ndjson')
+```
+
+and in the wave-close full run, 6 failed / 5 errors across
+`test_serve_socket_child_e2e`, `test_gateway_peer_cross_install_chat_e2e` and
+`test_gateway_peer_two_roots_e2e` — all green in isolation.
+
+The stage's own §0 named the property that mattered ("installed at conftest
+import, not in a fixture") and then let it do one job too many. **Installing
+and refusing had to be two different things**, and nothing in the original
+red-proof could have caught the difference: every proof ran `tests/hermes_cli`
+alone, which is the one shape where a process-global refusal and a
+directory-scoped one are indistinguishable.
+
+### The fix
+
+The wrappers stay permanent — that is still the only reason the fence lives
+outside a fixture. The REFUSAL is now armed:
+
+* **per test under `tests/hermes_cli`**, by an autouse fixture in this
+  directory's conftest. A directory conftest runs its fixtures for its own
+  items and no others, so the arming follows the running item's path without
+  anyone matching path strings, and without resting on collection order
+  (`tests/agent_runtime` happens to collect first in a combined run; nothing
+  should depend on that — proof C below runs `tests/hermes_cli` first);
+* **permanently from `pytest_sessionfinish`**, which is the window the escape
+  actually used. Arming is a FLAG the installed wrappers read at spawn time,
+  so it does not have to win a LIFO race against the handler
+  `_cmd_update_impl` parked mid-test — it only has to be down before that
+  handler runs, and session finish always is.
+
+L2's `_spawn_detached` stub delegates to the real function while disarmed,
+rather than refusing: the chokepoint is ours only where it is ours to close.
+
+### The atexit window, re-proven by A/B
+
+With L1 reverted so the resume handler is parked again, and the external
+recording probe loaded (it refuses rather than executes, so nothing can start):
+
+| | probe log |
+|---|---|
+| latch ON (shipped) | `atexit.register(_resume_windows_gateways_after_update, {…cold_start_if_installed: True})`, `schtasks /Query /TN Hermes_Gateway_alice` — **and no Popen**: the fence refused it |
+| latch REMOVED | the same two lines **plus** `Popen: C:\Python312\python.exe -m hermes_cli.main --profile alice gateway run` |
+
+The A/B is the point: absence of a Popen line proves nothing on its own, but
+the line reappearing the moment the latch is taken out proves the latch is
+what catches it.
+
+### Red-proof under the new scoping
+
+| layer | reverted | result |
+|---|---|---|
+| L1 (pause-seam default) | `1 failed, 28 passed` — `test_the_pause_seam_is_defaulted_for_every_test_in_this_directory` |
+| L2 (`_spawn_detached` stub) | `1 failed, 28 passed` — `test_spawn_detached_is_fenced_for_the_whole_session` |
+| arming (the new layer) | `6 failed, 23 passed` — the four L3 claims plus `test_spawn_detached_is_fenced…` and `test_the_fence_is_armed_while_a_test_in_this_directory_runs` |
+
+**A mistake worth recording:** the arming revert was first run WITHOUT the
+external probe. Reverting the arming is equivalent to reverting L3 — the L3
+tests carry `live_system_guard_bypass`, so with the fence disarmed nothing
+stood between them and the OS. `test_subprocess_run_refuses_the_measured_argv`
+calls `subprocess.run` with no timeout, so it started a gateway child and then
+blocked waiting for a process that never exits; the command hit its 2-minute
+cap. The child died with the killed pytest parent — a `Win32_Process` sweep for
+anything created that day with `gateway` in its command line came back with
+only the sweep itself, and the two live `harness serve` processes on this box
+are the operator's own, created 2026-08-30 14:39:46, well outside the run. The
+proof was redone with the probe standing in, which is how §3's L3 proof was
+already done and should have been done here from the start: **any revert that
+removes the refusal must have a non-fence refuser loaded, or the red-proof
+performs the incident.**
+
+### Proofs on the shipped state
+
+```
+tests/hermes_cli/test_env_export_prefix.py
+  + tests/agent_runtime/test_serve_socket_child_e2e.py            5 passed
+tests/agent_runtime/{test_serve_socket_child_e2e,
+                     test_gateway_peer_cross_install_chat_e2e,
+                     test_gateway_peer_two_roots_e2e}.py
+  + tests/hermes_cli/test_env_export_prefix.py                   10 passed
+tests/hermes_cli/test_gateway_spawn_fence.py                     31 passed
+  + tests/agent_runtime/test_serve_socket_child_e2e.py    (hermes_cli FIRST)
+python -m pytest tests/hermes_cli -q --timeout=300
+                          4418 passed, 100 skipped, 1 xfailed — 721.89s
+```
+
+Three new claims pin the scoping so it cannot silently regress: the fence is
+armed while a test in this directory runs; a disarmed fence passes a backend
+argv straight through (the classifier still RECOGNISES it — the fence has not
+forgotten what a backend looks like, the wrapper simply must not act); and
+`disarm()` cannot lift the session-finish latch.
