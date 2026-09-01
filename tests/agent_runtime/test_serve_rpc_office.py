@@ -607,6 +607,13 @@ def test_the_envelope_itself_is_validated_with_upstreams_codes():
         "runtime.office.unsubscribe",
         "runtime.office.upsert",
         "runtime.persona.prewarm",
+        # Plan WS4, additive for the third time: the two scope-pointer verbs.
+        # They ARE advertised like every other method — the restriction on them
+        # is a caller-KIND test at the chokepoint, not an absence from the
+        # manifest, because a client has to see that the method exists in order
+        # to lower onto it (the launcher's membership gate).
+        "runtime.realm.use",
+        "runtime.workspace.use",
     ]
 
     assert _reply(out, "old")["error"]["code"] == -32600
@@ -765,6 +772,9 @@ def test_stdio_learns_the_method_set_from_ready_and_can_re_ask_version():
             "runtime.office.unsubscribe",
             "runtime.office.upsert",
             "runtime.persona.prewarm",
+            # Plan WS4, additive: the two scope-pointer verbs.
+            "runtime.realm.use",
+            "runtime.workspace.use",
         ],
         "tiers": {
             "peer.agent_chat.execute": "console",
@@ -783,6 +793,8 @@ def test_stdio_learns_the_method_set_from_ready_and_can_re_ask_version():
             "runtime.office.unsubscribe": "read",
             "runtime.office.upsert": "console",
             "runtime.persona.prewarm": "read",
+            "runtime.realm.use": "console",
+            "runtime.workspace.use": "console",
         },
     }
     ready = next(f for f in frames if f.get("event") == "ready")
@@ -841,6 +853,9 @@ def test_the_method_surface_is_transport_agnostic_and_answers_on_the_socket():
                     "runtime.office.unsubscribe",
                     "runtime.office.upsert",
                     "runtime.persona.prewarm",
+                    # Plan WS4, additive: the two scope-pointer verbs.
+                    "runtime.realm.use",
+                    "runtime.workspace.use",
                 ],
                 "tiers": {
                     "peer.agent_chat.execute": "console",
@@ -859,6 +874,8 @@ def test_the_method_surface_is_transport_agnostic_and_answers_on_the_socket():
                     "runtime.office.unsubscribe": "read",
                     "runtime.office.upsert": "console",
                     "runtime.persona.prewarm": "read",
+                    "runtime.realm.use": "console",
+                    "runtime.workspace.use": "console",
                 },
             }
 
