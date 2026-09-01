@@ -2273,6 +2273,156 @@
         "-q",
         "tests/agent_runtime/test_persona_instance_publish.py::test_the_publish_row_carries_the_projections_accounting_and_the_store_shortfall"
       ]
+    },
+    {
+      "id": "ir-h3-baseline-re-derived-from-the-local-write",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "apply_persona_instance_pull",
+      "operator": "align-the-baseline-to-local-instead-of-remote",
+      "find": "        written.append((instance_id, remote_body))\n        # THE baseline-alignment property",
+      "replace": "        written.append((instance_id, remote_body))\n        remote_hash = persona_instance_def_hash(project_persona_instance(store.get(instance_id))) + 'x'\n        # THE baseline-alignment property",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_a_fresh_replica_reads_zero_drift_immediately"
+      ]
+    },
+    {
+      "id": "ir-h3-a-short-remote-answer-deletes-the-replica",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "apply_persona_instance_pull",
+      "operator": "treat-upstream-absent-as-a-delete",
+      "find": "            if local_hash is not None:\n                summary.upstream_absent.append(instance_id)\n            else:\n                baseline.pop(key, None)\n            continue",
+      "replace": "            baseline.pop(key, None)\n            __import__('agent_runtime.paths', fromlist=['x']).persona_instance_path(instance_id).unlink(missing_ok=True)\n            continue",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_a_row_the_realm_stopped_publishing_is_not_a_delete"
+      ]
+    },
+    {
+      "id": "ir-h3-hold-clobbers-the-locally-edited-replica",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "apply_persona_instance_pull",
+      "operator": "adopt-on-conflict",
+      "find": "        if decision.action == PullAction.CONFLICT:\n            summary.held.append(instance_id)\n",
+      "replace": "        if decision.action == PullAction.CONFLICT:\n            summary.held.append(instance_id)\n            store.replicate_instance(remote_body, realm_id=realm_id, adopt_existing=local_record)\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_a_locally_edited_replica_is_held_and_never_clobbered"
+      ]
+    },
+    {
+      "id": "ir-h3-a-replication-mint-poses-as-an-authored-create",
+      "path": "agent_runtime/persona_assignments.py",
+      "symbol": "PersonaInstanceStore.replicate_instance",
+      "operator": "reuse-the-authored-create-event",
+      "find": "            \"persona_instance.replicated\",\n            instance,\n            {\n                \"source\": \"realm_sync\",",
+      "replace": "            \"persona_instance.created\",\n            instance,\n            {\n                \"source\": \"realm_sync\",",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_the_mint_emits_a_delta_patch_on_the_event_log"
+      ]
+    },
+    {
+      "id": "ir-h3-the-mint-reaches-no-live-consumer",
+      "path": "agent_runtime/persona_assignments.py",
+      "symbol": "PersonaInstanceStore.replicate_instance",
+      "operator": "drop-the-delta-patch",
+      "find": "        if created:\n            emit_persona_instance_create(self.event_log, instance)\n        else:\n            emit_persona_instance_patch(",
+      "replace": "        if False:\n            emit_persona_instance_create(self.event_log, instance)\n        elif False:\n            emit_persona_instance_patch(",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_the_mint_emits_a_delta_patch_on_the_event_log"
+      ]
+    },
+    {
+      "id": "ir-h3-the-store-door-writes-the-whole-remote-body",
+      "path": "agent_runtime/persona_assignments.py",
+      "symbol": "PersonaInstanceStore.replicate_instance",
+      "operator": "ignore-the-travel-allowlist",
+      "find": "        for name in sorted(PERSONA_INSTANCE_ALLOWED_KEYS - {\"id\", \"persona_id\", \"steered_by\"}):",
+      "replace": "        for name in sorted(set(body) - {\"id\", \"persona_id\", \"steered_by\"}):",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_the_store_door_cannot_express_importing_a_live_binding"
+      ]
+    },
+    {
+      "id": "ir-h3-steering-collapses-to-a-single-phase",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "apply_persona_instance_pull",
+      "operator": "never-run-phase-two",
+      "find": "    for instance_id, remote_body in written:\n        parents = [str(item) for item in (remote_body.get(\"steered_by\") or [])]",
+      "replace": "    for instance_id, remote_body in written[:0]:\n        parents = [str(item) for item in (remote_body.get(\"steered_by\") or [])]",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_a_steering_edge_naming_a_row_minted_later_in_the_same_pass_still_lands"
+      ]
+    },
+    {
+      "id": "ir-h3-a-remote-graph-installs-a-cycle",
+      "path": "agent_runtime/persona_assignments.py",
+      "symbol": "PersonaInstanceStore.apply_replicated_steering",
+      "operator": "skip-the-cycle-validator",
+      "find": "                self._validate_no_steering_cycle(persona_instance_id, parent)\n",
+      "replace": "                pass\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_a_remote_graph_carrying_a_cycle_cannot_install_one"
+      ]
+    },
+    {
+      "id": "ir-h3-an-unreadable-projection-reads-as-absence",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "read_remote_persona_instances",
+      "operator": "fold-a-parse-error-into-absence",
+      "find": "        return {}, \"unreadable\"",
+      "replace": "        return {}, None",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_a_projection_that_will_not_decode_is_refused_never_read_as_absence"
+      ]
+    },
+    {
+      "id": "ir-h3-an-unreadable-local-row-is-minted-over",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "_local_projection_hash",
+      "operator": "fold-a-local-parse-error-into-absence",
+      "find": "        if path.exists():\n            return None, None, \"local_row_unreadable\"",
+      "replace": "        if False:\n            return None, None, 'local_row_unreadable'",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_a_local_row_that_will_not_decode_is_refused_never_minted_over"
+      ]
     }
   ]
 }

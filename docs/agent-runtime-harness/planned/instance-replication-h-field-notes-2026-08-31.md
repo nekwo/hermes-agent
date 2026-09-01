@@ -175,3 +175,84 @@ actually claims is the one catching a machine path in an AUTHORED field, so the
 claim was repointed at
 `test_a_machine_shaped_display_name_refuses_the_record_rather_than_shipping_it`.
 Gate: **11 candidates selected, 11 killed, exit 0** against the branch base.
+
+## H3 — the mint door (the heart)
+
+`PersonaInstanceStore.replicate_instance` (+ `apply_replicated_steering`), the
+new `persona_instance.replicated` contract, `apply_persona_instance_pull`, and
+the wiring at the plan's exact seam — between `apply_profile_artifact_pull` and
+`_apply_workspace_tombstones`.
+
+### Decisions taken while building
+
+1. **A `kept_local` row the plan's five-row table does not have.** Local drifted,
+   remote did not: `classify_three_way_pull` returns KEEP_LOCAL "unpublished".
+   The plan folds this into "not held"; it is named because silently adopting
+   over an unpublished local edit is the clobber the whole lane exists to end,
+   and because H4's drift lane reports exactly these rows.
+2. **The remote-absent arm is decided BEFORE the classifier.** For any row where
+   `remote_body is None` the answer is `upstream_absent`, full stop — the
+   classifier's ARCHIVE_LOCAL and edit-vs-remove CONFLICT arms are both
+   delete-shaped, and this family has no archive arm in the pull at all.
+   Retirement follows the DESK (H4), never the absence.
+3. **Local unreadable is not local absent.** Absent is what drives the MINT arm,
+   so a parse error folded into it would overwrite a row that may carry a live
+   run binding. Refused per row (`local_row_unreadable`), store untouched.
+4. **An unreadable REMOTE projection is refused, not read as absence** — absence
+   drives `upstream_absent` for every baselined row, so a parse error read as
+   absence is a delete-shaped decision taken on a read failure.
+5. **The chat root is made durable INSIDE the store door and a failure refuses
+   the row.** `_durable_chat_root` raises rather than returning a bool precisely
+   because "could not persist, carry on and bind anyway" is the defect it was
+   written to close. The applier catches it as `mint_failed` and keeps pulling;
+   the alternative — minting with a pointer to a SessionDB row this machine does
+   not have — is the `unknown_chat_session` defect, reproduced.
+6. **`persona_instance.replicated` is NOT added to
+   `patch_coverage.LIVE_COVERED_DOMAIN_EVENT_TYPES`.** Leaving it uncovered
+   routes a replication batch down the full-core lane with no new code and no
+   new failure mode; covering it would need the §V1 derivability audit, and the
+   paired create patch is a create-on-absent, which that list's own comment says
+   rides the full core anyway. The row still reaches every live consumer — the
+   plan's actual requirement — either way.
+7. **`SURVIVING_EVENT_COUNT` 58 to 59** in `test_s15_event_contract_pruning.py`,
+   with the reason written beside it. That counter going red on a legitimate new
+   contract is the counter working; it is moved deliberately, never quietly.
+
+### Known gap, named rather than improvised past
+
+**A dropped steering edge leaves its row reading as local drift, and does not
+self-heal on the next pull.** Phase two drops an edge whose parent is absent
+(refused, unpublished, or canonical) and ACCOUNTS it; the row's local body then
+differs from the remote body while the baseline holds the REMOTE hash — so the
+next pull classifies it `kept_local`, and phase two does not re-run for those.
+Re-running phase two for `kept_local` rows was considered and rejected: it would
+clobber an operator's own local re-steer, which is the one thing `kept_local`
+exists to protect. The narrowness is real (both ends of an edge are normally
+published in the same projection, so this needs a refused or unpublished
+parent), but it is a genuine non-convergence and it is rowed for the queue
+rather than papered over.
+
+### Red-proofs (ten, each watched red by reverting the line it claims)
+
+baseline re-derived from the local write; upstream_absent turned into a delete;
+HOLD clobbering; the mint posing as an authored create; the delta patch dropped;
+the store door writing the whole remote body; steering collapsed to one phase;
+the cycle validator skipped; an unreadable projection read as absence; an
+unreadable local row minted over.
+
+**One survived, and where it survived was the useful part:** "the store door
+writes the whole remote body" is UNREACHABLE through the applier, because the
+admission door already refuses any body carrying a non-allowlisted key. That
+makes the door's own allowlist look redundant — and it is not, because
+`replicate_instance` is a public store verb and the next caller may not be the
+pull. Closed by a test that calls the door directly with a body carrying
+`active_run_id` / `chat_head_home` / `runtime_root` and asserts the local record
+keeps its own.
+
+### Mutation
+
+Ten more claims (`ir-h3-*`). **21 candidates now select against the branch base,
+which exceeds the script's DEFAULT `--max-candidates 12` and exits 2.** With
+`--max-candidates 30`: 21 selected, 21 KILLED, exit 0. Per-stage bases stay
+under the default cap. The orchestrator needs the raised cap (or a per-stage
+base) for the landing gate — this is a selector budget, not a failing claim.

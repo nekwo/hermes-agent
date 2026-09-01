@@ -534,6 +534,24 @@ def pull_realm_sync(
     profile_files_summary = apply_profile_artifact_pull(realm.id, subtree)
     if profile_files_summary.changed:
         changed = True
+    # Persona INSTANCES — THE mint door. A pulled desk whose agent does not exist
+    # on this machine gets one (the operator's 2026-08-31 ruling; the
+    # instance-replication plan §3.1). Excluded from the generic loop like every
+    # other family here (``store/persona_instances.yaml`` →
+    # ``_destination_for_sync_path`` None), because the write is a STORE door —
+    # a raw file write would produce a replica no live consumer ever hears about.
+    #
+    # The position in this sequence is the argument, not a preference. AFTER the
+    # persona-definition and profile-file lanes, because the mint reads the
+    # definition to derive ``role``/``profile_id`` and a mint from a definition
+    # that has not landed yet builds the wrong agent. BEFORE the workspace
+    # tombstone lane directly below, so a replica is never minted into a
+    # workspace this same pull is about to archive.
+    from .persona_instance_sync import apply_persona_instance_pull
+
+    instance_summary = apply_persona_instance_pull(realm.id, subtree)
+    if instance_summary.changed:
+        changed = True
     # Workspace deletions: honor the pulled realm's deleted_workspace_ids
     # resurrection-guard ledger so a member's surviving local copy neither
     # lingers nor republishes a workspace another member deleted.
@@ -551,6 +569,12 @@ def pull_realm_sync(
     result["office_sync"] = office_summary.as_dict()
     result["skill_sync"] = skill_summary.as_dict()
     result["profile_artifact_sync"] = profile_files_summary.as_dict()
+    # THE contract seam with the launcher (plan §6). Emitted UNCONDITIONALLY,
+    # carrying ``source: null`` when the peer published no projection, because
+    # the launcher's version-skew rule (L1/L2) has to tell "this peer runs an
+    # older hermes" apart from "this ack came from an older hermes" — and an
+    # omitted key cannot say the first one.
+    result["persona_instance_sync"] = instance_summary.as_dict()
     if tombstone_summary["deleted"] or tombstone_summary["archived"] or tombstone_summary["warnings"]:
         result["workspace_tombstones"] = tombstone_summary
     if any(skill_tombstone_summary.values()):

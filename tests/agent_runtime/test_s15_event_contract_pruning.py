@@ -226,7 +226,18 @@ REMOVED_EVENT_TYPES = frozenset(
 # (root, client_message_id, error_kind, ts) with the text deliberately excluded.
 # Registered in the same commit as its emitter, per S55; this counter went red
 # on it and was moved deliberately, which is the counter working.
-SURVIVING_EVENT_COUNT = 58
+#
+# Then +1 (instance replication H3, 2026-08-31): persona_instance.replicated. A
+# realm pull that delivers a desk now mints the agent behind it, and that write
+# is a THIRD intent class — neither an authored create nor a diagnostic repair,
+# but the arrival of a peer's authored fact (plan §3.5). Reusing
+# ``persona_instance.created`` was the alternative and was refused: that type
+# means "this machine authored an agent" to every consumer that reads it, so one
+# pull would read as N creates in the log an operator greps. Registered in the
+# SAME commit as its emitter (``PersonaInstanceStore.replicate_instance`` /
+# ``apply_replicated_steering``), per S55; this counter went red on it and was
+# moved deliberately, which is again the counter working.
+SURVIVING_EVENT_COUNT = 59
 
 
 def test_the_unemittable_event_types_are_no_longer_registered():

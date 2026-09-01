@@ -648,6 +648,25 @@ def instance_baseline_key(instance_id: str) -> str:
     return f"instance:{instance_id}"
 
 
+def instance_conflict_path(realm_id: str, instance_id: str):
+    """Where a HELD row's remote body is parked.
+
+    Under the realm-sync root, beside the baseline, so it is never-synced and
+    never-published by construction. The office lane's ``conflicts/`` precedent:
+    a hold that leaves no copy of what it refused to adopt makes the operator's
+    only exit "pull again and hope".
+    """
+
+    from . import paths
+
+    return (
+        paths.realm_sync_root()
+        / paths.safe_path_token(realm_id)
+        / "persona_instance_conflicts"
+        / f"{paths.safe_path_token(instance_id)}.json"
+    )
+
+
 def update_persona_instance_baseline_after_publish(
     realm_id: str, projection: PersonaInstanceProjection
 ) -> None:
@@ -662,3 +681,324 @@ def update_persona_instance_baseline_after_publish(
     for instance_id, body_hash in projection.hashes().items():
         baseline[instance_baseline_key(instance_id)] = body_hash
     write_persona_instance_baseline(realm_id, baseline)
+
+
+# --- pull: the mint door (plan §3) -------------------------------------------
+
+
+@dataclass(slots=True)
+class PersonaInstancePullSummary:
+    """Typed accounting for the persona-instance pull — the ONE contract seam
+    between this repo and the launcher (plan §6), carried on a pull ack as
+    ``result["persona_instance_sync"]``.
+
+    Every outcome is a row of the §3.3 decision table, and nothing is silently
+    written or silently skipped:
+
+    - ``replicated`` — the desk arrived and the agent did not exist here. Minted
+      through the store door, with the §1.3 fields derived locally.
+    - ``adopted`` — the row was already here, unchanged since the last sync, and
+      the realm moved its travelling surface forward. Only travelling fields are
+      written; every §1.2 field is preserved by construction.
+    - ``converged`` — local already equals remote (no write).
+    - ``kept_local`` — this machine edited the row and the realm did not. Stays
+      local and unpublished. The plan's table folds this into "not held"; it is
+      named separately because the H4 drift lane reports exactly these rows.
+    - ``held`` — BOTH sides moved. The local row is left untouched and the
+      remote body is parked in a conflict sidecar. Divergent content is never
+      clobbered.
+    - ``upstream_absent`` — the realm's projection does not carry a row this
+      baseline says it published. **NOT a delete** (plan §3.3, §5.2): absence is
+      short-answer-shaped, and this subsystem has already paid for inferring
+      deletion from a short answer. The baseline is KEPT so a repaired publish
+      still converges.
+    - ``refused`` — a row the admission door would not admit, or one whose local
+      file will not decode. Per-entity isolation: the row is untouched, the
+      refusal is named, the pull continues.
+    - ``steering_dropped`` — phase-two edges naming a parent this machine does
+      not have. Accounted, never silent.
+
+    ``source`` is ``None`` when the pulled subtree carries no instance
+    projection at all — an older publisher. That is the version-skew fact the
+    launcher's badge demotion keys on, and it is deliberately distinct from an
+    EMPTY projection.
+    """
+
+    replicated: list[str] = field(default_factory=list)
+    adopted: list[str] = field(default_factory=list)
+    converged: list[str] = field(default_factory=list)
+    kept_local: list[str] = field(default_factory=list)
+    held: list[str] = field(default_factory=list)
+    upstream_absent: list[str] = field(default_factory=list)
+    refused: list[dict[str, str]] = field(default_factory=list)
+    steering_dropped: list[dict[str, str]] = field(default_factory=list)
+    source: str | None = None
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.replicated or self.adopted)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "replicated": sorted(set(self.replicated)),
+            "adopted": sorted(set(self.adopted)),
+            "converged": sorted(set(self.converged)),
+            "kept_local": sorted(set(self.kept_local)),
+            "held": sorted(set(self.held)),
+            "upstream_absent": sorted(set(self.upstream_absent)),
+            "refused": list(self.refused),
+            "steering_dropped": list(self.steering_dropped),
+            "source": self.source,
+        }
+
+
+def read_remote_persona_instances(subtree) -> tuple[dict[str, dict[str, Any]], str | None]:
+    """Instance bodies carried by a pulled realm subtree.
+
+    ``(bodies, source)``; ``source`` is ``None`` when the subtree has no
+    projection — an older publisher, or a realm that publishes no
+    placement-backed rows. There is deliberately NO legacy fallback: unlike
+    persona definitions, instances have never travelled in any other shape, so
+    an absent projection means exactly one thing.
+    """
+
+    from pathlib import Path
+
+    path = Path(subtree).joinpath(*PROJECTION_RELATIVE_PATH.split("/"))
+    if not path.is_file():
+        return {}, None
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        # A projection that exists and will not decode is NOT absence: absence
+        # drives ``upstream_absent`` for every baselined row, and reading a parse
+        # error as absence would be a delete-shaped decision taken on a read
+        # failure (the ``RemoteOffice.unreadable`` argument). The caller reports
+        # it as a refusal and touches nothing.
+        return {}, "unreadable"
+    parsed = read_projection_document(data)
+    if parsed is None:
+        return {}, None
+    return parsed, "projection"
+
+
+def _refusal_row(instance_id: str, code: str, message: str) -> dict[str, str]:
+    return {"key": instance_id, "code": code, "message": message}
+
+
+def _local_projection_hash(store, instance_id: str):
+    """``(hash, record, refusal_code)`` for the LOCAL row.
+
+    A row whose file EXISTS and will not decode is refused rather than reported
+    absent. Absent is what drives the MINT arm, so folding a parse error into it
+    would overwrite a row that might carry a live run binding — the same
+    unreadable-is-not-absent rule ``apply_office_pull`` spends on its own local
+    scan.
+    """
+
+    from . import paths
+
+    path = paths.persona_instance_path(instance_id)
+    try:
+        record = store.get(instance_id)
+    except FileNotFoundError:
+        return None, None, None
+    except Exception:
+        if path.exists():
+            return None, None, "local_row_unreadable"
+        return None, None, None
+    return persona_instance_def_hash(project_persona_instance(record)), record, None
+
+
+def apply_persona_instance_pull(
+    realm_id: str,
+    subtree,
+    *,
+    event_log: Any = None,
+) -> PersonaInstancePullSummary:
+    """THE mint door: a pulled desk that has no agent here gets one.
+
+    Runs inside ``pull_realm_sync`` AFTER the persona-definition and
+    profile-file lanes (the mint reads the definition to derive ``role`` and
+    ``profile_id``, and a mint from a definition that has not landed yet builds
+    the wrong agent) and BEFORE the workspace-tombstone lane (so a replica is
+    never minted into a workspace the same pull is about to archive).
+
+    Two phases, per plan §3.4. Phase one writes every row with ``steered_by``
+    empty; phase two applies the edges, because an edge may name a parent this
+    same pass has not minted yet. Without the split the outcome would depend on
+    the alphabetical order of instance ids.
+
+    Every write goes through ``PersonaInstanceStore.replicate_instance`` — a
+    store door, never a raw file write — so the delta patch, the §1.3
+    derivations and the event all happen in one place. A pull that GIVES you an
+    agent reaches the same live consumers as one that takes one away.
+    """
+
+    from .persona_assignments import PersonaInstanceStore
+    from .sync_merge import PullAction, classify_three_way_pull
+
+    summary = PersonaInstancePullSummary()
+    remote, source = read_remote_persona_instances(subtree)
+    summary.source = source
+    if source is None:
+        # Not published. Never a removal — the baseline is left exactly as it
+        # was, so an older peer in the rotation cannot strand this machine's
+        # replicas.
+        return summary
+    if source == "unreadable":
+        summary.refused.append(
+            _refusal_row(
+                PROJECTION_RELATIVE_PATH,
+                "unreadable_projection",
+                "the pulled instance projection exists and would not decode",
+            )
+        )
+        return summary
+
+    store = (
+        PersonaInstanceStore(event_log=event_log)
+        if event_log is not None
+        else PersonaInstanceStore()
+    )
+    baseline = read_persona_instance_baseline(realm_id)
+    prefix = instance_baseline_key("")
+    baselined_ids = {key[len(prefix):] for key in baseline if key.startswith(prefix)}
+    written: list[tuple[str, dict[str, Any]]] = []
+
+    # --- phase one: the rows ------------------------------------------------
+    for instance_id in sorted(set(remote) | baselined_ids):
+        remote_body = remote.get(instance_id)
+        key = instance_baseline_key(instance_id)
+
+        if remote_body is not None:
+            refusal = refuse_persona_instance(instance_id, remote_body)
+            if refusal is not None:
+                # Untouched, named, and the pull continues — the store never
+                # learns this row existed.
+                summary.refused.append(refusal.as_dict())
+                continue
+
+        local_hash, local_record, local_refusal = _local_projection_hash(store, instance_id)
+        if local_refusal is not None:
+            summary.refused.append(
+                _refusal_row(instance_id, local_refusal, "local instance row will not decode")
+            )
+            continue
+
+        if remote_body is None:
+            # THE row that is not a delete. The realm stopped carrying a row
+            # this baseline says it published, and that is exactly as consistent
+            # with "the publisher's office scan came back short" as with "the
+            # operator deleted it". Only the DESK's own removal is authored
+            # intent (plan §5.2). Hold it, name it, and KEEP the baseline so a
+            # repaired publish still converges.
+            if local_hash is not None:
+                summary.upstream_absent.append(instance_id)
+            else:
+                baseline.pop(key, None)
+            continue
+
+        remote_hash = persona_instance_def_hash(remote_body)
+        decision = classify_three_way_pull(local_hash, remote_hash, baseline.get(key))
+
+        if decision.action == PullAction.NOOP:
+            summary.converged.append(instance_id)
+            written.append((instance_id, remote_body))
+            baseline[key] = remote_hash
+            continue
+        if decision.action == PullAction.KEEP_LOCAL:
+            summary.kept_local.append(instance_id)
+            continue
+        if decision.action == PullAction.CONFLICT:
+            summary.held.append(instance_id)
+            _write_conflict_sidecar(
+                realm_id, instance_id, decision.reason, remote_body, local_hash, remote_hash
+            )
+            continue
+        if decision.action == PullAction.ARCHIVE_LOCAL:
+            # Unreachable while ``remote_body is not None`` — the classifier only
+            # takes this arm on an absent remote — and stated rather than left to
+            # fall through: this family has NO archive arm in the pull at all.
+            # Retirement follows the DESK (H4/§5.2), never the absence.
+            summary.upstream_absent.append(instance_id)
+            continue
+
+        # WRITE_REMOTE. ``converged`` here means both sides moved to the SAME
+        # content and only the baseline needs to catch up — never a rewrite.
+        if decision.reason == "converged":
+            summary.converged.append(instance_id)
+            written.append((instance_id, remote_body))
+            baseline[key] = remote_hash
+            continue
+        try:
+            store.replicate_instance(remote_body, realm_id=realm_id, adopt_existing=local_record)
+        except Exception as exc:  # noqa: BLE001 — accounted; the pull continues
+            summary.refused.append(_refusal_row(instance_id, "mint_failed", type(exc).__name__))
+            continue
+        if local_record is None:
+            summary.replicated.append(instance_id)
+        else:
+            summary.adopted.append(instance_id)
+        written.append((instance_id, remote_body))
+        # THE baseline-alignment property (plan §3.3): keyed off the REMOTE hash,
+        # never re-derived from the local write, so a fresh replica reads ZERO
+        # drift immediately. Without it the very next `realm sync status` reports
+        # the replica as an unpublished local addition and the revert lane offers
+        # to archive correct state.
+        baseline[key] = remote_hash
+
+    # --- phase two: the authored steering edges -----------------------------
+    #
+    # Only rows this pass WROTE or found converged. A ``held`` row must not have
+    # its graph rewritten by the body it refused to adopt, and a ``kept_local``
+    # row's steering is this machine's own edit.
+    for instance_id, remote_body in written:
+        parents = [str(item) for item in (remote_body.get("steered_by") or [])]
+        try:
+            _, dropped = store.apply_replicated_steering(instance_id, parents, realm_id=realm_id)
+        except Exception as exc:  # noqa: BLE001 — accounted; a bad edge never fails a pull
+            summary.steering_dropped.append(
+                {"key": instance_id, "parent": "", "reason": type(exc).__name__}
+            )
+            continue
+        for row in dropped:
+            summary.steering_dropped.append({"key": instance_id, **row})
+
+    write_persona_instance_baseline(realm_id, baseline)
+    return summary
+
+
+def _write_conflict_sidecar(
+    realm_id: str,
+    instance_id: str,
+    kind: str,
+    remote_body: dict[str, Any],
+    local_hash: str | None,
+    remote_hash: str | None,
+) -> None:
+    """Park the body a HOLD refused to adopt.
+
+    Best-effort: a sidecar this machine cannot write is not a reason to clobber
+    the row the hold exists to protect.
+    """
+
+    from utils import atomic_json_write
+
+    try:
+        atomic_json_write(
+            instance_conflict_path(realm_id, instance_id),
+            {
+                "schema_version": 1,
+                "realm_id": realm_id,
+                "persona_instance_id": instance_id,
+                "kind": kind,
+                "local_hash": local_hash,
+                "remote_hash": remote_hash,
+                "remote_body": remote_body,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    except Exception:  # noqa: BLE001 — the HOLD stands with or without its receipt
+        pass

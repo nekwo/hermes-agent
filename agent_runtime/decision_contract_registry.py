@@ -157,6 +157,17 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     # events.OPERATOR_SUMMARY_EVENT_TYPES, so no summary arm went with them. See
     # tests/agent_runtime/test_s44_role_envelope_family_removal.py.
     "persona_instance.created": EventContract("persona_instance.created", "Persona instance created", ("persona_instance_id",), ("persona_id",)),
+    # A replication mint is a THIRD intent class, neither authored create nor
+    # diagnostic repair (instance-replication plan §3.5), so it gets its own
+    # type rather than reusing ``persona_instance.created`` — which means "this
+    # machine authored an agent" to every consumer that reads it, and would make
+    # one realm pull look like N creates in the log an operator greps.
+    # ``action`` distinguishes the three writes the one door takes (a fresh
+    # ``replicated``, an ``adopted`` travelling surface, a phase-two
+    # ``steered``); ``source`` is always ``realm_sync``, the ``updated_by``
+    # precedent. Emitter: ``PersonaInstanceStore.replicate_instance`` /
+    # ``apply_replicated_steering``.
+    "persona_instance.replicated": EventContract("persona_instance.replicated", "Persona instance replicated from a realm peer", ("persona_instance_id", "source", "realm_id", "action"), ("persona_id", "steered_by")),
     "persona_instance.steered": EventContract("persona_instance.steered", "Persona instance steering edge changed", ("persona_instance_id", "goal_id"), ("persona_id", "spawned_by", "steered_by", "added", "removed", "detached")),
     "persona_instance.reconciled": EventContract("persona_instance.reconciled", "Legacy-id persona instance row folded onto its canonical channel", ("persona_instance_id", "from_id", "to_id", "action"), ("persona_id",)),
     "persona_instance.pruned": EventContract("persona_instance.pruned", "Orphaned/legacy-role persona instance archived from the live graph", ("persona_instance_id", "reason"), ("persona_id", "role", "profile_id", "updated_at")),

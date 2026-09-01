@@ -600,6 +600,183 @@ class PersonaInstanceStore:
         self._event("persona_instance.created", instance, {})
         return instance
 
+    def replicate_instance(
+        self,
+        body: dict[str, Any],
+        *,
+        realm_id: str,
+        adopt_existing: PersonaInstance | None = None,
+    ) -> PersonaInstance:
+        """THE door a realm pull writes a replicated agent through.
+
+        A replication mint is a **THIRD intent class** (plan §3.5). It is not
+        AUTHORED — no operator clicked on this machine, so it must not produce
+        the receipts an authored create produces — and it is not DIAGNOSTIC — it
+        is not a repair of a local projection against a local truth, but the
+        arrival of a peer's authored fact. So it gets its own verb here and its
+        own event type (``persona_instance.replicated``), rather than reusing
+        ``_mint_instance``: ``persona_instance.created`` means "this machine
+        authored an agent" to every consumer that reads it, and one pull would
+        otherwise look like N creates in the log an operator greps.
+
+        Why a STORE DOOR and not a raw ``persona_instances/`` write in the
+        applier. Three facts are store-level and all three would be lost:
+
+        * the DELTA PATCH. This is the one place not to repeat a mistake made
+          one lane over three days ago — ``apply_board_pull`` writes cards with
+          raw atomic writes, so a pull that GIVES you a card reaches no live
+          consumer while one that ARCHIVES a card emits (open queue row). A
+          replicated instance that needs an app restart to appear has not been
+          replicated as far as the operator is concerned.
+        * the §1.3 DERIVATIONS. ``role`` / ``profile_id`` / ``runtime_root`` /
+          ``state`` / the durable chat root are this machine's answers, and an
+          applier deriving them would be a second authority over what a
+          persona-instance row means.
+        * the EVENT-then-patch ordering the rest of this store keeps.
+
+        ``adopt_existing`` is the ADOPT arm: the row is already here and only
+        the travelling surface moves. Every §1.2 field on it is preserved
+        BY CONSTRUCTION — the arm copies the existing record and writes only
+        allowlisted keys onto it — so this door cannot express "adopt a live
+        binding" even by mistake.
+
+        No tombstone is minted here, ever: nothing is being deleted. No office
+        write happens here either — the desk arrived through its own lane, and
+        writing it again would be a second authority over one row.
+        """
+
+        from .persona_instance_sync import (
+            PERSONA_INSTANCE_ALLOWED_KEYS,
+            cleared_travel_value,
+        )
+
+        instance_id = str(body["id"])
+        persona_id = str(body["persona_id"])
+        if adopt_existing is not None:
+            instance = replace(adopt_existing)
+            created = False
+        else:
+            instance = self._replica_row(instance_id, persona_id, body)
+            created = True
+
+        # The travelling SURFACE, wholesale. A key the publisher cleared clears
+        # here too — a locally stale override that outlived the upstream write
+        # removing it is the same clobber class the record split exists to end.
+        # ``steered_by`` is deliberately NOT applied here: the edges are phase
+        # two (plan §3.4), because an edge may name a parent this pass has not
+        # minted yet.
+        for name in sorted(PERSONA_INSTANCE_ALLOWED_KEYS - {"id", "persona_id", "steered_by"}):
+            value = body.get(name, _MISSING_TRAVEL_FIELD)
+            if value is _MISSING_TRAVEL_FIELD:
+                value = cleared_travel_value(name)
+            setattr(instance, name, _coerce_travel_value(name, value))
+        instance.updated_at = now()
+
+        self._write(instance)
+        if created:
+            emit_persona_instance_create(self.event_log, instance)
+        else:
+            emit_persona_instance_patch(
+                self.event_log,
+                instance,
+                [*sorted(PERSONA_INSTANCE_ALLOWED_KEYS - {"id", "persona_id"}), "updated_at"],
+            )
+        # ``source``/``realm_id`` on the payload: the ``updated_by="realm_sync"``
+        # precedent, so an operator reading the log can tell a peer's arrival
+        # from their own click without joining against anything.
+        self._event(
+            "persona_instance.replicated",
+            instance,
+            {
+                "source": "realm_sync",
+                "realm_id": str(realm_id),
+                "action": "replicated" if created else "adopted",
+            },
+        )
+        return instance
+
+    def _replica_row(self, instance_id: str, persona_id: str, body: dict[str, Any]) -> PersonaInstance:
+        """A brand-new replica's LOCAL half — plan §1.3, derived, never carried.
+
+        ``role`` and ``profile_id`` come from the persona definition that
+        arrived in the SAME pull (the applier runs after
+        ``apply_persona_config_pull`` for exactly this reason); travelling them
+        would let a stale copy shadow the definition beside it. The chat root is
+        minted fresh AND MADE DURABLE before the bind — a pointer that travelled
+        would resolve to a SessionDB row the receiver does not have, which is
+        precisely the ``unknown_chat_session`` defect ``_durable_chat_root`` was
+        written to retire. A failure there RAISES, so the applier refuses this
+        row and keeps pulling rather than binding a root it did not persist.
+        """
+
+        display_name = safe_assignment_text(body.get("display_name"), limit=120)
+        return PersonaInstance(
+            id=instance_id,
+            persona_id=persona_id,
+            role=str(_role_for_persona_or_template(persona_id) or ""),
+            display_name=display_name,
+            profile_id=_profile_id_for_persona_or_template(persona_id),
+            runtime_root=str(paths.store_root()),
+            state=WorkerSessionState.IDLE,
+            default_chat_session_id=_durable_chat_root(
+                persona_chat_session_id_for(instance_id),
+                persona_id=persona_id,
+                display_name=display_name,
+            ),
+            updated_at=now(),
+        )
+
+    def apply_replicated_steering(
+        self, persona_instance_id: str, parents: list[str], *, realm_id: str
+    ) -> tuple[list[str], list[dict[str, str]]]:
+        """Phase TWO of the mint (plan §3.4): the authored steering edges.
+
+        Returns ``(applied, dropped)``. An edge whose target is still absent
+        after phase one is DROPPED with a typed row, never silently — the target
+        may be a row this realm never published, or one whose own admission was
+        refused. ``_validate_no_steering_cycle`` runs per edge, so a hostile or
+        corrupt remote graph cannot install a cycle even though every edge in it
+        passed the content door.
+        """
+
+        applied: list[str] = []
+        dropped: list[dict[str, str]] = []
+        for parent in _dedupe_tokens(parents):
+            if parent == persona_instance_id:
+                dropped.append({"parent": parent, "reason": "self_edge"})
+                continue
+            if not paths.persona_instance_path(parent).exists():
+                dropped.append({"parent": parent, "reason": "parent_absent"})
+                continue
+            try:
+                self._validate_no_steering_cycle(persona_instance_id, parent)
+            except Exception as exc:  # noqa: BLE001 — accounted, never silent
+                dropped.append({"parent": parent, "reason": type(exc).__name__})
+                continue
+            applied.append(parent)
+        try:
+            instance = self.get(persona_instance_id)
+        except Exception as exc:  # noqa: BLE001 — the row went away under us
+            dropped.append({"parent": "", "reason": type(exc).__name__})
+            return [], dropped
+        if list(instance.steered_by) == applied:
+            return applied, dropped
+        instance.steered_by = applied
+        instance.updated_at = now()
+        self._write(instance)
+        emit_persona_instance_patch(self.event_log, instance, ["steered_by", "updated_at"])
+        self._event(
+            "persona_instance.replicated",
+            instance,
+            {
+                "source": "realm_sync",
+                "realm_id": str(realm_id),
+                "action": "steered",
+                "steered_by": list(applied),
+            },
+        )
+        return applied, dropped
+
     def steer(
         self,
         persona_instance_id: str,
@@ -3191,6 +3368,66 @@ def personas_equal(left: Any, right: Any) -> bool:
     if not left_key:
         return False
     return left_key == _persona_comparison_key(right)
+
+
+#: Sentinel for "the remote body did not carry this travelling key", kept
+#: distinct from ``None`` because ``None`` is a MEANING on this record ("inherit
+#: the backing persona live" for the override tier, "runtime-global" for the
+#: scope pointers). Collapsing the two would make an omitted key and an
+#: explicitly cleared one indistinguishable to the adopt arm.
+_MISSING_TRAVEL_FIELD = object()
+
+
+def _coerce_travel_value(name: str, value: Any) -> Any:
+    """One pulled travelling value, coerced to the field's own type.
+
+    The wire carries ``model_override_issued_at`` as an ISO-8601 string (that is
+    what ``serde.to_jsonable`` writes and what ``from_jsonable`` reads back), and
+    a supersession clock stored as a raw string would compare as text against
+    every ``datetime`` beside it. Coercion goes through ``serde`` rather than a
+    local ``fromisoformat`` so the wire spelling has exactly one parser.
+    """
+
+    if value is None:
+        return None
+    from typing import get_type_hints
+
+    from .serde import _coerce
+
+    annotation = get_type_hints(PersonaInstance).get(name)
+    if annotation is None:
+        return value
+    try:
+        return _coerce(annotation, value)
+    except Exception:  # noqa: BLE001 — an uncoercible value stays as it arrived
+        return value
+
+
+def _role_for_persona_or_template(persona_or_template_id: str) -> str | None:
+    """The ROLE a replica should be stamped with — from the local persona
+    definition, never from the wire.
+
+    The sibling of :func:`_profile_id_for_persona_or_template` directly below,
+    and it exists for the sharper of the two reasons: the persona definition
+    arrives in the SAME pull (``apply_persona_config_pull`` runs before the
+    instance lane), so travelling ``role`` would let a peer's stale copy shadow
+    the definition that landed beside it. Unresolvable personas yield ``None``
+    and the caller stamps ``""`` — a replica with no role is honest, where a
+    replica with a wrong one is not.
+    """
+
+    raw = str(persona_or_template_id or "").strip()
+    if not raw:
+        return None
+    try:
+        from .config import ensure_persisted_personas, load_agent_runtime_config
+
+        for candidate in ensure_persisted_personas(load_agent_runtime_config()):
+            if safe_assignment_token(getattr(candidate, "id", None)) == safe_assignment_token(raw):
+                return str(getattr(candidate, "role", "") or "") or None
+    except Exception:
+        return None
+    return None
 
 
 def _profile_id_for_persona_or_template(persona_or_template_id: str) -> str | None:
