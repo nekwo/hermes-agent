@@ -64,6 +64,135 @@ DEFAULT_STREAM_CALLER = "cli"
 BATCH_REASON_DEMOTE = "demote"
 
 
+#: Stage 5 (``planned/chat-turn-prep-cost.md`` §5): the HARD ceiling, in
+#: milliseconds, on how long ONE demote-cadence core build may stand aside for
+#: a live agent run.
+#:
+#: A module constant and not a config field ON PURPOSE — Stage 2 §7 records why:
+#: every ``PersonaChatConfig``/runtime-config field is projected onto the
+#: read-model wire, so a knob here reds the stream-contract goldens and becomes
+#: a cross-stack landing. The value a knob would carry is a doctrine, and the
+#: doctrine is written here instead.
+#:
+#: WHY BOUNDED AT ALL, and why at one second. The launcher's HUD freshness rides
+#: these builds; an unbounded "wait until no turn is running" is a STARVATION on
+#: exactly the install this exists for, where an operator sends turns back to
+#: back and the demote lane would never see a quiet moment. The plan's own
+#: wording is "hundreds of ms, not a starvation". One second is the ceiling on
+#: the WHOLE deferral of one build request, not per poll: once it elapses the
+#: build proceeds regardless of what is in flight, so the worst case this adds
+#: to HUD staleness is one second — against the seconds of CPU a led build was
+#: measured to steal from a turn it overlapped (§2.5: ``build_ms=3979`` inside
+#: the 4a80f05e turn; Stage 2a item 7: 1,796/2,343 ms turns overlapping a
+#: readiness walk against 453 ms for a non-overlapping one).
+SNAPSHOT_DEMOTE_DEFERRAL_MAX_MS = 1000
+
+#: Poll granularity while deferring. Small enough that the common case — a turn
+#: that ends mid-wait — resumes promptly, large enough not to spin.
+_SNAPSHOT_DEMOTE_DEFERRAL_POLL_SECONDS = 0.025
+
+
+def _agent_runs_in_flight() -> int | None:
+    """Real agent runs this process is inside right now, or ``None`` if unaskable.
+
+    Deliberately NOT a second "a turn is running" authority: this forwards to
+    ``agent_runtime.profile_runner.agent_runs_in_flight``, the signal the Stage-2
+    prewarm yield rule already takes its decision on. Minting a second counter
+    here is how two answers to one question drift.
+
+    ``None`` is the honest answer when the module cannot be consulted at all
+    (import shape, a partially initialized process). The caller treats unknown
+    as "do not defer" — a deferral is an optimization, and an optimization that
+    fires on an unmeasured premise is the failure mode this whole plan exists to
+    end.
+    """
+
+    try:
+        from .profile_runner import agent_runs_in_flight
+
+        return int(agent_runs_in_flight())
+    except Exception:
+        return None
+
+
+def _defer_demote_build_for_active_turns(
+    *,
+    reason: str,
+    caller: str,
+    sleeper: Callable[[float], None] | None = None,
+    clock: Callable[[], float] | None = None,
+) -> int:
+    """Hold a demote-cadence core build while an agent run is in flight.
+
+    Returns the milliseconds actually waited — ``0`` when nothing was in flight,
+    when the counter could not be read, or when this is not the demote lane.
+
+    **Scope, stated because the exclusions are the safety argument.** ONLY
+    ``reason == BATCH_REASON_DEMOTE`` defers. The boot/hydrate job
+    (``stream_frames``' ``boot_job``, which rides ``accept_inflight=True``) and
+    the ``full_core`` lane — a client's first frame, and every batch with the
+    patch lane off — are a consumer WAITING on an answer, not a cadence
+    rebuilding state nobody asked for; making an operator's first paint wait on
+    a chat turn would trade the inflation this removes for a worse one.
+
+    **The window is slightly wider than the plan's.** The plan says defer while a
+    turn is between ``write_ahead`` and ``stream_done``;
+    ``agent_runs_in_flight()`` counts from ``ProfileAgentRunner.run()``'s entry
+    to its exit, which opens marginally earlier (the run still has admission and
+    profile-context install to do) and closes marginally later. That is
+    deliberate — it is the SAME signal the prewarm yields on, and one authority
+    with a slightly generous window beats two authorities that agree today — and
+    it is bounded by the ceiling above either way.
+
+    **A deferred build still counts as overlapping if it then overlaps.**
+    Nothing here touches the build ledger: ``builds_overlapped`` is computed
+    from the ledger's own spans, so a build that waited 1,000 ms and started
+    anyway inside a turn is still counted against that turn. The deferral must
+    not be able to launder its own failures out of the receipt.
+    """
+
+    if reason != BATCH_REASON_DEMOTE:
+        return 0
+    in_flight = _agent_runs_in_flight()
+    if not in_flight:
+        return 0
+    _sleep = sleeper if sleeper is not None else time.sleep
+    _now = clock if clock is not None else time.monotonic
+    started = _now()
+    deadline = started + (SNAPSHOT_DEMOTE_DEFERRAL_MAX_MS / 1000.0)
+    while True:
+        if request_cancelled():
+            break
+        now_s = _now()
+        if now_s >= deadline:
+            break
+        in_flight = _agent_runs_in_flight()
+        if not in_flight:
+            break
+        _sleep(
+            min(
+                _SNAPSHOT_DEMOTE_DEFERRAL_POLL_SECONDS,
+                max(0.0, deadline - now_s),
+            )
+        )
+    waited_ms = max(0, int((_now() - started) * 1000))
+    if waited_ms > 0:
+        # Closed vocabulary, ids and timings only (07-observability census
+        # style): the lane, who paid, how long, what the bound was, and what was
+        # still running when the wait ended. Never a persona, a chat root, or a
+        # display name.
+        logger.info(
+            "snapshot_build_deferred reason=%s caller=%s waited_ms=%d "
+            "runs_in_flight_at_exit=%s bound_ms=%d",
+            reason,
+            caller,
+            waited_ms,
+            "unknown" if in_flight is None else int(in_flight),
+            SNAPSHOT_DEMOTE_DEFERRAL_MAX_MS,
+        )
+    return waited_ms
+
+
 def _log_snapshot_build(
     *,
     reason: str,
@@ -816,6 +945,15 @@ def _full_core_batch_frames(
             core_source=demote_core_reuse.CORE_SOURCE_REUSED_SAME_OFFSET,
         )
         yield frame
+        return
+
+    # Stage 5: stand aside for a live agent run before paying for a full core.
+    # Placed AFTER the reuse gate on purpose — a reuse builds nothing, so there
+    # is no CPU to yield and nothing to wait for — and BEFORE the job so the
+    # wait is not held while a worker thread is already running. Bounded by
+    # ``SNAPSHOT_DEMOTE_DEFERRAL_MAX_MS`` and a no-op on every lane but demote.
+    _defer_demote_build_for_active_turns(reason=reason, caller=caller)
+    if request_cancelled():
         return
 
     job = _SnapshotBuildJob(caller=caller)
