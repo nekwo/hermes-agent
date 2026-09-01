@@ -574,10 +574,27 @@ def test_a_reused_actor_constructed_NOTHING_and_the_record_says_so_by_absence(
     assert "agent_construct_ms" not in block
 
 
-def test_a_runner_that_reported_no_timing_leaves_the_key_off_entirely(
+def test_a_runner_that_reported_no_timing_leaves_only_what_the_HANDLER_measured(
     monkeypatch, capsys, isolate_agent_runtime_root, scripted_marks  # noqa: F811
 ):
-    """Absent stays absent — an empty block would claim an accounting nobody took."""
+    """Absent stays absent — but "nobody" now has to mean nobody.
+
+    This row used to assert the key was absent entirely when the runner reported
+    nothing, and that was the right assertion while the runner was the block's
+    only contributor. chat-turn-prep Stage 4 made the block the TURN's rather
+    than the runner's: ``_cmd_mission_chat_message`` measures its own SessionDB
+    open — a cost paid before any runner exists, inside the
+    ``request_received → context_built`` span — and folds it in across the turn
+    plan.
+
+    So the invariant is unchanged and its application is sharpened: a block may
+    only carry what was actually measured. With a blind runner that is EXACTLY
+    ONE key, and specifically not a fabricated ``resident_actor_reused`` or a
+    zeroed ``agent_construct_ms``. The "nothing measured at all" arm is still
+    pinned, one layer down, by
+    ``test_safe_turn_profile_timing_rejects_everything_it_cannot_read``'s empty
+    dict returning ``None``.
+    """
 
     _drive(
         monkeypatch,
@@ -586,7 +603,74 @@ def test_a_runner_that_reported_no_timing_leaves_the_key_off_entirely(
         turn_id="phases_timing_blind",
     )
     record = _record_on_disk(isolate_agent_runtime_root, "phases_timing_blind")
-    assert TURN_PROFILE_TIMING_KEY not in record
+    block = record[TURN_PROFILE_TIMING_KEY]
+    assert set(block) == {"session_db_open_ms"}, (
+        "a blind runner must contribute nothing; only the handler's own "
+        "measurement may appear"
+    )
+    assert isinstance(block["session_db_open_ms"], int)
+    assert block["session_db_open_ms"] >= 0
+
+
+def test_the_handlers_session_db_open_reaches_the_durable_record(
+    monkeypatch, capsys, isolate_agent_runtime_root, scripted_marks  # noqa: F811
+):
+    """Stage 4's instrument, end to end on a real turn.
+
+    H3 (§3 of the plan) confirmed in CODE that every turn constructs a fresh
+    ``SessionDB`` — schema init, FTS probe, WAL checks — and confirmed just as
+    plainly that nobody had ever measured it. The pooling remedy is gated on
+    this number existing, so the number reaching a persisted record IS the
+    deliverable; a key the store's sanitizer silently refused would gate the
+    remedy on nothing.
+    """
+
+    _drive(
+        monkeypatch,
+        capsys,
+        _streaming_provider(profile_timing={"resident_actor_reused": 1}),
+        turn_id="phases_session_db_open",
+    )
+    record = _record_on_disk(isolate_agent_runtime_root, "phases_session_db_open")
+    block = record[TURN_PROFILE_TIMING_KEY]
+    assert "session_db_open_ms" in block
+    assert isinstance(block["session_db_open_ms"], int)
+    assert block["session_db_open_ms"] >= 0
+    # It is ADDITIVE: the runner's own accounting is untouched beside it.
+    assert block["resident_actor_reused"] == 1
+
+
+def test_a_plan_that_measured_nothing_leaves_session_db_open_ms_ABSENT(
+    monkeypatch, capsys, isolate_agent_runtime_root, scripted_marks  # noqa: F811
+):
+    """Unmeasured is a third state, and a zero would erase it.
+
+    ``session_db_open_ms = 0`` reads as "opening the chat database was free",
+    which is the exact claim Stage 4 exists to test. A plan that carries no
+    measurement must produce no key.
+    """
+
+    from agent_runtime import mission_chat_outcome
+
+    real_plan = mission_chat_outcome.MissionChatTurnPlan
+
+    def _unmeasured_plan(*args, **kwargs):
+        kwargs["session_db_open_ms"] = None
+        return real_plan(*args, **kwargs)
+
+    monkeypatch.setattr(
+        mission_chat_outcome, "MissionChatTurnPlan", _unmeasured_plan
+    )
+    _drive(
+        monkeypatch,
+        capsys,
+        _streaming_provider(profile_timing={"resident_actor_reused": 1}),
+        turn_id="phases_session_db_unmeasured",
+    )
+    record = _record_on_disk(
+        isolate_agent_runtime_root, "phases_session_db_unmeasured"
+    )
+    assert "session_db_open_ms" not in record[TURN_PROFILE_TIMING_KEY]
 
 
 @pytest.mark.parametrize(

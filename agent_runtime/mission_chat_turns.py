@@ -1205,6 +1205,15 @@ _JOURNAL_RUN_BUDGET_FIELD = RUN_BUDGET_ACCOUNTING_KEY
 #: — ``*_ms`` durations, ``resident_actor_reused``, and ``resident_rebuild_*``
 #: — every value coerced to a non-negative int. No free text can reach the
 #: record through this key, by construction rather than by scrubbing.
+#:
+#: THE HANDLER CONTRIBUTES TOO, so this block is a SUPERSET of the runner's dict
+#: rather than a copy of it (chat-turn-prep Stage 4). ``session_db_open_ms`` is
+#: measured by ``_cmd_mission_chat_message`` around its own
+#: ``_default_persona_session_db()`` call — a cost paid BEFORE the runner exists,
+#: inside the ``request_received → context_built`` span, which the runner
+#: therefore cannot see — and folded in at the persist site. The LIVE result
+#: frame still carries the runner's dict unchanged; this block is the TURN's,
+#: which is the one the durable record keeps.
 TURN_PROFILE_TIMING_KEY = "profile_timing"
 
 #: Ceilings. A turn is bounded by its wall budget; a "duration" of a day is a

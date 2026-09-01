@@ -369,6 +369,22 @@ class MissionChatTurnPlan:
     #: nothing the turn reads back. Nothing downstream may branch on a mark.
     phases: object
 
+    #: chat-turn-prep Stage 4: milliseconds the PLAN phase spent opening the
+    #: chat ``SessionDB``, or ``None`` when it was not measured.
+    #:
+    #: Carried here for the same reason ``phases`` is: the cost is paid in
+    #: ``_cmd_mission_chat_message``, before the lease and before any runner
+    #: exists, and it is READ in ``_mission_chat_commit_turn`` — a different
+    #: function. The plan IS the boundary between those two, and smuggling the
+    #: value across on an ``args._*`` attribute instead is exactly the pattern
+    #: this object exists to retire.
+    #:
+    #: Unlike ``phases`` this is an immutable ``int | None``: a measurement taken
+    #: once, not an instrument that keeps recording. ``None`` means UNMEASURED
+    #: and must reach the record as an absent key, never a zero. Defaulted so a
+    #: caller that could not measure is not forced to invent a value.
+    session_db_open_ms: object = None
+
 
 @dataclass(slots=True)
 class MissionChatDeferredFinalization:

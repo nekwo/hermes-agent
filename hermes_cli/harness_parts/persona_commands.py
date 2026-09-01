@@ -2654,6 +2654,22 @@ def _cmd_mission_chat_message(args) -> int:
         _mission_chat_emit(args, data)
         return 2
 
+    # chat-turn-prep Stage 4: MEASURE the SessionDB open before deciding to pool
+    # it. H3 (§3) confirmed in CODE that every turn constructs a fresh
+    # ``SessionDB`` whose writer-path constructor runs ``_init_schema`` (DDL +
+    # FTS probe + column reconcile) plus the WAL checks, and confirmed just as
+    # plainly that its millisecond share of the ``request_received →
+    # context_built`` span was never measured. The pooling remedy is gated on
+    # this number, not on the code shape — the plan's own §6 rule about remedies
+    # measured against numbers nobody can re-take applies to its own stages.
+    #
+    # ``time.monotonic`` for the same reason ``mission_chat_phases`` uses it: an
+    # NTP step must not be able to poison a duration. The value is folded into
+    # the durable record's ``profile_timing`` block below; a turn that fails
+    # here never reaches that fold, so the key stays ABSENT rather than
+    # reporting the cost of an open that did not succeed.
+    _session_db_open_started = time.monotonic()
+    _session_db_open_ms: int | None = None
     try:
         session_db = _default_persona_session_db()
     except PersonaChatPersistenceError as exc:
@@ -2669,6 +2685,9 @@ def _cmd_mission_chat_message(args) -> int:
         }
         _mission_chat_emit(args, data)
         return 2
+    _session_db_open_ms = max(
+        0, int((time.monotonic() - _session_db_open_started) * 1000)
+    )
     instance_store = PersonaInstanceStore()
     instance_store.ensure_for_personas(ensure_persisted_personas(cfg))
     # Canonicalize a caller-supplied instance id at THIS boundary (the same
@@ -3108,6 +3127,7 @@ def _cmd_mission_chat_message(args) -> int:
         relay_chain_in=relay_chain_in,
         relay_deadline=relay_deadline,
         phases=turn_phases,
+        session_db_open_ms=_session_db_open_ms,
     )
     # The lease covers the WRITES and nothing else. Post-emit decoration — the
     # auxiliary-LLM auto-title and the metadata event that reports it — is
@@ -3980,7 +4000,25 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
         # provider failure) leaves `stream_done` absent, and with it the Stage 4
         # overlap count whose window it defines.
         turn_phases.mark("stream_done")
-        _profile_timing = getattr(chat_result, "profile_timing", None) or {}
+        # A COPY, not the runner's dict: the handler folds its own Stage-4
+        # measurement in below, and the live result frame further down reads
+        # ``chat_result.profile_timing`` directly. Copying keeps the frame the
+        # runner's own accounting, byte-for-byte as it was, while the DURABLE
+        # RECORD carries the turn's — which is a superset, and which is where
+        # Stage 4's receipt was asked for.
+        _profile_timing = dict(getattr(chat_result, "profile_timing", None) or {})
+        # chat-turn-prep Stage 4: the handler's SessionDB open, folded into the
+        # same block the runner's phases ride. ``safe_turn_profile_timing``
+        # admits any ``*_ms`` int, so this needs no schema change — but it is
+        # bounded there rather than trusted from here. It arrives on the turn
+        # PLAN, which is the declared boundary between the phase that paid this
+        # cost and this one. ABSENT when the plan carried no measurement (an
+        # unavailable store returns before the plan is built), never a zero.
+        _session_db_open_ms = getattr(plan, "session_db_open_ms", None)
+        if isinstance(_session_db_open_ms, int) and not isinstance(
+            _session_db_open_ms, bool
+        ):
+            _profile_timing["session_db_open_ms"] = _session_db_open_ms
         # Cold/warm, from the runner's own receipt rather than a guess here.
         # `resident_actor_reused` is written by the resident-actor registry on
         # every acquire; a turn whose runner reported none (no registry on this

@@ -155,7 +155,44 @@ the runner's own accounting byte-for-byte, while the DURABLE RECORD carries the
 turn's, which is a superset. That is what keeps this lane off the producer
 surface.
 
-**PARKED: the pooling.** See §5 for the measurement and the decision rule.
+**The measurement was taken, and it REFUSES the pooling.** The plan's own rule
+is *"if it bills >100 ms warm, hold one writer handle per serve process"*. It
+does not.
+
+Method (reproducible; the script is 30 lines and is described here rather than
+committed, because a perf assertion in the suite is a liability): copy a live
+`state.db` into `X:/Eternia/test-tmp` — **never** the operator's file — and time
+`hermes_state.SessionDB(db_path=...)`, the non-read-only constructor, twelve
+times in one process. That call is `_init_schema` (DDL + FTS probe + column
+reconcile) plus the WAL checks, which is exactly what H3 named.
+
+| store | on disk | cold (first open in the process) | **warm median** | warm min–max |
+|---|---|---|---|---|
+| `profiles/neko/state.db` | 0.6 MB | 56.1 ms | **6.5 ms** | 5.5–7.5 |
+| `profiles/base/state.db` (the live serve profile) | 68.6 MB | 203.9 ms | **5.7 ms** | 4.7–6.7 |
+| `profiles/launcher-qa/state.db` | 170.8 MB | 60.4 ms | **6.6 ms** | 5.3–8.2 |
+
+**~6 ms warm, and flat across a 280× range of store size** — so the cost is fixed
+per-open work, not a scan. The 56–204 ms cold figure is the process's FIRST open
+(SQLite/module init, the WAL-vulnerability warning path) and pooling would not
+remove it either: a pool still has to open once.
+
+**Decision: DO NOT POOL, and the number is why.** Pooling would trade a measured
+~6 ms per turn for the multi-process WAL discipline that per-open close exists to
+protect (IC-2). That is the shape of remedy this plan refuses. The
+`request_received → context_built` span it sits inside ran 155–3,718 ms on the
+sampled turns; ~6 ms of that is 0.2–4%, and H3's residue is elsewhere in the
+context builder — the same place Stage 1's own remaining-open item points
+(§6: "the `context_built` tail ... needs its own conviction before it gets a
+remedy").
+
+**One caveat, stated rather than buried.** This is a quiet worktree process, not
+a live serve under GIL contention from concurrent snapshot builds. That is
+precisely why the INSTRUMENT landed anyway: `session_db_open_ms` is now on every
+durable record, so the operator re-takes this number in the field on the next
+restart instead of trusting a bench. **The decision rule stands if it moves:**
+`session_db_open_ms` median >100 ms warm on live records → pool one writer handle
+per serve process, close-side IC-2 checkpoint discipline unchanged.
 
 ---
 
@@ -190,3 +227,56 @@ pinned by a test that asserts that ORDER).
 * **Receipt:** one `snapshot_build_deferred reason=… caller=… waited_ms=…
   runs_in_flight_at_exit=… bound_ms=…` line per deferral (never per poll), closed
   vocabulary, ids and timings only.
+
+---
+
+## 6. Corrections to the plan and the brief, collected
+
+1. **§5 Stage 3's named site is wrong** — `request_build` bills 1 ms warm, not
+   0.5–1.0 s. The remedy it asks for already exists in `model_tools`. (§2.)
+2. **The brief's "the serialization happens in `request_build` inside
+   `agent/conversation_loop.py` (`:2239–2264`)"** is true and irrelevant: that
+   block is `_redecorate_prompt_cache_for_provider` + `_build_api_kwargs` +
+   the codex preflight, and on the live lane its tool work is
+   `_responses_tools`, a reference-copying loop. The expensive schema build is
+   `model_tools.get_tool_definitions`, called at agent CONSTRUCTION, billed as
+   `profile_agent_init_tool_setup_ms` (853–1,674 ms live) and already skipped
+   entirely on a reused resident actor.
+3. **H3's magnitude is now measured and is small** — ~6 ms warm, not the
+   hundreds the pooling stage was written against. Stage 4's pooling half is
+   REFUSED on that number, not parked as unknown. (§4.)
+4. **The brief said the gate record was at 01:43Z.** The store's freshest
+   qualifying records are at **05:43–05:44Z on 2026-09-01**; the gate is open
+   either way, and the baseline in §1 is read from the fresher pair.
+5. **A pre-existing test encoded a contract this stage necessarily changes.**
+   `test_a_runner_that_reported_no_timing_leaves_the_key_off_entirely` asserted
+   the `profile_timing` key was absent whenever the RUNNER reported nothing.
+   That was right while the runner was the block's only contributor; the block
+   is now the TURN's. The row was rewritten rather than deleted, and it is
+   STRICTER than before: with a blind runner the block must carry **exactly**
+   `{session_db_open_ms}` — no fabricated `resident_actor_reused`, no zeroed
+   `agent_construct_ms`. The "nothing measured at all" arm is still pinned one
+   layer down by `safe_turn_profile_timing({}) is None`.
+6. **A first pass of the Stage-3 tests pinned the emitter and not the call
+   site**, and stayed green through a mutation that unwired
+   `build_turn_context`'s timing from `run_conversation`. Caught by the
+   red-first round-trip, not by review. The replacement drives the real
+   `run_conversation` prologue through a turn context that aborts on its first
+   field read, which isolates exactly that window.
+
+## 7. Cross-stack: no producer surface moved
+
+No new RPC method, no argparse change, no config field, no new `phases` key.
+Every receipt rides `*_ms` keys on the existing `profile_timing` channel, which
+`safe_turn_profile_timing` already admitted with no schema change.
+
+One asymmetry was chosen deliberately to keep it that way: the handler copies
+the runner's timing dict rather than mutating it, so the LIVE result frame's
+`profile_timing` is byte-identical to what it was and only the DURABLE RECORD
+gains `session_db_open_ms`.
+
+`MissionChatTurnPlan` gained one field (`session_db_open_ms`, defaulted). It is
+an internal `agent_runtime` dataclass carrying argparse namespaces and store
+handles — it is not projected onto any wire — and the field is the declared way
+to pass a fact from the plan phase to the commit phase, which is the alternative
+to smuggling it on an `args._*` attribute.
