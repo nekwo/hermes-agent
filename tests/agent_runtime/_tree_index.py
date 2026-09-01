@@ -40,6 +40,18 @@ Under ``scripts/run_tests_parallel.py`` each test file is its own process, so
 this cache warms once per file — which is precisely the sharing that already
 exists there; what it removes is the intra-file, per-test repetition, in
 every runner.
+
+MEMORY LIFETIME — the first design retained every AST for the life of the
+process, and the full production tree parses to **785 MB of AST objects**
+(measured 2026-09-01, 839 files). In a serial full-directory run that
+ballast rode through thousands of later tests and the resulting GC/paging
+pressure pushed a 13 s gate over the 30 s pytest-timeout ceiling — a crash
+the 9-file verification run could not see. So the caches are now cleared at
+test-MODULE boundaries by an autouse fixture in this directory's conftest:
+within one gate module every test shares one parse (the entire win — the
+duplication was per-test), across modules the tree is re-read (a bounded
+~10 s per walking module, instead of 785 MB forever), and peak retention is
+one module's walk set, held only while that module runs.
 """
 
 from __future__ import annotations
@@ -49,7 +61,14 @@ import functools
 import subprocess
 from pathlib import Path
 
-__all__ = ["text", "parsed", "git_lines"]
+__all__ = ["text", "parsed", "git_lines", "clear"]
+
+
+def clear() -> None:
+    """Drop everything cached. Called at test-module teardown (see above)."""
+    text.cache_clear()
+    parsed.cache_clear()
+    git_lines.cache_clear()
 
 
 @functools.lru_cache(maxsize=None)

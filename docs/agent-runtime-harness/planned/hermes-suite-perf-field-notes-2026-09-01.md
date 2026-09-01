@@ -348,7 +348,14 @@ Stage 6 (its cost was CLI children, not walks).
   roster red; planted `os.environ.get("HERMES_HEAD_HOME")` → env-gate red;
   planted `stream_frames` call → stream gate red.
 
-## 12. Stage 6 — CLI-child spawns (CONVERTED where honest; table = R5)
+## 12. Stage 6 — CLI-child spawns (CONVERTED **PROVISIONALLY** — R5's strike pass is still the operator's)
+
+**R5 status: the conversions below are landed PROVISIONAL.** The plan's R5
+mechanic is table-first, operator strikes rows, only unstruck rows convert;
+the operator's blanket go-ahead ("implement this all") predates this table,
+so the two converted files ship with the table and revert per-file on a
+strike — each conversion lives in ONE helper (`_run_harness`), so a strike
+is a two-line revert restoring the original subprocess body.
 
 The seam: `hermes_cli.harness_parts.serve.dispatch_argv` — production's own
 in-process dispatcher ("exactly as `hermes <argv…>` would, including the
@@ -371,6 +378,70 @@ harness error-envelope contract"), wrapped by
 * No converted site asserts stderr CONTENT (only concatenated into failure
   messages) — the known logging-handler capture gap cannot flip a verdict.
 
-## 13. Full-lane verification
+## 13. Stage 7 collision + resolution (same day)
 
-<!-- FINAL RUNS -->
+A second session (`hermes-agent-6b`) independently landed Stage 7 on main
+(`98d43d0c86`) as a conftest-import-time redirect of TMP/TEMP/TMPDIR +
+`tempfile.tempdir` into a fresh `run-*` dir under `HERMES_TEST_TMP_ROOT`
+(same env var), plus `tests/test_tmp_root_optin.py`. That design SUBSUMES
+this branch's basetemp wiring (pytest derives basetemp from
+`tempfile.gettempdir()`, so the redirect moves it too, per-process), so the
+rebase resolved the conftest overlap in main's favor and dropped the
+basetemp/pytest_configure variant. Kept from this branch: the O(1) counter
+`tmp_path`, the credential regex, the lazy psutil walk. Verified merged:
+their 12 Stage 7 tests green; probe lands its dirs under
+`X:\Eternia	est-tmpun-*`. Coordination closed by message — that session
+confirmed it is building no further stages.
+
+Peer also claimed canon `08-performance-and-debt-ledger.md` carries the
+32:37 wall / aging-floor numbers needing re-truing — **checked, does not
+verify**: no such rows exist in the canon docs on this tree. Nothing to
+re-true.
+
+## 14. Full-lane verification (quiet, hands-off reruns)
+
+Method note: the FIRST verification pair was invalidated twice over — the
+serial agent_runtime run crashed at 76% when the original process-lifetime
+AST cache (785 MB retained, measured) pushed a 13 s gate over the 30 s
+pytest-timeout ceiling, and the hermes_cli timing was contaminated by
+benchmarks I ran during its window. Both lessons recorded; the runs below
+are post-fix and untouched.
+
+Serial, `HERMES_TEST_TMP_ROOT` set, identical result sets to baseline:
+
+| lane | baseline (§6/§6b) | after | result set |
+|---|---|---|---|
+| `tests/agent_runtime` | 1,287.5 s (21:27), 7,263/2 | **999.3 s (16:39)**, 7,296/2 (+33 tests from main's advance) | ✓ pass/skip identical modulo new tests |
+| `tests/hermes_cli` | 890.8 s (14:50), 4,623/100/1 | **707.7 s (11:47)** | ✓ identical (4,623/100/1) |
+| setup phase | 410 s / 326 s | **150 s / 186 s** | — |
+| aged-floor probe (end of hermes_cli run) | 77 ms mean / 670 max | **36 ms mean / 580 max** | fresh floor is ~8 ms |
+
+Converted/ported sinks, same runs: `test_realm_sync.py` 82.5→23.7 s,
+`test_office_class_key_guard.py` 18.8→2.8 s, `test_hermes_home_env_gate.py`
+→2.8 s, s27 27.6→16.7 s. Per-gate comparisons are NOT SHA-clean (main
+advanced under the rebase and several walks scan a bigger tree; s29/s46/s50
+read higher than their contended baselines) — the honest deltas are the lane
+totals and the setup phase.
+
+**OPEN (filed as a plan follow-up): residual aging.** 36 ms aged vs ~8 ms
+fresh misses the ≤1.5× acceptance. The numbered-dir scan is gone (tmp_path
+is O(1) now); prime remaining suspect is gen-2 GC cost scaling with the
+imported-module heap as the process ages. Unattributed — needs an in-situ
+profile at the aged tail before any further fix.
+
+Parallel (Stage 3), lane `agent_runtime:hermes_cli:cli:state`, from this
+worktree, tmp root set:
+
+* **Pass 1 (8 workers): 1,089 files, 12,492 passed, 0 failed, 1,096.2 s
+  (18:16).** The July-2026 destructive-run failure class did NOT reproduce.
+  Repo integrity: worktree list and all branch refs byte-identical before/
+  after except `main`, which advanced by ANOTHER session's landings —
+  verified fast-forward ancestry, not a reset; no new `%TEMP%`
+  hermes-agent-wt registrations.
+* Per-file overhead now dominates the parallel lane: CPU-wall 8,681 s for
+  ~1,700 s of serial test time ⇒ ~6.4 s/file under 8-way contention
+  (the runner docstring's ~250 ms assumption is a Linux-era number).
+* **Pass 2 (R3's second pass, doubling as the Stage 4 probe):**
+
+<!-- PASS2 -->
+

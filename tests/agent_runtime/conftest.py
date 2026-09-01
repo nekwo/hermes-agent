@@ -383,3 +383,23 @@ def release_to_implementation(task, *, owner_slots=("dev", "backend_dev")):
 
     task.current_stage_id = "implement"
     return task
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _drop_tree_index_between_modules():
+    """Clear the source-walk gates' shared I/O+parse cache at module teardown.
+
+    ``tests/agent_runtime/_tree_index.py`` memoizes file text and parsed ASTs
+    so the gate tests in ONE module share a single parse of the production
+    tree instead of repeating it per test. Retaining those ASTs for the life
+    of the process measured 785 MB (2026-09-01, 839 files) and the ballast
+    pushed a later 13 s gate over the 30 s pytest-timeout ceiling in a serial
+    full-directory run. Clearing here bounds retention to one module's walk
+    set, held only while that module runs; a module that never touched the
+    cache pays one no-op call. See the lifetime section of the module
+    docstring in ``_tree_index.py``.
+    """
+    yield
+    from tests.agent_runtime import _tree_index
+
+    _tree_index.clear()
