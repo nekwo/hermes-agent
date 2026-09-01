@@ -2694,6 +2694,278 @@
         "-q",
         "tests/agent_runtime/test_scope_use_methods.py::test_the_result_is_json_serializable"
       ]
+    },
+    {
+      "id": "ctp5-demote-deferral-fires-on-every-lane",
+      "path": "agent_runtime/stream.py",
+      "symbol": "_defer_demote_build_for_active_turns",
+      "operator": "drop-lane-guard",
+      "find": "    if reason != BATCH_REASON_DEMOTE:\n        return 0\n    in_flight = _agent_runs_in_flight()",
+      "replace": "    in_flight = _agent_runs_in_flight()",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_snapshot_demote_deferral.py::test_a_non_demote_lane_never_defers"
+      ]
+    },
+    {
+      "id": "ctp5-deferral-bound-widened-to-a-starvation",
+      "path": "agent_runtime/stream.py",
+      "symbol": "SNAPSHOT_DEMOTE_DEFERRAL_MAX_MS",
+      "operator": "widen-bound",
+      "find": "SNAPSHOT_DEMOTE_DEFERRAL_MAX_MS = 1000",
+      "replace": "SNAPSHOT_DEMOTE_DEFERRAL_MAX_MS = 5000",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_snapshot_demote_deferral.py::test_the_bound_is_one_second_and_is_a_constant_not_a_literal"
+      ]
+    },
+    {
+      "id": "ctp5-deferral-ignores-a-cancelled-consumer",
+      "path": "agent_runtime/stream.py",
+      "symbol": "_defer_demote_build_for_active_turns",
+      "operator": "drop-cancellation-break",
+      "find": "        if request_cancelled():\n            break\n        now_s = _now()",
+      "replace": "        now_s = _now()",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_snapshot_demote_deferral.py::test_a_cancelled_request_abandons_the_wait_immediately"
+      ]
+    },
+    {
+      "id": "ctp5-deferral-decided-after-the-build-worker-starts",
+      "path": "agent_runtime/stream.py",
+      "symbol": "_full_core_batch_frames",
+      "operator": "reorder-yield-after-job",
+      "find": "    _defer_demote_build_for_active_turns(reason=reason, caller=caller)\n    if request_cancelled():\n        return\n\n    job = _SnapshotBuildJob(caller=caller)",
+      "replace": "    job = _SnapshotBuildJob(caller=caller)\n    _defer_demote_build_for_active_turns(reason=reason, caller=caller)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_snapshot_demote_deferral.py::test_the_demote_lane_actually_calls_the_deferral_before_it_builds"
+      ]
+    },
+    {
+      "id": "ctp5-a-zero-wait-still-logs-a-deferral",
+      "path": "agent_runtime/stream.py",
+      "symbol": "_defer_demote_build_for_active_turns",
+      "operator": "loosen-receipt-guard",
+      "find": "    if waited_ms > 0:\n        # Closed vocabulary",
+      "replace": "    if waited_ms >= 0:\n        # Closed vocabulary",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_snapshot_demote_deferral.py::test_a_wait_that_resolves_to_zero_ms_logs_nothing"
+      ]
+    },
+    {
+      "id": "ctp3-restored-prompt-does-not-report-itself",
+      "path": "agent/conversation_loop.py",
+      "symbol": "_restore_or_build_system_prompt",
+      "operator": "drop-restore-flag",
+      "find": "        agent._system_prompt_restored_from_session = True\n        _emit_conversation_timing(\n            agent,\n            \"system_prompt_restore\",",
+      "replace": "        _emit_conversation_timing(\n            agent,\n            \"system_prompt_restore\",",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_prologue_timing_receipts.py::TestSystemPromptReceipt::test_a_restored_prompt_reports_a_restore_and_never_a_build"
+      ]
+    },
+    {
+      "id": "ctp3-restore-receipt-never-emitted",
+      "path": "agent/conversation_loop.py",
+      "symbol": "_restore_or_build_system_prompt",
+      "operator": "drop-restore-receipt",
+      "find": "        _emit_conversation_timing(\n            agent,\n            \"system_prompt_restore\",\n            _prompt_started,\n            stored_state=stored_state,\n        )\n        return",
+      "replace": "        return",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_prologue_timing_receipts.py::TestSystemPromptReceipt::test_a_restored_prompt_reports_a_restore_and_never_a_build",
+        "tests/agent/test_prologue_timing_receipts.py::TestTheReceiptsReachTheDurableRecord::test_the_system_prompt_pair_survives_collector_and_sanitizer"
+      ]
+    },
+    {
+      "id": "ctp3-prompt-rebuild-never-reported",
+      "path": "agent/conversation_loop.py",
+      "symbol": "_restore_or_build_system_prompt",
+      "operator": "drop-build-receipt",
+      "find": "    _emit_conversation_timing(\n        agent,\n        \"system_prompt_build\",\n        _prompt_started,\n        stored_state=stored_state,\n    )",
+      "replace": "    pass",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_prologue_timing_receipts.py::TestSystemPromptReceipt"
+      ]
+    },
+    {
+      "id": "ctp3-stale-restore-flag-survives-into-the-next-turn",
+      "path": "agent/conversation_loop.py",
+      "symbol": "_restore_or_build_system_prompt",
+      "operator": "drop-per-turn-reset",
+      "find": "    _prompt_started = time.perf_counter()\n    agent._system_prompt_restored_from_session = False",
+      "replace": "    _prompt_started = time.perf_counter()",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_prologue_timing_receipts.py::TestSystemPromptReceipt::test_a_stale_restored_flag_from_a_previous_turn_cannot_survive"
+      ]
+    },
+    {
+      "id": "ctp3-turn-context-is-not-timed-by-the-loop",
+      "path": "agent/conversation_loop.py",
+      "symbol": "_run_conversation",
+      "operator": "unwire-call-site-timing",
+      "find": "    _emit_conversation_timing(\n        agent,\n        \"turn_context\",\n        _turn_context_started,",
+      "replace": "    _noop_conversation_timing(\n        agent,\n        \"turn_context\",\n        _turn_context_started,",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_prologue_timing_receipts.py::test_run_conversation_times_build_turn_context_at_the_call_site"
+      ]
+    },
+    {
+      "id": "ctp3-tool-schema-memo-hit-is-not-counted",
+      "path": "model_tools.py",
+      "symbol": "get_tool_definitions",
+      "operator": "drop-hit-counter",
+      "find": "        if cached is not None:\n            _bump_tool_defs_counter(\"hits\")",
+      "replace": "        if cached is not None:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_prologue_timing_receipts.py::TestToolSchemaMemoReceipt::test_the_serializer_runs_once_across_two_builds_of_one_toolset_tuple"
+      ]
+    },
+    {
+      "id": "ctp3-tool-schema-rebuild-is-not-counted",
+      "path": "model_tools.py",
+      "symbol": "get_tool_definitions",
+      "operator": "drop-miss-counter",
+      "find": "    _bump_tool_defs_counter(\"misses\")\n    result = _compute_tool_definitions",
+      "replace": "    result = _compute_tool_definitions",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_prologue_timing_receipts.py::TestToolSchemaMemoReceipt::test_a_registry_epoch_change_rebuilds_rather_than_pinning_a_stale_surface"
+      ]
+    },
+    {
+      "id": "ctp3-invalidation-erases-work-that-was-already-paid",
+      "path": "model_tools.py",
+      "symbol": "_clear_tool_defs_cache",
+      "operator": "reset-cumulative-receipt",
+      "find": "    _tool_defs_cache.clear()",
+      "replace": "    _tool_defs_cache.clear()\n    _tool_defs_counters.hits = 0\n    _tool_defs_counters.misses = 0",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_prologue_timing_receipts.py::TestToolSchemaMemoReceipt::test_the_hatch_drops_the_memo_and_keeps_the_receipt"
+      ]
+    },
+    {
+      "id": "ctp3-unreadable-counter-is-reported-as-a-cache-hit",
+      "path": "agent/agent_init.py",
+      "symbol": "_emit_tool_defs_receipt",
+      "operator": "collapse-unknown-into-hit",
+      "find": "    if misses_before is None or misses_after is None:\n        return\n    step = (",
+      "replace": "    if False:\n        return\n    step = (",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_prologue_timing_receipts.py::TestToolSchemaMemoReceipt::test_an_unreadable_counter_reports_NOTHING_rather_than_a_hit"
+      ]
+    },
+    {
+      "id": "ctp3-a-memo-hit-is-reported-as-a-schema-build",
+      "path": "agent/agent_init.py",
+      "symbol": "_emit_tool_defs_receipt",
+      "operator": "weaken-miss-discriminator",
+      "find": "        \"tool_defs_build\" if misses_after > misses_before else \"tool_defs_cached\"",
+      "replace": "        \"tool_defs_build\" if misses_after >= misses_before else \"tool_defs_cached\"",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_prologue_timing_receipts.py::TestToolSchemaMemoReceipt::test_a_miss_reports_a_build_and_a_hit_reports_a_cached_read"
+      ]
+    },
+    {
+      "id": "ctp4-plan-drops-the-session-db-measurement",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_cmd_mission_chat_message",
+      "operator": "drop-plan-field",
+      "find": "        phases=turn_phases,\n        session_db_open_ms=_session_db_open_ms,\n    )",
+      "replace": "        phases=turn_phases,\n    )",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_mission_chat_turn_phases.py::test_the_handlers_session_db_open_reaches_the_durable_record"
+      ]
+    },
+    {
+      "id": "ctp4-unmeasured-session-db-open-becomes-a-zero",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_mission_chat_commit_turn",
+      "operator": "fabricate-zero-for-absent",
+      "find": "        if isinstance(_session_db_open_ms, int) and not isinstance(\n            _session_db_open_ms, bool\n        ):\n            _profile_timing[\"session_db_open_ms\"] = _session_db_open_ms",
+      "replace": "        _profile_timing[\"session_db_open_ms\"] = int(_session_db_open_ms or 0)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_mission_chat_turn_phases.py::test_a_plan_that_measured_nothing_leaves_session_db_open_ms_ABSENT"
+      ]
+    },
+    {
+      "id": "ctp4-the-session-db-open-is-never-timed",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_cmd_mission_chat_message",
+      "operator": "drop-measurement",
+      "find": "    _session_db_open_ms = max(\n        0, int((time.monotonic() - _session_db_open_started) * 1000)\n    )\n    instance_store = PersonaInstanceStore()",
+      "replace": "    instance_store = PersonaInstanceStore()",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_mission_chat_turn_phases.py::test_the_handlers_session_db_open_reaches_the_durable_record",
+        "tests/hermes_cli/test_mission_chat_turn_phases.py::test_a_runner_that_reported_no_timing_leaves_only_what_the_HANDLER_measured"
+      ]
     }
   ]
 }
