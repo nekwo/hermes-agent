@@ -60,6 +60,7 @@ from dataclasses import MISSING, fields, is_dataclass
 import pytest
 
 from agent_runtime.runtime_config import RuntimeConfig
+from tests.agent_runtime import _tree_index
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -144,7 +145,7 @@ def _referenced_names(paths) -> set[str]:
     for path in paths:
         rel = path.relative_to(REPO_ROOT).as_posix()
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+            tree = _tree_index.parsed(str(path), errors="ignore")
         except SyntaxError:  # pragma: no cover - a broken file is its own failure
             continue
         skipped = {
@@ -197,7 +198,7 @@ def test_the_scan_finds_the_getattr_string_form_specifically():
     attribute_only: set[str] = set()
     for path in _production_files():
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+            tree = _tree_index.parsed(str(path), errors="ignore")
         except SyntaxError:  # pragma: no cover
             continue
         for node in ast.walk(tree):

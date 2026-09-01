@@ -268,3 +268,109 @@ full run (alphabetically last → ran near the end of the 4.7 k-test process):
   run produced ~338 spurious failures and destroyed a detached worktree.
   The 2026-08-31 fence and the dcw-h2 test-isolation lane postdate those; the
   plan treats "parallel run is clean now" as a claim to re-verify, not assume.
+
+---
+
+# IMPLEMENTATION LOG — 2026-09-01, same session (operator go-ahead on all stages)
+
+New precondition, verified before anything else: **the operator excluded
+`X:\Eternia` in Defender.** Churn re-bench: `X:\Eternia` 0.25 s vs `X:\wt`
+0.57 s vs `%TEMP%` 0.76 s per 300 units — the exclusion is live. Work moved to
+worktree `X:\Eternia\_worktrees\perf-h` (branch `perf-hermes-suite`, rebased;
+the plan-docs commit had already been landed on main as `a426ea3494` by
+another session).
+
+## 8. Stage 1 — psutil walk off the per-test path (LANDED)
+
+Eager `children(recursive=True)` in `_live_system_guard` → lazy memoized
+capture at first guarded kill. Semantics: the snapshot only fast-paths PIDs
+the live `parents()` walk (still the authority, unchanged) would allow anyway;
+lazy capture is a superset of eager among still-alive PIDs and contains no
+foreign PID, so refusals are identical.
+
+* 200-no-op probe, fresh process: **6.30 s → 2.65 s** (~28 ms → ~8 ms/test)
+  — this includes Stage 2's tmp fix; the psutil share alone was 10.9 ms.
+* `test_live_system_guard.py` + `test_live_system_guard_self_test.py`:
+  identical result set before/after my change (2 failed, 40 passed,
+  1 skipped) — the 2 failures are PRE-EXISTING Windows environment gaps
+  (`termios`/pty does not exist on win32; `WinError 87`), proven by running
+  the stashed baseline.
+
+## 9. Stage 2 — the aging floor (LANDED)
+
+Attribution completed with pytest's REAL allocator:
+`_pytest.pathlib.make_numbered_dir` in a filling root costs
+**2.69 ms (fresh) → 12.51 ms (4.2 k entries) → 23.94 ms (11 k entries),
+150.8 s cumulative for 11,000 calls** in `%TEMP%`. That is the dominant
+attributed component of the 28→77 ms aged floor (§6b-i).
+
+Fix: `tests/conftest.py` now overrides `tmp_path` with an O(1)
+counter-allocated directory under the session basetemp (same contract:
+unique, empty, test-named, kept for the session — matching default
+`tmp_path_retention_policy="all"`). Also: credential env-var predicate
+compiled to one regex. `tmp_path_factory` deliberately not overridden.
+
+## 10. Stage 7 — excluded test-tmp root (LANDED as opt-in wiring)
+
+`HERMES_TEST_TMP_ROOT` (env, opt-in, unset in CI): relocates the session
+HERMES_HOME sandbox AND pytest's basetemp into the named root, one
+`hermes-pytest-<pid>` subdir per process (concurrent runs and the parallel
+runner's children never share), stale run dirs pruned best-effort after 24 h.
+Verified: probe run with the root set lands all dirs under
+`X:\Eternia\.test-tmp\hermes-pytest-<pid>\`, 200 probe tests in 2.37 s.
+Recommended operator config: `HERMES_TEST_TMP_ROOT=X:\Eternia\.test-tmp`.
+
+## 11. Stage 5 — source-walk gates share one parse (LANDED)
+
+`tests/agent_runtime/_tree_index.py`: process-lifetime memoization of file
+text, parsed AST (keyed on path + decode-errors mode) and git query lines.
+NOT an enumeration authority — every gate keeps its own walk/glob/skip-list;
+only I/O and parsing are shared. Ported: s27 (+`lru_cache` on its derived
+surface, callers verified read-only), s29, s46, s49, s50, s56,
+stream-stale-first (its `_repo_python_sources` deliberately left UNCACHED —
+it enumerates with `git ls-files --others`, and its anti-vacuity test plants
+an ignored file and re-enumerates, which a cache would make vacuous),
+persona-roster, hermes-home-env-gate. Tombstone registry NOT ported (already
+internally cached, pinned by its own tests); office-class-key reclassified to
+Stage 6 (its cost was CLI children, not walks).
+
+* Same-command measurement, all 9 ported files, identical conditions:
+  **125.92 s (baseline via stash) → 70.45 s** — 44% off the wall, more off
+  the call time (the wall includes ~10 s of pytest boot both sides).
+* **Sabotage round-trips, one per ported file, all red for the RIGHT
+  reason and all reverted clean** (`git status` empty after each):
+  planted orphan in `snapshot.py` → s27 AND s29 red; function-local
+  `from agent_runtime import operator_control` / `launcher_process_hygiene`
+  in production files → s49 / s50 red (note: a MODULE-level plant breaks
+  collection instead — wrong-reason failure, rejected); planted
+  `def apply_pending` → s46 red; planted dead `RuntimeConfig` field → s56
+  red naming the field; planted undeclared `require_known_persona` call →
+  roster red; planted `os.environ.get("HERMES_HEAD_HOME")` → env-gate red;
+  planted `stream_frames` call → stream gate red.
+
+## 12. Stage 6 — CLI-child spawns (CONVERTED where honest; table = R5)
+
+The seam: `hermes_cli.harness_parts.serve.dispatch_argv` — production's own
+in-process dispatcher ("exactly as `hermes <argv…>` would, including the
+harness error-envelope contract"), wrapped by
+`tests/agent_runtime/_harness_cli.run_harness_in_process` (argv needs the
+`harness` prefix; found by the first red run). Classification:
+
+| file / claim | sites | class | disposition |
+|---|---|---|---|
+| `test_realm_sync.py` — verb behavior: envelope shape, exit code, store effects | 25 in 15 tests | (b) wiring | CONVERTED (helper swapped; call sites untouched) |
+| `test_office_class_key_guard.py` — refusal/override verb behavior | 12 in 12 tests | (b) wiring | CONVERTED (same) |
+| `tests/hermes_cli/test_harness_characters_cli.py` (67.3 s) — "the full QA flow runs through the CLI" | — | (a) deliberate CLI acceptance | LEFT byte-identical |
+| `tests/hermes_cli/test_doctor.py` (57.8 s; 18.3 s single test) — profiled solo: 7.1 s inside `run_doctor` = its own late imports (~5.7 s) + probe-thread joins (~3.0 s); the test is already in-process and its subject IS real diagnostics | — | (a) | LEFT |
+| `tests/hermes_cli/test_completion.py` (14.1 s) — subject is the generated bash script's validity, proven by real bash | — | (a) | LEFT |
+
+* Both converted files: **89 passed in 32.84 s** (baseline: ~101 s of
+  reported ≥5 ms rows alone, contended).
+* Seam sabotage: `code = 0` without dispatching → immediate reds (assertions
+  depend on the dispatched work, not just exit codes); reverted, re-run green.
+* No converted site asserts stderr CONTENT (only concatenated into failure
+  messages) — the known logging-handler capture gap cannot flip a verdict.
+
+## 13. Full-lane verification
+
+<!-- FINAL RUNS -->

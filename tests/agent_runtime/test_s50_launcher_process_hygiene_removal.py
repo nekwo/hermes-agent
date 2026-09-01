@@ -67,6 +67,7 @@ import pathlib
 
 import agent_runtime
 from agent_runtime.decision_contract_registry import event_catalog
+from tests.agent_runtime import _tree_index
 
 
 def test_no_production_module_still_imports_it():
@@ -82,7 +83,7 @@ def test_no_production_module_still_imports_it():
             if "__pycache__" in path.parts:
                 continue
             try:
-                tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+                tree = _tree_index.parsed(str(path), errors="replace")
             except SyntaxError:
                 continue
             scanned += 1

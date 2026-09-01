@@ -73,6 +73,8 @@ import textwrap
 import tokenize
 from pathlib import Path
 
+from tests.agent_runtime import _tree_index
+
 import pytest
 
 
@@ -382,9 +384,9 @@ def test_no_surviving_module_re_grows_the_lane():
             if "__pycache__" in path.parts:
                 continue
             scanned += 1
-            raw = path.read_text(encoding="utf-8", errors="replace")
+            raw = _tree_index.text(str(path), errors="replace")
             try:
-                tree = ast.parse(raw)
+                tree = _tree_index.parsed(str(path), errors="replace")
             except SyntaxError:
                 tree = None
             if tree is not None:

@@ -38,11 +38,14 @@ history verb family), so the reader had no lane left to serve.
 from __future__ import annotations
 
 import ast
+import functools
 import inspect
 import pathlib
 import textwrap
 
 from agent_runtime import snapshot
+
+from tests.agent_runtime import _tree_index
 
 
 #: The unreachable island. Grouped by the chain that used to reach it.
@@ -221,6 +224,7 @@ def _imported_module(node: ast.ImportFrom, path: pathlib.Path, root: pathlib.Pat
     return ".".join(package + ([node.module] if node.module else []))
 
 
+@functools.lru_cache(maxsize=1)
 def _external_surface_of_snapshot() -> dict[str, set[str]]:
     """Every production name reached INTO ``agent_runtime.snapshot``, with sites.
 
@@ -257,7 +261,7 @@ def _external_surface_of_snapshot() -> dict[str, set[str]]:
         if path.resolve() == this_module:
             continue
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = _tree_index.parsed(str(path))
         except (SyntaxError, UnicodeDecodeError):
             continue
         where = path.relative_to(root).as_posix()

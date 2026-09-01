@@ -36,6 +36,8 @@ import subprocess
 import pytest
 
 from agent_runtime import core_cache
+
+from tests.agent_runtime import _tree_index
 from agent_runtime.stream import stream_frames
 from tests.agent_runtime.stream_liveness_helpers import drain_boot_liveness
 
@@ -264,7 +266,7 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
 def _stream_frames_calls(path: pathlib.Path, function_name: str) -> list[ast.Call]:
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = _tree_index.parsed(str(path))
     found: list[ast.Call] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef) or node.name != function_name:
@@ -370,7 +372,7 @@ def _stream_frames_caller_files() -> set[str]:
             continue
         path = _REPO_ROOT / relative
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = _tree_index.parsed(str(path))
         except (SyntaxError, UnicodeDecodeError, OSError):
             # A file this repo owns that will not parse is not this gate's
             # business — but it is also not silently "no callers": every such

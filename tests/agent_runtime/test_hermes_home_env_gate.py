@@ -51,6 +51,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.agent_runtime import _tree_index
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 #: The environment variables that name a runtime root.
@@ -185,7 +187,7 @@ def scanned() -> dict[str, list[int]]:
     found: dict[str, list[int]] = {}
     for path in _python_files():
         try:
-            tree = ast.parse(path.read_bytes().decode("utf-8"))
+            tree = _tree_index.parsed(str(path))
         except (SyntaxError, UnicodeDecodeError):  # pragma: no cover - defensive
             continue
         hits = _gated_env_access(tree)

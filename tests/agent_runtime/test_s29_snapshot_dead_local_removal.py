@@ -44,6 +44,8 @@ import textwrap
 
 from agent_runtime import snapshot
 
+from tests.agent_runtime import _tree_index
+
 
 #: The two helpers S27 kept as roots on a test-only pin.
 REMOVED_SNAPSHOT_SYMBOLS = (
@@ -241,7 +243,7 @@ def _external_surface_of_snapshot() -> dict[str, set[str]]:
         if path.resolve() == this_module:
             continue
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = _tree_index.parsed(str(path))
         except (SyntaxError, UnicodeDecodeError):
             continue
         where = path.relative_to(root).as_posix()

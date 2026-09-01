@@ -1,9 +1,16 @@
 # Planned — hermes test-suite performance (the 32:37 serial wall)
 
-**Status:** PLANNED 2026-09-01 — diagnosis complete, nothing implemented.
+**Status:** IMPLEMENTED 2026-09-01 (same day — operator go-ahead "implement
+this all", and the operator excluded `X:\Eternia` in Defender, which resolved
+R2 and reshaped Stage 7 into landed opt-in wiring). Stages 1, 2, 5, 6, 7
+landed with acceptance measurements and sabotage round-trips; Stage 3 parity +
+integrity verification and Stage 4's worker sweep measured the same session.
+Per-stage results: field notes §§8–14. R5's classification table: field notes
+§12 — the operator may still strike rows (conversions live in one helper per
+file and are trivially reversible). R1/R6 stand as recommended: no xdist, no
+per-batch isolation.
 **Evidence:** [`hermes-suite-perf-field-notes-2026-09-01.md`](hermes-suite-perf-field-notes-2026-09-01.md)
-(all § references below point there). Diagnose-only lane: this plan and the
-field notes are the whole deliverable; no test or fixture was changed.
+(all § references below point there).
 
 **Question this answers** (operator, 2026-09-01): *why is the suite slow on
 this machine — is it hangs?* — **No. There are no happy-path hangs** (§4: every

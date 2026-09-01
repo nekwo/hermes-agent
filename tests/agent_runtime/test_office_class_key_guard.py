@@ -41,16 +41,18 @@ import sys
 from agent_runtime.office_store import OfficeStore
 from agent_runtime.store import WorkspaceStore
 
+from tests.agent_runtime._harness_cli import run_harness_in_process
+
 INSTANCE = "personainst_backend_dev_agent_29fdd71a"
 
 
 def _run_harness(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [sys.executable, "-m", "hermes_cli.main", "harness", *args],
-        capture_output=True,
-        text=True,
-        timeout=90,
-    )
+    # In-process since the hermes-suite-perf Stage 6 conversion: every call
+    # site here asserts verb behavior (envelope, exit code, store effect),
+    # not the process boundary, and the real child cost ~3 s of interpreter
+    # boot per call across 12 sites. See tests/agent_runtime/_harness_cli.py
+    # for the seam (production dispatch_argv) and what it does NOT prove.
+    return run_harness_in_process(*args)
 
 
 def _instance_file(persona_instance_id: str = INSTANCE, *, persona_id: str = "backend_dev") -> None:

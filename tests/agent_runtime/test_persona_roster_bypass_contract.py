@@ -46,6 +46,7 @@ from pathlib import Path
 import pytest
 
 from agent_runtime import agent_create
+from tests.agent_runtime import _tree_index
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -234,7 +235,7 @@ def _enumerate_persona_callers() -> set[tuple[str, str, str]]:
     found: set[tuple[str, str, str]] = set()
     for package in SCANNED_PACKAGES:
         for path in sorted((REPO_ROOT / package).rglob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = _tree_index.parsed(str(path))
             owners = _owners(tree)
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Call):

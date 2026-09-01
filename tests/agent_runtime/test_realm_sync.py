@@ -26,14 +26,16 @@ from agent_runtime.realm_sync import (
 from agent_runtime.skill_install import HARNESS_SKILLS, harness_skill_hash_mismatches, install_harness_skills
 from agent_runtime.store import RealmStore, WorkspaceStore
 
+from tests.agent_runtime._harness_cli import run_harness_in_process
+
 
 def _run_harness(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [sys.executable, "-m", "hermes_cli.main", "harness", *args],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    # In-process since the hermes-suite-perf Stage 6 conversion: every call
+    # site here asserts verb behavior (envelope, exit code, store effect),
+    # not the process boundary, and the real child cost ~3 s of interpreter
+    # boot per call across 25 sites. See tests/agent_runtime/_harness_cli.py
+    # for the seam (production dispatch_argv) and what it does NOT prove.
+    return run_harness_in_process(*args)
 
 
 def _realm_with_repo(tmp_path: Path, name: str = "Sync Realm"):

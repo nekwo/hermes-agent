@@ -21,7 +21,9 @@ test runner at ``scripts/run_tests.sh``.
 
 import asyncio
 import atexit
+import itertools
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -240,11 +242,19 @@ _CREDENTIAL_NAMES = frozenset({
 })
 
 
+#: One compiled alternation instead of 15 ``endswith`` probes per env var —
+#: this predicate runs against every environment key at EVERY test's setup,
+#: so it sits on the per-test floor (hermes-suite-perf plan, Stage 2).
+_CREDENTIAL_SUFFIX_RE = re.compile(
+    "(?:" + "|".join(re.escape(suffix) for suffix in _CREDENTIAL_SUFFIXES) + ")$"
+)
+
+
 def _looks_like_credential(name: str) -> bool:
     """True if env var name matches a credential-shaped pattern."""
     if name in _CREDENTIAL_NAMES:
         return True
-    return any(name.endswith(suf) for suf in _CREDENTIAL_SUFFIXES)
+    return _CREDENTIAL_SUFFIX_RE.search(name) is not None
 
 
 # HERMES_* vars that change test behavior by being set. Unset all of these
@@ -1101,6 +1111,45 @@ def _reset_tui_gateway_server_state():
         pass
 
 
+# ── O(1) tmp_path (the aging-floor fix) ─────────────────────────────────────
+#
+# pytest's stock ``tmp_path`` allocates through ``make_numbered_dir``, which
+# scans EVERY entry of the session basetemp to find the next free suffix — an
+# O(entries) scan per test that makes the per-test floor GROW as a
+# single-process run ages. Measured 2026-09-01 on this codebase's own scale:
+# a fresh process pays ~2.7 ms/call, the 11,000th call pays ~24 ms, 150.8 s
+# cumulative — and a 200-no-op-test probe's setup went 28 ms/test fresh →
+# 77 ms/test at the end of a 4.7k-test run, with this scan the largest
+# attributed component. (docs/agent-runtime-harness/planned/
+# hermes-suite-perf-field-notes-2026-09-01.md §6b-i.)
+#
+# This override keeps the stock fixture's contract — a unique, empty,
+# test-named directory under the session basetemp, kept for the life of the
+# session exactly like the default ``tmp_path_retention_policy = "all"`` — and
+# replaces only the ALLOCATOR: a process-local counter, so creation is O(1)
+# regardless of how many tests have run. Uniqueness is the counter's, not the
+# scan's: two tests with the same sanitized name get different suffixes, and
+# concurrent pytest processes never share a basetemp in the first place
+# (pytest allocates basetemp per process; the HERMES_TEST_TMP_ROOT wiring
+# above keeps that per-PID too).
+#
+# ``tmp_path_factory`` is deliberately NOT overridden — direct
+# ``mktemp()`` callers still get stock behavior; they are rare enough not to
+# age the floor.
+
+_TMP_COUNTER = itertools.count()
+_TMP_NAME_RE = re.compile(r"[\W]")
+
+
+@pytest.fixture()
+def tmp_path(request, tmp_path_factory):
+    """O(1) drop-in for pytest's ``tmp_path`` — see block comment above."""
+    name = _TMP_NAME_RE.sub("_", request.node.name)[:30]
+    path = tmp_path_factory.getbasetemp() / f"{name}-{next(_TMP_COUNTER)}"
+    path.mkdir(mode=0o700)
+    return path
+
+
 @pytest.fixture()
 def tmp_dir(tmp_path):
     """Provide a temporary directory that is cleaned up automatically."""
@@ -1386,17 +1435,36 @@ def _live_system_guard(request, monkeypatch):
     import subprocess as _subprocess
 
     test_pid = _os.getpid()
-    # Capture the test process's existing children at fixture start —
-    # any *new* children spawned by the test are also allowlisted via
-    # the live psutil walk below. Static set keeps the fast path cheap.
     try:
         import psutil as _psutil
-        _initial_children = {
-            c.pid for c in _psutil.Process(test_pid).children(recursive=True)
-        }
     except Exception:
         _psutil = None
-        _initial_children = set()
+
+    # The children snapshot is a fast-path allowlist, not the authority — the
+    # live parents() walk in _is_own_subtree is. Capturing it eagerly here paid
+    # a full process-table walk (psutil ppid_map: 10.9 ms measured on Windows,
+    # ~2 min across an 11.5k-test run) at EVERY test's setup to serve the rare
+    # test that actually delivers a signal. It is captured lazily instead, at
+    # the first guarded kill: any PID that is a child of this pytest process at
+    # that moment is inside our subtree by definition — a superset of "was a
+    # child at fixture start", and every member is a PID the walk would allow
+    # anyway. Foreign PIDs are never in the set, so nothing new is allowed.
+    _children_cache: set | None = None
+
+    def _own_children() -> set:
+        nonlocal _children_cache
+        if _children_cache is None:
+            if _psutil is None:
+                _children_cache = set()
+            else:
+                try:
+                    _children_cache = {
+                        c.pid
+                        for c in _psutil.Process(test_pid).children(recursive=True)
+                    }
+                except Exception:
+                    _children_cache = set()
+        return _children_cache
 
     def _is_own_subtree(pid: int) -> bool:
         # PID 0 means "our own process group"; -1 means "every process we
@@ -1407,7 +1475,7 @@ def _live_system_guard(request, monkeypatch):
             return True
         if pid < 0:
             return False
-        if pid == test_pid or pid in _initial_children:
+        if pid == test_pid or pid in _own_children():
             return True
         if _psutil is None:
             return False
