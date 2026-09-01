@@ -308,7 +308,17 @@ Recorded so the next lane can repeat exactly what was run, and see what was not.
 | `pytest tests/agent_runtime -k "scope or store or activation or realm or workspace or straddle" -q` | 1268 passed / 1 failed → the stage-13 straddle test above; re-run green |
 | `pytest tests/{stage13,scope_use_methods,scope_straddle_invariant,scope_patch_coverage,mutation_gate_worktree_lock,no_source_grep_assertions}` | 99 passed |
 | `pytest tests/test_mutation_gate_worktree_lock.py tests/scripts -q` | 91 passed, no stray lock left in the tree |
-| `python scripts/changed_line_mutation_check.py --base 98d43d0c86 --max-candidates 40` | see below |
+| `python scripts/changed_line_mutation_check.py --base 98d43d0c86 --max-candidates 40` | **9 selected, 9 KILLED, exit 0** (run 1: `baseline failed`; run 2: 8 killed / 1 SURVIVED; run 3 after both corrections: clean) |
+
+Cross-stack, read-only from the launcher primary, both pointed at this worktree:
+
+| command | result |
+|---|---|
+| `python tool/hermes_serve_frames/generate.py --check --hermes-root X:/wt/hyg --python <hermes venv>` | exit 0 — every serve-frame fixture matches; the notes are only "captured at an older sha" |
+| `python tool/test_quality/check_producer_contracts.py --hermes-root X:/wt/hyg --no-generate` | exit 0 — "producer contract fixtures match Hermes: stream frames + response envelopes" |
+
+That is the wire claim discharged with evidence rather than by reading: Part 1
+adds no field to any answer row, and no launcher pin moves.
 
 **A collection hazard, not a defect.** `pytest tests -k "<pattern>"` over the
 whole tree fails collection on this host with 11 pre-existing errors —
