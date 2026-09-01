@@ -101,6 +101,21 @@ warns `office_actors_unreadable` with the count and the SOURCE workspace id
 (`workspace_template.py:123`) — the id an operator has to go back to, not the
 one being created.
 
+**Rule 1 read from the other side, 2026-08-31 (the instance-replication lane).**
+`result["persona_instance_sync"]` is emitted **unconditionally** on every realm
+pull — including against a peer that publishes no projection, where it carries
+`source: null` — because here an absent KEY and a present-but-null answer mean
+two different things ("this ack came from an older hermes" vs "this peer runs
+one"), and an omitted key can only say the second by accident. Where rule 1
+forbids inventing a zero for a phase that did not run, this forbids the mirror:
+dropping the key for a lane that DID run and found nothing. Its sibling receipt
+is a domain event rather than a log line, and the honesty is the same kind: a
+replication mint emits `persona_instance.replicated`
+(`decision_contract_registry.py:170`) and never `persona_instance.created`,
+because that type means "this machine authored an agent" to every consumer that
+reads it, and one pull posing as N local creates is a lie no grep over the log
+can detect.
+
 ## Wire safety: receipts ride the LOG, never the envelope
 
 **Observability never adds a key to the parity envelope.** Parity rides the

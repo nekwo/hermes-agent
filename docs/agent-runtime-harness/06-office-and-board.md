@@ -54,18 +54,36 @@ than on the shape of the key (launcher plan
 `docs/mission_control/planned/realm-actor-lifecycle-refactor.md` A1, in the
 EterniaLauncher repo).
 
-> **"A pull adopts office ACTORS and never instances" is the LIVE behaviour and
-> a SUPERSEDED destination (operator ruling 2026-08-31).** Instance replication
-> is RULED — one shared instance id realm-wide, no machine namespace, and
-> placement-backed rows RECREATED on pull — but it is **not built**: nothing in
-> `realm_sync.py` names `persona_instances/` today, and everything this section
-> describes is exactly what runs. Read the paragraph above as current fact, not
-> as the design. The ruling's authority is the launcher plan
-> `docs/mission_control/planned/instance-replication.md` (audited) and ADR 0027
-> in `Launcher_Brain`'s Decisions, both in the EterniaLauncher repo; the build
-> is in flight on a branch and will land with its own canon fold. Until then,
-> do not describe replication machinery as existing, and do not cite
-> "instances never sync" as a rule that will hold.
+> **"A pull adopts office ACTORS and never instances" was superseded by the
+> BUILD, 2026-08-31 (H1–H4, tip `a0c171af47`).** The pull now RECREATES
+> placement-backed instances: `apply_persona_instance_pull` mints a local row
+> through `PersonaInstanceStore.replicate_instance` for every desk that arrived
+> without an agent behind it, one shared instance id realm-wide (Option A, no
+> machine namespace). The record split is per FIELD and not per category — of
+> `PersonaInstance`'s 32 dataclass fields, **14 travel, 18 never do, and 6 of
+> those 18 are re-derived by the mint** (this box's store root, the pulled
+> definition's `role`, the profile the pull's own artifact lane materialized, a
+> fresh idle `state`, a fresh durable chat root, `now()`); the argument for the
+> three-set spelling and the totality test that keeps it from rotting are in
+> `agent_runtime/persona_instance_sync.py`'s own module docstring, which is the
+> authority. Architecture summary: doc 01 §Realms.
+>
+> **What the paragraph above still describes correctly.** Canonical channel rows
+> are not replicated — publish skips them, and the pull door refuses a peer that
+> sends one (`canonical_channel_not_replicable`) — and a placement can still be
+> born row-less on this install: against a peer running older hermes, or for a
+> row the door refused, or one the realm stopped carrying (`upstream_absent`).
+> `runtime.office.remove` is still the verb that can reach those, for the same
+> reason it always was. What is no longer true is that this is the *only* way a
+> pulled placement can end up; the ordinary case now has an agent.
+>
+> **The two-machine live proof (plan stage L3) has NOT been run.** Every
+> guarantee here is measured against one store. Until an operator pulls a
+> Windows-authored desk onto the Mac and opens a chat on it, "a realm pull
+> delivers a working agent" is a property this repo's suites assert and no live
+> realm has demonstrated. Authority for the stage list and the landed wire
+> contract: `docs/mission_control/planned/instance-replication.md` in the
+> EterniaLauncher repo, stamped EXECUTED-through-L2.
 
 **Intent semantics at this verb (ruled 2026-08-30).** A `runtime.office.remove`
 carrying an operator's click is AUTHORED intent: the tombstone it mints and that

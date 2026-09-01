@@ -299,6 +299,69 @@ realigns those exact rows to the last-pulled upstream already on disk:
 archive-never-delete so it is recoverable, and **local-only** — no git, no
 network, no `--credential-file`, and it never mints a realm-visible tombstone.
 
+**A pull that delivers a desk now delivers the AGENT behind it**
+(landed 2026-08-31, H1–H4, tip `a0c171af47`). Until that day the pull adopted
+office actors and never instances, so a pulled placement was born with an actor
+key and no `persona_instances/` row and the launcher badged it "Not linked here".
+The lane that closes it is one more family applier, and nothing else:
+
+- **The projection.** `agent_runtime/persona_instance_sync.py` splits the
+  32-field `PersonaInstance` record into three disjoint sets whose union is every
+  dataclass field — `PERSONA_INSTANCE_ALLOWED_KEYS` (14, travels),
+  `PERSONA_INSTANCE_DERIVED_KEYS` (6, re-derived by the mint), and
+  `PERSONA_INSTANCE_LOCAL_ONLY_KEYS` (12, neither) — because "does this leave the
+  machine" and "is this re-derived on arrival" are different questions about one
+  field and both have to be answerable. A test asserts the partition is TOTAL
+  over `dataclasses.fields(PersonaInstance)`, so a field added tomorrow cannot
+  compile green unclassified. The 14 publish as `store/persona_instances.yaml`
+  (`kind: realm_persona_instances`), synthesized in the SAME gated walk that
+  already resolves persona ids — `OfficePublishScan` grew `instance_ids` rather
+  than a second `glob`, because a refusal gate cannot speak for a walk it did not
+  take. Pruned to the ids the published desks reference; no artifact at all when
+  a realm has no instance-backed desks.
+- **The seam.** `apply_persona_instance_pull` runs AFTER
+  `apply_profile_artifact_pull` and BEFORE `_apply_workspace_tombstones`. After,
+  because the mint reads the pulled persona definition to derive `role` and
+  `profile_id` and a mint from a definition that has not landed builds the wrong
+  agent; before, so a replica is never minted into a workspace the same pull is
+  about to archive.
+- **The mint is a STORE DOOR, never a file write.**
+  `PersonaInstanceStore.replicate_instance` — the delta patch, the local
+  derivations, and the event-then-patch ordering are all store-level facts, and
+  an applier writing `persona_instances/` directly would lose all three. It is
+  the board lane's event-less-adopt defect, refused in advance. The receipt is a
+  THIRD intent class: not authored (nobody clicked here) and not diagnostic (this
+  is a peer's authored fact arriving), so it is `persona_instance.replicated`
+  with `source: "realm_sync"` — reusing `persona_instance.created` would make one
+  pull read as N local creates in the log an operator greps.
+- **The baseline is keyed off the REMOTE hash**, in its own sidecar
+  (`paths.persona_instance_baseline_path`), through the shared
+  `classify_three_way_pull`. That is what makes a fresh replica read as
+  baseline-aligned rather than as unpublished local drift — without it the very
+  next `realm sync status` offers to revert correct state. HOLD never clobbers,
+  and an instance simply missing from the projection is `upstream_absent`, never
+  a delete: absence is short-answer-shaped and this subsystem has already paid
+  for inferring deletion from a short answer.
+- **Drift and revert reach these rows.** `DRIFT_FAMILY_PERSONA_INSTANCE`
+  (`realm_sync.py:1300`) with counts `store_drift.persona_instances` additive
+  beside `boards` / `office`, items keyed `{family, container=workspace_id,
+  item_key=instance_id, kind}`, and the revert selector
+  `persona_instance:<workspace_id>:<instance_id>`. `classify_revert` needed the
+  family's transition rows and no new table — it was already total over
+  family × kind. The revert routes through the FAMILY's admission door, not just
+  the shared scan, or a revert would admit a body its own pull would refuse.
+
+Scope is placement-backed rows only. Canonical channel rows
+(`is_canonical_persona_channel`) are derived identically on every machine
+already; publish SKIPS them and the pull door REFUSES them
+(`canonical_channel_not_replicable`), which is what keeps the lane independent of
+the queued global-singleton redesign. The ack is
+`result["persona_instance_sync"]`, emitted unconditionally with
+`source: "projection" | "unreadable" | null` — an omitted key cannot tell an
+older PEER apart from an older local hermes, and the launcher has to tell them
+apart. **The two-machine live proof is not run**: every guarantee above is
+measured against one store.
+
 Workspace scoping is its own authority, and it governs **advertising and
 bare-persona resolution only** (`agent_runtime/workspace_scope.py`):
 
