@@ -2226,6 +2226,14 @@ def test_the_reclaim_pair_joins_the_manifest_without_moving_the_contract_version
         # set, no existing shape moves, so the integer below stays 1 — a client
         # only calls methods it found in the set.
         "runtime.persona.prewarm",
+        # Plan WS4, additive again: the two scope-pointer verbs. They ARE
+        # advertised like every other method — what restricts them is a
+        # caller-KIND test at the chokepoint
+        # (``call_authorization.LOCAL_CONSOLE_METHODS``), not an absence from
+        # the manifest, because the launcher's lowering gate is a membership
+        # test and a method it cannot see is a method it cannot lower onto.
+        "runtime.realm.use",
+        "runtime.workspace.use",
     ]
     assert serve_rpc.RPC_CONTRACT_VERSION == 1
     assert serve_rpc.manifest()["contract"] == 1

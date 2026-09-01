@@ -1076,6 +1076,11 @@ def test_the_method_set_grew_and_the_contract_integer_did_not_move():
             "runtime.office.unsubscribe",
             "runtime.office.upsert",
             "runtime.persona.prewarm",
+            # Plan WS4, additive: the two scope-pointer verbs. Advertised
+            # like any other method; what restricts them is a caller-KIND
+            # test at the chokepoint, not an absence from the manifest.
+            "runtime.realm.use",
+            "runtime.workspace.use",
     ],
         "tiers": {
             "peer.agent_chat.execute": "console",
@@ -1095,6 +1100,8 @@ def test_the_method_set_grew_and_the_contract_integer_did_not_move():
             "runtime.office.unsubscribe": "read",
             "runtime.office.upsert": "console",
             "runtime.persona.prewarm": "read",
+            "runtime.realm.use": "console",
+            "runtime.workspace.use": "console",
         },
     }
     assert serve_rpc.manifest() == expected
@@ -1227,6 +1234,9 @@ def test_the_write_method_is_transport_agnostic_and_answers_on_the_socket():
                     "runtime.office.unsubscribe",
                     "runtime.office.upsert",
                     "runtime.persona.prewarm",
+                    # Plan WS4, additive: the two scope-pointer verbs.
+                    "runtime.realm.use",
+                    "runtime.workspace.use",
                 ],
                 "tiers": {
                     "peer.agent_chat.execute": "console",
@@ -1245,6 +1255,8 @@ def test_the_write_method_is_transport_agnostic_and_answers_on_the_socket():
                     "runtime.office.unsubscribe": "read",
                     "runtime.office.upsert": "console",
                     "runtime.persona.prewarm": "read",
+                    "runtime.realm.use": "console",
+                    "runtime.workspace.use": "console",
                 },
             }
 
