@@ -390,6 +390,51 @@ def test_the_shim_and_the_shared_function_agree(scope):
     assert through_shim.result == to_jsonable(direct)
 
 
+def test_the_method_lane_inherits_WS1s_scope_patch_for_free(scope, monkeypatch):
+    """The cross-lane property, asserted rather than assumed.
+
+    WS1 put the ``scope`` patch emission INSIDE ``WorkspaceStore.set_active`` —
+    the store chokepoint — and this lane's shared implementation goes through
+    that same call. So a switch carried by the method lane produces the same
+    patch a switch carried by argv produces, with no WS4 code knowing the patch
+    exists. Had either lane instead emitted from its own handler, this would be
+    the test that failed.
+    """
+
+    from agent_runtime import state_patches as sp
+    from agent_runtime.config import load_agent_runtime_config
+    from agent_runtime.events import EventLog
+    from agent_runtime.state_patches import (
+        SCOPE_ENTITY,
+        SCOPE_PATCH_ID,
+        STATE_PATCHED_EVENT_TYPE,
+    )
+
+    def _loader(*args, **kwargs):
+        cfg = load_agent_runtime_config(*args, **kwargs)
+        cfg.read_model.delta_patches = True
+        return cfg
+
+    monkeypatch.setattr(sp, "load_root_runtime_config", _loader)
+
+    log = EventLog()
+    before = len(log.tail(200))
+    reply = _call(WORKSPACE_USE_METHOD, {"workspace_id": scope["ws_b"].id})
+    emitted = [
+        {"type": event.type, "payload": dict(event.payload or {})}
+        for event in log.tail(200)
+    ][before:]
+
+    assert reply["result"]["applied"] is True
+    assert [event["type"] for event in emitted] == [
+        STATE_PATCHED_EVENT_TYPE,
+        "workspace.activated",
+    ]
+    assert emitted[0]["payload"]["entity"] == SCOPE_ENTITY
+    assert emitted[0]["payload"]["id"] == SCOPE_PATCH_ID
+    assert emitted[0]["payload"]["changed"]["active_workspace_id"] == scope["ws_b"].id
+
+
 def test_activate_realm_is_the_only_place_the_reconcile_is_spelled(scope):
     """A door that forgot the reconcile would be a bug reachable from one lane
     only. Both doors call this function, so the fallback is structural."""

@@ -128,7 +128,8 @@ All with the system `python -m pytest`.
 
 | suite | result |
 |---|---|
-| `test_scope_use_methods.py` (new) | 26 passed |
+| `test_scope_use_methods.py` (new) | 27 passed |
+| `test_scope_patch_coverage.py` (lane A's, unedited) | 13 passed against this refactor |
 | `test_scope_use_serve_acceptance.py` (new) | 5 passed |
 | authorization + gateway + office-rpc + row-consolidation focused set | 151 passed |
 | `tests/agent_runtime` + `tests/hermes_cli` | see the closing report's count |
@@ -163,6 +164,17 @@ console-tier device it *"requires the console tier"*, which it holds.
 `CallAuthorization` now carries an optional `detail` the policy sets and the
 dispatcher renders; the wire contract (`reason` / `tier` / `caller`) is
 untouched, because that is what the launcher's decoders branch on.
+
+### The cross-lane property, asserted rather than assumed
+
+WS1 emits the `scope` patch from INSIDE `WorkspaceStore.set_active` — the store
+chokepoint — and this lane's shared implementation goes through that same call.
+So a switch carried by `runtime.workspace.use` produces the same patch a switch
+carried by argv produces, with no WS4 code knowing the patch exists. That is
+now a test (`test_the_method_lane_inherits_WS1s_scope_patch_for_free`) rather
+than a coincidence: had either lane emitted from its own handler instead, this
+is the assertion that would have caught it. Lane A's own suite also runs green
+unedited against the refactor.
 
 ## 4. Landing mechanics
 
