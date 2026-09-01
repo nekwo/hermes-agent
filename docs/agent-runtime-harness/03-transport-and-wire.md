@@ -579,6 +579,32 @@ Rules, all in `agent_runtime/patch_coverage.py`:
 Negotiation makes a new entity POSSIBLE; it does not enable one. The producer
 still emits `state.patched` only for entities its chokepoints cover.
 
+**The `scope` entity, and the demote a pointer flip no longer buys
+(2026-09-01, instant-workspace-switching WS1/WS4 — hermes `ffd540bf73`).**
+`workspace.activated` / `realm.activated` are now covered:
+`WorkspaceStore.set_active` / `RealmStore.set_active` append a paired
+`state.patched` for entity `scope`, op `upsert`, whose payload is BOTH
+pointers (`{active_workspace_id, active_realm_id}` — always both, because a
+realm activate can move the workspace and two half-patches are two chances to
+disagree). Before this, the cheapest possible state change demoted every batch
+it rode in to a full O(world) core — measured launcher-side at p50 **8.76 s**
+before the `active` flags flipped (doc 08 carries the figure). The coverage is
+honest by a pinned audit: `snapshot.py` reads `active_id()` in exactly seven
+places, all derivable from the two pointers, and
+`test_scope_patch_coverage.py` enumerates them by normalized source text so an
+eighth reader fails with instructions rather than making the patch a lie. Skew
+needs no flag: an undeclaring subscriber takes `span_not_foldable` → the
+demoted core, per-subscriber. There is no `replace` op —
+`FOLDABLE_PATCH_OPS = {upsert, remove}`, and a complete-row `upsert` IS the
+replace. The same lane's WS4 gave the switch its accept verbs:
+`runtime.workspace.use` / `runtime.realm.use` on the method lane, gated by
+`call_authorization.LOCAL_CONSOLE_METHODS` — evaluated before every other
+arm, so a paired device of ANY tier (including `console`) is refused; that
+membership set, not the tier equality, is what enforces "a remote viewer
+never parks the harness pointer" (the launcher plan's R-B). Both verbs share
+one implementation with the argv CLI (`agent_runtime/scope_activation.py`);
+neither joins `PEER_METHOD_ALLOWLIST`.
+
 ## 5. Attachment receipts
 
 `log_stream_attach` (`stream.py:176`) writes ONE line per attachment to the

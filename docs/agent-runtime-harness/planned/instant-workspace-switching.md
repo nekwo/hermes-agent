@@ -1,5 +1,17 @@
 # Planned — Instant workspace switching (hermes half)
 
+**EXECUTED 2026-09-01 — WS1 landed `cf9abaac4b`, WS4's hermes half landed
+`ffd540bf73`; WS5 stays gated per R-W3 (its deletion clock starts when WS1
+has a quiet field week).** Canon carries the landed facts: 03 § the `scope`
+entity (coverage, the seven-reader pin and its `_INDIRECT_READERS` honesty
+note, `LOCAL_CONSOLE_METHODS`), 08 § Landed optimizations (the 8.76 s figure,
+now in the hermes ledger). Combined suite at the landed tip: **11,716
+passed**. Field notes: `iws-ws12-field-notes-2026-09-01.md`,
+`iws-ws4-field-notes-2026-09-01.md`. Known red NOT of this lane:
+`test_no_source_grep_assertions` fails at this wave's own baseline (11
+pre-existing offenders, zero added — proven by offender-list diff); it is
+owed its own row.
+
 **Primary plan:** EterniaLauncher repo,
 `docs/mission_control/planned/instant-workspace-switching.md` — architecture,
 measured cost model, stages WS0–WS5, rulings R-W0..R-W3 (all RULED
