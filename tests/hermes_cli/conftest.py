@@ -13,11 +13,54 @@ import pytest
 from tests._env_gap_fence import EnvGapSkipRegistry, apply_skips
 from tests.hermes_cli import _gateway_fence
 
-# L2/L3 of the gateway fence: process-wide, installed at conftest IMPORT — the
-# earliest moment this directory owns — rather than inside a fixture, because
-# the measured escape ran from an ``atexit`` handler, a window no fixture can
-# cover. See tests/hermes_cli/_gateway_fence.py for the full reproduction.
+# L2/L3 of the gateway fence: the spawn wrappers go on at conftest IMPORT — the
+# earliest moment this directory owns — and are never removed, because the
+# measured escape ran from an ``atexit`` handler, a window no fixture can
+# cover. Installing is not the same as refusing: the refusal is armed by
+# ``_gateway_fence_is_armed_for_this_test`` below for items in THIS directory,
+# and latched on for good at ``pytest_sessionfinish``. See
+# tests/hermes_cli/_gateway_fence.py for the full reproduction and for why the
+# two had to be separated.
 _gateway_fence.install()
+
+
+@pytest.fixture(autouse=True)
+def _gateway_fence_is_armed_for_this_test():
+    """Arm the gateway fence for the duration of THIS directory's tests.
+
+    Conftest import is process-wide, and in a combined run
+    ``tests/agent_runtime tests/hermes_cli`` it is the same process. Merely
+    COLLECTING a module here therefore used to install a refusal that outlived
+    this directory entirely — and tests/agent_runtime spawns real
+    ``python -m hermes_cli.main harness serve`` children on purpose, against
+    roots it sandboxes itself. Measured 2026-08-31 on `671ae4f9a7`:
+
+        python -m pytest tests/hermes_cli/test_env_export_prefix.py \
+                         tests/agent_runtime/test_serve_socket_child_e2e.py -q
+        -> 2 failed  (GatewayFenceViolation on a legitimate serve child)
+
+    and in the wave-close full run, 6 failed / 5 errors across
+    test_serve_socket_child_e2e, test_gateway_peer_cross_install_chat_e2e and
+    test_gateway_peer_two_roots_e2e — all green in isolation. A fence that reds
+    another directory's honest work is not a fence, it is a bug with a good
+    excuse.
+
+    Being a fixture in THIS conftest is the scoping: pytest runs a directory
+    conftest's fixtures for its own items and no others, so the arming follows
+    the running item's path without anyone matching path strings. It is
+    deliberately NOT keyed on collection order — in a combined run
+    tests/agent_runtime happens to collect first, but nothing should depend on
+    that.
+
+    The atexit window is not covered here (a spawn from a handler happens long
+    after this teardown) and does not need to be — ``pytest_sessionfinish``
+    latches the refusal on permanently, before any atexit handler runs.
+    """
+    _gateway_fence.arm()
+    try:
+        yield
+    finally:
+        _gateway_fence.disarm()
 
 
 #: Pristine ``web_server.app`` state — ``app.state`` and the router's merged
@@ -1189,6 +1232,23 @@ def pytest_runtest_logreport(report):  # noqa: D401 — pytest hook
     _, _, within_file = report.nodeid.partition("::")
     if any(within_file in node_ids for _, _, node_ids in groups):
         _STALE_ENV_GAP_ENTRIES.append(report.nodeid)
+
+
+def pytest_sessionfinish(session, exitstatus):  # noqa: D401 — pytest hook
+    """Latch the gateway fence on for whatever the process does next.
+
+    Every fixture has torn down by now and every monkeypatch is undone, which
+    is precisely the state the measured escape ran in: ``_cmd_update_impl``
+    parks ``_resume_windows_gateways_after_update`` on ``atexit`` mid-test, and
+    it fires at interpreter exit against the operator's real profile. Arming is
+    a flag the already-installed wrappers read at spawn time, so it does not
+    have to beat that handler in atexit's LIFO order — it only has to be down
+    before the handler runs, and session finish always is.
+
+    Nothing is disarmed after this point, on purpose. The run is over; no
+    legitimate test spawn can still be owed.
+    """
+    _gateway_fence.arm_permanently()
 
 
 def pytest_terminal_summary(terminalreporter):  # noqa: D401 — pytest hook

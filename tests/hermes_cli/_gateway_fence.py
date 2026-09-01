@@ -232,13 +232,68 @@ def classify(cmd, env=None) -> str | None:
     return None
 
 
+# ── Arming: the wrappers are permanent, the REFUSAL is scoped ──────────────
+#
+# The wrappers below are installed once and never removed — that is what makes
+# the atexit window reachable at all, and it must not change. But "installed"
+# and "refusing" have to be two different things, because this module is
+# imported the moment pytest COLLECTS anything under tests/hermes_cli, and in a
+# combined run that is the same process that later runs tests/agent_runtime.
+# Those tests spawn real ``hermes_cli.main harness serve`` children ON PURPOSE
+# (test_serve_socket_child_e2e, test_gateway_peer_cross_install_chat_e2e,
+# test_gateway_peer_two_roots_e2e) against their own sandboxed roots, and a
+# process-global refusal reds them: measured 2026-08-31, 6 failed / 5 errors in
+# the wave-close run, every one of them green in isolation.
+#
+# So the refusal is ARMED:
+#   * for the duration of each test that lives under tests/hermes_cli — the
+#     autouse fixture in this directory's conftest is exactly that scope, since
+#     a directory conftest's fixtures run for its own items and nothing else;
+#   * permanently from ``pytest_sessionfinish`` onward, which is the window the
+#     escape actually used. Arming is a FLAG, not an atexit handler, so it does
+#     not have to win a LIFO race against the handler ``_cmd_update_impl``
+#     registered mid-test: the wrapper reads the flag when the spawn is
+#     attempted, and by then the latch is down.
+#
+# Everywhere else — collection, tests outside this directory, their fixtures
+# and their children — the wrappers pass straight through.
+
+_ARMED = False
+_LATCHED = False
+
+
+def arm() -> None:
+    """Refuse gateway/backend spawns from now until :func:`disarm`."""
+    global _ARMED
+    _ARMED = True
+
+
+def disarm() -> None:
+    """Stop refusing — unless the session-finish latch is already down."""
+    global _ARMED
+    _ARMED = _LATCHED
+
+
+def arm_permanently() -> None:
+    """Latch the refusal on for the rest of the process (the atexit window)."""
+    global _ARMED, _LATCHED
+    _LATCHED = True
+    _ARMED = True
+
+
+def is_armed() -> bool:
+    return _ARMED
+
+
 def _refuse(primitive: str, cmd, reason: str):
     raise GatewayFenceViolation(
         f"tests/hermes_cli gateway fence: blocked {primitive}({cmd!r}) — "
         f"{reason}.\n"
-        "This fence is process-wide and is NOT undone at test teardown, so it "
-        "also covers collection, background threads and atexit handlers — the "
-        "window the measured escape actually used (see "
+        "The wrappers are process-wide and are never removed, so this fence "
+        "still covers background threads and atexit handlers — the window the "
+        "measured escape actually used. The REFUSAL is armed only for tests "
+        "under tests/hermes_cli and from session finish onward, so it is not "
+        "what you are seeing if you are outside that directory (see "
         "tests/hermes_cli/_gateway_fence.py).\n"
         "Drive the code in-process (build the parser, call the handler, fake "
         "the transport) instead of spawning, or — if the test is ABOUT the "
@@ -256,9 +311,10 @@ def _install_spawn_wrappers() -> None:
 
     class _FencedPopen(real_popen):  # type: ignore[misc, valid-type]
         def __init__(self, cmd, *args, **kwargs):
-            reason = classify(cmd, kwargs.get("env"))
-            if reason:
-                _refuse("subprocess.Popen", cmd, reason)
+            if _ARMED:
+                reason = classify(cmd, kwargs.get("env"))
+                if reason:
+                    _refuse("subprocess.Popen", cmd, reason)
             super().__init__(cmd, *args, **kwargs)
 
     _FencedPopen.__name__ = "Popen"
@@ -270,9 +326,10 @@ def _install_spawn_wrappers() -> None:
 
         def _make(primitive, func):
             def _fenced(cmd, *args, **kwargs):
-                reason = classify(cmd, kwargs.get("env"))
-                if reason:
-                    _refuse(f"subprocess.{primitive}", cmd, reason)
+                if _ARMED:
+                    reason = classify(cmd, kwargs.get("env"))
+                    if reason:
+                        _refuse(f"subprocess.{primitive}", cmd, reason)
                 return func(cmd, *args, **kwargs)
 
             _fenced.__name__ = f"_fenced_{primitive}"
@@ -286,15 +343,17 @@ def _install_spawn_wrappers() -> None:
     real_os_popen = os.popen
 
     def _fenced_system(command):
-        reason = classify(command)
-        if reason:
-            _refuse("os.system", command, reason)
+        if _ARMED:
+            reason = classify(command)
+            if reason:
+                _refuse("os.system", command, reason)
         return real_system(command)
 
     def _fenced_os_popen(cmd, *args, **kwargs):
-        reason = classify(cmd)
-        if reason:
-            _refuse("os.popen", cmd, reason)
+        if _ARMED:
+            reason = classify(cmd)
+            if reason:
+                _refuse("os.popen", cmd, reason)
         return real_os_popen(cmd, *args, **kwargs)
 
     os.system = _fenced_system
@@ -314,7 +373,13 @@ def _install_spawn_detached_stub() -> None:
     except Exception:
         return
 
+    real_spawn_detached = gateway_windows._spawn_detached
+
     def _fenced_spawn_detached(script_path=None):
+        if not _ARMED:
+            # Outside this directory's tests the chokepoint is not ours to
+            # close; hand the call back to production unchanged.
+            return real_spawn_detached(script_path)
         _refuse(
             "gateway_windows._spawn_detached",
             script_path,
@@ -346,8 +411,12 @@ def real_root() -> Path | None:
 __all__ = [
     "GatewayFenceViolation",
     "REAL_PAUSE_MARK",
+    "arm",
+    "arm_permanently",
     "classify",
+    "disarm",
     "install",
+    "is_armed",
     "is_installed",
     "real_root",
 ]
