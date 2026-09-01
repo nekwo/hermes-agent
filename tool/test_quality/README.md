@@ -2,13 +2,45 @@
 
 `python scripts/changed_line_mutation_check.py --base <merge-base>` selects
 only explicit claims whose exact production source overlaps the diff, baselines
-their focused commands once, applies at most 16 mutations, and requires each
-focused test to fail. 16, not the script's own `--max-candidates` default of
-12: CI's `mutation-claims` job passes `--max-candidates 16` explicitly and the
-comment beside that call site carries the reason for the raise. The number a
-run enforces is the one on the command line, so read it there — this paragraph
-said 12 while the gate ran 16. The original bytes are restored in `finally` after every
-candidate.
+their focused commands once, applies at most `--max-candidates` mutations, and
+requires each focused test to fail. The number a run enforces is the one on the
+command line, so read it there — this paragraph said 12 while the gate ran 16,
+then said 16 while CI ran 20. The original bytes are restored in `finally`
+after every candidate.
+
+## Which cap, on which lane
+
+- **A per-stage run** uses the default, `12`. Per-stage bases stay under it,
+  and that is what the default is sized for.
+- **A multi-stage LANDING run passes its own cap explicitly** — `40` is the
+  current house number. This is the run that matters and the one the default
+  cannot carry: the H1–H4 landing selected **30** against its base and only ran
+  because a 40 was hand-passed. Splitting the diff, the cap's other cure, is
+  not available to a landing whose whole point is that the stages land together.
+- **CI** passes `--max-candidates 20` in the `mutation-claims` job, with the
+  reason for each raise written in the comment beside the call site.
+
+The doctrine behind all three is one rule: the enforced number is readable
+beside the command that enforces it, with the reason in the command line rather
+than buried in a default. `--max-candidates` is a RUNTIME bound (one baseline
+plus one mutant test run per candidate), never a quality bound — dropping
+claims to fit a cap is the failure this gate exists to prevent.
+
+## Never share the worktree with a test run
+
+The gate **rewrites source files in place** for the duration of a run. Anything
+else reading the tree meanwhile — a pytest run in another terminal, an editor's
+test-on-save, a watcher — reads sabotaged source and reds tests that pass in
+isolation. At the console that is indistinguishable from a real defect; the H
+landing lost ten minutes to exactly that before the concurrency was identified.
+
+A second *mutating* run against the same tree is refused: the script
+exclusive-creates `.mutation_gate.lock` at the repo root, prints the holder's
+pid and start time on a collision, and exits 2. There is deliberately no
+liveness probe on the recorded pid (`os.kill(pid, 0)` KILLS the process on
+Windows), so a lock left behind by a crashed run is cleared by hand — the
+refusal prints the exact path to delete. `--list` and `--claims-for` never take
+the lock; they touch no source file.
 
 Claims live in `tests/mutation_claims.json`. Defect/ruling tests should add a
 claim in the same change as the production fix. A stale claim fails

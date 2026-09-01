@@ -316,6 +316,31 @@ class WorkspaceStore:
             return None
         return safe_id(raw.get("workspace_id"))
 
+    def active_intent_issued_at(self) -> str | None:
+        """The supersede basis stored ALONGSIDE the active workspace pointer.
+
+        ``set_active`` writes it on every applied write; this reads it back.
+        The one caller is ``scope_activation``'s straddle heal: when a realm
+        switch's reconcile is refused ``superseded``, the workspace pointer is
+        owned by a strictly newer explicit gesture, and re-parking the realm
+        pointer under the REALM intent's (older) basis would be refused in turn
+        — leaving the two pointers in different realms with nothing to heal
+        them. The winning gesture's own basis is the only one that carries, and
+        this is where it is recorded.
+
+        ``None`` when the pointer file is missing, unreadable, or predates the
+        field. The caller then lets ``set_active`` stamp ``now()``, which is the
+        fail-open direction ``_resolve_activation_write`` already takes when
+        either side has no parseable basis.
+        """
+
+        try:
+            raw = _read_json(paths.active_workspace_path())
+        except Exception:
+            return None
+        value = raw.get("intent_issued_at")
+        return value if isinstance(value, str) and value.strip() else None
+
     def add_agent(self, workspace_id: str, persona_id: str) -> Workspace:
         item = self.get(workspace_id)
         persona = safe_id(persona_id)

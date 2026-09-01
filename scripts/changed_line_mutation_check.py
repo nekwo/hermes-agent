@@ -1,11 +1,32 @@
-"""Run bounded, explicit mutation claims that intersect changed production lines."""
+"""Run bounded, explicit mutation claims that intersect changed production lines.
+
+**This gate REWRITES SOURCE FILES IN PLACE while it runs.** Each mutant is
+spliced into the real file on disk, the claim's test command runs against it,
+and the original bytes are restored in a ``finally``. For the duration of a run
+this worktree does not hold the code you committed.
+
+Never run pytest — or anything else that reads the tree — in the same worktree
+during a run. A concurrent test run reads sabotaged source and reds tests that
+pass in isolation, and at the console that is indistinguishable from a real
+defect: the H landing (2026-08-31) spent ten minutes on a phantom red before
+the concurrency was identified as its cause. A second MUTATING run against the
+same tree is refused outright (:func:`_acquire_gate_lock`); a concurrent pytest
+is not something this script can see, which is why it is written down here as
+well as enforced.
+
+Cap doctrine. ``--max-candidates`` defaults to 12, which is sized for a
+PER-STAGE base. A multi-stage LANDING run selects more — the H1-H4 landing
+selected 30 — and passes its own cap explicitly on the command line, the way
+CI does in ``.github/workflows/tests.yml``, so the enforced number is readable
+beside the command that enforces it. See ``tool/test_quality/README.md``.
+"""
 
 from __future__ import annotations
 
 import argparse
 import ast
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -18,6 +39,11 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CLAIMS = REPO_ROOT / "tests" / "mutation_claims.json"
 DEFAULT_EXEMPTIONS = REPO_ROOT / "tool" / "test_quality" / "mutation_exemptions.yaml"
+#: Held for the duration of a MUTATING run — see :func:`_acquire_gate_lock`.
+#: Worktree-local by construction (``REPO_ROOT`` is this checkout's root), which
+#: is the right scope: the hazard is a shared TREE, and two worktrees of one
+#: clone have two trees.
+LOCK_PATH = REPO_ROOT / ".mutation_gate.lock"
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
 #: ``symbol`` spellings that mean "the whole module" rather than a definition
@@ -628,6 +654,50 @@ def _run_command(command: list[str]) -> int:
     return subprocess.run(command, cwd=REPO_ROOT, check=False).returncode
 
 
+def _acquire_gate_lock() -> bool:
+    """Exclusive-create :data:`LOCK_PATH`; ``False`` when someone already holds it.
+
+    Only MUTATING runs take it. ``--list`` and ``--claims-for`` are inventory
+    questions that never touch a source file, so locking them would refuse a
+    harmless read for a reason that does not apply to it.
+
+    The create is the test: ``open(..., "x")`` is atomic, so two runs racing for
+    the lock cannot both win. There is deliberately NO liveness probe on the
+    recorded pid — ``os.kill(pid, 0)`` KILLS the process on Windows, and this
+    gate's primary host is Windows. A stale lock is therefore cleared by hand,
+    and the refusal prints the exact path to delete. That is the honest trade: a
+    manual step after a crash, in exchange for never mistaking a live run for a
+    dead one.
+    """
+
+    try:
+        with open(LOCK_PATH, "x", encoding="utf-8") as stream:
+            stream.write(
+                f"pid: {os.getpid()}\n"
+                f"started: {datetime.now(timezone.utc).isoformat()}\n"
+                f"argv: {' '.join(sys.argv)}\n"
+            )
+    except FileExistsError:
+        return False
+    return True
+
+
+def _refuse_because_locked() -> int:
+    """Print who holds the lock, in a block that pastes cleanly, and exit 2."""
+
+    try:
+        held = LOCK_PATH.read_text(encoding="utf-8").strip()
+    except Exception:  # noqa: BLE001 — the lock existing is the fact; its text is a courtesy
+        held = "(the lock file exists but its contents could not be read)"
+    print(
+        "another mutation run appears active in this worktree; if none is "
+        f"running, delete {LOCK_PATH} and retry\n"
+        "\n```\n" + held + "\n```",
+        file=sys.stderr,
+    )
+    return 2
+
+
 def run(base: str, claims_path: Path, exemptions_path: Path, max_candidates: int, list_only: bool) -> int:
     _validate_exemptions(exemptions_path)
     claims, unselected = _partition_claims(base, claims_path)
@@ -682,43 +752,63 @@ def run(base: str, claims_path: Path, exemptions_path: Path, max_candidates: int
     # under the cap only because half its claims were platform-skipped would
     # hand CI a refusal nobody local could reproduce.
     if len(claims) > max_candidates:
-        print("candidate cap exceeded; split the diff or raise the cap visibly", file=sys.stderr)
+        # Name the numbers and the cure. The old copy said neither, so an exit 2
+        # that means "your change is big" read as "your claims are bad" — the
+        # wrong signal on the wrong lane, measured on the H1-H4 landing.
+        print(
+            f"candidate cap exceeded: {len(claims)} selected > --max-candidates "
+            f"{max_candidates}; split the diff, or pass the cap visibly (a "
+            "multi-stage LANDING run passes its own cap, e.g. --max-candidates 40)",
+            file=sys.stderr,
+        )
         return 2
     if list_only or not runnable:
         return 0
 
-    commands: dict[tuple[str, ...], list[str]] = {}
-    for claim in runnable:
-        command = _command(claim)
-        commands.setdefault(tuple(command), command)
-    for command in commands.values():
-        print(f"BASELINE: {' '.join(command)}")
-        if _run_command(command) != 0:
-            print("baseline failed; mutation result would be meaningless", file=sys.stderr)
-            return 2
+    # Everything past here READS OR WRITES the tree, so everything past here is
+    # inside the lock — the baseline runs included. They do not mutate, but they
+    # are part of the same run and a second run's mutants would corrupt them
+    # exactly as they corrupt the mutation runs.
+    if not _acquire_gate_lock():
+        return _refuse_because_locked()
+    try:
+        commands: dict[tuple[str, ...], list[str]] = {}
+        for claim in runnable:
+            command = _command(claim)
+            commands.setdefault(tuple(command), command)
+        for command in commands.values():
+            print(f"BASELINE: {' '.join(command)}")
+            if _run_command(command) != 0:
+                print("baseline failed; mutation result would be meaningless", file=sys.stderr)
+                return 2
 
-    survivors: list[str] = []
-    for claim in runnable:
-        target = REPO_ROOT / str(claim["path"])
-        original, text = _read_source(target)
-        anchor = claim[ANCHOR_KEY]
-        if text[anchor.offset : anchor.offset + len(anchor.find)] != anchor.find:
-            # The baseline run moved the file under us. Refusing beats splicing
-            # at an offset that now points somewhere else.
-            raise RuntimeError(f"{claim['id']}: {claim['path']} changed after the anchor resolved")
-        # Spliced at the anchor's offset, never ``str.replace``: uniqueness is a
-        # property of the SYMBOL now, so an identical line earlier in the file
-        # is legal — and would be the one a first-occurrence replace rewrote.
-        mutated = text[: anchor.offset] + anchor.replace + text[anchor.offset + len(anchor.find) :]
-        try:
-            target.write_text(mutated, encoding="utf-8", newline="")
-            print(f"MUTATE: {claim['id']}")
-            if _run_command(_command(claim)) == 0:
-                survivors.append(str(claim["id"]))
-            else:
-                print(f"KILLED: {claim['id']}")
-        finally:
-            target.write_bytes(original)
+        survivors: list[str] = []
+        for claim in runnable:
+            target = REPO_ROOT / str(claim["path"])
+            original, text = _read_source(target)
+            anchor = claim[ANCHOR_KEY]
+            if text[anchor.offset : anchor.offset + len(anchor.find)] != anchor.find:
+                # The baseline run moved the file under us. Refusing beats splicing
+                # at an offset that now points somewhere else.
+                raise RuntimeError(f"{claim['id']}: {claim['path']} changed after the anchor resolved")
+            # Spliced at the anchor's offset, never ``str.replace``: uniqueness is a
+            # property of the SYMBOL now, so an identical line earlier in the file
+            # is legal — and would be the one a first-occurrence replace rewrote.
+            mutated = text[: anchor.offset] + anchor.replace + text[anchor.offset + len(anchor.find) :]
+            try:
+                target.write_text(mutated, encoding="utf-8", newline="")
+                print(f"MUTATE: {claim['id']}")
+                if _run_command(_command(claim)) == 0:
+                    survivors.append(str(claim["id"]))
+                else:
+                    print(f"KILLED: {claim['id']}")
+            finally:
+                target.write_bytes(original)
+    finally:
+        # Released on EVERY exit — including the RuntimeError above and a
+        # KeyboardInterrupt — because a lock that outlives its run turns the
+        # guard into the obstruction it exists to prevent.
+        LOCK_PATH.unlink(missing_ok=True)
     if survivors:
         print(f"SURVIVED: {', '.join(survivors)}", file=sys.stderr)
         return 1
@@ -726,14 +816,48 @@ def run(base: str, claims_path: Path, exemptions_path: Path, max_candidates: int
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        # Hand-wrapped, because RawDescriptionHelpFormatter is what keeps the
+        # epilog's indented cap doctrine readable and it wraps nothing at all.
+        description=(
+            "Run bounded, explicit mutation claims that intersect changed\n"
+            "production lines.\n"
+            "\n"
+            "THIS GATE REWRITES SOURCE FILES IN PLACE while it runs. Never run\n"
+            "pytest -- or anything else that reads the tree -- in the same\n"
+            "worktree during a run: a concurrent test run reads sabotaged source\n"
+            "and reds tests that pass in isolation, which at the console is\n"
+            "indistinguishable from a real defect. A second MUTATING run against\n"
+            "the same tree is refused (.mutation_gate.lock); a concurrent pytest\n"
+            "cannot be seen from here."
+        ),
+        epilog=(
+            "cap doctrine:\n"
+            "  --max-candidates defaults to 12, sized for a PER-STAGE base. A\n"
+            "  multi-stage LANDING run selects more (the H1-H4 landing selected\n"
+            "  30) and passes its own cap explicitly, the way CI does, so the\n"
+            "  enforced number is readable beside the command that enforces it:\n"
+            "    python scripts/changed_line_mutation_check.py --base <sha> --max-candidates 40\n"
+            "  See tool/test_quality/README.md."
+        ),
+    )
     # Not `required=True` any more: `--claims-for` is an inventory question
     # about the registry, and there is no base to diff against when the answer
     # is wanted BEFORE the rewrite that would produce one.
     parser.add_argument("--base")
     parser.add_argument("--claims", type=Path, default=DEFAULT_CLAIMS)
     parser.add_argument("--exemptions", type=Path, default=DEFAULT_EXEMPTIONS)
-    parser.add_argument("--max-candidates", type=int, default=12)
+    parser.add_argument(
+        "--max-candidates",
+        type=int,
+        default=12,
+        help=(
+            "refuse the run when more than N claims are selected (default: 12, "
+            "sized for a per-stage base; a multi-stage landing run passes its "
+            "own cap -- 40 is the current house number)"
+        ),
+    )
     parser.add_argument("--list", action="store_true", dest="list_only")
     parser.add_argument(
         "--claims-for",

@@ -419,6 +419,14 @@ def test_the_method_lane_inherits_WS1s_scope_patch_for_free(scope, monkeypatch):
     patch a switch carried by argv produces, with no WS4 code knowing the patch
     exists. Had either lane instead emitted from its own handler, this would be
     the test that failed.
+
+    FOUR events since the straddle ruling (2026-09-01), not two: ``ws_b``
+    belongs to realm B and the realm pointer starts cleared, so the applied
+    workspace selection pulls the realm pointer after it — the second half of
+    ``scope_activation``'s never-straddle invariant. Both writes go through
+    their store's ``set_active``, which is exactly what this test is about: the
+    new arm inherited the patch for free too, and the LAST row carries the
+    settled pair.
     """
 
     from agent_runtime import state_patches as sp
@@ -449,10 +457,16 @@ def test_the_method_lane_inherits_WS1s_scope_patch_for_free(scope, monkeypatch):
     assert [event["type"] for event in emitted] == [
         STATE_PATCHED_EVENT_TYPE,
         "workspace.activated",
+        STATE_PATCHED_EVENT_TYPE,
+        "realm.activated",
     ]
     assert emitted[0]["payload"]["entity"] == SCOPE_ENTITY
     assert emitted[0]["payload"]["id"] == SCOPE_PATCH_ID
     assert emitted[0]["payload"]["changed"]["active_workspace_id"] == scope["ws_b"].id
+    assert emitted[-2]["payload"]["changed"] == {
+        "active_workspace_id": scope["ws_b"].id,
+        "active_realm_id": scope["realm_b"].id,
+    }
 
 
 def test_activate_realm_is_the_only_place_the_reconcile_is_spelled(scope):

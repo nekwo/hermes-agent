@@ -28,10 +28,39 @@ where Ruling A put it. A service-level second check is deliberately absent:
 scope pointer is not one — it is a two-scalar preference this install's own
 operator sets, and the argv door reaches these functions with no caller object
 at all.
+
+**The invariant: the two pointers never durably straddle realms.**
+(Operator ruling, 2026-09-01 — "newest explicit gesture wins".) There are two
+EXPLICIT gestures, :func:`activate_workspace` and :func:`activate_realm`, and
+they are ordered against each other by the ``issued_at`` basis the launcher
+stamps once at the gesture. After ANY interleaving of the two, both pointers
+land in the scope of the gesture with the strictly newer basis, and the loser
+answers ``applied: false, reason: "superseded"``.
+
+The reconcile's own ``set_active`` is NOT a gesture: it carries its realm
+intent's basis, so a late-delivered realm switch cannot clobber a newer
+workspace selection through it. That protection is what OPENS the hole this
+invariant closes — a refused reconcile used to be discarded, leaving the realm
+pointer in the realm the (older) realm gesture asked for and the workspace
+pointer in the realm the (newer) workspace gesture asked for, with both verbs
+having answered ``applied: true`` and nothing on the tree able to heal it. Each
+door therefore carries one arm:
+
+* :func:`activate_realm` — when the reconcile comes back ``superseded``, the
+  workspace gesture is newer, so it wins the whole scope: the realm pointer is
+  re-parked to the WINNING workspace's realm under that workspace's stored
+  basis, and the realm verb answers ``superseded``.
+* :func:`activate_workspace` — when an explicit workspace selection applies,
+  the realm pointer follows it under the SAME basis.
+
+Both arms write through ``*Store.set_active``, never around it, so the scope
+patch and the ``*.activated`` event ride along exactly as they do for a plain
+switch. Neither arm hand-writes a pointer file.
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -40,6 +69,7 @@ from .store import RealmStore, WorkspaceStore
 __all__ = [
     "WORKSPACE_USE_METHOD",
     "REALM_USE_METHOD",
+    "RECONCILE_KEPT",
     "workspace_row",
     "realm_row",
     "activation_outcome_row",
@@ -50,6 +80,8 @@ __all__ = [
     "ScopeActivationOutcome",
     "perform_scope_activation",
 ]
+
+_log = logging.getLogger(__name__)
 
 #: The method names, spelled once. The launcher gates its lowering on membership
 #: of these exact strings in the ``rpc.methods`` manifest set (the D12 pattern),
@@ -165,11 +197,35 @@ def activation_outcome_row(store, row_builder, outcome: dict, key: str) -> dict:
     return row
 
 
-def reconcile_active_workspace_to_realm(realm, *, issued_at: str | None = None) -> None:
+#: What :func:`reconcile_active_workspace_to_realm` answers when the active
+#: workspace ALREADY belonged to the target realm and no write was attempted.
+#:
+#: Every other arm answers ``WorkspaceStore.set_active``'s own dict verbatim,
+#: where ``applied``/``reason`` describe the WRITE. This token keeps "there was
+#: nothing to do" distinguishable from "the store declined", which is the exact
+#: distinction :func:`activate_realm`'s straddle heal turns on — a kept pointer
+#: is already in the target realm and must NOT drag the realm pointer back.
+RECONCILE_KEPT = "kept"
+
+
+def reconcile_active_workspace_to_realm(realm, *, issued_at: str | None = None) -> dict:
     """Switching realms must not leave the active workspace pointing into
     another realm. Keep it when it already belongs; otherwise fall to the
     realm's declared default, then its configured order, then listing order,
-    choosing only unarchived workspaces; clear it when the realm has none."""
+    choosing only unarchived workspaces; clear it when the realm has none.
+
+    Returns the OUTCOME rather than nothing, because the caller has a decision
+    to make on it. ``set_active`` can decline this write — a strictly newer
+    explicit workspace selection owns the pointer — and a discarded refusal is
+    precisely the straddle the module docstring's invariant forbids.
+    :func:`activate_realm` reads ``reason == "superseded"`` off this dict and
+    heals; ``_cmd_workspace_delete`` (the other caller, where a delete of the
+    active workspace reconciles for the same reason a realm switch does) ignores
+    it, which is correct there: no gesture is racing a delete's fallback.
+
+    Shape: ``{"workspace_id": …, "applied": …, "reason": …}`` — ``set_active``'s
+    dict on the write arms, and ``reason == RECONCILE_KEPT`` on the early return.
+    """
     store = WorkspaceStore()
     active_id = store.active_id()
     if active_id:
@@ -178,7 +234,7 @@ def reconcile_active_workspace_to_realm(realm, *, issued_at: str | None = None) 
         except Exception:
             active = None
         if active is not None and getattr(active, "realm_id", None) == realm.id:
-            return
+            return {"workspace_id": active_id, "applied": False, "reason": RECONCILE_KEPT}
     candidates = [
         workspace
         for workspace in store.list_all()
@@ -197,8 +253,54 @@ def reconcile_active_workspace_to_realm(realm, *, issued_at: str | None = None) 
     # set_active emits workspace.activated (or {"cleared": true}) at the
     # store chokepoint — Stage 12. The realm intent's basis rides along so a
     # late-delivered realm switch cannot clobber a newer explicit workspace
-    # selection through its reconcile.
-    store.set_active(next_workspace.id if next_workspace else None, issued_at=issued_at)
+    # selection through its reconcile. When it IS clobbered, the caller heals —
+    # see the module docstring's invariant.
+    return store.set_active(next_workspace.id if next_workspace else None, issued_at=issued_at)
+
+
+def _follow_realm_of_selected_workspace(workspace, *, issued_at: str | None) -> None:
+    """The workspace door's half of the invariant: an APPLIED explicit workspace
+    selection pulls the realm pointer to that workspace's realm.
+
+    This closes the race order where the realm switch fully applies FIRST and
+    the newer workspace selection lands after, pointing into another realm —
+    the realm pointer would otherwise sit in the realm the older gesture asked
+    for while the workspace pointer sits in the newer gesture's, and no
+    reconcile ever runs again to notice.
+
+    Three no-ops, each deliberate:
+
+    * a workspace with no ``realm_id`` has no realm to follow;
+    * a realm pointer already parked there needs no write, and writing anyway
+      would emit a second ``realm.activated`` on every ordinary workspace
+      switch — the non-race paths stay byte-identical because of this check;
+    * a ``realm_id`` naming a realm the store cannot read (a deleted realm, a
+      half-migrated store) is logged and skipped rather than raised: the
+      workspace selection ITSELF landed, and turning it into a
+      ``realm_not_found`` refusal would report a failure for a write that
+      succeeded.
+
+    The write carries THIS gesture's basis, so ``RealmStore.set_active``'s own
+    compare-and-set still protects it against a strictly newer realm intent —
+    the follow is a consequence of the gesture, never an override of the
+    ordering.
+    """
+
+    realm_id = getattr(workspace, "realm_id", None)
+    if not realm_id:
+        return
+    realms = RealmStore()
+    if realms.active_id() == realm_id:
+        return
+    try:
+        realms.set_active(realm_id, issued_at=issued_at)
+    except Exception:  # noqa: BLE001 — the workspace write already landed
+        _log.warning(
+            "workspace %s selected but its realm %s could not be parked",
+            getattr(workspace, "id", None),
+            realm_id,
+            exc_info=True,
+        )
 
 
 def activate_workspace(workspace_id: str, *, issued_at: str | None = None) -> dict:
@@ -208,15 +310,78 @@ def activate_workspace(workspace_id: str, *, issued_at: str | None = None) -> di
     ``applied: true`` with the workspace's own row, and the declined arms
     (``superseded`` / ``duplicate``) rendered by :func:`activation_outcome_row`
     against whatever currently owns the pointer.
+
+    On the APPLIED arm the realm pointer follows the selection
+    (:func:`_follow_realm_of_selected_workspace`) — half of the module
+    docstring's straddle invariant. The declined arms do not: a gesture that
+    lost the pointer must not move the other one either.
     """
 
     store = WorkspaceStore()
     outcome = store.set_active(workspace_id, issued_at=issued_at)
     if not outcome.get("applied", True):
         return activation_outcome_row(store, workspace_row, outcome, "workspace_id")
-    row = workspace_row(store.get(workspace_id))
+    active_id = outcome.get("workspace_id")
+    if not active_id:
+        # ``--clear``: the pointer is empty, so there is no workspace to render
+        # and no realm to follow. Reading ``store.get(None)`` here is what the
+        # old spelling did, and it raised.
+        return {"id": None, "name": None, "applied": True}
+    workspace = store.get(active_id)
+    _follow_realm_of_selected_workspace(workspace, issued_at=issued_at)
+    row = workspace_row(workspace)
     row["applied"] = True
     return row
+
+
+def _heal_realm_pointer_to_winning_workspace(requested_realm_id: str) -> dict | None:
+    """The realm door's half of the invariant, run only when the reconcile was
+    refused ``superseded``.
+
+    A refusal means a strictly newer explicit workspace selection owns the
+    workspace pointer. Under "newest explicit gesture wins" that selection wins
+    the whole scope, so the REALM pointer is re-parked to the winning
+    workspace's realm — under the WORKSPACE pointer's stored basis, which is the
+    newer one and therefore the only one the realm CAS will accept. The realm
+    verb then answers ``superseded`` through the row shape the protocol already
+    has; the launcher's client drops its optimistic state on that arm.
+
+    Returns ``None`` — meaning "no straddle, keep today's applied answer" — when
+    the winning workspace already belongs to the target realm, or when the
+    pointer is cleared or unreadable and there is no realm to follow.
+    """
+
+    workspaces = WorkspaceStore()
+    winner_id = workspaces.active_id()
+    if not winner_id:
+        return None
+    try:
+        winner = workspaces.get(winner_id)
+    except Exception:  # noqa: BLE001 — an unreadable pointer heals nothing
+        _log.warning("active workspace %s is unreadable; not healing", winner_id, exc_info=True)
+        return None
+    winning_realm_id = getattr(winner, "realm_id", None)
+    if not winning_realm_id or winning_realm_id == requested_realm_id:
+        return None
+    realms = RealmStore()
+    try:
+        realms.set_active(winning_realm_id, issued_at=workspaces.active_intent_issued_at())
+    except Exception:  # noqa: BLE001 — report the pointer's real owner below
+        _log.warning("could not re-park the realm pointer to %s", winning_realm_id, exc_info=True)
+    # The pointer is re-READ rather than assumed: if an even newer realm intent
+    # took it between the reconcile and here, the row must name what actually
+    # owns it, not what this heal asked for.
+    return activation_outcome_row(
+        realms,
+        realm_row,
+        {
+            "realm_id": realms.active_id(),
+            "applied": False,
+            "reason": "superseded",
+            "requested_realm_id": requested_realm_id,
+        },
+        "realm_id",
+    )
 
 
 def activate_realm(realm_id: str, *, issued_at: str | None = None) -> dict:
@@ -227,6 +392,14 @@ def activate_realm(realm_id: str, *, issued_at: str | None = None) -> dict:
     ``set_active``: a realm switch that skipped it would leave the active
     workspace pointing into the realm the operator just left, and a second door
     that forgot the call would be a bug only reachable from one lane.
+
+    The reconcile's own answer is now READ. When the workspace pointer is owned
+    by a strictly newer explicit selection the reconcile is refused, and this
+    realm switch has lost the scope: :func:`_heal_realm_pointer_to_winning_workspace`
+    puts the realm pointer back where that selection implies and this call
+    answers ``superseded``. Discarding the refusal — what the code did before
+    2026-09-01 — is what left the two pointers straddling realms with both verbs
+    reporting success.
     """
 
     store = RealmStore()
@@ -234,7 +407,11 @@ def activate_realm(realm_id: str, *, issued_at: str | None = None) -> dict:
     if not outcome.get("applied", True):
         return activation_outcome_row(store, realm_row, outcome, "realm_id")
     item = store.get(realm_id)
-    reconcile_active_workspace_to_realm(item, issued_at=issued_at)
+    reconciled = reconcile_active_workspace_to_realm(item, issued_at=issued_at)
+    if reconciled.get("reason") == "superseded":
+        healed = _heal_realm_pointer_to_winning_workspace(realm_id)
+        if healed is not None:
+            return healed
     row = realm_row(item)
     row["applied"] = True
     return row

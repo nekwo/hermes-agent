@@ -39,6 +39,17 @@ the count in its header is asserted against the entry count, entries are
 ordered, and a ledgered violation that no longer exists FAILS this gate rather
 than rotting in place. Paying debt down never requires editing this file.
 
+A SECOND register, ``tests/source_grep_ruled_exemptions.txt``, holds the twelve
+offenders that were red on hermes ``main`` with no lane owning them, ruled onto
+an allowlist by the operator on 2026-09-01. It is a separate file rather than
+twelve more lines in the debt register because that register declares itself
+closed and its count only ever goes down — absorbing a later batch would retire
+the one property that makes it readable. Everything else about it is the same
+shape: closed to additions, header count asserted, stale entries fail. It
+carries one addition of its own — every line must state, in one sentence, what
+its test actually pins and why the grep was left standing; a line without a
+reason is not an exemption and fails twice over.
+
 Known bounds, stated rather than hidden — a gate that overclaims its reach is
 the same lie it is here to stop:
 
@@ -75,6 +86,13 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TESTS_ROOT = REPO_ROOT / "tests"
 LEDGER_PATH = TESTS_ROOT / "source_grep_debt.txt"
+RULED_EXEMPTIONS_PATH = TESTS_ROOT / "source_grep_ruled_exemptions.txt"
+
+#: What separates a ruled exemption's KEY from its one-line reason. Split at the
+#: LAST occurrence, not the first: the key half is ``ast.unparse`` output this
+#: gate does not control and may legally contain the sequence inside a string
+#: literal, while the reason half is prose the author does control.
+_REASON_SEPARATOR = " # "
 
 #: ``inspect.getsource``/``getsourcelines`` under any import spelling. Both hand
 #: back the module's own text; ``getsourcefile`` does not and is not covered.
@@ -491,6 +509,40 @@ def _read_ledger() -> tuple[list[str], int | None]:
     return entries, declared
 
 
+def _read_ruled_exemptions() -> tuple[list[str], int | None, list[str]]:
+    """Exemption keys, the count its header declares, and the lines that carry
+    no reason.
+
+    The reasonless lines are returned rather than raised on, and they are NOT
+    admitted as exemptions: a line missing its sentence fails
+    :func:`test_every_ruled_exemption_carries_a_reason` for being reasonless
+    AND leaves its offender unaccounted for in
+    :func:`test_no_new_positive_source_grep_assertion`. Both failures name the
+    same line, which is the point — an allowlist entry whose justification was
+    never written is exactly the config blob this register refuses to become.
+    """
+
+    declared: int | None = None
+    entries: list[str] = []
+    reasonless: list[str] = []
+    for raw in RULED_EXEMPTIONS_PATH.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            marker = "ruled exemptions:"
+            if marker in line:
+                declared = int(line.split(marker, 1)[1].strip())
+            continue
+        key, separator, reason = line.rpartition(_REASON_SEPARATOR)
+        if not separator or not reason.strip():
+            reasonless.append(line)
+            continue
+        entries.append(key.strip())
+    entries.sort()
+    return entries, declared, reasonless
+
+
 _REMEDY = (
     "\n\nA positive substring claim over a function's TEXT proves the characters "
     "exist, never that the branch runs — it goes false-green on a "
@@ -518,7 +570,11 @@ def test_no_new_positive_source_grep_assertion(scan) -> None:
         "the tree, so a green here would mean nothing"
     )
     ledgered, _declared = _read_ledger()
-    new = sorted((Counter(found) - Counter(ledgered)).elements())
+    exempt, _exempt_declared, _reasonless = _read_ruled_exemptions()
+    # Multiset difference against BOTH registers. Two files, one subtraction:
+    # neither is a lane the other can be played off against, because both are
+    # closed and an offender in neither is a red build.
+    new = sorted((Counter(found) - Counter(ledgered) - Counter(exempt)).elements())
 
     def located(key: str) -> str:
         path, _, rest = key.partition("::")
@@ -530,7 +586,8 @@ def test_no_new_positive_source_grep_assertion(scan) -> None:
         + "\n".join(f"  {located(item)}" for item in new)
         + _REMEDY
         + f"\n\nThis gate does not accept new debt, so there is no ledger line to "
-        f"add: fix the assertion. ({LEDGER_PATH.name} is closed to additions.)"
+        f"add: fix the assertion. ({LEDGER_PATH.name} and "
+        f"{RULED_EXEMPTIONS_PATH.name} are BOTH closed to additions.)"
     )
 
 
@@ -564,6 +621,57 @@ def test_ledger_header_count_matches_its_entries() -> None:
     assert declared == len(entries), (
         f"tests/{LEDGER_PATH.name} declares {declared} grandfathered violations "
         f"but lists {len(entries)}."
+    )
+
+
+@pytest.mark.timeout(300)
+def test_ruled_exemptions_have_no_stale_entries(scan) -> None:
+    """The debt register's staleness test, mirrored onto the ruling's register.
+
+    An allowlist that keeps rows for assertions nobody writes any more is the
+    same rot: it reads as twelve outstanding greps when there are fewer, and it
+    would silently re-admit an offender that came back under an old key."""
+
+    found, _scanned, _locations = scan
+    exempt, _declared, _reasonless = _read_ruled_exemptions()
+    stale = sorted((Counter(exempt) - Counter(found)).elements())
+    assert not stale, (
+        "Ruled-exempt source-grep assertion(s) that no longer exist:\n"
+        + "\n".join(f"  {item}" for item in stale)
+        + f"\n\nNice — fewer source greps. Delete the line(s) above from "
+        f"tests/{RULED_EXEMPTIONS_PATH.name} and lower the count in its header "
+        "so the register stays honest. (Nothing in this gate needs editing.)"
+    )
+
+
+@pytest.mark.timeout(300)
+def test_ruled_exemptions_header_count_matches_its_entries() -> None:
+    entries, declared, _reasonless = _read_ruled_exemptions()
+    assert declared is not None, (
+        f"tests/{RULED_EXEMPTIONS_PATH.name} lost its '# ruled exemptions: N' "
+        "header line — that count is the register's headline."
+    )
+    assert declared == len(entries), (
+        f"tests/{RULED_EXEMPTIONS_PATH.name} declares {declared} ruled exemptions "
+        f"but lists {len(entries)} with a reason."
+    )
+
+
+@pytest.mark.timeout(300)
+def test_every_ruled_exemption_carries_a_reason() -> None:
+    """The one rule this register has that the debt register does not.
+
+    The debt register was a bulk baseline of a rule arriving; this one is a
+    per-offender ruling, and a ruling nobody wrote down is indistinguishable
+    from an entry somebody added to make a build green."""
+
+    _entries, _declared, reasonless = _read_ruled_exemptions()
+    assert not reasonless, (
+        f"Line(s) in tests/{RULED_EXEMPTIONS_PATH.name} with no reason:\n"
+        + "\n".join(f"  {line}" for line in reasonless)
+        + f"\n\nEvery entry ends with '{_REASON_SEPARATOR}<one line saying what "
+        "the test actually pins and why the grep was left standing>'. Until it "
+        "does, the line is not an exemption and its offender counts as new."
     )
 
 

@@ -208,3 +208,8 @@ native/fts5_cjk/*.so
 # tree fills with generated sheets, attempt PNGs and revision state. Nothing
 # under it is source; a stray `git add -A` would commit a character corpus.
 /profiles/
+
+# The mutation gate holds this for the duration of a MUTATING run (see
+# tool/test_quality/README.md). Worktree-local, cleared in a `finally`, and
+# cleared by hand after a crash — never source.
+.mutation_gate.lock

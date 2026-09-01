@@ -2655,8 +2655,8 @@
       "path": "agent_runtime/scope_activation.py",
       "symbol": "activate_realm",
       "operator": "drop-the-reconcile",
-      "find": "    item = store.get(realm_id)\n    reconcile_active_workspace_to_realm(item, issued_at=issued_at)",
-      "replace": "    item = store.get(realm_id)",
+      "find": "    item = store.get(realm_id)\n    reconciled = reconcile_active_workspace_to_realm(item, issued_at=issued_at)\n    if reconciled.get(\"reason\") == \"superseded\":",
+      "replace": "    item = store.get(realm_id)\n    reconciled = {}\n    if reconciled.get(\"reason\") == \"superseded\":",
       "test": [
         "{python}",
         "-m",
@@ -2965,6 +2965,81 @@
         "-q",
         "tests/hermes_cli/test_mission_chat_turn_phases.py::test_the_handlers_session_db_open_reaches_the_durable_record",
         "tests/hermes_cli/test_mission_chat_turn_phases.py::test_a_runner_that_reported_no_timing_leaves_only_what_the_HANDLER_measured"
+      ]
+    },
+    {
+      "id": "iws-straddle-the-realm-heal-fires-on-a-refused-reconcile",
+      "path": "agent_runtime/scope_activation.py",
+      "symbol": "activate_realm",
+      "operator": "never-heal",
+      "find": "    if reconciled.get(\"reason\") == \"superseded\":",
+      "replace": "    if False:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_straddle_invariant.py::test_order_a_a_late_realm_switch_loses_the_scope_to_a_newer_workspace_selection"
+      ]
+    },
+    {
+      "id": "iws-straddle-the-heal-uses-the-winning-workspaces-basis",
+      "path": "agent_runtime/scope_activation.py",
+      "symbol": "_heal_realm_pointer_to_winning_workspace",
+      "operator": "drop-the-winning-basis",
+      "find": "        realms.set_active(winning_realm_id, issued_at=workspaces.active_intent_issued_at())",
+      "replace": "        realms.set_active(winning_realm_id, issued_at=None)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_straddle_invariant.py::test_the_healed_realm_pointer_carries_the_winning_gestures_basis"
+      ]
+    },
+    {
+      "id": "iws-straddle-a-kept-workspace-is-not-a-refusal",
+      "path": "agent_runtime/scope_activation.py",
+      "symbol": "reconcile_active_workspace_to_realm",
+      "operator": "report-kept-as-superseded",
+      "find": "            return {\"workspace_id\": active_id, \"applied\": False, \"reason\": RECONCILE_KEPT}",
+      "replace": "            return {\"workspace_id\": active_id, \"applied\": False, \"reason\": \"superseded\"}",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_straddle_invariant.py::test_a_realm_switch_whose_workspace_already_belongs_still_answers_applied"
+      ]
+    },
+    {
+      "id": "iws-straddle-a-workspace-selection-pulls-the-realm-pointer",
+      "path": "agent_runtime/scope_activation.py",
+      "symbol": "activate_workspace",
+      "operator": "drop-the-follow",
+      "find": "    _follow_realm_of_selected_workspace(workspace, issued_at=issued_at)",
+      "replace": "    pass",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_straddle_invariant.py::test_order_b_a_workspace_selection_after_a_realm_switch_pulls_the_realm_with_it"
+      ]
+    },
+    {
+      "id": "iws-straddle-the-follow-arm-skips-an-already-parked-realm",
+      "path": "agent_runtime/scope_activation.py",
+      "symbol": "_follow_realm_of_selected_workspace",
+      "operator": "drop-the-already-parked-guard",
+      "find": "    if realms.active_id() == realm_id:\n        return",
+      "replace": "    if False:\n        return",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_straddle_invariant.py::test_an_ordinary_switch_inside_one_realm_leaves_the_realm_pointer_alone"
       ]
     }
   ]

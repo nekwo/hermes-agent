@@ -1,0 +1,51 @@
+# Source-grep RULED EXEMPTIONS
+# =============================
+#
+# Operator ruling, 2026-09-01 (Mission Control queue row
+# "`test_no_source_grep_assertions` is red on hermes main, and no lane owns
+# it"). These are the positive source-grep assertions that were RED on hermes
+# `main` while no lane owned them — pre-existing, and proven so: the offender
+# set is byte-identical at `cf9abaac4b` (the instant-workspace-switching wave's
+# baseline) and at `98d43d0c86`, so no wave added any. The ruling was
+# allowlist-with-reasons, not migrate: the twelve tests below are NOT rewritten.
+#
+# This register is a SECOND grandfathering, not a second lane. It exists
+# separately from `source_grep_debt.txt` because that register declares itself
+# closed and its count only ever goes down; reopening it to absorb a later
+# batch would retire the one property that makes it readable.
+#
+# ruled exemptions: 12
+#
+# THIS REGISTER IS ALSO CLOSED TO ADDITIONS. A new positive source grep is a
+# red build, not a new line here. The number above only ever goes down.
+#
+# Paying one off:
+#   1. Re-aim the assertion at the guarantee — execute the path and assert on
+#      what it returns/emits/raises, or parse the source and assert against a
+#      resolved AST node.
+#   2. Delete its line below and lower the count above.
+# A line left behind after its assertion is gone FAILS
+# test_ruled_exemptions_have_no_stale_entries, exactly as a paid-off debt line
+# does next door.
+#
+# Format: <path>::<enclosing qualname>::<the assertion, as ast.unparse renders
+# it> # <one-line reason>
+#
+# The reason is REQUIRED and a line without one fails the gate twice over (it
+# is not an exemption, so its offender is also unaccounted for). It says what
+# the test actually pins and why the grep was left standing — a description,
+# never a justification-by-authority. The key is split off at the LAST " # " in
+# the line, so an assertion may contain that sequence and a reason may not.
+#
+tests/agent_runtime/test_agent_create_service.py::test_the_rpc_handler_holds_no_second_copy_of_the_sequence::'err(' in source # Guards the guard beside it: an RPC handler emptied entirely would satisfy all seven of the absence assertions this test is actually built on.
+tests/agent_runtime/test_agent_create_service.py::test_the_rpc_handler_holds_no_second_copy_of_the_sequence::'ok(' in source # The other half of that same emptied-handler guard — the handler still answers on both arms.
+tests/agent_runtime/test_agent_create_service.py::test_the_rpc_handler_holds_no_second_copy_of_the_sequence::'perform_agent_create' in source # Pins that the RPC handler DELEGATES to the extracted create sequence rather than holding a second copy of it; the seven `not in` assertions above it are the load-bearing half.
+tests/agent_runtime/test_office_class_key_one_fence.py::test_every_production_writer_of_a_live_actor_file_is_enumerated_and_dispositioned::'_guard_class_keyed_' in source # Checks the disposition table's word FENCED against the two entry points it names, so `upsert_actor`/`resolve_conflict` cannot be listed as fenced while consulting no fence.
+tests/agent_runtime/test_office_class_key_one_fence.py::test_every_production_writer_of_a_live_actor_file_is_enumerated_and_dispositioned::'allow_class_key' in source # Pins that both fenced entry points keep the explicit override PARAMETER — an override that is not a parameter is a caller that forgot to pass it.
+tests/agent_runtime/test_office_class_key_one_fence.py::test_no_lane_holds_a_second_copy_of_the_predicate::'ClassKeyedPlacementRefused' in source # Pins that each of the four upsert lanes still names the store's typed refusal at all, rather than having quietly stopped handling it; the `not in` halves beside it carry the one-fence claim.
+tests/agent_runtime/test_office_class_key_one_fence.py::test_no_lane_holds_a_second_copy_of_the_predicate::'class_key_collision(' in inspect.getsource(OfficeStore._guard_class_keyed_adoption) # The positive half of "the predicate is spent in exactly one place per fence" — here, the adoption fence.
+tests/agent_runtime/test_office_class_key_one_fence.py::test_no_lane_holds_a_second_copy_of_the_predicate::'class_key_collision(' in inspect.getsource(OfficeStore._guard_class_keyed_write) # Same claim for the write fence: the predicate lives inside the fence and nowhere else.
+tests/agent_runtime/test_office_class_key_one_fence.py::test_the_carve_out_is_a_live_hole_and_not_a_stale_note::'_write_actor(' in source # Pins that `adopt_remote_actor` still writes a live actor file, so its D3 carve-out from the fence describes a real hole rather than a stale note; the run-level spy above it proves the pull reaches that verb.
+tests/agent_runtime/test_persona_assignments.py::test_the_two_unbind_paths_are_told_apart_by_what_they_emit::'chat_binding_cleared' in body_of(clear) # Pins which of the two emissions the CLEAR path carries; the same file's wire tests at the bottom are the run-level half the docstring says a grep cannot answer.
+tests/agent_runtime/test_persona_assignments.py::test_the_two_unbind_paths_are_told_apart_by_what_they_emit::'emit_persona_instance_patch' in body_of(retract) # The other side of that asymmetry: the RETRACTION emits the state patch and not the domain event.
+tests/agent_runtime/test_s29_persona_runtime_context_lane_removal.py::test_the_chat_lane_block_list_survives::'_blocked_tool_names_for_chat(' in inspect.getsource(bundle_module) # Pins that the surviving chat-lane block list is still called from `chat_lane_bundle`'s builder after the run-lane twin one character away was removed.

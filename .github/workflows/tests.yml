@@ -64,9 +64,12 @@ jobs:
       # `--max-candidates` is a RUNTIME bound, not a quality bound: each
       # candidate costs one baseline plus one mutant focused-test run. The
       # script's default is 12 and its own refusal offers two cures, "split the
-      # diff or raise the cap visibly" — this is the visible raise, and it is
+      # diff, or pass the cap visibly" — this is the visible raise, and it is
       # here rather than in the script so the number a run actually enforces is
-      # readable beside the command that enforces it.
+      # readable beside the command that enforces it. Since 2026-09-01 that
+      # refusal names its own numbers (`<N> selected > --max-candidates <M>`)
+      # and extends the doctrine to the other lane that outgrows the default: a
+      # multi-stage LANDING run passes its own cap the way this job does.
       #
       # 16 because a slice that adds a whole PHASE legitimately carries more
       # claims than a bug fix does: the placement verb's skills phase (S4) came

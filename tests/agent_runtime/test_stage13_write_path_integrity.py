@@ -140,10 +140,27 @@ def test_realm_use_late_lander_cannot_clobber_newer_selection(capsys):
     assert WorkspaceStore().active_id() == ws_b.id
 
 
-def test_realm_use_reconcile_carries_the_realm_intents_basis(capsys):
-    """A realm switch that APPLIES but was issued before a subsequent explicit
-    workspace choice must not drag the workspace pointer through its
-    reconcile — each pointer is owned by the newest intent that touched it."""
+def test_a_late_realm_use_loses_the_whole_scope_to_a_newer_workspace_choice(capsys):
+    """A realm switch issued BEFORE a subsequent explicit workspace choice loses
+    to it — and loses the realm pointer too, not only the workspace one.
+
+    This test used to assert the other half ("each pointer is owned by the
+    newest intent that touched IT"), and what it asserted was a STRADDLE: the
+    realm pointer in A while the workspace pointer sat in a workspace of B, both
+    verbs having answered success, and nothing on the tree able to heal it. The
+    2026-09-01 operator ruling replaced per-pointer ownership with **newest
+    explicit gesture wins** — the two pointers never durably straddle realms, so
+    the newer workspace gesture takes both. The invariant and its two arms are
+    documented at ``agent_runtime/scope_activation.py``'s module docstring and
+    tested in ``tests/agent_runtime/test_scope_straddle_invariant.py``.
+
+    The reconcile-basis property this test was written for SURVIVES, and the
+    workspace assertion still pins it: the late realm switch does not drag the
+    workspace pointer with it. What changed is that it no longer keeps the realm
+    pointer either — the workspace choice's own follow write moved the realm
+    pointer first, so the late switch is refused at the realm compare-and-set
+    and never reaches its reconcile at all.
+    """
     from agent_runtime.store import RealmStore, WorkspaceStore
     from hermes_cli.harness import _cmd_realm_use, _cmd_workspace_use
 
@@ -153,10 +170,14 @@ def test_realm_use_reconcile_carries_the_realm_intents_basis(capsys):
     ws_b = WorkspaceStore().create(name="WS B", realm_id=realm_b.id)
 
     assert _cmd_workspace_use(_args(workspace_id=ws_b.id, issued_at="2026-07-09T12:00:30Z")) == 0
-    assert _cmd_realm_use(_args(realm_id=realm_a.id, issued_at="2026-07-09T12:00:20Z")) == 0
     capsys.readouterr()
+    assert _cmd_realm_use(_args(realm_id=realm_a.id, issued_at="2026-07-09T12:00:20Z")) == 0
+    envelope = json.loads(capsys.readouterr().out)
 
-    assert RealmStore().active_id() == realm_a.id
+    assert envelope["applied"] is False
+    assert envelope["superseded"] is True
+    assert envelope["requested_realm_id"] == realm_a.id
+    assert RealmStore().active_id() == realm_b.id
     assert WorkspaceStore().active_id() == ws_b.id
 
 
