@@ -128,7 +128,7 @@ All with the system `python -m pytest`.
 
 | suite | result |
 |---|---|
-| `test_scope_use_methods.py` (new) | 27 passed |
+| `test_scope_use_methods.py` (new) | 28 passed |
 | `test_scope_patch_coverage.py` (lane A's, unedited) | 13 passed against this refactor |
 | `test_scope_use_serve_acceptance.py` (new) | 5 passed |
 | authorization + gateway + office-rpc + row-consolidation focused set | 151 passed |

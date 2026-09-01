@@ -139,6 +139,26 @@ def test_the_manifest_carries_both_names_and_the_contract_integer_does_not_move(
     assert manifest["tiers"][REALM_USE_METHOD] == TIER_CONSOLE
 
 
+def test_the_restricted_set_names_exactly_the_two_registered_methods():
+    """``LOCAL_CONSOLE_METHODS`` holds LITERALS, not imports — deliberately, for
+    the reason ``PEER_METHOD_ALLOWLIST`` does: ``call_authorization`` is the
+    policy module and must not import a service to answer a question about a
+    name. The cost of literals is a typo that silently opens the door, so the
+    join is pinned here instead.
+
+    Both directions matter. A name in the set that no method registers is a
+    dead restriction; a scope method NOT in the set is an open door. The
+    registry is walked rather than the two names re-typed, so a third scope verb
+    added later fails this instead of shipping ungated.
+    """
+
+    assert LOCAL_CONSOLE_METHODS == {WORKSPACE_USE_METHOD, REALM_USE_METHOD}
+    registry = set(serve_rpc.method_names())
+    assert LOCAL_CONSOLE_METHODS <= registry, "a restriction on a method that does not exist"
+    scope_methods = {name for name in registry if name.endswith((".workspace.use", ".realm.use"))}
+    assert scope_methods == LOCAL_CONSOLE_METHODS, "a scope verb reached the registry ungated"
+
+
 def test_neither_method_joins_the_peer_allowlist():
     """The exclusion holds by CONSTRUCTION — everything is absent unless it is
     named — and ``test_peer_authorization``'s registry walk is what enforces it
