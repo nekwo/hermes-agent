@@ -2639,8 +2639,8 @@
       "path": "agent_runtime/scope_activation.py",
       "symbol": "activate_workspace",
       "operator": "collapse-the-declined-arm",
-      "find": "    if not outcome.get(\"applied\", True):\n        return activation_outcome_row(store, workspace_row, outcome, \"workspace_id\")\n    row = workspace_row(store.get(workspace_id))",
-      "replace": "    row = workspace_row(store.get(workspace_id))",
+      "find": "    if not outcome.get(\"applied\", True):\n        return activation_outcome_row(store, workspace_row, outcome, \"workspace_id\")\n    active_id = outcome.get(\"workspace_id\")",
+      "replace": "    active_id = outcome.get(\"workspace_id\")",
       "test": [
         "{python}",
         "-m",
@@ -2998,18 +2998,18 @@
       ]
     },
     {
-      "id": "iws-straddle-a-kept-workspace-is-not-a-refusal",
+      "id": "iws-straddle-the-kept-arm-still-returns-early",
       "path": "agent_runtime/scope_activation.py",
       "symbol": "reconcile_active_workspace_to_realm",
-      "operator": "report-kept-as-superseded",
+      "operator": "fall-through-the-kept-arm",
       "find": "            return {\"workspace_id\": active_id, \"applied\": False, \"reason\": RECONCILE_KEPT}",
-      "replace": "            return {\"workspace_id\": active_id, \"applied\": False, \"reason\": \"superseded\"}",
+      "replace": "            pass",
       "test": [
         "{python}",
         "-m",
         "pytest",
         "-q",
-        "tests/agent_runtime/test_scope_straddle_invariant.py::test_a_realm_switch_whose_workspace_already_belongs_still_answers_applied"
+        "tests/agent_runtime/test_scope_straddle_invariant.py::test_the_reconcile_keeps_a_workspace_that_already_belongs_and_says_so"
       ]
     },
     {

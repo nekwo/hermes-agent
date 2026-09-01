@@ -254,11 +254,19 @@ def test_the_reconcile_keeps_a_workspace_that_already_belongs_and_says_so(scope)
 
 
 def test_a_realm_switch_whose_workspace_already_belongs_still_answers_applied(scope):
-    """The kept arm, read from the CALLER — where reading it wrong costs
-    something. A reconcile that reported "kept" as a refusal would send
-    ``activate_realm`` into the heal on the most ordinary switch there is, drag
-    the realm pointer straight back out of the realm just asked for, and answer
-    ``superseded`` for a switch that worked."""
+    """The kept arm, read from the CALLER: the most ordinary realm switch there
+    is — one whose active workspace already belongs to the realm being asked for
+    — still answers ``applied: true`` and moves nothing.
+
+    Written expecting to prove more than it does. The mutation
+    ``RECONCILE_KEPT`` → ``"superseded"`` SURVIVES this, and correctly: a kept
+    workspace belongs to the target realm by definition, so the heal's own
+    ``winning_realm_id == requested_realm_id`` check turns the mislabelling into
+    a wasted read. The registered claim on this arm is the one that IS a
+    guarantee — the early return keeps the operator's chosen workspace instead of
+    letting the ladder re-derive one — and it lives on
+    :func:`test_the_reconcile_keeps_a_workspace_that_already_belongs_and_says_so`.
+    """
 
     activate_workspace(scope["ws_a1"].id, issued_at=T0)
     RealmStore().set_active(scope["realm_b"].id, issued_at=T1)

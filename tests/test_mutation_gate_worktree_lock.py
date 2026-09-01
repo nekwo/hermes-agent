@@ -20,46 +20,30 @@ the join that was broken untested.
 
 from __future__ import annotations
 
-import importlib.util
 import os
-import sys
 from pathlib import Path
 
 import pytest
 
-
-REPO = Path(__file__).resolve().parent.parent
-SCRIPT = REPO / "scripts" / "changed_line_mutation_check.py"
-
-
-def _load_module():
-    """The script is not importable as a package member — load it by path, the
-    way its own callers invoke it.
-
-    Registered in ``sys.modules`` BEFORE it executes, and only ever loaded once:
-    ``@dataclass`` resolves a string annotation through
-    ``sys.modules[cls.__module__]``, so a module executed outside the table
-    raises ``AttributeError`` on its own ``ClaimAnchor`` definition."""
-
-    name = "changed_line_mutation_check"
-    existing = sys.modules.get(name)
-    if existing is not None and getattr(existing, "__file__", None) == str(SCRIPT):
-        return existing
-    spec = importlib.util.spec_from_file_location(name, SCRIPT)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+from scripts import changed_line_mutation_check as module
 
 
 @pytest.fixture()
 def gate(tmp_path, monkeypatch):
     """The gate module, re-rooted onto a temp tree with one production file and
     one claim that mutates it. Every command it would run is recorded rather
-    than executed."""
+    than executed.
 
-    module = _load_module()
+    The module is imported as a package member — ``scripts/`` is a namespace
+    package and the gate's own tests under ``tests/scripts/`` import it this
+    way. Loading it by path instead (``spec_from_file_location`` +
+    ``exec_module``) works only if the module is registered in ``sys.modules``
+    FIRST: ``dataclasses`` resolves a string annotation through
+    ``sys.modules[cls.__module__]``, so a module executed outside the table
+    raises ``AttributeError: 'NoneType' object has no attribute '__dict__'`` on
+    its own ``ClaimAnchor``.
+    """
+
     target = tmp_path / "prod.py"
     target.write_text("VALUE = 1\n", encoding="utf-8")
 

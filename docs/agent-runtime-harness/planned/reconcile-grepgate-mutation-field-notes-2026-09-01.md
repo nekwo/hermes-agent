@@ -234,8 +234,58 @@ worth a gate. **Flagged for the orchestrator as a candidate queue row.**
 `@dataclass` in the loaded module raise `AttributeError: 'NoneType' object has
 no attribute '__dict__'` — `dataclasses._is_type` resolves string annotations
 through `sys.modules[cls.__module__]`. Nine tests errored on `ClaimAnchor`
-before the module was registered. Any future test that loads a `scripts/*.py`
-by path hits this.
+before the module was registered. The final file does not load by path at all
+(`scripts/` is a namespace package and `from scripts import
+changed_line_mutation_check` is what the gate's own tests already use), but any
+future test that DOES load a `scripts/*.py` by path hits this.
+
+### The lock broke the gate's own tests, and that is a finding
+
+The first real gate run of this branch reported **`baseline failed`**. Cause:
+`tests/scripts/test_mutation_claim_anchoring.py` and
+`tests/scripts/test_changed_line_mutation_check.py` drive
+`gate.run(..., list_only=False)` — genuinely mutating runs — so they now take
+the lock at the REAL repo root. Two consequences, both real:
+
+1. they exclusive-created `.mutation_gate.lock` in the working tree as a side
+   effect they never had before, and
+2. **nested inside a live gate run they were REFUSED**, which is exactly what
+   happens whenever a diff touches `run` and the gate baselines its own tests.
+   Every future change to `run` would have hit this.
+
+Fixed at the shared level rather than per test: a new `tests/scripts/conftest.py`
+with one autouse fixture re-rooting `gate.LOCK_PATH` into `tmp_path`. Re-rooting
+rather than disabling, so the lock's own behaviour stays under test in
+`tests/test_mutation_gate_worktree_lock.py`, which sets its `LOCK_PATH`
+explicitly. The lesson generalises: a guard keyed on a module-level path taken
+from `REPO_ROOT` will be taken by that module's own tests too.
+
+### The gate falsified a claim in this change's own comments
+
+First full run: **9 selected, 8 KILLED, 1 SURVIVED** —
+`iws-straddle-a-kept-workspace-is-not-a-refusal`, whose mutation was
+`RECONCILE_KEPT` → `"superseded"`.
+
+It survived because the claim behind it was **false**, and the comment I wrote
+beside `RECONCILE_KEPT` asserted it: "a kept pointer must not drag the realm
+pointer back". It cannot. A kept workspace belongs to the target realm BY
+DEFINITION, so even when the heal is entered its
+`winning_realm_id == requested_realm_id` check returns `None` and nothing moves.
+The token is worth having for honesty and readability; it is not load-bearing
+for the heal, and saying it was would have shipped a comment that reads like a
+guarantee and is not one.
+
+Corrected in three places (the `RECONCILE_KEPT` comment, the test docstring that
+repeated it, and the claim itself). The claim was re-aimed at the guarantee that
+IS there — `iws-straddle-the-kept-arm-still-returns-early`, mutation `return …`
+→ `pass`, killed by
+`test_the_reconcile_keeps_a_workspace_that_already_belongs_and_says_so`, because
+without the early return the ladder re-derives a workspace and can move the
+operator off the one they chose.
+
+**This is the gate working as designed**, and it is worth recording as the
+positive case: a claim written green-first from the author's belief, caught by
+the one mechanism that asks the code instead of the author.
 
 ### Red-first proof for the lock
 
@@ -257,6 +307,8 @@ Recorded so the next lane can repeat exactly what was run, and see what was not.
 | `pytest tests/agent_runtime/test_scope_straddle_invariant.py -q` | 14 passed |
 | `pytest tests/agent_runtime -k "scope or store or activation or realm or workspace or straddle" -q` | 1268 passed / 1 failed → the stage-13 straddle test above; re-run green |
 | `pytest tests/{stage13,scope_use_methods,scope_straddle_invariant,scope_patch_coverage,mutation_gate_worktree_lock,no_source_grep_assertions}` | 99 passed |
+| `pytest tests/test_mutation_gate_worktree_lock.py tests/scripts -q` | 91 passed, no stray lock left in the tree |
+| `python scripts/changed_line_mutation_check.py --base 98d43d0c86 --max-candidates 40` | see below |
 
 **A collection hazard, not a defect.** `pytest tests -k "<pattern>"` over the
 whole tree fails collection on this host with 11 pre-existing errors —

@@ -202,9 +202,18 @@ def activation_outcome_row(store, row_builder, outcome: dict, key: str) -> dict:
 #:
 #: Every other arm answers ``WorkspaceStore.set_active``'s own dict verbatim,
 #: where ``applied``/``reason`` describe the WRITE. This token keeps "there was
-#: nothing to do" distinguishable from "the store declined", which is the exact
-#: distinction :func:`activate_realm`'s straddle heal turns on — a kept pointer
-#: is already in the target realm and must NOT drag the realm pointer back.
+#: nothing to do" apart from "the store declined", for the caller and for the
+#: reader.
+#:
+#: It is NOT what stops the straddle heal firing on a kept pointer, and the
+#: comment here said so until a mutation run corrected it (2026-09-01: the
+#: claim "a kept arm mislabelled ``superseded`` would drag the realm pointer
+#: back" SURVIVED, because it is false). A kept workspace belongs to the target
+#: realm BY DEFINITION, so ``_heal_realm_pointer_to_winning_workspace``'s
+#: ``winning_realm_id == requested_realm_id`` check turns the mislabelling into
+#: a wasted store read and nothing else. What the arm's early return really
+#: buys is the pointer itself: without it the ladder re-derives a workspace and
+#: can move the operator off the one they chose.
 RECONCILE_KEPT = "kept"
 
 
