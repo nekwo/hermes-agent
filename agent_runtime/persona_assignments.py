@@ -726,6 +726,84 @@ class PersonaInstanceStore:
             updated_at=now(),
         )
 
+    def retire_replica(
+        self,
+        persona_instance_id: str,
+        *,
+        reason: str = "remote_removed",
+        realm_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Archive a replicated row when its DESK left — plan §5.2, nothing else.
+
+        Two things this deliberately does NOT do, and both are the point:
+
+        * **It runs no office half.** :meth:`retire` calls
+          ``_archive_office_placements``, which archives through
+          ``remove_actor``'s DEFAULT ``record_tombstone=True`` — a realm-visible
+          ledger entry. Here the authored tombstone already exists upstream, and
+          the pull's own office lane has already archived the local desk that
+          triggered this, so minting a second one is the duplicate-authority
+          defect §5.2 forbids. That is what "``record_tombstone=False``
+          semantics" MEANS for this family: a persona-instance row has no
+          realm-visible ledger of its own, so withholding the office write is
+          the whole of it.
+        * **It mints no tombstone of any kind.** Nothing in the replication lane
+          ever does. The row MOVES to the archive (archive-never-delete) and the
+          projection stops listing it, exactly as :meth:`retire` does.
+
+        Refuses typed — never silently — on the two guards :meth:`retire`
+        carries: a canonical channel (which never replicates at all, so reaching
+        this door with one is a caller bug worth naming) and a LIVE run binding.
+        A working agent is never archived; the pull accounts it as held and
+        re-decides next pass, the "keep the baseline, retry" repair
+        ``_reconcile_actors`` already uses one lane over.
+        """
+
+        instance = self.get(persona_instance_id)
+        if is_canonical_persona_channel(instance):
+            raise PersonaInstanceRetireError(
+                "canonical_persona_channel",
+                f"{instance.id} is a canonical persona channel and never replicates",
+                persona_instance_id=instance.id,
+                detail={"persona_id": instance.persona_id},
+            )
+        if self._has_live_binding(instance):
+            raise PersonaInstanceRetireError(
+                "instance_active",
+                f"{instance.id} has a live run binding; never archive a working agent",
+                persona_instance_id=instance.id,
+                detail={"active_run_id": safe_optional_token(instance.active_run_id)},
+            )
+
+        archive_dir = (
+            paths.persona_instances_archive_dir()
+            / f"{now().strftime('%Y%m%dT%H%M%SZ')}_replica_retire"
+        )
+        archived_path = self._archive_instance_row(instance, archive_dir)
+        if archived_path is None:
+            raise PersonaInstanceRetireError(
+                "not_found",
+                f"persona instance row is not on disk: {instance.id}",
+                persona_instance_id=instance.id,
+            )
+        payload: dict[str, Any] = {
+            "reason": safe_assignment_text(reason, limit=240) or "remote_removed",
+            "persona_id": instance.persona_id,
+            "mode": instance.mode,
+            "archive_dir": str(archive_dir),
+            "source": "realm_sync",
+        }
+        if realm_id:
+            payload["realm_id"] = str(realm_id)
+        self._event("persona_instance.retired", instance, payload)
+        emit_persona_instance_remove(self.event_log, instance)
+        return {
+            "persona_instance_id": instance.id,
+            "persona_id": instance.persona_id,
+            "archive_path": str(archived_path),
+            "archive_dir": str(archive_dir),
+        }
+
     def apply_replicated_steering(
         self, persona_instance_id: str, parents: list[str], *, realm_id: str
     ) -> tuple[list[str], list[dict[str, str]]]:

@@ -717,6 +717,10 @@ class PersonaInstancePullSummary:
       refusal is named, the pull continues.
     - ``steering_dropped`` — phase-two edges naming a parent this machine does
       not have. Accounted, never silent.
+    - ``retired`` / ``retire_held`` — §5.2's retire-follows-the-DESK arm, and
+      the desks whose agent could not be archived (a live run binding above
+      all). These are driven by the office lane's own ``remote_removed``
+      archives, never by an instance's absence.
 
     ``source`` is ``None`` when the pulled subtree carries no instance
     projection at all — an older publisher. That is the version-skew fact the
@@ -732,11 +736,29 @@ class PersonaInstancePullSummary:
     upstream_absent: list[str] = field(default_factory=list)
     refused: list[dict[str, str]] = field(default_factory=list)
     steering_dropped: list[dict[str, str]] = field(default_factory=list)
+    #: Replicas archived because their DESK left (plan §5.2). Never derived from
+    #: an instance's absence — only from the office lane having ARCHIVED the
+    #: actor for the same key in this same pull, which is authored intent that
+    #: already propagated. Empty is the normal case.
+    retired: list[str] = field(default_factory=list)
+    #: Desks that left while their agent could NOT be archived — a live run
+    #: binding above all (``instance_active``). Held, named, and re-decided on
+    #: the next pull: a working agent is never archived out from under an
+    #: operator, and the count says so rather than implying the retire happened.
+    retire_held: list[dict[str, str]] = field(default_factory=list)
+    #: The realm still publishes this agent, but its DESK is archived on this
+    #: machine, so no replica is minted or revived. The office surface's
+    #: ``archived_actor_keys`` ledger is the resurrection guard the office family
+    #: already uses, and the actor key IS the instance id — so this lane asks the
+    #: SAME ledger rather than growing a second one. Without it a retire-follows-
+    #: the-desk in one pull would be undone by the very next pull, and a desk the
+    #: operator deleted would keep coming back with an agent behind it.
+    desk_archived: list[str] = field(default_factory=list)
     source: str | None = None
 
     @property
     def changed(self) -> bool:
-        return bool(self.replicated or self.adopted)
+        return bool(self.replicated or self.adopted or self.retired)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -748,6 +770,9 @@ class PersonaInstancePullSummary:
             "upstream_absent": sorted(set(self.upstream_absent)),
             "refused": list(self.refused),
             "steering_dropped": list(self.steering_dropped),
+            "retired": sorted(set(self.retired)),
+            "retire_held": list(self.retire_held),
+            "desk_archived": sorted(set(self.desk_archived)),
             "source": self.source,
         }
 
@@ -810,11 +835,86 @@ def _local_projection_hash(store, instance_id: str):
     return persona_instance_def_hash(project_persona_instance(record)), record, None
 
 
+def _locally_archived_actor_keys() -> set[str]:
+    """Every actor key this machine has archived, across every office surface.
+
+    Read from the office store's own ``archived_actor_keys`` ledger — the SAME
+    resurrection guard ``_reconcile_actors`` passes to the classifier — because
+    the actor key IS the instance id for an instance-bound actor. Growing a
+    second ledger for the same fact is how two authorities over one identity
+    start disagreeing.
+
+    A store that cannot be read yields an EMPTY set, which is the permissive
+    direction, and that is the right one here: the alternative is refusing to
+    replicate anything on a projection fault, and the resurrection this guards
+    against is bounded (one desk comes back and the operator deletes it again),
+    while the refusal would strand every agent in the realm.
+    """
+
+    try:
+        from .office_store import OfficeStore
+
+        store = OfficeStore()
+        keys: set[str] = set()
+        for workspace_token in store.list_workspaces():
+            try:
+                surface = store.get_surface(workspace_token)
+            except Exception:  # noqa: BLE001 — one unreadable surface is not the others'
+                continue
+            keys.update(str(key) for key in (surface.archived_actor_keys or []))
+        return keys
+    except Exception:  # noqa: BLE001 — see the docstring: permissive on a fault
+        return set()
+
+
+def _retire_replicas_for_removed_desks(
+    store,
+    summary: PersonaInstancePullSummary,
+    baseline: dict[str, str],
+    *,
+    realm_id: str,
+    desks_removed,
+) -> None:
+    """§5.2: the replica follows the DESK, never the absence.
+
+    ``desks_removed`` is the actor keys the office lane ARCHIVED in this same
+    pull — the ``remote_removed`` arm, which is authored intent that already
+    propagated from the machine the operator clicked on. That is a different
+    fact from an instance being missing from the projection, which is
+    ``upstream_absent`` and never a delete: a desk's removal is a decision a
+    peer made, while a row's absence is equally consistent with the publisher's
+    own office scan having come back short.
+
+    The actor key IS the canonical instance id for an instance-bound actor
+    (``_canonical_actor_key``), so a key with no matching row is simply a
+    persona-keyed desk and there is nothing to retire.
+    """
+
+    from . import paths
+
+    for actor_key in sorted({str(key) for key in (desks_removed or []) if key}):
+        if not paths.persona_instance_path(actor_key).exists():
+            continue
+        try:
+            store.retire_replica(actor_key, reason="remote_removed", realm_id=realm_id)
+        except Exception as exc:  # noqa: BLE001 — accounted, never silent
+            code = getattr(exc, "code", None) or type(exc).__name__
+            summary.retire_held.append({"key": actor_key, "code": str(code)})
+            # The baseline entry STAYS. Dropping it would tell the next pull
+            # there is no baseline for a row that is still live, and a row with
+            # no baseline reads as a local ADD — the failed archive would come
+            # back as something to publish (``_reconcile_actors``' C2 lesson).
+            continue
+        summary.retired.append(actor_key)
+        baseline.pop(instance_baseline_key(actor_key), None)
+
+
 def apply_persona_instance_pull(
     realm_id: str,
     subtree,
     *,
     event_log: Any = None,
+    desks_removed=(),
 ) -> PersonaInstancePullSummary:
     """THE mint door: a pulled desk that has no agent here gets one.
 
@@ -841,10 +941,27 @@ def apply_persona_instance_pull(
     summary = PersonaInstancePullSummary()
     remote, source = read_remote_persona_instances(subtree)
     summary.source = source
+    store = (
+        PersonaInstanceStore(event_log=event_log)
+        if event_log is not None
+        else PersonaInstanceStore()
+    )
+    baseline = read_persona_instance_baseline(realm_id)
+
+    # §5.2 FIRST, and independent of the projection. The trigger is the office
+    # lane's own ``remote_removed`` archive, not anything in this document — a
+    # peer can retire a desk in the same pull where their projection is absent,
+    # unreadable, or unchanged, and the replica has to follow the desk in all
+    # three cases.
+    _retire_replicas_for_removed_desks(
+        store, summary, baseline, realm_id=realm_id, desks_removed=desks_removed
+    )
+
     if source is None:
-        # Not published. Never a removal — the baseline is left exactly as it
-        # was, so an older peer in the rotation cannot strand this machine's
-        # replicas.
+        # Not published. Never a removal — no baselined row is touched, so an
+        # older peer in the rotation cannot strand this machine's replicas.
+        if summary.retired:
+            write_persona_instance_baseline(realm_id, baseline)
         return summary
     if source == "unreadable":
         summary.refused.append(
@@ -854,17 +971,20 @@ def apply_persona_instance_pull(
                 "the pulled instance projection exists and would not decode",
             )
         )
+        if summary.retired:
+            write_persona_instance_baseline(realm_id, baseline)
         return summary
 
-    store = (
-        PersonaInstanceStore(event_log=event_log)
-        if event_log is not None
-        else PersonaInstanceStore()
-    )
-    baseline = read_persona_instance_baseline(realm_id)
     prefix = instance_baseline_key("")
     baselined_ids = {key[len(prefix):] for key in baseline if key.startswith(prefix)}
     written: list[tuple[str, dict[str, Any]]] = []
+    # The resurrection guard, from TWO sources that answer the same question at
+    # different ranges. The office ledger covers desks archived in any earlier
+    # pass; ``summary.retired`` covers the ones THIS pass just archived, which
+    # the ledger would also carry in production but which must not depend on
+    # another store's state for a guarantee this function makes about itself. A
+    # retire undone by phase one of the same pull would be incoherent.
+    archived_keys = _locally_archived_actor_keys() | set(summary.retired)
 
     # --- phase one: the rows ------------------------------------------------
     for instance_id in sorted(set(remote) | baselined_ids):
@@ -900,7 +1020,28 @@ def apply_persona_instance_pull(
             continue
 
         remote_hash = persona_instance_def_hash(remote_body)
-        decision = classify_three_way_pull(local_hash, remote_hash, baseline.get(key))
+        decision = classify_three_way_pull(
+            local_hash,
+            remote_hash,
+            baseline.get(key),
+            # THE resurrection guard, and it is the office family's own ledger
+            # rather than a second one: the actor key IS the instance id, so a
+            # desk the operator archived here answers for its agent too. Without
+            # it, a retire-follows-the-desk taken in one pull would be undone by
+            # the very next pull, because the retired row reads as locally absent
+            # while the realm still publishes it.
+            locally_archived=instance_id in archived_keys,
+        )
+        if decision.reason in ("archived_local", "archive_vs_edit"):
+            summary.desk_archived.append(instance_id)
+            if decision.action == PullAction.CONFLICT:
+                # The realm EDITED an agent whose desk is archived here. Nothing
+                # is written, but the body is parked so the divergence is not
+                # simply lost between two correct local states.
+                _write_conflict_sidecar(
+                    realm_id, instance_id, decision.reason, remote_body, local_hash, remote_hash
+                )
+            continue
 
         if decision.action == PullAction.NOOP:
             summary.converged.append(instance_id)

@@ -29,8 +29,15 @@ Three rulings shape every line below.
 
 The write arms are the PULL lane's arms, not new ones: ``adopt_remote_actor`` /
 ``adopt_remote_surface`` / ``restore_actor`` / ``restore_card`` /
-``archive_card`` / ``remove_actor``, and the same ``sync_admission`` door every
-pulled payload passes. A revert writes nothing a pull could not have written.
+``archive_card`` / ``remove_actor``, and — since the replicated persona-INSTANCE
+family joined on 2026-08-31 — ``replicate_instance`` / ``retire_replica``, plus
+the same admission door every pulled payload passes. A revert writes nothing a
+pull could not have written.
+
+The instance family's ``added`` arm needs no ``record_tombstone=False``
+parameter, and that is not an omission: a persona-instance record carries no
+realm-visible ledger at all, so the only place this lane could mint one is the
+office half — and ``retire_replica`` deliberately does not run it.
 """
 
 from __future__ import annotations
@@ -48,6 +55,7 @@ from .realm_sync import (
     DRIFT_FAMILY_BOARD_CARD,
     DRIFT_FAMILY_OFFICE_ACTOR,
     DRIFT_FAMILY_OFFICE_SURFACE,
+    DRIFT_FAMILY_PERSONA_INSTANCE,
     DRIFT_KIND_ADDED,
     DRIFT_KIND_CHANGED,
     DRIFT_KIND_REMOVED,
@@ -117,6 +125,7 @@ FAMILIES = frozenset(
         DRIFT_FAMILY_BOARD_CARD,
         DRIFT_FAMILY_OFFICE_SURFACE,
         DRIFT_FAMILY_OFFICE_ACTOR,
+        DRIFT_FAMILY_PERSONA_INSTANCE,
     }
 )
 
@@ -128,6 +137,7 @@ FAMILIES = frozenset(
 _PROCESS_ORDER = {
     DRIFT_FAMILY_OFFICE_ACTOR: 0,
     DRIFT_FAMILY_BOARD_CARD: 0,
+    DRIFT_FAMILY_PERSONA_INSTANCE: 0,
     DRIFT_FAMILY_OFFICE_SURFACE: 1,
     DRIFT_FAMILY_BOARD: 1,
 }
@@ -248,6 +258,9 @@ class _Upstream:
         self._subtree = subtree
         self._offices: dict[str, Any] = {}
         self._boards: dict[str, Any] = {}
+        #: The instance family is ONE document for the whole realm, so it caches
+        #: as one entry rather than per container.
+        self._instances: tuple[dict[str, Any], str | None] | None = None
 
     def _office(self, workspace_id: str):
         from .office_sync import _read_remote_office
@@ -265,11 +278,32 @@ class _Upstream:
             self._boards[board_id] = _read_remote_board(board_dir)
         return self._boards[board_id]
 
+    def _instance(self, instance_id: str) -> tuple[Any, bool]:
+        """One instance BODY out of the pulled projection, and whether the
+        document itself would not decode.
+
+        The whole family lives in ONE artifact, so ``unreadable`` is a property
+        of the document rather than of the row: when the projection will not
+        parse, every instance is unreadable and none is absent — and absence is
+        what drives the archive arm below."""
+
+        from .persona_instance_sync import read_remote_persona_instances
+
+        if self._instances is None:
+            bodies, source = read_remote_persona_instances(self._subtree)
+            self._instances = (bodies, source)
+        bodies, source = self._instances
+        if source == "unreadable":
+            return None, True
+        return bodies.get(instance_id), False
+
     def lookup(self, family: str, container: str, item_key: str) -> tuple[Any, bool]:
         """``(entity_or_None, unreadable)``. ``unreadable`` True means the
         artifact is not decodable HERE, which is never the same answer as
         absent."""
 
+        if family == DRIFT_FAMILY_PERSONA_INSTANCE:
+            return self._instance(item_key)
         if family == DRIFT_FAMILY_OFFICE_SURFACE:
             remote = self._office(container)
             return remote.surface, remote.surface_unreadable
@@ -360,12 +394,18 @@ def revert_realm_sync(
                 continue
             selected.append(item)
 
+    from .persona_instance_sync import (
+        read_persona_instance_baseline,
+        write_persona_instance_baseline,
+    )
+
     upstream = _Upstream(subtree)
     office_store = OfficeStore()
     board_store = BoardStore()
     office_baseline = read_office_baseline(realm.id)
     board_baseline = read_board_baseline(realm.id)
-    touched_office = touched_board = False
+    instance_baseline = read_persona_instance_baseline(realm.id)
+    touched_office = touched_board = touched_instances = False
 
     for item in sorted(selected, key=lambda row: (_PROCESS_ORDER[row.family], row.family, row.container, row.item_key)):
         row = _revert_one(
@@ -375,12 +415,16 @@ def revert_realm_sync(
             board_store=board_store,
             office_baseline=office_baseline,
             board_baseline=board_baseline,
+            instance_baseline=instance_baseline,
+            realm_id=realm.id,
             dry_run=dry_run,
         )
         rows.append(row)
         if row.applied:
             if item.family in (DRIFT_FAMILY_OFFICE_ACTOR, DRIFT_FAMILY_OFFICE_SURFACE):
                 touched_office = True
+            elif item.family == DRIFT_FAMILY_PERSONA_INSTANCE:
+                touched_instances = True
             else:
                 touched_board = True
 
@@ -395,6 +439,8 @@ def revert_realm_sync(
             write_office_baseline(realm.id, office_baseline)
         if touched_board:
             write_board_baseline(realm.id, board_baseline)
+        if touched_instances:
+            write_persona_instance_baseline(realm.id, instance_baseline)
         if applied:
             _append_realm_sync_event(
                 REVERT_EVENT_TYPE, realm, changed=True, artifacts=len(applied)
@@ -427,6 +473,8 @@ def _revert_one(
     board_store,
     office_baseline: dict[str, str],
     board_baseline: dict[str, str],
+    instance_baseline: dict[str, str] | None = None,
+    realm_id: str | None = None,
     dry_run: bool,
 ) -> RevertRow:
     """One item, decided purely and then applied. Every store refusal is caught
@@ -453,11 +501,12 @@ def _revert_one(
         row.detail = "no_subtree_artifact"
         return row
 
-    baseline = (
-        office_baseline
-        if item.family in (DRIFT_FAMILY_OFFICE_ACTOR, DRIFT_FAMILY_OFFICE_SURFACE)
-        else board_baseline
-    )
+    if item.family in (DRIFT_FAMILY_OFFICE_ACTOR, DRIFT_FAMILY_OFFICE_SURFACE):
+        baseline = office_baseline
+    elif item.family == DRIFT_FAMILY_PERSONA_INSTANCE:
+        baseline = instance_baseline if instance_baseline is not None else {}
+    else:
+        baseline = board_baseline
     key = item.baseline_key()
 
     if decision.action is RevertAction.DROP_BASELINE:
@@ -470,8 +519,16 @@ def _revert_one(
 
         # The same door every pulled payload passes. A revert adopts bytes this
         # machine did not author, so it inherits the pull's trust boundary
-        # rather than opening a second one beside it.
-        refusal = refuse_entity(key, payload=to_jsonable(entity))
+        # rather than opening a second one beside it — and for the instance
+        # family that means the FAMILY's door (allowlist totality, canonical-id
+        # and steering-shape refusals), not just the shared scan, or a revert
+        # would admit a body its own pull would have turned away.
+        if item.family == DRIFT_FAMILY_PERSONA_INSTANCE:
+            from .persona_instance_sync import refuse_persona_instance
+
+            refusal = refuse_persona_instance(item.item_key, entity)
+        else:
+            refusal = refuse_entity(key, payload=to_jsonable(entity))
         if refusal is not None:
             row.outcome = REFUSED_ADMISSION
             row.detail = refusal.code
@@ -482,9 +539,13 @@ def _revert_one(
 
     try:
         if decision.action is RevertAction.RESTORE:
-            _restore_from_upstream(item, entity, office_store=office_store, board_store=board_store)
+            _restore_from_upstream(
+                item, entity, office_store=office_store, board_store=board_store, realm_id=realm_id
+            )
         elif decision.action is RevertAction.ADOPT:
-            _adopt_from_upstream(item, entity, office_store=office_store, board_store=board_store)
+            _adopt_from_upstream(
+                item, entity, office_store=office_store, board_store=board_store, realm_id=realm_id
+            )
         else:  # ARCHIVE_LOCAL
             _archive_local_only(item, office_store=office_store, board_store=board_store)
     except Exception as exc:  # noqa: BLE001 — accounted, never silent; the pass continues
@@ -510,7 +571,9 @@ def _revert_one(
     return row
 
 
-def _restore_from_upstream(item: StoreDriftItem, entity, *, office_store, board_store) -> None:
+def _restore_from_upstream(
+    item: StoreDriftItem, entity, *, office_store, board_store, realm_id: str | None = None
+) -> None:
     """The un-archive door, then the upstream content on top of it.
 
     Two writes and not one, deliberately. The archive copy holds THIS machine's
@@ -531,6 +594,17 @@ def _restore_from_upstream(item: StoreDriftItem, entity, *, office_store, board_
     not "is this key archived".
     """
 
+    if item.family == DRIFT_FAMILY_PERSONA_INSTANCE:
+        # A replicated AGENT has no un-archive verb of its own and does not need
+        # one: the store door mints a row for an id with no live file, deriving
+        # this machine's §1.3 half exactly as the pull would. So "restore" and
+        # "adopt" are the same write for this family, and the archived copy on
+        # disk stays where archive-never-delete put it — a second copy of a row
+        # the projection can rebuild is not worth a second verb.
+        _adopt_from_upstream(
+            item, entity, office_store=office_store, board_store=board_store, realm_id=realm_id
+        )
+        return
     if item.family == DRIFT_FAMILY_OFFICE_ACTOR:
         if paths.office_archived_actor_path(item.container, item.item_key).exists():
             restored = office_store.restore_actor(
@@ -549,7 +623,9 @@ def _restore_from_upstream(item: StoreDriftItem, entity, *, office_store, board_
     _adopt_from_upstream(item, entity, office_store=office_store, board_store=board_store)
 
 
-def _adopt_from_upstream(item: StoreDriftItem, entity, *, office_store, board_store) -> None:
+def _adopt_from_upstream(
+    item: StoreDriftItem, entity, *, office_store, board_store, realm_id: str | None = None
+) -> None:
     """Write the subtree artifact over the local row — the pull's adopt arms,
     unchanged.
 
@@ -561,6 +637,21 @@ def _adopt_from_upstream(item: StoreDriftItem, entity, *, office_store, board_st
     still event-less.)
     """
 
+    if item.family == DRIFT_FAMILY_PERSONA_INSTANCE:
+        # Through the SAME store door the pull writes replicas with, so a revert
+        # writes nothing a pull could not have written — including the delta
+        # patch and the ``persona_instance.replicated`` receipt. ``entity`` here
+        # is the projected BODY (a dict), not a record: this family's upstream
+        # artifact is one document for the whole realm.
+        from .persona_assignments import PersonaInstanceStore
+
+        store = PersonaInstanceStore()
+        try:
+            existing = store.get(item.item_key)
+        except Exception:
+            existing = None
+        store.replicate_instance(entity, realm_id=str(realm_id or ""), adopt_existing=existing)
+        return
     if item.family == DRIFT_FAMILY_OFFICE_ACTOR:
         entity.workspace_id = item.container
         entity.state = "active"
@@ -591,6 +682,16 @@ def _archive_local_only(item: StoreDriftItem, *, office_store, board_store) -> N
     ``record_tombstone=False`` lane on both stores, so no realm-visible ledger
     entry is minted. See the module docstring (§AX7)."""
 
+    if item.family == DRIFT_FAMILY_PERSONA_INSTANCE:
+        # A locally-authored agent the realm does not have. The instance record
+        # carries NO realm-visible ledger at all, so ``record_tombstone=False``
+        # is structural here rather than a parameter: ``retire_replica`` archives
+        # the row and deliberately runs no office half, which is the only place
+        # this lane could have minted a ledger entry.
+        from .persona_assignments import PersonaInstanceStore
+
+        PersonaInstanceStore().retire_replica(item.item_key, reason="revert_local_only")
+        return
     if item.family == DRIFT_FAMILY_OFFICE_ACTOR:
         office_store.remove_actor(
             item.container,
@@ -621,6 +722,13 @@ def _current_content_hash(item: StoreDriftItem, *, office_store, board_store) ->
     make the sheet read in-sync for content this install does not hold.
     """
 
+    if item.family == DRIFT_FAMILY_PERSONA_INSTANCE:
+        from .persona_assignments import PersonaInstanceStore
+        from .persona_instance_sync import persona_instance_def_hash, project_persona_instance
+
+        return persona_instance_def_hash(
+            project_persona_instance(PersonaInstanceStore().get(item.item_key))
+        )
     if item.family == DRIFT_FAMILY_OFFICE_ACTOR:
         return office_models.office_content_hash(office_store.get_actor(item.container, item.item_key))
     if item.family == DRIFT_FAMILY_OFFICE_SURFACE:

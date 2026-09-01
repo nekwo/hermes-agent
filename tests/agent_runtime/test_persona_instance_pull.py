@@ -539,10 +539,13 @@ def test_the_pull_ack_carries_the_summary_under_the_contract_key():
     assert sorted(shape) == [
         "adopted",
         "converged",
+        "desk_archived",
         "held",
         "kept_local",
         "refused",
         "replicated",
+        "retire_held",
+        "retired",
         "source",
         "steering_dropped",
         "upstream_absent",

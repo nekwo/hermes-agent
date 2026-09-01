@@ -256,3 +256,81 @@ which exceeds the script's DEFAULT `--max-candidates 12` and exits 2.** With
 `--max-candidates 30`: 21 selected, 21 KILLED, exit 0. Per-stage bases stay
 under the default cap. The orchestrator needs the raised cap (or a per-stage
 base) for the landing gate — this is a selector budget, not a failing claim.
+
+## H4 — drift, revert, and retire-follows-the-desk
+
+`DRIFT_FAMILY_PERSONA_INSTANCE` + `_persona_instance_store_drift_items` +
+`_PERSONA_INSTANCE_DRIFT_COUNTS`; `classify_revert`'s existing table gains the
+family (no new table — it was already total over family × kind); the revert
+lane's `_Upstream.lookup` / restore / adopt / archive arms; and
+`PersonaInstanceStore.retire_replica`.
+
+### Decisions taken while building
+
+1. **`record_tombstone=False` is STRUCTURAL for this family, not a parameter.**
+   The plan asks for "`record_tombstone=False` semantics". A persona-instance
+   record has no realm-visible ledger of its own — the only place this lane
+   could mint one is the office half, via `_archive_office_placements` →
+   `remove_actor` with its DEFAULT `record_tombstone=True`. So `retire_replica`
+   simply does not run the office half, and that IS the whole of the semantics.
+   Adding a parameter would have implied a ledger that does not exist.
+2. **`restore` and `adopt` are the same write for this family.** A replicated
+   agent has no un-archive verb and does not need one: the store door mints a
+   row for an id with no live file, deriving this machine's §1.3 half exactly as
+   the pull would. The archived copy stays where archive-never-delete put it.
+3. **The revert routes through the FAMILY's admission door**, not just the
+   shared `refuse_entity` scan — allowlist totality, canonical-id and
+   steering-shape refusals included. Otherwise a revert would admit a body its
+   own pull would have turned away.
+4. **A resurrection guard was needed and is NOT new machinery.** Retire-follows-
+   the-desk archives a row the realm still publishes, so the very next pull
+   would mint it back — the retire undone in one round trip, and a desk the
+   operator deleted returning with an agent behind it. The office surface's
+   `archived_actor_keys` ledger already answers this, and the actor key IS the
+   instance id, so the lane asks that ledger (`locally_archived=` into the shared
+   classifier) rather than growing a second one. A new `desk_archived` outcome
+   names the state.
+   The guard is the union of that ledger and `summary.retired`, so the guarantee
+   holds within a single pass without depending on another store's state.
+5. **`desks_removed` comes from the office summary's `archive_outcomes`, not from
+   a re-derivation.** Only that arm knows which archives it actually took: the
+   ones it FENCED (`delete_fenced`, unreadable remote) and the ones it tried and
+   could not are both absent from the list by construction. Retiring an agent
+   for a desk removal that did not happen is the worst mistake available here.
+6. **The retire arm runs BEFORE the projection is even read**, because its
+   trigger is the office lane's archive rather than anything in the document — a
+   peer can retire a desk in the same pull where their projection is absent,
+   unreadable, or unchanged, and the replica must follow in all three cases.
+
+### The red-proof that took three attempts, and what it revealed
+
+`_retire_replicas_for_removed_desks` keeps the baseline entry when a retire is
+HELD (the C2 lesson: dropping the entry for a still-live row re-classifies it as
+a local ADD, so a failed archive comes back as something to publish). Sabotaging
+that line survived twice:
+
+* with the projection ABSENT, the baseline file is never written on the held
+  path at all, so the in-memory pop never reaches disk;
+* with the projection PRESENT and matching, phase one's `converged` arm silently
+  re-records the entry two blocks later.
+
+The only shape where the drop survives to disk is a locally-edited replica whose
+remote ALSO moved — the `held` arm, which writes the baseline and re-records
+nothing. That is the shape the test now pins, and the docstring says why, because
+this is exactly how a guarantee ends up believed and untested.
+
+### Other red-proofs (seven, each watched red)
+
+canonical rows entering the drift walk; the unreadable-store guard removed;
+retire-follows-the-desk removed; the live-binding guard removed; the
+resurrection guard removed; `retire_replica` running the office half; the family
+dropped from the revert selector.
+
+### Wire additions in this stage
+
+`store_drift.persona_instances` = `{instances_added, instances_changed,
+instances_removed}` (additive; `_any_store_drift` sums it, so a locally-authored
+agent nobody published now lights "unpublished changes" — the honest answer, and
+the same reason the office family was added on 2026-08-29); `store_drift.items`
+gains rows with `family: "persona_instance"`; the pull ack's summary gains
+`retired`, `retire_held`, `desk_archived`.

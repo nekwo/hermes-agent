@@ -2423,6 +2423,126 @@
         "-q",
         "tests/agent_runtime/test_persona_instance_pull.py::test_a_local_row_that_will_not_decode_is_refused_never_minted_over"
       ]
+    },
+    {
+      "id": "ir-h4-canonical-rows-enter-the-drift-walk",
+      "path": "agent_runtime/realm_sync.py",
+      "symbol": "_persona_instance_store_drift_items",
+      "operator": "stop-excluding-canonical-channels",
+      "find": "        if is_canonical_persona_channel(instance):\n            continue",
+      "replace": "        if False:\n            continue",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_drift.py::test_a_canonical_channel_is_never_reported_as_drift"
+      ]
+    },
+    {
+      "id": "ir-h4-a-short-instance-read-reports-removals",
+      "path": "agent_runtime/realm_sync.py",
+      "symbol": "_persona_instance_store_drift_items",
+      "operator": "spend-only-the-rows",
+      "find": "    if scan.unreadable:\n        return []\n\n    workspace_ids",
+      "replace": "    if False:\n        return []\n\n    workspace_ids",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_drift.py::test_an_unreadable_store_contributes_no_accounting_rather_than_removals"
+      ]
+    },
+    {
+      "id": "ir-h4-a-removed-desk-leaves-its-agent-behind",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "_retire_replicas_for_removed_desks",
+      "operator": "never-retire-the-replica",
+      "find": "        try:\n            store.retire_replica(actor_key, reason=\"remote_removed\", realm_id=realm_id)",
+      "replace": "        try:\n            pass",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_drift.py::test_the_replica_follows_the_desk"
+      ]
+    },
+    {
+      "id": "ir-h4-a-working-agent-is-archived",
+      "path": "agent_runtime/persona_assignments.py",
+      "symbol": "PersonaInstanceStore.retire_replica",
+      "operator": "drop-the-live-binding-guard",
+      "find": "        if self._has_live_binding(instance):\n            raise PersonaInstanceRetireError(\n                \"instance_active\",",
+      "replace": "        if False:\n            raise PersonaInstanceRetireError(\n                \"instance_active\",",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_drift.py::test_a_live_replica_is_never_archived_and_says_so"
+      ]
+    },
+    {
+      "id": "ir-h4-a-failed-archive-comes-back-as-something-to-publish",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "_retire_replicas_for_removed_desks",
+      "operator": "drop-the-baseline-of-a-held-retire",
+      "find": "            summary.retire_held.append({\"key\": actor_key, \"code\": str(code)})",
+      "replace": "            summary.retire_held.append({\"key\": actor_key, \"code\": str(code)})\n            baseline.pop(instance_baseline_key(actor_key), None)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_drift.py::test_a_held_retire_keeps_its_baseline_entry"
+      ]
+    },
+    {
+      "id": "ir-h4-the-next-pull-revives-a-deleted-desks-agent",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "apply_persona_instance_pull",
+      "operator": "drop-the-resurrection-guard",
+      "find": "    archived_keys = _locally_archived_actor_keys() | set(summary.retired)",
+      "replace": "    archived_keys = set()",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_drift.py::test_an_archived_desk_blocks_the_next_pull_from_reviving_its_agent"
+      ]
+    },
+    {
+      "id": "ir-h4-the-replica-retire-mints-a-realm-visible-ledger-entry",
+      "path": "agent_runtime/persona_assignments.py",
+      "symbol": "PersonaInstanceStore.retire_replica",
+      "operator": "run-the-office-half",
+      "find": "        self._event(\"persona_instance.retired\", instance, payload)\n        emit_persona_instance_remove(self.event_log, instance)\n        return {\n            \"persona_instance_id\": instance.id,\n            \"persona_id\": instance.persona_id,\n            \"archive_path\": str(archived_path),",
+      "replace": "        self._event(\"persona_instance.retired\", instance, payload)\n        emit_persona_instance_remove(self.event_log, instance)\n        self._archive_office_placements(instance)\n        return {\n            \"persona_instance_id\": instance.id,\n            \"persona_id\": instance.persona_id,\n            \"archive_path\": str(archived_path),",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_drift.py::test_reverting_a_local_only_agent_archives_it_and_mints_no_tombstone"
+      ]
+    },
+    {
+      "id": "ir-h4-the-instance-family-is-not-addressable-by-revert",
+      "path": "agent_runtime/realm_revert.py",
+      "symbol": "FAMILIES",
+      "operator": "drop-the-family-from-the-revert-selector",
+      "find": "        DRIFT_FAMILY_PERSONA_INSTANCE,\n    }\n)",
+      "replace": "    }\n)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_drift.py::test_the_revert_table_is_total_over_the_new_family"
+      ]
     }
   ]
 }

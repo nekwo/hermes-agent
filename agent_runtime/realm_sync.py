@@ -213,6 +213,12 @@ def realm_sync_status(
     store_drift = {
         "boards": _drift_counts(drift_items, _BOARD_DRIFT_COUNTS),
         "office": _drift_counts(drift_items, _OFFICE_DRIFT_COUNTS),
+        # Additive third family (instance-replication H4). ``_any_store_drift``
+        # sums every family it finds, so a locally-authored agent nobody has
+        # published now lights "unpublished changes" — which is the honest
+        # answer, and exactly the reason the office family was added on 2026-08-29
+        # ("the sheet kept saying In sync while the local store had drifted").
+        "persona_instances": _drift_counts(drift_items, _PERSONA_INSTANCE_DRIFT_COUNTS),
         "items": [item.as_dict() for item in drift_items],
     }
     profile_artifacts_held = _held_profile_artifacts(realm, repo)
@@ -549,7 +555,21 @@ def pull_realm_sync(
     # workspace this same pull is about to archive.
     from .persona_instance_sync import apply_persona_instance_pull
 
-    instance_summary = apply_persona_instance_pull(realm.id, subtree)
+    # §5.2 retire-follows-the-DESK: the actor keys the OFFICE lane archived in
+    # THIS pull. Taken from the office summary's own outcomes rather than
+    # re-derived, because only that arm knows which archives it actually took —
+    # the ones it FENCED (``delete_fenced``, an unreadable remote) and the ones
+    # it tried and could not are both absent from this list by construction, and
+    # retiring an agent for a desk removal that did not happen is the worst
+    # mistake available in this lane.
+    desks_removed = [
+        row["actor_key"]
+        for row in (office_summary.archive_outcomes or [])
+        if row.get("outcome") == "archived" and row.get("actor_key")
+    ]
+    instance_summary = apply_persona_instance_pull(
+        realm.id, subtree, desks_removed=desks_removed
+    )
     if instance_summary.changed:
         changed = True
     # Workspace deletions: honor the pulled realm's deleted_workspace_ids
@@ -1272,6 +1292,12 @@ DRIFT_FAMILY_BOARD = "board"
 DRIFT_FAMILY_BOARD_CARD = "board_card"
 DRIFT_FAMILY_OFFICE_SURFACE = "office_surface"
 DRIFT_FAMILY_OFFICE_ACTOR = "office_actor"
+#: The replicated persona-INSTANCE family (instance-replication plan H4). Rows
+#: here are the AGENTS behind the desks, not the desks: an actor and its
+#: instance drift independently (an operator can rename an agent without moving
+#: its desk), so folding the two into one family would let one row's publish
+#: silently speak for the other's.
+DRIFT_FAMILY_PERSONA_INSTANCE = "persona_instance"
 
 DRIFT_KIND_ADDED = "added"
 DRIFT_KIND_CHANGED = "changed"
@@ -1334,6 +1360,15 @@ class StoreDriftItem:
             return _card_key(self.container, self.item_key)
         if self.family == DRIFT_FAMILY_OFFICE_SURFACE:
             return _surface_key(self.container)
+        if self.family == DRIFT_FAMILY_PERSONA_INSTANCE:
+            from .persona_instance_sync import instance_baseline_key
+
+            # Keyed on the id ALONE, with no container in it, and that is the
+            # Option A ruling showing through: one shared instance id realm-wide
+            # means the id is already unique across every workspace, so a
+            # workspace-qualified key would be a second spelling of an identity
+            # that has only one.
+            return instance_baseline_key(self.item_key)
         return _actor_key(self.container, self.item_key)
 
 
@@ -1351,6 +1386,15 @@ _OFFICE_DRIFT_COUNTS = (
     ("actors_changed", DRIFT_FAMILY_OFFICE_ACTOR, DRIFT_KIND_CHANGED),
     ("actors_added", DRIFT_FAMILY_OFFICE_ACTOR, DRIFT_KIND_ADDED),
     ("actors_removed", DRIFT_FAMILY_OFFICE_ACTOR, DRIFT_KIND_REMOVED),
+)
+#: The instance family's counts. A NEW key group under ``store_drift``, additive
+#: like the ``items`` list beside it: a launcher that does not read it is
+#: unaffected, and one that does can finally say WHICH agent is unpublished
+#: rather than only that a desk is.
+_PERSONA_INSTANCE_DRIFT_COUNTS = (
+    ("instances_changed", DRIFT_FAMILY_PERSONA_INSTANCE, DRIFT_KIND_CHANGED),
+    ("instances_added", DRIFT_FAMILY_PERSONA_INSTANCE, DRIFT_KIND_ADDED),
+    ("instances_removed", DRIFT_FAMILY_PERSONA_INSTANCE, DRIFT_KIND_REMOVED),
 )
 
 
@@ -1377,7 +1421,93 @@ def store_drift_items(realm_id: str, workspaces: list[Workspace]) -> list[StoreD
     return [
         *_board_store_drift_items(realm_id, workspaces),
         *_office_store_drift_items(realm_id, workspaces),
+        *_persona_instance_store_drift_items(realm_id, workspaces),
     ]
+
+
+def _persona_instance_store_drift_items(
+    realm_id: str, workspaces: list[Workspace]
+) -> list[StoreDriftItem]:
+    """The replicated-agent half of the drift walk (instance-replication H4).
+
+    Scoped exactly as the mint is: PLACEMENT-BACKED rows whose ``workspace_id``
+    belongs to this realm. Canonical channels are excluded, because every member
+    derives its own — reporting one as ``added`` would offer the operator a
+    publish that the pull door on the other end refuses by design.
+
+    Two under-count guards, both the office family's, both preferring silence to
+    a delete-shaped lie:
+
+    * a store whose rows do not fully READ (``scan.unreadable``) contributes NO
+      accounting at all. Spending only the rows would hand back a short list, and
+      the baseline diff would then report N removals for agents whose files
+      merely would not open here.
+    * a REPLICA is not drift. That is the baseline-alignment property doing its
+      job rather than a special case: the mint recorded the remote hash, so a
+      fresh replica's projection equals its baseline entry and the walk below
+      simply does not produce a row for it.
+    """
+
+    from .persona_assignments import PersonaInstanceStore, is_canonical_persona_channel
+    from .persona_instance_sync import (
+        instance_baseline_key,
+        persona_instance_def_hash,
+        project_persona_instance,
+        read_persona_instance_baseline,
+    )
+
+    baseline = read_persona_instance_baseline(realm_id)
+    try:
+        scan = PersonaInstanceStore().scan_all()
+    except Exception:  # noqa: BLE001 — an unreadable listing is not evidence of removal
+        return []
+    if scan.unreadable:
+        return []
+
+    workspace_ids = {ws.id for ws in workspaces}
+    prefix = instance_baseline_key("")
+    baselined_ids = {key[len(prefix):] for key in baseline if key.startswith(prefix)}
+    items: list[StoreDriftItem] = []
+    current_ids: set[str] = set()
+    by_id = {instance.id: instance for instance in scan.instances}
+
+    for instance in scan.instances:
+        if is_canonical_persona_channel(instance):
+            continue
+        if instance.workspace_id not in workspace_ids:
+            continue
+        current_ids.add(instance.id)
+        base_hash = baseline.get(instance_baseline_key(instance.id))
+        body_hash = persona_instance_def_hash(project_persona_instance(instance))
+        if base_hash is None:
+            kind = DRIFT_KIND_ADDED
+        elif base_hash != body_hash:
+            kind = DRIFT_KIND_CHANGED
+        else:
+            continue
+        items.append(
+            StoreDriftItem(
+                family=DRIFT_FAMILY_PERSONA_INSTANCE,
+                container=str(instance.workspace_id or ""),
+                item_key=instance.id,
+                kind=kind,
+            )
+        )
+    for instance_id in sorted(baselined_ids - current_ids):
+        # A baselined agent that is no longer live here: retired, or moved out of
+        # this realm's workspaces. ``container`` comes from the row when there
+        # still is one, and is empty when there is not — a guess would be worse
+        # than a blank, since the revert lane addresses this family by ID.
+        record = by_id.get(instance_id)
+        items.append(
+            StoreDriftItem(
+                family=DRIFT_FAMILY_PERSONA_INSTANCE,
+                container=str(getattr(record, "workspace_id", "") or ""),
+                item_key=instance_id,
+                kind=DRIFT_KIND_REMOVED,
+            )
+        )
+    return items
 
 
 def _board_store_drift_items(realm_id: str, workspaces: list[Workspace]) -> list[StoreDriftItem]:
