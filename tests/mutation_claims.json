@@ -2543,6 +2543,66 @@
         "-q",
         "tests/agent_runtime/test_persona_instance_drift.py::test_the_revert_table_is_total_over_the_new_family"
       ]
+    },
+    {
+      "id": "iws-ws1-the-scope-patch-carries-only-the-pointer-that-moved",
+      "path": "agent_runtime/state_patches.py",
+      "symbol": "emit_scope_patch",
+      "operator": "drop-the-unmoved-pointer-from-the-row",
+      "find": "    changed: dict[str, Any] = {\n        \"active_workspace_id\": safe_id(active_workspace_id),\n        \"active_realm_id\": safe_id(active_realm_id),\n    }",
+      "replace": "    changed: dict[str, Any] = {\n        \"active_workspace_id\": safe_id(active_workspace_id),\n    }",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_patch_coverage.py::test_set_active_emits_the_scope_row_beside_its_domain_event"
+      ]
+    },
+    {
+      "id": "iws-ws1-a-cleared-pointer-leaves-the-row-as-an-absent-key",
+      "path": "agent_runtime/state_patches.py",
+      "symbol": "emit_scope_patch",
+      "operator": "drop-null-pointers-from-the-payload",
+      "find": "        \"active_realm_id\": safe_id(active_realm_id),\n    }\n    return emit_state_patch(",
+      "replace": "        \"active_realm_id\": safe_id(active_realm_id),\n    }\n    changed = {k: v for k, v in changed.items() if v is not None}\n    return emit_state_patch(",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_patch_coverage.py::test_a_cleared_pointer_is_a_null_on_the_wire_not_an_absent_key"
+      ]
+    },
+    {
+      "id": "iws-ws1-the-activate-events-free-ride-at-an-undeclaring-client",
+      "path": "agent_runtime/patch_coverage.py",
+      "symbol": "module",
+      "operator": "un-gate-the-paired-domain-events",
+      "find": "    \"workspace.activated\": SCOPE_ENTITY,\n    \"realm.activated\": SCOPE_ENTITY,\n}",
+      "replace": "}",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_patch_coverage.py::test_the_two_activate_events_are_covered_and_gated_on_the_scope_entity"
+      ]
+    },
+    {
+      "id": "iws-ws1-the-activation-write-emits-no-row-to-express-it",
+      "path": "agent_runtime/store.py",
+      "symbol": "WorkspaceStore.set_active",
+      "operator": "drop-the-paired-patch-from-the-chokepoint",
+      "find": "        _emit_active_scope_patch(self.event_log)\n        if value:\n            _append_store_event(self.event_log, \"workspace.activated\", workspace_id=value, name=name)",
+      "replace": "        if value:\n            _append_store_event(self.event_log, \"workspace.activated\", workspace_id=value, name=name)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_patch_coverage.py::test_set_active_emits_the_scope_row_beside_its_domain_event"
+      ]
     }
   ]
 }
