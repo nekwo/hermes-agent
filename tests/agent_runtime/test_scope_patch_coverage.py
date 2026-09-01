@@ -315,21 +315,61 @@ def test_required_tokens_and_the_boolean_agree_on_the_new_vocabulary():
             assert actual == expected, (event.type, event.payload, sorted(normalize_fold_entities(declared)))
 
 
-def test_a_cleared_pointer_is_a_null_on_the_wire_not_an_absent_key():
+def test_a_cleared_pointer_is_a_null_on_the_wire_not_an_absent_key(monkeypatch):
     """``harness workspace use --clear`` is a real state, and it must reach the
-    client as ``null``. An absent key would leave a fold that merges present
-    keys holding the departed pointer forever — the row would say nothing where
-    it means "nothing"."""
+    client as ``null``. An absent key would leave a fold that merges present keys
+    holding the departed pointer forever — the row would say nothing where it
+    means "nothing".
 
-    payload = _scope_patch_event(1, None, None)[1].payload
+    Driven through the REAL emitter, and that is the whole point of the test.
+    An earlier version asserted on ``build_state_patch``'s output, which is the
+    layer BELOW the one that decides what goes in ``changed`` — so a producer
+    that filtered its nulls out on the way in was invisible to it. The mutation
+    gate found exactly that (``iws-ws1-a-cleared-pointer-leaves-the-row-as-an-
+    absent-key`` SURVIVED), which is the assertion moving one layer up.
+    """
+
+    from agent_runtime import state_patches as sp
+    from agent_runtime.config import load_agent_runtime_config
+    from agent_runtime.events import EventLog
+
+    def _loader(*args, **kwargs):
+        cfg = load_agent_runtime_config(*args, **kwargs)
+        cfg.read_model.delta_patches = True
+        return cfg
+
+    monkeypatch.setattr(sp, "load_root_runtime_config", _loader)
+
+    log = EventLog()
+    assert sp.emit_scope_patch(log, active_workspace_id=None, active_realm_id=None)
+    payload = _read_events(log)[-1]["payload"]
     assert set(payload["changed"]) == set(SCOPE_PATCH_FIELDS)
     assert payload["changed"] == {"active_workspace_id": None, "active_realm_id": None}
     assert payload["op"] == PATCH_OP_UPSERT
     assert payload["id"] == SCOPE_PATCH_ID
     # Still foldable: a two-null upsert carries a non-empty ``changed``.
     assert event_is_patch_coverable(
-        _scope_patch_event(1, None, None)[1], fold_entities=_DECLARING
+        Event(
+            ts=_TS,
+            type=STATE_PATCHED_EVENT_TYPE,
+            task_id=None,
+            run_id=None,
+            persona_id=None,
+            payload=payload,
+        ),
+        fold_entities=_DECLARING,
     )
+
+    # And a HALF-clear keeps the surviving pointer beside the null — the pair is
+    # one fact, so neither half may go missing.
+    assert sp.emit_scope_patch(
+        log, active_workspace_id=None, active_realm_id="realm_a"
+    )
+    half = _read_events(log)[-1]["payload"]
+    assert half["changed"] == {
+        "active_workspace_id": None,
+        "active_realm_id": "realm_a",
+    }
 
 
 # --------------------------------------------------------------------------- #
