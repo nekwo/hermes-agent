@@ -277,11 +277,63 @@ _tool_defs_cache: Dict[tuple, List[Dict[str, Any]]] = {}
 # serves) while keeping the cap small. (#19251)
 _TOOL_DEFS_CACHE_MAX = 8
 
+# chat-turn-prep Stage 3: the memo above had no RECEIPT.
+#
+# The plan's Stage 3 asked for "cache tool-schema serialization per toolset
+# tuple ... keyed or invalidated on the registry epoch, bounded, copy-on-out,
+# with an explicit invalidation hatch". Every one of those properties is
+# already true of ``_tool_defs_cache`` — the key carries the enabled/disabled/
+# blocked frozensets, ``registry._generation`` (the epoch), the config
+# ``(mtime_ns, size)`` fingerprint, the kanban toggle and the delegated-child
+# context; ``_TOOL_DEFS_CACHE_MAX`` bounds it; both the hit and the miss arm
+# hand back ``list(...)`` so a caller appending memory/LCM schemas cannot
+# poison it; ``_clear_tool_defs_cache`` is the hatch. Building a second cache
+# above it would be a parallel authority over one question, which is how two
+# answers drift.
+#
+# What was genuinely missing is the one thing the plan also asked for: a
+# counter that distinguishes "schema cache hit" from "built". Without it, the
+# 853–1,674 ms ``profile_agent_init_tool_setup_ms`` on live cold turns cannot
+# be told apart from a memo hit that happened to be slow for another reason.
+#
+# THREAD-LOCAL and cumulative, never reset here — the same shape (and the same
+# reason for it) as ``tools.registry.probe_rounds_this_thread`` and
+# ``chat_lane_bundle.bundle_builds_this_thread``: a serve reuses pooled threads
+# across turns, so the interesting number is a DELTA across one turn's window
+# taken on that turn's own thread, and a process-global counter would fold in
+# every concurrent turn's work.
+_tool_defs_counters = threading.local()
+
+
+def _bump_tool_defs_counter(name: str) -> None:
+    setattr(_tool_defs_counters, name, getattr(_tool_defs_counters, name, 0) + 1)
+
+
+def tool_defs_cache_hits_this_thread() -> int:
+    """This thread's cumulative ``get_tool_definitions`` memo HITS."""
+
+    return int(getattr(_tool_defs_counters, "hits", 0))
+
+
+def tool_defs_cache_misses_this_thread() -> int:
+    """This thread's cumulative ``get_tool_definitions`` memo MISSES.
+
+    A miss is a real schema recomputation: the registry walk, the per-tool
+    schema filter and the ``check_fn`` sweep behind ``registry.get_definitions``.
+    """
+
+    return int(getattr(_tool_defs_counters, "misses", 0))
+
 
 def _clear_tool_defs_cache() -> None:
     """Drop memoized get_tool_definitions() results. Called when dynamic
     schema dependencies change (e.g. discord capability cache reset,
-    execute_code sandbox reconfigured)."""
+    execute_code sandbox reconfigured).
+
+    Deliberately does NOT reset the hit/miss counters: they are cumulative
+    receipts of work this thread actually performed, and an invalidation does
+    not un-perform it.
+    """
     _tool_defs_cache.clear()
 
 
@@ -341,6 +393,7 @@ def get_tool_definitions(
         )
         cached = _tool_defs_cache.get(cache_key)
         if cached is not None:
+            _bump_tool_defs_counter("hits")
             # Update _last_resolved_tool_names so downstream callers see
             # consistent state even on a cache hit.
             global _last_resolved_tool_names
@@ -349,6 +402,10 @@ def get_tool_definitions(
             # schemas are treated as read-only by all known callers.
             return list(cached)
 
+    # Every path that reaches here recomputed the schemas — the quiet-mode memo
+    # missed, or the caller is on the non-memoized (printing) lane. Both paid
+    # the registry walk and the ``check_fn`` sweep, so both are misses.
+    _bump_tool_defs_counter("misses")
     result = _compute_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode,
                                        skip_tool_search_assembly=skip_tool_search_assembly,
                                        blocked_tool_names=blocked_tool_names)

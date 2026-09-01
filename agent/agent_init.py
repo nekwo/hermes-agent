@@ -69,6 +69,75 @@ def _ra():
     return run_agent
 
 
+def _tool_defs_cache_misses() -> Optional[int]:
+    """This thread's cumulative tool-schema memo misses, or ``None``.
+
+    ``None`` is the honest answer when ``model_tools`` cannot be consulted at
+    all. The caller turns an unknown reading — at EITHER end of the window —
+    into no receipt at all, rather than a hit it never observed.
+    """
+
+    try:
+        from model_tools import tool_defs_cache_misses_this_thread
+
+        return int(tool_defs_cache_misses_this_thread())
+    except Exception:
+        return None
+
+
+def _emit_tool_defs_receipt(
+    status_callback: Optional[Callable[[Dict[str, Any]], None]],
+    *,
+    started: float,
+    misses_before: Optional[int],
+    misses_after: Optional[int],
+) -> None:
+    """Name whether this construction BUILT the tool schemas or reused the memo.
+
+    Emits exactly one of ``agent_init_tool_defs_build_ms`` (the memo missed —
+    the registry walk, the schema filter and the ``check_fn`` sweep were paid)
+    or ``agent_init_tool_defs_cached_ms`` (the memo hit). Both ride the existing
+    ``*_ms`` profile-timing channel, so they reach the durable turn record
+    through ``mission_chat_turns.safe_turn_profile_timing`` with no schema
+    change and no new phase key.
+
+    NEITHER key is emitted when the counter could not be read at either end.
+    That absence is a third state — "unmeasured" — and collapsing it into
+    "cached" would be exactly the fake-zero this plan's honesty contract exists
+    to forbid.
+
+    Deliberately NOT routed through ``_emit_init_timing``: that helper walks a
+    rolling checkpoint, so emitting through it would silently redefine the
+    existing ``agent_init_tool_setup_ms`` to mean "the rest of tool setup". A
+    receipt must not move a measurement that already has readers.
+    """
+
+    if status_callback is None:
+        return
+    if misses_before is None or misses_after is None:
+        return
+    step = (
+        "tool_defs_build" if misses_after > misses_before else "tool_defs_cached"
+    )
+    duration_ms = max(0, int((time.perf_counter() - started) * 1000))
+    try:
+        status_callback(
+            {
+                "type": "run.progress",
+                "phase": "timing",
+                "step": f"agent_init_{step}",
+                "status": "completed",
+                "summary": (
+                    f"Agent init {step.replace('_', ' ')} completed in {duration_ms}ms."
+                ),
+                "duration_ms": duration_ms,
+                "timing_key": f"agent_init_{step}_ms",
+            }
+        )
+    except Exception:
+        logger.debug("tool-defs receipt callback failed", exc_info=True)
+
+
 def _moa_reference_output_allowed(agent: Any) -> bool:
     """Keep MoA display events off only the machine-readable ``-Q`` surface."""
     return not (
@@ -1420,13 +1489,34 @@ def init_agent(
         agent._tool_snapshot_generation = _snapshot_registry._generation
     except Exception:
         agent._tool_snapshot_generation = 0
+    # chat-turn-prep Stage 3: the tool-schema memo's receipt.
+    #
+    # ``model_tools._tool_defs_cache`` already IS the "cache tool-schema
+    # serialization per toolset tuple" the plan's Stage 3 asked for (see its
+    # header for the property-by-property reconciliation). What it never had is
+    # a way for a durable turn record to say whether THIS construction paid the
+    # registry walk + ``check_fn`` sweep or hit the memo — which is the whole
+    # difference between an 853–1,674 ms ``agent_init_tool_setup_ms`` that is
+    # inevitable and one that is waste.
+    #
+    # Exactly one of two keys is emitted, and both are POSITIVE facts. Neither
+    # is emitted when the counters cannot be read at all — "I could not ask" is
+    # not "it hit", and absent-never-zero is the contract that keeps them apart.
+    _tool_defs_started = time.perf_counter()
+    _tool_defs_misses_before = _tool_defs_cache_misses()
     agent.tools = _ra().get_tool_definitions(
         enabled_toolsets=enabled_toolsets,
         disabled_toolsets=disabled_toolsets,
         quiet_mode=agent.quiet_mode,
         blocked_tool_names=blocked_tool_names,
     )
-    
+    _emit_tool_defs_receipt(
+        status_callback,
+        started=_tool_defs_started,
+        misses_before=_tool_defs_misses_before,
+        misses_after=_tool_defs_cache_misses(),
+    )
+
     # Show tool configuration and store valid tool names for validation
     agent.valid_tool_names = set()
     if agent.tools:

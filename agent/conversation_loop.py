@@ -554,6 +554,32 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     (which constructs a fresh ``AIAgent`` per turn and depends on this
     DB roundtrip).
     """
+    # chat-turn-prep Stage 3, item 2: the restore-path RECEIPT.
+    #
+    # The plan asked whether this path actually hits on turn 2+ of one chat,
+    # and required the answer to come from a receipt rather than a code read.
+    # Exactly one of two keys is emitted below and both are POSITIVE facts:
+    #
+    #   ``conversation_system_prompt_restore_ms`` — the stored prompt was found,
+    #       matched the runtime identity, and was reused verbatim (the prefix
+    #       cache hit).
+    #   ``conversation_system_prompt_build_ms``   — the prompt was rebuilt, and
+    #       the number is what that cost this turn.
+    #
+    # Absent-never-zero, per ``mission_chat_phases``' honesty contract: a turn
+    # that never entered the prologue carries NEITHER key, which is a different
+    # fact from "restored in 0 ms" and must stay distinguishable from it. The
+    # pair rides the existing ``*_ms`` profile-timing channel, so the durable
+    # turn record answers "did this turn rebuild its system prompt?" with no
+    # schema change and no new phase key.
+    #
+    # ``agent._system_prompt_restored_from_session`` carries the same fact to
+    # the caller's ``turn_context`` timing without re-deriving it. Reset here,
+    # not at the call site: a gateway agent is reused across turns, and a stale
+    # True from the previous turn would be a lie this function is the only thing
+    # positioned to prevent.
+    _prompt_started = time.perf_counter()
+    agent._system_prompt_restored_from_session = False
     stored_prompt = None
     stored_state = "missing"
     if conversation_history and agent._session_db:
@@ -594,6 +620,13 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
         from agent.system_prompt import reconstruct_static_prefix
 
         reconstruct_static_prefix(agent, system_message=system_message)
+        agent._system_prompt_restored_from_session = True
+        _emit_conversation_timing(
+            agent,
+            "system_prompt_restore",
+            _prompt_started,
+            stored_state=stored_state,
+        )
         return
     if stored_prompt:
         stored_state = "stale_runtime"
@@ -621,6 +654,15 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     # First turn of a new session (or recovering from a broken stored
     # prompt) — build from scratch.
     agent._cached_system_prompt = agent._build_system_prompt(system_message)
+    # The miss half of the receipt pair documented at the top of this function.
+    # Emitted BEFORE the ``on_session_start`` hook below so a slow third-party
+    # plugin cannot be billed to the prompt build it did not perform.
+    _emit_conversation_timing(
+        agent,
+        "system_prompt_build",
+        _prompt_started,
+        stored_state=stored_state,
+    )
 
     # Plugin hook: on_session_start — fired once when a brand-new
     # session is created (not on continuation).  Plugins can use this
@@ -1322,6 +1364,22 @@ def _run_conversation(
     # ``build_turn_context``.  It mutates ``agent`` exactly as the inline code
     # did and returns the locals the loop below reads back.  See
     # ``agent/turn_context.py``.
+    #
+    # TIMED (chat-turn-prep Stage 3). The turn record's
+    # ``provider_request_started → request_assembled`` span is the plan's
+    # "prologue", and §5 attributed it to tool-schema serialization on the
+    # strength of a code read. The live 2026-09-01 records falsify that:
+    # ``profile_conversation_request_build_ms`` — the span that CONTAINS the
+    # serialization — bills **1 ms** on a warm turn (51–128 ms cold), and
+    # ``profile_conversation_pre_api_hook_ms`` is 0, while the enclosing
+    # assembly span bills 703 ms warm and 2,000 ms cold. So several hundred
+    # milliseconds of every turn's assembly had no owner on the record, and the
+    # prologue's largest single call was never measured. This names it.
+    #
+    # The key rides the EXISTING ``*_ms`` profile-timing channel
+    # (``mission_chat_turns.safe_turn_profile_timing`` admits any ``*_ms`` int):
+    # no schema change, no new phase key, no producer surface moved.
+    _turn_context_started = time.perf_counter()
     _ctx = build_turn_context(
         agent,
         user_message,
@@ -1344,6 +1402,14 @@ def _run_conversation(
         # MoA turns append per-call aggregated context to the API copy of the
         # user message, so no byte-stable api_content sidecar can be stamped.
         moa_active=bool(moa_config),
+    )
+    _emit_conversation_timing(
+        agent,
+        "turn_context",
+        _turn_context_started,
+        system_prompt_restored=bool(
+            getattr(agent, "_system_prompt_restored_from_session", False)
+        ),
     )
     user_message = _ctx.user_message
     original_user_message = _ctx.original_user_message
