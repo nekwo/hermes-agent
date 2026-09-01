@@ -602,3 +602,63 @@ def refuse_persona_instance(instance_id: str, body: Any):
                 "steered_by must be a list of persona-instance ids",
             )
     return None
+
+
+# --- baseline sidecar (never synced, never published) ------------------------
+#
+# The one IO in this module, and it sits below the line on purpose: everything
+# above is pure so the allowlist, the projection, the hash and the admission
+# grammar stay unit-testable without a store. This is the same two-halves shape
+# ``persona_config_sync`` has, for the same reason — one module per synced
+# family beats a pure module and a sidecar module that can drift apart.
+
+
+def read_persona_instance_baseline(realm_id: str) -> dict[str, str]:
+    from . import paths
+
+    path = paths.persona_instance_baseline_path(realm_id)
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    entries = raw.get("entries") if isinstance(raw, dict) else None
+    return {str(k): str(v) for k, v in entries.items()} if isinstance(entries, dict) else {}
+
+
+def write_persona_instance_baseline(realm_id: str, entries: dict[str, str]) -> None:
+    from utils import atomic_json_write
+
+    from . import paths
+
+    atomic_json_write(
+        paths.persona_instance_baseline_path(realm_id),
+        {"schema_version": 1, "entries": entries},
+        indent=2,
+        sort_keys=True,
+    )
+
+
+def instance_baseline_key(instance_id: str) -> str:
+    """This family's baseline key. ``instance:<id>``, namespaced because the
+    drift/revert lane addresses rows by ``FAMILY:CONTAINER:KEY`` and a bare id
+    would be indistinguishable from a container token."""
+
+    return f"instance:{instance_id}"
+
+
+def update_persona_instance_baseline_after_publish(
+    realm_id: str, projection: PersonaInstanceProjection
+) -> None:
+    """Record the published bodies' hashes as the new baseline.
+
+    The ``_published_profile_file_hashes`` precedent: a member who publishes and
+    then pulls must see local == baseline, or their own publish comes straight
+    back as a HOLD on every row they just shipped.
+    """
+
+    baseline = read_persona_instance_baseline(realm_id)
+    for instance_id, body_hash in projection.hashes().items():
+        baseline[instance_baseline_key(instance_id)] = body_hash
+    write_persona_instance_baseline(realm_id, baseline)

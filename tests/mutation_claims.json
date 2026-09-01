@@ -2123,6 +2123,156 @@
         "-q",
         "tests/agent_runtime/test_realm_revert.py::test_reverting_a_local_only_card_archives_without_a_tombstone"
       ]
+    },
+    {
+      "id": "ir-h1-record-split-loses-a-field",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "PERSONA_INSTANCE_LOCAL_ONLY_KEYS",
+      "operator": "reclassify-a-local-only-field-as-travelling",
+      "find": "        \"current_chat_goal\",\n        \"current_task_id\",\n",
+      "replace": "        \"current_task_id\",\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_sync.py::test_the_fields_the_ruling_named_are_on_the_side_it_named"
+      ]
+    },
+    {
+      "id": "ir-h1-door-admits-a-canonical-row-from-a-peer",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "refuse_persona_instance",
+      "operator": "drop-the-canonical-channel-refusal",
+      "find": "    if instance_id == persona_instance_id_for(persona_id):\n",
+      "replace": "    if False:\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_sync.py::test_the_door_refuses_a_canonical_channel_id_from_a_peer"
+      ]
+    },
+    {
+      "id": "ir-h1-door-admits-session-and-run-state",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "refuse_persona_instance",
+      "operator": "empty-the-unexpected-key-rule",
+      "find": "    unexpected = sorted(str(key) for key in body if str(key) not in PERSONA_INSTANCE_ALLOWED_KEYS)\n",
+      "replace": "    unexpected = []\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_sync.py::test_the_door_refuses_session_and_run_state_as_unexpected_keys"
+      ]
+    },
+    {
+      "id": "ir-h1-id-safety-stops-asking-the-real-sanitizer",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "valid_persona_instance_id",
+      "operator": "drop-the-safe-path-token-round-trip",
+      "find": "    if paths.safe_path_token(text) != text:\n        return False\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_sync.py::test_the_door_refuses_traversal_and_non_instance_shaped_ids"
+      ]
+    },
+    {
+      "id": "ir-h1-portability-walk-exempts-the-authored-name",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "refuse_persona_instance",
+      "operator": "restore-the-shared-prose-key-default",
+      "find": "        prose_keys=frozenset(),\n    )\n    if refusal is not None:\n        return refusal",
+      "replace": "    )\n    if refusal is not None:\n        return refusal",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_sync.py::test_the_door_scans_display_name_because_an_instance_body_is_all_wiring"
+      ]
+    },
+    {
+      "id": "ir-h1-publish-projects-a-machine-shaped-body",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "project_persona_instances",
+      "operator": "drop-the-publish-side-portability-scan",
+      "find": "        offenders = find_nonportable_values(body, prefix=f\"instances.{instance_id}\")\n",
+      "replace": "        offenders = []\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_sync.py::test_a_machine_shaped_display_name_refuses_the_record_rather_than_shipping_it"
+      ]
+    },
+    {
+      "id": "ir-h2-instance-ids-re-walk-the-directory-instead-of-the-scan",
+      "path": "agent_runtime/realm_sync.py",
+      "symbol": "_office_publish_scan",
+      "operator": "restore-second-authority-glob-for-instances",
+      "find": "            if actor.persona_instance_id and actor.persona_instance_id not in instance_ids:\n                instance_ids.append(actor.persona_instance_id)\n",
+      "replace": "            for _p in sorted(paths.office_actors_dir(workspace_token).glob('*.json')):\n                import json as _j\n                try:\n                    _iid = _j.loads(_p.read_text(encoding='utf-8')).get('persona_instance_id')\n                except Exception:\n                    continue\n                if _iid and _iid not in instance_ids:\n                    instance_ids.append(_iid)\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_publish.py::test_the_instance_ids_come_off_the_gated_scan_never_a_second_directory_walk"
+      ]
+    },
+    {
+      "id": "ir-h2-projection-stops-pruning-to-the-referenced-set",
+      "path": "agent_runtime/realm_sync.py",
+      "symbol": "_resolve_artifacts_with_projection",
+      "operator": "publish-every-local-instance",
+      "find": "    instance_projection, instance_rows_unreadable = _persona_instance_projection(\n        office_scan.instance_ids\n    )\n",
+      "replace": "    from .persona_assignments import PersonaInstanceStore as _S\n    instance_projection, instance_rows_unreadable = _persona_instance_projection(\n        [i.id for i in _S().scan_all().instances]\n    )\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_publish.py::test_the_projection_carries_exactly_the_instances_the_desks_reference"
+      ]
+    },
+    {
+      "id": "ir-h2-publish-baseline-is-never-recorded",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "update_persona_instance_baseline_after_publish",
+      "operator": "skip-the-baseline-write",
+      "find": "    for instance_id, body_hash in projection.hashes().items():\n        baseline[instance_baseline_key(instance_id)] = body_hash\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_publish.py::test_the_publish_baseline_leaves_the_publisher_with_nothing_to_hold"
+      ]
+    },
+    {
+      "id": "ir-h2-publish-row-swallows-the-store-shortfall",
+      "path": "agent_runtime/realm_sync.py",
+      "symbol": "_persona_instance_projection",
+      "operator": "zero-the-unreadable-row-count",
+      "find": "        unreadable = scan.unreadable\n",
+      "replace": "        unreadable = 0\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_publish.py::test_the_publish_row_carries_the_projections_accounting_and_the_store_shortfall"
+      ]
     }
   ]
 }

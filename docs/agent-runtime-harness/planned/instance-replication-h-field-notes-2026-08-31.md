@@ -109,3 +109,69 @@ Each sabotage was applied to the source, the suite run, the source restored.
   `test_the_projection_is_deterministic_and_lf` (measured). The test claims the
   observable property rather than one of the two lines, and the docstring
   records the pair so the next reader does not conclude it is uncovered.
+
+## H2 — the publish arm
+
+`OfficePublishScan` grows a FOURTH fact, `instance_ids`, off the walk it already
+takes. The plan says "one walk, one authority"; the concrete reason is that the
+refusal gate cannot speak for a walk it did not take, so a second
+`actors_dir.glob` would ship agents the gate never cleared. `actor.persona_instance_id`
+is read from the PAYLOAD rather than from the actor key, because payload is
+truth and the key is routing — even though `_canonical_actor_key` makes them
+equal for instance-bound actors today.
+
+New: `paths.persona_instance_baseline_path`, the sidecar read/write/update trio
+at the bottom of `persona_instance_sync.py` (the module's only IO, below a line
+that says so), `_persona_instance_projection` + `_persona_instance_artifact` +
+`_persona_instance_row` in `realm_sync.py`, the `_kind_for_sync_path` row, and
+an explicit `_destination_for_sync_path` branch.
+
+### Decisions taken while building
+
+1. **The instance publish arm does NOT refuse on a short read, and the office
+   arm does.** Deliberate asymmetry with an argument: publish replaces the
+   subtree wholesale, so for the OFFICE family an absence is a desk removal on
+   every peer — which is why `_office_publish_scan` refuses a workspace whole.
+   For the INSTANCE family an absence is `upstream_absent` (plan §3.3/§5.2),
+   which is explicitly held and accounted, never a delete. So the shortfall is
+   REPORTED (`rows_unreadable` on the publish row) rather than escalated to a
+   refusal. Escalating would cost a whole realm's replication for one
+   quarantined row and buy nothing.
+2. **The `_destination_for_sync_path` branch is behaviour-neutral and lands
+   anyway.** `store/persona_instances.yaml` already reached `None` through the
+   final fallthrough at the base sha (pinned by a test written BEFORE the
+   branch). The branch records OWNERSHIP the way the `store/personas.yaml` one
+   above it does — otherwise the next reader has to prove the fallthrough.
+3. **No empty document is ever published.** A realm with no instance-backed
+   desks publishes no artifact at all, so a realm that has never placed an agent
+   gains no byte-churning file.
+
+### Red-proofs
+
+| Sabotage | Test that went red |
+|---|---|
+| Instance ids re-globbed past the refusal gate | `…_come_off_the_gated_scan_never_a_second_directory_walk` |
+| Projection stops pruning to the referenced set | `…_carries_exactly_the_instances_the_desks_reference` (+2) |
+| Publish baseline never recorded | `…_leaves_the_publisher_with_nothing_to_hold` |
+| `_kind_for_sync_path` row removed | `…_classifies_as_its_own_kind` |
+| Store shortfall zeroed | `…_carries_the_projections_accounting_and_the_store_shortfall` |
+
+**One sabotage initially survived and it was a TEST-selection error, not a
+coverage gap:** the "second authority" mutant passed because the only refusal
+fixture blinds an actor file, and a second glob fails to decode that file too —
+the two authorities agreed by accident. The only way they can disagree without
+the gate refusing first is a row the scan does not return while its file sits
+readable, so the divergence is INJECTED (monkeypatched `scan_actors`), exactly
+as the existing C3 test does for the artifact list.
+
+### Mutation claims
+
+Ten new claims registered in `tests/mutation_claims.json`
+(`ir-h1-*` ×6, `ir-h2-*` ×4). One initially SURVIVED —
+`ir-h1-publish-projects-a-machine-shaped-body` was pointed at
+`test_runtime_root_never_reaches_the_published_bytes`, which stays green under
+that mutant because the ALLOWLIST already drops `runtime_root`; the scan it
+actually claims is the one catching a machine path in an AUTHORED field, so the
+claim was repointed at
+`test_a_machine_shaped_display_name_refuses_the_record_rather_than_shipping_it`.
+Gate: **11 candidates selected, 11 killed, exit 0** against the branch base.

@@ -303,6 +303,10 @@ def publish_realm_sync(
         result["profile_files"] = _profile_files_row(artifacts, profile_files_withheld)
         result["office_sync"] = {"refused": list(resolved.office_refused or [])}
         result["board_sync"] = {"refused": list(resolved.board_refused or [])}
+        if resolved.instance_projection is not None:
+            result["persona_instance_projection"] = _persona_instance_row(
+                resolved.instance_projection, resolved.instance_rows_unreadable
+            )
         return result
 
     subtree = _realm_subtree(repo, realm.id)
@@ -400,6 +404,16 @@ def publish_realm_sync(
         update_profile_artifact_baseline_after_publish(realm.id, _published_profile_file_hashes(artifacts))
     except Exception:  # noqa: BLE001 — baseline is best-effort; never fail publish
         pass
+    # Persona INSTANCES: same baseline discipline again. Without it a publisher
+    # who then pulls sees every row they just shipped as locally-edited-and-
+    # remotely-changed, i.e. a HOLD on their own publish.
+    from .persona_instance_sync import update_persona_instance_baseline_after_publish
+
+    try:
+        if resolved.instance_projection is not None:
+            update_persona_instance_baseline_after_publish(realm.id, resolved.instance_projection)
+    except Exception:  # noqa: BLE001 — baseline is best-effort; never fail publish
+        pass
     warnings = _notify_publish(realm, repo=repo, artifacts=artifacts, credential=credential) if changed else []
     git_after = _git_state(repo)
     result = _sync_result(realm, "publish", "published", artifacts, repo=repo, git=git_after, changed=changed)
@@ -416,6 +430,10 @@ def publish_realm_sync(
         "baseline": office_baseline,
     }
     result["board_sync"] = {"refused": list(resolved.board_refused or [])}
+    if resolved.instance_projection is not None:
+        result["persona_instance_projection"] = _persona_instance_row(
+            resolved.instance_projection, resolved.instance_rows_unreadable
+        )
     if warnings:
         result["warnings"] = warnings
     _write_sync_sidecar(realm, repo=repo, git=git_after, skills_drift=_held_skill_packages_for_realm(realm), artifacts=artifacts)
@@ -776,6 +794,18 @@ class _ResolvedPublish:
     office_refused: list[dict[str, Any]] = ()  # type: ignore[assignment]
     #: The board family's twin of the field above, same discipline.
     board_refused: list[dict[str, Any]] = ()  # type: ignore[assignment]
+    #: The persona-INSTANCE projection resolved by the same pass — its bodies and
+    #: its accounting (dropped keys, canonical rows skipped, records refused,
+    #: wanted ids with no row). ``None`` only in the degenerate case where the
+    #: instance store itself could not be read; an EMPTY projection is a
+    #: different fact and says so.
+    instance_projection: Any = None
+    #: Instance rows on this machine that would not decode during the publish
+    #: walk. Carried rather than dropped for the ``ActorScan.unreadable``
+    #: reason — a shortened answer must state its own shortfall. It is NOT a
+    #: delete here: a peer that misses an instance from the projection classifies
+    #: it ``upstream_absent`` (plan §3.3), which is explicitly held, not archived.
+    instance_rows_unreadable: int = 0
 
 
 def resolve_realm_sync_artifacts(realm_id: str) -> list[RealmSyncArtifact]:
@@ -837,6 +867,15 @@ def _resolve_artifacts_with_projection(realm_id: str) -> _ResolvedPublish:
     )
     if projection.personas:
         artifacts.append(_persona_config_artifact(projection))
+    # The persona-INSTANCE projection: the agents behind the desks this publish
+    # is already shipping. Pruned to exactly ``office_scan.instance_ids`` — the
+    # ids resolved in the office walk above, never a second enumeration — so a
+    # workspace the office scan refused contributes no instance either.
+    instance_projection, instance_rows_unreadable = _persona_instance_projection(
+        office_scan.instance_ids
+    )
+    if instance_projection.instances:
+        artifacts.append(_persona_instance_artifact(instance_projection))
     return _ResolvedPublish(
         artifacts=_dedupe_artifacts(artifacts),
         projection=projection,
@@ -844,7 +883,34 @@ def _resolve_artifacts_with_projection(realm_id: str) -> _ResolvedPublish:
         bound_profiles=sorted(bound_profiles),
         office_refused=office_scan.refused,
         board_refused=board_scan.refused,
+        instance_projection=instance_projection,
+        instance_rows_unreadable=instance_rows_unreadable,
     )
+
+
+def _persona_instance_projection(instance_ids: list[str]):
+    """``(projection, unreadable_row_count)`` for the wanted instance ids.
+
+    The store's ``scan_all`` is THE reader — not a second glob of
+    ``persona_instances/`` — and its ``unreadable`` count is spent rather than
+    dropped. Spending it here is cheap because a short answer in THIS family
+    costs an absence, not a deletion: an instance missing from the published
+    projection while its desk is still present is ``upstream_absent`` on every
+    peer (plan §3.3, §5.2), which is held and accounted. That is the whole
+    reason this arm does not have to refuse the way the office scan does.
+    """
+
+    from .persona_assignments import PersonaInstanceStore
+    from .persona_instance_sync import project_persona_instances
+
+    wanted = [str(item) for item in (instance_ids or [])]
+    try:
+        scan = PersonaInstanceStore().scan_all()
+        records = {instance.id: instance for instance in scan.instances}
+        unreadable = scan.unreadable
+    except Exception:  # noqa: BLE001 — accounted below, never a failed publish
+        records, unreadable = {}, 0
+    return project_persona_instances(wanted, records=records), unreadable
 
 
 def _workspaces_for_realm(realm: Realm) -> list[Workspace]:
@@ -1509,17 +1575,25 @@ def _any_store_drift(store_drift: dict[str, Any]) -> bool:
 class OfficePublishScan(NamedTuple):
     """What ONE pass over the office store says this realm publishes.
 
-    Three facts, resolved together on purpose. The artifacts and the persona ids
+    FOUR facts, resolved together on purpose. The artifacts and the persona ids
     the placements REQUIRE used to be two independent walks of the same
     directories, and a workspace excluded from one but not the other publishes a
     placement whose persona definition never travelled. ``refused`` is the third
-    because it is the reason the other two are short — a shortened answer that
+    because it is the reason the others are short — a shortened answer that
     does not carry its own shortfall is the defect this stage retires.
+
+    ``instance_ids`` is the fourth, added for instance replication, and it comes
+    off the SAME walk for exactly the reason ``persona_ids`` does: a second
+    ``actors_dir.glob`` would be a second authority over which desks this
+    publish contains, and the refusal gate above cannot speak for a walk it did
+    not take. A workspace refused here therefore contributes no instance id
+    either — the placement that would have needed the agent is not travelling.
     """
 
     artifacts: list[RealmSyncArtifact]
     persona_ids: list[str]
     refused: list[dict[str, Any]]
+    instance_ids: list[str] = ()  # type: ignore[assignment]
 
 
 def _office_publish_scan(workspaces: list[Workspace]) -> OfficePublishScan:
@@ -1547,6 +1621,7 @@ def _office_publish_scan(workspaces: list[Workspace]) -> OfficePublishScan:
     store = OfficeStore()
     artifacts: list[RealmSyncArtifact] = []
     persona_ids: list[str] = []
+    instance_ids: list[str] = []
     refused: list[dict[str, Any]] = []
     for workspace_token in store.list_workspaces():
         try:
@@ -1604,7 +1679,19 @@ def _office_publish_scan(workspaces: list[Workspace]) -> OfficePublishScan:
             )
             if actor.persona_id and actor.persona_id not in persona_ids:
                 persona_ids.append(actor.persona_id)
-    return OfficePublishScan(artifacts=artifacts, persona_ids=persona_ids, refused=refused)
+            # The instance the desk is bound to, off THIS row, in THIS walk. The
+            # actor key IS the canonical instance id for instance-bound actors
+            # (``_canonical_actor_key``), but the payload's own field is read
+            # rather than the filename-shaped key, because payload is truth and
+            # the key is routing (office plan §4.3).
+            if actor.persona_instance_id and actor.persona_instance_id not in instance_ids:
+                instance_ids.append(actor.persona_instance_id)
+    return OfficePublishScan(
+        artifacts=artifacts,
+        persona_ids=persona_ids,
+        refused=refused,
+        instance_ids=instance_ids,
+    )
 
 
 def _office_wanted_persona_ids(workspaces: list[Workspace]) -> list[str]:
@@ -1829,6 +1916,47 @@ def _persona_config_artifact(projection) -> RealmSyncArtifact:
         destination=config,
         content=projection.to_bytes(),
     )
+
+
+def _persona_instance_artifact(projection) -> RealmSyncArtifact:
+    """The single synthesized ``persona_instance_config`` artifact.
+
+    Published at ``store/persona_instances.yaml``, a path no older hermes maps
+    to anything (``_destination_for_sync_path`` → ``None`` → skipped), so an old
+    member degrades to "no instance replication" rather than writing a
+    persona-instance document over some unrelated destination. That degrade is
+    the whole version-skew contract the launcher's badge demotion keys on.
+
+    ``source``/``destination`` are the local instance directory: this artifact
+    is SYNTHESIZED (``content`` is set), so both are provenance only — the
+    publish lane reads ``content`` through ``read_bytes`` and never touches
+    them.
+    """
+
+    from .persona_instance_sync import PROJECTION_RELATIVE_PATH
+
+    root = paths.persona_instances_dir()
+    return RealmSyncArtifact(
+        kind="persona_instance_config",
+        source=root,
+        relative_path=PROJECTION_RELATIVE_PATH,
+        destination=root,
+        content=projection.to_bytes(),
+    )
+
+
+def _persona_instance_row(projection, unreadable: int) -> dict[str, Any]:
+    """Typed publish accounting for the instance family.
+
+    ``rows_unreadable`` is beside the projection's own accounting rather than
+    folded into it, because they are different facts: the projection reports
+    what it decided about records it COULD read, and this reports how much of
+    the store it could not read at all.
+    """
+
+    row = projection.as_dict()
+    row["rows_unreadable"] = int(unreadable)
+    return row
 
 
 def _persona_projection_row(projection, bound_profiles: list[str]) -> dict[str, Any]:
@@ -2200,6 +2328,18 @@ def _destination_for_sync_path(rel: str) -> Path | None:
         # against a never-synced baseline), never the generic overwrite loop —
         # same exclusion precedent as store/boards/*, store/office/*, skills/*.
         return None
+    if parts and parts[0] == "store" and len(parts) == 2 and parts[1] == "persona_instances.yaml":
+        # The portable persona-INSTANCE projection. Owned by
+        # ``apply_persona_instance_pull`` (the mint door + the 3-way baseline
+        # merge), never the generic overwrite loop: a raw write of this document
+        # would put a persona-instance YAML somewhere no reader expects it, and
+        # would produce replicas no live consumer ever heard about.
+        #
+        # It ALREADY resolved to None through the final fallthrough before this
+        # branch existed (pinned by a test at the base sha), so this line changes
+        # no behaviour — it records the OWNERSHIP, the way the personas.yaml
+        # branch directly above does.
+        return None
     if len(parts) > 2 and parts[0] == "store" and parts[1] == "profile_files":
         # The per-profile FILE family (MEMORY.md, core context, persona prompts).
         # Owned by ``profile_artifact_sync.apply_profile_artifact_pull``.
@@ -2256,6 +2396,8 @@ def _kind_for_sync_path(rel: str) -> str:
         return "office_actor" if "/actors/" in rel else "office"
     if rel == "store/personas.yaml":
         return "persona_config"
+    if rel == "store/persona_instances.yaml":
+        return "persona_instance_config"
     if rel.startswith("store/profile_files/"):
         # Kind is derived from the DESTINATION the published tail names — the
         # same authority the pull applier uses, never a second spelling.

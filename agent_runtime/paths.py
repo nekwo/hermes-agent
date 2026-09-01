@@ -267,6 +267,15 @@ def persona_config_baseline_path(realm_id: str) -> Path:
     return realm_sync_root() / safe_path_token(realm_id) / "persona_config_baseline.json"
 
 
+def persona_instance_baseline_path(realm_id: str) -> Path:
+    # realm-sync baseline sidecar for the replicated persona-INSTANCE family;
+    # NEVER synced, NEVER published. Keyed off the REMOTE hash at mint time so a
+    # fresh replica reads ZERO drift immediately — without that, the very next
+    # `realm sync status` reports the replica as an unpublished local addition
+    # and the revert lane offers to archive correct state.
+    return realm_sync_root() / safe_path_token(realm_id) / "persona_instance_baseline.json"
+
+
 def profile_artifact_baseline_path(realm_id: str) -> Path:
     # realm-sync baseline sidecar for the per-profile FILE family (MEMORY.md,
     # core-context files, persona prompts); NEVER synced, NEVER published.
