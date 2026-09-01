@@ -87,6 +87,13 @@ from agent_runtime.realm_sync import (
     sync_artifacts_for_workspace_agent,
 )
 from agent_runtime.resolution import resolution_table, resolve_runtime
+from agent_runtime.scope_activation import (
+    activate_realm,
+    activate_workspace,
+    realm_row as _scope_realm_row,
+    reconcile_active_workspace_to_realm as _scope_reconcile_active_workspace_to_realm,
+    workspace_row as _scope_workspace_row,
+)
 from agent_runtime.migrations import effective_config_summary, migration_status
 from agent_runtime.mission_chat_turns import (
     MissionChatTurnPersistOutcome,
@@ -2981,58 +2988,13 @@ def _cmd_prompt_context_show(args) -> int:
     return 0
 
 
-def _workspace_row(workspace, *, full: bool = False) -> dict:
-    """`workspace list|show|…` row — a RE-KEY of the snapshot's own workspace
-    builder, never a second projection (S48, ledger item 4).
-
-    The hand-rolled twin this replaces is what shipped the ``tasks`` NameError
-    (`a21ab1a2a`): a field the snapshot row had already dropped survived here
-    because nothing tied the two together. Every value below now comes from
-    ``_workspace_summary``; the CLI owns only the key SUBSET (skinny vs
-    ``--full``).
-
-    Deliberate deviations, each with a reason:
-
-    * ``created_at`` is CLI-only — the wire never carried it, and an operator
-      reading ``workspace show`` does. It is a plain timestamp off the model,
-      not a re-derivation of anything the builder computes.
-    * timestamps stay as ``datetime`` rather than the builder's value, because
-      the Stage-42 printer (``emit_json`` -> ``to_jsonable``) is the
-      serialization authority for this lane; pre-serializing here would change
-      the ``--output table`` rendering for no reason. ``_workspace_summary``
-      passes ``updated_at`` through unconverted anyway, so this is a no-op for
-      workspaces and kept only for symmetry with the board/office rows.
-
-    The builder import is FUNCTION-LOCAL on purpose (all six rows do this): a
-    module-level ``from … import _workspace_summary`` binds whichever
-    definition existed at CLI import time, which is itself a second reference
-    to the authority. Resolving through the module on every call means there is
-    exactly one live definition and it is the snapshot module's.
-    """
-
-    from agent_runtime.snapshot import _workspace_summary
-
-    summary = _workspace_summary(workspace, persona_instances=PersonaInstanceStore().list_all())
-    row = {
-        key: summary[key]
-        for key in (
-            "id",
-            "name",
-            "realm_id",
-            "agents",
-            "agent_ids",
-            "live_scoped_agent_count",
-            "live_scoped_agent_ids",
-            "roster_agent_count",
-            "roster_agent_ids",
-            "isolation",
-        )
-    }
-    row["updated_at"] = workspace.updated_at
-    if full:
-        row.update({key: summary[key] for key in ("kind", "slug", "default_blueprint_id", "max_concurrent_lanes", "archived")})
-        row["created_at"] = workspace.created_at
-    return row
+#: MOVED to `agent_runtime.scope_activation` by plan WS4, and imported back
+#: under its old private name so every call site below is unchanged. The reason
+#: is the second door: `runtime.workspace.use` answers with THIS row, and a row
+#: the method lane could only reach by re-deriving would be the S48 twin all
+#: over again. It is a re-key of `agent_runtime.snapshot._workspace_summary`, so
+#: agent_runtime is where it always belonged.
+_workspace_row = _scope_workspace_row
 
 
 def _cmd_workspace_list(args) -> int:
@@ -3164,40 +3126,13 @@ def _cmd_workspace_delete(args) -> int:
 
 
 def _cmd_workspace_use(args) -> int:
-    store = WorkspaceStore()
-    outcome = store.set_active(args.workspace_id, issued_at=getattr(args, "issued_at", None))
-    if not outcome.get("applied", True):
-        _print_stage42(
-            _object_envelope("workspace", _activation_outcome_row(store, _workspace_row, outcome, "workspace_id")),
-            args=args,
-            default_output="json",
-        )
-        return 0
-    item = store.get(args.workspace_id)
-    row = _workspace_row(item)
-    row["applied"] = True
+    # The DECISION is `agent_runtime.scope_activation`'s, not this handler's —
+    # `runtime.workspace.use` reaches the same function, so the argv verb and
+    # the method lane cannot drift about what `applied` / `superseded` /
+    # `duplicate` mean (plan WS4). All that is left here is the envelope.
+    row = activate_workspace(args.workspace_id, issued_at=getattr(args, "issued_at", None))
     _print_stage42(_object_envelope("workspace", row), args=args, default_output="json")
     return 0
-
-
-def _activation_outcome_row(store, row_builder, outcome: dict, key: str) -> dict:
-    """Envelope row for a set_active call the store declined. The row shows
-    the pointer's CURRENT owner (what stays active); `applied`/`reason` tell
-    the client why its request did not take. `superseded` = a strictly newer
-    intent owns the pointer (client should drop its optimistic state);
-    `duplicate` = this exact intent already applied (client treats as
-    success). Exit code stays 0 — both are valid protocol outcomes, not
-    errors."""
-    current_id = outcome.get(key)
-    try:
-        row = row_builder(store.get(current_id)) if current_id else {"id": None, "name": None}
-    except Exception:
-        row = {"id": current_id, "name": None}
-    row["applied"] = False
-    row["reason"] = outcome.get("reason")
-    row["superseded"] = outcome.get("reason") == "superseded"
-    row[f"requested_{key}"] = outcome.get(f"requested_{key}")
-    return row
 
 
 def _known_persona_ids() -> set[str]:
@@ -3295,30 +3230,9 @@ def _cmd_workspace_archive(args) -> int:
     return 0
 
 
-def _realm_row(realm, *, full: bool = False) -> dict:
-    """`realm list|show|…` row — a RE-KEY of the snapshot's own realm builder
-    (S48, ledger item 4).
-
-    The hand-rolled twin this replaces is where ``"sync": "in_sync"`` was
-    hardcoded (`a21ab1a2a`) — the exact fake ``_realm_summary`` forbids. The
-    honest sidecar read now happens in ONE place, so the CLI cannot drift from
-    the wire again. CLI-only additions (never on the wire, both plain model
-    scalars): ``sync_manifest_ref`` and ``created_at``.
-    """
-
-    from agent_runtime.snapshot import _realm_summary
-
-    summary = _realm_summary(realm, workspaces=WorkspaceStore().list_all(include_archived=True))
-    row = {
-        key: summary[key]
-        for key in ("id", "name", "server_id", "default_workspace_id", "default_workspace_version", "workspaces", "sync")
-    }
-    row["updated_at"] = realm.updated_at
-    if full:
-        row.update({key: summary[key] for key in ("kind", "slug", "workspace_ids", "default_workspace_name", "archived")})
-        row["sync_manifest_ref"] = realm.sync_manifest_ref
-        row["created_at"] = realm.created_at
-    return row
+#: MOVED to `agent_runtime.scope_activation` with `_workspace_row`, for the same
+#: reason and in the same landing — see the note there.
+_realm_row = _scope_realm_row
 
 
 def _cmd_realm_list(args) -> int:
@@ -3356,20 +3270,10 @@ def _cmd_realm_bind_server(args) -> int:
 
 
 def _cmd_realm_use(args) -> int:
-    store = RealmStore()
-    issued_at = getattr(args, "issued_at", None)
-    outcome = store.set_active(args.realm_id, issued_at=issued_at)
-    if not outcome.get("applied", True):
-        _print_stage42(
-            _object_envelope("realm", _activation_outcome_row(store, _realm_row, outcome, "realm_id")),
-            args=args,
-            default_output="json",
-        )
-        return 0
-    item = store.get(args.realm_id)
-    _reconcile_active_workspace_to_realm(item, issued_at=issued_at)
-    row = _realm_row(item)
-    row["applied"] = True
+    # Same shared decision as `_cmd_workspace_use`, reconcile included — see
+    # `agent_runtime.scope_activation.activate_realm` for why the workspace
+    # reconcile lives inside the shared function rather than at each door.
+    row = activate_realm(args.realm_id, issued_at=getattr(args, "issued_at", None))
     _print_stage42(_object_envelope("realm", row), args=args, default_output="json")
     return 0
 
@@ -3409,40 +3313,12 @@ def _cmd_realm_default_scope(args) -> int:
     return 0
 
 
-def _reconcile_active_workspace_to_realm(realm, *, issued_at: str | None = None) -> None:
-    """Switching realms must not leave the active workspace pointing into
-    another realm. Keep it when it already belongs; otherwise fall to the
-    realm's declared default, then its configured order, then listing order,
-    choosing only unarchived workspaces; clear it when the realm has none."""
-    store = WorkspaceStore()
-    active_id = store.active_id()
-    if active_id:
-        try:
-            active = store.get(active_id)
-        except Exception:
-            active = None
-        if active is not None and getattr(active, "realm_id", None) == realm.id:
-            return
-    candidates = [
-        workspace
-        for workspace in store.list_all()
-        if getattr(workspace, "realm_id", None) == realm.id and not workspace.archived
-    ]
-    configured_order = {wid: index for index, wid in enumerate(getattr(realm, "workspace_ids", None) or [])}
-    default_workspace_id = getattr(realm, "default_workspace_id", None)
-    candidates.sort(
-        key=lambda workspace: (
-            0 if workspace.id == default_workspace_id else 1,
-            configured_order.get(workspace.id, len(configured_order)),
-            workspace.id,
-        )
-    )
-    next_workspace = candidates[0] if candidates else None
-    # set_active emits workspace.activated (or {"cleared": true}) at the
-    # store chokepoint — Stage 12. The realm intent's basis rides along so a
-    # late-delivered realm switch cannot clobber a newer explicit workspace
-    # selection through its reconcile.
-    store.set_active(next_workspace.id if next_workspace else None, issued_at=issued_at)
+#: MOVED to `agent_runtime.scope_activation` (plan WS4): `activate_realm` calls
+#: it, so the reconcile happens on BOTH doors by construction rather than
+#: because each door remembered. `_cmd_workspace_delete` still calls it
+#: directly — a delete of the active workspace reconciles for the same reason a
+#: realm switch does, and that is not an activation.
+_reconcile_active_workspace_to_realm = _scope_reconcile_active_workspace_to_realm
 
 
 def _realm_sync_credential(args):

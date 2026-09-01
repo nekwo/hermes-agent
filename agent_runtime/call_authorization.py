@@ -88,6 +88,7 @@ __all__ = [
     "CALLER_PEER",
     "CALLER_UNKNOWN",
     "PEER_METHOD_ALLOWLIST",
+    "LOCAL_CONSOLE_METHODS",
     "TRANSPORT_GATEWAY",
     "RpcCaller",
     "LOCAL_CONSOLE",
@@ -180,6 +181,35 @@ CALLER_UNKNOWN = "unknown"
 #: pinned by two literals stops being pinned the moment a third verb arrives.
 PEER_METHOD_ALLOWLIST: frozenset[str] = frozenset(
     {"peer.ping", "peer.agent_chat.execute"}
+)
+
+#: **Verbs whose authority is a KIND and not a strength** — the machine owner at
+#: this install's own console, and nobody else, however strong their credential
+#: (plan WS4 / ruling R-W1, ``planned/instant-workspace-switching.md``).
+#:
+#: Why a set and not a tier. The two scope-pointer verbs
+#: (``runtime.workspace.use`` / ``runtime.realm.use``) park THIS install's
+#: active realm/workspace — the two scalars every local surface reads to decide
+#: what it is looking at. R-B's sentence is that a remote cockpit holds its own
+#: scope and cannot park the harness, and the tier vocabulary cannot say that:
+#: there are two words, the verb is plainly a level-adjacent write so it declares
+#: ``console``, and :func:`authorize_call`'s device arm is an EQUALITY — so a
+#: device paired at ``console`` (which R11 explicitly contemplates: "a paired
+#: console device may chat") would compare equal and be allowed to move the
+#: desktop operator's scope out from under them mid-session. The tier is right
+#: about STRENGTH and silent about KIND, and this is the kind.
+#:
+#: **The plan's own sentence was imprecise here and this comment is the
+#: correction** (recorded 2026-09-01, WS4 field notes): the survey wrote that
+#: the device arm's equality alone refuses a device caller. It refuses a ``read``
+#: device; it does not refuse a ``console`` one. Enforcing R-B needed this set.
+#:
+#: A membership test for the same reason :data:`PEER_METHOD_ALLOWLIST` is one:
+#: it admits — here, RESTRICTS — nothing it was not edited to name, so a future
+#: ``console`` verb does not silently join, and widening or narrowing this door
+#: is a visible line in a diff with a reason attached.
+LOCAL_CONSOLE_METHODS: frozenset[str] = frozenset(
+    {"runtime.workspace.use", "runtime.realm.use"}
 )
 
 #: The transport name the gateway listener tags its connections with. Named here
@@ -436,6 +466,15 @@ def authorize_call(
     from :data:`PEER_METHOD_ALLOWLIST` and from nothing else, and the tier the
     verb declares does not enter into it.
 
+    **The machine-owner arm is WS4, and it is a RESTRICTION rather than a
+    grant** — the only arm here that can turn an allow into a refusal for a
+    caller whose credential is strong enough. A verb in
+    :data:`LOCAL_CONSOLE_METHODS` is answerable only to the machine owner's own
+    kinds, so a paired device holding ``console`` — which every other console
+    verb admits, deliberately — is refused these two with the same typed
+    ``scope_denied`` the launcher's decoders already branch on. See that set's
+    comment for why a tier could not have said this.
+
     ``method`` is therefore REQUIRED in practice for a peer and optional in the
     signature, and the asymmetry is intentional: every other caller kind is
     decided by tier alone, so forcing the argument on all of them would rewrite
@@ -455,8 +494,29 @@ def authorize_call(
             tier=normalized,
             caller_kind=resolved.kind,
         )
+    name = str(method or "").strip()
+    # **The machine-owner arm (WS4), and its POSITION is load-bearing.** It runs
+    # before every other arm — before the peer allowlist, before the read-tier
+    # opening, before the device equality — because each of those answers a
+    # question about STRENGTH or about one caller kind, and this one is a
+    # restriction that must hold across all of them. Placed after the device arm
+    # it would be unreachable for exactly the caller it exists to refuse (a
+    # ``console`` device compares equal and returns), which is the bug the
+    # comment on :data:`LOCAL_CONSOLE_METHODS` records.
+    #
+    # A caller with no method name is NOT restricted here, and that is not a
+    # hole: the CLI mirror (Stage A4) asks "may the console run a console verb"
+    # with no method in it, and it is already the machine owner. Every caller
+    # this set exists to refuse arrives through :func:`serve_rpc.handle_request`,
+    # which passes the name unconditionally.
+    if name and name in LOCAL_CONSOLE_METHODS and resolved.kind not in _CONSOLE_KINDS:
+        return CallAuthorization(
+            ok=False,
+            reason=REASON_SCOPE_DENIED,
+            tier=normalized,
+            caller_kind=resolved.kind,
+        )
     if resolved.kind == CALLER_PEER:
-        name = str(method or "").strip()
         if name and name in PEER_METHOD_ALLOWLIST:
             return CallAuthorization(
                 ok=True,
