@@ -973,8 +973,10 @@ _ENV_GAP_SKIPS: EnvGapSkipRegistry = {
         (
             _no_module("pwd"),
             'sudo profile resolution reads the POSIX account database '
-            '(main.py:546 _resolve_sudo_user_profile_env imports pwd behind an '
-            'os.geteuid()==0 gate); the pwd module does not exist here',
+            '(the _resolve_sudo_user_profile_env closure inside '
+            'hermes_cli._profile_bootstrap.apply_profile_override imports pwd '
+            'behind an os.geteuid()==0 gate); the pwd module does not exist '
+            'here',
             {
                 'TestApplyProfileOverrideHermesHomeGuard::test_sudo_explicit_profile_resolves_invoking_users_profile',
             },

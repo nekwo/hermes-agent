@@ -1674,7 +1674,15 @@ class OfficeStore:
                 actor.updated_at = now()
                 actor.updated_by = _safe_actor_ref(updated_by)
                 return actor
-            surface = self.ensure_surface(wsid, created_by=updated_by)
+            # ``_ensure_surface_locked``, not ``ensure_surface``: this call sits
+            # INSIDE ``office_lock(wsid)`` and ``office_lock`` is not reentrant,
+            # so the public door would contend with the lock this verb is
+            # already holding and refuse ``HarnessLockUnavailable`` at the
+            # deadline. It only ever worked because ``ensure_surface`` returns
+            # before acquiring when the surface already exists — i.e. the bug
+            # was invisible for exactly as long as no surface-less workspace
+            # reached this line.
+            surface = self._ensure_surface_locked(wsid, created_by=updated_by)
             self._archive_actor_locked(
                 surface,
                 actor,
@@ -1725,7 +1733,8 @@ class OfficeStore:
                 return actor
             _write_actor(actor)
             archive_path.unlink(missing_ok=True)
-            surface = self.ensure_surface(wsid, created_by=updated_by)
+            # Locked variant — see remove_actor: office_lock is not reentrant.
+            surface = self._ensure_surface_locked(wsid, created_by=updated_by)
             if actor_key in surface.archived_actor_keys:
                 surface.archived_actor_keys = [k for k in surface.archived_actor_keys if k != actor_key]
                 surface.updated_at = now()
@@ -1972,7 +1981,11 @@ class OfficeStore:
                     # Remote removed the actor (edit-vs-remove) → archive local.
                     actor = self.get_actor(wsid, actor_key)
                     if not dry_run:
-                        surface = self.ensure_surface(wsid, created_by=updated_by)
+                        # Locked variant — see remove_actor: office_lock is not
+                        # reentrant.
+                        surface = self._ensure_surface_locked(
+                            wsid, created_by=updated_by
+                        )
                         self._archive_actor_locked(
                             surface,
                             actor,

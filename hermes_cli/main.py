@@ -519,221 +519,28 @@ sys.path.insert(0, str(PROJECT_ROOT))
 # ---------------------------------------------------------------------------
 # Profile override — MUST happen before any hermes module import.
 #
-# Many modules cache HERMES_HOME at import time (module-level constants).
-# We intercept --profile/-p from sys.argv here and set the env var so that
-# every subsequent ``os.getenv("HERMES_HOME", ...)`` resolves correctly.
-# The flag is stripped from sys.argv so argparse never sees it.
-# Falls back to ~/.hermes/active_profile for sticky default.
+# Many modules cache HERMES_HOME at import time (module-level constants), so
+# ``--profile``/``-p`` is intercepted out of sys.argv and turned into
+# ``HERMES_HOME`` before the first of them is importable. The mechanism lives in
+# ``hermes_cli._profile_bootstrap``; the alias below keeps
+# ``hermes_cli.main._apply_profile_override`` resolving, which is the name every
+# doc and test in the tree cites.
+#
+# IT RUNS ONLY WHEN THIS PROCESS IS A HERMES CLI ENTRYPOINT. Unconditional, it
+# parsed whatever argv the process had and repointed the whole process's
+# HERMES_HOME — under pytest that meant reading pytest's ``-p`` as a profile and
+# exiting from a collection import, and pointing a whole test session at the
+# operator's LIVE profile. Importing this module is not "running hermes", and
+# the gate is what makes the difference structural rather than incidental. See
+# the bootstrap module's docstring for the two measurements.
 # ---------------------------------------------------------------------------
-def _apply_profile_override() -> None:
-    """Pre-parse --profile/-p and set HERMES_HOME before imports."""
-    argv = sys.argv[1:]
-    profile_name = None
-    consume = 0
-    profile_index = None
+from hermes_cli._profile_bootstrap import (  # noqa: E402
+    apply_profile_override as _apply_profile_override,
+    is_hermes_cli_entrypoint as _is_hermes_cli_entrypoint,
+)
 
-    def _inside_mcp_add_args(index: int) -> bool:
-        """True once argv reaches `hermes mcp add ... --args <command argv>`.
-
-        ``mcp add --args`` is command-argv passthrough. Flags after that point
-        belong to the child MCP command (for example Docker MCP Toolkit's
-        ``--profile``), not to Hermes' own profile selector.
-        """
-        try:
-            mcp_index = argv.index("mcp", 0, index)
-            argv.index("add", mcp_index + 1, index)
-        except ValueError:
-            return False
-        return True
-
-    def _inside_harness_agent_set_profile(index: int) -> bool:
-        """True when ``--profile`` belongs to the Harness rebind verb.
-
-        ``harness agent set-profile`` deliberately owns a required
-        ``--profile`` argument naming the target persona profile.  Consuming
-        that argument here turns a valid rebind into an argparse error before
-        the Harness operator can validate or apply it.
-        """
-        return any(
-            argv[harness_index : harness_index + 3]
-            == ["harness", "agent", "set-profile"]
-            for harness_index in range(index)
-        )
-
-    def _resolve_sudo_user_profile_env(name: str) -> str | None:
-        """Resolve `sudo hermes -p <name>` against the invoking user's home.
-
-        `_apply_profile_override()` runs before argparse, so `--run-as-user`
-        is not available yet. For sudo invocations, the best available signal
-        is SUDO_USER: root is only doing the privileged install/start action,
-        while the profile store normally belongs to the user who invoked sudo.
-        """
-        if name == "default":
-            return None
-        if not hasattr(os, "geteuid") or os.geteuid() != 0:
-            return None
-        sudo_user = os.environ.get("SUDO_USER", "").strip()
-        if not sudo_user or sudo_user == "root":
-            return None
-
-        try:
-            import pwd
-
-            home = Path(pwd.getpwnam(sudo_user).pw_dir)
-        except Exception:
-            return None
-
-        candidate = home / ".hermes" / "profiles" / name
-        try:
-            if candidate.is_dir():
-                return str(candidate)
-        except OSError:
-            return None
-        return None
-
-    # 1. Check for explicit -p / --profile flag. Historically this worked even
-    # after the subcommand (`hermes chat -p coder`), so keep scanning broadly.
-    # The exception is command-argv passthrough regions such as `mcp add --args`.
-    value_flags = {
-        "-z", "--oneshot",
-        "-m", "--model",
-        "--provider",
-        "-t", "--toolsets",
-        "-r", "--resume",
-        "-s", "--skills",
-        "--usage-file",
-    }
-    optional_value_flags = {"-c", "--continue"}
-    i = 0
-    while i < len(argv):
-        arg = argv[i]
-        if arg == "--":
-            break
-        if arg == "--args" and _inside_mcp_add_args(i):
-            break
-        if (
-            arg == "--profile" or arg.startswith("--profile=")
-        ) and _inside_harness_agent_set_profile(i):
-            break
-        if arg in {"--profile", "-p"} and i + 1 < len(argv):
-            profile_name = argv[i + 1]
-            consume = 2
-            profile_index = i
-            break
-        if arg.startswith("--profile="):
-            profile_name = arg.split("=", 1)[1]
-            consume = 1
-            profile_index = i
-            break
-        if "=" not in arg and arg in value_flags and i + 1 < len(argv):
-            i += 2
-        elif (
-            "=" not in arg
-            and arg in optional_value_flags
-            and i + 1 < len(argv)
-            and not argv[i + 1].startswith("-")
-        ):
-            i += 2
-        else:
-            i += 1
-
-    # 1b. Reject values that can't be valid profile names (e.g. pytest's
-    # "-p no:xdist" would be misread as profile "no:xdist" otherwise).
-    # Mirrors hermes_cli.profiles._PROFILE_ID_RE so we never call
-    # resolve_profile_env() with a value it must reject + sys.exit on.
-    if profile_name is not None and consume == 2:
-        import re as _re
-
-        if not _re.match(r"^[a-z0-9][a-z0-9_-]{0,63}$", profile_name):
-            profile_name = None
-            consume = 0
-            profile_index = None
-
-    # 1.5 If HERMES_HOME is already set and no explicit flag was given, trust it
-    # only when it already points to a specific profile directory.  The
-    # distinguishing heuristic: a profile path has "profiles" as its immediate
-    # parent directory name (e.g. ~/.hermes/profiles/coder or
-    # /opt/data/profiles/coder).  If HERMES_HOME points to the hermes root
-    # instead (e.g. systemd hardcodes HERMES_HOME=/root/.hermes), we must
-    # still read active_profile — the user may have switched profiles via
-    # `hermes profile use` and the gateway should honour that choice.
-    # See issue #22502.
-    # Stamped unconditionally BEFORE any rung can answer, so the value always
-    # describes THIS process. Without the reset, a child inherits its parent's
-    # answer and the receipt reports the parent's rung — the exact confusion the
-    # receipt exists to remove.
-    os.environ["HERMES_PROFILE_RESOLUTION"] = "default"
-
-    hermes_home_env = os.environ.get("HERMES_HOME", "")
-    if profile_name is None and hermes_home_env:
-        if Path(hermes_home_env).parent.name == "profiles":
-            # Record WHICH rung answered, additively. This early return is the
-            # one that skips the sticky marker entirely, so a child spawned from
-            # a profile-shaped env stays on that profile forever and nothing
-            # downstream could tell that apart from an explicit choice. The
-            # gateway reads this back at boot (hermes_cli/gateway_home_receipt).
-            # Spelled inline rather than imported: this pre-parse runs BEFORE any
-            # hermes module is importable, which is its entire reason to exist.
-            os.environ["HERMES_PROFILE_RESOLUTION"] = "env_profile_dir"
-            return
-    resolution = "flag" if profile_name is not None else "default"
-
-    # 2. If no flag, check active_profile in the hermes root.
-    #
-    # EXCEPTION: a supervised s6 gateway child (exported by the container
-    # run-script as HERMES_S6_SUPERVISED_CHILD=1) must NOT follow the sticky
-    # active_profile. Each supervised slot has a fixed profile identity: named
-    # slots pass ``-p <name>`` explicitly (handled in step 1 above), and the
-    # reserved ``gateway-default`` slot runs bare ``hermes gateway run`` to mean
-    # "the root HERMES_HOME profile". If the reserved default child read
-    # active_profile here, switching the active profile (e.g. via the dashboard)
-    # would silently redirect the default gateway into that profile — yielding a
-    # duplicate gateway for the active profile and no real default gateway. See
-    # the "Docker & Profiles & Dashboard" report.
-    if profile_name is None and not os.environ.get("HERMES_S6_SUPERVISED_CHILD"):
-        try:
-            from hermes_constants import get_default_hermes_root
-
-            active_path = get_default_hermes_root() / "active_profile"
-            if active_path.exists():
-                name = active_path.read_text(encoding="utf-8").strip()
-                if name and name != "default":
-                    profile_name = name
-                    resolution = "active_profile_marker"
-                    consume = 0  # don't strip anything from argv
-        except (UnicodeDecodeError, OSError):
-            pass  # corrupted file, skip
-
-    # 3. If we found a profile, resolve and set HERMES_HOME
-    if profile_name is not None:
-        try:
-            from hermes_cli.profiles import resolve_profile_env
-
-            hermes_home = resolve_profile_env(profile_name)
-        except FileNotFoundError as exc:
-            hermes_home = _resolve_sudo_user_profile_env(profile_name)
-            if not hermes_home:
-                print(f"Error: {exc}", file=sys.stderr)
-                sys.exit(1)
-        except ValueError as exc:
-            print(f"Error: {exc}", file=sys.stderr)
-            sys.exit(1)
-        except Exception as exc:
-            # A bug in profiles.py must NEVER prevent hermes from starting
-            print(
-                f"Warning: profile override failed ({exc}), using default",
-                file=sys.stderr,
-            )
-            return
-        os.environ["HERMES_HOME"] = hermes_home
-        os.environ["HERMES_PROFILE_RESOLUTION"] = resolution
-        # Strip the flag from argv so argparse doesn't choke
-        if consume > 0 and profile_index is not None:
-            start = profile_index + 1  # +1 because argv is sys.argv[1:]
-            sys.argv = sys.argv[:start] + sys.argv[start + consume :]
-
-
-_apply_profile_override()
+if _is_hermes_cli_entrypoint(__name__):
+    _apply_profile_override()
 
 # Load .env from ~/.hermes/.env first, then project root as dev fallback.
 # User-managed env files should override stale shell exports on restart.

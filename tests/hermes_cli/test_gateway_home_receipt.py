@@ -48,7 +48,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 # ---------------------------------------------------------------------------
-# Ladder instrumentation (main.py) — run out of process, because the pre-parse
+# Ladder instrumentation (hermes_cli._profile_bootstrap) — run out of process,
+# because the pre-parse
 # mutates os.environ and sys.argv of whatever interpreter runs it.
 # ---------------------------------------------------------------------------
 
@@ -57,20 +58,13 @@ _PROBE = textwrap.dedent(
     import json, os, sys
     sys.argv = json.loads(os.environ.pop("PROBE_ARGV"))
     sys.path.insert(0, os.environ["PROBE_ROOT"])
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "_probe_main", os.path.join(os.environ["PROBE_ROOT"], "hermes_cli", "main.py")
-    )
-    # Executing main.py end-to-end would start the CLI. Only the pre-parse is
-    # under test, so pull the function out of the module source and run THAT.
-    src = open(spec.origin, encoding="utf-8").read()
-    start = src.index("def _apply_profile_override()")
-    # Boundary is the MODULE-LEVEL call at column 0, found from the end.
-    # A plain forward .index() lands inside the function's own docstrings.
-    end = src.rindex(chr(10) + "_apply_profile_override()")
-    ns = {"os": os, "sys": sys, "Path": __import__("pathlib").Path}
-    exec(compile(src[start:end], "main_preparse", "exec"), ns)
-    ns["_apply_profile_override"]()
+    # Executing main.py end-to-end would start the CLI, and only the pre-parse
+    # is under test. It lives in its own import-safe module now
+    # (hermes_cli._profile_bootstrap), so this imports the real thing instead of
+    # exec'ing a slice of main.py's source between two spellings — a boundary
+    # any reformat of that file could move without reddening anything.
+    from hermes_cli._profile_bootstrap import apply_profile_override
+    apply_profile_override()
     print(json.dumps({
         "resolution": os.environ.get("HERMES_PROFILE_RESOLUTION"),
         "hermes_home": os.environ.get("HERMES_HOME"),
@@ -399,27 +393,29 @@ def test_wrapper_generator_allows_a_non_profile_home(tmp_path):
 #
 # `gateway_home_receipt` exports RESOLUTION_FLAG / _ENV_PROFILE_DIR /
 # _ACTIVE_PROFILE_MARKER / _DEFAULT and its comment said they existed so
-# "main.py and the tests agree on the spelling rather than each hard-coding a
-# string literal". main.py does not import them — it writes all four inline,
-# and always has. So the constants and the producer were two independent
-# copies of one wire vocabulary with nothing comparing them, and a rename on
-# either side would have gone unnoticed until a gateway read a rung name it
-# did not recognise at boot.
+# "the pre-parse and the tests agree on the spelling rather than each
+# hard-coding a string literal". The pre-parse does not import them — it writes
+# all four inline, and always has. So the constants and the producer were two
+# independent copies of one wire vocabulary with nothing comparing them, and a
+# rename on either side would have gone unnoticed until a gateway read a rung
+# name it did not recognise at boot.
 #
-# main.py cannot simply import them: the pre-parse runs before any hermes
-# module is importable, which is the entire point of the pre-parse. So the
-# seam stays, and this is the thing that holds it.
+# The pre-parse cannot simply import them: it runs before any hermes module is
+# importable, which is the entire point of the pre-parse. So the seam stays, and
+# this is the thing that holds it. It reads `_profile_bootstrap.py`, which is
+# where the pre-parse lives since the entrypoint gate landed — the producer
+# moved, the seam did not.
 # ---------------------------------------------------------------------------
 
 
-def _main_py_source() -> str:
+def _preparse_source() -> str:
     import pathlib
 
     import hermes_cli
 
-    path = pathlib.Path(hermes_cli.__file__).with_name("main.py")
+    path = pathlib.Path(hermes_cli.__file__).with_name("_profile_bootstrap.py")
     text = path.read_text(encoding="utf-8", errors="replace")
-    assert len(text) > 10_000, "main.py read came back too small - vacuous"
+    assert len(text) > 5_000, "_profile_bootstrap.py read came back too small - vacuous"
     return text
 
 
@@ -432,13 +428,13 @@ def _main_py_source() -> str:
         "RESOLUTION_DEFAULT",
     ],
 )
-def test_each_resolution_rung_is_the_literal_main_py_writes(constant):
+def test_each_resolution_rung_is_the_literal_the_preparse_writes(constant):
     from hermes_cli import gateway_home_receipt
 
     value = getattr(gateway_home_receipt, constant)
-    source = _main_py_source()
+    source = _preparse_source()
     assert f'"{value}"' in source or f"'{value}'" in source, (
-        f"{constant} == {value!r}, and main.py writes no such literal. main.py "
+        f"{constant} == {value!r}, and the pre-parse writes no such literal. It "
         "hard-codes the resolution rung it took into "
         f"{gateway_home_receipt.RESOLUTION_ENV_VAR}; the gateway reads it back "
         "through this constant. If one side was renamed, rename the other in "
@@ -446,9 +442,10 @@ def test_each_resolution_rung_is_the_literal_main_py_writes(constant):
     )
 
 
-def test_main_py_writes_the_resolution_env_var_this_module_names():
+def test_the_preparse_writes_the_resolution_env_var_this_module_names():
     from hermes_cli import gateway_home_receipt
 
-    assert gateway_home_receipt.RESOLUTION_ENV_VAR in _main_py_source(), (
-        "main.py no longer writes the env var this module reads the rung from"
+    assert gateway_home_receipt.RESOLUTION_ENV_VAR in _preparse_source(), (
+        "the pre-parse no longer writes the env var this module reads the rung "
+        "from"
     )
