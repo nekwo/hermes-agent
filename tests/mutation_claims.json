@@ -3716,6 +3716,21 @@
         "-q",
         "tests/plugins/memory/test_provider_loader_import_identity.py::test_a_provider_that_fails_to_exec_leaves_neither_half_behind"
       ]
+    },
+    {
+      "id": "doctor-home-is-read-at-call-time-not-at-import",
+      "path": "hermes_cli/doctor.py",
+      "symbol": "run_doctor/HERMES_HOME",
+      "operator": "re-freeze-the-home",
+      "find": "    HERMES_HOME = get_hermes_home()",
+      "replace": "    HERMES_HOME = Path.home() / \".hermes\"",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_doctor.py::TestDoctorResolvesTheHomeAtCallTime::test_the_env_var_alone_redirects_every_profile_relative_read"
+      ]
     }
   ]
 }

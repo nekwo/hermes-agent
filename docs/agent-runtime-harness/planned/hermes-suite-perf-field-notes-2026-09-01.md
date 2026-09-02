@@ -535,3 +535,196 @@ __getattr__ never fires, keep the before-copy + teardown identity loop (dict ops
 <=1.5x aging acceptance passes. gc.freeze optional second-order (~40-60 s/run) at the
 price of never-collected frozen garbage. OPEN: _live_system_guard's +5.7 ms aged
 growth is measured, undecomposed.
+
+## 16. Residual aging CURED, and the doctor-binding row re-measured (2026-09-02, worktree w1-aging)
+
+Two rows off the launcher's Mission Control queue, worked together because the
+second one's evidence lives in this directory's fixtures too.
+
+**Load caveat, and it is large.** The box was contended throughout — other
+sessions were running suites on the same 16 cores — so every number below is
+comparable ONLY against the numbers beside it, taken the same session, and NONE
+of them against §15's. The size of the tax is visible in the fresh/aged pair:
+this session's fresh floor reproduces §15's almost exactly (15.3 ms vs 14.5),
+while the aged floor is roughly double (92.7 ms vs 45.2). The aging MECHANISM is
+the same one; what doubled is the price of every page fault and every GC pass
+under contention — exactly §15's own warning ("identical run 18:29 contended vs
+11:52 uncontended — never compare walls across sessions").
+
+### 16a. The aging floor: the guard keeps its guarantee and loses its walk
+
+§15 attributed ~65% of the aged setup floor to the SETUP half of
+`_sys_modules_identity_is_restored` and wrote a decision-ready fix. Landed as
+written, with one addition the prescription left open.
+
+`tests/hermes_cli/_module_identity.py::ParentBindingRepair` now owns the
+parent-binding repair the fixture used to run inline:
+
+- **`child in vars(parent)`, never `hasattr(parent, child)`** — the ~24 ms half.
+  `hasattr` fires PEP 562 module `__getattr__` and the lazy-import machinery
+  behind it; `vars()` reads `__dict__` and cannot. The verdict is identical for
+  the only names considered: ones whose module object is already in
+  `sys.modules`, so nothing is left to lazily load.
+- **The walk is gated on `len(sys.modules)` having changed**, and when it does
+  run it skips every name already bound — the other ~5 ms. Binding a child
+  changes no `sys.modules` row, so a test that imports nothing new leaves the
+  mapping in exactly the state the last pass fixed.
+- **The addition:** a name is remembered as done only after its parent RESOLVED.
+  A child whose parent is not imported yet stays unmarked, so the pass after the
+  parent's own import reconsiders it. Without that, the count gate would have
+  been a hole rather than a free skip.
+
+`before = sys.modules.copy()` and the teardown restore loop are untouched — §15
+measured them cheap, and they are the identity guarantee itself.
+
+**Numbers.** 200-no-op probe collected last; serial `tests/hermes_cli` minus
+`test_doctor.py` (§15's method); `--timeout=600` because the 30 s default's
+thread method killed the whole process at `test_config_loader_e2e.py` under
+load; phase durations read off `report.duration`, which is unquantized, rather
+than `--durations`, which rounds to 10 ms.
+
+| probe phase (median, ms) | fresh process | aged tail, BEFORE |
+|---|---|---|
+| setup | 15.34 | 92.74 |
+| teardown | 1.38 | 24.30 |
+
+Aged setup mean / p90 / max BEFORE: 115.66 / 166.44 / 2329.23. Wall **31:48**;
+1 failed / 4624 passed / 100 skipped / 1 xfailed. The single red is
+`test_harness_flag_and_control_reachability.py::test_every_harness_flag_has_a_reader`
+and it is **pre-existing at `b9e7a27988`, not this lane's**: that gate's scan
+lane is `hermes_cli/harness.py` + `harness_support.py` + `harness_parts/*.py`,
+none of which this branch touches, and it names six `harness.py` flags with no
+reader (`persona_instance_return.proof_ids` / `.artifact_refs`,
+`roots_migrate.configs` / `.root`, `workspace_create.agent`,
+`skills_delete_cmd.realms`) — the flag-binding migration's territory.
+
+**The whole-run AFTER arm could not be taken comparably, and is OWED.** Two
+attempts: the first was killed at 93% by this session's own background-task
+cleanup (before the probe file, which is collected last, had run); on the second
+the box saturated — `wmic cpu get loadpercentage` = 100 with 24 python processes
+from other sessions — and the same command that took 31:48 an hour earlier was
+on pace for three hours. A wall measured under 4x the contention is not a
+comparison, it is a different experiment, which is §15's own rule. So the AFTER
+side is carried by two cheaper measurements that ARE load-robust, plus the
+attribution §15 already established:
+
+*The mechanism, interleaved A/B in one hermetic process* (the two algorithms
+alternate on the same mapping, so drift cancels; 15 reps, medians), real
+`sys.modules` inflated to **2,810** by importing this repo's own tree:
+
+| per call | median | min | max |
+|---|---|---|---|
+| OLD `hasattr` walk | 3.479 ms | 2.834 | 4.765 |
+| NEW, nothing imported since the last pass | 0.003 ms | 0.002 | 0.007 |
+| NEW, one module HAS landed (it walks) | 0.393 ms | — | 0.902 |
+
+*The fixture, bracketed A/B* — the 200-no-op probe file run alone against a
+`sys.modules` aged to **2,957** by a session-start inflation plugin, so the
+guard sees a realistic mapping without a 30-minute suite. Arms alternated and
+each side run twice to bracket the load:
+
+| arm | probe setup median (ms) |
+|---|---|
+| NEW (this branch) | 18.44, 19.62 |
+| OLD (pre-fix walk planted back) | 25.23, 23.51 |
+
+**~5.3 ms/test at 2,957 modules.** The real tail is 14,843 — five times that
+mapping — and §15 measured the same term at 29.9 ms there, which is what this
+scales to. Note what the inflation lab CANNOT show: §15 established that a fat
+heap alone reproduces only a fraction of the total aging (14.5 -> 20.1 ms), so
+these numbers are the GUARD's contribution, not the floor's, and the floor's
+own AFTER number remains owed.
+
+**The guarantee, proven both ways.** Both pollution classes the guard's
+docstring names, re-run against the new code in one process in the order that
+reproduces them:
+
+- `test_skills_subparser.py` then files that patch `hermes_cli.main`: identity
+  restored on all three spellings — the `sys.modules` row, the `main` attribute
+  on the `hermes_cli` package, and `_build_web_ui.__globals__`. 29 passed / 1
+  skipped over `test_update_venv_health.py` + `test_web_ui_build.py`.
+- `test_dashboard_admin_endpoints.py` then
+  `test_doctor.py::TestHonchoDoctorConfigDetection`, one process, that order:
+  **39 passed**. Counterfactual — same command, repair call commented out:
+  **1 failed**, and it is the documented failure verbatim, `AttributeError:
+  'module' object at plugins.memory.honcho has no attribute 'honcho'`.
+
+New tests: `tests/hermes_cli/test_module_identity_guard.py` (8). Red-first
+against the pre-fix walk planted back into `run()`: **3 failed, 5 passed** — the
+`__getattr__` probe, the count-gate skip and "only the new name is examined" go
+red; the five that assert the GUARANTEE are green both ways, which is the shape
+a refactor's test set should have.
+
+### 16b. `doctor.HERMES_HOME`: the binding was real, its consequence was not
+
+The row read: *`doctor.HERMES_HOME` is bound at module import, so the suite
+resolves a tool out of the operator's LIVE profile, and `_gateway_fence.py`
+carries an exemption for exactly that.* **The first clause is true. The second
+does not follow, and the exemption is not deletable by fixing the first.**
+
+Verified on this host at `b9e7a27988`:
+
+- `hermes_cli/doctor.py` did bind `HERMES_HOME = get_hermes_home()` at module
+  scope, and under a bare `python -m pytest` in the operator's shell that
+  resolves at COLLECTION time to `X:\Eternia\.hermes` — the live store — because
+  `_apply_profile_override()` is gated off outside a hermes entrypoint and the
+  hermetic-home fixture only runs afterwards. Printed from a probe test whose
+  module-level import captured it: `doctor.HERMES_HOME (module-import-bound):
+  X:\Eternia\.hermes`.
+- But **none of doctor's three profile-relative browser candidates**
+  (`<home>/node/bin`, `<home>/node`, `<home>/node_modules/.bin`) exists under
+  that root, so the binding resolves nothing. The
+  `X:\Eternia\.hermes\profiles\alice\node\agent-browser.CMD --version` spawn the
+  fence exempts comes from `shutil.which("agent-browser")` — the operator's
+  **PATH**, which `scripts/run_tests.sh` forwards verbatim (`PATH="$PATH"`) and
+  which no profile redirection can reach.
+- Measured after the binding moved to call time: deleting the exemption still
+  reds **19 tests in `test_doctor.py` alone**, and the refusal names that same
+  PATH-resolved CMD.
+
+The binding was fixed on its own merits, which are real and were already
+documented in the tree by the test that had to work around it
+(`TestGitHubTokenCheck._isolate_home`): `setenv("HERMES_HOME")` alone left
+doctor probing the operator's `~/.hermes`, where a large real `state.db` made
+`PRAGMA integrity_check` blow a 300 s per-file budget. Importing the module also
+loaded the operator's real `.env` into the test process. `run_doctor` now
+resolves the home AND that `.env` at call time; `hermes_cli/doctor.py`'s entry
+in `tests/test_no_frozen_hermes_home.py` shrinks from
+`{HERMES_HOME, _DHH, _env_path}` to `{_DHH}` (a display LABEL, never a
+filesystem read). 31 `monkeypatch.setattr(doctor_mod, "HERMES_HOME", ...)` sites
+across 4 test files became `monkeypatch.setenv`.
+
+Red-first: the two new `test_doctor.py::TestDoctorResolvesTheHomeAtCallTime`
+tests fail 2/2 with the import-time binding planted back, pass 2/2 with it gone;
+they assert on a file doctor must have READ (a planted skills-hub `lock.json`
+count), not on the printed home, so patching the label cannot fake them.
+Mutation claim `doctor-home-is-read-at-call-time-not-at-import` anchors
+`run_doctor/HERMES_HOME`. The four migrated files run **85 passed / 3 skipped**.
+
+**The fence exemption was NARROWED, not deleted.** It was spelled "any argv
+without a hermes entry point", which let every non-hermes command through — an
+`npm --prefix <real root> install`, a `node <real root>/...` — for the sake of
+one read-only `--version`. It is now spelled as the probe itself:
+`_is_agent_browser_version_probe` (exactly two tokens, an `agent-browser`
+basename, `--version`). Four new parametrized cases pin the tightening and fail
+4/4 against the old spelling; the fence file runs 33 passed.
+
+### 16c. Two things this lane found and did not fix
+
+- **The fence's real-store arm is inert under `scripts/run_tests.sh`.**
+  `_real_hermes_root()` reads `get_default_hermes_root()`, which is env-derived;
+  `run_tests.sh` execs `env -i` without forwarding `HERMES_HOME`, so
+  `tests/conftest.py` has already installed a session temp home in the env by
+  the time the fence computes `_REAL_ROOT`. Measured: `_REAL_ROOT` came back as
+  `...\Temp\hermes-test-home-0p7v68i_`, and `classify()` of the live
+  `profiles/alice` agent-browser CMD returned `None`. The arm defends the
+  operator's store only on the bare-`pytest` path — the path AGENTS.md calls the
+  exception. No fix exists inside the fence: under `env -i` this box's actual
+  store root (`X:\Eternia\.hermes`, a custom deployment, not the platform
+  default `%LOCALAPPDATA%\hermes`) is unknowable from the environment the runner
+  hands the process.
+- **The remaining half of the agent-browser row is a TEST-side seam**, not a
+  production binding. The suite runs doctor's real resolver, and production is
+  entitled to consult PATH. `agent_browser_runnable`'s per-path memoisation
+  already cut the spawns to one per process; killing the last one means stubbing
+  the resolver for the tests that only want doctor's report.

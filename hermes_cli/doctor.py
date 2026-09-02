@@ -23,12 +23,27 @@ from hermes_constants import display_hermes_home
 from hermes_constants import agent_browser_runnable
 
 PROJECT_ROOT = get_project_root()
-HERMES_HOME = get_hermes_home()
 _DHH = display_hermes_home()  # user-facing display path (e.g. ~/.hermes or ~/.hermes/profiles/coder)
 
-# Load environment variables from ~/.hermes/.env so API key checks work
-_env_path = get_env_path()
-load_hermes_dotenv(hermes_home=_env_path.parent, project_env=PROJECT_ROOT / ".env")
+# The HOME ITSELF, and the ``.env`` read off it, are resolved inside
+# ``run_doctor`` — deliberately not here. A module-level ``HERMES_HOME =
+# get_hermes_home()`` is normally fine (AGENTS.md, "Rules for profile-safe
+# code": the constant is bound after ``_apply_profile_override`` has run), but
+# that argument assumes the process is a hermes CLI entrypoint. Under pytest it
+# is not: ``_apply_profile_override`` is gated off, this module is imported at
+# COLLECTION, and the autouse hermetic-home fixture only redirects
+# ``HERMES_HOME`` afterwards. So every diagnostic below used to read the
+# operator's live store — measured, and documented in the test that had to work
+# around it: doctor's ``PRAGMA integrity_check`` ran against the developer's
+# real ``state.db`` and blew a 300 s per-file budget, and importing this module
+# loaded the operator's real ``.env`` into the test process. Reading at CALL
+# time costs one env lookup per ``hermes doctor`` invocation and makes the
+# profile under test the profile reported on.
+#
+# ``_DHH`` stays frozen on purpose: it is a LABEL, never a filesystem read, and
+# ``display_hermes_home()`` renders home-relative (``~/AppData/...``) where the
+# path assertions want the raw path. It is the one name left in this module's
+# entry in ``tests/test_no_frozen_hermes_home.py``.
 
 from hermes_cli.colors import Colors, color
 from hermes_cli.models import _HERMES_USER_AGENT
@@ -794,6 +809,14 @@ def run_doctor(args):
             ))
             sys.exit(1)
         return
+
+    # The home this run reports on, read now rather than at import (see the
+    # module header). Everything below resolves off this one binding, so a
+    # single invocation can never straddle two homes.
+    HERMES_HOME = get_hermes_home()
+    _env_path = get_env_path()
+    # Load environment variables from ~/.hermes/.env so API key checks work.
+    load_hermes_dotenv(hermes_home=_env_path.parent, project_env=PROJECT_ROOT / ".env")
 
     issues = []
     manual_issues = []  # issues that can't be auto-fixed

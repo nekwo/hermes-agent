@@ -125,8 +125,9 @@ FROZEN_LEDGER: dict[str, tuple[frozenset[str], str]] = {
         "upstream: openclaw install marker path",
     ),
     "hermes_cli/doctor.py": (
-        frozenset({"HERMES_HOME", "_DHH", "_env_path"}),
-        "upstream: doctor reports on the home it was launched against",
+        frozenset({"_DHH"}),
+        "display LABEL only, never a filesystem read; run_doctor resolves the "
+        "home and its .env at call time",
     ),
     "hermes_cli/web_server.py": (
         frozenset({"_ACTION_LOG_DIR"}),

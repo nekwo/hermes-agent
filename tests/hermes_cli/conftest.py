@@ -7,12 +7,11 @@ import importlib.util
 import os
 import pathlib
 import sys
-import types
 
 import pytest
 
 from tests._env_gap_fence import EnvGapSkipRegistry, apply_skips, is_owned
-from tests.hermes_cli import _gateway_fence
+from tests.hermes_cli import _gateway_fence, _module_identity
 
 # L2/L3 of the gateway fence: the spawn wrappers go on at conftest IMPORT — the
 # earliest moment this directory owns — and are never removed, because the
@@ -223,37 +222,14 @@ def _sys_modules_identity_is_restored():
     dishonestly by appearing to.
     """
     # Setup half: make sys.modules and the package attributes AGREE before the
-    # test runs. plugins/memory/__init__.py discovers providers by hand —
-    # ``spec_from_file_location`` + ``sys.modules[full_name] = mod`` — and never
-    # performs the last step real import machinery does, which is binding the
-    # child on its parent package. So once any test triggers provider
-    # discovery, ``sys.modules["plugins.memory.honcho"]`` exists while
-    # ``plugins.memory`` has no ``honcho`` attribute, and
-    # ``importlib.import_module`` will not repair it: it short-circuits on the
-    # sys.modules row it finds. Every later
-    # ``monkeypatch.setattr("plugins.memory.honcho.client...")`` then dies in
-    # pytest's own path resolver with ``'module' object at
-    # plugins.memory.honcho has no attribute 'honcho'`` — a message that names
-    # neither the loader nor the test that ran it. Measured 2026-08-31:
-    # test_dashboard_admin_endpoints.py alone reds
-    # test_doctor.py::TestHonchoDoctorConfigDetection.
-    #
-    # Repaired on the way IN, and only where the attribute is MISSING: this
-    # adds the binding a real import would have made and overwrites nothing.
-    # The loader not doing it is a product row, filed separately — this makes
-    # the suite honest about it rather than order-dependent because of it.
-    for _name, _module in list(sys.modules.items()):
-        if not isinstance(_name, str) or "." not in _name:
-            continue
-        if not isinstance(_module, types.ModuleType):
-            continue
-        _parent_name, _, _child = _name.rpartition(".")
-        _parent = sys.modules.get(_parent_name)
-        if isinstance(_parent, types.ModuleType) and not hasattr(_parent, _child):
-            try:
-                setattr(_parent, _child, _module)
-            except Exception:
-                pass
+    # test runs, so a hand-rolled loader's child module carries the binding a
+    # real import would have made. ``tests/hermes_cli/_module_identity.py``
+    # owns that repair, carries the measurement that moved it out of this
+    # fixture body, and states why its two skips cannot lose the guarantee.
+    # It is O(new modules), not O(sys.modules), and it never fires a parent's
+    # module ``__getattr__``: the inline loop this replaced was 29.9 ms per
+    # test at the aged tail of a full run, ~65% of the suite's aging floor.
+    _module_identity.PARENT_BINDING_REPAIR.run()
 
     before = sys.modules.copy()
     try:

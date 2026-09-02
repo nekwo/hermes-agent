@@ -92,20 +92,53 @@ def test_classifier_refuses_a_hermes_run_pointed_at_the_real_store():
     assert "REAL store" in reason
 
 
-def test_a_third_party_tool_under_the_real_root_is_not_refused():
+def test_the_agent_browser_capability_probe_is_not_refused():
     """The over-refusal this arm was narrowed away from, pinned so it stays gone.
 
-    ``hermes doctor`` probes an agent-browser shim whose path was resolved at
-    import time out of the operator's live profile. That IS a finding -- the
-    suite reads a tool out of a real profile home -- but it is a ``--version``
-    call that starts nothing, and refusing it turned 44 tests across 8 files
-    red for a hazard this fence is not about.
+    ``hermes doctor`` probes an agent-browser shim that lives inside the
+    operator's live profile. That IS a finding -- the suite reads a tool out of
+    a real profile home -- but it is a ``--version`` call that starts nothing,
+    and refusing it turned 44 tests across 8 files red for a hazard this fence
+    is not about.
+
+    The path is resolved by ``shutil.which("agent-browser")`` off the
+    operator's PATH, which ``run_tests.sh`` forwards verbatim. It was recorded
+    as doctor's import-time ``HERMES_HOME`` binding; that was wrong, and was
+    re-measured 2026-09-02 when the binding moved to call time and this spawn
+    did not move with it.
     """
     real_root = _gateway_fence.real_root()
     if real_root is None:
         pytest.skip("no default hermes root resolvable on this host")
     probe = str(real_root / "profiles" / "alice" / "node" / "agent-browser.CMD")
     assert _gateway_fence.classify([probe, "--version"]) is None
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["npm", "--prefix", "{root}", "install"],
+        ["node", "{root}/profiles/alice/node/whatever.js"],
+        ["{root}/profiles/alice/node/agent-browser.CMD", "install"],
+        ["{root}/profiles/alice/node/agent-browser.CMD", "--version", "--json"],
+    ],
+    ids=["npm-prefix", "node-script", "agent-browser-install", "probe-plus-a-flag"],
+)
+def test_only_the_version_probe_itself_is_exempt(argv):
+    """The exemption is the PROBE, not "any argv without a hermes entry point".
+
+    Spelled the old way, every one of these reached the operator's store
+    unremarked -- an ``npm install`` into a real profile is exactly the class
+    of write this fence exists to stop, and it was allowed for the sake of one
+    read-only ``--version``.
+    """
+    real_root = _gateway_fence.real_root()
+    if real_root is None:
+        pytest.skip("no default hermes root resolvable on this host")
+    root = str(real_root).replace("\\", "/")
+    reason = _gateway_fence.classify([tok.replace("{root}", root) for tok in argv])
+    assert reason is not None
+    assert "REAL store" in reason
 
 
 # ── L3: the primitives actually refuse ─────────────────────────────────────

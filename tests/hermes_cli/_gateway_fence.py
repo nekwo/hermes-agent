@@ -88,6 +88,17 @@ _LAUNCHER_BASENAMES = ("gateway.vbs", "gateway.cmd")
 #: install-detection branch, and reading a task cannot start one.
 _SCHTASKS_MUTATING_VERBS = ("/create", "/delete", "/change", "/run", "/end")
 
+#: The one read-only capability probe the real-store arm below lets through,
+#: and the exact argv shape it is allowed in. See
+#: :func:`_is_agent_browser_version_probe`.
+_AGENT_BROWSER_BASENAMES = (
+    "agent-browser",
+    "agent-browser.cmd",
+    "agent-browser.exe",
+    "agent-browser.bat",
+    "agent-browser.ps1",
+)
+
 
 class GatewayFenceViolation(RuntimeError):
     """A test (or something it left running) tried to touch the live gateway."""
@@ -163,6 +174,21 @@ def _backend_subcommand(tokens: list[str]) -> str | None:
     return None
 
 
+def _is_agent_browser_version_probe(tokens: list[str]) -> bool:
+    """Exactly ``<...>/agent-browser[.cmd|.exe|.bat|.ps1] --version``, nothing else.
+
+    ``hermes_constants.agent_browser_runnable`` validates a candidate binary by
+    running it with ``--version``. It starts nothing, writes nothing and exits;
+    the whole point of the call is that a dangling npm symlink answers 127
+    instead of being trusted (#48521).
+    """
+    return (
+        len(tokens) == 2
+        and _basename(tokens[0]) in _AGENT_BROWSER_BASENAMES
+        and str(tokens[1]).lower() == "--version"
+    )
+
+
 def _names_real_root(text: str, env) -> bool:
     if _REAL_ROOT is None:
         return False
@@ -212,26 +238,31 @@ def classify(cmd, env=None) -> str | None:
                     "Task Scheduler"
                 )
 
-    # The real-store arm is scoped to argv that would boot OUR OWN runtime.
-    # A blanket "names the real root" refusal was measured over-wide: it also
-    # caught ``X:\...\.hermes\profiles\alice\node\agent-browser.CMD --version``,
-    # a read-only capability probe reached from ``hermes doctor`` through an
-    # import-time-resolved path -- 44 reds across 8 files in the 2026-08-31
-    # measurement run, not one of them the hazard this fence is for. That probe
-    # IS a real find (the suite resolves a tool out of the operator's live
-    # profile) but it is a separate lane, and a ``--version`` call starts
-    # nothing. What this arm must catch is a hermes process coming up on the
-    # operator's store: the second half of the measured escape.
+    # The real-store arm refuses any argv that names the operator's store, with
+    # ONE exemption: the read-only ``agent-browser --version`` capability probe.
+    # A blanket refusal was measured over-wide -- it caught
+    # ``X:\...\.hermes\profiles\alice\node\agent-browser.CMD --version``, 44
+    # reds across 8 files in the 2026-08-31 measurement run, not one of them the
+    # hazard this fence is for. What this arm must catch is a hermes process
+    # coming up on the operator's store: the second half of the measured escape.
     #
-    # 2026-09-01: the COUNT was cut, the exemption was not.
-    # ``agent_browser_runnable`` now memoises its ``--version`` spawn per path
-    # (``hermes_constants._AGENT_BROWSER_PROBE_CACHE``), so
-    # ``tests/hermes_cli/test_doctor.py`` went from 29 spawns of that CMD to 1,
-    # measured on this host. One is still one: the path is import-bound in
-    # ``doctor``, so the suite still reaches the operator's live profile and
-    # this arm must still let it through. Deleting the exemption needs the
-    # OTHER half — resolving the browser path through the profile under test.
-    if _hermes_entry_index(tokens) is not None and _names_real_root(text, env):
+    # The exemption used to be spelled "argv without a hermes entry point",
+    # which let EVERY non-hermes command through -- an ``npm --prefix
+    # <real root>``, a ``node <real root>/...`` -- for the sake of one probe.
+    # It is now spelled as the probe.
+    #
+    # 2026-09-02, measured on this host: the previously-recorded MECHANISM was
+    # wrong, and the correction is why the exemption survives a lane that set
+    # out to delete it. The probed path does NOT come from ``doctor``'s
+    # import-time ``HERMES_HOME`` -- that binding is now resolved at call time
+    # and ``<home>/node`` does not exist under either the real root or the
+    # session's hermetic home. It comes from ``shutil.which("agent-browser")``,
+    # i.e. the operator's PATH, which ``run_tests.sh`` forwards verbatim and no
+    # profile redirection can touch. Deleting this exemption therefore still
+    # reds 19 tests in ``test_doctor.py`` alone (measured with the doctor fix in
+    # place). The remaining half is a test-side seam over the real resolver, not
+    # a production binding; it is rowed, not done here.
+    if _names_real_root(text, env) and not _is_agent_browser_version_probe(tokens):
         return (
             f"it would run hermes against the operator's REAL store ({_REAL_ROOT}). "
             "Tests run against the hermetic home that tests/conftest.py's "

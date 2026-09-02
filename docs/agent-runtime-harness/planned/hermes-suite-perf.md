@@ -18,7 +18,7 @@ no xdist, no per-batch isolation.
 | stage | what landed | sha(s) | measured outcome |
 |---|---|---|---|
 | 1 — psutil off the floor | lazy children-snapshot in `_live_system_guard`; refusal semantics unchanged | `29ae6a2b3c` | probe floor 28 ms → ~8 ms/test fresh (with Stage 2); guard tests identical result set (2 pre-existing win32 termios/pty fails, proven baseline) |
-| 2 — aging floor | O(1) counter `tmp_path` override + credential regex; attribution: real `make_numbered_dir` 2.69→23.94 ms/call, 150.8 s per 11 k calls | `29ae6a2b3c` | aged probe 77 ms → 36 ms mean; setup phase 410→150 s (agent_runtime), 326→186 s (hermes_cli). Residual aging (36 vs 8 ms, gen-2-GC suspect) OPEN |
+| 2 — aging floor | O(1) counter `tmp_path` override + credential regex; attribution: real `make_numbered_dir` 2.69→23.94 ms/call, 150.8 s per 11 k calls | `29ae6a2b3c` | aged probe 77 ms → 36 ms mean; setup phase 410→150 s (agent_runtime), 326→186 s (hermes_cli). Residual aging (36 vs 8 ms) attributed §15 (not GC — the identity guard's `hasattr` walk) and CURED 2026-09-02, §16a + §Follow-ups |
 | 3 — parallel lane verified | no code; two full-lane passes from a worktree | — | 12,492/0 in 18:16 and 12,494/0 in 17:36 (8 workers); integrity byte-identical both times. **R3 RULED: default** (2026-09-01, delegated review — §14; AGENTS.md §Testing amended, `run_tests.sh` forwards `HERMES_TEST_TMP_ROOT`) |
 | 4 — worker sweep | no code; 12-worker probe | — | REJECTED: 23:55, 2 load-flaked fails (serially green). 8 workers stands |
 | 5 — gate parse sharing | `_tree_index` + 9 gate ports + module-teardown cache lifetime (785 MB retention lesson) | `29ae6a2b3c` + `adb17621db` | 9-file set 125.9→70.5 s same-command; 9 sabotage round-trips red-for-the-right-reason |
@@ -353,3 +353,44 @@ Stage 7 builds immediately; every other stage HOLDS for the operator's go.**
 - 3 further collection errors exist in fringe dirs under a full-tree
   `pytest tests/ --collect-only` (§6c) — outside the operator's lanes, noted
   for whoever owns those dirs.
+- **`[LANDED 2026-09-02, <sha>]` The residual aging §15 attributed is cured.**
+  Stage 2's ledger row left "Residual aging (36 vs 8 ms) OPEN"; §15 then pinned
+  ~65% of it on the SETUP half of
+  `tests/hermes_cli/conftest.py::_sys_modules_identity_is_restored` and wrote a
+  decision-ready fix. Landed as written:
+  `tests/hermes_cli/_module_identity.py::ParentBindingRepair` keeps the identity
+  guarantee (the before-copy and the teardown restore are untouched) and retires
+  the per-test O(`sys.modules`) module-object work — `child in vars(parent)`
+  instead of `hasattr`, and the walk gated on `len(sys.modules)` having changed.
+  Both pollution classes the guard's docstring names were re-run in one process
+  in the order that reproduces them, with the counterfactual. Measured at
+  2,957 modules, bracketed both ways under load: **~5.3 ms/test off the
+  fixture's setup**, and the guard's own per-call cost 3.479 ms -> 0.003 ms.
+  **OWED:** a whole-run aged AFTER on the §15 probe method — two attempts were
+  lost (one to a task kill at 93%, one to the box saturating at 100% CPU), so
+  the floor's own after-number is not measured. Numbers, guarantee proofs and
+  the red-first result set: field notes §16a.
+- **`[LANDED 2026-09-02, <sha>]` `doctor.HERMES_HOME` reads at call time — and
+  the row's stated CONSEQUENCE was wrong.** `run_doctor` now resolves the home,
+  and the `.env` it loads, when it runs; `hermes_cli/doctor.py`'s entry in
+  `tests/test_no_frozen_hermes_home.py` shrinks to the display label alone. But
+  the `agent-browser.CMD --version` spawn the gateway fence exempts does NOT
+  come from that binding — it comes from `shutil.which("agent-browser")` on the
+  operator's PATH, which `run_tests.sh` forwards verbatim. Deleting the
+  exemption still reds 19 tests in `test_doctor.py` with the binding fixed, so
+  it was NARROWED to the probe itself instead of deleted. Field notes §16b.
+- **`[RESIDUAL 2026-09-02]` The gateway fence's real-store arm is inert under
+  `run_tests.sh`.** `_real_hermes_root()` reads `get_default_hermes_root()`,
+  which is env-derived, and `run_tests.sh` runs `env -i` without `HERMES_HOME` —
+  so by the time the fence computes `_REAL_ROOT`, `tests/conftest.py` has
+  already put a session temp home in the env, and that temp dir becomes
+  "the operator's real store". Measured: `classify()` of the live
+  `profiles/alice` agent-browser CMD returns `None` under the sanctioned runner.
+  The arm defends the real store only on the bare-`pytest` path. Not fixable
+  inside the fence — under `env -i` this box's actual store root
+  (`X:\Eternia\.hermes`, a custom deployment) is not knowable from the
+  environment the runner hands the process. Field notes §16c.
+- **`[RESIDUAL 2026-09-02]` The last agent-browser spawn is a TEST-side seam.**
+  `agent_browser_runnable`'s per-path memoisation already cut it to one per
+  process; killing it means stubbing doctor's real browser resolver for the
+  tests that only want doctor's report. Production is entitled to consult PATH.

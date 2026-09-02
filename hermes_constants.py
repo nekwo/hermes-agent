@@ -789,10 +789,14 @@ def with_hermes_node_path(env: dict[str, str] | None = None) -> dict[str, str]:
 #: retry the same candidates: ``doctor`` walks four of them, ``browser_tool``
 #: walks five, ``dep_ensure`` and ``nous_subscription`` walk three each. Measured
 #: 2026-08-31: one pytest run executed the operator's live
-#: ``.hermes/profiles/alice/node/agent-browser.CMD --version`` **56 times**,
-#: because ``doctor.HERMES_HOME`` is bound at module import and a hermetic test
-#: home cannot redirect it. The gateway fence exempts that spawn — a
-#: ``--version`` call starts nothing — which makes the calls legal, not free.
+#: ``.hermes/profiles/alice/node/agent-browser.CMD --version`` **56 times**.
+#: That was recorded as ``doctor.HERMES_HOME`` being bound at module import;
+#: re-measured 2026-09-02, when that binding moved to call time and the spawn
+#: did NOT move with it, the path in fact comes from
+#: ``shutil.which("agent-browser")`` — the operator's PATH, which
+#: ``scripts/run_tests.sh`` forwards verbatim and no hermetic home can
+#: redirect. The gateway fence exempts that exact ``--version`` argv — it
+#: starts nothing — which makes the calls legal, not free.
 #:
 #: What is cached is only the SPAWN. The cheap gates (``None``/empty, the npx
 #: two-token form, ``exists``/``access``) are re-evaluated on every call, so a
