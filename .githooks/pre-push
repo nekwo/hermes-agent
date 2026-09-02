@@ -270,6 +270,18 @@ runner="$repo_root/scripts/run_tests.sh"
 [ -f "$runner" ] || fail "$runner is missing from this checkout." \
     "Lane B cannot run. This is a broken checkout, not a reason to push."
 
+# PREFLIGHT: distinguish "the suite is red" from "the suite never started".
+# `run_tests.sh` refuses when no candidate venv has pytest INSTALLED, and its
+# refusal is correct -- a venv without pytest reports "0 tests passed", which
+# reads green at a glance. But surfacing that refusal as "the lane is red"
+# names the wrong defect and sends the reader hunting for a test failure that
+# does not exist. This is an EXISTENCE check over the runner's own candidate
+# list, not a second copy of its pytest probe: the runner still owns the real
+# decision, and still refuses if the venv it finds turns out to be empty.
+if [ -z "${HERMES_PYTHON:-}" ]    && [ ! -d "$repo_root/.venv" ] && [ ! -d "$repo_root/venv" ]    && [ ! -d "$HOME/.hermes/hermes-agent/venv" ]; then
+    fail "lane B has no interpreter -- it did NOT run, and did not fail either."          "scripts/run_tests.sh probes .venv, venv and ~/.hermes/hermes-agent/venv;"          "none exists here and HERMES_PYTHON is unset. This box has had no .venv"          "since 2026-08-30, and what the canonical test env IS is an open row."          ""          "Fix now:    export HERMES_PYTHON=/path/to/python-with-pytest"          "Fix right:  answer the row and create the canonical venv."
+fi
+
 banner "pre-push lane B: the validated parallel suite lane (~18 min)"
 printf '  %s\n' "$lane_cmd" >&2
 printf '  landing on main; set HERMES_PUSH_SUITE_LANE=skip to push without it (loudly).\n\n' >&2
