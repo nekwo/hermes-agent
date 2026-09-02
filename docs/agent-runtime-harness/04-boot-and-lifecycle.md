@@ -45,7 +45,7 @@ inside the thing measured (`_boot_clock.py:29-31`).
 Two segments have had work aimed at them, and both landed. **`bytecode_sweep_ms`** — two hermes
 processes booting against one checkout is a REAL concurrency, so the sweep is claimed with
 `O_EXCL` and the loser waits rather than overwriting the winner's claim
-(`hermes_cli/main.py:5272-5290`, `:5312`, stale-lock break `:5232`;
+(`hermes_cli/main.py:5079-5097`, `:5119`, stale-lock break `:5039`;
 `tests/hermes_cli/test_bytecode_sweep_lock.py`). **`harness_parser_ms`** — the
 `hermes_cli.harness` import used to drag a full plugin-discovery walk in through
 `tool_visibility` → `model_tools`; it is now function-local (`tool_visibility.py:85`), guarded
