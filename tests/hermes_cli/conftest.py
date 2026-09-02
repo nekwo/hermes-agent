@@ -5,12 +5,13 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import os
+import pathlib
 import sys
 import types
 
 import pytest
 
-from tests._env_gap_fence import EnvGapSkipRegistry, apply_skips
+from tests._env_gap_fence import EnvGapSkipRegistry, apply_skips, is_owned
 from tests.hermes_cli import _gateway_fence
 
 # L2/L3 of the gateway fence: the spawn wrappers go on at conftest IMPORT — the
@@ -22,6 +23,14 @@ from tests.hermes_cli import _gateway_fence
 # tests/hermes_cli/_gateway_fence.py for the full reproduction and for why the
 # two had to be separated.
 _gateway_fence.install()
+
+#: The directory this conftest's registries own, and the node-id prefix its
+#: reports carry. Both hooks below are GLOBAL and every registry is keyed by file
+#: BASENAME, so without these a combined run lets one directory's rows skip — or
+#: claim the pass of — a same-named file in another. tests/_env_gap_fence.py
+#: carries the measurement and the shared half of this scoping.
+_OWNER_DIR = pathlib.Path(__file__).resolve().parent
+_OWNER_NODEID_PREFIX = "tests/hermes_cli/"
 
 
 @pytest.fixture(autouse=True)
@@ -1112,8 +1121,18 @@ def pytest_configure(config):  # noqa: D401 — pytest hook
 
 
 def pytest_collection_modifyitems(items):  # noqa: D401 — pytest hook
-    """Attach the environment-gap mark to every registered node id."""
+    """Attach the environment-gap mark to every registered node id.
+
+    Items OUTSIDE this directory are skipped first. This is a global pytest
+    hook — once this conftest is loaded, pytest hands it every item in the
+    session — and every registry it reads is keyed by file BASENAME, so in a
+    combined run (``pytest tests/hermes_cli tests/cli``) a row here would reach
+    a same-named file one directory over and skip it. See the ownership block in
+    tests/_env_gap_fence.py for the measurement.
+    """
     for item in items:
+        if not is_owned(item.path, _OWNER_DIR):
+            continue
         if (
             _WEB_BUILD_PREREQ_REASON is not None
             and item.path.name in _WEB_BUILD_PREREQ_FILES
@@ -1131,7 +1150,7 @@ def pytest_collection_modifyitems(items):  # noqa: D401 — pytest hook
         for mark, reason, node_ids in groups:
             if within_file in node_ids:
                 item.add_marker(getattr(pytest.mark, mark)(reason=reason))
-    apply_skips(items, _ENV_GAP_SKIPS)
+    apply_skips(items, _ENV_GAP_SKIPS, owner_dir=_OWNER_DIR)
 
 
 _STALE_ENV_GAP_ENTRIES: list[str] = []
@@ -1215,6 +1234,10 @@ def pytest_runtest_logreport(report):  # noqa: D401 — pytest hook
     day someone must read the row and delete it.
     """
     if report.when != "call":
+        return
+    if not report.nodeid.replace("\\", "/").startswith(_OWNER_NODEID_PREFIX):
+        # Another directory's report. Global hook, basename-keyed registries —
+        # see pytest_collection_modifyitems above.
         return
     file_name = report.nodeid.split("::", 1)[0].rsplit("/", 1)[-1]
 

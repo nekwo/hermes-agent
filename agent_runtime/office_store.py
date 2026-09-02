@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any, Callable, NamedTuple
 
 from hermes_time import now
@@ -184,6 +185,84 @@ class DuplicateDeskRefused(AgentRuntimeError):
 OfficePositionPolicy = Callable[["ActorScan"], tuple[float, float]]
 
 
+#: How many unreadable file names one scan CARRIES before the rest become an
+#: overflow count. A store holding a pathological number of undecodable files
+#: must not turn every scan — and every shortfall row derived from one — into an
+#: unbounded list, and an operator who cannot fix ten of them will not be helped
+#: by the eleventh name. The cap is on the NAMES only: ``total`` stays exact.
+MAX_UNREADABLE_ACTOR_FILE_NAMES = 10
+
+
+@dataclass(frozen=True, slots=True)
+class UnreadableActorFiles:
+    """The actor files a scan could not decode — BY NAME, bounded, and counted.
+
+    ``ActorScan`` carried only a count, so the shortfall row it feeds could say
+    "ActorsUnreadable: 3" and nothing more, while ``read_actor_dir`` had the
+    paths in its hand and dropped them. A count tells an operator that something
+    is wrong; a name tells them which file to open. So the names travel.
+
+    Bounded on purpose (:data:`MAX_UNREADABLE_ACTOR_FILE_NAMES`) with the
+    remainder carried as an explicit ``+N more`` rather than silently trimmed:
+    a truncated list that describes itself as whole is the exact defect
+    ``ActorScan`` was created to close, one layer down.
+
+    ``total`` is the one representation of "how many": :attr:`ActorScan.
+    unreadable` reads it rather than keeping a second copy. It is NOT
+    ``len(names)`` once the cap bites, which is why the cap has to be visible in
+    the rendering.
+    """
+
+    #: The file names, at most :data:`MAX_UNREADABLE_ACTOR_FILE_NAMES` of them,
+    #: each ``<directory>/<file>.json`` so an ``actors/`` entry and an
+    #: ``archive/`` entry with the same token cannot be confused.
+    names: tuple[str, ...] = ()
+    #: EVERY undecodable file, capped by nothing. The names may be a prefix of
+    #: this; the count never is.
+    total: int = 0
+
+    @classmethod
+    def of(cls, names: Sequence[str]) -> "UnreadableActorFiles":
+        """THE mint. Caps the names, keeps the count exact."""
+
+        ordered = tuple(str(name) for name in names)
+        return cls(names=ordered[:MAX_UNREADABLE_ACTOR_FILE_NAMES], total=len(ordered))
+
+    def merge(self, other: "UnreadableActorFiles") -> "UnreadableActorFiles":
+        """Two directories' shortfalls as one. Re-caps rather than concatenating
+        two already-capped lists, so a merge of two full lists is still bounded
+        and the count is still the sum of the two totals."""
+
+        return UnreadableActorFiles(
+            names=(*self.names, *other.names)[:MAX_UNREADABLE_ACTOR_FILE_NAMES],
+            total=self.total + other.total,
+        )
+
+    def __bool__(self) -> bool:
+        return bool(self.total)
+
+    def describe(self) -> str:
+        """One line an operator can act on: the names, then what was elided.
+
+        ``""`` when nothing was unreadable — a caller that renders this into a
+        message is asking for the shortfall, and a shortfall of nothing has no
+        words.
+        """
+
+        if not self.total:
+            return ""
+        elided = self.total - len(self.names)
+        if not self.names:
+            return f"{self.total} unnamed"
+        rendered = ", ".join(self.names)
+        return f"{rendered}, +{elided} more" if elided > 0 else rendered
+
+
+#: The shortfall of a directory that had nothing to report. One shared value
+#: because it is immutable and every empty scan means the same thing.
+NO_UNREADABLE_ACTOR_FILES = UnreadableActorFiles()
+
+
 class ActorScan(NamedTuple):
     """What an actor-directory scan FOUND, beside what it could not read.
 
@@ -197,12 +276,23 @@ class ActorScan(NamedTuple):
     Two fields rather than a bare list because the two facts have to travel
     TOGETHER: any seam that carried only the actors would re-open the hole at
     that seam, which is exactly how the projection acquired it.
+
+    The second field is now the FILES and not a bare count: see
+    :class:`UnreadableActorFiles`. :attr:`unreadable` survives as a property
+    over ``unreadable_files.total`` — every reader that only wants the number
+    keeps its spelling, and there is still exactly one place the number lives.
     """
 
     actors: list[OfficeActor]
-    #: How many ``*.json`` files in the scanned directories existed and did not
-    #: decode. NEVER folded into ``actors`` and never silently zero.
-    unreadable: int
+    #: The ``*.json`` files in the scanned directories that existed and did not
+    #: decode. NEVER folded into ``actors`` and never silently empty.
+    unreadable_files: UnreadableActorFiles = NO_UNREADABLE_ACTOR_FILES
+
+    @property
+    def unreadable(self) -> int:
+        """How many files did not decode. Derived, never stored twice."""
+
+        return self.unreadable_files.total
 
 
 #: The one word an outcome that simply WORKED is spelled with. Failures are
@@ -274,17 +364,24 @@ class OfficeActorOutcome:
     def scan_unreadable(cls, workspace_id: str, scan: ActorScan) -> "OfficeActorOutcome":
         """The shortfall row for a workspace whose actor directory read short.
 
-        The COUNT is what the scan can honestly supply (``read_actor_dir``
-        keeps a per-class tally, not a path list), and the count is enough to do
-        this row's job: turn an empty failure list back into the positive claim
-        ``agent_retire``'s docstring says it is.
+        NAMES the files, and not only how many there were. The row's job is to
+        turn an empty failure list back into the positive claim
+        ``agent_retire``'s docstring says it is — a count does that, but a count
+        is also the whole of what an operator gets, and "3 files here would not
+        open" is not something anyone can act on. ``read_actor_dir`` is standing
+        on the paths (:class:`UnreadableActorFiles`), so the row spends them.
+
+        The COUNT stays in ``outcome``, which is the machine-read half and is
+        matched on by prefix; the names ride ``error``, which is the half meant
+        for a human. Bounded there by the scan, not here — see
+        :data:`MAX_UNREADABLE_ACTOR_FILE_NAMES`.
         """
 
         return cls(
             workspace_id=workspace_id,
             actor_key=None,
             outcome=f"scan_unreadable:{scan.unreadable}",
-            error=f"ActorsUnreadable: {scan.unreadable}",
+            error=f"ActorsUnreadable: {scan.unreadable} ({scan.unreadable_files.describe()})",
         )
 
     @classmethod
@@ -408,24 +505,31 @@ def read_actor_dir(directory) -> ActorScan:
 
     actors: list[OfficeActor] = []
     if not directory.exists():
-        return ActorScan(actors, 0)
-    unreadable = 0
+        return ActorScan(actors)
+    # The NAMES, not just a tally: the reader is standing on the paths, and the
+    # shortfall row downstream can only name a file if this loop keeps one.
+    # Qualified by the directory (``actors/x.json`` vs ``archive/x.json``)
+    # because ``scan_actors`` merges two of these and the file TOKEN alone is
+    # the same in both.
+    unreadable_names: list[str] = []
     classes: dict[str, int] = {}
     for path in sorted(directory.glob("*.json")):
         try:
             actors.append(from_jsonable(OfficeActor, _read_json(path)))
         except Exception as exc:  # noqa: BLE001 — the scan survives one bad file
-            unreadable += 1
+            unreadable_names.append(f"{directory.name}/{path.name}")
             name = type(exc).__name__
             classes[name] = classes.get(name, 0) + 1
+    unreadable = UnreadableActorFiles.of(unreadable_names)
     if classes:
         import logging
 
         logging.getLogger(__name__).warning(
-            "office actor files unreadable in %s: %d (%s)",
+            "office actor files unreadable in %s: %d (%s) [%s]",
             f"{directory.parent.name}/{directory.name}",
-            unreadable,
+            unreadable.total,
             ", ".join(f"{name} x{count}" for name, count in sorted(classes.items())),
+            unreadable.describe(),
         )
     return ActorScan(actors, unreadable)
 
@@ -1033,27 +1137,64 @@ class OfficeStore:
             raise ValueError("invalid_request")
         if self.surface_exists(wsid):
             return self.get_surface(wsid)
-        if not self.workspace_resolves(wsid):
-            # ``workspace_resolves`` is the SHARED predicate — the one
-            # ``archive_orphaned_surface`` refuses on, derived from the same
-            # membership the ``orphaned_office`` parity warning uses — so the
-            # door and the diagnostic cannot answer differently about one id.
-            # Archived workspaces resolve, deliberately: an archived workspace is
-            # a real record and its office is not an orphan.
-            raise WorkspaceUnresolved(
-                f"no workspace record resolves '{wsid}', so an office surface "
-                "will not be authored for it; create the workspace first, or if "
-                "the id is expected to arrive by realm sync, pull the realm "
-                "before placing into it",
-                safe_details={"workspace_id": wsid},
-            )
+        self._refuse_unresolvable_workspace(wsid)
         with office_lock(wsid):
-            if self.surface_exists(wsid):
-                return self.get_surface(wsid)
-            surface = office_models.default_surface(wsid, created_at=now(), updated_by=_safe_actor_ref(created_by))
-            _write_surface(surface)
-            self._emit("office.surface.created", workspace_id=surface.workspace_id)
+            self._ensure_surface_locked(wsid, created_by=created_by)
         return self.get_surface(wsid)
+
+    def _refuse_unresolvable_workspace(self, wsid: str) -> None:
+        """THE door, spelled once, so every caller refuses in the same words.
+
+        ``workspace_resolves`` is the SHARED predicate — the one
+        ``archive_orphaned_surface`` refuses on, derived from the same
+        membership the ``orphaned_office`` parity warning uses — so the door and
+        the diagnostic cannot answer differently about one id. Archived
+        workspaces resolve, deliberately: an archived workspace is a real record
+        and its office is not an orphan.
+
+        Extracted because :meth:`upsert_actor` has to spend this refusal at a
+        different MOMENT than the creation it used to be welded to (see
+        :meth:`_ensure_surface_locked`), and two spellings of one door are two
+        doors free to disagree.
+        """
+
+        if self.workspace_resolves(wsid):
+            return
+        raise WorkspaceUnresolved(
+            f"no workspace record resolves '{wsid}', so an office surface "
+            "will not be authored for it; create the workspace first, or if "
+            "the id is expected to arrive by realm sync, pull the realm "
+            "before placing into it",
+            safe_details={"workspace_id": wsid},
+        )
+
+    def _ensure_surface_locked(self, wsid: str, *, created_by: str) -> OfficeSurface:
+        """The CREATION half of :meth:`ensure_surface`, for a caller that ALREADY
+        holds ``office_lock(wsid)``.
+
+        ``office_lock`` is NOT reentrant (``locks._file_lock``): a second
+        acquisition from this same process contends with the first and refuses
+        at the deadline rather than deadlocking. So a write verb that must
+        author the surface INSIDE its own lock — after its fences have passed,
+        not before — cannot call :meth:`ensure_surface`; it calls this. Same
+        split, same reason, as ``upsert_actor``'s ``position_policy`` hook: work
+        that must see or extend the locked state runs inside the lock that
+        already holds it, never by taking it again.
+
+        The unresolved-workspace refusal runs here TOO, not only at the pre-lock
+        site: a helper that authors a surface without asking whether the
+        workspace resolves would be a second door past ``ensure_surface``'s, and
+        MC-8's whole finding was that an unresolved id could author a LIVE
+        office.
+        """
+
+        if self.surface_exists(wsid):
+            return self.get_surface(wsid)
+        self._refuse_unresolvable_workspace(wsid)
+        surface = office_models.default_surface(wsid, created_at=now(), updated_by=_safe_actor_ref(created_by))
+        _write_surface(surface)
+        self._emit("office.surface.created", workspace_id=surface.workspace_id)
+        return surface
 
     def update_surface(
         self,
@@ -1154,11 +1295,11 @@ class OfficeStore:
 
         scan = read_actor_dir(paths.office_actors_dir(workspace_id))
         actors = scan.actors
-        unreadable = scan.unreadable
+        unreadable = scan.unreadable_files
         if include_archived:
             archived = read_actor_dir(paths.office_archive_dir(workspace_id))
             actors = [*actors, *archived.actors]
-            unreadable += archived.unreadable
+            unreadable = unreadable.merge(archived.unreadable_files)
         return ActorScan(sorted(actors, key=lambda a: a.actor_key), unreadable)
 
     def scan_conflicts(self, workspace_id: str) -> ConflictScan:
@@ -1234,6 +1375,20 @@ class OfficeStore:
         position_policy: OfficePositionPolicy | None = None,
     ) -> OfficeActor:
         """Write ONE actor placement, creating the surface if it does not exist.
+
+        THE ORDER: refuse an unresolvable workspace BEFORE the lock, run every
+        fence INSIDE it, and author the surface only once the write is going to
+        happen. It used to be one ``ensure_surface`` call ABOVE the lock, which
+        made "this workspace has an office" a side effect of ATTEMPTING a
+        placement rather than of making one — a refused write left a default
+        ``office.json`` behind on a workspace that had none, for every guard
+        (class-key, desk, tombstone, conflict, revision) and by construction.
+        The creation could not simply move down into the existing lock as an
+        ``ensure_surface`` call, because ``office_lock`` is not reentrant
+        (``locks._file_lock``) and this frame already holds it; the creation half
+        is therefore reachable on its own as :meth:`_ensure_surface_locked`,
+        while the refusal — the only part that must keep its precedence over the
+        fences — stays where it was.
 
         ``allow_class_key`` is the sanctioned override for the class→instance
         re-key fence below (``_guard_class_keyed_write``). It is a STORE
@@ -1311,7 +1466,17 @@ class OfficeStore:
             items = []
 
         if not dry_run:
-            self.ensure_surface(wsid, created_by=updated_by)
+            # The REFUSAL here, the CREATION under the lock (see the write half
+            # below). This used to be one ``ensure_surface`` call, and it
+            # authored a default ``office.json`` BEFORE any fence had run — so a
+            # write the class-key, desk, tombstone, conflict or revision guard
+            # was about to refuse still left a live office behind on a
+            # surface-less workspace, for every guard and by construction. The
+            # refusal keeps its old position on purpose: it is the first thing
+            # ``upsert_actor`` can answer about an id, and moving it under the
+            # fences would make an unresolved workspace hear a class-key
+            # sentence about a placement it can never make.
+            self._refuse_unresolvable_workspace(wsid)
         with office_lock(wsid):
             # THE class-key fence, first and inside the lock (EG-6.6). First
             # because that is the precedence the four caller-side copies had —
@@ -1411,7 +1576,12 @@ class OfficeStore:
                 # revision check ran above; return the would-be actor in memory.
                 # Write nothing, touch no ledger, emit no event.
                 return actor
-            surface = self.get_surface(wsid)
+            # THE surface creation, here rather than before the lock: every
+            # fence above has passed, so this is the first line of an upsert
+            # that is actually going to happen. ``_ensure_surface_locked``
+            # rather than ``ensure_surface`` because ``office_lock`` is not
+            # reentrant and this frame already holds it.
+            surface = self._ensure_surface_locked(wsid, created_by=updated_by)
             _write_actor(actor)
             # An explicit local upsert of an archived key is operator intent to
             # re-add: clear the resurrection-guard ledger entry + archive copy

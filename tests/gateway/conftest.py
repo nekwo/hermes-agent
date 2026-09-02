@@ -684,13 +684,19 @@ _ENV_GAP_SKIPS: EnvGapSkipRegistry = {
     ],
 }
 
+#: The directory this conftest's registries own. The env-gap hooks below are
+#: GLOBAL — pytest hands them every item and every report in the session once
+#: this conftest is loaded — so a combined run would otherwise let these rows
+#: reach a same-named file in another directory. See tests/_env_gap_fence.py.
+_OWNER_DIR = Path(__file__).resolve().parent
+
 _STALE = StaleEntryTracker(_ENV_GAPS, "tests/gateway/conftest.py")
 
 
 def pytest_collection_modifyitems(items):  # noqa: D401 — pytest hook
     """Attach the environment-gap mark to every registered node id."""
-    apply_marks(items, _ENV_GAPS)
-    apply_skips(items, _ENV_GAP_SKIPS)
+    apply_marks(items, _ENV_GAPS, owner_dir=_OWNER_DIR)
+    apply_skips(items, _ENV_GAP_SKIPS, owner_dir=_OWNER_DIR)
 
 
 def pytest_runtest_logreport(report):  # noqa: D401 — pytest hook

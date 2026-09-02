@@ -162,3 +162,92 @@ def test_no_skip_row_points_at_a_deleted_test(directory: str) -> None:
         f"These rows in _ENV_GAP_SKIPS ({conftest.relative_to(TESTS_ROOT.parent)}) "
         "name tests that no longer exist:\n  " + "\n  ".join(orphans)
     )
+
+
+# ── ownership: a directory's registry may only reach that directory ─────────
+
+
+class _FakeItem:
+    """The two attributes ``apply_skips``/``apply_marks`` read off an item, plus
+    a marker sink. Not a pytest item: what is under test is which items the
+    registry TOUCHES, and a real item would need a whole collection to exist."""
+
+    def __init__(self, path: Path, name: str) -> None:
+        self.path = path
+        self.nodeid = f"{path.as_posix()}::{name}"
+        self.markers: list[object] = []
+
+    def add_marker(self, marker) -> None:
+        self.markers.append(marker)
+
+
+def test_a_directorys_registry_cannot_reach_another_directorys_file():
+    """The cross-directory conftest interaction, closed at the mechanism.
+
+    Every registry is keyed by file BASENAME, and every conftest that owns one
+    registers ``pytest_collection_modifyitems`` — a GLOBAL pytest hook, handed
+    every item in the session once that conftest is loaded, not just its own
+    directory's. In a single-directory run the two facts never meet. In a
+    combined run they compose: ``tests/gateway``'s row for
+    ``test_update_command.py`` also matches ``tests/cli/test_update_command.py``,
+    and a row that fires there SKIPS a test nobody registered — silently, because
+    a skip is not a failure.
+
+    Measured live at this HEAD: that one basename really is shared across the two
+    directories, and it is the only pair today. "Only one today" is the state a
+    landmine is in before it goes off, and the fix is at the mechanism rather
+    than at the row: ownership is a required parameter, and an item outside the
+    owning directory is not the registry's to touch.
+
+    Both halves, because a scoping check that refuses everything would pass the
+    first: the OWNED item must still be skipped.
+    """
+
+    from tests._env_gap_fence import apply_skips
+
+    owner = TESTS_ROOT / "gateway"
+    registry: EnvGapSkipRegistry = {
+        "test_update_command.py": [(lambda: True, "the gap is present", {"test_a"})],
+    }
+    mine = _FakeItem(owner / "test_update_command.py", "test_a")
+    theirs = _FakeItem(TESTS_ROOT / "cli" / "test_update_command.py", "test_a")
+
+    apply_skips([mine, theirs], registry, owner_dir=owner)
+
+    assert mine.markers, "the registry stopped skipping its OWN directory's row"
+    assert not theirs.markers, (
+        "tests/gateway's registry skipped a same-named test in tests/cli — a "
+        "combined run is silently deselecting another directory's coverage"
+    )
+
+
+def test_the_stale_row_tracker_does_not_claim_another_directorys_pass():
+    """The same interaction on the reporting half.
+
+    ``pytest_runtest_logreport`` is global too, so in a combined run the tracker
+    sees every other directory's reports. A pass one directory over, in a
+    same-named file, would be printed as a stale row of OURS — and the operator's
+    instruction for a stale row is to DELETE it, which would retire a fence that
+    was never stale.
+    """
+
+    from tests._env_gap_fence import StaleEntryTracker
+
+    class _Report:
+        def __init__(self, nodeid: str) -> None:
+            self.nodeid = nodeid
+            self.when = "call"
+            self.outcome = "passed"
+
+    registry = {
+        "test_update_command.py": [("windows_env_gap", "reason", {"test_a"})],
+    }
+    tracker = StaleEntryTracker(registry, "tests/gateway/conftest.py")
+    tracker.record(_Report("tests/cli/test_update_command.py::test_a"))
+    assert not tracker._passed, (
+        "tests/gateway's tracker claimed a tests/cli pass as its own stale row"
+    )
+    tracker.record(_Report("tests/gateway/test_update_command.py::test_a"))
+    assert tracker._passed == ["tests/gateway/test_update_command.py::test_a"], (
+        "the tracker stopped seeing its own directory's rows"
+    )

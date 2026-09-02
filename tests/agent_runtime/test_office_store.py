@@ -1208,9 +1208,15 @@ def test_a_prune_over_an_unreadable_directory_reports_the_shortfall():
     assert result["archived_actor_keys"] == ["personainst_c4_qa"]
     assert not store.actor_exists(ws, "personainst_c4_qa")
     # ``actor_key: None`` — the key of the file that would not decode is exactly
-    # what could not be decoded, so naming one would be inventing it.
+    # what could not be decoded, so naming one would be inventing it. The FILE
+    # can be named, and now is: the scan carries the paths it skipped, so the
+    # row an operator reads points at something they can open.
     assert result["failures"] == [
-        {"actor_key": None, "workspace_id": ws, "error": "ActorsUnreadable: 1"}
+        {
+            "actor_key": None,
+            "workspace_id": ws,
+            "error": "ActorsUnreadable: 1 (actors/broken.json)",
+        }
     ]
     assert result["failed"] == 1
 
@@ -1703,7 +1709,11 @@ def test_the_prunes_ack_is_derived_from_its_outcomes_and_cannot_disagree():
     assert result["failed"] == len(result["failures"]) == 1
     assert result["archived_actor_keys"] == ["personainst_hh3_a"]
     assert result["failures"] == [
-        {"actor_key": None, "workspace_id": ws, "error": "ActorsUnreadable: 1"}
+        {
+            "actor_key": None,
+            "workspace_id": ws,
+            "error": "ActorsUnreadable: 1 (actors/broken.json)",
+        }
     ]
 
 
@@ -1927,3 +1937,157 @@ def test_the_row_builder_refuses_to_default_the_guess_list():
     assert param.default is inspect.Parameter.empty
     with pytest.raises(TypeError):
         office_summary_row(object(), [], actors_unreadable=0)
+
+
+# ── a refused upsert authors nothing (the ensure_surface/office_lock order) ──
+
+
+def test_a_refused_upsert_leaves_no_office_behind_on_a_surfaceless_workspace():
+    """The surface is authored by a placement that HAPPENS, not by one attempted.
+
+    ``upsert_actor`` called ``ensure_surface`` above ``office_lock`` — before a
+    single fence had run — so every refusal in the verb had the same side effect:
+    a workspace that had no office came out of the refused call holding a default
+    ``office.json``, at revision 1, created_by the operator who was just told no.
+    That is a write nobody asked for and nobody is told about, and it is shared by
+    every guard: the class-key fence, the desk fence, the tombstone fence, the
+    conflict guard and the revision check all refuse AFTER the office exists.
+
+    Driven through the revision guard because it is the one refusal reachable on
+    a workspace with no state at all — no migration, no archive, no sibling desk —
+    which is exactly the case where the leftover office is most visible.
+
+    ANTI-VACUITY, and it is the assertion that matters: an accepted upsert on the
+    same workspace still authors the surface. A store that had simply stopped
+    creating offices would satisfy the first half and fail here.
+    """
+
+    ws = _make_workspace()
+    store = OfficeStore()
+    assert not store.surface_exists(ws), "fixture already has an office"
+
+    with pytest.raises(StaleRevision):
+        store.upsert_actor(ws, _actor_payload("dev"), expect_revision=7)
+
+    assert not store.surface_exists(ws), (
+        "a refused upsert authored an office for a workspace that had none — the "
+        "surface is being created by the ATTEMPT rather than by the placement"
+    )
+    assert not paths.office_surface_path(ws).exists()
+    assert "office.surface.created" not in _event_types()
+
+    store.upsert_actor(ws, _actor_payload("dev"))
+    assert store.surface_exists(ws)
+    assert "office.surface.created" in _event_types()
+
+
+def test_a_fence_refusal_authors_no_office_either(monkeypatch):
+    """The same property, asked of the FENCE lane rather than the revision check.
+
+    The revision guard and the fences sit on either side of the position-policy
+    hook and the archive read, so proving one says nothing about the other. This
+    drives the desk fence — the one this order defect was found beside — by
+    making it refuse on a workspace where no desk exists, which is what a fence
+    on a fresh workspace looks like from the store's point of view.
+    """
+
+    from agent_runtime.office_store import OfficeStore as _Store
+
+    ws = _make_workspace()
+    store = OfficeStore()
+
+    def _always_refuses(self, workspace_id, *, actor_key, items):
+        raise DuplicateDeskRefused("duplicate_desk", safe_details={"actor_key": actor_key})
+
+    monkeypatch.setattr(_Store, "_guard_duplicate_desk", _always_refuses)
+
+    with pytest.raises(DuplicateDeskRefused):
+        store.upsert_actor(ws, _actor_payload("dev"))
+
+    assert not store.surface_exists(ws), (
+        "the desk fence refused and the store still authored the office the "
+        "refused placement would have gone into"
+    )
+
+
+def test_an_unresolvable_workspace_is_still_refused_before_any_fence():
+    """The refusal that had to KEEP its position when the creation moved.
+
+    ``ensure_surface``'s workspace-record refusal (MC-8) ran before the lock and
+    therefore before every fence. Moving the surface CREATION under the lock must
+    not take the refusal with it: an id no workspace record resolves has no
+    business hearing a class-key or desk sentence about a placement it can never
+    make, and the store must not go near its actor directory to find that out.
+    """
+
+    store = OfficeStore()
+    with pytest.raises(WorkspaceUnresolved):
+        store.upsert_actor("ws_no_such_record", _actor_payload("dev"))
+    assert not store.surface_exists("ws_no_such_record")
+
+
+# ── the scan NAMES what it could not read ───────────────────────────────────
+
+
+def test_the_scan_names_the_files_it_could_not_read_and_bounds_the_list():
+    """``ActorScan`` carried a COUNT while the reader was standing on the paths.
+
+    "3 actor files here would not open" tells an operator something is wrong and
+    nothing about what to do next; ``actors/broken.json`` tells them which file to
+    open. The names travel now — bounded, because a store holding a pathological
+    number of undecodable files must not turn every scan into an unbounded list,
+    and with the remainder spelled ``+N more`` rather than trimmed away, since a
+    truncated list that describes itself as whole is the exact defect ``ActorScan``
+    exists to close one layer down.
+
+    ``unreadable`` is asserted to be the EXACT total past the cap: the count is
+    not ``len(names)``, which is why the elision has to be visible.
+    """
+
+    from agent_runtime.office_store import MAX_UNREADABLE_ACTOR_FILE_NAMES
+
+    ws = _make_workspace()
+    store = OfficeStore()
+    store.upsert_actor(ws, _actor_payload("dev"))
+    (paths.office_actors_dir(ws) / "broken.json").write_text("{not json", encoding="utf-8")
+
+    scan = store.scan_actors(ws)
+    assert [a.actor_key for a in scan.actors] == ["dev"]
+    assert scan.unreadable == 1
+    assert scan.unreadable_files.names == ("actors/broken.json",)
+    assert scan.unreadable_files.describe() == "actors/broken.json"
+
+    overflow = MAX_UNREADABLE_ACTOR_FILE_NAMES + 3
+    for index in range(overflow - 1):
+        (paths.office_actors_dir(ws) / f"broken{index:02d}.json").write_text(
+            "{not json", encoding="utf-8"
+        )
+
+    scan = store.scan_actors(ws)
+    assert scan.unreadable == overflow, "the COUNT is capped by nothing"
+    assert len(scan.unreadable_files.names) == MAX_UNREADABLE_ACTOR_FILE_NAMES
+    assert scan.unreadable_files.describe().endswith("+3 more"), (
+        "the elided remainder is silent, so the list reads as the whole story"
+    )
+
+
+def test_the_archived_directorys_shortfall_is_distinguishable_from_the_live_ones():
+    """A merged scan says WHICH directory each unreadable file was in.
+
+    ``scan_actors(include_archived=True)`` reads two directories, and an actor
+    file and its archive copy share a filename token. A bare ``broken.json`` in
+    the merged list would be a name an operator cannot act on — the whole reason
+    the count was not enough in the first place.
+    """
+
+    ws = _make_workspace()
+    store = OfficeStore()
+    store.upsert_actor(ws, _actor_payload("dev"))
+    (paths.office_actors_dir(ws) / "broken.json").write_text("{not json", encoding="utf-8")
+    archive_dir = paths.office_archive_dir(ws)
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    (archive_dir / "broken.json").write_text("{not json", encoding="utf-8")
+
+    scan = store.scan_actors(ws, include_archived=True)
+    assert scan.unreadable == 2
+    assert set(scan.unreadable_files.names) == {"actors/broken.json", "archive/broken.json"}

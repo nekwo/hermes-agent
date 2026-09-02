@@ -98,7 +98,22 @@ def test_the_same_identity_is_resolved_once_and_served_the_same_object():
     first = CLB.chat_lane_bundle(persona, session_id="chat-reuse")
     second = CLB.chat_lane_bundle(persona, session_id="chat-reuse")
     if second is not first:
-        # A digest is unreadable evidence. Name the component that moved.
+        # A digest is unreadable evidence. Name the component that moved — and
+        # FIRST establish which of the two possible causes actually fired, because
+        # they have opposite fixes and this failure used to report only one of
+        # them. A rebuild means either the KEY moved (an input changed under two
+        # identical lookups) or the key held and the bundle was never stored,
+        # which ``chat_lane_bundle`` does only for a bundle that came back
+        # incomplete. Blaming the key for a degraded component sent the one
+        # intermittent red this cache has produced looking in the wrong place.
+        if first.key == second.key:
+            pytest.fail(
+                "the bundle key HELD across two identical lookups and the bundle was "
+                "still rebuilt, so it was never memoized: chat_lane_bundle() stores "
+                "only a complete bundle. Degraded components (component:ExceptionClass) "
+                f"= {list(first.degraded)!r} / {list(second.degraded)!r}. Fix the "
+                "component that faulted; the key is not the problem."
+            )
         material = CLB.chat_lane_bundle_key_material(
             persona,
             permission_options_for_chat(persona, session_id="chat-reuse"),
@@ -316,10 +331,33 @@ def test_a_degraded_bundle_is_served_to_this_turn_and_then_thrown_away(monkeypat
     first = CLB.chat_lane_bundle(persona, session_id="chat-fault")
     assert first.complete is False
     assert first.capability() == {}
+    # WHICH component, and what it raised. ``complete`` alone says only that
+    # something degraded, and its loudest consequence — the bundle is never
+    # memoized, so the next lookup rebuilds — reaches a reuse measurement two
+    # layers up as "the object changed" with no cause attached. That is not
+    # hypothetical: it is the shape of the one intermittent red this cache has
+    # produced, where the only diagnosis on offer named the bundle KEY, which had
+    # not moved. The class, never the message, per this runtime's disclosure rule.
+    assert first.degraded == ("capability_account:RuntimeError",)
 
     second = CLB.chat_lane_bundle(persona, session_id="chat-fault")
     assert second is not first, "a degraded bundle was pinned in the cache"
     assert len(faults) == 2
+
+
+def test_a_complete_bundle_names_no_degraded_component(monkeypatch):
+    """Anti-vacuity for the row above: the field is EMPTY on the healthy path.
+
+    A ``degraded`` that always carried something (or always carried nothing)
+    would satisfy the assertion there while telling a diagnosing operator
+    nothing, which is the failure mode the field exists to end.
+    """
+
+    persona = _persona()
+    _warm_the_lane(persona)
+    bundle = CLB.chat_lane_bundle(persona, session_id="chat-healthy")
+    assert bundle.complete is True
+    assert bundle.degraded == ()
 
 
 def test_a_hard_component_fault_still_fails_the_turn(monkeypatch):

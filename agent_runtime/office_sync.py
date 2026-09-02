@@ -214,7 +214,7 @@ def update_office_baseline_after_sync(realm_id: str, workspace_ids: list[str]) -
         # alone describe a directory this read may only have half-decoded, which
         # is precisely the fact this arm has to know before it writes a
         # completeness claim.
-        scan = store.scan_actors(workspace_id) if exists else ActorScan([], 0)
+        scan = store.scan_actors(workspace_id) if exists else ActorScan([])
         refusal = OfficeSyncRefusal.for_scan(workspace_id, scan)
         if refusal is not None:
             summary.refused.append(refusal.as_dict())
@@ -559,7 +559,7 @@ def apply_office_pull(realm_id: str, subtree: Path, *, event_log: EventLog | Non
         # classifier below as ``local_hash=None``, and is then indistinguishable
         # from an actor the member deleted — so the pull would either adopt over
         # it or archive it. Refuse the workspace, keep the count, judge nothing.
-        local_scan = store.scan_actors(workspace_id) if store.surface_exists(workspace_id) else ActorScan([], 0)
+        local_scan = store.scan_actors(workspace_id) if store.surface_exists(workspace_id) else ActorScan([])
         unknowable = OfficeSyncRefusal.for_scan(workspace_id, local_scan)
         if unknowable is not None:
             summary.unknowable.append(unknowable.as_dict())

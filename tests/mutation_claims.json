@@ -3236,6 +3236,81 @@
         "-q",
         "tests/agent_runtime/test_serve_rpc_media.py::test_the_peer_keyhole_refuses_a_caller_that_proved_no_install"
       ]
+    },
+    {
+      "id": "uaf-surface-authored-before-the-fences-again",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "OfficeStore.upsert_actor",
+      "operator": "restore-ensure-surface-above-the-lock",
+      "find": "            self._refuse_unresolvable_workspace(wsid)\n        with office_lock(wsid):",
+      "replace": "            self.ensure_surface(wsid, created_by=updated_by)\n        with office_lock(wsid):",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_a_refused_upsert_leaves_no_office_behind_on_a_surfaceless_workspace"
+      ]
+    },
+    {
+      "id": "uaf-fence-refusal-still-authors-the-office",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "OfficeStore.upsert_actor",
+      "operator": "restore-ensure-surface-above-the-lock",
+      "find": "            self._refuse_unresolvable_workspace(wsid)\n        with office_lock(wsid):",
+      "replace": "            self.ensure_surface(wsid, created_by=updated_by)\n        with office_lock(wsid):",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_a_fence_refusal_authors_no_office_either"
+      ]
+    },
+    {
+      "id": "uaf-scan-drops-the-names-it-is-standing-on",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "read_actor_dir",
+      "operator": "degrade-named-shortfall-to-a-count",
+      "find": "    unreadable = UnreadableActorFiles.of(unreadable_names)",
+      "replace": "    unreadable = UnreadableActorFiles(names=(), total=len(unreadable_names))",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_scan_names_the_files_it_could_not_read_and_bounds_the_list"
+      ]
+    },
+    {
+      "id": "uaf-unreadable-name-list-loses-its-bound",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "UnreadableActorFiles.of",
+      "operator": "unbound-the-name-list",
+      "find": "        return cls(names=ordered[:MAX_UNREADABLE_ACTOR_FILE_NAMES], total=len(ordered))",
+      "replace": "        return cls(names=ordered, total=len(ordered))",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_scan_names_the_files_it_could_not_read_and_bounds_the_list"
+      ]
+    },
+    {
+      "id": "uaf-degraded-component-collapses-to-a-bare-flag",
+      "path": "agent_runtime/chat_lane_bundle.py",
+      "symbol": "_build_bundle",
+      "operator": "collapse-degradation-reason",
+      "find": "        degraded.append(f\"capability_account:{type(exc).__name__}\")",
+      "replace": "        degraded.append(\"degraded\")",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_chat_lane_bundle.py::test_a_degraded_bundle_is_served_to_this_turn_and_then_thrown_away"
+      ]
     }
   ]
 }

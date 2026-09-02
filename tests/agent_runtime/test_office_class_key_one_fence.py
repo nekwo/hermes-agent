@@ -415,63 +415,163 @@ def test_no_lane_holds_a_second_copy_of_the_predicate():
 # ── witness 3: enumeration — a fourth writer reds ───────────────────────────
 
 
+#: THE fences a live actor write can stand behind. The disposition table is keyed
+#: (writer × fence) on ALL of them, so a writer cannot declare its relationship to
+#: one and stay silent about the rest.
+#:
+#: It was keyed by writer alone, with a single sentence per writer, and every one
+#: of those sentences happened to talk about the class-key fence — so
+#: ``upsert_actor``'s DESK fence (D6) and TOMBSTONE fence (D1) were pinned by
+#: nothing at all. That is not a gap in the rows; it is the shape of the table
+#: choosing which question can be asked of it. A one-fence table cannot notice a
+#: second fence going missing, and a five-fence store cannot be described by a
+#: one-column pin.
+ACTOR_FENCES = ("class_key", "desk", "tombstone")
+
+#: Which store guard each fence is spent through. The witness reads these out of
+#: a writer's source, so the table's words are CHECKED rather than believed:
+#: "FENCED" must name the guard, and every other verdict must not.
+FENCE_GUARDS: dict[str, tuple[str, ...]] = {
+    "class_key": ("_guard_class_keyed_write", "_guard_class_keyed_adoption"),
+    "desk": ("_guard_duplicate_desk",),
+    "tombstone": ("_guard_archived_actor",),
+}
+
+#: The verdict a disposition may open with. A free-text sentence is a disposition
+#: nothing can check; the leading token is the part the witness reads.
+FENCED = "FENCED"
+SANCTIONED_OVERRIDE = "SANCTIONED OVERRIDE"
+UNFENCED = "UNFENCED"
+PRIMITIVE = "THE PRIMITIVE"
+_VERDICTS = (FENCED, SANCTIONED_OVERRIDE, UNFENCED, PRIMITIVE)
+
 #: Every production function that writes a LIVE actor file, with the disposition
-#: that makes it safe. Adding a writer means adding a line here BY HAND, which is
-#: the cost of the pin and much cheaper than the hole it closes.
-FENCED_ACTOR_WRITERS = {
-    ("agent_runtime/office_store.py", "upsert_actor"): (
-        "FENCED — _guard_class_keyed_write, first inside the lock; override is the "
-        "explicit allow_class_key parameter"
-    ),
-    ("agent_runtime/office_store.py", "resolve_conflict"): (
-        "FENCED — _guard_class_keyed_adoption (peer-authored record, past upsert_actor); "
-        "override is the explicit allow_class_key parameter"
-    ),
-    ("agent_runtime/office_store.py", "restore_actor"): (
-        "SANCTIONED OVERRIDE — un-archiving IS the deliberate resurrection the fence "
-        "refuses elsewhere, and the exit refusal_message points at. Fencing it would "
-        "make the refusal a dead end."
-    ),
-    ("agent_runtime/office_store.py", "_write_actor"): (
-        "THE PRIMITIVE — the one-line atomic write every entry above funnels into. "
-        "Not a writer, the thing writers use."
-    ),
+#: that makes it safe — one per fence, all of them, for each writer. Adding a
+#: writer means adding a BLOCK here BY HAND, and adding a fence means adding a
+#: column to every block; that is the cost of the pin and much cheaper than the
+#: hole it closes.
+FENCED_ACTOR_WRITERS: dict[tuple[str, str], dict[str, str]] = {
+    ("agent_runtime/office_store.py", "upsert_actor"): {
+        "class_key": (
+            "FENCED — _guard_class_keyed_write, first inside the lock; override is the "
+            "explicit allow_class_key parameter"
+        ),
+        "desk": (
+            "FENCED — _guard_duplicate_desk (D6), inside the same lock, after the "
+            "class-key fence and the conflict guard and before the revision check. NO "
+            "override parameter, and that asymmetry is deliberate: the class-key fence "
+            "guards a MIGRATION an operator may legitimately want undone, this one "
+            "guards an invariant the render layer depends on, so the way past it is to "
+            "move or remove the desk that is already there."
+        ),
+        "tombstone": (
+            "FENCED — _guard_archived_actor (D1), on the ``existing is None`` arm and "
+            "before the archive file is read; override is the explicit resurrect "
+            "parameter, which is ORTHOGONAL to allow_class_key and never implied by it."
+        ),
+    },
+    ("agent_runtime/office_store.py", "resolve_conflict"): {
+        "class_key": (
+            "FENCED — _guard_class_keyed_adoption (peer-authored record, past upsert_actor); "
+            "override is the explicit allow_class_key parameter"
+        ),
+        "desk": (
+            "UNFENCED — the verb adopts a record a PEER already published, so a duplicate "
+            "desk arriving through it is a conflict-lane fact about what the peer holds, "
+            "not a local placement this store may refuse. Same boundary the realm pull's "
+            "adopt arm was ruled onto (D3), and the same reason the launcher's "
+            "render-time duplicate_desk warning stays."
+        ),
+        "tombstone": (
+            "UNFENCED — resolving a conflict is deciding between two versions of a row "
+            "that EXISTS on both sides; there is no re-add for the tombstone fence to "
+            "refuse, and refusing here would leave the conflict sidecar unresolvable."
+        ),
+    },
+    ("agent_runtime/office_store.py", "restore_actor"): {
+        "class_key": (
+            "SANCTIONED OVERRIDE — un-archiving IS the deliberate resurrection the fence "
+            "refuses elsewhere, and the exit refusal_message points at. Fencing it would "
+            "make the refusal a dead end."
+        ),
+        "desk": (
+            "SANCTIONED OVERRIDE — restore puts BACK the actor that was archived, items "
+            "and all. Refusing it on a desk that was authored elsewhere in the meantime "
+            "would make the archive a one-way door; the operator's remedy is the same as "
+            "the desk fence's own (move or remove the other desk) and they can see both."
+        ),
+        "tombstone": (
+            "SANCTIONED OVERRIDE — this verb IS the tombstone fence's exit. It is what "
+            "the D1 refusal names, so fencing it would be the same dead end."
+        ),
+    },
+    ("agent_runtime/office_store.py", "_write_actor"): {
+        "class_key": (
+            "THE PRIMITIVE — the one-line atomic write every entry above funnels into. "
+            "Not a writer, the thing writers use."
+        ),
+        "desk": (
+            "THE PRIMITIVE — same. A fence here would fire under restore_actor and under "
+            "the pull's adopt arm, both of which are ruled unfenced above."
+        ),
+        "tombstone": (
+            "THE PRIMITIVE — same, and most sharply so: restore_actor reaches this "
+            "function precisely to raise the dead."
+        ),
+    },
 }
 
 #: NOT blessed. Named, with its ruling, so the witness DOCUMENTS the hole instead
 #: of silently passing over it.
-CARVED_OUT_ACTOR_WRITERS = {
-    ("agent_runtime/office_store.py", "adopt_remote_actor"): (
-        "OPEN HOLE, HELD FOR A RULING — task #33. The realm-sync pull's "
-        "PullAction.WRITE_REMOTE arm writes a peer's actor row verbatim, past "
-        "upsert_actor and therefore past the class-key fence, so a peer that never "
-        "migrated can land an archived class key as ACTIVE beside its "
-        "instance-keyed sibling with no operator in the loop. It is carved out "
-        "rather than fenced because the fix is a decision this stage does not own: "
-        "a pull is not an operator action, so it has no consent to offer, and the "
-        "choices (refuse the actor and write a conflict sidecar, adopt it and warn "
-        "on the pull summary, or re-key it on arrival) each change what realm sync "
-        "means. EG-6.6 fences the four OPERATOR-INTENT writers and records this one "
-        "as outstanding; #33 decides it. "
-        "RELOCATED 2026-08-30 (plan realm-pull-live-projection H1): the write moved "
-        "OUT of office_sync.apply_office_pull's raw atomic_json_write and INTO this "
-        "store verb so the adopt arm finally emits its office.actor.upserted + "
-        "state.patched pair. H1 changed WHERE the unfenced write lives and what it "
-        "emits; it did not change WHETHER it is fenced. "
-        "RULED 2026-08-30 (operator, realm-actor-lifecycle-refactor D3): the adopt "
-        "arm STAYS UNFENCED. A pull is REPLICATION, not authoring — the class-key, "
-        "tombstone and desk fences all refuse local operator intent, and a pull has "
-        "no operator behind it to offer consent, so fencing it would mean refusing "
-        "to hold a fact a peer already published. What #33 named as one hole was "
-        "three: the two REAL ones are closed instead — the surface arm no longer "
-        "overwrites the local tombstone ledger (C1, office_store.merge_archived_"
-        "ledgers) and the archive arm no longer discards the outcome of a delete "
-        "it could not take (C2, office_sync.OfficeArchiveOutcome). What remains is "
-        "the DISPOSITION above, not an open question: a pulled duplicate desk or a "
-        "peer's un-migrated class key is a conflict-lane fact, which is why the "
-        "launcher's render-time duplicate_desk warning stays. This entry no longer "
-        "moves to FENCED_ACTOR_WRITERS on a future ruling — it is the ruling."
-    ),
+CARVED_OUT_ACTOR_WRITERS: dict[tuple[str, str], dict[str, str]] = {
+    ("agent_runtime/office_store.py", "adopt_remote_actor"): {
+        "class_key": (
+            "UNFENCED, BY RULING (D3, 2026-08-30) — filed as OPEN HOLE, HELD FOR A "
+            "RULING under task #33. The realm-sync pull's "
+            "PullAction.WRITE_REMOTE arm writes a peer's actor row verbatim, past "
+            "upsert_actor and therefore past the class-key fence, so a peer that never "
+            "migrated can land an archived class key as ACTIVE beside its "
+            "instance-keyed sibling with no operator in the loop. It is carved out "
+            "rather than fenced because the fix is a decision this stage does not own: "
+            "a pull is not an operator action, so it has no consent to offer, and the "
+            "choices (refuse the actor and write a conflict sidecar, adopt it and warn "
+            "on the pull summary, or re-key it on arrival) each change what realm sync "
+            "means. EG-6.6 fences the four OPERATOR-INTENT writers and records this one "
+            "as outstanding; #33 decides it. "
+            "RELOCATED 2026-08-30 (plan realm-pull-live-projection H1): the write moved "
+            "OUT of office_sync.apply_office_pull's raw atomic_json_write and INTO this "
+            "store verb so the adopt arm finally emits its office.actor.upserted + "
+            "state.patched pair. H1 changed WHERE the unfenced write lives and what it "
+            "emits; it did not change WHETHER it is fenced. "
+            "RULED 2026-08-30 (operator, realm-actor-lifecycle-refactor D3): the adopt "
+            "arm STAYS UNFENCED. A pull is REPLICATION, not authoring — the class-key, "
+            "tombstone and desk fences all refuse local operator intent, and a pull has "
+            "no operator behind it to offer consent, so fencing it would mean refusing "
+            "to hold a fact a peer already published. What #33 named as one hole was "
+            "three: the two REAL ones are closed instead — the surface arm no longer "
+            "overwrites the local tombstone ledger (C1, office_store.merge_archived_"
+            "ledgers) and the archive arm no longer discards the outcome of a delete "
+            "it could not take (C2, office_sync.OfficeArchiveOutcome). What remains is "
+            "the DISPOSITION above, not an open question: a pulled duplicate desk or a "
+            "peer's un-migrated class key is a conflict-lane fact, which is why the "
+            "launcher's render-time duplicate_desk warning stays. This entry no longer "
+            "moves to FENCED_ACTOR_WRITERS on a future ruling — it is the ruling."
+        ),
+        "desk": (
+            "UNFENCED, BY THE SAME D3 RULING — a pulled duplicate desk is a fact about "
+            "what a peer published, not a placement this store may refuse. Stated as its "
+            "own row rather than left implied by the class-key paragraph above: the "
+            "ruling covers all three fences, and a table that records only one of them "
+            "is how the desk fence went un-enumerated in the first place."
+        ),
+        "tombstone": (
+            "UNFENCED, BY THE SAME D3 RULING — the resurrection question is answered "
+            "UPSTREAM of this verb by the pull's own three-way classification, which is "
+            "where a peer's archive and the local tombstone ledger are reconciled "
+            "(C1, merge_archived_ledgers). A fence here would refuse a row the pull "
+            "already decided to hold."
+        ),
+    },
 }
 
 
@@ -582,6 +682,100 @@ def test_every_production_writer_of_a_live_actor_file_is_enumerated_and_disposit
     restore_source = inspect.getsource(OfficeStore.restore_actor)
     assert "_guard_class_keyed_" not in restore_source
     assert "allow_class_key" not in restore_source
+
+
+def test_every_writer_declares_itself_against_every_fence():
+    """THE completeness the writer-keyed table could not express.
+
+    The old table asked one question per writer and every answer happened to be
+    about the class-key fence, so ``upsert_actor``'s desk fence (D6) and
+    tombstone fence (D1) were pinned by nothing — not because a row was missing
+    but because there was nowhere for one to go. A witness that cannot represent
+    the second fence cannot notice it disappearing, and the store has three.
+
+    So the key is (writer × fence) and the equality is on the FENCE SET, per
+    writer, in both tables. A new fence is a column every writer must fill in
+    before the suite is green again; a writer that answers two of three reds
+    naming the one it skipped. That is the property, and it is the same one the
+    writer-set equality above gives for writers.
+    """
+
+    for table_name, table in (
+        ("FENCED_ACTOR_WRITERS", FENCED_ACTOR_WRITERS),
+        ("CARVED_OUT_ACTOR_WRITERS", CARVED_OUT_ACTOR_WRITERS),
+    ):
+        for writer, dispositions in table.items():
+            assert isinstance(dispositions, dict), (
+                f"{table_name}[{writer}] is not keyed by fence. Every entry is a "
+                f"mapping over {list(ACTOR_FENCES)}, so one fence cannot be answered "
+                "while the others go unasked."
+            )
+            missing = set(ACTOR_FENCES) - set(dispositions)
+            assert not missing, (
+                f"{table_name}[{writer}] does not say what it does about "
+                f"{sorted(missing)}. Every writer declares itself against EVERY fence: "
+                "FENCED (and name the guard), SANCTIONED OVERRIDE, UNFENCED with the "
+                "ruling that permits it, or THE PRIMITIVE."
+            )
+            stray = set(dispositions) - set(ACTOR_FENCES)
+            assert not stray, (
+                f"{table_name}[{writer}] declares a fence that is not in ACTOR_FENCES: "
+                f"{sorted(stray)}. Add it to ACTOR_FENCES and FENCE_GUARDS — and then "
+                "to every other writer — or drop the row."
+            )
+            for fence, disposition in dispositions.items():
+                assert disposition.startswith(_VERDICTS), (
+                    f"{table_name}[{writer}][{fence}] opens with prose instead of a "
+                    f"verdict. Start with one of {list(_VERDICTS)} — the leading token "
+                    "is the part this witness can check; the sentence after it is for "
+                    "the reader."
+                )
+
+
+def test_the_word_fenced_is_checked_against_the_writers_source_for_every_fence():
+    """The table's verdicts, read back out of the code they describe.
+
+    Both directions, and the negative one is the load-bearing half. "This
+    function contains no fence" is a NEGATIVE claim, which is exactly the shape a
+    source walk answers safely (over-approximation refuses too much, never too
+    little) — so an UNFENCED / SANCTIONED OVERRIDE / PRIMITIVE row that quietly
+    grows a guard reds here, and a row that claims FENCED while the guard call is
+    gone reds here too.
+
+    The positive direction is deliberately weak on its own and is not asked to
+    carry the guarantee: that a fence actually REFUSES is proven at runtime by
+    the witnesses above and by the D1/D6 suites. What this pins is that the TABLE
+    is not describing a function that stopped consulting the guard it names.
+    """
+
+    for table in (FENCED_ACTOR_WRITERS, CARVED_OUT_ACTOR_WRITERS):
+        for (path, function), dispositions in table.items():
+            if path != "agent_runtime/office_store.py":
+                continue
+            target = getattr(OfficeStore, function, None)
+            if target is None:  # module-level helper (``_write_actor``)
+                from agent_runtime import office_store
+
+                target = getattr(office_store, function)
+            source = inspect.getsource(target)
+            for fence, disposition in dispositions.items():
+                guards = FENCE_GUARDS[fence]
+                consulted = any(f"{guard}(" in source for guard in guards)
+                if disposition.startswith(FENCED):
+                    assert consulted, (
+                        f"{function} is dispositioned FENCED for the {fence} fence but "
+                        f"its source calls none of {list(guards)}. Either the guard call "
+                        "was dropped — in which case this writer is now unfenced — or "
+                        "the fence moved and the table is describing a fiction."
+                    )
+                else:
+                    assert not consulted, (
+                        f"{function} is dispositioned {disposition.split(chr(8212))[0].strip()} "
+                        f"for the {fence} fence, but its source DOES call one of "
+                        f"{list(guards)}. A writer that consults a fence is fenced by it; "
+                        "re-disposition the row rather than leaving the table and the "
+                        "code disagreeing."
+                    )
 
 
 def test_the_carve_out_is_a_live_hole_and_not_a_stale_note(tmp_path):

@@ -500,7 +500,7 @@ def test_publish_ships_the_scan_it_gated_on_never_the_directory(tmp_path, monkey
         scan = real_scan(self, workspace_id, **kwargs)
         return type(scan)(
             [actor for actor in scan.actors if actor.actor_key != "latecomer"],
-            scan.unreadable,
+            scan.unreadable_files,
         )
 
     monkeypatch.setattr(OfficeStore, "scan_actors", _scan_without_the_latecomer)
@@ -594,7 +594,7 @@ def test_a_workspace_with_an_unreadable_actor_file_refuses_realm_publish_typed()
     recorder was called and carried no key for that workspace.
 
     *Mutation:* swap the arms back to a rows-only view
-    (``ActorScan(store.scan_actors(ws).actors, 0)``). The mutant cannot mint a reason
+    (``ActorScan(store.scan_actors(ws).actors)``). The mutant cannot mint a reason
     from a count it never took, and it publishes the workspace's artifacts —
     the recorder convicts it on both.
     """

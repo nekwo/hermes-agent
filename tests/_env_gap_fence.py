@@ -106,6 +106,54 @@ import pytest
 WINDOWS_ENV_GAP = "windows_env_gap"
 HOST_DEPENDENCY_GAP = "host_dependency_gap"
 
+
+# ── Ownership: a directory's registry may only reach that directory ─────────
+#
+# Every registry below is keyed by file BASENAME, and every conftest that owns
+# one registers ``pytest_collection_modifyitems`` / ``pytest_runtest_logreport``
+# — hooks pytest calls GLOBALLY once the conftest is loaded, with every item and
+# every report in the session, not just its own directory's. In a single-
+# directory run those two facts are invisible. In a combined run
+# (``pytest tests/gateway tests/cli``) they compose into a cross-directory
+# interaction: one directory's row reaches a same-named file in another
+# directory and SKIPS it, or claims its pass as a stale row.
+#
+# Measured on 2026-09-01 at this HEAD: ``tests/gateway``'s ``_ENV_GAP_SKIPS``
+# row for ``test_update_command.py`` also matches ``tests/cli/
+# test_update_command.py``. No node id overlaps today, so nothing is currently
+# mis-skipped — which is exactly the state a landmine is in before it goes off,
+# and a skip that lands this way is silent by construction.
+#
+# So ownership is a PARAMETER, not a convention: every entry point takes the
+# directory whose conftest owns the registry and refuses to touch anything
+# outside it. Required, never defaulted — a default is the thing the next
+# caller forgets.
+
+
+def is_owned(path, owner_dir) -> bool:
+    """Is ``path`` inside ``owner_dir``? (An unresolvable path is NOT owned.)"""
+
+    from pathlib import Path
+
+    try:
+        Path(path).resolve().relative_to(Path(owner_dir).resolve())
+    except (ValueError, OSError):
+        return False
+    return True
+
+
+def _owner_prefix(registry_location: str) -> str:
+    """The node-id prefix a registry's reports must carry, from its location.
+
+    Derived from the location string the tracker is already given
+    (``"tests/gateway/conftest.py"`` -> ``"tests/gateway/"``) rather than passed
+    separately: two spellings of one directory are two spellings free to drift,
+    and this one is already load-bearing (it is printed in the stale-row banner).
+    """
+
+    head, _, _ = registry_location.replace("\\", "/").rpartition("/")
+    return f"{head}/" if head else ""
+
 # file basename -> [(mark, reason, {node ids within the file}), ...].
 #
 # A file can carry MORE THAN ONE group when its failures have more than one
@@ -141,14 +189,20 @@ def register_marks(config) -> None:
 EnvGapSkipRegistry = dict[str, list[tuple["Callable[[], bool]", str, set[str]]]]
 
 
-def apply_skips(items, registry: EnvGapSkipRegistry) -> None:
+def apply_skips(items, registry: EnvGapSkipRegistry, *, owner_dir) -> None:
     """Skip every registered node whose probe reports the gap is present.
 
     A row whose probe is False is deliberately left alone: the test runs, and
     a stale row becomes a failing assertion in the registry ledger rather than
     a silent non-fence.
+
+    ``owner_dir`` is the directory whose conftest owns ``registry``; items
+    outside it are not this registry's to skip. See the ownership block at the
+    top of this module for the combined-run interaction that makes it required.
     """
     for item in items:
+        if not is_owned(item.path, owner_dir):
+            continue
         groups = registry.get(item.path.name)
         if groups is None:
             continue
@@ -174,9 +228,15 @@ def stale_skip_rows(registry: EnvGapSkipRegistry) -> list[str]:
     return stale
 
 
-def apply_marks(items, registry: EnvGapRegistry) -> None:
-    """Attach the registered env-gap mark to every matching collected item."""
+def apply_marks(items, registry: EnvGapRegistry, *, owner_dir) -> None:
+    """Attach the registered env-gap mark to every matching collected item.
+
+    ``owner_dir`` scopes the registry to the directory that owns it — see
+    :func:`apply_skips` and the ownership block at the top of this module.
+    """
     for item in items:
+        if not is_owned(item.path, owner_dir):
+            continue
         groups = registry.get(item.path.name)
         if groups is None:
             continue
@@ -196,11 +256,18 @@ class StaleEntryTracker:
     def __init__(self, registry: EnvGapRegistry, registry_location: str) -> None:
         self._registry = registry
         self._location = registry_location
+        #: Reports outside the owning directory are not this registry's to
+        #: judge: ``pytest_runtest_logreport`` is a global hook, so in a combined
+        #: run this tracker sees every other directory's reports too, and a
+        #: same-named file there would be reported as a stale row of OURS.
+        self._owner_prefix = _owner_prefix(registry_location)
         self._passed: list[str] = []
 
     def record(self, report) -> None:
         """Feed one report in (call from ``pytest_runtest_logreport``)."""
         if report.when != "call" or report.outcome != "passed":
+            return
+        if not report.nodeid.replace("\\", "/").startswith(self._owner_prefix):
             return
         file_name = report.nodeid.split("::", 1)[0].rsplit("/", 1)[-1]
         groups = self._registry.get(file_name)

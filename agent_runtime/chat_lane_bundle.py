@@ -187,6 +187,18 @@ class ChatLaneBundle:
     #: thrown away — pinning a degraded account until the next epoch bump is how
     #: one transient fault becomes a permanent wrong answer.
     complete: bool = True
+    #: WHICH best-effort components faulted, as ``<component>:<ExceptionClass>``
+    #: — the class, never the message, the same disclosure rule this runtime's
+    #: other receipts follow.
+    #:
+    #: ``complete`` alone says only THAT something degraded, and its most visible
+    #: consequence is invisible: an incomplete bundle is not memoized, so the
+    #: next lookup rebuilds and a caller measuring reuse sees "the bundle was not
+    #: reused" with nothing to say why. That is not hypothetical — it is the
+    #: shape of the one intermittent red this cache has produced, where the only
+    #: diagnosis available named the bundle KEY (which had not moved). The
+    #: degraded components were in a debug log line that nobody was capturing.
+    degraded: tuple[str, ...] = ()
 
     def capability(self) -> dict[str, Any]:
         return copy.deepcopy(self._capability)
@@ -374,29 +386,34 @@ def _build_bundle(
     }
     permission_state = permission_state_for_chat(persona, session_id=session_id)
 
-    complete = True
+    # Every degradation is RECORDED, not only counted into ``complete``. See
+    # ``ChatLaneBundle.degraded``: an incomplete bundle is never memoized, so the
+    # component that faulted here is the whole explanation for a rebuild that a
+    # reuse measurement two layers up can otherwise only report as "the object
+    # changed".
+    degraded: list[str] = []
     try:
         capability = capability_block_for_persona(persona, session_id=session_id) or {}
-    except Exception:
+    except Exception as exc:
         logger.debug("chat-lane capability account unavailable for this turn", exc_info=True)
         capability = {}
-        complete = False
+        degraded.append(f"capability_account:{type(exc).__name__}")
     try:
         admission_line = str(
             mission_chat_admission_line(persona, session_id=session_id) or ""
         )
-    except Exception:
+    except Exception as exc:
         logger.debug("MCP admission line unavailable for this turn", exc_info=True)
         admission_line = ""
-        complete = False
+        degraded.append(f"admission_line:{type(exc).__name__}")
     try:
         operating_skills = tuple(
             mission_chat_operating_skills(persona, session_id=session_id) or ()
         )
-    except Exception:
+    except Exception as exc:
         logger.debug("admitted MCP operating skills unavailable for this turn", exc_info=True)
         operating_skills = ()
-        complete = False
+        degraded.append(f"operating_skills:{type(exc).__name__}")
 
     return ChatLaneBundle(
         key=key,
@@ -410,7 +427,8 @@ def _build_bundle(
         _capability=capability,
         _tool_contract=tool_contract,
         _permission_state=permission_state if isinstance(permission_state, dict) else {},
-        complete=complete,
+        complete=not degraded,
+        degraded=tuple(degraded),
     )
 
 

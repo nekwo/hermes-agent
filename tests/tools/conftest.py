@@ -174,6 +174,7 @@ def disable_lazy_stt_install():
 #     search execution path and is filed rather than smuggled into an audit.
 
 import importlib
+import pathlib
 import os
 import socket
 import stat
@@ -403,6 +404,12 @@ _ENV_GAP_SKIPS: EnvGapSkipRegistry = {
 }
 
 
+#: The directory this conftest's registries own. The env-gap hooks below are
+#: GLOBAL — pytest hands them every item and every report in the session once
+#: this conftest is loaded — so a combined run would otherwise let these rows
+#: reach a same-named file in another directory. See tests/_env_gap_fence.py.
+_OWNER_DIR = pathlib.Path(__file__).resolve().parent
+
 _STALE = StaleEntryTracker(_ENV_GAPS, "tests/tools/conftest.py")
 
 
@@ -439,8 +446,8 @@ def pytest_configure(config):  # noqa: D401 — pytest hook
 
 def pytest_collection_modifyitems(items):  # noqa: D401 — pytest hook
     """Skip every registered node whose probe reports its gap on this host."""
-    apply_marks(items, _ENV_GAPS)
-    apply_skips(items, _ENV_GAP_SKIPS)
+    apply_marks(items, _ENV_GAPS, owner_dir=_OWNER_DIR)
+    apply_skips(items, _ENV_GAP_SKIPS, owner_dir=_OWNER_DIR)
 
 
 def pytest_runtest_logreport(report):  # noqa: D401 — pytest hook
