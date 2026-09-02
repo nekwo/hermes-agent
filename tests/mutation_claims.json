@@ -1559,8 +1559,8 @@
       "path": "agent_runtime/office_store.py",
       "symbol": "upsert_actor",
       "operator": "resolve-slot-outside-office-lock",
-      "find": "            items = []\n\n        if not dry_run:\n            self.ensure_surface(wsid, created_by=updated_by)\n        with office_lock(wsid):",
-      "replace": "            items = [\n                _normalize_item(\n                    raw_items[0],\n                    persona_id=persona_id,\n                    position=position_policy(self.scan_actors(wsid)),\n                )\n            ]\n            position_policy = None\n\n        if not dry_run:\n            self.ensure_surface(wsid, created_by=updated_by)\n        with office_lock(wsid):",
+      "find": "            items = []\n\n        if not dry_run:",
+      "replace": "            items = [\n                _normalize_item(\n                    raw_items[0],\n                    persona_id=persona_id,\n                    position=position_policy(self.scan_actors(wsid)),\n                )\n            ]\n            position_policy = None\n\n        if not dry_run:",
       "test": [
         "{python}",
         "-m",
