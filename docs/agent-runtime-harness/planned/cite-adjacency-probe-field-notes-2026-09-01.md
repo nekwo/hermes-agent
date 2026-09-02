@@ -148,6 +148,22 @@ cites (`upstream-prs/`), not a stubbed walk.
   which is why the whole-root walk reads 194 after the sweep where the gated
   canon reads 66. Out of gate scope by the ruling above; the number is here so
   nobody re-derives it.
+- **A weak identifier can pass a cite by coincidence.** Within minutes of
+  landing, three commits between `16fe90fb6a` and `d6055dab83` moved
+  `hermes_constants.py`'s step constant 1481 -> 1533 (the gate caught it, red,
+  and it was re-anchored) and simultaneously made
+  `07-observability.md|persona_commands.py:3522` PASS — not because
+  `slim_chat_final_observability` moved to 3522, it is at 127/4221/4494, but
+  because the same sentence also backticks `show`, `final` and `chat`, and one
+  of those landed in the window. The subject rule needs an occurrence ceiling:
+  an identifier appearing all over a 5000-line file is not a locator. That is
+  the second increment, and it will re-shuffle the baseline when it lands.
+- **The gate is worth exactly one push-cycle of latency.** The same rebase that
+  produced the false pass above produced a genuine red, on a cite this stage had
+  itself just re-anchored, from three unrelated commits landing in between. Line
+  cites into live modules rot on a timescale of hours here, which is the case
+  for naming symbols rather than lines and for keeping this gate on.
+
 - **Ambiguous bare names (35 live, 51 whole-root) are counted, never guessed.**
   Same refusal as the resolution report. Spelling a cite as `agent_runtime/
   models.py` instead of `models.py` moves it into scope for free.
