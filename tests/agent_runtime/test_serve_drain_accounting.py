@@ -179,9 +179,19 @@ def test_a_drain_the_reader_outran_is_declared_abandoned_in_a_frame(monkeypatch)
     Silence here was the defect: the process exited 0 with no terminal frame,
     which a supervisor reads as a clean drain. Now it emits ``drain_abandoned``
     and returns the same nonzero code a timeout does.
+
+    The dispatch sleep is LOAD-BEARING and cannot be replaced by waiting for the
+    ``exit`` frame: the request has to be in flight when the shutdown arrives,
+    or the pending set is already empty and the loop ends the drain cleanly —
+    tried, and it is the wrong scenario, not a faster one. What was raced is the
+    grace: ``requests_completed == 1`` needs that 50ms dispatch to finish inside
+    it, and 200ms is not a bound a loaded box respects (this is the
+    parallel-only red reported 2026-09-02). The grace is now 2s — the flake
+    policy's floor for a wall-clock bound — and the monitor's poll is pushed out
+    with it, so widening the wait cannot hand the race to the monitor instead.
     """
 
-    monkeypatch.setattr(serve_module, "_DRAIN_ABANDON_GRACE_SECONDS", 0.2)
+    monkeypatch.setattr(serve_module, "_DRAIN_ABANDON_GRACE_SECONDS", 2.0)
 
     pipe, sink = _Pipe(), _Sink()
     result = _run_serve(
@@ -190,7 +200,7 @@ def test_a_drain_the_reader_outran_is_declared_abandoned_in_a_frame(monkeypatch)
         dispatch=lambda argv: time.sleep(0.05) or 0,
         # The monitor's poll is longer than the abandon grace, so it is still
         # sleeping when the reader unwinds — the race the fix has to survive.
-        drain_poll_interval_seconds=5.0,
+        drain_poll_interval_seconds=60.0,
     )
     sink.wait_for("ready")
     pipe.send({"id": "req-1", "argv": ["harness", "status"]})
@@ -439,23 +449,56 @@ def test_the_completion_count_cannot_miss_a_request_that_just_landed(monkeypatch
 @pytest.mark.parametrize("concurrency", [8])
 def test_the_completion_count_matches_the_exits_under_concurrency(concurrency):
     """The shape the reviewer saw flake (5 reported for 8 exits), kept as a
-    live-fire check next to the deterministic pin above."""
+    live-fire check next to the deterministic pin above.
+
+    ``requests_completed`` counts what completed DURING THE DRAIN — ``_run``
+    reads ``drain_state`` at exit time and a ``None`` there means no drain was
+    open yet — so ``== len(exits)`` is an invariant only while every request is
+    still in flight when the drain op is parsed. This test used to buy that
+    precondition with a 50ms sleep in the dispatch and the hope that the reader
+    thread reached the drain line first. It does not hold on a loaded box: with
+    all eight allowed to land before the drain op is read, this same assertion
+    measures **0 against 8** (probed directly, 2026-09-02). The reviewer's
+    ``5 == 8`` is that race caught part-way — wearing the same numbers as the
+    FINDING-B under-count above it, and so accusing production of a defect the
+    deterministic pin beside it already proves fixed.
+
+    The precondition is therefore HELD now rather than raced for: every worker
+    parks inside its dispatch until the ``draining`` frame reports the drain
+    state installed, which is the moment after which a completion is guaranteed
+    to be counted. No wall clock is involved either side of it.
+    """
+
+    all_in_flight = threading.Barrier(concurrency + 1)
+    drain_is_open = threading.Event()
+
+    def _dispatch(argv):
+        all_in_flight.wait(WAIT)
+        assert drain_is_open.wait(WAIT), "the drain never opened"
+        return 0
 
     pipe, sink = _Pipe(), _Sink()
     result = _run_serve(
         pipe,
         sink,
-        dispatch=lambda argv: time.sleep(0.05) or 0,
+        dispatch=_dispatch,
         pool_size=concurrency,
         drain_poll_interval_seconds=0.005,
     )
     sink.wait_for("ready")
     for index in range(concurrency):
         pipe.send({"id": f"req-{index}", "argv": ["harness", "status"]})
+    # Every worker is inside its dispatch, so every request is in `inflight`
+    # and none of them can exit before the drain state exists to count it.
+    all_in_flight.wait(WAIT)
     pipe.send({"op": "drain", "deadline_seconds": 30})
+    sink.wait_for("draining")
+    drain_is_open.set()
+
     complete = sink.wait_for("drain_complete")
     pipe.close()
     result["thread"].join(WAIT)
 
     exits = [f for f in sink.frames() if f.get("event") == "exit"]
+    assert len(exits) == concurrency
     assert complete["requests_completed"] == len(exits)
