@@ -3731,6 +3731,81 @@
         "-q",
         "tests/hermes_cli/test_doctor.py::TestDoctorResolvesTheHomeAtCallTime::test_the_env_var_alone_redirects_every_profile_relative_read"
       ]
+    },
+    {
+      "id": "cli-persona-refusal-drops-the-choices",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "persona_not_found_message",
+      "operator": "refuse-without-naming-the-choices",
+      "find": "    choices = _placeable_persona_choice_text()\n    return f\"{base}. Placeable now: {choices}\" if choices else base",
+      "replace": "    return base",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_agent_create_verb.py::test_the_unknown_persona_refusal_spells_out_what_is_placeable"
+      ]
+    },
+    {
+      "id": "cli-persona-spelling-offered-for-a-shared-profile",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "accepted_persona_spellings",
+      "operator": "offer-the-profile-spelling-without-checking-ownership",
+      "find": "    if owners == [persona_id] and profile_spelling not in spellings:",
+      "replace": "    if profile_spelling not in spellings:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_agent_create_verb.py::test_a_profile_two_personas_share_is_not_offered_as_a_spelling"
+      ]
+    },
+    {
+      "id": "cli-agent-list-row-loses-the-accepted-spellings",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_agent_definition_row",
+      "operator": "reprint-the-binding-instead-of-the-spellings",
+      "find": "        \"persona_spellings\": accepted_persona_spellings(persona, list(roster or [persona])),",
+      "replace": "        \"persona_spellings\": [persona.hermes_profile],",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_profile_binding.py::test_agent_list_row_names_both_spellings_agent_create_accepts"
+      ]
+    },
+    {
+      "id": "charsheet-no-sheet-still-reads-and-inlines-the-bytes",
+      "path": "agent/charsheet/draft.py",
+      "symbol": "sprite_payload",
+      "operator": "ignore-the-metadata-only-mode",
+      "find": "            if include_sheet\n            else {\"sheet\": str(sheet_path)}",
+      "replace": "            if True\n            else {\"sheet\": str(sheet_path)}",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_charsheet_draft.py::test_the_metadata_only_payload_drops_the_bytes_and_names_the_file"
+      ]
+    },
+    {
+      "id": "charsheet-sprite-verb-ignores-the-no-sheet-flag",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_cmd_characters_sprite",
+      "operator": "drop-the-flag-on-the-way-through",
+      "find": "            slug, include_sheet=not bool(getattr(args, \"no_sheet\", False))",
+      "replace": "            slug, include_sheet=True",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_characters_cli.py::test_no_sheet_hands_back_the_path_instead_of_half_a_megabyte_of_base64"
+      ]
     }
   ]
 }

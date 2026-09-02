@@ -1626,8 +1626,27 @@ def _sheet_revision(path: Path) -> str:
     return f"{stat.st_mtime_ns}:{stat.st_size}"
 
 
-def sprite_payload(slug: str) -> dict:
+def sprite_payload(slug: str, *, include_sheet: bool = True) -> dict:
     """The launcher payload for an installed character.
+
+    ``include_sheet=False`` is the METADATA-ONLY shape (``characters sprite
+    --no-sheet``, 2026-09-02). It omits ``spritesheetBase64`` — and never reads
+    the bytes at all, which is the point — and puts ``sheet``, the absolute
+    path, in the same slot, spelled the way ``characters list``'s installed rows
+    already spell it so a consumer has ONE name for that file across both verbs.
+    ``spritesheetRevision`` stays: it is ``mtime_ns:size`` off a ``stat()``, it
+    costs nothing next to the read this mode skips, and it is the field the
+    launcher's ``CharaSheetProvenance.contentHash`` hangs on — a metadata read
+    that dropped it would be cheap and useless.
+
+    A FLAG and not a second function because every other key is wanted in both
+    modes and exactly one is expensive: 468.8 KiB of base64 on the live 3-state
+    ``anime-girl``, 107x the event-payload cap and 8.8x the terminal tool's
+    output cap. A consumer that wanted ``framesByRow``, ``states`` or ``rows``
+    paid all of it and decoded none of it. The default is unchanged to the byte,
+    key order included — the two shapes are spelled as one conditional entry in
+    the same position rather than an append, so the launcher's shipped
+    ``sprite()`` client, which passes no flag, cannot see this change.
 
     Field names and meanings match the pet sprite payload where they overlap, so
     the Dart client's parse path is unchanged; the additions (``directions``,
@@ -1664,12 +1683,19 @@ def sprite_payload(slug: str) -> dict:
 
     spec = spec_from_dict(manifest.get("spec") or {})
     rows = [_row_json(row) for row in spec.rows()]
-    raw = sheet_path.read_bytes()
     return {
         "slug": str(manifest.get("slug", safe)),
         "displayName": str(manifest.get("displayName", "") or safe),
         "mime": "image/webp",
-        "spritesheetBase64": base64.standard_b64encode(raw).decode("ascii"),
+        **(
+            {
+                "spritesheetBase64": base64.standard_b64encode(
+                    sheet_path.read_bytes()
+                ).decode("ascii")
+            }
+            if include_sheet
+            else {"sheet": str(sheet_path)}
+        ),
         "spritesheetRevision": _sheet_revision(sheet_path),
         "frameW": spec.frame_w,
         "frameH": spec.frame_h,

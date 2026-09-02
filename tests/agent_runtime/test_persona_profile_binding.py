@@ -515,6 +515,34 @@ def test_agent_list_row_without_a_binding_index_still_reports_the_binding(profil
     assert "binding_diverged" not in row
 
 
+def test_agent_list_row_names_both_spellings_agent_create_accepts(profiles):
+    """The listing answers the question its own refusal sends operators here for.
+
+    `agent list` already enumerated the placeable definitions; what it never
+    said is that `--persona` takes TWO spellings for one agent. ``profile`` is
+    the BINDING and reads like the second spelling without being one — an
+    operator who types `profile:<that>` for a shared profile gets a different,
+    defaults-less agent — so the accepted spellings get their own column,
+    computed by the same function the refusal's choice list spends.
+    """
+
+    from hermes_cli.harness import _agent_definition_row
+
+    sole = _persona(id="widget", hermes_profile="beta", skills=["harness-qa-verdict"])
+    row = _agent_definition_row(sole, source_profile="operator-active", roster=[sole])
+
+    assert row["persona_spellings"] == ["widget", "profile:beta"]
+    assert row["skills"] == ["harness-qa-verdict"]
+
+    # Two owners: the bare id survives, the profile spelling does not — the
+    # negative is what stops the column from being a re-print of `profile`.
+    rival = _persona(id="gadget", hermes_profile="beta")
+    shared = _agent_definition_row(sole, source_profile="operator-active", roster=[sole, rival])
+
+    assert shared["persona_spellings"] == ["widget"]
+    assert shared["profile"] == "beta"
+
+
 def test_doctor_surfaces_the_divergence_without_repairing_it(profiles, monkeypatch):
     from agent_runtime import harness_doctor
 

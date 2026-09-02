@@ -71,9 +71,13 @@ ask one question per decision, and hand back an installed sheet.
 
   — and chain a stage boundary you have already decided:
   `... approve-direction --draft <id> --all --json && ... rows --draft <id> --json`.
-- **Never pipe `sprite --json` into a turn** — it inlines the whole sheet as
-  base64 (468.8 KiB live), past the tool output cap, and truncation makes it
-  unparseable. Read `character.json` or `status --json` instead.
+- **Never pipe a bare `sprite --json` into a turn** — it inlines the whole sheet
+  as base64 (468.8 KiB live), past the tool output cap, and truncation makes it
+  unparseable. Add **`--no-sheet`** when you want the shape: it drops
+  `spritesheetBase64`, carries `sheet` (the absolute path) in its place, keeps
+  `spritesheetRevision` and every geometry/taxonomy key, and is small enough to
+  read in a turn. `character.json` and `status --json` still answer the same
+  question offline.
 
 **Where the rulings live.** Citations of the form **§13.n** are owner decisions
 recorded once, in the launcher companion
@@ -110,7 +114,7 @@ not the slug** (`20260824-140756-cd645a` vs `anime-girl`).
 | `auto --draft <id> [--through turnaround\|approve-direction\|rows\|compose]` | **The whole pipeline in ONE process**: turnaround → approve every direction → generate the rows that are missing → compose and install, printing a receipt as each stage lands (`--json` = one compact object per LINE; the last line is always the summary). **Only for an operator's explicit "drive it all the way" ask** — it auto-approves the turnaround, which is the last moment a reference can change. It stops on a handedness refusal and has no way to override one; it resumes rather than restarts (a stage whose work already exists is skipped, with the reason on the summary), so it is also the one-command repair after `reopen`; and it writes the same per-attempt history, so crops and `reopen` behave exactly as after a hand-driven run. **One command is still many stage changes: emit a `CHARSHEET-QA:` line for every receipt line it printed**, plus the `MEDIA:` lines. | `turnaround` or `rows` |
 | `reopen --draft <id>` | Back to `rows` for fixes. Installed sheet untouched. | `composed` |
 | `add-state --draft <id> --state <name>:<frames>[:fixed]` | Adds ONE state; seeds its rows un-generated, touches no approved attempt. | `rows` |
-| `sprite <slug>` | The installed payload the launcher reads. **Never pipe it into a turn** — see above. | — |
+| `sprite <slug> [--no-sheet]` | The installed payload the launcher reads. **Never pipe the bare form into a turn** — see above. `--no-sheet` is the metadata-only shape: no `spritesheetBase64`, plus `sheet` (the absolute path) so you can read the bytes yourself. | — |
 
 ## The reply is the operator's only window
 

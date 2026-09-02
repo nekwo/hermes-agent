@@ -248,6 +248,97 @@ def test_an_unknown_persona_refuses_before_any_write(
     assert set(_actors()) == before
 
 
+# ── the refusal names the CHOICES, not just the verb that lists them ─────────
+#
+# `harness agent list` DOES enumerate the placeable definitions and always has —
+# it walks the same `ensure_persisted_personas` merge this refusal checks — so
+# the gap was never a missing listing. It was that a caller who cannot run a
+# second command (a script, a cron, a remote `call` leg) was handed the name of
+# one, and that neither the listing nor the error said `--persona` takes TWO
+# spellings for the same agent.
+
+
+def _persona_with_profile(persona_id: str, profile: str | None):
+    from agent_runtime.models import AgentPersona
+    from agent_runtime.store import AgentStore
+
+    persona = AgentPersona(
+        id=persona_id,
+        display_name=persona_id.replace("_", " ").title(),
+        role="dev",
+        model=None,
+        provider=None,
+        api_mode=None,
+        toolsets=[],
+        system_prompt_path="",
+        hermes_profile=profile,
+    )
+    AgentStore().save(persona)
+    return persona
+
+
+def test_the_unknown_persona_refusal_spells_out_what_is_placeable(
+    qa_persona, seeded_workspace, capsys
+):
+    """ANTI-VACUITY. Every probe here is a POSITIVE substring of a message the
+    pre-change code could not emit, and the ids are seeded by this test rather
+    than assumed off the operator root, so the assertion cannot pass by reading
+    someone's live roster.
+
+    ``profile:launcher-qa`` is the probe that matters. The bare id was already
+    reachable — a caller could guess it off `agent list`'s ``id`` column — but
+    the second accepted spelling appears in NO listing, and the ``profile``
+    column that looks like it is one is the persona's binding, not an argument.
+    """
+
+    _persona_with_profile("qa", "launcher-qa")
+    _persona_with_profile("scribe", None)
+
+    code, data = _create(
+        capsys, "--idempotency-key", "verb-choices", persona="qa_agent",
+    )
+
+    assert (code, data["ok"], data["reason"]) == (2, False, "persona_not_found")
+    # The cure sentence is not replaced by the list; both are owed.
+    assert "harness agent list" in data["error"]
+    assert "Placeable now:" in data["error"]
+    assert "qa (or profile:launcher-qa)" in data["error"]
+    # A persona with no profile binding gets exactly one spelling, and the
+    # message must not invent a second.
+    assert "scribe" in data["error"]
+    assert "profile:scribe" not in data["error"]
+
+
+def test_a_profile_two_personas_share_is_not_offered_as_a_spelling(
+    seeded_workspace, capsys
+):
+    """The carve-out, and it is the reason the spelling list is computed rather
+    than derived from the ``hermes_profile`` field.
+
+    ``profile:<token>`` parses for ANY token — D-U1 exempts every ``profile:``
+    id from the roster check — so a message that printed the binding verbatim
+    would offer a spelling that PARSES and mints a DIFFERENT agent: the CLI
+    synthesis lane fills its defaults from ``profile_persona_resolution``, which
+    answers ``None`` for a profile with two owners, so the created agent would
+    carry none of the model/provider/toolsets of the id printed beside it.
+
+    ANTI-VACUITY: the negative probe is paired with two positives on the same
+    string, so "the list is empty" and "the message lost its list" both fail
+    here rather than passing the negative for free.
+    """
+
+    _persona_with_profile("dev_a", "shared-profile")
+    _persona_with_profile("dev_b", "shared-profile")
+
+    code, data = _create(
+        capsys, "--idempotency-key", "verb-shared", persona="dev_c",
+    )
+
+    assert (code, data["reason"]) == (2, "persona_not_found")
+    assert "dev_a" in data["error"] and "dev_b" in data["error"]
+    assert "profile:shared-profile" not in data["error"]
+
+
 # ── the roster FAULT, on both lanes (RD-H6 item 2) ───────────────────────────
 #
 # A roster fault answered the two create lanes differently. The RPC lane passes

@@ -341,9 +341,10 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   `.status.spec.sheetWidth` x `.status.spec.sheetHeight`. Do not carry a copy of the
   threshold, and do not read the boolean as a comparison.
 
-- **[READ] `characters sprite <slug> --json` inlines the whole sheet as base64 and has no
-  path-only mode.** `draft.sprite_payload` always emits `spritesheetBase64` from the sheet
-  bytes and returns no path or directory for it. Measured on the installed CHAR8 `anime-girl`:
+- **[FIXED 2026-09-02 — `--no-sheet`] `characters sprite <slug> --json` inlines the whole
+  sheet as base64 and has no path-only mode.** `draft.sprite_payload` always emitted
+  `spritesheetBase64` from the sheet
+  bytes and returned no path or directory for it. Measured on the installed CHAR8 `anime-girl`:
   438,972 base64 chars = **428.7 KiB**, in a 441,694-byte payload — 107x the 4,096-byte
   event-payload cap (`agent_runtime/events.EVENT_PAYLOAD_LIMIT_BYTES`) that the "images travel
   as paths" rule is written against. It is also 8.8x the terminal tool's own output cap
@@ -355,6 +356,19 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   the size scales with the sheet, so the small case proves nothing about the real one.
   *Consequence:* on the chat lane read `character.json` (or `status --json`) for the shape.
   `sprite --json` is a launcher-side read; do not pipe it into a turn.
+  *Cure, 2026-09-02:* `sprite_payload` takes `include_sheet`, and the verb spells it
+  `--no-sheet`. That mode omits `spritesheetBase64`, never reads the sheet bytes at all, and
+  puts `sheet` — the absolute path, the same key `characters list`'s installed rows use — in
+  its slot; `spritesheetRevision` and every geometry/taxonomy key are unchanged, so the
+  provenance record a consumer writes after reading the file itself is still available. The
+  numbers above are the DEFAULT's and stay true: the default payload is byte-identical,
+  key order included, because the two shapes are one conditional entry in the same position
+  rather than an append. The "do not pipe it into a turn" rule survives for the default and
+  is what `--no-sheet` exists to let an agent step around — the metadata-only payload of the
+  small 4-way fixture is under 2 KiB. What is still NOT cured is the pets sibling: `harness
+  pets sprite` is served by `_pet_sprite_payload_for_launcher` in `hermes_cli/harness.py`, a
+  different function with its own always-inlined `spritesheetBase64`, so the flag was
+  deliberately not mirrored onto it.
 
 - **[READ] `CHARSHEET-QA:`'s required `generator` key has no source in any payload, and its
   meaning flips at compose.** `tests/fixtures/charsheet_qa_line.json` puts `generator` in

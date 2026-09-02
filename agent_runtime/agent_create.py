@@ -57,6 +57,7 @@ lanes map that vocabulary to their own; they do not get to re-spell it.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -247,19 +248,102 @@ def persona_roster_unavailable_message(cause: Any = None) -> str:
     )
 
 
+#: How many placeable ids the refusal spells out before it stops and points at
+#: the verb. A bound, not a preference: this string is an ERROR message on a
+#: lane whose envelopes are read by a launcher panel, and a runtime with a
+#: hundred personas must not turn a one-line refusal into a page. The live
+#: operator root carries five, so the cap is dormant there and the list is
+#: whole; it exists for the root that is not this one.
+PERSONA_CHOICE_LIST_LIMIT = 20
+
+
+def accepted_persona_spellings(persona: Any, roster: Sequence[Any]) -> list[str]:
+    """Every spelling ``--persona`` accepts for *persona*, bare id first.
+
+    The ONE authority for the question "how may an operator name this row",
+    shared by :func:`persona_not_found_message`'s choice list and by the
+    ``harness agent list`` row. Two spellings at most, and the second is
+    CONDITIONAL on something the id alone cannot show.
+
+    ``profile:<token>`` does not reach this roster at all — it reaches the CLI
+    resolver's synthesis lane (``_persona_by_id``), which fills the synthesised
+    persona's model/provider/toolsets from ``profile_persona_resolution``, and
+    that returns a persona only for a profile with exactly ONE owner. So a
+    profile two personas declare is deliberately NOT advertised here: the
+    spelling still parses (D-U1 exempts every ``profile:`` id from the roster
+    check), but it would mint a defaults-less agent DIFFERENT from the id
+    printed beside it, and an error message that offers that trade silently is
+    worse than one that offers nothing.
+    """
+
+    persona_id = str(getattr(persona, "id", "") or "").strip()
+    spellings = [persona_id] if persona_id else []
+    profile = str(getattr(persona, "hermes_profile", "") or "").strip()
+    if not profile:
+        return spellings
+    owners = [
+        str(getattr(row, "id", "") or "").strip()
+        for row in roster
+        if str(getattr(row, "hermes_profile", "") or "").strip() == profile
+    ]
+    profile_spelling = f"profile:{profile}"
+    if owners == [persona_id] and profile_spelling not in spellings:
+        spellings.append(profile_spelling)
+    return spellings
+
+
+def _placeable_persona_choice_text() -> str:
+    """The refusal's choice list, or ``""`` when there is nothing to offer.
+
+    Best-effort ON PURPOSE. It is reached only after a refusal has already been
+    decided, so a roster this second read cannot open must degrade the message
+    back to its cure sentence rather than convert a refusal the caller can act
+    on into a fault it cannot — the exact collapse
+    :class:`PersonaRosterUnavailable` exists to prevent, one layer out.
+    """
+
+    try:
+        roster = list(persona_roster())
+    except PersonaRosterUnavailable:
+        return ""
+    listed: list[str] = []
+    for persona in roster:
+        spellings = accepted_persona_spellings(persona, roster)
+        if not spellings:
+            continue
+        listed.append(
+            spellings[0] + (f" (or {spellings[1]})" if len(spellings) > 1 else "")
+        )
+    if not listed:
+        return ""
+    shown = listed[:PERSONA_CHOICE_LIST_LIMIT]
+    remainder = len(listed) - len(shown)
+    return "; ".join(shown) + (f"; and {remainder} more" if remainder else "")
+
+
 def persona_not_found_message(persona_id: Any) -> str:
     """The ONE spelling of the refusal, shared by every lane (UC-H2/UC-H4).
 
     It names the cure, because the operator who hits this has usually typed a
     plausible-looking id (``qa_agent`` for ``qa``) and has no way to know the
     roster from the error alone.
+
+    Since 2026-09-02 it also names the CHOICES. Naming the verb was the whole
+    cure while the operator was at a console with a shell; it is not one for a
+    script, a cron or a remote ``call`` leg, none of which can run a second
+    command to find out what the first would have accepted. Both accepted
+    spellings ride along for the same reason ``--persona`` takes two: ``qa``
+    and ``profile:launcher-qa`` are the same agent, and nothing else in the
+    CLI says so.
     """
 
-    return (
+    base = (
         f"unknown persona: {str(persona_id or '')!r} is not in the agent roster; "
         "run `harness agent list` to see the personas that exist, or add it "
         "before creating an instance for it"
     )
+    choices = _placeable_persona_choice_text()
+    return f"{base}. Placeable now: {choices}" if choices else base
 
 
 def _persona_is_unknown(persona_id: str, persona: Any | None = None) -> bool:

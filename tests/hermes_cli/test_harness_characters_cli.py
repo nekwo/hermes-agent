@@ -1452,6 +1452,127 @@ def test_an_uninstalled_slug_is_an_error_with_the_slug_echoed_back(capsys):
     assert "not installed" in payload["error"]
 
 
+def _installed_slug(capsys, base_image) -> str:
+    """One composed, installed character through the CLI — the sprite verb's subject."""
+
+    draft_id = to_rows(capsys, base_image)
+    run(["harness", "characters", "rows", "--draft", draft_id, "--json"], capsys)
+    code, composed = run(["harness", "characters", "compose", "--draft", draft_id, "--json"], capsys)
+    assert (code, composed["ok"]) == (0, True)
+    return composed["slug"]
+
+
+def test_no_sheet_hands_back_the_path_instead_of_half_a_megabyte_of_base64(
+    fake, base_image, capsys
+):
+    """The flag on the verb, at the join — not just on `sprite_payload`.
+
+    ANTI-VACUITY: the two payloads are taken from ONE installed character in one
+    test, so "the flag did nothing" and "the default lost its bytes" are both
+    reds here rather than two tests that could pass in different worlds. The
+    path probe opens the file and compares it to the default's decoded bytes,
+    because a path that names nothing is exactly as useless to the consumer as
+    the missing base64 it replaced.
+    """
+
+    slug = _installed_slug(capsys, base_image)
+
+    code, full = run(["harness", "characters", "sprite", slug, "--json"], capsys)
+    assert (code, full["ok"]) == (0, True)
+    code, lean = run(["harness", "characters", "sprite", slug, "--no-sheet", "--json"], capsys)
+    assert (code, lean["ok"]) == (0, True)
+
+    heavy, light = full["character"], lean["character"]
+    assert "spritesheetBase64" not in light
+    assert Path(light["sheet"]).is_file()
+    assert Path(light["sheet"]).read_bytes() == base64.standard_b64decode(
+        heavy["spritesheetBase64"]
+    )
+    assert light["spritesheetRevision"] == heavy["spritesheetRevision"]
+    assert light["framesByRow"] == heavy["framesByRow"]
+    assert light["states"] == heavy["states"]
+    assert light["rows"] == heavy["rows"]
+    # Stated as an exact saving, not a ratio: this fixture's sheet is a few
+    # frames, so a ratio here would prove nothing about the 468.8 KiB live case
+    # the flag exists for. What IS scale-free is that the whole base64 came off
+    # and only the path went on.
+    def entry(key: str, payload: dict) -> int:
+        return len(json.dumps({key: payload[key]})) - len("{}")
+
+    saved = len(json.dumps(full)) - len(json.dumps(lean))
+    assert saved == entry("spritesheetBase64", heavy) - entry("sheet", light)
+    assert saved > 0
+
+
+def test_the_default_sprite_envelope_carries_exactly_the_keys_it_always_did(
+    fake, base_image, capsys
+):
+    """The additive claim, checked rather than asserted.
+
+    The launcher's `HermesCharacterClient.sprite` passes no flag and reads this
+    object twice — once for `spritesheetBase64` / `spritesheetRevision`, once
+    through `CharaSheetDescriptor.fromHermesPayload`. The key set is written out
+    in full and compared with `==`, not `>=`: an implementation that added
+    `sheet` to EVERY payload rather than only the metadata-only one would
+    satisfy every superset probe in this file and still have changed the default
+    for a shipped client.
+
+    Key ORDER is not pinned here and cannot be: `emit_json` sorts, so the CLI's
+    bytes are alphabetical whatever `sprite_payload` builds. The order pin lives
+    where the order is real, on `sprite_payload` itself in
+    `tests/agent/test_charsheet_draft.py`.
+    """
+
+    slug = _installed_slug(capsys, base_image)
+
+    code, sprite = run(["harness", "characters", "sprite", slug, "--json"], capsys)
+    character = sprite["character"]
+
+    assert code == 0
+    assert set(character) == {
+        "slug",
+        "displayName",
+        "mime",
+        "spritesheetBase64",
+        "spritesheetRevision",
+        "frameW",
+        "frameH",
+        "framesByRow",
+        "loopMs",
+        "scale",
+        "directions",
+        "states",
+        "rows",
+        "stateRows",
+        "handednessAccepted",
+    }
+
+
+def test_the_human_line_says_where_the_sheet_is_when_it_is_not_carrying_it(
+    fake, base_image, capsys
+):
+    """Without `--json` the operator gets a line, and it must be actionable.
+
+    A metadata-only read whose human rendering says nothing about the file has
+    told a console operator strictly less than the default did. The default's
+    line is unchanged — that negative is the second half of the same claim.
+    """
+
+    slug = _installed_slug(capsys, base_image)
+
+    def line(*extra: str) -> str:
+        args = parser().parse_args(["harness", "characters", "sprite", slug, *extra])
+        assert args.func(args) == 0
+        return capsys.readouterr().out
+
+    lean_line = line("--no-sheet")
+    full_line = line()
+
+    assert "sheet " in lean_line
+    assert Path(lean_line.split("sheet ", 1)[1].strip().splitlines()[0]).is_file()
+    assert "sheet " not in full_line
+
+
 def test_a_malformed_states_flag_is_refused_before_a_draft_exists(fake, capsys):
     code, payload = run(
         ["harness", "characters", "start", "--concept", "x", "--states", "idle", "--json"], capsys

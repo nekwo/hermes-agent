@@ -2298,6 +2298,73 @@ def test_the_sprite_payload_ships_the_installed_bytes(installed):
     assert json.dumps(payload)
 
 
+def test_the_metadata_only_payload_drops_the_bytes_and_names_the_file(installed):
+    """``include_sheet=False``: the base64 goes, the PATH arrives, nothing else moves.
+
+    ANTI-VACUITY. The kill-mutation is "ignore the flag and emit the default",
+    which the first two probes catch; the SECOND mutation — "drop the base64 but
+    say nothing about where the sheet is" — is caught only by the path probe,
+    and the path is checked against the real file rather than asserted non-empty,
+    because a payload that names a file the consumer cannot open is the same
+    dead end as one that names none.
+
+    The revision probe is the third: the whole point of dropping the bytes is
+    that the consumer reads them itself, and it cannot record their provenance
+    without the key the launcher's ``contentHash`` hangs on.
+    """
+
+    sheet_path = characters_dir() / installed["slug"] / SHEET_FILENAME
+    full = sprite_payload(installed["slug"])
+    lean = sprite_payload(installed["slug"], include_sheet=False)
+
+    assert "spritesheetBase64" not in lean
+    assert lean["sheet"] == str(sheet_path)
+    assert Path(lean["sheet"]).read_bytes() == base64.standard_b64decode(
+        full["spritesheetBase64"]
+    )
+    assert lean["spritesheetRevision"] == full["spritesheetRevision"]
+    # Everything that is not the two swapped keys is identical — the flag is a
+    # payload DIET, not a second, thinner contract a consumer has to learn.
+    assert {k: v for k, v in lean.items() if k != "sheet"} == {
+        k: v for k, v in full.items() if k != "spritesheetBase64"
+    }
+    # The size claim, measured — and stated as a DIFFERENCE rather than a ratio
+    # on purpose. This fixture's sheet is a handful of frames, so its base64 is
+    # ~800 chars and a ratio probe would say nothing about the 468.8 KiB live
+    # case the flag exists for (the field notes make the same point about the
+    # small 4-way sheet). The exact whole-base64 saving is scale-free and it is
+    # the claim: everything the bytes cost came off, and only the path went on.
+    def entry(key: str, payload: dict) -> int:
+        return len(json.dumps({key: payload[key]})) - len("{}")
+
+    saved = len(json.dumps(full)) - len(json.dumps(lean))
+    assert saved == entry("spritesheetBase64", full) - entry("sheet", lean)
+    assert saved > 0
+
+
+def test_the_default_sprite_payload_is_untouched_by_the_no_sheet_mode(installed):
+    """The DEFAULT is byte-identical, key order included.
+
+    The launcher's shipped ``HermesCharacterClient.sprite`` passes no flag and
+    reads ``spritesheetBase64`` positionally in a `character` object it also
+    hands to ``CharaSheetDescriptor.fromHermesPayload``. This pins the exact key
+    sequence so that "additive" is a checked claim and not a hope — an
+    implementation that appended ``sheet`` to every payload, or that moved the
+    base64 to the end while adding the mode, reds here.
+    """
+
+    payload = sprite_payload(installed["slug"])
+
+    assert list(payload)[:5] == [
+        "slug",
+        "displayName",
+        "mime",
+        "spritesheetBase64",
+        "spritesheetRevision",
+    ]
+    assert "sheet" not in payload
+
+
 def test_the_sprite_payload_describes_every_row_of_the_sheet(installed):
     payload = sprite_payload(installed["slug"])
 

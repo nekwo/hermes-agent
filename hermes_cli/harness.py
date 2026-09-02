@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1901,6 +1902,7 @@ def build_parser(parent_subparsers) -> None:
     characters_add_state.set_defaults(func=_cmd_characters_add_state)
     characters_sprite = characters_subs.add_parser("sprite", help="Return an installed character spritesheet payload")
     characters_sprite.add_argument("slug")
+    characters_sprite.add_argument("--no-sheet", dest="no_sheet", action="store_true", help="Metadata only: drop `spritesheetBase64` (468.8 KiB of it on the live 3-state character, and the sheet bytes are not read at all) and carry `sheet`, the absolute path, in its place. `spritesheetRevision` and every geometry/taxonomy key are unchanged, so a consumer that wants framesByRow/states/rows and reads the file itself pays kilobytes instead of half a megabyte. The default is byte-identical to what it always was")
     characters_sprite.add_argument("--json", action="store_true")
     characters_sprite.set_defaults(func=_cmd_characters_sprite)
 
@@ -3628,15 +3630,27 @@ def _cmd_agent_list(args) -> int:
             except Exception:
                 continue
             for persona in personas:
-                rows.append(_agent_definition_row(persona, source_profile=profile.name, bindings=bindings))
+                rows.append(
+                    _agent_definition_row(
+                        persona, source_profile=profile.name, bindings=bindings, roster=personas
+                    )
+                )
     else:
         cfg = load_agent_runtime_config()
         try:
             bindings = binding_index(cfg)
         except Exception:
             bindings = {}
-        for persona in ensure_persisted_personas(cfg):
-            rows.append(_agent_definition_row(persona, source_profile=active_profile_name(), bindings=bindings))
+        personas = ensure_persisted_personas(cfg)
+        for persona in personas:
+            rows.append(
+                _agent_definition_row(
+                    persona,
+                    source_profile=active_profile_name(),
+                    bindings=bindings,
+                    roster=personas,
+                )
+            )
     deduped: dict[tuple[str, str | None], dict] = {}
     for row in rows:
         # Dedup on the ENUMERATED Hermes profile the definition was read from,
@@ -3653,7 +3667,13 @@ def _cmd_agent_list(args) -> int:
     return 0
 
 
-def _agent_definition_row(persona: AgentPersona, *, source_profile: str | None, bindings: dict | None = None) -> dict:
+def _agent_definition_row(
+    persona: AgentPersona,
+    *,
+    source_profile: str | None,
+    bindings: dict | None = None,
+    roster: Sequence[AgentPersona] | None = None,
+) -> dict:
     """One `agent list` row.
 
     ``profile`` is the agent's OWN ``hermes_profile`` binding — the thing the
@@ -3665,7 +3685,23 @@ def _agent_definition_row(persona: AgentPersona, *, source_profile: str | None, 
     honestly-named ``source_profile`` column, and the config-vs-store
     disagreement that ``ensure_persisted_personas`` silently resolves
     store-wins is surfaced rather than hidden.
+
+    ``persona_spellings`` and ``skills`` (2026-09-02) make this verb answer the
+    question the refusal on ``agent create --persona`` sends an operator here to
+    ask. It already enumerated the placeable definitions — that is exactly what
+    ``ensure_persisted_personas`` returns — but it named only ONE of the two
+    spellings ``--persona`` takes, and the ``profile`` column beside it is the
+    persona's binding rather than an accepted argument, which is a column an
+    operator can read as the second spelling and be wrong. The list comes from
+    :func:`agent_create.accepted_persona_spellings`, the same function the
+    refusal's choice list spends, so the verb and the error cannot disagree.
+    ``roster`` is this enumeration's OWN batch, because the ``profile:`` spelling
+    is offered only for a uniquely-owned profile and ownership is a property of
+    the set the row was read from — under ``--all-profiles`` that is the
+    enumerated profile's config merge, not the active root's.
     """
+
+    from agent_runtime.agent_create import accepted_persona_spellings
 
     binding = (bindings or {}).get(persona.id)
     row = {
@@ -3673,6 +3709,8 @@ def _agent_definition_row(persona: AgentPersona, *, source_profile: str | None, 
         "name": persona.display_name,
         "role": str(persona.role),
         "profile": persona.hermes_profile,
+        "persona_spellings": accepted_persona_spellings(persona, list(roster or [persona])),
+        "skills": list(getattr(persona, "skills", []) or []),
         "source_profile": source_profile,
         "state": "available",
         "updated_at": None,
@@ -4894,7 +4932,9 @@ def _cmd_characters_sprite(args) -> int:
 
     slug = str(getattr(args, "slug", "") or "").strip()
     try:
-        payload = charsheet_draft.sprite_payload(slug)
+        payload = charsheet_draft.sprite_payload(
+            slug, include_sheet=not bool(getattr(args, "no_sheet", False))
+        )
     except _CHARACTERS_EXPECTED as exc:
         return _characters_error(args, exc, slug=slug)
     data = {"ok": True, "character": payload}
@@ -4904,6 +4944,11 @@ def _cmd_characters_sprite(args) -> int:
         data,
         f"{payload['slug']} ({payload['displayName']}): {len(payload['framesByRow'])} rows, "
         f"{payload['frameW']}x{payload['frameH']} cells, revision {payload['spritesheetRevision']}"
+        # The human line says where the bytes ARE exactly when it is not
+        # carrying them. Reading the key off the payload rather than off
+        # `args.no_sheet` keeps the two from drifting: the mode is the payload's
+        # fact, and the flag is only how this handler asked for it.
+        + (f", sheet {payload['sheet']}" if "sheet" in payload else "")
         + (
             "; handedness accepted: "
             + ", ".join(

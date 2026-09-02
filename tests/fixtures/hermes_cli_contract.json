@@ -2650,6 +2650,14 @@
           "required": false,
           "type": null
         },
+        "--no-sheet": {
+          "action": "store_true",
+          "canonical": "--no-sheet",
+          "choices": null,
+          "nargs": 0,
+          "required": false,
+          "type": null
+        },
         "-h": {
           "action": "help",
           "canonical": "--help",

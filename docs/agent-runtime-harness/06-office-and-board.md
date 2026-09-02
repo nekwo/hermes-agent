@@ -375,6 +375,27 @@ id breaks the prediction. The unknown-persona question is asked before the shape
 question at every door, so "that agent does not exist" never hides behind a
 spelling complaint.
 
+**The unknown-persona refusal names the CHOICES, not only the verb that lists
+them (2026-09-02).** There was never a missing listing to build: `harness agent
+list` walks the same `ensure_persisted_personas` merge this fence checks, so it
+has always enumerated exactly the definitions `--persona` accepts. What
+`persona_not_found_message` handed back was the NAME of a command, and that
+cures nothing for the callers this door was widened for — a script, a cron, a
+remote `call` leg cannot run a second command to learn what the first would have
+accepted. The refusal now spells the placeable ids inline, bounded by
+`PERSONA_CHOICE_LIST_LIMIT` so a large roster cannot turn an error into a page,
+and each id carries both spellings because `--persona` takes two for one agent
+and nothing in the CLI said so. `accepted_persona_spellings` is the single
+authority, spent by that message and by the `persona_spellings` column
+`_agent_definition_row` now puts on every `agent list` row, so the verb and the
+error cannot drift. It offers `profile:<token>` only for a profile with exactly
+ONE owner: the CLI's synthesis lane fills a synthesised persona's defaults
+through `profile_persona_resolution`, which answers nothing for a shared
+profile, so the spelling would still parse (D-U1 exempts every `profile:` id
+from the roster check) and would mint a defaults-less agent DIFFERENT from the
+id printed beside it. Advertising that trade silently is worse than advertising
+nothing.
+
 **The server's own version of that census stopped crying wolf on 2026-08-31**
 (`671ae4f9a7`). `operator_channels`' `duplicate_instances_same_channel` warning
 ("multiple persona instances projected to one operator channel") counted ids
