@@ -222,6 +222,15 @@ def classify(cmd, env=None) -> str | None:
     # profile) but it is a separate lane, and a ``--version`` call starts
     # nothing. What this arm must catch is a hermes process coming up on the
     # operator's store: the second half of the measured escape.
+    #
+    # 2026-09-01: the COUNT was cut, the exemption was not.
+    # ``agent_browser_runnable`` now memoises its ``--version`` spawn per path
+    # (``hermes_constants._AGENT_BROWSER_PROBE_CACHE``), so
+    # ``tests/hermes_cli/test_doctor.py`` went from 29 spawns of that CMD to 1,
+    # measured on this host. One is still one: the path is import-bound in
+    # ``doctor``, so the suite still reaches the operator's live profile and
+    # this arm must still let it through. Deleting the exemption needs the
+    # OTHER half — resolving the browser path through the profile under test.
     if _hermes_entry_index(tokens) is not None and _names_real_root(text, env):
         return (
             f"it would run hermes against the operator's REAL store ({_REAL_ROOT}). "
