@@ -486,4 +486,52 @@ worktree, tmp root set:
   same commit); `run_tests.sh` now forwards `HERMES_TEST_TMP_ROOT` through
   its `env -i` so the Stage 7 tmp root survives the canonical entry point.
 
+## 15. Residual aging ATTRIBUTED (2026-09-01 evening, probe worktree aging-h, measure-only)
 
+Method: full serial tests/hermes_cli (minus test_doctor.py — its 18 s vercel test
+crosses the 30 s thread-method ceiling under load and the thread method kills the
+whole process) with the 200-no-op probe collected last; four uncommitted
+instruments: exact per-phase durations via a logreport-hook plugin (pytest's
+--durations output quantizes to 10 ms), a gc.callbacks pause meter over the probe
+window, an unprofiled per-fixture setup timer, and an in-process micro-lab at the
+aged tail. Fresh floor this day/box: setup 14.5 ms median (not 8 — box drift; all
+comparisons same-session). Aged tail: setup 45.2 ms / teardown 8.2 ms median.
+The growth is NOT gen-2-GC-dominated and NOT tmp_path (O(1) fix holds: 0.43 ms aged).
+
+| mechanism | fresh | aged | delta /test |
+|---|---|---|---|
+| _sys_modules_identity_is_restored setup half (tests/hermes_cli/conftest.py:179) | 0.42 ms | 29.9 ms | +29.5 — DOMINANT (~65%) |
+| same guard's teardown half (2nd O(N) loop) + GC landing there | ~1.5 | ~8.2 | most of teardown +6.7 |
+| GC pauses (direct meter): gen0 0.29->4.1 ms/pass x182/window; one gen2 pass 611 ms aged vs 27 fresh | 0.33 | 5-8 | owns the 500-2000 ms SPIKES, not the mean |
+| _live_system_guard | 4.4 | 10.1 | +5.7 (undecomposed) |
+| _hermetic_environment (environ 111->199) | 2.0 | 3.5 | +1.5 |
+| _ensure_current_event_loop | 1.5 | 2.2 | +0.7 |
+| pytest-timeout timer thread; capture tmpfile | — | 0.25 / 0.31 ms | acquitted (micro-lab) |
+
+Cross-check: the aged per-fixture table sums to 46.9 ms ≈ the 45.2 ms measured floor.
+
+- The guard scales with sys.modules (626 fresh -> 14,843 aged; growth happens DURING
+  the run, not at collection). Aged probe window: 27.7M function calls vs 3.6M fresh
+  for identical tests. A synthetic dict-only replica of its loops at 14.8k entries
+  costs 5.4 ms — the other ~24 ms is hasattr(parent, child) firing module
+  __getattr__ lazy-import machinery on real modules (failed import: 2.04 ms aged vs
+  0.73 fresh; the no-op probe tests stat 120 files/test via importlib _path_stat).
+- gc.freeze() after collection, matched uncontended buckets (tests 3000-4000):
+  setup 31.5 vs 36.6, teardown 5.7 vs 6.6 -> recovers ~6 ms/test and suppresses the
+  gen-2 spike class; does NOT touch the guard. Walls 797 s (freeze) vs 712 s
+  (no freeze) — no whole-run win. Second-order, not the fix.
+- Heap inflation alone (842 production modules pre-imported into a fresh process):
+  14.5->20.1 ms — a fat heap reproduces only a fraction; the run itself is required.
+- Aged-process hygiene at the 4.6k-test tail: 31 live threads (fresh 3), 10,900
+  open handles (fresh 663), RSS 646 MB.
+- Contention trap re-validated: identical run 18:29 contended vs 11:52 uncontended —
+  never compare walls across sessions.
+
+Recommended fix (decision-ready): keep the identity guarantee, retire the per-test
+O(sys.modules) module-object work — run the parent-binding repair once per session
+(or only when len(sys.modules) changed), probe via vars(parent) membership so module
+__getattr__ never fires, keep the before-copy + teardown identity loop (dict ops,
+~1-5 ms). Expected: aged floor 45->~20 ms, ~60-90 s off every full hermes_cli run,
+<=1.5x aging acceptance passes. gc.freeze optional second-order (~40-60 s/run) at the
+price of never-collected frozen garbage. OPEN: _live_system_guard's +5.7 ms aged
+growth is measured, undecomposed.
