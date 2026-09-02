@@ -447,6 +447,7 @@ from typing import Optional
 
 import functools as _functools
 
+from hermes_cli.flag_binding import list_flag_or_empty
 from hermes_cli.sessions_cmd import cmd_sessions  # noqa: F401
 from hermes_cli.subcommands._shared import add_accept_hooks_flag as _add_accept_hooks_flag
 from hermes_cli.subcommands.cron import build_cron_parser
@@ -12119,8 +12120,8 @@ def main():
         if action == "doctor":
             from tools.computer_use.doctor import run_doctor
             code = run_doctor(
-                include=list(getattr(args, "include", []) or []),
-                skip=list(getattr(args, "skip", []) or []),
+                include=list_flag_or_empty(args, "include"),
+                skip=list_flag_or_empty(args, "skip"),
                 json_output=bool(getattr(args, "json", False)),
             )
             sys.exit(code)

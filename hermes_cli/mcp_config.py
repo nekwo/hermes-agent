@@ -12,6 +12,7 @@ import asyncio
 import logging
 import os
 import re
+from hermes_cli.flag_binding import list_flag_or_empty
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -439,7 +440,7 @@ def cmd_mcp_add(args):
     # mcp_add_p.add_argument("--command", dest="mcp_command", ...) in
     # hermes_cli/main.py for why the dest is renamed.
     command = getattr(args, "mcp_command", None)
-    cmd_args = getattr(args, "args", None) or []
+    cmd_args = list_flag_or_empty(args, "args")
     if cmd_args and cmd_args[0] == "--":
         cmd_args = cmd_args[1:]
     auth_type = getattr(args, "auth", None)
@@ -756,7 +757,7 @@ def cmd_mcp_test(args):
     # config dict that other commands in the same process may read.
     cfg = dict(servers[name])
 
-    raw_env = getattr(args, "env", None) or []
+    raw_env = list_flag_or_empty(args, "env")
     try:
         runtime_env = _parse_env_assignments(raw_env)
     except ValueError as exc:

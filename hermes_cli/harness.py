@@ -18,6 +18,7 @@ from typing import Optional
 from hermes_time import now
 from hermes_constants import get_hermes_home
 from hermes_cli.profiles import list_profiles
+from hermes_cli.flag_binding import list_flag_or_empty
 
 from agent_runtime.cli_format import emit_json, emit_json_line
 from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config, mission_chat_clarify_token_binding, resolve_mission_chat_max_seconds
@@ -2200,14 +2201,14 @@ def _cmd_roots_migrate(args) -> int:
 
     if not _require_yes(args):
         return 8
-    config_paths = _machine_root_config_paths(list(getattr(args, "configs", []) or []))
+    config_paths = _machine_root_config_paths(list_flag_or_empty(args, "configs"))
     if not config_paths:
         return emit_harness_error(
             NotFound("config.yaml"), args=args, message="No profile config.yaml files found to migrate."
         )
 
     explicit: dict[str, str] = {}
-    for item in getattr(args, "root", []) or []:
+    for item in list_flag_or_empty(args, "root"):
         if "=" not in str(item):
             return emit_harness_error(
                 ValueError(str(item)), args=args, code="invalid_payload", message=f"--root expects NAME=PATH, got '{item}'"
@@ -2693,7 +2694,7 @@ def _cmd_skills_delete(args) -> int:
     slug = str(getattr(args, "skill", "") or "").strip()
     dry_run = bool(getattr(args, "dry_run", False))
     requested: list[str] = []
-    for value in getattr(args, "realms", None) or []:
+    for value in list_flag_or_empty(args, "realms"):
         token = str(value or "").strip()
         if token and token not in requested:
             requested.append(token)
@@ -3029,7 +3030,7 @@ def _cmd_workspace_create(args) -> int:
             ValueError("--copy requires --from-workspace"), args=args, code="invalid_request"
         )
     if getattr(args, "dry_run", False):
-        row = {"id": f"ws_dry_{uuid.uuid4().hex[:6]}", "name": args.name, "realm_id": args.realm, "agents": len(args.agent or []), "goals": 0, "isolation": args.isolation or "soft", "updated_at": now()}
+        row = {"id": f"ws_dry_{uuid.uuid4().hex[:6]}", "name": args.name, "realm_id": args.realm, "agents": len(list_flag_or_empty(args, "agent")), "goals": 0, "isolation": args.isolation or "soft", "updated_at": now()}
         if template is not None:
             row["template_workspace_id"] = template.id
             row["copy_scopes"] = list(scopes)
@@ -3039,7 +3040,7 @@ def _cmd_workspace_create(args) -> int:
         RealmStore().get(args.realm)
     # Template settings/roster feed the create itself; explicit flags always
     # win over the template so the operator can override any copied field.
-    agent_ids = list(args.agent or [])
+    agent_ids = list_flag_or_empty(args, "agent")
     blueprint = args.blueprint
     isolation = args.isolation
     max_lanes = args.max_lanes
@@ -3444,7 +3445,7 @@ def _cmd_realm_sync_revert(args) -> int:
     try:
         data = revert_realm_sync(
             args.realm_id,
-            item_specs=list(getattr(args, "items", None) or []),
+            item_specs=list_flag_or_empty(args, "items"),
             revert_all=bool(getattr(args, "revert_all", False)),
             dry_run=dry_run,
         )

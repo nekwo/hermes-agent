@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+from hermes_cli.flag_binding import list_flag_or_empty
 import json
 import os
 import shlex
@@ -1513,7 +1514,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             project_id=getattr(args, "project", None),
             tenant=args.tenant,
             priority=args.priority,
-            parents=tuple(args.parent or ()),
+            parents=tuple(list_flag_or_empty(args, "parent")),
             triage=bool(getattr(args, "triage", False)),
             idempotency_key=getattr(args, "idempotency_key", None),
             max_runtime_seconds=max_runtime,
@@ -1547,7 +1548,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
 
 def _cmd_swarm(args: argparse.Namespace) -> int:
     try:
-        workers = [ks.parse_worker_arg(raw) for raw in (args.worker or [])]
+        workers = [ks.parse_worker_arg(raw) for raw in list_flag_or_empty(args, "worker")]
     except ValueError as exc:
         print(f"kanban swarm: {exc}", file=sys.stderr)
         return 2
@@ -2145,7 +2146,7 @@ def _worker_run_id_for(task_id: str) -> Optional[int]:
 
 def _cmd_complete(args: argparse.Namespace) -> int:
     """Mark one or more tasks done. Supports a single id or a list."""
-    ids = list(args.task_ids or [])
+    ids = list_flag_or_empty(args, "task_ids")
     if not ids:
         print("at least one task_id is required", file=sys.stderr)
         return 1
@@ -2264,7 +2265,7 @@ def _cmd_block(args: argparse.Namespace) -> int:
     reason = " ".join(args.reason).strip() if args.reason else None
     kind = getattr(args, "kind", None)
     author = _profile_author()
-    ids = [args.task_id] + list(getattr(args, "ids", None) or [])
+    ids = [args.task_id] + list_flag_or_empty(args, "ids")
     failed: list[str] = []
     with kb.connect_closing() as conn:
         for tid in ids:
@@ -2300,7 +2301,7 @@ def _cmd_block(args: argparse.Namespace) -> int:
 def _cmd_schedule(args: argparse.Namespace) -> int:
     reason = " ".join(args.reason).strip() if args.reason else None
     author = _profile_author()
-    ids = [args.task_id] + list(getattr(args, "ids", None) or [])
+    ids = [args.task_id] + list_flag_or_empty(args, "ids")
     failed: list[str] = []
     with kb.connect_closing() as conn:
         for tid in ids:
@@ -2320,7 +2321,7 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
 
 
 def _cmd_unblock(args: argparse.Namespace) -> int:
-    ids = list(args.task_ids or [])
+    ids = list_flag_or_empty(args, "task_ids")
     if not ids:
         print("at least one task_id is required", file=sys.stderr)
         return 1
@@ -2345,7 +2346,7 @@ def _cmd_promote(args: argparse.Namespace) -> int:
     reason = " ".join(args.reason).strip() if args.reason else None
     author = _profile_author()
     as_json = getattr(args, "json", False)
-    extra_ids = list(getattr(args, "ids", None) or [])
+    extra_ids = list_flag_or_empty(args, "ids")
     # Dedupe while preserving order; positional task_id always first.
     ids: list[str] = []
     seen: set[str] = set()
@@ -2393,8 +2394,8 @@ def _cmd_promote(args: argparse.Namespace) -> int:
 
 
 def _cmd_archive(args: argparse.Namespace) -> int:
-    ids = list(args.task_ids or [])
-    purge_ids = list(getattr(args, "purge_ids", None) or [])
+    ids = list_flag_or_empty(args, "task_ids")
+    purge_ids = list_flag_or_empty(args, "purge_ids")
     if ids and purge_ids:
         print("choose either task_ids to archive or --rm archived task_ids", file=sys.stderr)
         return 1

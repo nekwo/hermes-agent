@@ -136,6 +136,7 @@ from agent_runtime.tool_permissions import (
 )
 from agent_runtime.tool_turn_history import persist_tool_turn_actual
 from agent_runtime.tool_visibility import ToolVisibilityOptions, resolve_tool_visibility
+from hermes_cli.flag_binding import list_flag_or_absent, list_flag_or_empty
 from hermes_cli.harness_support import (
     PERSONA_CHAT_SESSION_SOURCE,
     _list_envelope,
@@ -520,9 +521,9 @@ def _cmd_agent_create(args) -> int:
     # (inherit the persona's, live) while `[]` writes an explicit "no skills"
     # override. Sending `skills: []` for an operator who never typed the flag
     # is the exact `None -> []` collapse this slice fixes one handler below.
-    requested_skills = getattr(args, "skills", None)
+    requested_skills = list_flag_or_absent(args, "skills")
     if requested_skills is not None:
-        params["skills"] = list(requested_skills)
+        params["skills"] = requested_skills
     for key, value in (
         ("display_name", getattr(args, "display_name", None)),
         ("placement_id", getattr(args, "placement_id", None)),
@@ -4642,13 +4643,13 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
 def _cmd_mission_chat_queue_skill(args) -> int:
     persona_id = safe_assignment_token(getattr(args, "persona_id", None))
     session_id = safe_assignment_token(getattr(args, "session_id", None))
-    single_values = getattr(args, "skill", None) or []
-    batch_values = getattr(args, "skills", None) or []
-    if isinstance(single_values, str):
-        single_values = [single_values]
-    if isinstance(batch_values, str):
-        batch_values = [batch_values]
-    raw_skills = [*single_values, *batch_values]
+    # Both spellings collapse deliberately: this verb refuses below unless
+    # at least one skill survives, so "flag absent" and "flag given empty"
+    # reach the same refusal and no store can tell them apart.
+    raw_skills = [
+        *list_flag_or_empty(args, "skill"),
+        *list_flag_or_empty(args, "skills"),
+    ]
     skills = list(
         dict.fromkeys(
             token
@@ -5312,8 +5313,8 @@ def _cmd_persona_instance_return_summary(args) -> int:
             args.persona_instance_id,
             parent_session_id=args.parent_session_id,
             summary=args.summary,
-            proof_ids=list(getattr(args, "proof_ids", []) or []),
-            artifact_refs=list(getattr(args, "artifact_refs", []) or []),
+            proof_ids=list_flag_or_empty(args, "proof_ids"),
+            artifact_refs=list_flag_or_empty(args, "artifact_refs"),
         )
     except Exception as exc:
         data = {"ok": False, "capability_id": "persona.instance.return_summary", "error": safe_assignment_text(str(exc), limit=240)}
@@ -5346,14 +5347,17 @@ def _cmd_persona_instance_update_profile(args) -> int:
             data = _coordinator_confirm_payload("persona.instance.update_profile", coordinator_id, auth)
             print(emit_json(data) if args.json else data["status"])
             return 2
-    requested_skills = getattr(args, "skills", None)
+    requested_skills = list_flag_or_absent(args, "skills")
     try:
         updated = store.update_profile(
             persona_instance_id,
             display_name=getattr(args, "display_name", None),
             current_chat_goal=getattr(args, "current_chat_goal", None),
             goal_id=getattr(args, "goal_id", None),
-            # `None` when the flag was not given, and NEVER `[]`.
+            # `None` when the flag was not given, and NEVER `[]` — which is
+            # the whole content of `list_flag_or_absent`. Three handlers in
+            # this file had each re-derived that rule in its own paragraph
+            # before the reader existed; the name now carries it.
             #
             # THE BUG THIS REPLACES. `list(... or [])` handed the store an empty
             # LIST for every call that omitted `--skill`, and the store's own
@@ -5369,7 +5373,7 @@ def _cmd_persona_instance_update_profile(args) -> int:
             # (`agent_chat/skills_context_controller.dart` refuses to write an
             # unproven baseline), which is a client working around a server bug —
             # not a fix, and not something a cron script or a remote `call` gets.
-            skills=list(requested_skills) if requested_skills is not None else None,
+            skills=requested_skills,
             clear_skills=bool(getattr(args, "clear_skills", False)),
         )
     except ValueError as exc:
@@ -5760,7 +5764,7 @@ def _validated_set_skills_request(args) -> dict:
     ``nothing_to_write`` refusal, and emptying the set has its own flag.
     """
 
-    raw_skills = getattr(args, "skills", None)
+    raw_skills = list_flag_or_absent(args, "skills")
     clear = bool(getattr(args, "clear_skills", False))
     if raw_skills is not None and clear:
         raise _SetModelRequestError(

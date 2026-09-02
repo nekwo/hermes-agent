@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import sys
 from datetime import datetime, timezone
+from hermes_cli.flag_binding import list_flag_or_empty
 from pathlib import Path
 from typing import Optional
 
@@ -352,7 +353,7 @@ def _cmd_adopt(args) -> int:
     """
     from tools import skill_usage
 
-    names = list(getattr(args, "skill", None) or [])
+    names = list_flag_or_empty(args, "skill")
     adopt_all = bool(getattr(args, "all_unmanaged", False))
     if adopt_all:
         if names:
