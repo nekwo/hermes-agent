@@ -15,20 +15,23 @@ translate "absent" into "absent".
 
 That instance is fixed. This module exists because the CLASS was not:
 
-* the collapse has no single spelling. ``getattr(args, X, None) or []`` and
-  ``args.X or []`` were both live, in eleven and seven places, and
-  ``or list()`` is a third that nothing would have caught. A rule enforced
-  against one spelling is a rule against a spelling, not a rule.
-* two sites had already worked it out by hand and written the correct thing
-  (``_cmd_persona_instance_update_profile``,
-  ``_validated_set_skills_request``), each with its own paragraph explaining
-  why. Nothing linked them, so the reasoning had to be re-derived per site --
-  and the eighteen that did not re-derive it are exactly the collapses.
+* the collapse has no single spelling, and the count depends on which one you
+  look for. A grep for ``getattr(args, X, None) or []`` found eleven. An AST
+  walk for the SHAPE found TWENTY-FIVE: seven more spelled ``args.X or []``,
+  and seven more again spelled ``getattr(args, X, []) or []`` or
+  ``args.parent or ()``. A rule enforced against a spelling is a rule about a
+  spelling, which is why the gate over this package matches on shape.
+* three handlers had already worked it out by hand and written the correct
+  thing (the agent-create params builder,
+  ``_cmd_persona_instance_update_profile``, ``_validated_set_skills_request``),
+  each with its own paragraph explaining why. Nothing linked them, so the
+  reasoning had to be re-derived per site -- and the sites that never
+  re-derived it are exactly the collapses.
 * absent-vs-empty is INVISIBLE in ``or []``. It is not that the sites chose
-  wrong; it is that they never had to choose. Every one of the eighteen was
-  checked when this landed and every one is safe today, which is the point:
-  this is a trap, not an outage, and the next verb to walk into it will look
-  exactly like the last eighteen did.
+  wrong; it is that they never had to choose. Every one of the twenty-five was
+  read when this landed and every one is safe today, which is the point: this
+  is a trap, not an outage, and the next verb to walk into it will look exactly
+  like the twenty-five did.
 
 THE TWO READERS BELOW ARE RULINGS, NOT UTILITIES. Their names are the whole
 mechanism: picking one is a decision a reviewer can see and check, where
@@ -39,12 +42,16 @@ WHERE THE DISTINCTION HAS TO EXIST FIRST
 
 A reader cannot recover what the parser threw away. ``add_argument(...,
 action="append", default=[])`` makes ``args.X`` an empty list when the flag is
-absent, so no command layer downstream can tell absence from emptiness -- and
-argparse appends into that one default LIST OBJECT, shared by every parse in the
-process. Any flag read through :func:`list_flag_or_absent` therefore has to be
-declared ``default=None``, and that is checked against the real parser tree at
-runtime by ``tests/hermes_cli/test_flag_binding_boundary.py`` rather than
-asserted here in a comment.
+absent, so no command layer downstream can tell absence from emptiness. Any
+flag read through :func:`list_flag_or_absent` therefore has to be declared
+``default=None``, and that is checked against the real parser tree at runtime
+by ``tests/hermes_cli/test_flag_binding_boundary.py`` rather than asserted here
+in a comment.
+
+(It is ONLY an expressiveness problem, not an aliasing one: ``_AppendAction``
+copies the default before appending, so the shared list is never mutated. That
+was measured rather than assumed -- the plausible second bug here does not
+exist, and saying it did would have been a comment that reads as evidence.)
 
 SCOPE. List-valued flags only. The string form (``(getattr(args, X, None) or
 "").strip()``) is a different question -- an empty string is a legal value far
