@@ -380,7 +380,8 @@ projector bug; events.jsonl untouched.
 `EventLog.iter_from_offset`, `agent_runtime/projector.py` with lease +
 `apply_pending` (event-kind routing table per the spec), ticker chokepoint
 integration, `harness rebuild-read-model` + `harness read` CLIs, and the
-five tests in `tests/agent_runtime/test_projector.py` — the
+five tests in `tests/agent_runtime/test_projector.py` [that file was deleted
+in `fac754194e` with the projector lane itself and no longer exists] — the
 full-vs-incremental replay equivalence test is the ship gate. SLO:
 incremental apply ≤ 150 ms. Full suite green. Check your brain first.”
 

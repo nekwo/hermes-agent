@@ -201,6 +201,7 @@ def _report(skills: list[str]) -> list[str]:
     """One line per canonical skill: repo size/hash vs installed size/hash."""
     from agent.skill_utils import skill_package_content_hash
     from agent_runtime.skill_install import (
+        SKILL_SIZE_CEILINGS,
         harness_skill_destination,
         harness_skill_source,
     )
@@ -208,6 +209,12 @@ def _report(skills: list[str]) -> list[str]:
     lines: list[str] = []
     for skill in skills:
         source = harness_skill_source(skill)
+        declared = SKILL_SIZE_CEILINGS.get(skill)
+        budget = (
+            f" | preload {source.stat().st_size} / {declared.limit} B"
+            if declared and source.exists()
+            else " | preload budget UNDECLARED"
+        )
         destination = harness_skill_destination(skill)
         if not source.exists():
             lines.append(f"  {skill}: MISSING SOURCE {source}")
@@ -216,7 +223,7 @@ def _report(skills: list[str]) -> list[str]:
         if not destination.exists():
             lines.append(
                 f"  {skill}: repo {source.stat().st_size} B {source_hash[:16]} "
-                f"— NOT INSTALLED at {destination}"
+                f"— NOT INSTALLED at {destination}{budget}"
             )
             continue
         installed_hash = skill_package_content_hash(destination.parent, destination)
@@ -224,6 +231,7 @@ def _report(skills: list[str]) -> list[str]:
         lines.append(
             f"  {skill}: repo {source.stat().st_size} B {source_hash[:16]} | "
             f"installed {destination.stat().st_size} B {installed_hash[:16]} | {state}"
+            f"{budget}"
         )
     return lines
 
@@ -271,7 +279,9 @@ def main(argv: list[str] | None = None) -> int:
             SKILL_HASH_MISMATCH,
             SKILL_HASH_NO_SOURCE,
             SKILL_HASH_NOT_INSTALLED,
+            SKILL_SIZE_NO_CEILING,
             get_shared_skills_dir,
+            harness_skill_size_overages,
             harness_skill_source_root,
             install_harness_skills,
         )
@@ -290,11 +300,24 @@ def main(argv: list[str] | None = None) -> int:
         if refreshed:
             print(f"  refreshed from the repo: {', '.join(refreshed)}")
 
+    # SIZE is the second thing "the two copies are identical" does not settle,
+    # and it is read HERE, beside the hash verdict, so one run reports both
+    # facts. A ``required_preload`` package's ``SKILL.md`` rides every turn of
+    # every persona that lists it, so its LENGTH is a standing context cost, and
+    # hashes have no opinion about length: the charsheet package grew 70% in one
+    # rewrite with this gate green throughout. The ceilings and their reasons
+    # live in ``agent_runtime.skill_install.SKILL_SIZE_CEILINGS``; raising one is
+    # a one-line diff someone defends in the same change as the growth.
+    #
+    # Deliberately NOT on the serve-boot path: a boot repairs drift it did not
+    # cause and must not be blocked by a budget question, which is an authoring
+    # decision the PRODUCER owns.
+    overages = harness_skill_size_overages(skills)
     buckets = _by_state(skills)
     mismatches = buckets.get(SKILL_HASH_MISMATCH, [])
     missing = buckets.get(SKILL_HASH_NOT_INSTALLED, [])
     sourceless = buckets.get(SKILL_HASH_NO_SOURCE, [])
-    if mismatches or missing or sourceless:
+    if mismatches or missing or sourceless or overages:
         print("\n".join(_report(skills)))
         if mismatches:
             print(
@@ -314,12 +337,37 @@ def main(argv: list[str] | None = None) -> int:
                 f"repo: {', '.join(sourceless)}",
                 file=sys.stderr,
             )
-        print(
-            "harness-skill-install: a chat turn loads the INSTALLED copy, never the repo "
-            "one. Run `hermes harness install-harness-skills` (or this script without "
-            "--check), or restart `harness serve`, which installs at boot.",
-            file=sys.stderr,
-        )
+        for state in overages:
+            if state.ceiling == SKILL_SIZE_NO_CEILING:
+                print(
+                    f"harness-skill-install: FAILED — {state.skill} has no entry in "
+                    f"SKILL_SIZE_CEILINGS ({state.size} B of per-turn preload measured "
+                    "by nobody). Declare a ceiling with its reason.",
+                    file=sys.stderr,
+                )
+                continue
+            print(
+                f"harness-skill-install: FAILED — {state.skill} preloads "
+                f"{state.size} B of SKILL.md, over its {state.ceiling} B ceiling by "
+                f"{state.size - state.ceiling} B. That is per-turn context for every "
+                f"persona listing it. Ceiling reason: {state.reason}",
+                file=sys.stderr,
+            )
+        if mismatches or missing or sourceless:
+            print(
+                "harness-skill-install: a chat turn loads the INSTALLED copy, never the "
+                "repo one. Run `hermes harness install-harness-skills` (or this script "
+                "without --check), or restart `harness serve`, which installs at boot.",
+                file=sys.stderr,
+            )
+        if overages:
+            print(
+                "harness-skill-install: cut prose, move it to references/ (the turn gets "
+                "their PATHS and fetches one with skill_view only when it needs it), or "
+                "raise the ceiling in agent_runtime/skill_install.py and say why in the "
+                "same diff.",
+                file=sys.stderr,
+            )
         return 1
 
     print("harness-skill-install: ok — every canonical package installed and current")

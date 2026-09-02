@@ -79,6 +79,22 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TESTS_ROOT = REPO_ROOT / "tests"
 
+#: This gate's cost is its CORPUS, not its verdict, and the repo-wide per-test
+#: cap does not know that. Measured 2026-09-02 on the Windows dev box, three
+#: runs: ``collect_claims()`` reads 197 md + 4031 py files and costs 27-31 s,
+#: paid ONCE in the module-scoped :func:`scan` fixture and paid identically
+#: whether the run is green or red. ``_unresolved`` over the whole corpus is
+#: 1.1 s; the ENTIRE failure report for 9 bad claims, ``_suggest`` included, is
+#: 1.2 s. So ``--timeout=30`` from ``pyproject.toml``'s addopts kills this file
+#: in FIXTURE SETUP, green or red, and every run of it so far has been a
+#: hand-passed ``--timeout=600``. A gate that only runs when someone remembers a
+#: flag is the unrun-gate defect ``AGENTS.md`` §Testing built the push lane for,
+#: so the cap is DECLARED here instead of typed at a console. It stays well
+#: under ``run_tests_parallel``'s 300 s per-FILE wall, which is still the real
+#: bound on a hang: this marker buys headroom for a slow corpus walk, not for a
+#: loop.
+pytestmark = pytest.mark.timeout(180)
+
 #: Markdown roots. Root-level ``*.md`` is included: AGENTS.md and the READMEs
 #: carry runner examples, and a rotted claim there is read by every contributor.
 _MD_DIRS = ("docs",)
@@ -599,6 +615,29 @@ def _unresolved(claims: list[Claim]) -> list[tuple[Claim, str]]:
     return bad
 
 
+#: How many unresolved claims get a ``near`` line before the gate stops paying
+#: for one. ``difflib.get_close_matches`` at cutoff 0.5 over the ~3000 test
+#: filenames costs 0.135 s per call (measured 2026-09-02), invisible at today's
+#: handful and LINEAR in the number of dangling claims -- a sweep that rots
+#: fifty citations at once would spend seven seconds building a report nobody
+#: reads to the bottom of. Every unresolved claim is still reported in full
+#: (arm, source, line, target, reason); only the nearest-name hint, the one part
+#: that costs a corpus pass each time, is budgeted.
+_SUGGEST_BUDGET = 25
+
+#: The fallback arm's filename pool, sorted once. Cheap next to difflib and
+#: rebuilt per claim before this -- the budget above is the bound, this is just
+#: not paying for the same sort N times.
+_SORTED_TEST_FILENAMES: list[str] | None = None
+
+
+def _sorted_test_filenames() -> list[str]:
+    global _SORTED_TEST_FILENAMES
+    if _SORTED_TEST_FILENAMES is None:
+        _SORTED_TEST_FILENAMES = sorted(_test_files_by_name())
+    return _SORTED_TEST_FILENAMES
+
+
 def _suggest(target: str) -> str:
     """Nearest existing names — most findings of this class are pure renames."""
 
@@ -614,7 +653,9 @@ def _suggest(target: str) -> str:
         if pool:
             near = difflib.get_close_matches(member, sorted(pool), n=3, cutoff=0.45)
             return ", ".join(f"{filename}::{n}" for n in near) if near else "(no near name in that file)"
-    near = difflib.get_close_matches(filename, sorted(by_name), n=3, cutoff=0.5)
+    near = difflib.get_close_matches(
+        filename, _sorted_test_filenames(), n=3, cutoff=0.5
+    )
     return ", ".join(near) if near else "(no near filename)"
 
 
@@ -624,6 +665,17 @@ def _suggest(target: str) -> str:
 @pytest.fixture(scope="module")
 def scan() -> tuple[list[Claim], dict[str, int]]:
     return collect_claims()
+
+
+def _near(index: int, claim: Claim) -> str:
+    """The nearest-name hint for one report row, or why it was not computed."""
+
+    if index < _SUGGEST_BUDGET:
+        return _suggest(claim.target)
+    return (
+        f"(not computed — past the {_SUGGEST_BUDGET}-claim suggestion budget; "
+        "fix those above and re-run for the rest)"
+    )
 
 
 def test_every_coverage_claim_names_a_test_that_exists(scan) -> None:
@@ -641,9 +693,9 @@ def test_every_coverage_claim_names_a_test_that_exists(scan) -> None:
         f"  [{claim.arm}] {claim.source}:{claim.lineno}\n"
         f"      claim : {claim.target}\n"
         f"      why   : {reason}\n"
-        f"      near  : {_suggest(claim.target)}\n"
+        f"      near  : {_near(index, claim)}\n"
         f"      line  : {claim[4][:160]}"
-        for claim, reason in bad
+        for index, (claim, reason) in enumerate(bad)
     )
     pytest.fail(
         f"{len(bad)} coverage claim(s) name a test that does not exist.\n\n"

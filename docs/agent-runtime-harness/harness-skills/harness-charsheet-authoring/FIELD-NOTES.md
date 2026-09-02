@@ -2347,9 +2347,11 @@ Worktree `X:/wt/servediag` off `4ab953df89`; nothing pushed, primary untouched.
   contract is pinned HERE, not only in the launcher.**
   `tests/agent_runtime/test_persona_skill_policy.py` is listed as "RETARGET — the verb-table
   set pin gains `migrate-home`", and that is true and was cheap. What the table does not say
-  is that the same file holds
-  `test_charsheet_skill_states_the_launcher_bindings_home_in_its_landed_meaning`, which pins
-  the skill's copy of the resume seed line **verbatim** — `"last observed home:"`,
+  is that the same file holds the pin on that seed line too. Its name when this entry was
+  written, `test_charsheet_skill_states_the_launcher_bindings_home_in_its_landed_meaning`,
+  is gone. The inversion below is what landed, and the surviving pin is
+  `test_persona_skill_policy.py::test_charsheet_skill_teaches_one_install_wide_library_and_no_home_scoping`,
+  which pins the skill's copy of the resume seed line **verbatim** — `"last observed home:"`,
   `"never observed by the launcher"`, `"observed the draft readable in"` — as the hermes end
   of the two-repo contract §13.26's rejection (d) created. §A-8 retires that line, so the
   pin does not "retarget": it INVERTS, and it does so in this strip whether the plan said so

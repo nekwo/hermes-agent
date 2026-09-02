@@ -198,13 +198,14 @@ Three consequences worth recording:
   is refused whatever the archive decodes to, so decoding first would only mean
   answering `archive_unreadable` ("ask again once the file is readable") to a
   caller whose write can never be accepted. This re-points
-  `test_serve_rpc_office_upsert.py::test_a_re_add_over_an_unreadable_archive_...`
+  `test_serve_rpc_office_upsert.py::test_a_re_add_over_an_unreadable_archive_refuses_typed_and_acks_no_revision_1`
   from `archive_unreadable` to `actor_archived` on the WIRE lane;
   `archive_unreadable` keeps its coverage on the consented store-level path,
   where the revision token it protects is actually read.
 * **The fence had to become a named method.** As an inline block it silently
-  broke `test_office_class_key_one_fence.py::test_deleting_the_stores_fence_
-  unguards_every_lane_at_once`, which isolates the class-key fence's claim by
+  broke
+  `test_office_class_key_one_fence.py::test_deleting_the_stores_fence_unguards_every_lane_at_once`,
+  which isolates the class-key fence's claim by
   monkeypatching it out — every write in that test is also a re-add, so the
   second fence refused them all and the class-key claim read as proven no matter
   what. Extracted to `OfficeStore._guard_archived_actor`, matching the store's

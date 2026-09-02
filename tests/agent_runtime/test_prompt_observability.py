@@ -426,6 +426,34 @@ def test_unresolved_used_skill_never_claims_hash_tracking():
     receipt = _resolved_skill_receipt("definitely-not-installed-skill")
     assert receipt["hash_tracked"] is False
     assert receipt["content_hash"] is None
+    # Absent is not zero. A size of 0 would read as "this skill cost nothing",
+    # which is a different claim from "there was no skill to cost anything".
+    assert receipt["skill_md_bytes"] is None
+
+
+def test_a_used_skill_receipt_reports_what_its_preload_cost(monkeypatch, tmp_path):
+    """The hash says WHICH bytes rode along; this says HOW MANY.
+
+    A ``required_preload`` row on the used-skills list means the whole of that
+    ``SKILL.md`` was pasted into the turn -- and the turn record used to name the
+    version without ever naming the cost, which is how a package grew 70% in one
+    rewrite with every gate green. One ``stat`` on a path the hash already read.
+    """
+    import agent.skill_utils as skill_utils
+    from agent_runtime.prompt_observability import _resolved_skill_receipt
+
+    shared = tmp_path / "shared"
+    manifest = shared / "sized-skill" / "SKILL.md"
+    manifest.parent.mkdir(parents=True)
+    body = "---\nname: sized-skill\n---\n" + ("body line\n" * 40)
+    manifest.write_text(body, encoding="utf-8")
+    monkeypatch.setattr(skill_utils, "get_shared_skills_dir", lambda: shared)
+    monkeypatch.setattr(skill_utils, "get_all_skills_dirs", lambda: [shared])
+
+    receipt = _resolved_skill_receipt("sized-skill")
+
+    assert receipt["hash_tracked"] is True
+    assert receipt["skill_md_bytes"] == manifest.stat().st_size
 
 
 def test_snapshot_omits_mission_hud_even_for_a_bound_task(monkeypatch):

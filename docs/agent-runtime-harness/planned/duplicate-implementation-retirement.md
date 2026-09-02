@@ -249,7 +249,9 @@ the evidence, what breaks, the kill proof, and the class of decision it needs.
     decides whether to serve the cached frame — `FrameSource.CACHE` costs one
     full build plus a DB read.
 - **WHAT DELETION BREAKS:** `tests/agent_runtime/test_read_model*.py`,
-  `test_projector.py`, and `test_s46_incremental_projection_lane_removal.py`
+  `test_projector.py` — both files were deleted with the lane in `fac754194e`,
+  so neither name resolves today — and
+  `test_s46_incremental_projection_lane_removal.py`
   (which pins projector.py's *current* 29-line shape — it must be rewritten to
   pin absence, in the tombstone style it already uses); `_cmd_snapshot` keeps
   working with `resolve_snapshot_frame` collapsed to `build_snapshot()` plus

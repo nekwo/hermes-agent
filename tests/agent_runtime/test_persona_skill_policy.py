@@ -441,6 +441,91 @@ def test_installed_canonical_skill_drift_fails_the_install_verifier(tmp_path, mo
     assert main([]) == 0
 
 
+def test_a_preload_over_its_declared_ceiling_fails_the_install_verifier(
+    tmp_path, monkeypatch, capsys
+):
+    """The second thing two identical copies do not settle: HOW BIG they are.
+
+    A ``required_preload`` package is not read when an agent needs it — its
+    whole ``SKILL.md`` body is pasted into every turn of every persona that
+    lists it. So its LENGTH is a standing context cost, and until this gate
+    nothing had an opinion about length: the install verifier compares hashes,
+    which are indifferent to size, and the policy tests above assert strings.
+    The charsheet package's own field notes record a rewrite taking it
+    26,042 B → 44,478 B — 70% growth, on every turn, forever — with every gate
+    in the tree green throughout.
+
+    The load-bearing assertion here is the third one: after a REPAIR the two
+    copies are byte-identical and the hash lane is perfectly clean, and the gate
+    still reds. A size gate that only fired alongside a divergence would be the
+    hash gate wearing a hat.
+    """
+    from agent_runtime import skill_install
+    from scripts.verify_harness_skill_install import main
+
+    source_root = tmp_path / "repo-skills"
+    shared_root = tmp_path / "shared" / "skills"
+    skill = "harness-qa-verdict"  # a real canonical id — the installer refuses any other
+
+    monkeypatch.setattr(
+        "agent_runtime.skill_install.harness_skill_source_root", lambda: source_root
+    )
+    monkeypatch.setattr(
+        "agent_runtime.skill_install.get_shared_skills_dir", lambda: shared_root
+    )
+    monkeypatch.setattr("agent_runtime.skill_install.HARNESS_SKILLS", frozenset({skill}))
+    monkeypatch.setattr("hermes_constants.CANONICAL_SHARED_SKILL_IDS", frozenset({skill}))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    monkeypatch.setitem(
+        skill_install.SKILL_SIZE_CEILINGS,
+        skill,
+        skill_install.SkillSizeCeiling(200, "a 200 B budget, for this test only"),
+    )
+
+    _write_skill_package(source_root, skill, "# small\n")
+    # Not installed yet, so the hash lane fails and prints the per-skill report
+    # — which now carries the budget beside the bytes, on every line it writes.
+    assert main(["--check"]) == 1
+    assert "preload 9 / 200 B" in capsys.readouterr().out
+    assert main([]) == 0
+
+    # Grow the preload past its budget. Nothing else about the package changes.
+    _write_skill_package(source_root, skill, "# small\n" + ("x" * 300) + "\n")
+    assert main(["--check"]) == 1
+    report = capsys.readouterr()
+    # Measured off the file rather than hand-typed: text-mode newline
+    # translation makes the literal platform-dependent, and a gate's own test
+    # asserting a number it invented is the shape this repo keeps finding.
+    grown = (source_root / skill / "SKILL.md").stat().st_size
+    assert (
+        f"preloads {grown} B of SKILL.md, over its 200 B ceiling by "
+        f"{grown - 200} B"
+    ) in report.err
+    assert "a 200 B budget, for this test only" in report.err
+
+    # THE POINT: repair, so the two copies are byte-identical and the hash lane
+    # has nothing to say. The size gate still fails.
+    assert main([]) == 1
+    assert "over its 200 B ceiling" in capsys.readouterr().err
+    assert not skill_install.harness_skill_hash_mismatches([skill])
+
+    # references/ bytes are NOT the preload and must not be counted: the turn
+    # gets their PATHS and fetches one with skill_view only when it needs it,
+    # which is the whole reason the reference layout exists. Counting them here
+    # would price a cost no turn pays and push authors to inline them.
+    _write_skill_package(source_root, skill, "# small\n")
+    references = source_root / skill / "references"
+    references.mkdir(parents=True, exist_ok=True)
+    (references / "long.md").write_text("y" * 5000, encoding="utf-8")
+    assert main([]) == 0
+
+    # A canonical id the table forgot is not a pass. "nobody set a budget" and
+    # "the budget was exceeded" are different repairs and say so separately.
+    monkeypatch.delitem(skill_install.SKILL_SIZE_CEILINGS, skill)
+    assert main(["--check"]) == 1
+    assert "has no entry in SKILL_SIZE_CEILINGS" in capsys.readouterr().err
+
+
 def test_the_gate_refuses_to_guess_a_root_instead_of_targeting_the_shadow_tree(
     monkeypatch, capsys
 ):

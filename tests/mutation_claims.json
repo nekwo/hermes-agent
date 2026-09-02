@@ -3926,6 +3926,51 @@
         "-q",
         "tests/hermes_cli/test_harness_characters_cli.py::test_the_human_receipt_names_the_directory_on_the_skipped_arm_too"
       ]
+    },
+    {
+      "id": "w2-a-preload-over-its-ceiling-stops-being-over",
+      "path": "agent_runtime/skill_install.py",
+      "symbol": "SkillSizeState.over",
+      "operator": "nothing-is-ever-over-budget",
+      "find": "        return self.ceiling == SKILL_SIZE_NO_CEILING or self.size > self.ceiling",
+      "replace": "        return False",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_skill_policy.py::test_a_preload_over_its_declared_ceiling_fails_the_install_verifier"
+      ]
+    },
+    {
+      "id": "w2-the-size-lane-drops-out-of-the-install-gates-verdict",
+      "path": "scripts/verify_harness_skill_install.py",
+      "symbol": "main",
+      "operator": "measure-it-then-ignore-it",
+      "find": "    if mismatches or missing or sourceless or overages:",
+      "replace": "    if mismatches or missing or sourceless:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_skill_policy.py::test_a_preload_over_its_declared_ceiling_fails_the_install_verifier"
+      ]
+    },
+    {
+      "id": "w2-the-turn-receipt-stops-saying-what-the-preload-cost",
+      "path": "agent_runtime/prompt_observability.py",
+      "symbol": "_skill_md_bytes",
+      "operator": "answer-absent-for-a-resolved-skill",
+      "find": "        return int(Path(candidate.skill_md).stat().st_size)",
+      "replace": "        return None",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_prompt_observability.py::test_a_used_skill_receipt_reports_what_its_preload_cost"
+      ]
     }
   ]
 }

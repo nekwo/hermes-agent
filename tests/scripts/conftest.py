@@ -8,7 +8,7 @@ repo root as a side effect — and, worse, would be REFUSED whenever they run
 inside a live gate run, which is exactly what happens when a diff touches
 ``run`` and the gate baselines its own tests. That failure was measured (the
 first gate run of this branch reported "baseline failed" on
-``test_the_mutation_is_spliced_at_the_anchor_not_at_the_first_occurrence``).
+``tests/scripts/test_mutation_claim_anchoring.py::test_the_mutation_is_spliced_at_the_anchor_not_at_the_first_occurrence``).
 
 Re-rooting the lock rather than disabling it keeps the lock's own behaviour
 under test: ``tests/test_mutation_gate_worktree_lock.py`` sets its own

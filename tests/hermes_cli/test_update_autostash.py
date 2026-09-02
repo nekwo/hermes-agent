@@ -67,6 +67,26 @@ def _setup_update_mocks(monkeypatch, tmp_path):
     monkeypatch.setattr(hermes_config, "migrate_config", lambda **kw: {"env_added": [], "config_added": []})
     monkeypatch.setattr(hermes_main, "_upgrade_pip_before_lazy_refresh", lambda *a, **kw: None)
     monkeypatch.setattr(hermes_main, "_refresh_active_lazy_features", lambda *a, **kw: True)
+    # The BOX'S PROCESS TABLE is not this file's subject, and until this line it
+    # was this file's cost. On Windows ``cmd_update`` calls
+    # ``_pause_windows_gateways_for_update`` and then
+    # ``_detect_venv_python_processes`` (``hermes_cli/update_cmd.py`` ->
+    # ``psutil.process_iter(["pid", "exe", "name", "cmdline", "cwd"])``) for
+    # real; both open every live process to read per-process ``exe`` / ``cwd``,
+    # and the ones they may not open cost an AccessDenied round trip each.
+    # Measured here 2026-09-02, same shell, one second apart: that walk is
+    # 7.46 s over 513 processes with ``cwd``, 4.02 s without it, and 0.01 s for
+    # ``pid`` + ``name`` alone. So the file's wall tracked HOW MANY PROCESSES
+    # THE MACHINE HAPPENED TO BE RUNNING -- green in 10 s alone, and in a
+    # six-file batch (eight pytest workers, a subprocess per test) over the
+    # runner's per-file cap, reported as "no tests ran". Nothing about
+    # autostash changed between those two runs.
+    # The guard itself is not going unpinned: its behaviour, including the
+    # refuse-and-exit-2 path and the --force-venv escape, is
+    # ``tests/hermes_cli/test_update_venv_health.py``, which stubs the same two
+    # seams for the same reason.
+    monkeypatch.setattr(hermes_main, "_detect_venv_python_processes", lambda **kw: [])
+    monkeypatch.setattr(hermes_main, "_pause_windows_gateways_for_update", lambda: None)
 
 
 

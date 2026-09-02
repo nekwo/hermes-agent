@@ -496,6 +496,34 @@ without writing). The runtime reports the same divergence passively as the
 which is where to look when a persona is behaving like an older version of its
 own skill.
 
+**The same gate now measures SIZE, because two identical copies do not settle
+how big they are.** A canonical package is `load_policy: required_preload`, so
+its whole `SKILL.md` body is pasted into every turn of every persona that lists
+it (`mission_chat_turn_context.py::_resolve_skill_preload` →
+`skill_commands.py::build_preloaded_skills_prompt` →
+`skill_commands.py::_build_skill_message`, which appends `content.strip()`
+verbatim). Its LENGTH is therefore a standing per-turn cost, and hashes are
+indifferent to length: the `harness-charsheet-authoring` rewrite took the
+package from 26,042 B to 44,478 B — 70% growth, on every turn, forever — with
+this gate green throughout, and the growth was filed as a missing measurement
+rather than caught. `skill_install.py::SKILL_SIZE_CEILINGS` is that
+measurement: one declared byte budget per canonical id, today's size rounded up
+with its headroom and a one-line reason, read by
+`skill_install.py::harness_skill_size_overages` and failed by
+`verify_harness_skill_install.py::main` in the same verdict as the hash lane.
+**A canonical id with no entry fails** — unmeasured is not the same as within
+budget. Only `SKILL.md` counts: a package's `references/` are named by PATH in
+the turn and fetched with `skill_view` on demand, so pricing their bytes here
+would charge for context no turn carries and push authors to inline them, which
+is backwards. Raising a ceiling is a one-line diff in the same change as the
+growth; deleting a paragraph is the other answer and usually the better one.
+The budget is deliberately NOT on the serve-boot path — a boot repairs drift it
+did not cause and must not be blocked by an authoring decision the producer
+owns. On the turn record the same number rides
+`prompt_observability.py::_resolved_skill_receipt` as `skill_md_bytes`, beside
+the `content_hash` that says which bytes: the hash answers WHICH, this answers
+HOW MANY, and `None` (never `0`) when the skill did not resolve.
+
 **Four triggers run the join, and the trigger set is the whole design**
 (operator ruling 2026-08-30; `archive/skill-install-trigger-relocation.md`):
 

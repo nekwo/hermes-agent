@@ -230,6 +230,130 @@ def install_and_verify_harness_skill(skill: str) -> SkillInstallResult:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class SkillSizeCeiling:
+    """A per-turn byte budget for one canonical package, and why it is that."""
+
+    limit: int
+    reason: str
+
+
+#: PER-TURN CONTEXT BUDGET, one entry per canonical shared skill id.
+#:
+#: A ``required_preload`` skill is not read when an agent needs it. Its whole
+#: ``SKILL.md`` body is pasted into EVERY turn of every persona that lists it
+#: (``mission_chat_turn_context._resolve_skill_preload`` ->
+#: ``agent.skill_commands.build_preloaded_skills_prompt`` ->
+#: ``_build_skill_message``, which appends ``content.strip()`` verbatim), so the
+#: file's length is a cost paid forever by turns that never look at it. Nothing
+#: measured that: the install gate compares HASHES and is indifferent to length,
+#: and ``tests/agent_runtime/test_persona_skill_policy.py`` asserts STRINGS. The
+#: charsheet package's own field notes record a rewrite taking it 26,042 B ->
+#: 44,478 B (a 70% growth) with nothing reporting it, and filed the missing
+#: measurement as a row. This table is that measurement.
+#:
+#: WHAT IS COUNTED, and what deliberately is not. ``SKILL.md`` only. A package's
+#: ``references/`` are NOT pasted into the turn — ``_build_skill_message`` lists
+#: their PATHS under "[This skill has supporting files:]" and the agent fetches
+#: one with ``skill_view`` when it needs it, which is exactly the split the
+#: reference layout exists to buy. Counting their bytes here would price a cost
+#: no turn pays and would push authors to inline them, which is the opposite of
+#: the intended move. ``FIELD-NOTES.md`` is the same: 208 KB at the charsheet
+#: package root, installed with the package, never in a turn. So "the package
+#: got bigger" is not the question this gate asks; "the PRELOAD got bigger" is.
+#:
+#: WHICH COPY. The REPO copy, because that is the one a diff can defend. The
+#: installed copy is derived from it by ``install_harness_skill`` and the same
+#: gate already repairs any divergence.
+#:
+#: Every ceiling is today's measured size rounded up to the next KiB boundary
+#: with the headroom stated, so a normal edit lands and a rewrite has to argue.
+#: RAISING ONE IS THE POINT: it is a one-line diff someone signs, in the same
+#: change as the growth, next to the reason. Deleting a paragraph to fit is the
+#: other legitimate answer and usually the better one.
+#:
+#: A canonical id with NO entry here FAILS the gate rather than passing
+#: unmeasured — an unceilinged package is the silence this table exists to end.
+SKILL_SIZE_CEILINGS: dict[str, SkillSizeCeiling] = {
+    "harness-charsheet-authoring": SkillSizeCeiling(
+        24_576,
+        "22,449 B on 2026-09-02, the largest preload we ship; 2,127 B (9%) of "
+        "headroom, and the four references/ files are where new prose goes.",
+    ),
+    "harness-dev-delivery": SkillSizeCeiling(
+        14_336,
+        "12,932 B on 2026-09-02; every dev persona pays it on every turn, so "
+        "1,404 B (11%) of headroom and no references/ lane yet to spill into.",
+    ),
+    "harness-qa-verdict": SkillSizeCeiling(
+        11_264,
+        "10,155 B on 2026-09-02, the smallest of the four; 1,109 B (11%) of "
+        "headroom.",
+    ),
+    "harness-runtime-model": SkillSizeCeiling(
+        16_384,
+        "14,414 B on 2026-09-02, already split with a 33 KB references/ "
+        "operations doc it does NOT preload; 1,970 B (14%) of headroom.",
+    ),
+}
+
+#: A canonical id the table forgot. Reported as its own state, never folded into
+#: "over ceiling" -- "nobody set a budget" and "the budget was exceeded" are
+#: different repairs, the same distinction ``SKILL_HASH_NOT_INSTALLED`` draws.
+SKILL_SIZE_NO_CEILING = -1
+
+
+@dataclass(frozen=True, slots=True)
+class SkillSizeState:
+    """One canonical id, the bytes its preload costs, and its declared budget."""
+
+    skill: str
+    size: int
+    ceiling: int
+    reason: str
+
+    @property
+    def over(self) -> bool:
+        return self.ceiling == SKILL_SIZE_NO_CEILING or self.size > self.ceiling
+
+
+def harness_skill_size_states(skill_names: list[str]) -> list[SkillSizeState]:
+    """Per canonical skill, the repo ``SKILL.md`` size against its ceiling.
+
+    A missing source file is not this function's finding -- the hash states
+    already own the absent case -- so it is skipped rather than reported as a
+    zero-byte pass.
+    """
+
+    states: list[SkillSizeState] = []
+    for name in skill_names:
+        if name not in HARNESS_SKILLS:
+            continue
+        source = harness_skill_source(name)
+        if not source.exists():
+            continue
+        declared = SKILL_SIZE_CEILINGS.get(name)
+        states.append(
+            SkillSizeState(
+                skill=name,
+                size=source.stat().st_size,
+                ceiling=declared.limit if declared else SKILL_SIZE_NO_CEILING,
+                reason=(
+                    declared.reason
+                    if declared
+                    else "no ceiling declared for this canonical id"
+                ),
+            )
+        )
+    return states
+
+
+def harness_skill_size_overages(skill_names: list[str]) -> list[SkillSizeState]:
+    """Only the states that fail: over their ceiling, or without one."""
+
+    return [state for state in harness_skill_size_states(skill_names) if state.over]
+
+
 #: The four answers to "does the installed package match the repo package".
 #: ABSENT IS NOT MATCHING — the distinction this vocabulary exists for.
 SKILL_HASH_MATCHES = "matches"

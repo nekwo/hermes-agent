@@ -2770,7 +2770,26 @@ def _resolved_skill_receipt(name: str) -> dict[str, Any]:
         "source_kind": selected.source_kind if selected else None,
         "content_hash": content_hash,
         "hash_tracked": content_hash is not None,
+        # SIZE, beside the hash, because the hash answers "which bytes" and this
+        # answers "how many". A ``required_preload`` row on this list means the
+        # whole of that ``SKILL.md`` was pasted into this turn, and until now the
+        # turn record said which version rode along without ever saying what it
+        # cost. Additive and cheap: the path is already resolved above, so this
+        # is one ``stat`` on a file the hash just read. ``None`` when the skill
+        # did not resolve, matching ``content_hash`` rather than inventing a 0.
+        "skill_md_bytes": _skill_md_bytes(selected),
     }
+
+
+def _skill_md_bytes(candidate: Any | None) -> int | None:
+    """Bytes of the resolved ``SKILL.md`` — the preload's per-turn cost."""
+
+    if candidate is None:
+        return None
+    try:
+        return int(Path(candidate.skill_md).stat().st_size)
+    except (OSError, TypeError, ValueError):
+        return None
 
 
 def _skill_candidate_content_hash(candidate: Any | None) -> str | None:

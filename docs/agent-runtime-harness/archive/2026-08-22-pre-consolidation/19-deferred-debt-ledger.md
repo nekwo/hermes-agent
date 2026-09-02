@@ -334,9 +334,11 @@
    four, not the last one — `stream.py` keeps it load-bearing. No coverage was
    lost with the replay-equivalence pair: `test_snapshot.py` pins
    `contract_version` / no-`goals` / `boards` on `build_snapshot()`, and
-   `test_read_model.py::test_apply_full_rebuild_then_render_is_equivalent` pins
+   `test_read_model.py::test_apply_full_rebuild_then_render_is_equivalent` pinned
    `render_snapshot() == build_snapshot()` through the read model, so the round
-   trip stays covered via the LIVE path.
+   trip stayed covered via the LIVE path — until `fac754194e` retired the read
+   model outright and deleted that file with it, which is where this ledger row
+   stopped being a live citation.
 
    **Contract:** `tests/agent_runtime/test_s46_incremental_projection_lane_removal.py`
    (22 tests, written red first — 16 failed / 5 passed before the cut). Its

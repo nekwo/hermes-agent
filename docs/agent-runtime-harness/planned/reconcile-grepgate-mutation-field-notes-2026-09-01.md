@@ -88,7 +88,8 @@ The cross-stack check was run read-only from the launcher primary (below).
    with the last scope row carrying the settled pair. This is the same shape a
    realm switch has emitted since WS1.
 2. **`tests/agent_runtime/test_stage13_write_path_integrity.py` asserted the
-   straddle.** `test_realm_use_reconcile_carries_the_realm_intents_basis` claimed
+   straddle.** The since-renamed
+   `test_realm_use_reconcile_carries_the_realm_intents_basis` claimed
    "each pointer is owned by the newest intent that touched it" and asserted the
    realm pointer in A with the workspace pointer in a workspace of B — which is
    the defect, written down as the expectation. Renamed to
