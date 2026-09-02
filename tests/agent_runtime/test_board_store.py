@@ -417,3 +417,99 @@ def test_a_board_with_an_unreadable_card_file_refuses_realm_publish_typed():
         {"board_id": board.board_id, "reason": "sync_unknowable", "unreadable": 1}
     ], resolved.board_refused
     assert [a.relative_path for a in resolved.artifacts if a.kind in ("board", "board_card")] == []
+
+
+# ── the idempotency receipt: "cannot resolve" is not "never happened" ──────
+#
+# From the 2026-09-02 audit of the class "a recorded ack replayed verbatim for a
+# row that is mutable afterwards". The board's receipt is ID-ONLY and the replay
+# re-reads the live card, so it is immune to THAT class by construction. What
+# the audit found instead is the branch on the other side of the same seam:
+# ``_idempotent_replay`` returned ``None`` for "no receipt" AND for "a receipt I
+# cannot honour", the caller cannot tell those apart, and so it ran the write
+# again. ``add_card`` mints a new card id per call, so the key whose whole job is
+# to prevent a duplicate produced one — and ``_record_idempotency`` then
+# overwrote the receipt, orphaning the first card beyond reach of that key.
+#
+# ``agent_create``'s answer to a re-read it cannot make is to SAY SO
+# (``actor_fresh: false``). The board's ack has no field to degrade, so it
+# refuses. Each test below corrupts the receipt in a DIFFERENT one of the three
+# unresolvable ways, because they were three separate ``return None`` sites.
+
+
+def _one_card_board(title: str = "Idem", key: str = "k-dup"):
+    from agent_runtime.board_store import BoardStore
+
+    ws = _make_workspace()
+    store = BoardStore()
+    card = store.add_card(workspace_id=ws, title=title, idempotency_key=key)
+    return ws, store, card
+
+
+def test_a_receipt_that_cannot_be_decoded_refuses_instead_of_minting_a_twin():
+    from agent_runtime.errors import IdempotentReplayUnresolved
+
+    ws, store, card = _one_card_board()
+    board_id = store.get_card(card.card_id).board_id
+    paths.board_idempotency_path(board_id, "k-dup").write_text("{truncated", encoding="utf-8")
+
+    before = len(store.list_cards(board_id=board_id))
+    with pytest.raises(IdempotentReplayUnresolved):
+        store.add_card(workspace_id=ws, title="Idem", idempotency_key="k-dup")
+
+    # The refusal is only worth anything if it also left the store alone.
+    assert len(store.list_cards(board_id=board_id)) == before
+
+
+def test_a_receipt_naming_no_card_refuses_instead_of_minting_a_twin():
+    from agent_runtime.errors import IdempotentReplayUnresolved
+
+    ws, store, card = _one_card_board()
+    board_id = store.get_card(card.card_id).board_id
+    paths.board_idempotency_path(board_id, "k-dup").write_text(
+        json.dumps({"idempotency_key": "k-dup"}), encoding="utf-8"
+    )
+
+    before = len(store.list_cards(board_id=board_id))
+    with pytest.raises(IdempotentReplayUnresolved):
+        store.add_card(workspace_id=ws, title="Idem", idempotency_key="k-dup")
+    assert len(store.list_cards(board_id=board_id)) == before
+
+
+def test_a_receipt_naming_a_card_that_is_neither_live_nor_archived_refuses():
+    """The case that cannot happen in normal operation, which is the point.
+
+    ``archive_card`` writes the archive copy BEFORE unlinking the active one and
+    ``restore_card`` does the reverse, so a card is always in exactly one of the
+    two places. Landing in neither is a truncated write — so re-running the
+    recorded write is never the right answer, and this is precisely the branch
+    that used to do it.
+    """
+    from agent_runtime.errors import IdempotentReplayUnresolved
+
+    ws, store, card = _one_card_board()
+    board_id = store.get_card(card.card_id).board_id
+    paths.board_card_path(board_id, card.card_id).unlink()
+
+    with pytest.raises(IdempotentReplayUnresolved):
+        store.add_card(workspace_id=ws, title="Idem", idempotency_key="k-dup")
+
+
+def test_an_intact_receipt_still_replays_the_live_card_after_it_was_edited():
+    """The class the audit was actually about, pinned on the board lane.
+
+    The receipt stores a card ID and nothing else, so a replay after an edit
+    reports the EDITED card. A receipt that had stored the ack would replay the
+    pre-edit title here — which is the defect ``agent_create`` had and this lane
+    never did.
+    """
+
+    ws, store, card = _one_card_board(title="before", key="k-live")
+    board_id = store.get_card(card.card_id).board_id
+    store.edit_card(card.card_id, board_id=board_id, title="after")
+
+    replayed = store.add_card(workspace_id=ws, title="before", idempotency_key="k-live")
+
+    assert replayed.card_id == card.card_id
+    assert replayed.title == "after"
+    assert len(store.list_cards(board_id=board_id)) == 1

@@ -46,6 +46,7 @@ from agent_runtime.errors import (
     ArchiveUnreadable,
     DefaultScopeReconciliationRequired,
     EventPayloadTooLarge,
+    IdempotentReplayUnresolved,
     NotFound,
     StaleRevision,
     StoreCorrupt,
@@ -207,6 +208,13 @@ ERROR_EXIT_CODES = {
     # the file is readable), the code is WHICH file to repair.
     "archive_unreadable": 7,
     "actors_unreadable": 7,
+    # A recorded idempotency receipt that cannot be resolved to the row it
+    # names. Family 7 beside the two rows above because the operator cure is
+    # theirs exactly — repair or remove one unreadable file and run the same
+    # command again — and because the alternative is what it did before this
+    # row existed: fall through to the AgentRuntimeError catch-all and exit 1
+    # as ``internal_error``, reporting a refusal as a harness crash.
+    "idempotent_replay_unresolved": 7,
     # Data integrity (1)
     "store_corrupt": 1,
     "event_payload_too_large": 1,
@@ -234,7 +242,7 @@ def emit_harness_error(exc: BaseException, *, args=None, code: str | None = None
         # AV hold releases or an operator repairs it, and the identical call then
         # succeeds. Saying ``retryable: false`` beside a 7 would have the two
         # halves of one envelope disagree about the same fault.
-        retryable=getattr(exc, "retryable", False) or error_code in {"runtime_unavailable", "daemon_offline", "timeout", "archive_unreadable", "actors_unreadable"},
+        retryable=getattr(exc, "retryable", False) or error_code in {"runtime_unavailable", "daemon_offline", "timeout", "archive_unreadable", "actors_unreadable", "idempotent_replay_unresolved"},
         safe_details=safe_details,
     )
     _print_stage42(envelope, args=args, default_output="json")
@@ -282,6 +290,13 @@ def _error_code_for_exception(exc: BaseException) -> str:
     # ``workspace_not_found`` — the RPC office arms' spelling for the neighbouring
     # condition — and no existing client branch has to learn a new exit.
     if isinstance(exc, WorkspaceUnresolved):
+        return exc.code
+    # A recorded idempotency receipt naming a row that will not resolve.
+    # Ahead of the catch-all for the third time and the same reason: the
+    # write REFUSED rather than crashed, and re-running it is the one thing
+    # that must not happen (``add_card`` mints a new id per call, so the key
+    # that exists to prevent a duplicate would create one).
+    if isinstance(exc, IdempotentReplayUnresolved):
         return exc.code
     # Typed AgentRuntimeError subclasses map to their precondition/integrity
     # codes. Four rows left this tuple on 2026-08-19 — InvalidTransition,
@@ -355,6 +370,7 @@ def _error_hint(code: str) -> str:
         # ``core_cache.py``'s exclusion note already spells out that these two
         # trees are distinct; this hint is where that distinction was lost.
         "archive_unreadable": "Repair or remove the undecodable archived actor copy under office/<workspace-id>/archive/ in the runtime store, then retry the same command.",
+        "idempotent_replay_unresolved": "The idempotency receipt named in the message records a write whose row cannot be found. Repair or remove that receipt file under boards/<board-id>/idempotency/, or retry with a fresh --idempotency-key, then run the same command again.",
         "actors_unreadable": "Repair or remove the undecodable actor file named in the message, or pass --persona-instance-id to place the instance, then retry.",
         # Its own hint rather than the default: the default sends the operator to
         # ``safe_details``, and this refusal's facts ride the MESSAGE (

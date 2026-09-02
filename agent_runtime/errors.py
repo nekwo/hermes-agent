@@ -160,6 +160,33 @@ class PersonaInstancesUnreadable(ArchiveUnreadable):
     code = "persona_instances_unreadable"
 
 
+class IdempotentReplayUnresolved(AgentRuntimeError):
+    """A receipt for this idempotency key EXISTS, but the row it names cannot
+    be resolved — so the write must refuse rather than run a second time.
+
+    The board's replay used to answer this by returning ``None``, which is the
+    same value it returns for "no receipt at all". The caller cannot tell those
+    apart, so it did the write again — and ``add_card`` mints a NEW card id per
+    call, so a key whose entire purpose is to prevent a duplicate produced one,
+    and the follow-up ``_record_idempotency`` then overwrote the receipt so the
+    first card was orphaned and permanently unreachable by that key.
+
+    Cards are never hard-deleted (``archive_card`` writes the archive copy
+    before unlinking the active one; ``restore_card`` does the reverse), so
+    "resolves to neither" is a truncated write or a corrupted file — never a
+    routine purge. There is no retry this refusal can wrongly break.
+
+    The honest-answer principle is ``agent_create``'s: a replay that cannot
+    re-read the row it describes says so (``actor_fresh: false``) instead of
+    presenting a stale or invented answer. This is that branch for a lane whose
+    ack cannot be degraded, only refused.
+
+    ``code`` rides the RPC error envelope verbatim.
+    """
+
+    code = "idempotent_replay_unresolved"
+
+
 class SyncConflict(AgentRuntimeError):
     """Raised when a board card is under an unresolved realm-sync conflict, or a
     conflict-resolution verb targets a card that has none."""

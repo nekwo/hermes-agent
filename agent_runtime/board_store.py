@@ -25,7 +25,14 @@ from hermes_time import now
 from utils import atomic_json_write
 
 from . import board_models, board_order, paths
-from .errors import AlreadyExists, CardsUnreadable, NotFound, StaleRevision, SyncConflict
+from .errors import (
+    AlreadyExists,
+    CardsUnreadable,
+    IdempotentReplayUnresolved,
+    NotFound,
+    StaleRevision,
+    SyncConflict,
+)
 from .events import EventLog
 from .locks import board_lock
 from .models import Board, BoardCard, BoardColumn, Event
@@ -746,6 +753,23 @@ class BoardStore:
     # --- idempotency ledger ----------------------------------------------
 
     def _idempotent_replay(self, board_id: str, key: str | None) -> BoardCard | None:
+        """The recorded card for this key, or ``None`` when there is no receipt.
+
+        ``None`` means EXACTLY ONE thing to every caller: nothing has been
+        recorded for this key, so go and do the write. It used to mean five
+        things — no key, no receipt, an undecodable receipt, a receipt with no
+        ``card_id``, and a ``card_id`` resolving to neither a live nor an
+        archived card — and the caller ran the write for all five. The last
+        three are "a receipt EXISTS and I cannot honour it", where re-running is
+        the one thing that must not happen: ``add_card`` mints a new id per
+        call, so the key meant to prevent a duplicate created one.
+
+        Those three now refuse :class:`IdempotentReplayUnresolved`. This is the
+        board's version of ``agent_create``'s ``actor_fresh: false`` — a replay
+        that cannot re-read the row it describes says so rather than inventing
+        an answer; the board's ack carries no field to degrade, so it refuses.
+        """
+
         safe = _safe_idempotency_key(key)
         if not safe:
             return None
@@ -754,19 +778,39 @@ class BoardStore:
             return None
         try:
             record = _read_json(path)
-            card_id = record.get("card_id")
-        except Exception:
-            return None
+        except Exception as exc:
+            raise IdempotentReplayUnresolved(
+                f"idempotency receipt for {safe!r} on board {board_id} could not "
+                f"be decoded ({type(exc).__name__}); the write it recorded is not "
+                "safe to repeat"
+            ) from exc
+        card_id = record.get("card_id")
         if not card_id:
-            return None
+            raise IdempotentReplayUnresolved(
+                f"idempotency receipt for {safe!r} on board {board_id} names no "
+                "card; the write it recorded is not safe to repeat"
+            )
         try:
             return self.get_card(card_id, board_id=board_id)
         except NotFound:
-            # Card archived since; surface the archived copy so replay is stable.
-            archive_path = paths.board_archived_card_path(board_id, card_id)
-            if archive_path.exists():
-                return from_jsonable(BoardCard, _read_json(archive_path))
-            return None
+            pass
+        # Card archived since; surface the archived copy so replay is stable.
+        archive_path = paths.board_archived_card_path(board_id, card_id)
+        if not archive_path.exists():
+            raise IdempotentReplayUnresolved(
+                f"idempotency receipt for {safe!r} on board {board_id} names card "
+                f"{card_id}, which is neither live nor archived; cards are never "
+                "hard-deleted, so this is a truncated or corrupted write and the "
+                "recorded write is not safe to repeat"
+            )
+        try:
+            return from_jsonable(BoardCard, _read_json(archive_path))
+        except Exception as exc:
+            raise IdempotentReplayUnresolved(
+                f"idempotency receipt for {safe!r} on board {board_id} names card "
+                f"{card_id}, whose archived copy could not be decoded "
+                f"({type(exc).__name__}); the recorded write is not safe to repeat"
+            ) from exc
 
     def _record_idempotency(self, board_id: str, key: str | None, card_id: str) -> None:
         safe = _safe_idempotency_key(key)
