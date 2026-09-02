@@ -261,7 +261,7 @@ additively at the existing schema version — the delete lane it powers is
 documented under [Skills](#skills).
 
 **Both of those ledgers are UNIONED on pull, not adopted** (RD-11, 2026-08-31,
-`4a8d398268`). `_UNIONED_REALM_LEDGERS` (`realm_sync.py:2262`) names them and
+`4a8d398268`). `_UNIONED_REALM_LEDGERS` (`realm_sync.py`) names them and
 `_pulled_artifact_bytes` merges each by its own rule — set-union for
 `deleted_workspace_ids`, per-slug newest-stamp-wins for `skill_tombstones` — so
 a concurrent publish can no longer drop a delete another member recorded. It is
@@ -285,11 +285,31 @@ single files (`paths.active_workspace_path()` / `active_realm_path()`).
 Server-bound realms authorize every sync action against the Eternia backend and
 **fail closed** (`realm_membership.py:1-12`).
 
+**"Fail closed" is per-HALF for the READ verb, since 2026-09-02.** `publish` and
+`pull` still refuse whole — every byte they touch is a realm-wide assertion, and
+no half of either is a denied member's to run. `realm_sync_status` is the
+exception, and it is a correction rather than a weakening: it called `_authorize`
+FIRST and raised `sync_auth_failed` before answering a single local fact, so a
+member whose credential expired lost the store drift, the held skill packages,
+the held profile artifacts and the workspace publication rows — every one of them
+a credential-free local read — at exactly the moment the diagnostic was worth
+having. The authorization now gates the REMOTE half only (the clone, the fetch,
+and therefore the freshness of `ahead`/`behind`), and a denial rides the same
+additive honesty pair an unreachable remote already rides: `remote_checked: false`
+with the typed code (`sync_auth_failed`, `role_insufficient`, …) in
+`remote_check_error`. No new key, because from the launcher's side "hermes could
+not reach the remote" and "hermes was not allowed to" are one fact — what follows
+is the last known LOCAL picture — and the sheet already renders exactly that
+(`realm_sync_detail_sheet.dart`'s `_RemoteUncheckedNote`). The FLOOR is
+deliberate: a member who has never cloned this realm has no local repo to read,
+and the only way to get one is the clone just refused, so the verb still raises
+with the code it always raised — and attempts no network call on the way there.
+
 **Unpublished local drift has two exits, not one, since 2026-08-31**
 (`3e6d8c06f3`). Pull deliberately never clobbers local state, which used to
 leave an operator holding drift they never meant to publish with Publish as the
 only door. `_board_store_drift` / `_office_store_drift` now build per-item rows
-(`StoreDriftItem`: family, container, item_key, kind — `realm_sync.py:1315`) and
+(`StoreDriftItem`: family, container, item_key, kind — `realm_sync.py`) and
 the four existing counts are DERIVED from those rows, so the count shapes the
 launcher parses are byte-identical and `store_drift.items` is additive beside
 them. `hermes harness realm sync revert <realm> [--item FAMILY:CONTAINER:KEY]…
@@ -328,8 +348,9 @@ The lane that closes it is one more family applier, and nothing else:
 - **The mint is a STORE DOOR, never a file write.**
   `PersonaInstanceStore.replicate_instance` — the delta patch, the local
   derivations, and the event-then-patch ordering are all store-level facts, and
-  an applier writing `persona_instances/` directly would lose all three. It is
-  the board lane's event-less-adopt defect, refused in advance. The receipt is a
+  an applier writing `persona_instances/` directly would lose all three. It was
+  the board lane's event-less-adopt defect, refused in advance — a defect the
+  board lane itself no longer has (see [The board](#the-board)). The receipt is a
   THIRD intent class: not authored (nobody clicked here) and not diagnostic (this
   is a peer's authored fact arriving), so it is `persona_instance.replicated`
   with `source: "realm_sync"` — reusing `persona_instance.created` would make one
@@ -343,7 +364,7 @@ The lane that closes it is one more family applier, and nothing else:
   a delete: absence is short-answer-shaped and this subsystem has already paid
   for inferring deletion from a short answer.
 - **Drift and revert reach these rows.** `DRIFT_FAMILY_PERSONA_INSTANCE`
-  (`realm_sync.py:1300`) with counts `store_drift.persona_instances` additive
+  (`realm_sync.py`) with counts `store_drift.persona_instances` additive
   beside `boards` / `office`, items keyed `{family, container=workspace_id,
   item_key=instance_id, kind}`, and the revert selector
   `persona_instance:<workspace_id>:<instance_id>`. `classify_revert` needed the
@@ -401,6 +422,23 @@ state. They do not carry or mutate mission records"
 (`agent_runtime/board_store.py:8-15`). `Board` / `BoardColumn` / `BoardCard`
 are at `models.py:135` / `:92` / `:108`. `BoardStore` is the single write
 chokepoint and emits a typed event on every mutation.
+
+**That second clause only became true on 2026-09-02.** `board_sync
+.apply_board_pull` wrote board defs and cards with a raw `atomic_json_write`,
+past the store entirely, so a pull that ARCHIVED a card emitted
+`board.card.archived` (it goes through `archive_card`) and reached every live
+consumer, while a pull that GAVE you a card — or changed the column taxonomy
+under your lanes — emitted nothing, advanced no watermark, and sat on disk
+invisible until an unrelated write happened to wake the pipeline. The office
+family closed the identical asymmetry in H1 (`f810bd2ac`); the board family now
+has its twin verbs, `BoardStore.adopt_remote_board` / `adopt_remote_card`, and
+both `apply_board_pull` and `realm_revert._adopt_from_upstream` route through
+them. The bytes written are unchanged, so nothing about pull classification
+moves: `board_content_hash` excludes `updated_by`, `revision` and the
+timestamps, so stamping `updated_by="realm_sync"` (`"realm_sync_revert"` on the
+revert lane) is hash-neutral and the baseline still keys off the REMOTE content.
+Board events stay UNCOVERED on the patch lane by design, so what a pull now
+reaches is the honest full-core delta it should always have reached.
 
 Three properties make it converge across machines without a merge engine: the
 default board id is deterministic (`board_default_<workspace_id>`,
@@ -501,9 +539,9 @@ tombstone covers top-level `foo` AND categorized `<cat>/foo`
 receipt's `archived` array is the truth and its scalar fields are only the
 single-package convenience. Enforcement is entirely client-side, because a
 GitHub-App push has no pre-receive hook, and it closes at three points in
-`realm_sync.py`: pull applies the ledger (`_apply_skill_tombstones`, `:712`,
+`realm_sync.py`: pull applies the ledger (`_apply_skill_tombstones`,
 archive-never-delete), pull's auto-adopt skips tombstoned slugs, and publish
-filters them out of the artifact set (`_skill_artifacts`, `:1048`). Canonical
+filters them out of the artifact set (`_skill_artifacts`). Canonical
 ids refuse with `skill_installer_owned` — every pull reinstalls the canonical
 set, so a tombstone would fight the installer forever (the R-B ruling); a
 malformed slug refuses with `skill_slug_invalid`; both are exit-code family 2.

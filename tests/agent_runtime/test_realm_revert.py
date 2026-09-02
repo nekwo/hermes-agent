@@ -306,6 +306,46 @@ def test_reverting_a_local_only_card_archives_without_a_tombstone(tmp_path):
     }
 
 
+def test_reverting_an_edited_card_writes_through_the_stores_evented_door(tmp_path):
+    """RED-FIRST (2026-09-02): this lane's ``_adopt_from_upstream`` wrote board
+    rows with a raw ``atomic_json_write`` — matching the pull arm, which did the
+    same — so a revert that PUT a card back emitted nothing, while a revert that
+    archived one emitted ``board.card.archived`` through ``archive_card``.
+
+    What this pins is the module's own promise ("A revert writes nothing a pull
+    could not have written", and the ``REVERT_EVENT_TYPE`` note beside it: a live
+    subscriber that never heard would render rows the store no longer has). Now
+    that the pull routes through ``BoardStore.adopt_remote_card``, so does this
+    — and the attribution stays this lane's own ``realm_sync_revert``, which is
+    the whole reason ``REVERT_ACTOR_REF`` exists.
+    """
+
+    from agent_runtime.events import EventLog
+    from agent_runtime.realm_revert import REVERT_ACTOR_REF
+
+    realm_id, ws = _make_realm_workspace(tmp_path)
+    subtree = _subtree(realm_id, tmp_path)
+    store = BoardStore()
+    card = store.add_card(workspace_id=ws, title="Upstream title")
+    board_id = board_models.default_board_id(ws)
+    update_board_baseline_after_sync(realm_id, [board_id])
+    _publish_board_to_subtree(subtree, board_id)
+    store.edit_card(card.card_id, title="Local edit nobody wanted")
+
+    before = max((offset for offset, _ in EventLog().iter_from_offset(0)), default=0)
+    result = revert_realm_sync(realm_id, item_specs=[f"board_card:{board_id}:{card.card_id}"])
+
+    assert [row["outcome"] for row in result["items"]] == [OUTCOME_REVERTED]
+    assert store.get_card(card.card_id).title == "Upstream title"
+
+    events = [event for _, event in EventLog().iter_from_offset(before)]
+    edited = [e for e in events if e.type == "board.card.edited"]
+    assert [e.payload["card_id"] for e in edited] == [card.card_id], [
+        e.type for e in events
+    ]
+    assert store.get_card(card.card_id).updated_by == REVERT_ACTOR_REF
+
+
 # ── dry run, idempotence, and the subtree-absent fallback ─────────────────
 
 

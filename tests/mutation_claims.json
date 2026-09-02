@@ -3566,6 +3566,156 @@
         "-q",
         "tests/hermes_cli/test_harness_characters_cli.py::test_the_autopilot_refuses_a_busy_draft_before_it_runs_one_step"
       ]
+    },
+    {
+      "id": "sh-status-swallows-the-denial-it-degraded-on",
+      "path": "agent_runtime/realm_sync.py",
+      "symbol": "realm_sync_status",
+      "operator": "report-the-degraded-read-as-a-verified-one",
+      "find": "        remote_check = {\"checked\": False, \"error\": auth_error.code}",
+      "replace": "        remote_check = {\"checked\": True, \"error\": None}",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_realm_sync.py::test_status_answers_local_facts_when_the_remote_half_is_denied"
+      ]
+    },
+    {
+      "id": "sh-status-degrades-with-no-local-repo-to-degrade-to",
+      "path": "agent_runtime/realm_sync.py",
+      "symbol": "realm_sync_status",
+      "operator": "drop-the-floor-of-the-degrade",
+      "find": "        if not (repo / \".git\").exists():\n            raise auth_error",
+      "replace": "        if False:\n            raise auth_error",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_realm_sync.py::test_status_still_refuses_when_the_denial_leaves_no_local_facts"
+      ]
+    },
+    {
+      "id": "sh-resolve-adopt-arm-writes-past-the-patch-lane",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "OfficeStore.resolve_conflict",
+      "operator": "drop-the-adopted-rows-patch",
+      "find": "                        self._emit_actor_patch(\n                            actor, created=created, correlation_id=correlation_id\n                        )",
+      "replace": "                        pass",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_serve_rpc_office_resolve.py::test_the_adopt_arm_emits_the_actor_patch_its_archive_sibling_always_did"
+      ]
+    },
+    {
+      "id": "sh-board-pull-card-arm-writes-past-the-store",
+      "path": "agent_runtime/board_sync.py",
+      "symbol": "apply_board_pull",
+      "operator": "restore-the-raw-atomic-write",
+      "find": "                store.adopt_remote_card(remote_card, board_id=board_id)",
+      "replace": "                atomic_json_write(paths.board_card_path(board_id, card_id), to_jsonable(remote_card), indent=2, sort_keys=True)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_board_sync.py::test_pull_that_adopts_a_card_emits_what_a_local_add_emits"
+      ]
+    },
+    {
+      "id": "sh-board-pull-def-arm-writes-past-the-store",
+      "path": "agent_runtime/board_sync.py",
+      "symbol": "apply_board_pull",
+      "operator": "restore-the-raw-atomic-write",
+      "find": "            store.adopt_remote_board(remote_board)",
+      "replace": "            atomic_json_write(paths.board_def_path(board_id), to_jsonable(remote_board), indent=2, sort_keys=True)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_board_sync.py::test_pull_that_adopts_a_board_def_emits_the_board_event"
+      ]
+    },
+    {
+      "id": "sh-card-adopt-calls-every-arrival-an-edit",
+      "path": "agent_runtime/board_store.py",
+      "symbol": "BoardStore.adopt_remote_card",
+      "operator": "assume-the-row-was-already-here",
+      "find": "            existed = self._card_path_active(bid, cid)",
+      "replace": "            existed = True",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_board_sync.py::test_pull_that_adopts_a_card_emits_what_a_local_add_emits"
+      ]
+    },
+    {
+      "id": "sh-board-adopt-calls-every-rewrite-a-create",
+      "path": "agent_runtime/board_store.py",
+      "symbol": "BoardStore.adopt_remote_board",
+      "operator": "assume-the-board-is-new",
+      "find": "            existed = self.exists(bid)",
+      "replace": "            existed = False",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_board_sync.py::test_pull_that_adopts_a_board_def_emits_the_board_event"
+      ]
+    },
+    {
+      "id": "sh-revert-card-arm-writes-past-the-store",
+      "path": "agent_runtime/realm_revert.py",
+      "symbol": "_adopt_from_upstream",
+      "operator": "restore-the-raw-atomic-write",
+      "find": "    board_store.adopt_remote_card(\n        entity, board_id=item.container, updated_by=REVERT_ACTOR_REF\n    )",
+      "replace": "    from utils import atomic_json_write\n\n    entity.board_id = item.container\n    atomic_json_write(paths.board_card_path(item.container, item.item_key), to_jsonable(entity), indent=2, sort_keys=True)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_realm_revert.py::test_reverting_an_edited_card_writes_through_the_stores_evented_door"
+      ]
+    },
+    {
+      "id": "sh-loader-registers-without-binding-the-parent",
+      "path": "plugins/memory/__init__.py",
+      "symbol": "_publish_module",
+      "operator": "stop-one-step-short-of-an-import",
+      "find": "    try:\n        setattr(parent, child, module)\n    except Exception:  # noqa: BLE001 — a binding failure must never fail a load\n        logger.debug(\"could not bind %s on %s\", child, parent_name, exc_info=True)",
+      "replace": "    return",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/plugins/memory/test_provider_loader_import_identity.py::test_loaded_provider_is_bound_on_its_parent_package"
+      ]
+    },
+    {
+      "id": "sh-loader-rollback-leaves-the-parent-attribute",
+      "path": "plugins/memory/__init__.py",
+      "symbol": "_unpublish_module",
+      "operator": "undo-only-the-sys-modules-half",
+      "find": "    try:\n        delattr(parent, child)\n    except AttributeError:\n        pass",
+      "replace": "    return",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/plugins/memory/test_provider_loader_import_identity.py::test_a_provider_that_fails_to_exec_leaves_neither_half_behind"
+      ]
     }
   ]
 }

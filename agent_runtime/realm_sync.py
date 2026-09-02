@@ -183,15 +183,49 @@ def realm_sync_status(
     credential: "RealmSyncCredential | None" = None,
 ) -> dict[str, Any]:
     realm = RealmStore().get(realm_id)
-    _authorize(realm, "status", membership, credential)
-    repo = _ensure_sync_repo(realm, credential=credential)
-    # Refresh the remote-tracking ref FIRST: ahead/behind below are computed
-    # against ``@{u}``, and without a fetch that ref is whatever the last
-    # pull/publish left behind — a member editing (or deleting) files upstream
-    # stayed invisible to "Check now" forever, so the update-policy banner
-    # never fired. Best-effort: an offline check still answers from the local
-    # state, and says so via ``remote_checked``.
-    remote_check = _refresh_remote_tracking(repo, credential=credential)
+    # The authorization gates the REMOTE half of this verb — the fetch, the
+    # clone, and therefore the freshness of ahead/behind — and nothing else.
+    # Everything below it (store drift, held skill packages, held profile
+    # artifacts, workspace publication statuses, the git state already on this
+    # disk) is a LOCAL read that needs no credential, and refusing the whole
+    # verb over the remote half deleted the diagnostic exactly when it was most
+    # wanted: a member whose credential expired got no drift, no held-artifact
+    # list and no workspace rows, only ``sync_auth_failed``. A diagnostic read
+    # DEGRADES; it does not vanish.
+    #
+    # The degrade rides the SAME honesty pair an unreachable remote already
+    # rides (``remote_checked`` / ``remote_check_error``) rather than a new key:
+    # from the launcher's side "hermes could not reach the realm remote" and
+    # "hermes was not allowed to" are the same fact — the state below is the
+    # last known local picture — and it already has a renderer for it
+    # (``_RemoteUncheckedNote``).
+    auth_error: RealmSyncError | None = None
+    try:
+        _authorize(realm, "status", membership, credential)
+    except RealmSyncError as exc:
+        auth_error = exc
+    if auth_error is None:
+        repo = _ensure_sync_repo(realm, credential=credential)
+        # Refresh the remote-tracking ref FIRST: ahead/behind below are computed
+        # against ``@{u}``, and without a fetch that ref is whatever the last
+        # pull/publish left behind — a member editing (or deleting) files upstream
+        # stayed invisible to "Check now" forever, so the update-policy banner
+        # never fired. Best-effort: an offline check still answers from the local
+        # state, and says so via ``remote_checked``.
+        remote_check = _refresh_remote_tracking(repo, credential=credential)
+    else:
+        # THE FLOOR of the degrade, and it is deliberate: a degraded read
+        # answers from local facts, so where there are none it still refuses
+        # with the code it refused with before. ``_ensure_sync_repo`` is not
+        # called at all here — its remote branch CLONES, which is the very
+        # operation just denied, and an ``init`` in its place would leave an
+        # empty repo that the next ``_ensure_sync_repo`` mistakes for a
+        # completed clone and never re-clones.
+        repo = _sync_repo_path(realm)
+        if not (repo / ".git").exists():
+            raise auth_error
+        _ensure_repo_gitattributes(repo)
+        remote_check = {"checked": False, "error": auth_error.code}
     git = _git_state(repo)
     artifacts = resolve_realm_sync_artifacts(realm_id)
     agent_state = realm_agent_selection_state(realm_id)
@@ -241,7 +275,10 @@ def realm_sync_status(
         # ``remote_checked`` is True only when a remote exists AND the fetch
         # succeeded — i.e. ahead/behind reflect the real upstream right now.
         # When False, ``remote_check_error`` carries the typed code (or None for
-        # a repo with no remote at all).
+        # a repo with no remote at all). It also carries the AUTHORIZATION code
+        # (``sync_auth_failed`` / ``role_insufficient`` / …) when the remote half
+        # was denied and this verb degraded to local facts — see the top of this
+        # function for why a denial answers here rather than raising.
         "remote_checked": remote_check["checked"],
         "remote_check_error": remote_check["error"],
         "skills_drift": skills_drift,
@@ -2617,6 +2654,20 @@ def _file_contains_secret_assignment(path: Path) -> bool:
 
 
 def _authorize(realm: Realm, action: str, membership: RealmMembershipProvider | None, credential: "RealmSyncCredential | None" = None) -> None:
+    """Raise the typed refusal when this realm+action is not permitted.
+
+    Unchanged for the two WRITE verbs: ``publish_realm_sync`` and
+    ``pull_realm_sync`` call it first and let it refuse them WHOLE, because
+    every byte they touch is a realm-wide assertion and there is no half of
+    either that a denied member is entitled to run.
+
+    ``realm_sync_status`` is the exception, and it is not a weakening of this
+    gate: it CATCHES the refusal and applies it to the remote half only (the
+    clone, the fetch, and therefore the freshness of ahead/behind), answering
+    the credential-free local half with ``remote_checked: false`` and this
+    error's code. See that function for the floor — no local repo, no degrade.
+    """
+
     if membership is None:
         if not _looks_like_remote(str(realm.sync_manifest_ref or "")):
             membership = RealmMembershipProvider()

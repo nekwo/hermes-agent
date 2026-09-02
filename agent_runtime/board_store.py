@@ -528,6 +528,133 @@ class BoardStore:
             self._emit("board.card.restored", board_id=board_id, card_id=card.card_id, column_id=card.column_id)
         return self.get_card(card_id, board_id=board_id)
 
+    # --- realm-pull adopt arms (the office H1 shape, board family) ---------
+
+    def adopt_remote_board(self, board: Board, *, updated_by: str = "realm_sync") -> Board:
+        """Write a PEER's board DEF verbatim — the realm pull's board-def arm.
+
+        The board family's half of the H1 asymmetry, closed here for the reason
+        ``OfficeStore.adopt_remote_surface`` closed the office family's:
+        ``board_sync.apply_board_pull`` wrote this row with a raw
+        ``atomic_json_write``, so a pull that ARCHIVED a card emitted
+        ``board.card.archived`` and reached every live consumer while a pull that
+        GAVE you a board — or renamed a column, or changed the whole column
+        taxonomy — emitted nothing at all: no batch, no delta frame, no
+        ``harness events tail`` line. This module's own standing rule (see the
+        module docstring: an event on EVERY mutation, because an event-less write
+        is invisible to the watermark-gated snapshot/serve pipeline) had one lane
+        exempt from it by accident.
+
+        A verb of its own rather than ``update_board``, for the office twin's
+        reason: ``update_board`` authors LOCAL intent — it BUMPS the revision and
+        re-times the row — while a pull adopts a record the peer already
+        numbered. Renumbering here would hand the next ``classify_board_pull`` a
+        row that looks locally edited, turning every later pull of an untouched
+        board into a conflict.
+
+        ``updated_by`` records the SYNC, matching the archive arm
+        (``archive_card(..., reason="remote_removed")``). Hash-neutral:
+        ``board_models.board_content_hash`` excludes ``updated_by`` along with
+        ``revision`` and the timestamps, so the caller's ``baseline[key] =
+        remote_hash`` stays keyed off the remote CONTENT.
+
+        Verbatim in every field, ``archived_card_ids`` INCLUDED — and that is the
+        one place this verb deliberately does not copy its office twin. The
+        surface twin UNIONS that ledger (C1) because adopting it wholesale erases
+        a tombstone the peer has not heard of; the board pull has always
+        overwritten it and this change does not alter one byte it writes. Making
+        the two families agree is a real row and a separate one: it moves the
+        resurrection guard, which is a decision about data, not about events.
+        """
+
+        bid = safe_id(board.board_id)
+        if not bid:
+            raise ValueError("invalid_request")
+        board.board_id = bid
+        board.updated_by = _safe_actor(updated_by)
+        with board_lock(bid):
+            existed = self.exists(bid)
+            _write_board(board)
+            if existed:
+                self._emit(
+                    "board.updated",
+                    board_id=bid,
+                    change="realm_sync",
+                    title=board.title,
+                    revision=board.revision,
+                )
+            else:
+                self._emit(
+                    "board.created",
+                    board_id=bid,
+                    workspace_id=board.workspace_id,
+                    title=board.title,
+                )
+        return board
+
+    def adopt_remote_card(
+        self,
+        card: BoardCard,
+        *,
+        board_id: str | None = None,
+        updated_by: str = "realm_sync",
+    ) -> BoardCard:
+        """Write a PEER's CARD verbatim — the realm pull's adopt/converge arm,
+        and the half that actually puts a card on somebody's board.
+
+        Twin of :meth:`adopt_remote_board` above and of
+        ``OfficeStore.adopt_remote_actor``; every property that docstring pins
+        holds here. The revision is the REMOTE's (no ``+1``), nothing is
+        re-derived from the write (the caller keys its baseline off the REMOTE
+        content hash and this verb returns the object it wrote), and the event is
+        the one a LOCAL write of the same shape emits — ``board.card.created``
+        for a card this board did not have, ``board.card.edited`` for one it did.
+        A consumer tailing the board lane therefore cannot tell "a peer gave me
+        this card" from "somebody added it" by the event's SHAPE, only by its
+        ``realm_sync`` attribution, and that symmetry is the point: the FACT that
+        changed is the same either way.
+
+        NOT guarded by ``_guard_no_conflict``, and that is the pull's rule rather
+        than an omission: the pull is exactly the lane that DECIDES a card is a
+        conflict (``apply_board_pull`` writes the sidecar on its ``CONFLICT`` arm
+        and never reaches this verb for that card), so consulting the guard here
+        would refuse to adopt a card whose conflict this same pass is about to
+        file, with no operator present to take the refusal. Same discriminator
+        ``OfficeStore.adopt_remote_actor`` records for the fences it does not
+        spend: those refuse LOCAL authoring intent, and a pull has none.
+        """
+
+        bid = safe_id(board_id or card.board_id)
+        cid = safe_id(card.card_id)
+        if not bid or not cid:
+            raise ValueError("invalid_request")
+        card.board_id = bid
+        card.card_id = cid
+        card.updated_by = _safe_actor(updated_by)
+        with board_lock(bid):
+            # ABSENCE asked under the lock that will hold for the write — the
+            # question that picks the event, and the only thing it turns on.
+            existed = self._card_path_active(bid, cid)
+            _write_card(card)
+            if existed:
+                self._emit(
+                    "board.card.edited",
+                    board_id=bid,
+                    card_id=cid,
+                    fields="realm_sync",
+                    revision=card.revision,
+                )
+            else:
+                self._emit(
+                    "board.card.created",
+                    board_id=bid,
+                    card_id=cid,
+                    title=card.title,
+                    column_id=card.column_id,
+                    created_by=card.created_by,
+                )
+        return card
+
     def resolve_conflict(self, card_id: str, *, take: str, board_id: str | None = None, updated_by: str = "operator") -> BoardCard | None:
         """Resolve a realm-sync conflict sidecar for a card. ``take=local`` keeps
         the local card; ``take=remote`` adopts the sidecar's remote copy (or

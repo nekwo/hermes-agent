@@ -116,6 +116,34 @@ because that type means "this machine authored an agent" to every consumer that
 reads it, and one pull posing as N local creates is a lie no grep over the log
 can detect.
 
+**Rule 1 over the EVENT lane, 2026-09-02 (the sync-honesty lane).** An
+event-less write is the same silent zero a defaulted phase is: it does not read
+as "nothing happened", it reads as nothing at all, and every watermark-gated
+consumer downstream then serves a world it holds no receipt for. Two instances
+closed together, both realm-sync ADOPT arms, and both found by the same
+asymmetry — the sibling arm that DELETES already emitted, so the missing half was
+never the store's rule but one lane's accidental exemption from it.
+`board_sync.apply_board_pull` (and `realm_revert._adopt_from_upstream` behind it)
+wrote board defs and cards past `BoardStore` with `atomic_json_write`; they now
+go through `BoardStore.adopt_remote_board` / `adopt_remote_card`.
+`OfficeStore.resolve_conflict`'s `take="remote"` adopt arm wrote the peer's actor
+past `_emit_actor_patch`, which its edit-vs-remove sibling never did; it now
+emits its `upsert`. Both mechanisms are 06's territory. What belongs here is the
+rule they instance, and the one receipt that deliberately did NOT move with them:
+`office.actor.conflict_resolved` stays uncovered on the patch lane, now for the
+honest reason (the conflict list a patch cannot carry) rather than the
+convenient one (06 § the fold model).
+
+**Rule 1 read a third way: a refusal is not an answer.** `realm_sync_status`
+authorized the whole verb before reading anything, so a denied credential deleted
+the local half of a DIAGNOSTIC — drift counts, held packages, held profile
+artifacts, workspace rows — and returned one typed error where an operator needed
+four facts. It now degrades: the authorization gates the remote half, and the
+denial rides the existing `remote_checked` / `remote_check_error` pair rather
+than a new key (01 § realms and workspaces). Same shape rule 1 keeps asking for
+— name the half you could not answer, out loud, instead of collapsing the whole
+answer down to the missing part.
+
 ## Wire safety: receipts ride the LOG, never the envelope
 
 **Observability never adds a key to the parity envelope.** Parity rides the

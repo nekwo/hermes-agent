@@ -28,11 +28,15 @@ Three rulings shape every line below.
   reach it.
 
 The write arms are the PULL lane's arms, not new ones: ``adopt_remote_actor`` /
-``adopt_remote_surface`` / ``restore_actor`` / ``restore_card`` /
-``archive_card`` / ``remove_actor``, and — since the replicated persona-INSTANCE
-family joined on 2026-08-31 — ``replicate_instance`` / ``retire_replica``, plus
-the same admission door every pulled payload passes. A revert writes nothing a
-pull could not have written.
+``adopt_remote_surface`` / ``adopt_remote_board`` / ``adopt_remote_card`` /
+``restore_actor`` / ``restore_card`` / ``archive_card`` / ``remove_actor``,
+and — since the replicated persona-INSTANCE family joined on 2026-08-31 —
+``replicate_instance`` / ``retire_replica``, plus the same admission door every
+pulled payload passes. A revert writes nothing a pull could not have written.
+(The two board adopt verbs arrived on 2026-09-02 with the pull arm that grew
+them; until then both lanes wrote board rows with a raw ``atomic_json_write``
+and emitted nothing, which is why the sentence above was true and the module's
+own "a live subscriber that never heard" note below was not.)
 
 The instance family's ``added`` arm needs no ``record_tombstone=False``
 parameter, and that is not an omission: a persona-instance record carries no
@@ -46,8 +50,6 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
-
-from utils import atomic_json_write
 
 from . import board_models, office_models, paths
 from .realm_sync import (
@@ -629,12 +631,15 @@ def _adopt_from_upstream(
     """Write the subtree artifact over the local row — the pull's adopt arms,
     unchanged.
 
-    The board families go through ``atomic_json_write`` because that is what
-    ``board_sync.apply_board_pull`` still does: the office store grew evented
-    ``adopt_remote_*`` verbs in the actor-lifecycle wave (H1) and the board
-    store did not, so this lane matches its family's pull arm rather than
-    inventing a third spelling. (Queue row filed: the board pull's adopt arm is
-    still event-less.)
+    "Unchanged" is the whole contract of this function, and it is why the board
+    families moved when their pull arm did. They went through
+    ``atomic_json_write`` for as long as ``board_sync.apply_board_pull`` did —
+    the office store grew evented ``adopt_remote_*`` verbs in the actor-lifecycle
+    wave (H1) and the board store did not, so this lane matched its family's pull
+    arm rather than inventing a third spelling. The board store now has
+    ``adopt_remote_board`` / ``adopt_remote_card`` and the pull routes through
+    them, so this lane does too: four families, four store doors, and a revert
+    that still writes nothing a pull could not have written.
     """
 
     if item.family == DRIFT_FAMILY_PERSONA_INSTANCE:
@@ -663,17 +668,11 @@ def _adopt_from_upstream(
         return
     if item.family == DRIFT_FAMILY_BOARD:
         entity.board_id = item.container
-        atomic_json_write(
-            paths.board_def_path(item.container), to_jsonable(entity), indent=2, sort_keys=True
-        )
+        board_store.adopt_remote_board(entity, updated_by=REVERT_ACTOR_REF)
         return
-    entity.board_id = item.container
     entity.state = "active"
-    atomic_json_write(
-        paths.board_card_path(item.container, item.item_key),
-        to_jsonable(entity),
-        indent=2,
-        sort_keys=True,
+    board_store.adopt_remote_card(
+        entity, board_id=item.container, updated_by=REVERT_ACTOR_REF
     )
 
 

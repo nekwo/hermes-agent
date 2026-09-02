@@ -282,20 +282,45 @@ LIVE_COVERED_DOMAIN_EVENT_TYPES: frozenset[str] = frozenset(
         # uncovered routes their batches down the full-core lane with no new
         # code and no new failure mode.
         #
-        # ``.conflict_resolved`` is in that list too, but NOT for the reason
-        # this comment used to give. It said the resolution "adopts a peer's row
-        # through a path that bypasses the upsert chokepoint" — an argument H1
-        # (``f810bd2ac``) discharged for the pull arm one method over, when
+        # ``.conflict_resolved`` is in that list too, and its reason has now
+        # been wrong TWICE, so the dead ones are kept beside the live one.
+        #
+        # It first said the resolution "adopts a peer's row through a path that
+        # bypasses the upsert chokepoint" — an argument H1 (``f810bd2ac``)
+        # discharged for the pull arm one method over, when
         # ``adopt_remote_actor`` started emitting ``_emit_actor_patch`` from
         # outside ``upsert_actor``. Bypassing the chokepoint has not implied
-        # "cannot carry a patch" since that day. The LIVE reason is narrower and
-        # is about this write, not about chokepoints: ``resolve_conflict``'s
-        # ``take="remote"`` arm calls ``_write_actor`` and emits no actor patch
-        # at all, so there is no row for a covered batch to ride (its
-        # edit-vs-remove arm does emit one, through ``_archive_actor_locked``).
-        # Covering the event before that write emits its patch would promote a
-        # batch that carries nothing. Making it emit — and then covering it —
-        # is a follow-on, not a correction of this list.
+        # "cannot carry a patch" since that day.
+        #
+        # It then said ``resolve_conflict``'s ``take="remote"`` arm "calls
+        # ``_write_actor`` and emits no actor patch at all, so there is no row
+        # for a covered batch to ride". TRUE as written, and no longer: that arm
+        # emits its ``upsert`` since 2026-09-02 — landed for the H1 reason and
+        # not for this list's, because a resolve that GAVE you a desk reached no
+        # live consumer while its edit-vs-remove sibling's ``remove`` did.
+        #
+        # The LIVE reason is this module's derivability audit, and it is about
+        # the CONTAINER row rather than the actor row. EVERY arm — including
+        # ``take="local"``, which writes no actor at all — calls
+        # ``_archive_conflict_sidecar``, and the office projection reads those
+        # sidecars into ``conflict_actor_keys`` (``snapshot.office_summary_row``, off
+        # ``OfficeStore.scan_conflicts``). No ``office_actor`` patch carries
+        # that field, and the launcher's ``_applyOfficeActorPatch`` never writes
+        # it — it is one of the office-row keys ``_officeSurfaceFields``
+        # deliberately refuses to let ANY patch move. A covered batch would
+        # therefore fold the resolved desk and leave the sync strip's conflict
+        # pill lit for the rest of the session: a conflict rendered on the row
+        # whose conflict this very gesture resolved.
+        #
+        # ``take="local"`` adds a second, independent refusal: it emits the
+        # domain event and no patch, so covering it would promote a batch whose
+        # only member the launcher ignores by contract — a patch frame carrying
+        # nothing, for a gesture that moved the conflict list.
+        #
+        # Covering this event needs a producer for the CONFLICT LIST, not one
+        # for the actor row. That is a cross-stack change (a new patch entity,
+        # or a widened office row and its capability token), not a line in this
+        # set.
         #
         # ``persona_instance.chat_binding_cleared`` is the PERSONA-side member
         # of that must-stay-absent list, and it is the one whose absence reads

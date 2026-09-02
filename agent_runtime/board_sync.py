@@ -270,7 +270,12 @@ def apply_board_pull(realm_id: str, subtree: Path, *, event_log: EventLog | None
         remote_board_hash = board_models.board_content_hash(remote_board)
         board_decision = classify_board_pull(local_board_hash, remote_board_hash, baseline.get(board_key))
         if board_decision.action == BoardPullAction.WRITE_REMOTE or local_board is None:
-            atomic_json_write(paths.board_def_path(board_id), to_jsonable(remote_board), indent=2, sort_keys=True)
+            # Through the STORE's adopt verb, not a raw ``atomic_json_write``:
+            # the bytes are identical and the write now emits, so a pull that
+            # gives this member a board (or a new column taxonomy) reaches the
+            # live lane instead of landing silently on disk. See
+            # ``BoardStore.adopt_remote_board``.
+            store.adopt_remote_board(remote_board)
             baseline[board_key] = remote_board_hash
 
         # Cards: the union of local-active and remote card ids. A REFUSED card is
@@ -294,9 +299,11 @@ def apply_board_pull(realm_id: str, subtree: Path, *, event_log: EventLog | None
                 summary.kept_local += 1
                 continue
             if decision.action == BoardPullAction.WRITE_REMOTE and remote_card is not None:
-                remote_card.board_id = board_id
                 remote_card.state = "active"
-                atomic_json_write(paths.board_card_path(board_id, card_id), to_jsonable(remote_card), indent=2, sort_keys=True)
+                # Same swap as the board def above — the store's evented adopt
+                # arm rather than a raw write, so an adopted or converged card
+                # is visible to the snapshot/serve pipeline the moment it lands.
+                store.adopt_remote_card(remote_card, board_id=board_id)
                 baseline[key] = remote_hash or board_models.board_content_hash(remote_card)
                 if decision.reason == "converged":
                     summary.converged += 1

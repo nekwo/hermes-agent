@@ -1932,6 +1932,17 @@ class OfficeStore:
         (or archives the local actor for an edit-vs-remove tombstone). Always
         archives the sidecar and emits ``office.actor.conflict_resolved``.
 
+        BOTH ``take="remote"`` arms also emit their ``office_actor`` patch — the
+        adopt arm an ``upsert``, the edit-vs-remove arm the ``remove``
+        ``_archive_actor_locked`` has always emitted. ``take="local"`` writes no
+        row and emits none. That does NOT make the domain event coverable: the
+        resolution also ARCHIVES the conflict sidecar, which takes the key out
+        of the office row's ``conflict_actor_keys``, and no ``office_actor``
+        patch carries that field (the launcher's ``_applyOfficeActorPatch``
+        never writes it). A covered batch would clear the desk and leave the
+        sync strip's conflict pill lit for the rest of the session. See
+        ``patch_coverage`` for that ruling in full.
+
         ``allow_class_key`` is the operator's on-the-record override for the
         class-key fence below (``harness office resolve-conflict
         --allow-class-key``); see ``_guard_class_keyed_adoption``.
@@ -1976,7 +1987,26 @@ class OfficeStore:
                     actor.updated_by = _safe_actor_ref(updated_by)
                     result_actor = actor
                     if not dry_run:
+                        # ABSENCE asked under the lock that is already held for
+                        # the write — the same question ``upsert_actor`` asks,
+                        # and the only one the fold's insert-on-absent cares
+                        # about. A resolve CAN land on an absent row: the
+                        # conflict sidecar outlives an archive of its own key.
+                        created = not self.actor_exists(wsid, actor.actor_key)
                         _write_actor(actor)
+                        # The half this arm was missing. Its sibling one branch
+                        # down archives through ``_archive_actor_locked``, which
+                        # emits its remove patch even with the domain event
+                        # suppressed — so a resolve that TOOK a desk away
+                        # reached every live consumer and a resolve that GAVE
+                        # you one reached none. Exactly the H1 asymmetry
+                        # ``adopt_remote_actor`` closed for the pull lane, on
+                        # the same lane, one method up. Inside the lock and
+                        # before the domain event, like every other emitter in
+                        # this class — see ``_emit_actor_patch``.
+                        self._emit_actor_patch(
+                            actor, created=created, correlation_id=correlation_id
+                        )
                 elif self.actor_exists(wsid, actor_key):
                     # Remote removed the actor (edit-vs-remove) → archive local.
                     actor = self.get_actor(wsid, actor_key)

@@ -226,6 +226,139 @@ def test_apply_pull_remote_removal_archives_local(tmp_path):
     assert paths.board_archived_card_path(board_id, gone.card_id).exists()
 
 
+# ── the adopt arm reaches the live lane (2026-09-02) ──────────────────────
+
+
+def _events_since(before: int):
+    from agent_runtime.events import EventLog
+
+    return [event for _, event in EventLog().iter_from_offset(before)]
+
+
+def _watermark() -> int:
+    from agent_runtime.events import EventLog
+
+    return max((offset for offset, _ in EventLog().iter_from_offset(0)), default=0)
+
+
+def _remote_card(board_id: str, card_id: str, title: str):
+    from hermes_time import now
+
+    from agent_runtime.models import BoardCard
+
+    return BoardCard(
+        card_id=card_id,
+        board_id=board_id,
+        column_id="col_queued",
+        title=title,
+        order_key="z",
+        created_by="operator",
+        created_at=now(),
+        updated_at=now(),
+    )
+
+
+def test_pull_that_adopts_a_card_emits_what_a_local_add_emits(tmp_path):
+    """RED-FIRST (2026-09-02): ``apply_board_pull``'s adopt arm wrote the card
+    with a bare ``atomic_json_write`` and emitted nothing.
+
+    The office twin grew evented ``adopt_remote_*`` verbs in H1 for exactly this
+    asymmetry: a pull that ARCHIVES a card goes through ``archive_card`` and
+    emits ``board.card.archived``, so it advances the EventLog watermark and
+    reaches the delta/serve lane — while a pull that GIVES you a card emitted no
+    event at all, advanced no watermark, and sat on disk invisible to every live
+    consumer until some unrelated write happened to wake the pipeline. This
+    module's own standing rule (``board_store``'s docstring: an event on EVERY
+    mutation) had one lane exempt from it by accident.
+
+    Asserted as the SHAPE a local add emits, not merely "an event exists": same
+    type, same board/card ids, same title — what changed is the same fact either
+    way, and only ``updated_by`` says which lane moved it.
+    """
+
+    realm_id, ws = _make_realm_workspace()
+    store = BoardStore()
+    local = store.add_card(workspace_id=ws, title="Local one")
+    board_id = board_models.default_board_id(ws)
+    update_board_baseline_after_sync(realm_id, [board_id])
+
+    board = store.get(board_id)
+    remote_new = _remote_card(board_id, "card_remote", "From peer")
+    subtree = _remote_subtree(tmp_path, board, [store.get_card(local.card_id), remote_new])
+
+    before = _watermark()
+    summary = apply_board_pull(realm_id, subtree)
+    assert summary.adopted == 1
+
+    created = [e for e in _events_since(before) if e.type == "board.card.created"]
+    assert [e.payload["card_id"] for e in created] == ["card_remote"], [
+        e.type for e in _events_since(before)
+    ]
+    assert created[0].payload["board_id"] == board_id
+    assert created[0].payload["title"] == "From peer"
+    # Provenance: the SYNC moved this row, not an operator. Hash-neutral
+    # (``board_content_hash`` excludes ``updated_by``), so the baseline the pull
+    # just recorded still keys off the remote CONTENT.
+    assert store.get_card("card_remote").updated_by == "realm_sync"
+    assert read_board_baseline(realm_id)[f"{board_id}:card:card_remote"] == (
+        board_models.board_content_hash(remote_new)
+    )
+
+
+def test_pull_that_adopts_a_board_def_emits_the_board_event(tmp_path):
+    """The def half of the same hole: a peer's column-taxonomy change rewrote
+    ``board.json`` and emitted nothing, so the launcher's lanes moved under a
+    core nobody rebuilt. ``change="realm_sync"`` is the attribution, matching
+    ``adopt_remote_surface``'s spelling on the office side."""
+
+    realm_id, ws = _make_realm_workspace()
+    store = BoardStore()
+    store.add_card(workspace_id=ws, title="Local one")
+    board_id = board_models.default_board_id(ws)
+    update_board_baseline_after_sync(realm_id, [board_id])
+
+    remote_board = store.get(board_id)
+    remote_board.title = "Renamed by a peer"
+    subtree = _remote_subtree(tmp_path, remote_board, [])
+
+    before = _watermark()
+    apply_board_pull(realm_id, subtree)
+
+    updated = [e for e in _events_since(before) if e.type == "board.updated"]
+    assert [e.payload["board_id"] for e in updated] == [board_id], [
+        e.type for e in _events_since(before)
+    ]
+    assert updated[0].payload["change"] == "realm_sync"
+    assert store.get(board_id).title == "Renamed by a peer"
+    # The peer's revision is adopted verbatim — no ``+1``. Renumbering here
+    # would make the next classify read an untouched board as locally edited.
+    assert store.get(board_id).revision == remote_board.revision
+
+
+def test_adopting_a_board_a_member_has_never_had_emits_created(tmp_path):
+    """A first arrival is a CREATE, not an edit — the same absence question
+    ``adopt_remote_actor`` asks, answered under the same lock as the write."""
+
+    from hermes_time import now
+
+    realm_id, ws = _make_realm_workspace()
+    store = BoardStore()
+    store.ensure_default_board(ws)
+    peer_board = board_models.default_board(
+        "ws_peer_only", created_at=now(), updated_by="peer"
+    )
+    subtree = _remote_subtree(tmp_path, peer_board, [])
+
+    before = _watermark()
+    apply_board_pull(realm_id, subtree)
+
+    created = [e for e in _events_since(before) if e.type == "board.created"]
+    assert [e.payload["board_id"] for e in created] == [peer_board.board_id], [
+        e.type for e in _events_since(before)
+    ]
+    assert created[0].payload["workspace_id"] == "ws_peer_only"
+
+
 # ── H1: store-drift honesty (_board_store_drift) ──────────────────────────
 
 

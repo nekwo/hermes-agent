@@ -1116,6 +1116,108 @@ def test_the_tombstone_arm_carries_the_token_and_the_store_shows_the_archive():
         assert _conflict_resolved_tokens(workspace) == [token]
 
 
+# ── the adopted row reaches the live lane ──────────────────────────────────
+
+
+def _patch_rows(before: int):
+    from agent_runtime.events import EventLog
+    from agent_runtime.state_patches import STATE_PATCHED_EVENT_TYPE
+
+    return [
+        event.payload
+        for _, event in EventLog().iter_from_offset(before)
+        if event.type == STATE_PATCHED_EVENT_TYPE
+    ]
+
+
+def _with_delta_patches(monkeypatch):
+    from agent_runtime import state_patches as sp
+    from agent_runtime.config import load_agent_runtime_config
+
+    def _loader(*args, **kwargs):
+        cfg = load_agent_runtime_config(*args, **kwargs)
+        cfg.read_model.delta_patches = True
+        return cfg
+
+    monkeypatch.setattr(sp, "load_root_runtime_config", _loader)
+
+
+def test_the_adopt_arm_emits_the_actor_patch_its_archive_sibling_always_did(monkeypatch):
+    """RED-FIRST (2026-09-02).
+
+    ``resolve_conflict``'s ``take="remote"`` ADOPT arm wrote the peer's row with
+    a bare ``_write_actor`` and emitted no ``office_actor`` patch at all, while
+    its edit-vs-remove sibling one branch down archives through
+    ``_archive_actor_locked`` — which emits its paired ``remove`` even when the
+    DOMAIN event is suppressed. So a resolve that TOOK a desk away reached every
+    live consumer and a resolve that GAVE you one reached none: exactly the H1
+    asymmetry ``adopt_remote_actor`` closed for the pull lane one method up.
+
+    Asserted against the ADOPTED row rather than merely "a patch exists": the
+    peer's ``[9.0, 9.0]`` item position and the store's ``max(remote, 1) + 1``
+    revision both ride the patch, so a row built from the pre-resolve actor —
+    or from the wrong side of the sidecar — still reds.
+    """
+
+    from agent_runtime.events import EventLog
+    from agent_runtime.state_patches import (
+        OFFICE_ACTOR_ENTITY,
+        PATCH_OP_UPSERT,
+        office_actor_patch_id,
+    )
+
+    _with_delta_patches(monkeypatch)
+    _seed()
+    _seed_conflict()
+    before = max((o for o, _ in EventLog().iter_from_offset(0)), default=0)
+
+    reply = _resolve(
+        "r-adopt-patch",
+        {"workspace_id": WORKSPACE, "actor_key": QA_INSTANCE, "take": "remote"},
+    )
+    assert "error" not in reply, reply
+
+    rows = _patch_rows(before)
+    assert [(r["entity"], r["op"]) for r in rows] == [
+        (OFFICE_ACTOR_ENTITY, PATCH_OP_UPSERT)
+    ], rows
+    row = rows[0]
+    assert row["id"] == office_actor_patch_id(WORKSPACE, QA_INSTANCE)
+    # The row this workspace now HAS, not the one it had: the store adopts the
+    # peer's revision as ``max(7, 1) + 1`` and the peer's desk sits at 9,9.
+    changed = row["changed"]
+    assert changed["revision"] == REMOTE_REVISION + 1
+    assert [item["position"] for item in changed["items"]] == [[9.0, 9.0]]
+    # A conflict sidecar can outlive its actor, so the adopt arm CAN land on an
+    # absent row. Here it does not, and the absent lifecycle marker says so —
+    # ``state_patch_is_office_lifecycle`` reads that key off the payload.
+    assert "created" not in row, row
+
+
+def test_take_local_writes_no_actor_and_therefore_emits_no_patch(monkeypatch):
+    """The other half of the pair, and the second independent reason the domain
+    event must stay uncovered: ``take="local"`` keeps the row it already had, so
+    there is no write and no patch — only the domain event a covered batch would
+    promote into a frame carrying nothing."""
+
+    from agent_runtime.events import EventLog
+
+    _with_delta_patches(monkeypatch)
+    _seed()
+    _seed_conflict()
+    before = max((o for o, _ in EventLog().iter_from_offset(0)), default=0)
+
+    reply = _resolve(
+        "r-local-nopatch",
+        {"workspace_id": WORKSPACE, "actor_key": QA_INSTANCE, "take": "local"},
+    )
+    assert "error" not in reply, reply
+
+    assert _patch_rows(before) == []
+    types = [e.type for _, e in EventLog().iter_from_offset(before)]
+    assert "office.actor.conflict_resolved" in types, types
+
+
 # ── coverage, deliberately unmoved ──────────────────────────────────────────
 
 
@@ -1124,23 +1226,27 @@ def test_the_batch_a_resolve_lands_in_still_demotes_for_every_client(monkeypatch
     prose.
 
     ``office.actor.conflict_resolved`` is deliberately absent from
-    ``LIVE_COVERED_DOMAIN_EVENT_TYPES`` and must stay absent: the adoption writes
-    a peer's row with ``_write_actor``, past the ``_emit_actor_patch`` chokepoint,
-    so NO patch carries the adopted actor. A client that folded this batch would
-    render the row it had before the peer's copy landed — the demote is what
-    keeps it honest.
+    ``LIVE_COVERED_DOMAIN_EVENT_TYPES`` and must stay absent — but NOT for the
+    reason this docstring gave until 2026-09-02. It said the adoption wrote the
+    peer's row past the patch chokepoint so no patch carried it; that was true,
+    and the fix one test up retired it. The LIVE reason is the container row:
+    every arm archives the conflict SIDECAR, which takes the key out of the
+    office row's ``conflict_actor_keys``, and no ``office_actor`` patch carries
+    that field (the launcher's ``_applyOfficeActorPatch`` never writes it). A
+    covered batch would fold the resolved desk and leave the sync strip's
+    conflict pill lit for the rest of the session.
 
-    Asserted from both ends: the batch really carries the domain event, it
-    carries no ``office_actor`` patch at all, and it is uncoverable even for a
-    client declaring every fold token this runtime knows.
+    Asserted from both ends: the batch really carries the domain event, it now
+    DOES carry the adopted actor's patch, and it is still uncoverable even for a
+    client declaring every fold token this runtime knows — which is the only
+    assertion here that was ever the point.
 
     The tombstone arm is the POSITIVE CONTROL, and it is why this test covers two
     scenarios instead of one. ``_archive_actor_locked`` emits its paired remove
-    patch even with the domain event suppressed, so that batch DOES carry a
-    patch — which proves patches are genuinely enabled here and that "no patch"
-    above is a finding rather than an artifact of the default config. It still
-    demotes, on its own uncovered ``conflict_resolved``, exactly as the coverage
-    module's comment block says it should.
+    patch even with the domain event suppressed, so that batch carries a
+    ``remove`` where the adopt arm carries an ``upsert`` — two different rows,
+    both demoted by the same uncovered event, exactly as the coverage module's
+    comment block says they should be.
     """
 
     from agent_runtime import state_patches as sp
@@ -1178,8 +1284,10 @@ def test_the_batch_a_resolve_lands_in_still_demotes_for_every_client(monkeypatch
     types = [e.type for e in batch]
     assert "office.actor.conflict_resolved" in types, types
     assert [
-        e.payload["entity"] for e in batch if e.type == STATE_PATCHED_EVENT_TYPE
-    ] == [], types
+        (e.payload["entity"], e.payload["op"])
+        for e in batch
+        if e.type == STATE_PATCHED_EVENT_TYPE
+    ] == [(OFFICE_ACTOR_ENTITY, "upsert")], types
 
     widened = HISTORICAL_FOLD_ENTITIES | {
         OFFICE_ACTOR_ENTITY,

@@ -325,6 +325,103 @@ def test_status_without_remote_reports_unchecked_without_error(
     assert status["remote_check_error"] is None
 
 
+def _clone_on_disk(realm) -> Path:
+    """The local sync repo a member who HAS synced before already holds.
+
+    Built by hand rather than by ``publish_realm_sync`` because the whole point
+    of the tests below is a realm whose remote half is refused: they must reach
+    the local state without ever passing the door that is about to say no.
+    """
+
+    repo = runtime_paths.realm_sync_root() / runtime_paths.safe_path_token(realm.server_id or "local")
+    repo.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True, text=True)
+    return repo
+
+
+def test_status_answers_local_facts_when_the_remote_half_is_denied(
+    isolate_agent_runtime_root, tmp_path,
+):
+    """RED-FIRST (2026-09-02): status called ``_authorize`` FIRST and refused the
+    whole verb before answering a single local fact.
+
+    The credential gates the REMOTE half — the clone, the fetch, and therefore
+    the freshness of ahead/behind. Store drift, held packages, held profile
+    artifacts and workspace publication rows are local reads that need no
+    credential, and deleting them exactly when a member's credential expired is
+    the opposite of what a diagnostic is for. A diagnostic read DEGRADES.
+
+    Pinned on the pair the launcher already renders for an unreachable remote
+    (``_RemoteUncheckedNote``), because "hermes could not reach the remote" and
+    "hermes was not allowed to" are the same fact from the sheet's side: what
+    follows is the last known LOCAL picture, said out loud.
+    """
+
+    from agent_runtime.office_store import OfficeStore
+
+    realm = _server_bound_remote_realm()
+    _clone_on_disk(realm)
+    ws = WorkspaceStore().create(name="Office WS", realm_id=realm.id, agent_ids=["dev"])
+    OfficeStore().upsert_actor(ws.id, dict(_OFFICE_ACTOR_PAYLOAD))
+
+    status = realm_sync_status(realm.id)
+
+    assert status["remote_checked"] is False
+    assert status["remote_check_error"] == "sync_auth_failed"
+    # The local half really answered — not an empty envelope shaped like one.
+    assert status["unpublished_changes"] is True
+    assert status["store_drift"]["office"]["actors_added"] >= 1
+    assert [row["workspace_id"] for row in status["workspace_statuses"]] == [ws.id]
+
+
+def test_status_carries_the_backends_own_denial_code_not_a_generic_one(
+    isolate_agent_runtime_root, monkeypatch,
+):
+    """The degraded envelope reports the code ``_authorize`` WOULD have raised.
+
+    A role denial is not an expired credential and the sheet must not say it is:
+    ``role_insufficient`` reaches ``remote_check_error`` verbatim, so the note
+    the operator reads names the thing they can act on.
+    """
+
+    import agent_runtime.realm_membership as realm_membership_module
+
+    realm = _server_bound_remote_realm()
+    _clone_on_disk(realm)
+    credential = _test_credential(realm.id)
+
+    def _deny(method, url, **kwargs):
+        assert f"/realms/{realm.id}/sync/permission?action=status" in url
+        return 200, {"allowed": False, "code": "role_insufficient", "message": "reader role"}
+
+    monkeypatch.setattr(realm_membership_module, "_request_json", _deny)
+
+    status = realm_sync_status(realm.id, credential=credential)
+
+    assert status["remote_checked"] is False
+    assert status["remote_check_error"] == "role_insufficient"
+
+
+def test_status_still_refuses_when_the_denial_leaves_no_local_facts(
+    isolate_agent_runtime_root,
+):
+    """THE FLOOR of the degrade, and it is deliberate rather than a gap.
+
+    A member who has never cloned this realm has no local sync repo to read, and
+    the only way to get one is the CLONE the denial just refused. There is
+    nothing to degrade TO, so the verb refuses with the code it always refused
+    with — and, just as importantly, attempts no network call on its way there.
+    """
+
+    realm = _server_bound_remote_realm(name="Never Cloned")
+
+    with pytest.raises(RealmSyncError) as excinfo:
+        realm_sync_status(realm.id)
+
+    assert excinfo.value.code == "sync_auth_failed"
+    assert not (runtime_paths.realm_sync_root() / runtime_paths.safe_path_token(realm.server_id)).exists()
+
+
 def test_local_workspace_status_is_local(isolate_agent_runtime_root, tmp_path):
     realm, _repo = _realm_with_repo(tmp_path)
     workspace = WorkspaceStore().create(name="Local Office", realm_id=realm.id)

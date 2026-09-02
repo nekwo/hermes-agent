@@ -836,7 +836,8 @@ server alone. The office surface's own fold is `office_surface`
 (`state_patches.py:1062`, `emit_office_surface_patch` at `:1132`), gated on
 `OFFICE_SURFACE_FOLD_CAPABILITY = "office_surface_fold"`
 (`patch_coverage.py:179`), which is what lets `office.surface.updated` join the
-covered set (`patch_coverage.py:331`). It is a **subset merge** of
+covered set (`patch_coverage.LIVE_COVERED_DOMAIN_EVENT_TYPES`). It is a
+**subset merge** of
 `{folders, revision, updated_at}`, not a row replace, because the office row also
 carries actor lists, counts and ledger keys this write does not move. The launcher
 declares both strings in one authority list — `kMissionFoldDeclaredEntities`
@@ -849,6 +850,30 @@ Where a surface write is genuinely unfoldable, hermes emits an accounted
 office row and every actor under it in one move, and a covered event with no patch
 beside it would ship an EMPTY patch list — advancing the client's watermark having
 folded nothing, keeping the archived surface and its chip forever.
+
+**A patch is not the same claim as coverage, and `resolve_conflict` is where the
+two came apart (2026-09-02).** Its `take="remote"` ADOPT arm wrote the peer's row
+with a bare `_write_actor` and emitted no `office_actor` patch at all, while its
+edit-vs-remove sibling archived through `_archive_actor_locked` — which emits its
+paired `remove` even when the DOMAIN event is suppressed. So a resolve that took
+a desk away reached every live consumer and a resolve that gave you one reached
+none: the same asymmetry H1 closed for the pull lane. The adopt arm now emits its
+`upsert` from inside the lock, and `take="local"` still emits nothing, because it
+writes nothing.
+
+`office.actor.conflict_resolved` nevertheless **stays off**
+`LIVE_COVERED_DOMAIN_EVENT_TYPES`, and the reason changed with the fix rather
+than surviving it. The old reason — "there is no row for a covered batch to
+ride" — is now false. The live reason is the container row: every arm calls
+`_archive_conflict_sidecar`, and the office projection reads those sidecars into
+`conflict_actor_keys` (`snapshot.office_summary_row`, off
+`OfficeStore.scan_conflicts`). No `office_actor` patch carries that field, and
+the launcher's `_applyOfficeActorPatch` never writes it — it is one of the
+office-row keys `_officeSurfaceFields` deliberately refuses to let any patch
+move. A covered batch would fold the resolved desk and leave the sync strip's
+conflict pill lit for the rest of the session: a conflict rendered on the row
+whose conflict that very gesture resolved. Covering it needs a producer for the
+CONFLICT LIST, which is a cross-stack change, not a line in a set.
 
 ### The fold fence, and why it stopped firing
 
@@ -1047,6 +1072,39 @@ One asymmetry worth knowing: the board DOES send `expect_revision`
 (`mission_board_write.dart:166,192`, sourced from `card.revision` at
 `mission_board_card_panel.dart:233`), while the office's argv arms deliberately
 omit it — the office's revision guard lives on the RPC lane only.
+
+### The pull's adopt arms, and the day they started emitting
+
+The board family reached the office's H1 shape on 2026-09-02, two days after the
+office did. Until then `board_sync.apply_board_pull` wrote both halves of a
+`WRITE_REMOTE` — the board def and each adopted or converged card — with a raw
+`atomic_json_write`, past `BoardStore` entirely. The asymmetry that made it a
+defect is the one `OfficeStore.adopt_remote_actor`'s docstring names: the pull's
+ARCHIVE arm already went through `archive_card` and emitted
+`board.card.archived`, so a pull that TOOK a card away advanced the EventLog
+watermark and reached the delta lane, the serve hub and `harness events tail`,
+while a pull that GAVE you one reached none of them — and neither did a pull
+that rewrote the column taxonomy the launcher renders as lanes.
+
+`BoardStore.adopt_remote_board` / `adopt_remote_card` are the twins of
+`adopt_remote_surface` / `adopt_remote_actor`, and carry the same four
+properties: the revision is the REMOTE's (no `+1`, or the next
+`classify_board_pull` reads an untouched row as locally edited), `updated_by`
+records the sync, nothing is re-derived from the write, and the event emitted is
+the one a LOCAL write of the same shape emits — `board.card.created` for a card
+this board did not have, `board.card.edited` for one it did, `board.created` /
+`board.updated` for the def. The absence question is asked under the same
+`board_lock` that holds for the write. `realm_revert._adopt_from_upstream`
+routes through them too, keeping its own `realm_sync_revert` attribution, so the
+revert lane's "writes nothing a pull could not have written" promise holds for
+four families through four store doors.
+
+Two things deliberately did NOT change. The bytes are identical — every field
+verbatim including `archived_card_ids`, so the board family does NOT get the
+office surface's C1 ledger UNION here; that moves the resurrection guard and is
+a decision about data, filed as its own row. And board events stay uncovered on
+the patch lane (`patch_coverage.py:33`), so what a pull now reaches is the
+honest full-core delta, not a promotion.
 
 ### One idempotency key names ONE verb
 
