@@ -1281,6 +1281,82 @@ def profile_env(tmp_path, monkeypatch):
 
 ## Testing
 
+### The push gate — install it once per clone
+
+```bash
+git config core.hooksPath .githooks
+```
+
+That one command installs BOTH repo hooks: `post-merge` (re-installs the
+canonical shared skill packages after a pull) and **`pre-push`, the always-on
+lane**. git config is per-clone and shared by every worktree of it, so one
+command covers the primary checkout and every `git worktree add` under it.
+
+**Why there is a push gate at all.** hermes `main` sat red and unreported from
+`6979bad59` — `test_every_json_verb_states_its_root_or_is_classified`, a whole-
+program gate — because CI on this fork is largely inert and there was no local
+lane. An unrun gate is indistinguishable from a passing one. The verb is fixed;
+the missing lane was the actual defect.
+
+The hook has two lanes:
+
+| lane | when | what | cost |
+|---|---|---|---|
+| **A — always** | every push, every ref, primary or worktree | `scripts/doc_cite_adjacency.py --exclude archive --exclude planned` (its RULED scope — the bare walk is red by 829 by ruling) + `scripts/dump_cli_contract.py --check` | ~11 s warm |
+| **B — the validated suite lane** | a push landing on `refs/heads/main` | `scripts/run_tests.sh tests/agent_runtime tests/hermes_cli tests/cli tests/state` | ~18 min |
+
+Lane B's scope is **the 4 directories R3 was proven on**, deliberately not the
+runner's whole-tree default: a whole-tree run on a green `main` reads ~142
+failed, every one triaged environmental or pre-existing (see
+[`planned/hermes-suite-perf.md`](docs/agent-runtime-harness/planned/hermes-suite-perf.md)
+§Follow-ups). Widening it is a scope decision with an open row, not a hook edit.
+
+`main` is the classifier because hermes has no `release` branch — `main` IS the
+shipping branch. A push that does not land on `main` runs Lane A and is told, in
+full, which gates did not run and the command that runs them. A ref line the
+hook cannot classify is forced to the Lane-B side, never the fast path.
+
+Controls, all loud and none silent:
+
+- `HERMES_PUSH_SUITE_LANE=skip` — skip Lane B, printing a banner naming exactly
+  what did not run. For a landing you have already reasoned about; not a default.
+- `HERMES_PUSH_SUITE_DIRS="tests/state"` — narrow Lane B's roots. Prints the
+  narrowing and the validated scope beside it. Bootstrap/debug knob.
+- `HERMES_PYTHON=/path/to/python` — the interpreter both lanes use. **Required on
+  a box with no `.venv`**: this repo has had none since 2026-08-30 and "what IS
+  the canonical test env" is an open row, so the hook names the interpreter it
+  needs and refuses the push rather than skipping.
+
+The hook calls `scripts/run_tests.sh` and never `pytest` directly. That is not
+style: the updater tests inside Lane B's scope do `git branch -f main
+origin/main`, and a plain `pytest tests/hermes_cli` in the primary checkout
+detached 11 unpushed commits on 2026-08-01. Per-file hermetic subprocesses are
+the mitigation; re-verified 2026-09-02 from a linked worktree with refs, reflog
+and worktree registrations byte-identical before and after.
+
+### The hermes CLI contract dump
+
+`scripts/dump_cli_contract.py` walks this repo's argparse tree and gates
+`tests/fixtures/hermes_cli_contract.json` on it.
+
+```bash
+python scripts/dump_cli_contract.py --check   # the gate Lane A runs
+python scripts/dump_cli_contract.py --write   # regenerate after a parser change
+```
+
+It exists because the launcher's Mission Control checks every operator button's
+argv against a dump of these parsers **committed in the launcher** — so a
+hermes-side argparse change leaves every launcher test green while that fixture
+lies, and only a hand-run refresh notices. Measured: the `--message` deletion on
+`persona instance create` (`ab6254643`) left it stale three days across five
+hermes commits. A hand-run regen is not a mechanism. Now the repo that MOVED is
+the repo that goes red.
+
+**When this gate reds, read the diff before regenerating.** A removed command or
+flag is not a fixture update — it is a launcher operator button that now exits 2.
+Re-sync the launcher's own fixture in the same wave and record the sync in its
+`tool/hermes_cli_contract/README.md`.
+
 ### Python
 **ALWAYS use `scripts/run_tests.sh`** — do not call `pytest` directly. The script enforces
 hermetic environment parity with CI (unset credential vars, TZ=UTC, LANG=C.UTF-8,

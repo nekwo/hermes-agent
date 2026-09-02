@@ -1,0 +1,298 @@
+#!/bin/sh
+# hermes' always-on push lane.
+#
+# Install this once per clone (the same command that installs `post-merge`):
+#
+#     git config core.hooksPath .githooks
+#
+# (git config is per-clone and shared by every worktree of it, so one command
+# covers the primary checkout and every `git worktree add` under it.)
+#
+#
+# WHY THIS EXISTS ── an unrun gate is indistinguishable from a passing one
+# ═══════════════════════════════════════════════════════════════════════════
+# hermes `main` sat RED and UNREPORTED from `6979bad59`:
+# `test_every_json_verb_states_its_root_or_is_classified` failed because
+# `_cmd_persona_instance_chat_bindings` emitted JSON with neither
+# `attach_root_observability` nor a LEDGER entry. Nobody was told, because
+# nothing was asking. CI on this fork is largely inert (billing), and there was
+# no local push gate at all -- `.githooks/` held only `post-merge`.
+#
+# That verb is fixed (`65b233d62`). The verb was never the row. The row is that
+# a repo whose CI does not run had no lane that runs, so ANY red on `main`
+# survives until a human happens to run a suite. This hook is that lane.
+#
+# It is the third instance of one class, and the sibling repo has met it twice:
+# the launcher's Stage C QA packages sat red for 12 days behind a trigger set
+# that could not reach them, and its `docs/` dead-link gate reddened `main`
+# twice in one day for the same reason. Its repair is the shape copied here --
+# a check whose input is the WHOLE tree must not depend on a trigger set to
+# run.
+#
+#
+# THE LANES, AND WHY THE EXPENSIVE ONE IS CLASSIFIED RATHER THAN ALWAYS-ON
+# ═══════════════════════════════════════════════════════════════════════════
+# Lane A ── ALWAYS. Every push, every ref, primary checkout or worktree.
+#   Two checks whose input is the whole tree, so no trigger set can express
+#   them:
+#     * `scripts/doc_cite_adjacency.py` at its RULED scope (see below)
+#     * `scripts/dump_cli_contract.py --check` -- the CLI-contract freshness
+#       gate, red the day hermes' argparse moves without a regen
+#   Measured 2026-09-02 on the operator box: ~11 s warm (7.6 s + ~3 s), cold
+#   first run in a fresh worktree closer to 20 s.
+#
+# Lane B ── the VALIDATED 4-directory parallel suite lane, on a push that
+#   lands on `refs/heads/main`. `tests/agent_runtime tests/hermes_cli
+#   tests/cli tests/state`, through `scripts/run_tests.sh`. ~18 min.
+#
+# Why classify at all: Lane B costs ~18 minutes (ledger: 12,492/0 in 18:16 and
+# 12,494/0 in 17:36, 8 workers, twice from a worktree --
+# `docs/agent-runtime-harness/planned/hermes-suite-perf.md` §EXECUTED). On
+# every push that is not a gate, it is a tax that gets routed around with
+# `--no-verify`, which is the silent skip this hook exists to prevent.
+#
+# Why `main` is the classifier, and why hermes' answer differs from the
+# launcher's: the launcher classifies branch-vs-RELEASE pushes because it has a
+# `release` branch. hermes has none -- `main` IS the shipping branch, and
+# "`main` red, unreported" is literally the row. So the expensive lane rides
+# the ref the row is about, and every other push runs Lane A and is TOLD, in
+# full, which gates did not run and the exact command that runs them.
+#
+# A ref line this hook cannot classify is forced to the Lane-B side, never the
+# fast path. Guessing "probably a branch" is how a gate goes quiet.
+#
+#
+# THE LANE-B SCOPE IS 4 DIRECTORIES, AND THAT IS NOT AN OVERSIGHT
+# ═══════════════════════════════════════════════════════════════════════════
+# `scripts/run_tests_parallel.py` default-discovers the WHOLE `tests` tree.
+# Do not point this lane at that default. A whole-tree run on a GREEN `main`
+# (`de710d0b89`) in a normal Windows operator environment read **31,063 passed
+# / 142 failed**, and all 142 triaged environmental or pre-existing: WSL-bash
+# PATH shadow, provider-network hangs, acp/ripgrep dependency holes, 2 reds
+# verified red at baseline `98d43d0c86`, 1 load-flake green in isolation. A
+# gate that reads ~142 red on a green tree trains its readers to ignore it,
+# which is worse than no gate.
+#
+# The 4 directories are the scope R3 was actually PROVEN on. Widening this
+# lane is a scope decision with an open row (launcher Mission Control queue:
+# "the runner default-discovers the WHOLE tests tree while R3's validated lane
+# is 4 directories"), not a hook edit. Full triage:
+# `docs/agent-runtime-harness/planned/hermes-suite-perf.md` §Follow-ups
+# `[RESIDUAL 2026-09-01, post-R3]`.
+#
+#
+# THE ADJACENCY PROBE'S SCOPE IS ALSO RULED ── NEVER WIDEN IT HERE
+# ═══════════════════════════════════════════════════════════════════════════
+# `--exclude archive --exclude planned`. The bare walk is red by 829 BY RULING
+# (archived and planned docs cite lines that have moved on purpose; they are
+# history, not claims about today's tree). Widening the hook's scope would make
+# this lane born-red, and a born-red gate is scenery. If the ruling changes,
+# it changes in the probe's baseline, not here.
+#
+#
+# WORKTREES ── this lane does NOT bulldoze them, and that was measured
+# ═══════════════════════════════════════════════════════════════════════════
+# The updater tests ARE inside Lane B's scope (`tests/hermes_cli/
+# test_cmd_update*.py`, `test_update_*.py`, `test_worktree_reap_cli.py`,
+# `test_kanban_worktree_isolation.py`), and their real update flow does
+# `git branch -f main origin/main`. On 2026-08-01 a PLAIN `pytest
+# tests/hermes_cli` in the primary checkout did exactly that and detached 11
+# unpushed commits belonging to four agents.
+#
+# The mitigation is the canonical runner, which is why this hook calls
+# `scripts/run_tests.sh` and MUST NEVER call `pytest` directly: every file
+# runs in its own hermetic subprocess. Re-verified 2026-09-02 from a linked
+# worktree over the six repo-touching updater files -- `main`/`origin/main`
+# unmoved, `main`'s reflog unchanged, 18 registered worktrees before and after.
+# The suite-perf ledger's two full-lane passes carry the same integrity
+# check.
+#
+#
+# CONTROLS ── all of them LOUD; none of them silent
+# ═══════════════════════════════════════════════════════════════════════════
+#   HERMES_PUSH_SUITE_LANE=skip   skip Lane B, print a banner naming exactly
+#                                 what did not run. For a docs-only landing you
+#                                 have already reasoned about -- not a default.
+#   HERMES_PUSH_SUITE_DIRS="..."  narrow Lane B's roots (space-separated).
+#                                 Prints the narrowing. Bootstrap/debug knob.
+#   HERMES_PYTHON=<python>        interpreter for both lanes. Required on a box
+#                                 with no `.venv` (see FAIL LOUD below).
+#
+# There is deliberately no "quiet" and no auto-skip. Every refusal below names
+# the fix.
+#
+#
+# FAIL LOUD ── the failure modes this hook refuses to paper over
+# ═══════════════════════════════════════════════════════════════════════════
+#   * no python on PATH and no HERMES_PYTHON -> the push FAILS. A check that
+#     quietly does not run is worse than no check.
+#   * a lane script missing from the checkout -> the push FAILS.
+#   * `run_tests.sh` refusing for want of pytest -> the push FAILS, with the
+#     `HERMES_PYTHON=` line that fixes it. `X:/Eternia/hermes-agent` has had NO
+#     `.venv` since 2026-08-30 and "what IS the canonical test env" is an open
+#     row; until it is answered, this hook names the interpreter it needs
+#     rather than skipping.
+#   * a lane that walks to zero inputs -> its own script fails loud (the
+#     adjacency probe refuses a zero-cite walk for this exact reason).
+
+set -u
+
+repo_root=$(git rev-parse --show-toplevel) || exit 1
+
+banner() {
+    printf '\n=== %s\n' "$1"
+}
+
+fail() {
+    printf '\n────────────────────────────────────────────────────────────\n' >&2
+    printf 'PUSH REFUSED — %s\n' "$1" >&2
+    shift
+    for line in "$@"; do printf '  %s\n' "$line" >&2; done
+    printf '────────────────────────────────────────────────────────────\n' >&2
+    exit 1
+}
+
+# ── interpreter ────────────────────────────────────────────────────────────
+if [ -n "${HERMES_PYTHON:-}" ] && [ -x "${HERMES_PYTHON}" ]; then
+    py="$HERMES_PYTHON"
+elif command -v python >/dev/null 2>&1; then
+    py=python
+elif command -v python3 >/dev/null 2>&1; then
+    py=python3
+else
+    fail "no python on PATH and HERMES_PYTHON is unset or not executable." \
+         "The always-on lane cannot run, and a gate that does not run is not a gate." \
+         "" \
+         "Fix:  export HERMES_PYTHON=/path/to/python"
+fi
+
+# ── classify the push ──────────────────────────────────────────────────────
+# git feeds pre-push one line per ref on stdin:
+#     <local ref> <local sha> <remote ref> <remote sha>
+# `git push origin HEAD:main` gives local ref `HEAD` and remote ref
+# `refs/heads/main`, so the REMOTE ref is the one that says where this lands.
+zero="0000000000000000000000000000000000000000"
+lands_on_main=0
+saw_ref=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ -z "${local_ref:-}${remote_ref:-}" ] && continue
+    saw_ref=1
+    # A deletion (local sha all zeros) removes a ref and tests nothing.
+    if [ "$local_sha" = "$zero" ]; then
+        continue
+    fi
+    case "$remote_ref" in
+        refs/heads/main) lands_on_main=1 ;;
+        refs/heads/*|refs/tags/*) ;;
+        *)
+            # Unclassifiable ref line: take the EXPENSIVE side. Guessing
+            # "probably a branch" is how a gate goes quiet.
+            printf 'pre-push: cannot classify ref line "%s" — treating as a main push.\n' \
+                   "$remote_ref" >&2
+            lands_on_main=1
+            ;;
+    esac
+done
+if [ "$saw_ref" = "0" ]; then
+    # No ref lines at all (git gave us nothing to classify). Same rule.
+    printf 'pre-push: no ref lines on stdin — treating as a main push.\n' >&2
+    lands_on_main=1
+fi
+
+# ═══ LANE A — always on ════════════════════════════════════════════════════
+banner "pre-push lane A (always-on): whole-tree gates"
+
+adjacency="$repo_root/scripts/doc_cite_adjacency.py"
+contract="$repo_root/scripts/dump_cli_contract.py"
+
+for script in "$adjacency" "$contract"; do
+    [ -f "$script" ] || fail "$script is missing from this checkout." \
+        "The always-on lane cannot run. This is a broken checkout, not a reason to push."
+done
+
+# RULED SCOPE. The bare walk is red by 829 by ruling — never widen it here.
+if ! "$py" "$adjacency" --exclude archive --exclude planned; then
+    fail "the doc cite-adjacency probe is red." \
+         "A cite names a symbol that is no longer within +/-3 lines of the line it cites." \
+         "" \
+         "Re-run:  $py scripts/doc_cite_adjacency.py --exclude archive --exclude planned" \
+         "Waive (with a written reason) via the probe's --write-baseline."
+fi
+
+if ! "$py" "$contract" --check; then
+    fail "the hermes CLI contract dump is stale." \
+         "hermes' argparse tree moved and tests/fixtures/hermes_cli_contract.json did not," \
+         "so the launcher's conformance gate is checking operator buttons against a lie." \
+         "" \
+         "Regenerate:  $py scripts/dump_cli_contract.py --write" \
+         "Then READ the diff before committing it."
+fi
+
+# ═══ LANE B — the validated 4-directory suite lane ═════════════════════════
+lane_dirs=${HERMES_PUSH_SUITE_DIRS:-"tests/agent_runtime tests/hermes_cli tests/cli tests/state"}
+lane_cmd="scripts/run_tests.sh $lane_dirs"
+
+if [ "$lands_on_main" = "0" ]; then
+    banner "pre-push lane B: NOT RUN — this push does not land on main."
+    cat >&2 <<EOF
+  Lane A passed. The ~18-minute suite lane did not run, and that is by design:
+  it rides pushes that land on refs/heads/main, which is the ref the
+  "main red, unreported" row is about.
+
+  Run it by hand when you want it:
+
+      $lane_cmd
+
+EOF
+    exit 0
+fi
+
+if [ "${HERMES_PUSH_SUITE_LANE:-}" = "skip" ]; then
+    banner "pre-push lane B: SKIPPED BY REQUEST (HERMES_PUSH_SUITE_LANE=skip)"
+    cat >&2 <<EOF
+  You are landing on main WITHOUT the validated suite lane. These did not run:
+
+      $lane_cmd
+
+  Lane A (cite-adjacency + CLI-contract freshness) DID run and passed.
+  Nothing else did. If main goes red on this commit, this is why.
+
+EOF
+    exit 0
+fi
+
+if [ -n "${HERMES_PUSH_SUITE_DIRS:-}" ]; then
+    printf '\npre-push: lane B NARROWED by HERMES_PUSH_SUITE_DIRS to: %s\n' "$lane_dirs" >&2
+    printf 'pre-push: the validated scope is tests/agent_runtime tests/hermes_cli tests/cli tests/state\n' >&2
+fi
+
+runner="$repo_root/scripts/run_tests.sh"
+[ -f "$runner" ] || fail "$runner is missing from this checkout." \
+    "Lane B cannot run. This is a broken checkout, not a reason to push."
+
+banner "pre-push lane B: the validated parallel suite lane (~18 min)"
+printf '  %s\n' "$lane_cmd" >&2
+printf '  landing on main; set HERMES_PUSH_SUITE_LANE=skip to push without it (loudly).\n\n' >&2
+
+# NEVER `pytest` directly — see the WORKTREES section above. `run_tests.sh`
+# gives every file its own hermetic subprocess, which is what keeps the updater
+# tests off the real repo's refs.
+# `run_tests.sh` is bash (arrays, `${!var}`); `sh` cannot run it. Refuse rather
+# than run it under a shell that will mangle the hermetic env.
+command -v bash >/dev/null 2>&1 || fail "no bash on PATH."     "scripts/run_tests.sh is bash and cannot run under plain sh."     "Push from Git Bash, or install bash."
+
+# shellcheck disable=SC2086
+if ! bash "$runner" $lane_dirs; then
+    fail "the validated suite lane is red." \
+         "Do not push a red main. Reproduce with:" \
+         "" \
+         "    $lane_cmd" \
+         "" \
+         "If the failure looks environmental, compare it against the triaged" \
+         "classes in docs/agent-runtime-harness/planned/hermes-suite-perf.md" \
+         "§Follow-ups before believing it — but do NOT widen this lane to make" \
+         "it green."
+fi
+
+banner "pre-push: all lanes green."
+exit 0
