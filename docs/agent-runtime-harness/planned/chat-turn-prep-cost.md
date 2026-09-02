@@ -1,7 +1,26 @@
 # Planned — chat-turn prep cost (the ~4 s of hermes between admission and the provider)
 
-**Status:** Stages 0–2 LANDED 2026-08-23 (`60c7f46ec1` / `7f2c82f090` / `bfde53b4ae`), Stage 2a landed in two parts (`14271f261f` = the instrument + convictions 4–6; `b0c1a668b9` = conviction 7, the ambient config document — the instrument's first field validation); live steady-state re-take READ 2026-08-24 for 1, 2a and the warm half of 2 (§6), leaving the `context_built` tail and the fresh-chat first turn open; Stages 3–5 not started. **Owner doc:**
+**Status:** Stages 0–2 LANDED 2026-08-23 (`60c7f46ec1` / `7f2c82f090` / `bfde53b4ae`), Stage 2a landed in two parts (`14271f261f` = the instrument + convictions 4–6; `b0c1a668b9` = conviction 7, the ambient config document — the instrument's first field validation); live steady-state re-take READ 2026-08-24 for 1, 2a and the warm half of 2 (§6), leaving the `context_built` tail and the fresh-chat first turn open. **Stages 3–5 EXECUTED WITH AMENDMENTS 2026-09-01** — see the ledger below; two of the three stages were built AGAINST this plan's named remedy, because the live record falsified it first (§5 stamps, field notes
+[`chat-turn-prep-stages-3-5-field-notes-2026-09-01.md`](chat-turn-prep-stages-3-5-field-notes-2026-09-01.md)). **Owner doc:**
 [`../05-chat-turn-lane.md`](../05-chat-turn-lane.md).
+
+## EXECUTED — 2026-09-01, Stages 3–5 (ledger)
+
+Branch `perf/chat-turn-prep-stages-3-5`, cut from `98d43d0c86`, landed on `main`.
+Verification: focused suites green (145/101/72/45/167 across the five sets),
+mutation gate 18/18 killed, cross-stack producer surface clean from the launcher
+primary (`generate.py --check` + `check_producer_contracts.py`, both exits 0).
+**Five live re-take reads are OWED before these instruments' numbers judge the
+stages** — enumerated in the field notes §9 and rowed as the OPERATOR row in the
+launcher Mission Control queue.
+
+| stage | what landed | sha | outcome |
+|---|---|---|---|
+| 3 — prologue receipts | `profile_conversation_turn_context_ms`; the system-prompt restore/build POSITIVE pair; the tool-defs memo hit/miss receipt (`agent_init_tool_defs_build_ms`/`..._cached_ms`) | `3b4923f6c2` | **AMENDED: the plan's named remedy site is FALSIFIED** — `request_build` bills 1 ms warm, and the cache this stage specified already exists (`model_tools._tool_defs_cache`). No second cache was built; the receipts were (field notes §2–3) |
+| 4 — SessionDB open | `session_db_open_ms` on every durable turn record (handler copies the runner's dict; live frame byte-unchanged) | `139f480a23` | **AMENDED: pooling REFUSED with the number** — warm writer-open ~6 ms median (5.7/6.5/6.6, flat 0.6→170.8 MB) vs this stage's own 100 ms threshold. Decision rule retained: live median >100 ms warm reopens it (field notes §4) |
+| 5 — demote-build deferral | `_defer_demote_build_for_active_turns` in `agent_runtime/stream.py`, bounded `SNAPSHOT_DEMOTE_DEFERRAL_MAX_MS = 1000`, demote lane only, `snapshot_build_deferred` receipt | `048bc96802` | Built as planned; `builds_overlapped` accounting untouched so a deferral cannot launder its own failures (field notes §5) |
+
+(Claims register: `13b7770042`; field notes: `48feeddf6f`.)
 **Question this answers** (operator, 2026-08-22): *"maybe something we are doing with the
 chat isn't initializing fully or fast enough?"* — the answer is **yes, twice over**: the
 turn path re-derives per turn what could live per process (and the per-process caches it
@@ -260,6 +279,12 @@ runs `_init_schema` (DDL + FTS probe + column reconcile) and the WAL checks. No 
 mark isolates it, so its ms share inside the ctx span is honestly unknown — a pooling
 stage needs a measurement first. (The IC-2 work covered the CLOSE side's checkpoint;
 this is the OPEN side.)
+**`[MEASURED 2026-09-01 — the magnitude is SMALL.]`** Warm writer-open is **~6 ms
+median** (5.7 / 6.5 / 6.6 across three live stores, flat from 0.6 MB to 170.8 MB —
+fixed per-open work, not a scan); the cold figure (56–204 ms) is the process's FIRST
+open and a pool would pay it too. Against Stage 4's own >100 ms rule, **pooling is
+REFUSED**; `session_db_open_ms` now rides every durable record so the operator
+re-takes this in the field. Field notes §4.
 
 **H4 — history re-read/re-serialized per turn: CONFIRMED, partially legitimate.**
 The native lineage is read from SessionDB every turn (`persona_commands.py:3017-3036`)
@@ -280,6 +305,15 @@ carry-forward split: 1,762 ms (turn `c59ab99e`); live corroboration ~1.1–1.5 s
 tuple — the schemas are stable across turns of one chat), system-prompt
 restore-or-build (already restore-first, verify hit rate). Genuinely per-turn: the
 hooks, compression preflight, the user-message row.
+**`[FALSIFIED 2026-09-01 — the "cacheable" naming is wrong at the named site.]`**
+`request_build` bills **1 ms warm** (4 of 7 freshest records; 51–128 ms cold) and
+`pre_api_hook` is 0 — on the live lane its tool work is `_responses_tools`, a
+reference-copying loop with nothing to cache. The expensive schema build is
+`model_tools.get_tool_definitions`, which runs at agent CONSTRUCTION (853–1,674 ms,
+billed as `profile_agent_init_tool_setup_ms`), is skipped on a reused resident actor,
+and is ALREADY cached (`model_tools._tool_defs_cache`, generation-keyed, bounded).
+What owns the span is `build_turn_context` plus the unmeasured prologue around it —
+now timed as `profile_conversation_turn_context_ms`. Field notes §2.
 
 **H6 — admission split: CONFIRMED hermes-dominated** (§1): launcher+transport ≈ 0.1 s
 of `send_to_admit`; the remaining ~0.8 s (up to ~2.4 s on other turns) is the handler's
@@ -296,7 +330,7 @@ dispatch" cost worth chasing.
 | Prompt-observability row rebuild | §2.2 | **(a)** (15 s TTL memos; key stable across turns) | ~0.4–0.6 s |
 | Agent construction on chat-root turn 1 | §2.3 | **(b)** per-chat-root lazy; **covered by Stage 2's prewarm since 2026-08-23** — the cost still exists, it moved off the turn | ~3.0–3.6 s (once per chat root, and again on signature change) |
 | Profile `.env` + context install | §2.3 | **(b)** | ~0.2–0.8 s |
-| SessionDB cold open ×1 + history read ×2 | §2.1.1/2.2 | **(a)/(d)** | unmeasured |
+| SessionDB cold open ×1 + history read ×2 | §2.1.1/2.2 | **(a)/(d)** | ~~unmeasured~~ open measured ~6 ms warm (2026-09-01, §3 H3); history reads still unmeasured |
 | Prologue + request assembly | §2.4 | mix **(a)** (schemas, system prompt) + **(c)** (hooks, message) | ~1.1–1.8 s |
 | Write-ahead persist, lease, guards, HUD deltas | §2.1 | **(c)** genuine | ~0.2–0.4 s |
 | Snapshot-build GIL contention | §2.5 | **(d)** infrastructural | unattributed inflation |
@@ -304,7 +338,7 @@ dispatch" cost worth chasing.
 
 ---
 
-## 5. Stages (ordered by value; Stages 0, 1, 2 and 2a have landed, Stages 3–5 not started)
+## 5. Stages (ordered by value; Stages 0, 1, 2 and 2a landed 2026-08-23, Stages 3–5 landed 2026-09-01 — see the EXECUTED ledger at the top)
 
 **Stage 0 — restore the instrument before touching anything (opening gate, §6).**
 **Code half LANDED 2026-08-23, commit `60c7f46ec1`**; the live re-take is still
@@ -739,12 +773,34 @@ median under 700 ms across a week.* Risk: low-medium. **Explicitly gated** by th
 standing rule in `planned/mission-chat-admission-latency.md` §5: no prologue work until
 the split is a distribution, not one turn.
 
+**`[EXECUTED WITH AMENDMENT 2026-09-01, `3b4923f6c2`.]` This stage's named remedy is
+FALSIFIED and was not built.** The live record (7 freshest `phases` records) bills
+`request_build` at **1 ms warm**; the serialization on the live lane is a
+reference-copying loop, and the cache this paragraph asks for already exists one level
+down (`model_tools._tool_defs_cache` — generation-keyed, config-fingerprinted, bounded,
+with an explicit hatch). A second cache would be a parallel authority. What landed
+instead is the one thing the memo lacked — receipts: `profile_conversation_turn_context_ms`
+(the previously unowned several-hundred-ms owner of the assembly span), the
+system-prompt restore/build POSITIVE pair, and the tool-defs memo hit/miss pair. The
+plan's expected −0.5–1.0 s never existed at this site. Re-target any future prologue
+diet at whatever `turn_context_ms` convicts — re-take read 1 of field notes §9.
+
 **Stage 4 — SessionDB open-side: measure, then pool.** Add a timing around
 `_default_persona_session_db()` (Stage 0 can carry it); if it bills >100 ms warm, hold
 one writer handle per serve process (the close-side checkpoint discipline from IC-2
 stays intact — pooling changes WHEN close happens, not whether). *Expected: unknown
 until measured. Receipt: the new timing key.* Risk: low for measuring; medium for
 pooling (multi-process WAL discipline is why per-open close exists).
+
+**`[EXECUTED WITH AMENDMENT 2026-09-01, `139f480a23`.]` Measured, and the measurement
+REFUSES the pooling half by this stage's own rule.** Warm writer-open: **~6 ms median**
+(5.7 / 6.5 / 6.6 ms across stores of 0.6 / 68.6 / 170.8 MB — flat across a 280× size
+range), nowhere near the 100 ms threshold. The instrument landed
+(`session_db_open_ms` folded into every durable record's `profile_timing`; the LIVE
+result frame keeps the runner's dict byte-for-byte); the pooling was NOT built. The
+decision rule stands if the field disagrees with the bench: live
+`session_db_open_ms` median >100 ms warm reopens pooling, IC-2 close discipline
+unchanged. Re-take read 4 of field notes §9.
 
 **Stage 5 — stop paying the snapshot builder during live turns.** `builds_overlapped`
 is already recorded; if Stage-0 data shows turn spans correlate with overlap (the
@@ -753,6 +809,17 @@ between `write_ahead` and `stream_done`. *Expected: removes the unattributed inf
 sharpens every other number. Receipt: span medians at `builds_overlapped=0` vs `>0`.*
 Risk: medium — the launcher's HUD freshness rides those builds; deferral must be
 bounded (hundreds of ms), not a starvation.
+
+**`[EXECUTED 2026-09-01, `048bc96802`.]`** The premise held in the freshest data
+(`builds_overlapped` = 1 and 2 on the two freshest turns).
+`_defer_demote_build_for_active_turns` (`agent_runtime/stream.py`) defers demote-cadence
+builds while `profile_runner.agent_runs_in_flight()` — the Stage-2 yield rule's own
+counter, not a new authority — reports a live run; bounded at
+`SNAPSHOT_DEMOTE_DEFERRAL_MAX_MS = 1000` (module constant, deliberately not a config
+key); demote lane ONLY (boot/hydrate and `full_core` never wait); unknown counter does
+not defer; `builds_overlapped` still counts an overlap that outlasted the bound.
+Receipt: one `snapshot_build_deferred` line per deferral. Re-take read 5 of field
+notes §9.
 
 Deliberately NOT staged: re-tuning the 15/30 s TTL constants upward. That trades the
 measured storm for a staleness window on every consumer (snapshot drawers included)
@@ -848,7 +915,10 @@ already writes `runtime_resolve_cached=0/1` to tell them apart.
   `Plugin discovery complete: 54 found, 47 enabled`) during the 4a80f05e window: the log
   carries no pid on those lines, so whether it ran in the serve or a sibling hermes
   child is unattributed. Small, but it fired inside the turn window.
-- The **SessionDB open cost** (H3) is a code-shape finding, not a measured one.
+- ~~The **SessionDB open cost** (H3) is a code-shape finding, not a measured one.~~
+  **Measured 2026-09-01: ~6 ms warm** (§3 H3's dated mark; field notes §4). The
+  bench was a quiet worktree process — `session_db_open_ms` on the live records is
+  what confirms or reopens it.
 - The **prologue split** on the live turns is inferred from log timestamps
   (23.15 → 24.24 → 24.63) plus one carry-forward measurement; the standing mark is not
   yet on any record.

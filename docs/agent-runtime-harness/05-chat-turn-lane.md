@@ -71,6 +71,20 @@ delta of a thread-cumulative counter like `registry_probe_rounds`: `0` on a warm
 `1` when a keyed input moved, and anything above `1` means something is re-resolving what the
 bundle holds.
 
+**Six `profile_timing` receipts landed 2026-09-01** (prep-cost Stages 3–5, `3b4923f6c2` /
+`139f480a23`; all `*_ms` keys `safe_turn_profile_timing` already admitted — no schema change):
+`profile_conversation_turn_context_ms` times `build_turn_context`, the owner of most of the
+`provider_request_started → request_assembled` span — the live record falsified the old belief
+that tool-schema `request_build` owned it (that bills **1 ms warm**; the expensive schema build
+runs at agent construction and is already cached in `model_tools._tool_defs_cache`); exactly one
+of `profile_conversation_system_prompt_restore_ms` / `..._build_ms` per prologue entry; exactly
+one of `agent_init_tool_defs_build_ms` / `..._cached_ms` per construction; and
+`session_db_open_ms` — the per-turn SessionDB writer-open, bench-measured **~6 ms warm**
+(5.7/6.5/6.6 median, flat from 0.6 to 170.8 MB store size; cold first-open 56–204 ms), which is
+why the open stays per-turn and unpooled. The durable record's block is the TURN's (a superset);
+the live result frame keeps the runner's dict byte-for-byte. Evidence + the owed live re-takes:
+`planned/chat-turn-prep-stages-3-5-field-notes-2026-09-01.md`.
+
 **Four honesty rules** (`:18-50`), each enforced in code, not by convention:
 
 1. **Absent, never a fake zero.** `snapshot()` emits only what was marked (`:334-355`);

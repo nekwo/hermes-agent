@@ -300,6 +300,18 @@ Stage 7 builds immediately; every other stage HOLDS for the operator's go.**
 
 ## Follow-ups this diagnosis surfaced (not perf, filed here for routing)
 
+- **`[RESIDUAL 2026-09-01, post-R3]` The ruled default's SCOPE is wider than its
+  proof.** R3's parity/integrity evidence is the 4-directory lane
+  (agent_runtime + hermes_cli + cli + state), but `scripts/run_tests_parallel.py`
+  default-discovers the WHOLE `tests` tree (`_DEFAULT_ROOTS = ['tests']`, minus
+  the integration/e2e skips). A whole-tree invocation on a green `main`
+  (`de710d0b89`, 2026-09-01, normal Windows operator environment) read
+  **31,063 passed / 142 failed — all 142 triaged environmental or pre-existing**
+  (provider-network hangs, WSL-bash PATH shadow, acp/ripgrep dependency holes,
+  2 run_agent reds verified red at baseline `98d43d0c86`, 1 load-flake green in
+  isolation), which an operator will misread as a red `main`. The validated gate
+  remains the 4-dir parallel lane per the EXECUTED ledger; the scope question is
+  rowed in the launcher Mission Control queue as a rider on the R3 ruling.
 - `tests/acp/*` collection failure in worktrees (`No module named 'acp'`) is
   known/pre-existing (editable install resolves to the primary) — any Stage 3
   worktree lane needs the same `--ignore`/install answer CI uses.
