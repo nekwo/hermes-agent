@@ -2049,6 +2049,108 @@ def test_a_live_chat_turn_survives_a_socket_drain_and_the_hold_is_reported():
     assert handle.code == 0
 
 
+def test_a_live_character_generation_survives_a_drain_the_way_a_chat_turn_does():
+    """The long-run half of the same contract, and the defect it closes.
+
+    `is_chat_turn` and the drain hold covered chat turns and nothing else, so a
+    launcher update or a Reap & Restart landing during a
+    `characters turnaround|rows|auto` ended the run without a word — and a
+    `turnaround` is generated whole, so there was nothing to resume from. Ten to
+    twenty minutes of provider spend, gone to a restart that could have waited.
+
+    The assertion that would pass vacuously if the generation had simply been
+    killed is the same one its chat-turn twin makes: the request LANDS, with its
+    own exit frame, after the deadline it outlived.
+    """
+
+    started = threading.Event()
+    release = threading.Event()
+    exits: list[int] = []
+
+    def _dispatch(argv):
+        started.set()
+        release.wait(WAIT)
+        return 0
+
+    with running_serve(
+        dispatch=_dispatch,
+        drain_socket_minimum_deadline_seconds=0.2,
+        drain_poll_interval_seconds=0.01,
+        hard_exit=exits.append,
+    ) as handle:
+        with client(handle, name="generation-holder") as (connection, _reply):
+            connection.send(
+                {"id": "gen-1", "argv": ["harness", "characters", "rows", "--draft", "d1"]}
+            )
+            assert started.wait(WAIT)
+
+            connection.send({"op": "drain", "force": True, "deadline_seconds": 0.2})
+            assert _read_until(connection, "draining")["pending"] == 1
+
+            held = _read_until(connection, "drain_timeout")
+            assert held["terminal"] is False
+            assert held["held_by_long_runs"] == 1
+            assert held["long_run_request_ids"] == ["conn-1:gen-1"]
+            # ADDITIVE: the chat-turn keys keep their names and their meaning,
+            # and they are honestly zero here.
+            assert held["held_by_chat_turns"] == 0
+            assert held["chat_turn_request_ids"] == []
+
+            assert exits == []
+            connection.send({"op": "ping"})
+            busy = _read_until(connection, "busy")
+            assert busy["long_runs"] == 1
+            assert busy["chat_turns"] == 0
+
+            # It re-arms rather than stopping at one lapse.
+            second = _read_until(connection, "drain_timeout")
+            assert second["terminal"] is False
+            assert second["deadline_holds"] >= 2
+
+            release.set()
+            assert _read_until(connection, "exit") == {
+                "id": "gen-1",
+                "event": "exit",
+                "code": 0,
+            }
+            complete = _read_until(connection, "drain_complete")
+            assert complete["requests_completed"] == 1
+
+    assert exits == [] or exits == [0]
+    assert handle.code == 0
+
+
+def test_a_read_that_is_not_a_long_run_does_not_hold_the_drain():
+    """The hold is the three generate verbs, not "anything under `characters`".
+
+    `characters status` is a read — the launcher polls it while a generation
+    runs — and a drain that waited on a poll would be a drain that never ended.
+    """
+
+    started = threading.Event()
+    exits: list[int] = []
+
+    def _dispatch(argv):
+        started.set()
+        return 0
+
+    with running_serve(
+        dispatch=_dispatch,
+        drain_socket_minimum_deadline_seconds=0.2,
+        drain_poll_interval_seconds=0.01,
+        hard_exit=exits.append,
+    ) as handle:
+        with client(handle, name="poller") as (connection, _reply):
+            connection.send(
+                {"id": "poll-1", "argv": ["harness", "characters", "status", "--draft", "d1"]}
+            )
+            assert started.wait(WAIT)
+            _read_until(connection, "exit")
+            connection.send({"op": "ping"})
+            busy = _read_until(connection, "busy")
+            assert busy["long_runs"] == 0
+
+
 def test_a_drain_refuses_new_connections_while_it_finishes():
     started = threading.Event()
     release = threading.Event()

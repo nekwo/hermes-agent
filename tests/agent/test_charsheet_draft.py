@@ -16,12 +16,15 @@ import base64
 import json
 import math
 import re
+import threading
 import warnings
 from pathlib import Path
 
 import pytest
 
 from agent.charsheet import pipeline
+from agent.charsheet.draft_lock import LOCK_FILENAME
+from agent.charsheet.errors import DraftBusy
 from agent.charsheet.draft import (
     DEFAULT_THUMB_SCALE,
     DRAFTS_DIRNAME,
@@ -401,6 +404,69 @@ def test_a_mirrored_row_cannot_be_generated(fake, base):
 
     with pytest.raises(ValueError, match="not an authored row"):
         draft.reroll_row("walk-w")
+
+
+# ────────────────── one writer per draft (the generation lock) ──────────────────
+
+
+def test_a_second_generation_on_one_draft_is_refused_rather_than_interleaved(
+    fake, base, monkeypatch
+):
+    """The whole of the row: two `characters` generations, one draft.
+
+    A second THREAD calling the same verb, because that is the shape the serve
+    child actually produces — four pool workers in ONE process, one request each
+    — and because the launcher's own latch cannot see an agent-driven run from a
+    chat turn at all. Before the lock, both batches ran: every row generated
+    twice into one revision store, last-writer-wins per item.
+
+    The refusal is taken from INSIDE the first batch's provider call, so what is
+    tested is the mid-flight moment rather than a tidy before-and-after.
+    """
+
+    draft = run_to_rows(base)
+    refused: list[BaseException] = []
+    arrived: list[str] = []
+
+    def _racing(prompt, **kwargs):
+        if not arrived:
+            arrived.append(str(kwargs.get("prefix", "")))
+
+            def _second_writer() -> None:
+                try:
+                    CharacterDraft.load(draft.id).run_rows()
+                except BaseException as exc:  # noqa: BLE001 - the type IS the assertion
+                    refused.append(exc)
+
+            worker = threading.Thread(target=_second_writer)
+            worker.start()
+            worker.join(20.0)
+            assert not worker.is_alive(), "the second writer blocked instead of refusing"
+        return fake(prompt, **kwargs)
+
+    monkeypatch.setattr(pipeline, "_generate_image", _racing)
+    draft.run_rows()
+
+    assert arrived, "the first batch never reached the provider"
+    assert [type(exc) for exc in refused] == [DraftBusy]
+    assert refused[0].safe_details["verb"] == "rows"
+
+    # And the store holds ONE writer's work: one attempt per authored row, not
+    # two racing sets of bytes under the same keys.
+    store = draft.store
+    for row in SPEC.authored_rows():
+        assert len(store.history(row_item(row.key))) == 1
+
+
+def test_the_generation_lock_is_gone_once_the_verb_ends(fake, base):
+    """A draft is not left wedged by a run that finished normally."""
+
+    draft = run_to_rows(base)
+    assert not (draft.directory / LOCK_FILENAME).exists()
+    draft.run_rows()
+    assert not (draft.directory / LOCK_FILENAME).exists()
+    # And the next generation is admitted, which is the property that matters.
+    draft.reroll_row("walk-e")
 
 
 # ────────────────────────────── compose / install ──────────────────────────────

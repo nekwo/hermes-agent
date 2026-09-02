@@ -3088,6 +3088,21 @@ DEFAULT_CONFIG = {
         "region": "global",
     },
 
+    # Character-sheet authoring (agent/charsheet/). Behavioural knobs only —
+    # WHICH image backend generates a sheet is `image_gen`'s business, not this
+    # section's.
+    "charsheet": {
+        # Ceiling on ONE image-provider call, in seconds; 0 disables the bound.
+        # The pipeline had none, and `imagegen.generate` takes no timeout
+        # parameter to pass one through, so a wedged backend held a serve pool
+        # worker for as long as its OWN client allowed — 600s x retries on the
+        # bare `openai.OpenAI()` path. 300 is the largest ceiling any shipped
+        # backend sets for itself, so raising this is only ever needed for a
+        # provider slower than all of them. Authority and full reasoning:
+        # `agent/charsheet/pipeline.py::PROVIDER_TIMEOUT_SECONDS`.
+        "provider_timeout_seconds": 300,
+    },
+
     # Config schema version - bump this when adding new required fields
     "_config_version": 33,
 }

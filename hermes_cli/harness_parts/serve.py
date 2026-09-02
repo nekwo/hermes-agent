@@ -67,7 +67,8 @@ Protocol (NDJSON, one frame per line):
              ``{"event":"drain_complete","requests_refused":N,
              "requests_completed":M,"drain_ms":X}`` and exit 0. If the
              deadline elapses first: ``{"event":"drain_timeout",…,
-             "stuck_request_ids":[…],"held_by_chat_turns":N,"terminal":true}``
+             "stuck_request_ids":[…],"held_by_chat_turns":N,
+             "held_by_long_runs":N,"terminal":true}``
              and a NONZERO exit — a drain that can hang forever is not a drain.
              Progress is reported as ``{"event":"drain_progress",…}`` while the
              wait runs, so a draining service never looks dead to a watchdog.
@@ -86,13 +87,23 @@ Protocol (NDJSON, one frame per line):
                the parent that spawned this process and owns its stdin, so it
                can end the runtime with a signal regardless, and flooring it
                would change a contract this lane promised to leave untouched;
-             * a deadline that expires WHILE A CHAT TURN IS IN FLIGHT does not
-               end the process. It emits a non-terminal
+             * a deadline that expires WHILE A CHAT TURN OR A LONG RUN IS IN
+               FLIGHT does not end the process. It emits a non-terminal
                ``{"event":"drain_timeout","terminal":false,
-               "held_by_chat_turns":N,…}``, keeps serving, and re-arms. Only an
-               expiry with no chat turn in flight is terminal. Recording safety
-               outranks restart latency: a killed turn is lost work, a late
-               restart is a slow one.
+               "held_by_chat_turns":N,"held_by_long_runs":N,…}``, keeps serving,
+               and re-arms. Only an expiry with neither in flight is terminal.
+               Recording safety outranks restart latency: a killed turn is lost
+               work, a late restart is a slow one.
+
+               The long runs are the ``characters turnaround|rows|auto`` verbs
+               (``_LONG_RUN_COMMANDS``), and they are here on the same argument
+               a chat turn is: a launcher update or a Reap & Restart landing
+               mid-generation used to end a ten-to-twenty-minute run without a
+               word, and a ``turnaround`` has no partial result to resume from.
+               Both counts are reported separately because the WAIT differs —
+               a chat turn ends in seconds, a generation may be fifteen minutes
+               from done — and ``held_by_chat_turns`` keeps its name and its
+               meaning so a reader that only knows that key is never lied to.
 
              On the SOCKET lane `drain` additionally requires ``"force":true``.
              Same reasoning as the `shutdown` refusal — an attached client
@@ -861,6 +872,29 @@ _REQUEST_SILENCE_SECONDS = 15.0
 # shapes mark a request as an in-flight chat turn for the busy/ping frame.
 _CHAT_TURN_COMMANDS = (("mission-chat", "message"), ("mission-chat", "steer"))
 
+# The verbs that legitimately run for MINUTES, and hold the drain deadline the
+# way a chat turn does. Same reason, different work: a character generation is
+# one provider call per direction or per row, hermes's own rate estimate is
+# 1-2 min per generation (`harness.py::_characters_auto_write`), and a
+# `turnaround` produces NOTHING until the whole strip lands — so a launcher
+# update or a Reap & Restart landing mid-generation used to end the run with no
+# word to anybody, and `turnaround` had no partial result to resume from.
+#
+# `rows` and `auto` do land per row, so what a kill costs them is the row in
+# flight; `turnaround` loses everything. That is the asymmetry, and it does not
+# change the answer: all three hold, because the frame the supervisor reads has
+# to say a long run is in flight before the supervisor can be expected to wait.
+#
+# NOT a licence to hang. The hold is only bounded because the generation itself
+# now is: `agent/charsheet/pipeline.py::PROVIDER_TIMEOUT_SECONDS` puts a
+# deadline on every provider call, which is what stops one wedged backend from
+# holding a drain open forever. The two changes are one change.
+_LONG_RUN_COMMANDS = (
+    ("characters", "turnaround"),
+    ("characters", "rows"),
+    ("characters", "auto"),
+)
+
 # ── Poll response cache (follow-up slice 1 of the serve design doc) ──────────
 #
 # NOT the serve core cache (``<store_root>/serve_read_model/``). This is a
@@ -1313,6 +1347,7 @@ class _ArgvRequest:
         "rid",
         "argv",
         "is_chat_turn",
+        "is_long_run",
         "is_runtime_stream",
         "cancel_event",
         "key",
@@ -1338,6 +1373,17 @@ class _ArgvRequest:
         tail = argv[1:] if argv and argv[0] == "harness" else argv
         self.is_chat_turn = any(
             tuple(tail[: len(shape)]) == shape for shape in _CHAT_TURN_COMMANDS
+        )
+        #: A generate verb that runs for minutes. Derived from the same argv
+        #: tail, by the same prefix match, so the two marks cannot disagree
+        #: about where a command name starts — and a sibling flag rather than a
+        #: `holds_drain` union because the drain frame reports the two
+        #: separately: an operator asking why a restart is waiting needs to know
+        #: WHICH kind of work is holding it, and the counts have different
+        #: cures (a chat turn ends in seconds; a generation may be fifteen
+        #: minutes from done).
+        self.is_long_run = any(
+            tuple(tail[: len(shape)]) == shape for shape in _LONG_RUN_COMMANDS
         )
         self.is_runtime_stream = bool(tail and tail[0] == "stream")
         self.cancel_event = threading.Event()
@@ -2037,7 +2083,19 @@ def serve_loop(
         with inflight_lock:
             pending = len(inflight)
             chat_turns = sum(1 for item in inflight.values() if item.is_chat_turn)
-        return {"event": "busy", "chat_turns": chat_turns, "pending": pending}
+            long_runs = sum(1 for item in inflight.values() if item.is_long_run)
+        # ``long_runs`` is ADDITIVE. ``chat_turns`` keeps its exact meaning and
+        # its exact name because the launcher decodes it by that name
+        # (`mission_control_serve_session_io.dart`, the `busy` case →
+        # `MissionServeBusySignal.chatTurns`), and a supervisor that learned to
+        # read a renamed key would be a supervisor that stopped reading the old
+        # one mid-upgrade.
+        return {
+            "event": "busy",
+            "chat_turns": chat_turns,
+            "long_runs": long_runs,
+            "pending": pending,
+        }
 
     def _report_quiet_requests(pending: list[_ArgvRequest]) -> None:
         """Describe every request that has gone quiet, to the lane that asked.
@@ -3636,6 +3694,13 @@ def serve_loop(
                     chat_turn_ids = sorted(
                         key for key, item in inflight.items() if item.is_chat_turn
                     )
+                    # Read in the SAME critical section for the same reason,
+                    # one line later: a generation that started between two
+                    # reads would be killed by a timeout that had already
+                    # decided nothing was holding.
+                    long_run_ids = sorted(
+                        key for key, item in inflight.items() if item.is_long_run
+                    )
                 if not remaining:
                     _finish_drain(
                         0,
@@ -3669,9 +3734,21 @@ def serve_loop(
                         # recycle by another name.
                         "held_by_chat_turns": len(chat_turn_ids),
                         "chat_turn_request_ids": chat_turn_ids,
-                        "terminal": not chat_turn_ids,
+                        # ADDITIVE, beside the two above rather than folded into
+                        # them. `held_by_chat_turns` keeps its name and its
+                        # meaning — a reader that only knows that key still
+                        # reads a true number about chat turns, it just is not
+                        # the whole reason the drain is being held any more.
+                        # And the split is what the frame is FOR: "held by 1
+                        # chat turn" and "held by 1 `characters rows`" are the
+                        # same terminal:false with very different waits behind
+                        # them, and an operator watching a restart deserves to
+                        # know which.
+                        "held_by_long_runs": len(long_run_ids),
+                        "long_run_request_ids": long_run_ids,
+                        "terminal": not (chat_turn_ids or long_run_ids),
                     }
-                    if chat_turn_ids:
+                    if chat_turn_ids or long_run_ids:
                         # NOT terminal: say so, keep serving, re-arm. The frame
                         # is emitted every time the deadline lapses, so a
                         # supervisor watching a drain that is being held open

@@ -1977,7 +1977,7 @@
     {
       "id": "dcw-h4-a-stopped-autopilot-never-writes-its-summary",
       "path": "hermes_cli/harness.py",
-      "symbol": "_cmd_characters_auto",
+      "symbol": "_characters_auto_steps",
       "operator": "return-instead-of-breaking",
       "find": "            stopped_at, error = step, str(exc)\n            break\n",
       "replace": "            return 2\n",
@@ -1992,7 +1992,7 @@
     {
       "id": "dcw-h4-an-autopilot-with-nothing-to-do-reports-success",
       "path": "hermes_cli/harness.py",
-      "symbol": "_cmd_characters_auto",
+      "symbol": "_characters_auto_steps",
       "operator": "swallow-the-empty-plan-refusal",
       "find": "        stopped_at, error = \"plan\", message\n",
       "replace": "        pass\n",
@@ -3445,6 +3445,126 @@
         "pytest",
         "-q",
         "tests/agent_runtime/test_board_store.py::test_the_cross_verb_refusal_is_its_own_exit_family_not_the_unresolved_one"
+      ]
+    },
+    {
+      "id": "longrun-draft-lock-admits-the-second-writer",
+      "path": "agent/charsheet/draft_lock.py",
+      "symbol": "_claim",
+      "operator": "admit-a-taken-lock",
+      "find": "        return False",
+      "replace": "        return True",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_charsheet_draft_lock.py::test_a_second_writer_on_one_draft_is_refused_and_told_who_holds_it"
+      ]
+    },
+    {
+      "id": "longrun-a-reentrant-acquire-contends-with-itself",
+      "path": "agent/charsheet/draft_lock.py",
+      "symbol": "draft_generation_lock",
+      "operator": "deny-same-thread-reentry",
+      "find": "        if entry is not None and entry[0] == ident:",
+      "replace": "        if False:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_charsheet_draft_lock.py::test_the_same_thread_re_enters_and_the_nested_exit_does_not_release"
+      ]
+    },
+    {
+      "id": "longrun-rows-generates-without-the-draft-lock",
+      "path": "agent/charsheet/draft.py",
+      "symbol": "CharacterDraft.run_rows",
+      "operator": "drop-the-generation-lock",
+      "find": "        with self.generation_lock(\"rows\"):",
+      "replace": "        with contextlib.nullcontext():",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_charsheet_draft.py::test_a_second_generation_on_one_draft_is_refused_rather_than_interleaved"
+      ]
+    },
+    {
+      "id": "longrun-drain-terminates-over-a-live-generation",
+      "path": "hermes_cli/harness_parts/serve.py",
+      "symbol": "serve_loop/_drain_monitor terminal",
+      "operator": "hold-only-for-chat-turns",
+      "find": "                        \"terminal\": not (chat_turn_ids or long_run_ids),",
+      "replace": "                        \"terminal\": not chat_turn_ids,",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_serve_socket_lane.py::test_a_live_character_generation_survives_a_drain_the_way_a_chat_turn_does"
+      ]
+    },
+    {
+      "id": "longrun-busy-frame-drops-the-long-run-count",
+      "path": "hermes_cli/harness_parts/serve.py",
+      "symbol": "_busy_frame",
+      "operator": "zero-the-long-run-count",
+      "find": "            long_runs = sum(1 for item in inflight.values() if item.is_long_run)",
+      "replace": "            long_runs = 0",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_serve_socket_lane.py::test_a_live_character_generation_survives_a_drain_the_way_a_chat_turn_does"
+      ]
+    },
+    {
+      "id": "longrun-provider-deadline-never-refuses",
+      "path": "agent/charsheet/pipeline.py",
+      "symbol": "_within_deadline",
+      "operator": "never-notice-the-abandoned-call",
+      "find": "    if worker.is_alive():",
+      "replace": "    if False:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_charsheet_provider_deadline.py::test_a_provider_that_never_answers_is_refused_within_the_deadline"
+      ]
+    },
+    {
+      "id": "longrun-busy-refusal-loses-its-typed-code",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_characters_refusal_extra",
+      "operator": "drop-the-refusal-code",
+      "find": "    extra: dict = {\"code\": code}",
+      "replace": "    extra: dict = {}",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_characters_cli.py::test_a_busy_draft_refuses_the_generate_verb_and_names_who_holds_it"
+      ]
+    },
+    {
+      "id": "longrun-autopilot-runs-without-holding-the-draft",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_cmd_characters_auto",
+      "operator": "drop-the-plan-wide-lock",
+      "find": "        holding.enter_context(draft.generation_lock(\"auto\"))",
+      "replace": "        pass",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_characters_cli.py::test_the_autopilot_refuses_a_busy_draft_before_it_runs_one_step"
       ]
     }
   ]

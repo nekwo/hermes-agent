@@ -15,13 +15,16 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 from agent.charsheet import pipeline
 from agent.charsheet.draft import drafts_dir
+from agent.charsheet.draft_lock import LOCK_FILENAME, STALE_HOLDER_SECONDS
 from agent.charsheet.revisions import STATE_FILENAME
 from agent.charsheet.spec import FOUR_WAY, SheetSpec, StateSpec
 from hermes_cli.harness import build_parser
@@ -561,6 +564,110 @@ def test_a_rows_batch_that_lands_hands_no_next_and_the_error_shape_is_unchanged(
 
     assert (code, refused["ok"]) == (2, False)
     assert set(refused) == {"ok", "error", "draft", "stage"}
+
+
+# ──────────── a draft another generation holds (`draft_busy`) ────────────
+
+
+def hold_draft(draft_id, *, verb="rows"):
+    """Write the holder file a live generation would be holding right now."""
+    path = drafts_dir() / draft_id / LOCK_FILENAME
+    path.write_text(
+        json.dumps({"draft": draft_id, "verb": verb, "pid": 4242, "host": "other-box",
+                    "started": "2026-09-02T10:00:00Z"}),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_a_busy_draft_refuses_the_generate_verb_and_names_who_holds_it(
+    fake, base_image, capsys
+):
+    """The refusal a second `characters rows` gets, in the shape a panel parses.
+
+    The flat pets error shape, plus two additive keys: `code`, so a consumer
+    branches on a token instead of on prose, and `busy`, so the operator learns
+    which verb is running, since when, and — because there is no pid liveness on
+    Windows — the exact file to delete if that process is gone.
+
+    The `next` hint is `status` and carries no `alternatives`: hermes cannot
+    cancel a running generation, so "wait, and look at what has landed" really
+    is the only legal move, and `_characters_next` reserves `alternatives` for
+    when there genuinely are two.
+    """
+
+    draft_id = to_rows(capsys, base_image)
+    lock = hold_draft(draft_id, verb="auto")
+
+    code, refused = run(
+        ["harness", "characters", "rows", "--draft", draft_id, "--json"], capsys
+    )
+
+    assert (code, refused["ok"]) == (2, False)
+    assert refused["code"] == "draft_busy"
+    assert refused["draft"] == draft_id
+    assert refused["busy"]["verb"] == "auto"
+    assert refused["busy"]["pid"] == 4242
+    assert refused["busy"]["lock"] == str(lock)
+    assert refused["next"] == {
+        "verb": "status",
+        "cmd": f"hermes harness characters status --draft {draft_id} --json",
+    }
+    # NOT the mid-flight resume hint: this batch was never admitted, so naming
+    # the rows that "never landed" would be an invitation to a second refusal.
+    assert "alternatives" not in refused["next"]
+
+    # And the refusal changed nothing: the holder file is left exactly as found.
+    assert json.loads(lock.read_text(encoding="utf-8"))["verb"] == "auto"
+
+
+def test_the_autopilot_refuses_a_busy_draft_before_it_runs_one_step(
+    fake, base_image, capsys
+):
+    """`auto` takes the lock ONCE, around its whole plan, and refuses on the line.
+
+    Two properties in one: the refusal reaches the newline-framed stream as a
+    LINE (never `_characters_error`'s indented block, which would be unparseable
+    mid-stream), and the summary — always the last line — reports that nothing
+    ran and where it stopped.
+    """
+
+    draft_id = to_rows(capsys, base_image)
+    hold_draft(draft_id, verb="rows")
+
+    code, lines = auto_lines(
+        ["harness", "characters", "auto", "--draft", draft_id, "--json"], capsys
+    )
+
+    assert code == 2
+    assert [line["step"] for line in lines] == ["lock", "auto"]
+    assert lines[0]["ok"] is False
+    assert lines[0]["next"]["verb"] == "status"
+    summary = lines[-1]
+    assert (summary["ok"], summary["ran"], summary["stopped_at"]) == (False, [], "lock")
+    assert summary["code"] == "draft_busy"
+
+
+def test_a_stale_holder_does_not_wedge_the_draft_forever(fake, base_image, capsys):
+    """The age ceiling, from the CLI: a crashed generation clears itself.
+
+    There is no pid liveness probe on either host (`os.kill(pid, 0)` kills the
+    process on Windows), so the recovery is the ceiling — and the ceiling is set
+    above the launcher's own 30-minute long-run bound so it can never break a
+    live run whose launcher ticket is still valid.
+    """
+
+    draft_id = to_rows(capsys, base_image)
+    lock = hold_draft(draft_id, verb="rows")
+    old = time.time() - (STALE_HOLDER_SECONDS + 60.0)
+    os.utime(lock, (old, old))
+
+    code, payload = run(
+        ["harness", "characters", "rows", "--draft", draft_id, "--json"], capsys
+    )
+
+    assert (code, payload["ok"]) == (0, True)
+    assert not lock.exists()
 
 
 # FIXTURE RULE for every assertion below that judges PIXELS: the crop's input

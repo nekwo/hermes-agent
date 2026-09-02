@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import math
@@ -146,6 +147,12 @@ from agent_runtime.store import RealmStore, WorkspaceStore
 from agent_runtime.tool_visibility import ToolVisibilityOptions, resolve_tool_visibility
 from agent_runtime.tool_permissions import ChatToolPermissionStore, permission_state_for_chat
 from agent_runtime.tool_turn_history import persist_tool_turn_actual
+
+# Pure stdlib, and deliberately at module scope while `agent.charsheet.draft`
+# stays a lazy import inside the character verbs: `draft` pulls the pixel
+# pipeline (and Pillow behind it) and every other harness verb would pay for it,
+# whereas `agent.charsheet.errors` costs one import of `agent.charsheet.spec`.
+from agent.charsheet.errors import CharsheetRefusal, DraftBusy
 
 from hermes_cli.harness_support import (
     ERROR_EXIT_CODES,
@@ -4015,9 +4022,54 @@ def _attempt_label(index: int, total: int | None = None) -> str:
 
 # What the backend raises for a refusal the operator can act on: a wrong stage, an
 # unauthored direction, an unknown row key (ValueError); a missing draft or an
-# uninstalled slug (FileNotFoundError); an --attempt out of range (IndexError).
-# Anything else is a bug and keeps its traceback.
-_CHARACTERS_EXPECTED = (ValueError, FileNotFoundError, IndexError)
+# uninstalled slug (FileNotFoundError); an --attempt out of range (IndexError);
+# and the two TYPED refusals the charsheet package raises for conditions that are
+# not about the request at all (`CharsheetRefusal` — a draft another generation
+# already holds, a provider call past its deadline). Anything else is a bug and
+# keeps its traceback.
+#
+# The typed pair deliberately does NOT ride `ValueError`. This tuple is the
+# taxonomy the character lane actually reads — `emit_harness_error` /
+# `_error_code_for_exception` are never called by any `characters` verb — so
+# these two are caught HERE, and their `code` travels on the flat payload rather
+# than being flattened into `invalid_request` by a mapping nothing on this lane
+# consults.
+_CHARACTERS_EXPECTED = (ValueError, FileNotFoundError, IndexError, CharsheetRefusal)
+
+
+def _characters_refusal_extra(draft, exc: BaseException) -> dict:
+    """What a TYPED charsheet refusal adds to the flat error payload.
+
+    Two keys, both additive on a ruled superset (`_characters_next`):
+
+    * ``code`` — the stable token (`draft_busy`, `provider_timeout`). A consumer
+      that had to branch on the message text was branching on prose; the
+      launcher's `CharaAuthoringOutcome.refused` already ignores keys it does
+      not know, so this costs it nothing and gains it a test it can write.
+    * ``busy`` — the HOLDER, for `draft_busy` only: verb, pid, host, start time,
+      age, and the lock path. The last one is not decoration. There is no pid
+      liveness on Windows (`os.kill(pid, 0)` kills the process — this repo's
+      mutation gate refuses the probe for that reason), so a lock a crashed
+      generation left behind is cleared by hand until the age ceiling laps it,
+      and a refusal that withheld the path would leave the operator guessing.
+
+    The ``next`` hint is `status` and nothing else. There genuinely is no second
+    legal move — hermes cannot cancel a running generation
+    (`serve.py`'s `cancel_denied`), so "wait, and look at what has landed" is
+    the whole of it — and `_characters_next` is explicit that `alternatives`
+    carries a second move only when there are two.
+    """
+
+    code = getattr(exc, "code", "")
+    if not code:
+        return {}
+    extra: dict = {"code": code}
+    if isinstance(exc, DraftBusy):
+        details = getattr(exc, "safe_details", None)
+        if details:
+            extra["busy"] = dict(details)
+        extra["next"] = _characters_next("status", "--draft", draft.id)
+    return extra
 
 
 def _characters_verb(args, call, on_error=None) -> int:
@@ -4042,7 +4094,12 @@ def _characters_verb(args, call, on_error=None) -> int:
     try:
         result, human = call(draft)
     except _CHARACTERS_EXPECTED as exc:
-        extra = (on_error(draft, exc) or {}) if on_error is not None else {}
+        extra = dict((on_error(draft, exc) or {}) if on_error is not None else {})
+        # LAST, so a typed refusal's own hint wins. `rows`'s `on_error` builds a
+        # resume naming the rows that never landed — exactly right for a batch
+        # that died mid-flight, and exactly wrong for a batch that was never
+        # admitted because another writer holds the draft.
+        extra.update(_characters_refusal_extra(draft, exc))
         return _characters_error(args, exc, draft=draft.id, stage=draft.stage, **extra)
     data = {"ok": True, "draft": draft.id, "stage": draft.stage}
     data.update(result)
@@ -4692,6 +4749,45 @@ def _cmd_characters_auto(args) -> int:
             f"Autopilot ran nothing: {exc}",
         )
         return 2
+
+    # ONE acquisition around the WHOLE plan, not one per step. The lock is
+    # re-entrant for this thread, so the step bodies below take it again and
+    # get a no-op; a per-step lock would leave a gap between `turnaround` and
+    # `rows` that a second generation could walk into, and this verb spends
+    # ten to twenty minutes standing in those gaps.
+    holding = contextlib.ExitStack()
+    try:
+        holding.enter_context(draft.generation_lock("auto"))
+    except CharsheetRefusal as exc:
+        refuse(str(exc), step="lock", draft=draft, hint=_characters_next("status", "--draft", draft.id))
+        _characters_auto_write(
+            args,
+            {
+                "ok": False,
+                "draft": draft.id,
+                "stage": draft.stage,
+                "step": "auto",
+                "through": through,
+                "ran": [],
+                "skipped": [],
+                "stopped_at": "lock",
+                "code": getattr(exc, "code", ""),
+                "error": str(exc),
+            },
+            f"Autopilot ran nothing: {exc}",
+        )
+        return 2
+
+    with holding:
+        return _characters_auto_steps(args, draft, through, refuse)
+
+
+def _characters_auto_steps(args, draft, through: str, refuse) -> int:
+    """The plan, the loop and the summary — everything under the draft's lock.
+
+    Split out of :func:`_cmd_characters_auto` only so the acquisition can refuse
+    before any of it runs; the body is the verb it always was.
+    """
 
     plan, skipped = _characters_auto_plan(draft, draft.status_payload(), through)
     ran: list[str] = []

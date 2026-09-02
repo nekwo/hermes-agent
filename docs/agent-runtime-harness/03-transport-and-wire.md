@@ -14,8 +14,8 @@ lane and nothing below carries a task frame.
 spawns the Launcher bridge otherwise pays a ~3s import tax on
 (`hermes_cli/harness_parts/serve.py:1-7`). Requests arrive as NDJSON, one frame
 per line, and dispatch into the **existing** harness argparse tree unchanged:
-`dispatch_argv` (`serve.py:1464`) builds a fresh parser per request
-(`_build_harness_parser`, `:1452`) and calls the same `_cmd_*` handler the CLI
+`dispatch_argv` (`serve.py:1510`) builds a fresh parser per request
+(`_build_harness_parser`, `:1498`) and calls the same `_cmd_*` handler the CLI
 would, including the harness error-envelope contract — argv arrives verbatim as
 the bridge already builds it, which keeps the per-call CLI fallback
 byte-identical to the served path. **`ready` is a BOOT frame, not a request
@@ -27,18 +27,32 @@ turns emit deltas live, so stdout/stderr are swapped once for contextvar-dispatc
 proxies (`_LineFrameProxy`, `:706`), one write lock keeps frames atomic, and
 writes from handler-spawned threads carry `"id": null`.
 
-**Chat turns are marked at the argv boundary, and the mark is a safety
-contract.** `_CHAT_TURN_COMMANDS = (("mission-chat", "message"), ("mission-chat",
-"steer"))` (`serve.py:862`); `_ArgvRequest.__init__` (`:1327`) matches the argv
-tail against it. The `ping` reply counts them (`_busy_frame`, `:1274`) because
-the Launcher supervisor must never recycle serve while one is in flight, and a
-drain deadline expiring with `held_by_chat_turns > 0` emits a NON-terminal
-`drain_timeout`, keeps serving, and re-arms (`"event": "drain_timeout"` `:2418`,
-`held_by_chat_turns` `:2434`, `"terminal": not chat_turn_ids` `:2436`, the
-keep-serving re-arm `:2438-2445`; contract at `:76-82`).
-Recording safety outranks restart latency. A running `harness stream` request is
-the sole exception to "running requests cannot be cancelled" — cooperatively
-cancelled, releasing its pool worker (`is_runtime_stream`, `:835`, used `:2952`).
+**Chat turns AND long runs are marked at the argv boundary, and the mark is a
+safety contract.** Two tuples, one derivation: `_CHAT_TURN_COMMANDS` is
+`mission-chat message|steer` and `_LONG_RUN_COMMANDS` is
+`characters turnaround|rows|auto` (both in `serve.py`, beside each other);
+`_ArgvRequest.__init__` matches the argv tail against each and sets
+`is_chat_turn` / `is_long_run`. The `ping` reply counts both (`_busy_frame`:
+`chat_turns` and `long_runs`) because the Launcher supervisor must never recycle
+serve while either is in flight, and a drain deadline expiring with
+`held_by_chat_turns > 0` **or** `held_by_long_runs > 0` emits a NON-terminal
+`drain_timeout`, keeps serving, and re-arms (`_drain_monitor`: the `expiry`
+frame's `held_by_chat_turns` / `held_by_long_runs`, `"terminal": not
+(chat_turn_ids or long_run_ids)`, and the keep-serving re-arm on the branch
+below it; contract in the `drain` block of the module docstring).
+Recording safety outranks restart latency.
+
+Both counts are reported, never merged: `held_by_chat_turns` keeps its exact
+name and meaning (the launcher decodes the sibling `chat_turns` off the `busy`
+frame by name), and `held_by_long_runs` is additive beside it because the WAIT
+differs — a chat turn ends in seconds, a `characters rows` batch may be fifteen
+minutes from done. The long-run hold is only bounded because the generation is:
+`agent/charsheet/pipeline.py::PROVIDER_TIMEOUT_SECONDS` puts a deadline on every
+provider call, which is what stops one wedged image backend from holding a drain
+open forever. Cancel semantics are unchanged — a RUNNING generation still
+answers `cancel_denied`, and a running `harness stream` request is still the sole
+exception to "running requests cannot be cancelled", cooperatively cancelled and
+releasing its pool worker (`is_runtime_stream`, `:835`, used `:2952`).
 
 **Two transports, one dispatcher.** `serve_loop` is transport-agnostic. One
 serve per root owns a localhost socket, decided by an OS-held exclusive lock
@@ -614,7 +628,7 @@ existed the log named none of them:
 
 | Caller | `op` / `purpose` | Site |
 |---|---|---|
-| socket/stdio op lane | `subscribe` / `stream_lane` | `serve.py:2712` |
+| socket/stdio op lane | `subscribe` / `stream_lane` | `serve.py:2770` |
 | RPC office lane | `runtime.office.subscribe` / `office_patch` | `serve_office_subscriptions.py:902` |
 | argv CLI | `harness_stream` / `cli_stream` | `runtime_commands.py:621-622` |
 
@@ -626,7 +640,7 @@ never raises — an instrument must not be why a subscribe fails.
 
 **Who paints the boot's one stale core is a property of the ROOM**, so
 `stream_frames(wants_stale_first=…)` is stated by the caller —
-`serve.py::_room_wants_stale_first` (`:3039`) reads the hub's two subscriber
+`serve.py::_room_wants_stale_first` (`:3097`) reads the hub's two subscriber
 tables at producer-build time, `_cmd_stream` (`runtime_commands.py:611`) states
 `True`, default `False`. It cannot be re-derived inside the producer: the
 subscriber attaching FIRST at boot is the RPC office lane, whose sink discards
@@ -649,7 +663,7 @@ workspace id that failed the private "id under `<workspace_id>/`" restatement
 becomes a resync notification; an UNKNOWN frame type takes the same branch
 deliberately. Drops are typed, never silent: a subscriber outrunning its bounded
 buffer gets `subscription_dropped` naming which of the two bounds tripped —
-frame count or bytes — then is unsubscribed (`serve.py:3988`).
+frame count or bytes — then is unsubscribed (`serve.py:4065`).
 
 ## 7. The PUSH-vs-RPC boundary, and the fork boundary
 
@@ -660,7 +674,7 @@ launcher gating on `subscribe_lanes`. The call half deliberately mirrors
 `tui_gateway`'s JSON-RPC 2.0 shape and error codes rather than minting a third
 convention, and sits BESIDE the argv lane: a frame is claimed by the method lane
 only when it names `jsonrpc` or `method`, neither of which an argv request has
-ever carried (`serve.py:110-115`).
+ever carried (`serve.py:121-126`).
 
 **The fork boundary is the reverse of the natural assumption: `agent_runtime/`
 is not in upstream at all.** The check that proves it is a path filter, not a

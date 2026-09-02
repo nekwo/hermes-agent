@@ -30,25 +30,38 @@ for the same reason; the gate is visual, and a re-roll always replaces what the
 sheet will use.
 
 **Concurrency.** Every JSON write is tmp + :func:`os.replace` (the revision
-store's discipline), so a reader sees one whole state or the other. There is no
-lock — ``agent_runtime.locks`` is not in the shipped wheel — so two writers on
-one draft are last-writer-wins per item (plan §A-7).
+store's discipline), so a reader sees one whole state or the other. That is
+atomicity per FILE and says nothing about two WRITERS, so every verb that
+generates holds a per-draft advisory lock for its whole run
+(:meth:`CharacterDraft.generation_lock`, :mod:`agent.charsheet.draft_lock`) and
+a second writer is refused :class:`~agent.charsheet.errors.DraftBusy`. It is
+built inside this package rather than on ``agent_runtime.locks`` because
+``agent_runtime`` is not in the shipped wheel — the packaging boundary
+:mod:`agent.charsheet` opens with — and the lock module records the rest of that
+argument.
+
+The verbs that do NOT generate (the approvals, ``add_state``, ``reopen``,
+``status``, ``list``) stay lock-free and last-writer-wins per item: each is one
+small write an operator makes by hand, and refusing a click because a batch is
+running would cost more than it protects.
 """
 
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import logging
 import os
 import re
 import tempfile
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
 from agent.charsheet import pipeline
+from agent.charsheet.draft_lock import LOCK_FILENAME, draft_generation_lock
 from agent.charsheet.revisions import ImageRevisionStore
 from agent.charsheet.spec import (
     CHAR8,
@@ -674,6 +687,32 @@ class CharacterDraft:
     def store(self) -> ImageRevisionStore:
         return ImageRevisionStore(self.directory / REVISIONS_DIRNAME)
 
+    # ----------------------------------------------------------- exclusion
+
+    @contextlib.contextmanager
+    def generation_lock(self, verb: str, *, stale_after_seconds: float | None = None) -> Iterator[dict]:
+        """Hold this draft against every other writer for the length of *verb*.
+
+        The draft owns the lock, so a caller that reaches the backend directly
+        is covered exactly as the CLI verb is; and the file lives in the draft
+        directory, so it travels with a copied or quarantined draft rather than
+        being stranded in a lock directory that draft never had.
+
+        Re-entrant for the SAME thread, which is what lets ``characters auto``
+        take it once around its whole plan and still call
+        :meth:`run_turnaround` and :meth:`run_rows`, each of which takes it
+        again. A second THREAD — the serve pool's other worker — is a second
+        writer and is refused. See :mod:`agent.charsheet.draft_lock`.
+        """
+
+        with draft_generation_lock(
+            self.directory / LOCK_FILENAME,
+            draft_id=self.id,
+            verb=verb,
+            stale_after_seconds=stale_after_seconds,
+        ) as holder:
+            yield holder
+
     # --------------------------------------------------------- provenance
 
     def record_home(self) -> bool:
@@ -777,59 +816,70 @@ class CharacterDraft:
         Re-running proposes a fresh attempt for every direction and clears the
         approvals (the revision store's rule), which is the intended behaviour for
         "the whole turnaround was bad".
+
+        Locked for the whole run (:meth:`generation_lock`): the stage read, the
+        provider call and every ``propose`` are one writer's work, and the stage
+        is read INSIDE the lock so a second writer cannot advance it in between.
         """
-        self._require_stage("run_turnaround", "turnaround")
-        spec = self.spec
-        base = self._require_base()
-        refs = pipeline.generate_turnaround(
-            spec,
-            self.concept,
-            base,
-            style=self.style,
-            provider=provider,
-            out_dir=self.directory / "turnaround",
-        )
-        store = self.store
-        out: dict[str, dict] = {}
-        for direction in pipeline.turnaround_order(spec.scheme.authored):
-            path = refs[direction]
-            attempt = store.propose(turnaround_item(direction), path)
-            out[direction] = {"attempt": attempt, "path": str(path), "approved": False}
-        self._save()
-        return {"stage": self.stage, "turnaround": out}
+        with self.generation_lock("turnaround"):
+            self._require_stage("run_turnaround", "turnaround")
+            spec = self.spec
+            base = self._require_base()
+            refs = pipeline.generate_turnaround(
+                spec,
+                self.concept,
+                base,
+                style=self.style,
+                provider=provider,
+                out_dir=self.directory / "turnaround",
+            )
+            store = self.store
+            out: dict[str, dict] = {}
+            for direction in pipeline.turnaround_order(spec.scheme.authored):
+                path = refs[direction]
+                attempt = store.propose(turnaround_item(direction), path)
+                out[direction] = {"attempt": attempt, "path": str(path), "approved": False}
+            self._save()
+            return {"stage": self.stage, "turnaround": out}
 
     def reroll_direction(self, direction: str, note: str = "", provider=None) -> dict:
         """Re-generate ONE direction reference on a square canvas, with *note*.
 
         Proposed unapproved: this is the identity gate, and a re-roll is a new
         candidate for the operator to look at.
+
+        Locked like the batch verbs, and for a reason of its own beyond "it
+        generates": the attempt count is READ to name the output file and then
+        WRITTEN by ``propose``, so two re-rolls of one direction racing here
+        pick the same filename and the second overwrites the first's bytes.
         """
-        self._require_stage("reroll_direction", "turnaround")
-        self._require_authored_direction(direction)
-        base = self._require_base()
-        store = self.store
-        key = turnaround_item(direction)
-        attempts = len(store.history(key))
-        out_path = self.directory / "turnaround" / f"reroll-{direction}-{attempts + 1}.png"
-        path = pipeline.generate_direction_view(
-            direction,
-            self.concept,
-            base,
-            style=self.style,
-            note=note,
-            provider=provider,
-            out=out_path,
-        )
-        attempt = store.propose(key, path, note=note)
-        self._save()
-        return {
-            "direction": direction,
-            "attempt": attempt,
-            "attempts": attempt + 1,
-            "path": str(path),
-            "note": note,
-            "approved": False,
-        }
+        with self.generation_lock("reroll-direction"):
+            self._require_stage("reroll_direction", "turnaround")
+            self._require_authored_direction(direction)
+            base = self._require_base()
+            store = self.store
+            key = turnaround_item(direction)
+            attempts = len(store.history(key))
+            out_path = self.directory / "turnaround" / f"reroll-{direction}-{attempts + 1}.png"
+            path = pipeline.generate_direction_view(
+                direction,
+                self.concept,
+                base,
+                style=self.style,
+                note=note,
+                provider=provider,
+                out=out_path,
+            )
+            attempt = store.propose(key, path, note=note)
+            self._save()
+            return {
+                "direction": direction,
+                "attempt": attempt,
+                "attempts": attempt + 1,
+                "path": str(path),
+                "note": note,
+                "approved": False,
+            }
 
     def approve_direction(self, direction: str, attempt: int = -1) -> dict:
         """Approve a direction reference; advances the stage once all are approved."""
@@ -878,45 +928,52 @@ class CharacterDraft:
         operator makes from the status payload.
 
         *only* restricts the run to the given row keys (``["walk-e"]``).
-        """
-        self._require_stage("run_rows", "rows")
-        spec = self.spec
-        rows = spec.authored_rows()
-        if only is not None:
-            wanted = [str(key) for key in only]
-            known = {row.key for row in rows}
-            unknown = [key for key in wanted if key not in known]
-            if unknown:
-                raise ValueError(
-                    f"unknown row key(s) {unknown}; authored rows: {sorted(known)}"
-                )
-            rows = [row for row in rows if row.key in set(wanted)]
 
-        store = self.store
-        out: dict[str, dict] = {}
-        for row in rows:
-            ref = self._row_reference(row)
-            key = row_item(row.key)
-            attempts = len(store.history(key))
-            out_path = self.directory / "strips" / _strip_filename(row.key, attempts + 1)
-            path = pipeline.generate_row_strip(
-                row,
-                self.concept,
-                ref,
-                style=self.style,
-                provider=provider,
-                out=out_path,
-            )
-            attempt = store.propose(key, path)
-            store.approve(key, attempt)
-            out[row.key] = {
-                "attempt": attempt,
-                "path": str(path),
-                "approved": True,
-                "reference": str(ref),
-            }
-        self._save()
-        return {"stage": self.stage, "rows": out}
+        Locked for the WHOLE batch, not per row (:meth:`generation_lock`). Rows
+        land one at a time and are visible to ``status`` as they do, which is
+        the resume story; but a second batch admitted between two rows would
+        regenerate the ones this one already approved and race the attempt
+        numbering on the ones it has not reached.
+        """
+        with self.generation_lock("rows"):
+            self._require_stage("run_rows", "rows")
+            spec = self.spec
+            rows = spec.authored_rows()
+            if only is not None:
+                wanted = [str(key) for key in only]
+                known = {row.key for row in rows}
+                unknown = [key for key in wanted if key not in known]
+                if unknown:
+                    raise ValueError(
+                        f"unknown row key(s) {unknown}; authored rows: {sorted(known)}"
+                    )
+                rows = [row for row in rows if row.key in set(wanted)]
+
+            store = self.store
+            out: dict[str, dict] = {}
+            for row in rows:
+                ref = self._row_reference(row)
+                key = row_item(row.key)
+                attempts = len(store.history(key))
+                out_path = self.directory / "strips" / _strip_filename(row.key, attempts + 1)
+                path = pipeline.generate_row_strip(
+                    row,
+                    self.concept,
+                    ref,
+                    style=self.style,
+                    provider=provider,
+                    out=out_path,
+                )
+                attempt = store.propose(key, path)
+                store.approve(key, attempt)
+                out[row.key] = {
+                    "attempt": attempt,
+                    "path": str(path),
+                    "approved": True,
+                    "reference": str(ref),
+                }
+            self._save()
+            return {"stage": self.stage, "rows": out}
 
     def _row_reference(self, row) -> Path:
         """What a row is grounded on: its approved direction ref, else the base."""
@@ -937,33 +994,34 @@ class CharacterDraft:
         will use, and the operator's gate is visual (look at the strip, re-roll
         again if it is still wrong).
         """
-        self._require_stage("reroll_row", "rows")
-        row = self._authored_row(row_key)
-        store = self.store
-        key = row_item(row.key)
-        attempts = len(store.history(key))
-        ref = self._row_reference(row)
-        out_path = self.directory / "strips" / _strip_filename(row.key, attempts + 1)
-        path = pipeline.generate_row_strip(
-            row,
-            self.concept,
-            ref,
-            style=self.style,
-            note=note,
-            provider=provider,
-            out=out_path,
-        )
-        attempt = store.propose(key, path, note=note)
-        store.approve(key, attempt)
-        self._save()
-        return {
-            "row": row.key,
-            "attempt": attempt,
-            "attempts": attempt + 1,
-            "path": str(path),
-            "note": note,
-            "approved": True,
-        }
+        with self.generation_lock("reroll-row"):
+            self._require_stage("reroll_row", "rows")
+            row = self._authored_row(row_key)
+            store = self.store
+            key = row_item(row.key)
+            attempts = len(store.history(key))
+            ref = self._row_reference(row)
+            out_path = self.directory / "strips" / _strip_filename(row.key, attempts + 1)
+            path = pipeline.generate_row_strip(
+                row,
+                self.concept,
+                ref,
+                style=self.style,
+                note=note,
+                provider=provider,
+                out=out_path,
+            )
+            attempt = store.propose(key, path, note=note)
+            store.approve(key, attempt)
+            self._save()
+            return {
+                "row": row.key,
+                "attempt": attempt,
+                "attempts": attempt + 1,
+                "path": str(path),
+                "note": note,
+                "approved": True,
+            }
 
     def add_state(self, state_text: str) -> dict:
         """Grow the sheet by ONE state. No approved row is touched.

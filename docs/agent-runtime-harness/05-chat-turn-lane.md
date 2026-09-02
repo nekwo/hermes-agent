@@ -617,6 +617,6 @@ superseded for the chat-turn lane by this document.
 | `turn-durability-design.md`, `run-budget-accounting.md` | §7 |
 | `send-policy-decisions-2026-08-09.md` | T5 shipped (§3); T2 and T7 are recorded decisions **not** to build |
 | `AGENT_CREATE_ONE_CALL_PLAN_2026-08-16.md`, `UNIFIED_AGENT_CREATE_CALL_PLAN_2026-08-16.md` | both shipped on the hermes side; §9 |
-| `PROVIDER_LOGIN_FIRST_CLASS_PLAN_2026-08-16.md` | PL-1 (`_provider_visibility_catalog`, `hermes_cli/harness.py:4974`) and PL-2 (`hermes_cli/auth_noninteractive.py`) shipped; PL-3/4/5/6 are launcher-repo work, not tracked here |
+| `PROVIDER_LOGIN_FIRST_CLASS_PLAN_2026-08-16.md` | PL-1 (`_provider_visibility_catalog`, `hermes_cli/harness.py:5071`) and PL-2 (`hermes_cli/auth_noninteractive.py`) shipped; PL-3/4/5/6 are launcher-repo work, not tracked here |
 | `PERSONA_PROFILE_BINDING_AUTHORITY_PLAN_2026-08-16.md` | B-1 shipped; remainder → `planned/persona-binding-env-authority.md` |
 | `eager-tool-discovery-audit-2026-08-09.md` | Fix B and Fix C shipped same-night; the lazy-builtin-discovery half is a startup-perf item, not a chat-lane one |
