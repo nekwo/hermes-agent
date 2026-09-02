@@ -80,7 +80,7 @@ session files, 234 locks, beside 18 persona instances and 19 prompt contexts.
 ## The event log is the ordering authority
 
 `event_offset` is a **byte position**, and every watermark in the runtime is one.
-`parity.events_watermark` (`agent_runtime/parity.py:233`) reads it via `stat`, in
+`parity.events_watermark` (`agent_runtime/parity.py:284`) reads it via `stat`, in
 O(1), without scanning the log.
 
 **An unreadable log yields `None`, never `0`** (`parity.py:244-256`). Zero is the
@@ -144,7 +144,7 @@ filesystem cannot support WAL's shared-memory and byte-range locking (NFS,
 SMB/CIFS, some FUSE, WSL1) — and it treats a `PRAGMA journal_mode=WAL` that
 returns a non-WAL mode *without raising* as a refusal (`:711-720`), because that
 PRAGMA is a query-that-sets. The snapshot's `persona_chat` section reads this
-database through `chat_session_scope.open_chat_session_db` (`snapshot.py:2337`).
+database through `chat_session_scope.open_chat_session_db` (`snapshot.py:2378`).
 
 ---
 
@@ -175,8 +175,8 @@ callers coalesce. The coalescer is deliberately strict — a caller arriving whi
 a build runs waits for the *next* build, never the in-flight one, because an
 in-flight build began earlier and may miss writes the caller already observed.
 `accept_inflight=True` opts out, and both non-test callers are the same
-boot-hydrate lane — `hydrate_frame` (`stream.py:270`) and the `stream_frames`
-boot job that drives it (`:979`) — because the hydrate's payload carries its own
+boot-hydrate lane — `hydrate_frame` (`stream.py:352`) and the `stream_frames`
+boot job that drives it (`:1102`) — because the hydrate's payload carries its own
 watermark and the stream tails from exactly that offset
 (`snapshot.py:522-536`). Roles:
 `BUILD_ROLE_LED` / `RODE` / `SHARED_NEXT` / `CACHE` / `REUSED`

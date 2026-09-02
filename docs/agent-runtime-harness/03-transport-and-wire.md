@@ -14,8 +14,8 @@ lane and nothing below carries a task frame.
 spawns the Launcher bridge otherwise pays a ~3s import tax on
 (`hermes_cli/harness_parts/serve.py:1-7`). Requests arrive as NDJSON, one frame
 per line, and dispatch into the **existing** harness argparse tree unchanged:
-`dispatch_argv` (`serve.py:937`) builds a fresh parser per request
-(`_build_harness_parser`, `:925`) and calls the same `_cmd_*` handler the CLI
+`dispatch_argv` (`serve.py:1464`) builds a fresh parser per request
+(`_build_harness_parser`, `:1452`) and calls the same `_cmd_*` handler the CLI
 would, including the harness error-envelope contract — argv arrives verbatim as
 the bridge already builds it, which keeps the per-call CLI fallback
 byte-identical to the served path. **`ready` is a BOOT frame, not a request
@@ -29,7 +29,7 @@ writes from handler-spawned threads carry `"id": null`.
 
 **Chat turns are marked at the argv boundary, and the mark is a safety
 contract.** `_CHAT_TURN_COMMANDS = (("mission-chat", "message"), ("mission-chat",
-"steer"))` (`serve.py:379`); `_ArgvRequest.__init__` (`:832`) matches the argv
+"steer"))` (`serve.py:862`); `_ArgvRequest.__init__` (`:1327`) matches the argv
 tail against it. The `ping` reply counts them (`_busy_frame`, `:1274`) because
 the Launcher supervisor must never recycle serve while one is in flight, and a
 drain deadline expiring with `held_by_chat_turns > 0` emits a NON-terminal
@@ -572,7 +572,7 @@ Rules, all in `agent_runtime/patch_coverage.py`:
   narrow and was silently widened back would get patches it cannot fold.
 - A batch naming any undeclared entity is demoted IN FULL to a core-bearing
   frame; there is no partial patch frame (`_batch_frames_with_liveness`,
-  `stream.py:795-838`). The demotion bills `snapshot_build reason=demote`
+  `stream.py:1016`). The demotion bills `snapshot_build reason=demote`
   (`BATCH_REASON_DEMOTE`, `:64`), which makes a foldable update that paid for a
   whole snapshot greppable.
 
@@ -607,7 +607,7 @@ neither joins `PEER_METHOD_ALLOWLIST`.
 
 ## 5. Attachment receipts
 
-`log_stream_attach` (`stream.py:176`) writes ONE line per attachment to the
+`log_stream_attach` (`stream.py:305`) writes ONE line per attachment to the
 shared producer, at subscribe time, into the serve child's own `agent.log`.
 Three call sites attach a reader to the same producer, and until this line
 existed the log named none of them:
@@ -616,7 +616,7 @@ existed the log named none of them:
 |---|---|---|
 | socket/stdio op lane | `subscribe` / `stream_lane` | `serve.py:2712` |
 | RPC office lane | `runtime.office.subscribe` / `office_patch` | `serve_office_subscriptions.py:902` |
-| argv CLI | `harness_stream` / `cli_stream` | `runtime_commands.py:507` |
+| argv CLI | `harness_stream` / `cli_stream` | `runtime_commands.py:621-622` |
 
 `op` is the call as the client made it, `purpose` is what the attachment is FOR
 — neither implies the other. `pid` rides LAST here and on both build families
@@ -627,7 +627,7 @@ never raises — an instrument must not be why a subscribe fails.
 **Who paints the boot's one stale core is a property of the ROOM**, so
 `stream_frames(wants_stale_first=…)` is stated by the caller —
 `serve.py::_room_wants_stale_first` (`:1954`) reads the hub's two subscriber
-tables at producer-build time, `_cmd_stream` (`runtime_commands.py:544`) states
+tables at producer-build time, `_cmd_stream` (`runtime_commands.py:611`) states
 `True`, default `False`. It cannot be re-derived inside the producer: the
 subscriber attaching FIRST at boot is the RPC office lane, whose sink discards
 every non-`office_actor` row, and measured 2026-08-18 two boots in three handed
@@ -649,7 +649,7 @@ workspace id that failed the private "id under `<workspace_id>/`" restatement
 becomes a resync notification; an UNKNOWN frame type takes the same branch
 deliberately. Drops are typed, never silent: a subscriber outrunning its bounded
 buffer gets `subscription_dropped` naming which of the two bounds tripped —
-frame count or bytes — then is unsubscribed (`serve.py:2676-2689`).
+frame count or bytes — then is unsubscribed (`serve.py:3988`).
 
 ## 7. The PUSH-vs-RPC boundary, and the fork boundary
 

@@ -18,19 +18,19 @@ There is one runtime execution surface. `GPTPersonaRuntime`
 (`agent_runtime/persona_runtime.py:51`) exposes exactly **one** public method,
 `mission_chat_reply` (`:72`) — there is no `run_persona`, no tick, no worker
 loop. The entry point is `_cmd_mission_chat_message` — defined at
-`hermes_cli/harness_parts/persona_commands.py:2034`, exec-loaded into
-`harness.py` globals (`hermes_cli/harness.py:4419`) and wired to argparse at
-`harness.py:1124`.
+`hermes_cli/harness_parts/persona_commands.py:2614`, exec-loaded into
+`harness.py` globals (`hermes_cli/harness.py:6004`) and wired to argparse at
+`harness.py:1365`.
 
 Turn ingress has one path. Asynchronous agent-to-agent delivery
 (`agent_chat_send(wait=false)`) does not inject a message: a serve-hosted drain
 forges a real turn through **the same handler an operator message goes through**
-(`agent_runtime/dispatch_delivery.py:1029`, docstring `:12-19`), which is what
+(`agent_runtime/dispatch_delivery.py:1072`, docstring `:12-19`), which is what
 keeps transcript, live log, turn journal and projection consistent for free.
 Two narrower append seams do exist and are deliberate, turn-less writes — the
 bounded child-summary mirror (`agent_runtime/continuity.py:52-62`, posted by
 `return_summary_to_parent_session`) and the explicit-append seam
-(`persona_commands.py:6071`, whose own docstring records the open question of
+(`persona_commands.py:7185`, whose own docstring records the open question of
 declaring the persona-chat write path native-only). Doc 05 §8 owns their
 contract; neither runs a turn or reaches the provider.
 
@@ -44,11 +44,11 @@ removal doc).
 
 Four things, in one chain, each with a distinct lifetime.
 
-**1 — Persona template.** `AgentPersona` (`agent_runtime/models.py:252`) — the
+**1 — Persona template.** `AgentPersona` (`agent_runtime/models.py:364`) — the
 definition: display name, role, model/provider/api_mode, toolsets, skills,
 `hermes_profile`, budgets, readiness. Personas are **data**, from the config
-block (`config.persona_records_from_config`, `agent_runtime/config.py:524`)
-merged with persisted store rows (`ensure_persisted_personas`, `:570`, over
+block (`config.persona_records_from_config`, `agent_runtime/config.py:532`)
+merged with persisted store rows (`ensure_persisted_personas`, `:578`, over
 `store.AgentStore` at `store.py:152`). Nothing in code declares them — S11 left
 `DEFAULT_PERSONA_IDS`, `BASE_PERSONA_ID`, `DEFAULT_SUPERVISOR_PERSONA_ID`,
 `ALLOWED_TOOLSETS_BY_ROLE` and `PER_ROLE_TOOL_DENIES` as scoped tombstone rows
@@ -261,7 +261,7 @@ additively at the existing schema version — the delete lane it powers is
 documented under [Skills](#skills).
 
 **Both of those ledgers are UNIONED on pull, not adopted** (RD-11, 2026-08-31,
-`4a8d398268`). `_UNIONED_REALM_LEDGERS` (`realm_sync.py:1980`) names them and
+`4a8d398268`). `_UNIONED_REALM_LEDGERS` (`realm_sync.py:2262`) names them and
 `_pulled_artifact_bytes` merges each by its own rule — set-union for
 `deleted_workspace_ids`, per-slug newest-stamp-wins for `skill_tombstones` — so
 a concurrent publish can no longer drop a delete another member recorded. It is
@@ -289,7 +289,7 @@ Server-bound realms authorize every sync action against the Eternia backend and
 (`3e6d8c06f3`). Pull deliberately never clobbers local state, which used to
 leave an operator holding drift they never meant to publish with Publish as the
 only door. `_board_store_drift` / `_office_store_drift` now build per-item rows
-(`StoreDriftItem`: family, container, item_key, kind — `realm_sync.py:1178`) and
+(`StoreDriftItem`: family, container, item_key, kind — `realm_sync.py:1315`) and
 the four existing counts are DERIVED from those rows, so the count shapes the
 launcher parses are byte-identical and `store_drift.items` is additive beside
 them. `hermes harness realm sync revert <realm> [--item FAMILY:CONTAINER:KEY]…
@@ -419,7 +419,7 @@ advisory `board` digest row of `HUD_FIELDS`.
 
 `docs/agent-runtime-harness/harness-skills/` is **installed source and stays
 live in place**. It is the repo-side origin
-(`skill_install.harness_skill_source_root`, `agent_runtime/skill_install.py:27`);
+(`skill_install.harness_skill_source_root`, `agent_runtime/skill_install.py:34`);
 `harness install-harness-skills` (`hermes_cli/harness.py:1343`) copies each
 package to the single shared canonical root, `get_shared_skills_dir()` —
 root-relative, not per-profile, so every persona references one copy and realm
@@ -531,7 +531,7 @@ ledger; it now holds only for the realm's ordinary fields.
 
 Identity is layered, and each layer has an owner. The Mission Control chat
 system message is composed by `_mission_chat_surface_message`
-(`persona_runtime.py:482`) in this order:
+(`persona_runtime.py:525`) in this order:
 
 1. **Runtime identity** — a first-person block naming the selected persona and
    making self-relay impossible (`_mission_chat_identity_prompt`, `:434`).
@@ -567,7 +567,7 @@ directional character sheets behind `hermes harness` verbs
 (`hermes_cli/harness.py:3001+`), and a placement carries its sprite as
 `OfficeItem.pet_slug` (`models.py:174`). Since 2026-08-31 the interactive
 per-verb lane has a one-shot sibling: `harness characters auto`
-(`harness.py:1873`, `_cmd_characters_auto` at `:4776`, shipped `2321a2a9c3`,
+(`harness.py:1884`, `_cmd_characters_auto` at `:4652`, shipped `2321a2a9c3`,
 plan stamped a ledger at `8e0617a458`) drives turnaround → approve → generate →
 compose → install in ONE process, printing a receipt line per stage. It is for
 an operator's explicit "drive it all the way" ask and nothing else, because it

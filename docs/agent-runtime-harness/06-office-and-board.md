@@ -833,7 +833,7 @@ demotes everything (`patch_coverage.py:25-40`).
 
 Promotion is **negotiated per client** by capability tokens, not decided by the
 server alone. The office surface's own fold is `office_surface`
-(`state_patches.py:1019`, `emit_office_surface_patch` at `:1089`), gated on
+(`state_patches.py:1062`, `emit_office_surface_patch` at `:1132`), gated on
 `OFFICE_SURFACE_FOLD_CAPABILITY = "office_surface_fold"`
 (`patch_coverage.py:179`), which is what lets `office.surface.updated` join the
 covered set (`patch_coverage.py:331`). It is a **subset merge** of
@@ -845,7 +845,7 @@ the `runtime.office.subscribe` request, so the two lanes cannot drift.
 
 Where a surface write is genuinely unfoldable, hermes emits an accounted
 **refresh** instead of pretending: `emit_office_surface_refresh`
-(`state_patches.py:1156`) exists because archiving an orphaned surface removes the
+(`state_patches.py:1199`) exists because archiving an orphaned surface removes the
 office row and every actor under it in one move, and a covered event with no patch
 beside it would ship an EMPTY patch list — advancing the client's watermark having
 folded nothing, keeping the archived surface and its chip forever.
@@ -991,7 +991,7 @@ third was an observability artifact over a real 24 s window.
 - **`projection drops N`** counted the residue of the operator's own first-class
   retires as anomalies. Fixed at the emission site: a session whose binding
   resolves in the persona-instance archive now drops as `instance_retired` with
-  `by_design=True` (`persona_chat_history.py:401`), so the count means *lost*
+  `by_design=True` (`persona_chat_history.py:420`), so the count means *lost*
   data. The chip also gained the disclosure the other two had —
   `anomalousDropSummaries` (`data/mission_control_snapshot.dart:345`, parsed
   `:263`, passed to the alert `:1070`).
@@ -999,7 +999,7 @@ third was an observability artifact over a real 24 s window.
   test called `monkeypatch.undo()` mid-body, which unwound the package's autouse
   root pin and let the next line write the operator's real store. Both halves
   landed — a structural gate (`tests/agent_runtime/test_no_midtest_monkeypatch_undo.py`)
-  and a teardown tripwire, hoisted 2026-08-18 to `tests/conftest.py:545`
+  and a teardown tripwire, hoisted 2026-08-18 to `tests/conftest.py:594`
   (`_shared_monkeypatch_pin_tripwire`; the incident narrative stays in
   `tests/agent_runtime/conftest.py`'s docstring) — plus a
   first-class `archive_orphaned_surface` verb so the operator can clear the

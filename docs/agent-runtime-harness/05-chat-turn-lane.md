@@ -109,15 +109,15 @@ emitter is built ~1,100 lines in and its clock cannot see the profile bootstrap.
 ## 3. Model selection
 
 Four tiers, highest wins, resolved once in `_chat_effective_model_payload`
-(`persona_commands.py:5752-5790`):
+(`persona_commands.py:6877`):
 
 ```
 chat-session override  >  instance override  >  persona default  >  config default
 ```
 
 The chat-session override persists under `mission_control_chat_model_override`
-(`persona_commands.py:5284`, `agent_runtime/persona_chat_history.py:226`) via
-`_resolve_chat_model_override` (`:5738-5749`), called at `:2734`. Its scope is literally
+(`persona_commands.py:6409`, `agent_runtime/persona_chat_history.py:234`) via
+`_resolve_chat_model_override` (`:6863`), called at `:2734`. Its scope is literally
 `mission_control_chat_session` (`:5788`, inside `_chat_effective_model_payload`) — per-thread,
 not per-instance. Values validate against
 `^[A-Za-z0-9_.:/@+-]{1,200}$` (`:5285`); a violation is a typed refusal, a persist failure is
@@ -482,7 +482,7 @@ PHYSICAL dispatch attempt, right after the transport preflight (so a codex token
 the hermes side of the split) and right before the provider call; it carries no
 `duration_ms`/`timing_key` because it names an INSTANT, which also keeps it out of the
 profile-timing dict. Step constant: `CONVERSATION_REQUEST_ASSEMBLED_STEP =
-"conversation_request_assembled"` (`hermes_constants.py:1400`); `mark_from_trace_payload`
+"conversation_request_assembled"` (`hermes_constants.py:1481`); `mark_from_trace_payload`
 (`mission_chat_phases.py:424-460`) is the only converter, and it takes nothing from a malformed one.
 
 **The payload has to survive the sink to reach that converter.** Its real route is
@@ -600,6 +600,6 @@ superseded for the chat-turn lane by this document.
 | `turn-durability-design.md`, `run-budget-accounting.md` | §7 |
 | `send-policy-decisions-2026-08-09.md` | T5 shipped (§3); T2 and T7 are recorded decisions **not** to build |
 | `AGENT_CREATE_ONE_CALL_PLAN_2026-08-16.md`, `UNIFIED_AGENT_CREATE_CALL_PLAN_2026-08-16.md` | both shipped on the hermes side; §9 |
-| `PROVIDER_LOGIN_FIRST_CLASS_PLAN_2026-08-16.md` | PL-1 (`_provider_visibility_catalog`, `hermes_cli/harness.py:3431`) and PL-2 (`hermes_cli/auth_noninteractive.py`) shipped; PL-3/4/5/6 are launcher-repo work, not tracked here |
+| `PROVIDER_LOGIN_FIRST_CLASS_PLAN_2026-08-16.md` | PL-1 (`_provider_visibility_catalog`, `hermes_cli/harness.py:4974`) and PL-2 (`hermes_cli/auth_noninteractive.py`) shipped; PL-3/4/5/6 are launcher-repo work, not tracked here |
 | `PERSONA_PROFILE_BINDING_AUTHORITY_PLAN_2026-08-16.md` | B-1 shipped; remainder → `planned/persona-binding-env-authority.md` |
 | `eager-tool-discovery-audit-2026-08-09.md` | Fix B and Fix C shipped same-night; the lazy-builtin-discovery half is a startup-perf item, not a chat-lane one |
