@@ -25,7 +25,8 @@ the fixture-measured call shape of an autopilot run — is
 `planned/dcw-h4-field-notes-2026-08-31.md`.
 
 **R-3 — RULED YES, 2026-08-31.** The one-shot autopilot ships. The ruling is
-RD-10 of `EterniaLauncher/docs/mission_control/planned/decision-close-wave-2026-08-31.md`
+RD-10 of `EterniaLauncher/docs/mission_control/archive/decision-close-wave-2026-08-31.md`
+(archived launcher-side 2026-09-01)
 ("it is the one-shot-autonomy north star in miniature"), and it adopts the
 Stage-5 text's own three conditions unchanged: the verb is documented as being
 for an operator's explicit "drive it all the way" ask ONLY, it stops rather

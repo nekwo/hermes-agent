@@ -7,7 +7,8 @@ orchestrator. Built WHOLE: union merge, `restored_at` markers, and the
 `deleted_workspace_ids` set-union in the one commit. Read §Corrections below
 before citing anything above it. The gate was open:
 **R-D UPGRADED TO UNION 2026-08-31** by RD-11 of the launcher repo's
-`docs/mission_control/planned/decision-close-wave-2026-08-31.md`, which rules
+`docs/mission_control/archive/decision-close-wave-2026-08-31.md` (archived
+launcher-side 2026-09-01), which rules
 this document buildable whole — union merge, `restored_at` markers, and the
 `deleted_workspace_ids` set-union in the same commit. Extracted at the
 2026-08-28 canon fold of

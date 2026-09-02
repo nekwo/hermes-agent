@@ -1,7 +1,8 @@
 # W1-H1 field notes — conflict guesses + unreadable-actor warnings (2026-08-31)
 
 Running record for stage **W1-H1** of the decision-close wave
-(`EterniaLauncher/docs/mission_control/planned/decision-close-wave-2026-08-31.md`),
+(`EterniaLauncher/docs/mission_control/archive/decision-close-wave-2026-08-31.md`,
+archived launcher-side 2026-09-01),
 branched from hermes `origin/main` `0c744aa586`, built in
 `X:/Eternia/_worktrees/dcw-h1` on `feat/dcw-h1-conflict-surfaces`.
 
