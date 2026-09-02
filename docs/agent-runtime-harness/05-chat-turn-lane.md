@@ -109,7 +109,7 @@ emitter is built ~1,100 lines in and its clock cannot see the profile bootstrap.
 ## 3. Model selection
 
 Four tiers, highest wins, resolved once in `_chat_effective_model_payload`
-(`persona_commands.py:6877`):
+(`persona_commands.py:6884`):
 
 ```
 chat-session override  >  instance override  >  persona default  >  config default

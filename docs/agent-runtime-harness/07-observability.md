@@ -355,7 +355,7 @@ never a fake empty list (`:1217-1220`). Two consumers: the live `chat.final`
 echo carries a slimmed projection (`slim_chat_final_observability`,
 `persona_commands.py:3522`); evicted rows are
 fetched by `harness prompt-context show --context-id <id> [--json]`
-(`hermes_cli/harness.py:634-645`, handler `:1935-1957`) — read-only, honest
+(`hermes_cli/harness.py:831-841`, handler `:2967-2999`) — read-only, honest
 `not_found` on absence. `trace_events` are the turn's tool-call trace, passed at
 `persona_commands.py:3416` and read by `used_skills_context`
 (`prompt_observability.py:2675-2700`) to report which skills were actually

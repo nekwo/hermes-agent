@@ -18,7 +18,7 @@ There is one runtime execution surface. `GPTPersonaRuntime`
 (`agent_runtime/persona_runtime.py:51`) exposes exactly **one** public method,
 `mission_chat_reply` (`:72`) — there is no `run_persona`, no tick, no worker
 loop. The entry point is `_cmd_mission_chat_message` — defined at
-`hermes_cli/harness_parts/persona_commands.py:2614`, exec-loaded into
+`hermes_cli/harness_parts/persona_commands.py:2618`, exec-loaded into
 `harness.py` globals (`hermes_cli/harness.py:6004`) and wired to argparse at
 `harness.py:1365`.
 
@@ -645,6 +645,25 @@ and the final acceptance are in
   something *is*.
 - **Volatile facts never enter the system prompt.** They ride the user turn, or
   the ~13K-token stable prefix is re-billed every turn.
+- **An idempotency receipt stores the KEY OF the row, never a picture of it.**
+  A replay re-reads and rebuilds; where it cannot, it says so rather than
+  presenting the recording as current. `agent_create` learned this the
+  expensive way — its `STATE_DONE` arm echoed the whole recorded ack for an
+  actor an operator drag, a realm pull or a `resolve_conflict` had since moved,
+  and it now re-reads through `_live_actor` and stamps `actor_fresh: false`
+  when it cannot. A 2026-09-02 audit of every other receipt ledger in the
+  runtime — chat-turn reservations, both persona-chat mint stores, the board,
+  the retire receipt, the mission-chat turn journal, the steer ack, the kanban
+  key column, and the three in-memory caches — found **no second instance**:
+  each is either id-only with a live re-read, or records a decision no live row
+  can contradict. Three had reached the rule independently, and `agent_retire`
+  goes further, sweeping live placements BEFORE the archived-keys read so a
+  replay self-heals instead of merely reporting.
+  **The corollary is the half that WAS broken**: "I cannot resolve this
+  receipt" is not "there is no receipt". The board answered both with `None`,
+  so the caller re-ran the write and `add_card` minted a twin under the key
+  that existed to prevent one. Unresolvable now refuses
+  (`errors.IdempotentReplayUnresolved`).
 
 ## Open rows
 
