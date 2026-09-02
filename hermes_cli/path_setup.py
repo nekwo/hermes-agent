@@ -15,12 +15,40 @@ and put *that* directory on PATH:
 The shim also bakes ``HERMES_HOME`` (only when the caller hasn't already set
 it), so a manually-run ``hermes`` sees the same state root the launcher/
 installer provisioned instead of computing a different default.
+
+**Three fences keep the shim from becoming the thing it wraps.** A shim whose
+target is its own path execs itself forever — measured on an operator's Mac as
+five stuck ``/bin/sh`` processes, the oldest 34 days old, on a machine where
+``~/.local/bin/hermes`` was already the first ``hermes`` on PATH.
+
+* :func:`_resolve_hermes_exe` looks in ``sys.executable``'s ``bin``/``Scripts``
+  dir FIRST. That is the console-script of the venv this process is running out
+  of — precisely the unreachable-from-PATH executable the shim exists to reach
+  — and only then falls back to ``sys.argv[0]`` and ``PATH``. A ``PATH``-first
+  order returns the *shim* on every run after the first.
+* :func:`register_hermes_command` REFUSES to write when the resolved target
+  still lands on the shim's own path, reporting
+  ``error="shim_target_is_shim"`` instead of writing the loop. That case is
+  real and not just belt-and-braces: a ``pip install --user`` puts the genuine
+  console-script at ``~/.local/bin/hermes``, which is the shim path itself.
+* Every candidate directory must be ABSOLUTE. ``shutil.which`` on Windows
+  searches the current directory before ``PATH``, so a relative answer is a
+  shim target that means a different file in every directory the operator
+  stands in. See :func:`_hermes_exe_dirs`.
+
+The PATH-first order in ``tools.environments.local._resolve_hermes_bin_dir()``
+is deliberately left alone: that function answers a different question. It
+prepends the install dir onto a *subshell's* PATH so a plugin shelling out to
+bare ``hermes`` resolves, and for that purpose the shim on PATH IS the right
+answer. This module wants the thing standing behind the shim.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 import stat
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,6 +61,12 @@ class PathSetupResult:
     path_dir: "str | None" = None
     path_registered: bool = False
     note: "str | None" = None
+    #: Machine-readable refusal code when no shim was written. ``None`` on a
+    #: run that wrote one (a written shim whose dir is not yet on PATH is
+    #: guidance in ``note``, not an error). Spelled as a code beside the prose
+    #: so the installer, which only ever sees this process's JSON summary, can
+    #: branch on the refusal instead of matching on a sentence.
+    error: "str | None" = None
 
 
 def render_windows_shim(hermes_home: str, hermes_exe: str) -> str:
@@ -55,25 +89,101 @@ def render_posix_shim(hermes_home: str, hermes_exe: str) -> str:
     )
 
 
+def _hermes_exe_names() -> "tuple[str, ...]":
+    """Console-script file names to look for, most canonical first."""
+    return ("hermes.exe", "hermes.cmd", "hermes.bat") if _IS_WINDOWS else ("hermes",)
+
+
+def _hermes_exe_dirs() -> "list[str]":
+    """Directories that may hold the ``hermes`` console-script, best first.
+
+    ``sys.executable``'s ``bin``/``Scripts`` dir leads: a console-script lives
+    beside the interpreter of the venv it was installed into, and that venv is
+    the one running this postinstall. ``sys.argv[0]`` follows (nix-store and
+    wrapper installs, where the running script IS an absolute ``hermes``), and
+    ``PATH`` is last — because on every run after the first, what ``PATH``
+    answers with is the shim this module wrote.
+
+    Every rung must be ABSOLUTE. ``shutil.which`` on Windows searches the
+    current directory before ``PATH`` and answers relatively when it hits
+    there — in this repo, run from its own root, ``which("hermes")`` returns
+    ``.\\hermes``. A relative path baked into the shim resolves against
+    whatever directory the operator happens to be standing in, which is a
+    different broken shim on every invocation.
+    """
+    dirs: list[str] = []
+
+    def _add(directory: str) -> None:
+        if (
+            directory
+            and os.path.isabs(directory)
+            and directory not in dirs
+            and os.path.isdir(directory)
+        ):
+            dirs.append(directory)
+
+    _add(os.path.dirname(sys.executable) if sys.executable else "")
+
+    argv0 = sys.argv[0] if sys.argv else ""
+    base = os.path.basename(argv0).lower()
+    if (
+        os.path.isabs(argv0)
+        and (base == "hermes" or base.startswith("hermes."))
+        and os.path.isfile(argv0)
+    ):
+        _add(os.path.dirname(argv0))
+
+    which = shutil.which("hermes")
+    if which:
+        _add(os.path.dirname(which))
+
+    return dirs
+
+
 def _resolve_hermes_exe() -> "str | None":
     """Absolute path to the ``hermes`` console-script the shim should call."""
-    from tools.environments.local import _resolve_hermes_bin_dir
+    dirs = _hermes_exe_dirs()
+    names = _hermes_exe_names()
+    for directory in dirs:
+        for name in names:
+            candidate = os.path.join(directory, name)
+            if os.path.isfile(candidate):
+                return candidate
+    if dirs:
+        # Name the canonical exe in the best dir even when the isfile probe
+        # missed it (an odd console-script variant, a permission on the probe).
+        # Guessing is safe only because the self-exec fence still runs below.
+        return os.path.join(dirs[0], names[0])
+    return None
 
-    bin_dir = _resolve_hermes_bin_dir()
-    if not bin_dir:
-        return None
-    name = "hermes.exe" if _IS_WINDOWS else "hermes"
-    candidate = os.path.join(bin_dir, name)
-    if os.path.isfile(candidate):
-        return candidate
-    # Fall back to the bare name in the resolved dir even if the isfile probe
-    # missed (e.g. a ``.cmd`` console-script variant on Windows).
+
+def _shim_install_dir() -> "str | None":
+    """The one stable directory the shim is written into, or None.
+
+    Split out of :func:`register_hermes_command` so it is (a) assertable
+    without writing a file and (b) a single seam the test suite pins — the
+    hermetic fixture redirects ``HERMES_HOME`` but deliberately NOT ``HOME``,
+    so before this seam existed any test that reached postinstall wrote a real
+    shim into the developer's real home with the test's temp ``HERMES_HOME``
+    baked into it.
+    """
     if _IS_WINDOWS:
-        for variant in ("hermes.exe", "hermes.cmd", "hermes.bat"):
-            alt = os.path.join(bin_dir, variant)
-            if os.path.isfile(alt):
-                return alt
-    return candidate
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        if not local_appdata:
+            return None
+        return os.path.join(local_appdata, "hermes", "bin")
+    return os.path.join(str(Path.home()), ".local", "bin")
+
+
+def _shim_file_name() -> str:
+    return "hermes.cmd" if _IS_WINDOWS else "hermes"
+
+
+def _same_path(left: str, right: str) -> bool:
+    """True when two paths name the same file, symlinks and case resolved."""
+    return os.path.normcase(os.path.realpath(left)) == os.path.normcase(
+        os.path.realpath(right)
+    )
 
 
 def _path_contains(directory: str) -> bool:
@@ -90,28 +200,51 @@ def register_hermes_command(hermes_home: Path) -> PathSetupResult:
     Returns a :class:`PathSetupResult` describing what happened.  Best-effort:
     failures are reported via the result rather than raised, so postinstall
     never aborts on a PATH hiccup.
+
+    ``hermes_home`` is baked into the shim as the default state root, so the
+    caller must pass the canonical home for the profile being installed
+    (``get_hermes_home()``) and never a scratch path — a shim is a durable
+    artifact on the operator's PATH and it repeats whatever it was handed for
+    the life of the install.
     """
     result = PathSetupResult()
     hermes_exe = _resolve_hermes_exe()
     if not hermes_exe:
         result.note = "Could not locate the hermes executable; PATH shim skipped."
+        result.error = "hermes_exe_unresolved"
+        return result
+
+    bin_dir = _shim_install_dir()
+    if not bin_dir:
+        result.note = "LOCALAPPDATA not set; PATH shim skipped."
+        result.error = "shim_dir_unresolved"
+        return result
+    shim = os.path.join(bin_dir, _shim_file_name())
+
+    if _same_path(hermes_exe, shim):
+        # The resolved target IS this file. Writing it produces a shim that
+        # execs itself — an unkillable-looking loop, not a broken command.
+        result.path_dir = bin_dir
+        result.path_registered = _path_contains(bin_dir)
+        result.error = "shim_target_is_shim"
+        result.note = (
+            f"Refusing to write {shim}: the only `hermes` this install can "
+            f"resolve is that same file, so the shim would exec itself. "
+            f"Install Hermes into a venv (its bin/Scripts dir holds the real "
+            f"console-script), or delete {shim} and re-run `hermes postinstall`."
+        )
         return result
 
     home_str = str(hermes_home)
 
     if _IS_WINDOWS:
-        local_appdata = os.environ.get("LOCALAPPDATA")
-        if not local_appdata:
-            result.note = "LOCALAPPDATA not set; PATH shim skipped."
-            return result
-        bin_dir = os.path.join(local_appdata, "hermes", "bin")
-        shim = os.path.join(bin_dir, "hermes.cmd")
         try:
             os.makedirs(bin_dir, exist_ok=True)
             with open(shim, "w", encoding="ascii", newline="") as f:
                 f.write(render_windows_shim(home_str, hermes_exe))
         except OSError as e:
             result.note = f"Could not write shim: {e}"
+            result.error = "shim_write_failed"
             return result
         result.shim_path = shim
         result.path_dir = bin_dir
@@ -125,8 +258,6 @@ def register_hermes_command(hermes_home: Path) -> PathSetupResult:
         return result
 
     # POSIX
-    bin_dir = os.path.join(str(Path.home()), ".local", "bin")
-    shim = os.path.join(bin_dir, "hermes")
     try:
         os.makedirs(bin_dir, exist_ok=True)
         with open(shim, "w", encoding="utf-8", newline="\n") as f:
@@ -137,6 +268,7 @@ def register_hermes_command(hermes_home: Path) -> PathSetupResult:
         )
     except OSError as e:
         result.note = f"Could not write shim: {e}"
+        result.error = "shim_write_failed"
         return result
     result.shim_path = shim
     result.path_dir = bin_dir

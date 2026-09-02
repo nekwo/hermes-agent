@@ -2866,8 +2866,20 @@ def cmd_postinstall(args):
     # agent never falls through to the System32 WSL stub.
     git_bash_path = ensure_git_bash(interactive=interactive)
 
-    # Put `hermes` on PATH via a stable wrapper shim.
+    # Put `hermes` on PATH via a stable wrapper shim. The home baked into it is
+    # THIS install's canonical resolution and nothing else — the shim outlives
+    # the run and repeats whatever it was handed for the life of the install.
     path_result = register_hermes_command(get_hermes_home())
+
+    # Say what happened. The whole result used to be reachable only inside the
+    # `--json` branch, so a human running `hermes postinstall` was told nothing
+    # at all — neither a refusal nor the "add this dir to your PATH" guidance.
+    if path_result.error:
+        print()
+        print(f"⚠ PATH shim not written [{path_result.error}]: {path_result.note}")
+    elif path_result.note:
+        print()
+        print(f"⚠ {path_result.note}")
 
     if not _has_any_provider_configured():
         print()
@@ -2893,6 +2905,10 @@ def cmd_postinstall(args):
             "shim_path": path_result.shim_path,
             "path_dir": path_result.path_dir,
             "path_registered": path_result.path_registered,
+            # Additive to `hermes.postinstall/1`: the refusal's machine-readable
+            # code beside the prose, so the installer can branch on it without
+            # matching a sentence. `None` on a run that wrote a shim.
+            "error": path_result.error,
             "note": note,
             "deps": {name: bool(check()) for name, check in _DEP_CHECKS.items()},
         }

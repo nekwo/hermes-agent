@@ -4329,7 +4329,14 @@ def _cmd_characters_backfill_home(args) -> int:
     data = {"ok": True, "home": home, "stamped": stamped, "skipped": skipped}
     lines = [f"{len(stamped)} draft(s) stamped with {home}; {len(skipped)} already recorded"]
     lines += [f"  stamped {row['id']}  {row['directory']}" for row in stamped]
-    lines += [f"  skipped {row['id']}  already {row['hermesHome']}" for row in skipped]
+    # The DIRECTORY rides on this arm too. The skipped rows are exactly the
+    # population an id cannot disambiguate — a copied draft keeps the id inside
+    # its `draft.json` AND keeps the home it was made in, so the two rows an
+    # id-collision produces here differ in nothing BUT their directory.
+    lines += [
+        f"  skipped {row['id']}  {row['directory']}  already {row['hermesHome']}"
+        for row in skipped
+    ]
     return _characters_emit(args, data, "\n".join(lines))
 
 

@@ -776,6 +776,39 @@ def _isolate_hermes_home(_hermetic_environment):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_hermes_shim_dir(tmp_path, monkeypatch):
+    """Keep `hermes postinstall`'s PATH shim out of the developer's real home.
+
+    ``_hermetic_environment`` redirects ``HERMES_HOME`` and, by an explicit
+    ruling recorded there, does NOT redirect ``HOME``. So the one directory
+    ``register_hermes_command`` writes into — ``~/.local/bin`` on POSIX,
+    ``%LOCALAPPDATA%\\hermes\\bin`` on Windows — stayed REAL for every test in
+    this tree. A test that reached postinstall wrote a genuine shim onto the
+    developer's PATH with the TEST's temp ``HERMES_HOME`` baked in as its
+    default state root; that shim then outlives the run and hands every later
+    hand-run ``hermes`` a state root that was deleted when the test finished.
+    Measured on an operator's Mac, whose `~/.local/bin/hermes` defaulted
+    ``HERMES_HOME`` to a macOS temp path from an E2E run.
+
+    Redirecting the seam is the fix rather than redirecting ``HOME``, which
+    that ruling forbids, and rather than asking each test to remember: the
+    tests that DID remember are not the population this protects.
+
+    **In-process only.** A test that spawns `hermes postinstall` as a
+    SUBPROCESS is not covered by a monkeypatch and must isolate the directory
+    itself (``LOCALAPPDATA``/``HOME`` in the child's env).
+    """
+    try:
+        from hermes_cli import path_setup
+    except Exception:
+        return None
+
+    shim_dir = tmp_path / "shim-bin"
+    monkeypatch.setattr(path_setup, "_shim_install_dir", lambda: str(shim_dir))
+    return shim_dir
+
+
+@pytest.fixture(autouse=True)
 def _neutralize_webbrowser(monkeypatch):
     """Record browser-open attempts instead of opening real browser windows."""
     import webbrowser as _webbrowser

@@ -3806,6 +3806,126 @@
         "-q",
         "tests/hermes_cli/test_harness_characters_cli.py::test_no_sheet_hands_back_the_path_instead_of_half_a_megabyte_of_base64"
       ]
+    },
+    {
+      "id": "shim-target-resolves-from-path-before-the-venv",
+      "path": "hermes_cli/path_setup.py",
+      "symbol": "_hermes_exe_dirs",
+      "operator": "hoist-path-rung-above-the-interpreter",
+      "find": "    _add(os.path.dirname(sys.executable) if sys.executable else \"\")\n\n    argv0 = sys.argv[0] if sys.argv else \"\"",
+      "replace": "    which = shutil.which(\"hermes\")\n    if which:\n        _add(os.path.dirname(which))\n\n    _add(os.path.dirname(sys.executable) if sys.executable else \"\")\n\n    argv0 = sys.argv[0] if sys.argv else \"\"",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_path_setup.py::TestResolveHermesExe::test_the_venv_console_script_beats_whatever_path_answers"
+      ]
+    },
+    {
+      "id": "shim-target-accepts-a-relative-rung",
+      "path": "hermes_cli/path_setup.py",
+      "symbol": "_hermes_exe_dirs/_add",
+      "operator": "drop-absolute-path-guard",
+      "find": "        if (\n            directory\n            and os.path.isabs(directory)\n            and directory not in dirs\n            and os.path.isdir(directory)\n        ):",
+      "replace": "        if directory and directory not in dirs and os.path.isdir(directory):",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_path_setup.py::TestResolveHermesExe::test_a_relative_hit_from_the_current_directory_is_not_a_target"
+      ]
+    },
+    {
+      "id": "shim-is-written-even-when-it-would-exec-itself",
+      "path": "hermes_cli/path_setup.py",
+      "symbol": "register_hermes_command",
+      "operator": "drop-self-exec-refusal",
+      "find": "    if _same_path(hermes_exe, shim):",
+      "replace": "    if False:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_path_setup.py::TestRefusesToWriteAShimThatExecsItself::test_the_shim_is_not_written_and_the_refusal_is_typed"
+      ]
+    },
+    {
+      "id": "shim-refusal-is-untyped-prose-only",
+      "path": "hermes_cli/path_setup.py",
+      "symbol": "register_hermes_command",
+      "operator": "blank-refusal-code",
+      "find": "        result.error = \"shim_target_is_shim\"",
+      "replace": "        result.error = None",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_path_setup.py::TestRefusesToWriteAShimThatExecsItself::test_an_existing_shim_is_left_exactly_as_it_was"
+      ]
+    },
+    {
+      "id": "shim-is-written-past-the-isolated-install-dir",
+      "path": "hermes_cli/path_setup.py",
+      "symbol": "register_hermes_command",
+      "operator": "write-beside-the-resolved-install-dir",
+      "find": "    bin_dir = _shim_install_dir()",
+      "replace": "    bin_dir = os.path.join(_shim_install_dir() or \"\", \"nested\")",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_postinstall_noninteractive.py::test_postinstall_writes_its_shim_inside_the_sandbox_and_nowhere_else"
+      ]
+    },
+    {
+      "id": "postinstall-swallows-the-shim-refusal",
+      "path": "hermes_cli/main.py",
+      "symbol": "cmd_postinstall",
+      "operator": "silence-the-shim-report",
+      "find": "    if path_result.error:\n        print()\n        print(f\"⚠ PATH shim not written [{path_result.error}]: {path_result.note}\")",
+      "replace": "    if False:\n        print()\n        print(f\"⚠ PATH shim not written [{path_result.error}]: {path_result.note}\")",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_postinstall_noninteractive.py::test_postinstall_says_out_loud_when_it_refuses_to_write_the_shim"
+      ]
+    },
+    {
+      "id": "postinstall-summary-drops-the-refusal-code",
+      "path": "hermes_cli/main.py",
+      "symbol": "cmd_postinstall",
+      "operator": "blank-summary-error",
+      "find": "            \"error\": path_result.error,",
+      "replace": "            \"error\": \"\",",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_postinstall_noninteractive.py::test_postinstall_json_emits_summary_as_final_line"
+      ]
+    },
+    {
+      "id": "backfill-skipped-row-loses-its-directory",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_cmd_characters_backfill_home",
+      "operator": "drop-directory-from-the-skipped-line",
+      "find": "    lines += [\n        f\"  skipped {row['id']}  {row['directory']}  already {row['hermesHome']}\"\n        for row in skipped\n    ]",
+      "replace": "    lines += [f\"  skipped {row['id']}  already {row['hermesHome']}\" for row in skipped]",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_characters_cli.py::test_the_human_receipt_names_the_directory_on_the_skipped_arm_too"
+      ]
     }
   ]
 }

@@ -2,11 +2,29 @@
 
 import os
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
 from hermes_cli import path_setup
+
+# The REAL seam, captured at import time. ``tests/conftest.py``'s autouse
+# ``_isolate_hermes_shim_dir`` replaces the module attribute for every test in
+# the tree, so a test that wants to assert the PRODUCTION derivation has to
+# hold the original function rather than look it up through the module.
+# Captured at collection, which happens before any fixture runs.
+_REAL_SHIM_INSTALL_DIR = path_setup._shim_install_dir
+
+
+def _exe_name() -> str:
+    return "hermes.exe" if os.name == "nt" else "hermes"
+
+
+def _make_exe(directory: Path, name: "str | None" = None) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    exe = directory / (name or _exe_name())
+    exe.write_text("#!/bin/sh\n", encoding="utf-8")
+    exe.chmod(0o755)
+    return exe
 
 
 class TestRenderShims:
@@ -25,48 +43,150 @@ class TestRenderShims:
         assert 'exec "/venv/bin/hermes" "$@"' in out
 
 
+class TestShimInstallDir:
+    """The write target, asserted without writing anything.
+
+    Splitting the derivation out of ``register_hermes_command`` is what lets
+    the suite pin ONE seam instead of redirecting ``HOME`` (which
+    ``_hermetic_environment`` rules out), so the derivation needs its own
+    assertions here, where no file is created.
+    """
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX shim layout")
+    def test_posix_is_home_local_bin(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(path_setup.Path, "home", staticmethod(lambda: tmp_path))
+
+        assert _REAL_SHIM_INSTALL_DIR() == str(tmp_path / ".local" / "bin")
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows shim layout")
+    def test_windows_is_localappdata_hermes_bin(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+
+        assert _REAL_SHIM_INSTALL_DIR() == str(tmp_path / "hermes" / "bin")
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows shim layout")
+    def test_windows_without_localappdata_resolves_to_nothing(self, monkeypatch):
+        monkeypatch.delenv("LOCALAPPDATA", raising=False)
+
+        assert _REAL_SHIM_INSTALL_DIR() is None
+
+
+class TestResolveHermesExe:
+    """Which `hermes` the shim is pointed AT — the self-exec defect's first half."""
+
+    def test_the_venv_console_script_beats_whatever_path_answers(
+        self, tmp_path, monkeypatch
+    ):
+        """`sys.executable`'s dir leads, and PATH comes last.
+
+        A PATH-first order returns the SHIM on every run after the first: the
+        shim is installed into a directory this module then puts on PATH, so
+        `shutil.which("hermes")` finds it and the next postinstall writes a
+        file whose exec target is its own path. Five stuck `/bin/sh` processes
+        on an operator's Mac, the oldest 34 days old.
+        """
+        venv_bin = tmp_path / "venv" / ("Scripts" if os.name == "nt" else "bin")
+        venv_exe = _make_exe(venv_bin)
+        path_dir = tmp_path / "path-bin"
+        _make_exe(path_dir)
+        monkeypatch.setattr(path_setup.sys, "executable", str(venv_bin / "python"))
+        monkeypatch.setattr(path_setup.sys, "argv", ["hermes"])
+        monkeypatch.setenv("PATH", str(path_dir))
+        # Off the repo root, so the PATH rung is genuinely reachable: Windows'
+        # `shutil.which` searches the cwd FIRST, and this repo's root holds a
+        # `hermes` script that would answer before PATH ever does.
+        monkeypatch.chdir(tmp_path)
+
+        assert path_setup._resolve_hermes_exe() == str(venv_exe)
+
+    def test_path_still_answers_when_the_interpreter_dir_holds_no_console_script(
+        self, tmp_path, monkeypatch
+    ):
+        """The fallback rung is intact: a system-python install still resolves."""
+        interpreter_dir = tmp_path / "usr-bin"
+        interpreter_dir.mkdir()
+        path_dir = tmp_path / "path-bin"
+        path_exe = _make_exe(path_dir)
+        monkeypatch.setattr(
+            path_setup.sys, "executable", str(interpreter_dir / "python3")
+        )
+        monkeypatch.setattr(path_setup.sys, "argv", ["hermes"])
+        monkeypatch.setenv("PATH", str(path_dir))
+        # Off the repo root: `shutil.which` searches the CURRENT directory
+        # first on Windows, and this repo's root holds a `hermes` script.
+        monkeypatch.chdir(tmp_path)
+
+        assert path_setup._resolve_hermes_exe() == str(path_exe)
+
+    def test_a_relative_hit_from_the_current_directory_is_not_a_target(
+        self, tmp_path, monkeypatch
+    ):
+        """`shutil.which` answers relatively when it hits a relative rung.
+
+        Windows searches the CURRENT directory before PATH, and a PATH entry
+        of `.` does the same thing on either platform. Baking the answer into
+        the shim makes the shim resolve against whatever directory the
+        operator happens to be standing in — a different broken command every
+        time. An absolute rung or no rung: here, no rung.
+        """
+        cwd = tmp_path / "cwd"
+        _make_exe(cwd)
+        # No interpreter rung: the dir does not exist, so `.` would otherwise
+        # be the only candidate left and would become the answer.
+        monkeypatch.setattr(
+            path_setup.sys, "executable", str(tmp_path / "absent" / "python3")
+        )
+        monkeypatch.setattr(path_setup.sys, "argv", ["hermes"])
+        monkeypatch.setenv("PATH", os.curdir)
+        monkeypatch.chdir(cwd)
+
+        resolved = path_setup._resolve_hermes_exe()
+
+        assert resolved is None, f"a relative rung became the shim target: {resolved}"
+
+
 class TestRegisterPosix:
     @pytest.mark.skipif(os.name == "nt", reason="POSIX shim layout")
-    def test_writes_local_bin_shim(self, tmp_path, monkeypatch):
-        home = tmp_path / "home"
-        home.mkdir()
-        monkeypatch.setattr(path_setup.Path, "home", staticmethod(lambda: home))
+    def test_writes_the_shim_into_the_install_dir(self, tmp_path, monkeypatch):
+        bin_dir = tmp_path / "home" / ".local" / "bin"
+        monkeypatch.setattr(path_setup, "_shim_install_dir", lambda: str(bin_dir))
         monkeypatch.setattr(
             path_setup, "_resolve_hermes_exe", lambda: "/venv/bin/hermes"
         )
-        # ~/.local/bin not on PATH → path_registered False + guidance note.
+        # The install dir is not on PATH → path_registered False + guidance.
         monkeypatch.setenv("PATH", "/usr/bin")
 
         result = path_setup.register_hermes_command(tmp_path / ".hermes")
 
-        shim = home / ".local" / "bin" / "hermes"
+        shim = bin_dir / "hermes"
         assert Path(result.shim_path) == shim
         assert shim.is_file()
         assert os.access(shim, os.X_OK)
+        assert result.error is None
         assert result.path_registered is False
-        assert ".local/bin" in (result.note or "") or ".local\\bin" in (result.note or "")
+        assert str(bin_dir) in (result.note or "")
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX shim layout")
     def test_path_registered_true_when_on_path(self, tmp_path, monkeypatch):
-        home = tmp_path / "home"
-        (home / ".local" / "bin").mkdir(parents=True)
-        monkeypatch.setattr(path_setup.Path, "home", staticmethod(lambda: home))
+        bin_dir = tmp_path / "home" / ".local" / "bin"
+        bin_dir.mkdir(parents=True)
+        monkeypatch.setattr(path_setup, "_shim_install_dir", lambda: str(bin_dir))
         monkeypatch.setattr(
             path_setup, "_resolve_hermes_exe", lambda: "/venv/bin/hermes"
         )
-        monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", str(home / ".local" / "bin")]))
+        monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", str(bin_dir)]))
 
         result = path_setup.register_hermes_command(tmp_path / ".hermes")
         assert result.path_registered is True
         assert result.note is None
+        assert result.error is None
 
 
 class TestRegisterWindows:
     @pytest.mark.skipif(os.name != "nt", reason="Windows shim layout")
-    def test_writes_localappdata_shim_and_registers_path(self, tmp_path, monkeypatch):
-        local_appdata = tmp_path / "AppData" / "Local"
-        local_appdata.mkdir(parents=True)
-        monkeypatch.setenv("LOCALAPPDATA", str(local_appdata))
+    def test_writes_the_shim_and_registers_path(self, tmp_path, monkeypatch):
+        bin_dir = tmp_path / "AppData" / "Local" / "hermes" / "bin"
+        monkeypatch.setattr(path_setup, "_shim_install_dir", lambda: str(bin_dir))
         monkeypatch.setattr(
             path_setup, "_resolve_hermes_exe",
             lambda: str(tmp_path / "venv" / "Scripts" / "hermes.exe"),
@@ -78,7 +198,75 @@ class TestRegisterWindows:
 
         result = path_setup.register_hermes_command(tmp_path / ".hermes")
 
-        shim = local_appdata / "hermes" / "bin" / "hermes.cmd"
+        shim = bin_dir / "hermes.cmd"
         assert Path(result.shim_path) == shim
         assert shim.is_file()
         assert result.path_registered is True
+        assert result.error is None
+
+
+class TestRefusesToWriteAShimThatExecsItself:
+    """The second half of the self-exec defect: a typed, loud, no-write refusal.
+
+    Reachable without any resolution bug at all — a `pip install --user` puts
+    the genuine console-script at `~/.local/bin/hermes`, which IS the POSIX
+    shim path. Nothing stands behind the shim there, so the only honest answer
+    is to refuse and say why.
+    """
+
+    def test_the_shim_is_not_written_and_the_refusal_is_typed(
+        self, tmp_path, monkeypatch
+    ):
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        shim = bin_dir / path_setup._shim_file_name()
+        monkeypatch.setattr(path_setup, "_shim_install_dir", lambda: str(bin_dir))
+        monkeypatch.setattr(path_setup, "_resolve_hermes_exe", lambda: str(shim))
+
+        result = path_setup.register_hermes_command(tmp_path / ".hermes")
+
+        assert not shim.exists()
+        assert result.shim_path is None
+        assert result.error == "shim_target_is_shim"
+        assert str(shim) in (result.note or "")
+
+    def test_an_existing_shim_is_left_exactly_as_it_was(self, tmp_path, monkeypatch):
+        """No truncate-then-refuse: the operator's working file is untouched."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        shim = bin_dir / path_setup._shim_file_name()
+        shim.write_text("the operator's own wrapper\n", encoding="utf-8")
+        before = shim.read_bytes()
+        monkeypatch.setattr(path_setup, "_shim_install_dir", lambda: str(bin_dir))
+        monkeypatch.setattr(path_setup, "_resolve_hermes_exe", lambda: str(shim))
+
+        result = path_setup.register_hermes_command(tmp_path / ".hermes")
+
+        assert shim.read_bytes() == before
+        assert result.error == "shim_target_is_shim"
+
+    def test_the_whole_resolution_chain_refuses_rather_than_looping(
+        self, tmp_path, monkeypatch
+    ):
+        """End to end, with no stub on `_resolve_hermes_exe`.
+
+        The operator's machine: the only `hermes` anywhere is the shim, and it
+        is first on PATH. The pre-fix code resolved it through `PATH`, wrote
+        `exec "<shim>"` into `<shim>`, and produced a file that execs itself.
+        """
+        bin_dir = tmp_path / "bin"
+        shim = _make_exe(bin_dir, path_setup._shim_file_name())
+        interpreter_dir = tmp_path / "usr-bin"
+        interpreter_dir.mkdir()
+        monkeypatch.setattr(path_setup, "_shim_install_dir", lambda: str(bin_dir))
+        monkeypatch.setattr(
+            path_setup.sys, "executable", str(interpreter_dir / "python3")
+        )
+        monkeypatch.setattr(path_setup.sys, "argv", ["hermes"])
+        monkeypatch.setenv("PATH", str(bin_dir))
+        monkeypatch.chdir(interpreter_dir)  # off this repo's own `hermes`
+
+        result = path_setup.register_hermes_command(tmp_path / ".hermes")
+
+        assert result.error == "shim_target_is_shim"
+        assert "exec" not in shim.read_text(encoding="utf-8")

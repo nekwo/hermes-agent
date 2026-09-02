@@ -16,6 +16,7 @@ import argparse
 import base64
 import json
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -1298,6 +1299,35 @@ def test_backfill_without_json_still_says_what_it_did(fake, capsys):
     assert str(get_hermes_home()) in line
     assert draft_id in line
     assert "stamped" in line
+
+
+def test_the_human_receipt_names_the_directory_on_the_skipped_arm_too(fake, capsys):
+    """The one arm where the id genuinely cannot say which draft a row is about.
+
+    A copied draft keeps the `id` inside its own `draft.json` AND keeps the
+    home it was made in, so a skipped pair prints twice under one id and the
+    directory is the ONLY thing that distinguishes the two rows. The stamped
+    arm named it from the start; the skipped arm printed `<id>  already <home>`
+    and dropped it — the asymmetry landed on exactly the arm that needed it.
+    """
+    original = start_draft(capsys)
+    original_dir = drafts_dir() / original
+    # A copy is the population: same `id` inside `draft.json`, own directory.
+    copy_dir = drafts_dir() / f"{original}-copy"
+    shutil.copytree(original_dir, copy_dir)
+
+    args = parser().parse_args(["harness", "characters", "backfill-home"])
+    assert args.func(args) == 0
+    out = capsys.readouterr().out
+
+    skipped_lines = [ln for ln in out.splitlines() if ln.startswith("  skipped ")]
+    assert len(skipped_lines) == 2, out
+    # Both rows carry the same id; only the directory tells them apart.
+    assert all(original in ln for ln in skipped_lines)
+    assert any(str(original_dir) in ln for ln in skipped_lines)
+    assert any(str(copy_dir) in ln for ln in skipped_lines)
+    # The home the row was already carrying is still on the line.
+    assert all(f"already {get_hermes_home()}" in ln for ln in skipped_lines)
 
 
 def _legacy_store(capsys) -> Path:
