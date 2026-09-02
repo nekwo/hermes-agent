@@ -72,10 +72,11 @@ Known Stage C proof hazards to check:
 
 - stale `stagec_qa_mcp_server.exe` source/build mismatch;
 - stale `stagec_qa_mcp_server` process locking rebuild;
-- **the serve venv missing the `mcp` pip extra** — the turn admits nothing and blames the
-  server (`mcp_not_registered_on_lane`) while the real fault is that hermes has no MCP
-  client at all. This cost weeks once. Check it FIRST when a turn reports
-  `mcp_admitted_servers: 0`:
+- **the serve venv missing the `mcp` pip extra** — the turn admits nothing and used to blame
+  the server (`mcp_not_registered_on_lane`) while the real fault is that hermes has no MCP
+  client at all. This cost weeks once. Since 2026-09-02 that turn reports its own
+  `mcp_sdk_unavailable`, naming the extra and the restart; check this FIRST anyway when a turn
+  reports `mcp_admitted_servers: 0`, because an older runtime still spells it the old way:
   `X:\Eternia\.hermes\venvs\hermes-agent\Scripts\python.exe -c "import mcp"`. Note the fix
   needs a runtime restart — `_MCP_AVAILABLE` is read at import (2026-08-26, fixed);
 - helper using `C:\Users\beast\.hermes\profiles` instead of `X:\Eternia\.hermes\profiles`

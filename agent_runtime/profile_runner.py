@@ -728,11 +728,16 @@ class ProfileAgentRunner:
             return None
         timing["mcp_admission_ms"] = _emit_request_timing(request, "mcp_admission", started)
         timing["mcp_admitted_servers"] = len(outcome.admitted)
-        # T2 (2026-08-09): WHY this turn's admission cost what it did. Measured
-        # warm re-registration is 6-8 ms and a cold spawn is ~3,200 ms, so the
-        # millisecond count alone cannot distinguish "MCP admission is expensive"
-        # from "one server had to be started". Recorded per server, and as a
-        # count so a reader does not have to parse the map to see the answer.
+        # T2 (2026-08-09): WHY this turn's admission cost what it did. The
+        # millisecond count alone cannot distinguish "MCP admission is
+        # expensive" from "one server had to be started", so the LABEL is
+        # recorded per server and as a count, and the label is read off the live
+        # transport map, never off the clock. The one measured cold spawn
+        # (~3,200 ms, one 60-tool stdio server) is NOT a threshold either way:
+        # launcher_qa is a compiled Dart exe that spawns cold in ~100 ms, and
+        # reading that as a fast failure sent a whole investigation down the
+        # wrong branch (corrected 2026-08-26; see mcp_admission.TRANSPORT_COLD).
+        # The honest discriminator is the admitted SET below.
         transport_paths = dict(getattr(outcome, "transport_paths", None) or {})
         if transport_paths:
             from .mcp_admission import TRANSPORT_COLD

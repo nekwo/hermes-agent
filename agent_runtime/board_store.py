@@ -28,6 +28,7 @@ from . import board_models, board_order, paths
 from .errors import (
     AlreadyExists,
     CardsUnreadable,
+    IdempotencyKeyVerbMismatch,
     IdempotentReplayUnresolved,
     NotFound,
     StaleRevision,
@@ -37,6 +38,13 @@ from .events import EventLog
 from .locks import board_lock
 from .models import Board, BoardCard, BoardColumn, Event
 from .serde import from_jsonable, safe_id, to_jsonable
+
+#: The three card verbs that share one board's idempotency namespace. Recorded
+#: ON the receipt (``_record_idempotency``) and checked on replay
+#: (``_idempotent_replay``) so a key cannot cross from one to another.
+VERB_ADD_CARD = "add_card"
+VERB_EDIT_CARD = "edit_card"
+VERB_MOVE_CARD = "move_card"
 
 # Bounded projection / ledger caps (honest accounting, never silent).
 ARCHIVED_LEDGER_CAP = 5000
@@ -312,7 +320,7 @@ class BoardStore:
             raise ValueError("invalid_request")
         board = self._resolve_board_for_write(board_id=board_id, workspace_id=workspace_id, created_by=created_by)
         with board_lock(board.board_id):
-            replay = self._idempotent_replay(board.board_id, idempotency_key)
+            replay = self._idempotent_replay(board.board_id, idempotency_key, verb=VERB_ADD_CARD)
             if replay is not None:
                 return replay
             board = self.get(board.board_id)
@@ -349,7 +357,7 @@ class BoardStore:
                 column_id=card.column_id,
                 created_by=card.created_by,
             )
-            self._record_idempotency(board.board_id, idempotency_key, card.card_id)
+            self._record_idempotency(board.board_id, idempotency_key, card.card_id, verb=VERB_ADD_CARD)
         return self.get_card(card.card_id, board_id=board.board_id)
 
     def edit_card(
@@ -370,7 +378,7 @@ class BoardStore:
     ) -> BoardCard:
         board_id, _ = self._locate_card(card_id, board_id=board_id)
         with board_lock(board_id):
-            replay = self._idempotent_replay(board_id, idempotency_key)
+            replay = self._idempotent_replay(board_id, idempotency_key, verb=VERB_EDIT_CARD)
             if replay is not None:
                 return replay
             card = self.get_card(card_id, board_id=board_id)
@@ -409,7 +417,7 @@ class BoardStore:
                 fields=",".join(fields) or "touched",
                 revision=card.revision,
             )
-            self._record_idempotency(board_id, idempotency_key, card.card_id)
+            self._record_idempotency(board_id, idempotency_key, card.card_id, verb=VERB_EDIT_CARD)
         return self.get_card(card_id, board_id=board_id)
 
     def move_card(
@@ -426,7 +434,7 @@ class BoardStore:
     ) -> BoardCard:
         board_id, _ = self._locate_card(card_id, board_id=board_id)
         with board_lock(board_id):
-            replay = self._idempotent_replay(board_id, idempotency_key)
+            replay = self._idempotent_replay(board_id, idempotency_key, verb=VERB_MOVE_CARD)
             if replay is not None:
                 return replay
             board = self.get(board_id)
@@ -454,7 +462,7 @@ class BoardStore:
                 from_column_id=from_column,
                 order_key=card.order_key,
             )
-            self._record_idempotency(board_id, idempotency_key, card.card_id)
+            self._record_idempotency(board_id, idempotency_key, card.card_id, verb=VERB_MOVE_CARD)
         return self.get_card(card_id, board_id=board_id)
 
     def archive_card(
@@ -752,7 +760,7 @@ class BoardStore:
 
     # --- idempotency ledger ----------------------------------------------
 
-    def _idempotent_replay(self, board_id: str, key: str | None) -> BoardCard | None:
+    def _idempotent_replay(self, board_id: str, key: str | None, *, verb: str) -> BoardCard | None:
         """The recorded card for this key, or ``None`` when there is no receipt.
 
         ``None`` means EXACTLY ONE thing to every caller: nothing has been
@@ -768,6 +776,27 @@ class BoardStore:
         board's version of ``agent_create``'s ``actor_fresh: false`` — a replay
         that cannot re-read the row it describes says so rather than inventing
         an answer; the board's ack carries no field to degrade, so it refuses.
+
+        ``verb`` closes the FOURTH way this used to answer wrongly. The receipt
+        namespace is one directory per BOARD, and ``add_card``, ``edit_card``
+        and ``move_card`` all read it, so a key reused across verbs replayed
+        the other verb's card and the second write silently did not happen —
+        an unmoved card returned from ``move_card`` with an ack no caller could
+        tell from a real move. A receipt whose recorded verb is not this one
+        refuses :class:`IdempotencyKeyVerbMismatch`, naming both verbs. That is
+        a different class from the three above on purpose: this fault is in the
+        REQUEST (retrying is futile; the cure is a distinct key), where those
+        are damaged FILES (retrying works once the file is repaired).
+
+        **Backward compatibility, decided here.** A receipt written before this
+        change carries no ``verb`` field, and it is honoured EXACTLY as before —
+        replayed for whichever verb presents the key. Refusing an unlabelled
+        receipt would turn every in-flight key on every existing board into a
+        hard failure at upgrade, to protect against a cross-verb reuse that
+        already happened and cannot now be undone by refusing. The receipts are
+        per-board scratch state that ages out with the board; the fence closes
+        as they are rewritten. Only a receipt that STATES a different verb is
+        refused.
         """
 
         safe = _safe_idempotency_key(key)
@@ -784,6 +813,14 @@ class BoardStore:
                 f"be decoded ({type(exc).__name__}); the write it recorded is not "
                 "safe to repeat"
             ) from exc
+        recorded_verb = str(record.get("verb") or "").strip()
+        if recorded_verb and recorded_verb != str(verb):
+            raise IdempotencyKeyVerbMismatch(
+                f"idempotency key {safe!r} on board {board_id} was already used by "
+                f"{recorded_verb}; it cannot be reused by {verb}. One key names ONE "
+                "gesture — replaying the other verb's card here would silently skip "
+                "this write. Retry with a key of its own."
+            )
         card_id = record.get("card_id")
         if not card_id:
             raise IdempotentReplayUnresolved(
@@ -812,13 +849,27 @@ class BoardStore:
                 f"({type(exc).__name__}); the recorded write is not safe to repeat"
             ) from exc
 
-    def _record_idempotency(self, board_id: str, key: str | None, card_id: str) -> None:
+    def _record_idempotency(self, board_id: str, key: str | None, card_id: str, *, verb: str) -> None:
+        """Write the receipt, naming the VERB that earned it.
+
+        ``verb`` is what makes the namespace per-verb without moving the files:
+        the directory stays one per board and the receipt states which gesture
+        wrote it, so :meth:`_idempotent_replay` can refuse a key crossing verbs
+        instead of replaying the wrong card. A receipt from before this field
+        existed reads back with no ``verb`` and is honoured as before.
+        """
+
         safe = _safe_idempotency_key(key)
         if not safe:
             return
         atomic_json_write(
             paths.board_idempotency_path(board_id, safe),
-            {"idempotency_key": safe, "card_id": card_id, "recorded_at": to_jsonable(now())},
+            {
+                "idempotency_key": safe,
+                "card_id": card_id,
+                "verb": str(verb),
+                "recorded_at": to_jsonable(now()),
+            },
             indent=2,
             sort_keys=True,
         )

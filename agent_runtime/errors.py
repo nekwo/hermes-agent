@@ -187,6 +187,32 @@ class IdempotentReplayUnresolved(AgentRuntimeError):
     code = "idempotent_replay_unresolved"
 
 
+class IdempotencyKeyVerbMismatch(AgentRuntimeError):
+    """One idempotency key was presented to TWO different board verbs.
+
+    The board's receipt namespace is per-BOARD (``boards/<id>/idempotency/``),
+    not per-verb, and ``add_card``, ``edit_card`` and ``move_card`` all consult
+    it. So a key reused across verbs replayed the OTHER verb's card and the
+    second write silently did not happen: ``move_card`` with ``add_card``'s key
+    returned the freshly-added card, unmoved, with a card-shaped ack that no
+    caller could tell from a real move.
+
+    Its own class rather than :class:`IdempotentReplayUnresolved`, because the
+    two refusals have opposite cures and opposite retry semantics. Unresolved
+    means a FILE is damaged: nothing about the request is wrong, an operator
+    repairs the file, and the identical call then succeeds — which is why that
+    code rides ``retryable: true``. This one means the REQUEST is wrong: the
+    same call repeated forever gets the same refusal, and the cure is a
+    distinct key per gesture. Sharing a code would have made the envelope's
+    ``retryable`` half lie about half of the calls that carry it.
+
+    ``code`` rides the CLI error envelope; its exit family is 2 (the fault is
+    in the request and the operator's next move is to change what they typed).
+    """
+
+    code = "idempotency_key_verb_mismatch"
+
+
 class SyncConflict(AgentRuntimeError):
     """Raised when a board card is under an unresolved realm-sync conflict, or a
     conflict-resolution verb targets a card that has none."""

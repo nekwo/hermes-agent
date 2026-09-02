@@ -46,6 +46,7 @@ from agent_runtime.errors import (
     ArchiveUnreadable,
     DefaultScopeReconciliationRequired,
     EventPayloadTooLarge,
+    IdempotencyKeyVerbMismatch,
     IdempotentReplayUnresolved,
     NotFound,
     StaleRevision,
@@ -119,6 +120,14 @@ ERROR_EXIT_CODES = {
     # code is WHICH correction.
     "skill_slug_invalid": 2,
     "skill_installer_owned": 2,
+    # One board idempotency key presented to two card verbs
+    # (``IdempotencyKeyVerbMismatch``). Family 2 on this table's standing rule —
+    # the family is the next MOVE and the code is WHICH correction: the caller
+    # retypes the gesture with a key of its own. Deliberately NOT beside
+    # ``idempotent_replay_unresolved`` (family 7, retryable): that one is a
+    # damaged file an operator repairs before the identical call succeeds, and
+    # this one is a request that will be refused identically forever.
+    "idempotency_key_verb_mismatch": 2,
     "duplicate_conflict": 4,
     # The office desk fence (D6): this persona already holds a live desk on this
     # level. Family 4 beside ``duplicate_conflict`` because the operator's next
@@ -298,6 +307,13 @@ def _error_code_for_exception(exc: BaseException) -> str:
     # that exists to prevent a duplicate would create one).
     if isinstance(exc, IdempotentReplayUnresolved):
         return exc.code
+    # One board idempotency key presented to two different card verbs. Ahead of
+    # the catch-all for the fourth time and the same reason — a refusal is not a
+    # crash — and its own row rather than a share of the one above because the
+    # two disagree about ``retryable``: repairing nothing will ever make this
+    # call succeed, so it must not join the retryable set that row is in.
+    if isinstance(exc, IdempotencyKeyVerbMismatch):
+        return exc.code
     # Typed AgentRuntimeError subclasses map to their precondition/integrity
     # codes. Four rows left this tuple on 2026-08-19 — InvalidTransition,
     # StaleRun, ProofMissing and RuntimeRootMismatch — because an AST Raise
@@ -371,6 +387,11 @@ def _error_hint(code: str) -> str:
         # trees are distinct; this hint is where that distinction was lost.
         "archive_unreadable": "Repair or remove the undecodable archived actor copy under office/<workspace-id>/archive/ in the runtime store, then retry the same command.",
         "idempotent_replay_unresolved": "The idempotency receipt named in the message records a write whose row cannot be found. Repair or remove that receipt file under boards/<board-id>/idempotency/, or retry with a fresh --idempotency-key, then run the same command again.",
+        # Names the two verbs' collision and the ONE cure. It must not say
+        # "retry the same command": the same command is exactly what is refused,
+        # and the neighbouring hint's "repair the file" is wrong here — the
+        # receipt is intact and correct about the gesture that wrote it.
+        "idempotency_key_verb_mismatch": "That --idempotency-key already belongs to a different board verb on this board (the message names both). One key names one gesture: re-run with a key of its own. Retrying this command unchanged will be refused identically.",
         "actors_unreadable": "Repair or remove the undecodable actor file named in the message, or pass --persona-instance-id to place the instance, then retry.",
         # Its own hint rather than the default: the default sends the operator to
         # ``safe_details``, and this refusal's facts ride the MESSAGE (

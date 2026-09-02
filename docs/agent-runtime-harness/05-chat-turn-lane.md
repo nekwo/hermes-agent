@@ -278,8 +278,18 @@ while the transport stays warm in `tools/mcp_tool._servers`; a teardown fault is
 **positive** allowlist — the `reviewer` row of the launcher's own per-profile allowlist, pinned as a
 26-tool snapshot (`:190-258`) — so a tool the server grows later is denied by default rather than
 silently inherited; a server whose mutating tools cannot be named admits nothing
-(`mcp_read_only_subset_unknown`, `:137`). Warm-vs-cold transport is recorded, not inferred
-(`:159-181`). And the agent is told when it does not get what it declared:
+(`mcp_read_only_subset_unknown`, `:137`). A runtime with **no MCP client at all** —
+`tools/mcp_tool._MCP_AVAILABLE` false because the optional `mcp` pip extra is absent — is its
+own code, `mcp_sdk_unavailable` (`MCP_SDK_UNAVAILABLE`, read through
+`mcp_admission.mcp_sdk_available`), because every such turn used to land on
+`mcp_not_registered_on_lane`, whose hint sends the operator at the server and the command —
+the two halves that are already healthy. That sentence cost weeks once
+(root cause 2026-08-26; `harness-skills/harness-runtime-model/references/proof.md` lists it as
+the hazard to check FIRST). Its hint names the extra and the required runtime RESTART, because
+availability is read once at import. Warm-vs-cold transport is recorded, not inferred
+(`TRANSPORT_WARM` / `TRANSPORT_COLD`) — and **the recorded milliseconds are not a spawn
+discriminator**: the honest one is a non-empty admitted SET
+(`registered_mcp_server_names()`, `mcp_admitted_servers`), never the clock. And the agent is told when it does not get what it declared:
 `render_mcp_admission_line` (`:1713`) puts one compact line on the volatile tail, kept a SEPARATE
 voice from the capability block — its denials resolve at a different lifecycle point and it has its
 own kill switch, and folding them would give one fact two voices. `MCP_OPERATING_SKILLS`
@@ -564,8 +574,15 @@ operator's text.
 Mechanism exists in code; the NUMBER or live condition was not re-measured here.
 
 - **Warm/cold MCP admission timings** (6–8 ms warm, 0.2–0.3 ms teardown, 3,197 ms cold) —
-  `mcp_admission.py:159-181`, 2026-08-09, one 60-tool stdio server. The `warm`/`cold` attribution
-  field is live; the milliseconds are historical.
+  `mcp_admission.TRANSPORT_WARM` / `TRANSPORT_COLD`, 2026-08-09, one 60-tool stdio server. The
+  `warm`/`cold` attribution field is live; the milliseconds are historical **and are not a
+  discriminator**. `launcher_qa` is a compiled Dart exe whose real cold spawn measured ~100 ms, so
+  the "~3,200 ms means a real cold spawn" rule of thumb reads a genuine spawn as a fast failure —
+  it sent a whole investigation down the wrong branch (corrected 2026-08-26; the docstring and
+  `profile_runner`'s comment were re-corrected 2026-09-02). The discriminator is the non-empty
+  admitted SET. No code compares an elapsed count, and
+  `tests/agent_runtime/test_mcp_admission.py::test_no_admission_code_branches_on_an_elapsed_millisecond_count`
+  is the fence that keeps it that way.
 - **The 2,421 ms `chat_lane_scope_ms`** —
   `tests/agent_runtime/test_agent_create_subphases.py:17-24`, one machine, hermetic home. That file
   states no test asserts a millisecond and none can reproduce the magnitude; the enforced gate is

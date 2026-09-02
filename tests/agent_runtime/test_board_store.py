@@ -513,3 +513,139 @@ def test_an_intact_receipt_still_replays_the_live_card_after_it_was_edited():
     assert replayed.card_id == card.card_id
     assert replayed.title == "after"
     assert len(store.list_cards(board_id=board_id)) == 1
+
+
+# ── one key, one verb ─────────────────────────────────────────────────────
+
+
+def test_a_key_reused_across_verbs_refuses_instead_of_silently_skipping_the_write():
+    """The receipt namespace is per-BOARD, and three verbs read it.
+
+    Before the ``verb`` field, ``move_card`` presented with ``add_card``'s key
+    was answered from ``add_card``'s receipt: it returned the freshly-added
+    card, still in its original column, with a card-shaped ack no caller could
+    tell from a real move. The move never happened and nothing said so.
+    """
+
+    from agent_runtime.errors import IdempotencyKeyVerbMismatch
+
+    ws, store, card = _one_card_board(title="Cross", key="k-cross")
+    board_id = store.get_card(card.card_id).board_id
+    board = store.get(board_id)
+    target = [col.column_id for col in board.columns if col.column_id != card.column_id][0]
+    before_column = card.column_id
+    before_revision = card.revision
+
+    with pytest.raises(IdempotencyKeyVerbMismatch) as excinfo:
+        store.move_card(card.card_id, column_id=target, board_id=board_id, idempotency_key="k-cross")
+
+    # The refusal NAMES both verbs, or an operator cannot tell which two keys
+    # collided on a board carrying dozens.
+    message = str(excinfo.value)
+    assert "add_card" in message and "move_card" in message
+    assert excinfo.value.code == "idempotency_key_verb_mismatch"
+
+    # And the silent skip is what it replaces: the card did not move, and the
+    # caller was not handed an ack that says it did.
+    after = store.get_card(card.card_id, board_id=board_id)
+    assert after.column_id == before_column
+    assert after.revision == before_revision
+
+
+def test_the_same_key_on_the_same_verb_still_replays():
+    """The fence must not cost the feature it fences."""
+
+    ws, store, card = _one_card_board(title="Same", key="k-same")
+    board_id = store.get_card(card.card_id).board_id
+
+    replayed = store.add_card(workspace_id=ws, title="Same", idempotency_key="k-same")
+
+    assert replayed.card_id == card.card_id
+    assert len(store.list_cards(board_id=board_id)) == 1
+
+
+def test_edit_cannot_borrow_adds_key_either():
+    """All three verbs share the namespace; the fence is not add/move-only."""
+
+    from agent_runtime.errors import IdempotencyKeyVerbMismatch
+
+    ws, store, card = _one_card_board(title="Borrow", key="k-borrow")
+    board_id = store.get_card(card.card_id).board_id
+
+    with pytest.raises(IdempotencyKeyVerbMismatch):
+        store.edit_card(card.card_id, board_id=board_id, title="edited", idempotency_key="k-borrow")
+
+    assert store.get_card(card.card_id, board_id=board_id).title == "Borrow"
+
+
+def test_a_receipt_written_before_the_verb_field_is_still_honoured():
+    """The compatibility decision, pinned so it cannot be quietly reversed.
+
+    A receipt with no ``verb`` predates this change. It replays for whichever
+    verb presents the key, exactly as it did before — refusing it would turn
+    every in-flight key on every existing board into a hard failure at upgrade,
+    to protect against a crossing that already happened.
+    """
+
+    ws, store, card = _one_card_board(title="Legacy", key="k-legacy")
+    board_id = store.get_card(card.card_id).board_id
+    receipt = paths.board_idempotency_path(board_id, "k-legacy")
+    payload = json.loads(receipt.read_text(encoding="utf-8"))
+    payload.pop("verb")
+    receipt.write_text(json.dumps(payload), encoding="utf-8")
+
+    replayed = store.move_card(
+        card.card_id,
+        column_id=card.column_id,
+        board_id=board_id,
+        idempotency_key="k-legacy",
+    )
+
+    assert replayed.card_id == card.card_id
+
+
+def test_the_receipt_records_the_verb_that_wrote_it():
+    """The field the fence reads — asserted directly, not only through it."""
+
+    ws, store, card = _one_card_board(title="Recorded", key="k-recorded")
+    board_id = store.get_card(card.card_id).board_id
+    payload = json.loads(
+        paths.board_idempotency_path(board_id, "k-recorded").read_text(encoding="utf-8")
+    )
+
+    assert payload["verb"] == "add_card"
+
+    store.edit_card(card.card_id, board_id=board_id, title="e", idempotency_key="k-edit")
+    edited = json.loads(
+        paths.board_idempotency_path(board_id, "k-edit").read_text(encoding="utf-8")
+    )
+    assert edited["verb"] == "edit_card"
+
+
+def test_the_cross_verb_refusal_is_its_own_exit_family_not_the_unresolved_one():
+    """The two refusals disagree about ``retryable``; the envelope must too.
+
+    ``idempotent_replay_unresolved`` is a damaged FILE — retryable, exit 7,
+    hint "repair the receipt". This is a wrong REQUEST — never retryable, exit
+    2, hint "use a key of its own". Sharing a code would have made one half of
+    the envelope lie about half the calls carrying it.
+    """
+
+    from agent_runtime.errors import IdempotencyKeyVerbMismatch
+    from hermes_cli.harness_support import (
+        ERROR_EXIT_CODES,
+        _error_code_for_exception,
+        _error_envelope,
+        _error_hint,
+    )
+
+    code = _error_code_for_exception(IdempotencyKeyVerbMismatch("k crossed add_card/move_card"))
+
+    assert code == "idempotency_key_verb_mismatch"
+    assert ERROR_EXIT_CODES[code] == 2
+    assert ERROR_EXIT_CODES["idempotent_replay_unresolved"] == 7
+    envelope = _error_envelope(code, "x", retryable=False)
+    assert envelope["error"]["retryable"] is False
+    hint = _error_hint(code)
+    assert "key of its own" in hint
+    assert hint != _error_hint("idempotent_replay_unresolved")

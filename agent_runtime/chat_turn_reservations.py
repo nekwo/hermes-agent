@@ -168,10 +168,35 @@ class ChatTurnReservation:
         Stamped HERE rather than at the call site so the flag cannot be
         forgotten by a second caller, and copied so a handler that mutates its
         reply cannot edit the receipt in memory.
+
+        ``state`` is re-stamped from the RECORD, not carried from the recorded
+        ack. The ack was written by ``mark_accepted`` and says ``accepted``
+        because that is what was true when it was written; a replay after
+        :func:`settle_chat_turn` was returning that frozen word beside
+        ``settled: true``, so one payload described the same turn two ways.
+        The record is the only thing that knows the turn's state now, so it is
+        what the field reports.
+
+        ``settled`` stays the LIVE discriminator and is deliberately UNCHANGED,
+        including its pairing with a recorded ``exit_code``: it answers "is
+        there a terminal outcome to read", which is a narrower question than
+        "what state is the record in", and a receipt hand-edited into
+        ``settled`` with no exit code has no outcome to hand a client. It is
+        also what the launcher's decoder actually reads
+        (``MissionChatTurnAck.fromFrame``: ``turn_request_id``, ``request_id``,
+        ``idempotent_replay``, ``settled``, ``exit_code``, ``correlation_id``;
+        it reads no ``state`` at all). So this corrects a field nothing branches
+        on today, precisely so a reader who DOES branch on it later is not lied
+        to — the launcher's office lane already treats ``result['state']`` as
+        "the discriminator the whole adoption branches on"
+        (``mission_office_rpc.dart``), and this ack was the one place that word
+        meant something else.
         """
 
         payload = dict(self.record.ack)
         payload["idempotent_replay"] = True
+        if self.record.state is not None:
+            payload["state"] = self.record.state
         if self.record.request_id:
             payload["request_id"] = self.record.request_id
         if self.record.state == STATE_SETTLED and self.record.exit_code is not None:

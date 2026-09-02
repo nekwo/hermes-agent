@@ -380,8 +380,12 @@ separated ~0 ms from "something happened".
 
 Typed refusals (`agent_runtime/mcp_admission.py`): `mcp_admission_lane_busy` (another
 admission in flight; registration is process-global and serialized), `mcp_admission_timeout`
-(registrar still running, may land for a LATER turn), `mcp_not_registered_on_lane`
-(the registrar returned but the server is not in the registry). **There is no fallback
+(registrar still running, may land for a LATER turn), `mcp_sdk_unavailable` (**this runtime has
+no MCP client** — the optional `mcp` pip extra is not in the venv; the hint names
+`pip install "hermes-agent[mcp]"` and the required runtime restart), `mcp_not_registered_on_lane`
+(the registrar returned but the server is not in the registry). Since 2026-09-02 those last two
+are separate codes: the SDK-absent case used to wear the server's code and its hint, which is the
+misdirection the scope note below records. **There is no fallback
 lane behind any of these** — the old `qa.request_screenshot` contract went with the
 mission lane, so a denial is terminal for that route.
 
@@ -410,9 +414,12 @@ first** — before re-auditing config, declarations, or roots:
 X:\Eternia\.hermes\venvs\hermes-agent\Scripts\python.exe -c "import mcp; print(mcp.__version__)"
 ```
 
-That failure mode is invisible by design: `mcp_not_registered_on_lane` says "check the
+That failure mode WAS invisible by design: `mcp_not_registered_on_lane` says "check the
 server is running and its command resolves", which sends you to the two things that are
-already fine, and the installer's own verify step (`from tools.mcp_tool import
+already fine. Since 2026-09-02 that turn reports `mcp_sdk_unavailable` instead and names the
+extra and the restart — the check above stays because a receipt from an older runtime, or an
+import that fails for some other reason, still lands on the old code. The installer's own
+verify step (`from tools.mcp_tool import
 _build_safe_env`) succeeds with the SDK entirely absent. Two further notes: the fix does
 not reach a running process — `_MCP_AVAILABLE` is a module-level constant read at import,
 so **restart the Hermes runtime from Mission Control** after any SDK install; and a

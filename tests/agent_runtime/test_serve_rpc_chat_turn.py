@@ -689,3 +689,60 @@ def test_settling_a_receipt_records_the_exit_and_never_raises():
     # An id nobody accepted is a False, not a raise: this runs in a worker's
     # ``finally``, where an exception would replace the turn's real exit frame.
     assert settle_chat_turn(turn_request_id="never-seen", exit_code=0) is False
+
+
+def test_a_settled_replay_does_not_report_state_accepted():
+    """One payload must not describe one turn two ways.
+
+    ``mark_accepted`` writes ``state: "accepted"`` INTO the ack, because that
+    is what was true when it wrote it. ``replay_ack`` copied that ack and
+    stamped ``settled``/``exit_code`` beside it without touching ``state``, so
+    a replay after ``settle_chat_turn`` came back saying ``state: "accepted"``
+    and ``settled: true`` at once. ``settled`` is the live discriminator and
+    stays so; ``state`` now reports what the RECORD says.
+    """
+
+    from agent_runtime.chat_turn_reservations import settle_chat_turn
+
+    with reserve_chat_turn(
+        turn_request_id="state-honesty",
+        verb=CHAT_MESSAGE_METHOD,
+        session_scope="root-1",
+    ) as reservation:
+        # The ack the accept path really writes — see ``chat_turn.py``.
+        reservation.mark_accepted(
+            {
+                "turn_request_id": "state-honesty",
+                "accepted": True,
+                "state": STATE_ACCEPTED,
+                "verb": CHAT_MESSAGE_METHOD,
+            },
+            request_id="chat-9",
+        )
+
+    # Before settling, the replay still says accepted — nothing changed there.
+    with reserve_chat_turn(
+        turn_request_id="state-honesty",
+        verb=CHAT_MESSAGE_METHOD,
+        session_scope="root-1",
+    ) as replayed:
+        ack = replayed.replay_ack()
+        assert ack["state"] == STATE_ACCEPTED
+        assert ack["settled"] is False
+
+    assert settle_chat_turn(turn_request_id="state-honesty", exit_code=0) is True
+
+    with reserve_chat_turn(
+        turn_request_id="state-honesty",
+        verb=CHAT_MESSAGE_METHOD,
+        session_scope="root-1",
+    ) as replayed:
+        ack = replayed.replay_ack()
+        assert ack["state"] == STATE_SETTLED
+        # The discriminator the launcher's decoder actually reads is untouched.
+        assert ack["settled"] is True
+        assert ack["exit_code"] == 0
+        assert ack["idempotent_replay"] is True
+        # And the fields that describe the REQUEST are still the client's own.
+        assert ack["turn_request_id"] == "state-honesty"
+        assert ack["verb"] == CHAT_MESSAGE_METHOD

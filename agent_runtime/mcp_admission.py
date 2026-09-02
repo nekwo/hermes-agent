@@ -145,6 +145,27 @@ MCP_ADMISSION_TEARDOWN_FAILED = "mcp_admission_teardown_failed"
 #: Design §3's residual-risk mitigation ("Loop → repeated launches/kills") and
 #: the one §7 row R2 shipped without.
 MCP_ADMISSION_BUDGET_EXHAUSTED = "mcp_admission_budget_exhausted"
+#: This RUNTIME has no MCP client at all — ``tools/mcp_tool`` set
+#: ``_MCP_AVAILABLE = False`` because the optional ``mcp`` pip extra is not in
+#: the venv, so ``register_mcp_servers`` returns ``[]`` in ~0 ms without
+#: consulting a single server.
+#:
+#: Its own code because the alternative cost weeks. Every such turn used to land
+#: on ``mcp_not_registered_on_lane``, whose fix hint says "check the server is
+#: running and its command resolves" — the two things that are already fine, and
+#: the ONE half of the system that is healthy. The 2026-08-26 root cause records
+#: the outcome: a standing "the chat lane admits nothing" gap was planned against
+#: for weeks while admission, declaration, resolution and policy were all correct
+#: and the runtime simply had no MCP client
+#: (``harness-skills/harness-runtime-model/references/operations.md``,
+#: "Scope note (2026-08-26)"; ``…/references/proof.md`` lists it as the hazard to
+#: check FIRST). This row names the runtime instead of blaming the server.
+#:
+#: Two facts belong in its hint and are in it. The cure is
+#: ``pip install "hermes-agent[mcp]"`` (``pyproject.toml`` — the ``mcp`` extra),
+#: and the cure does NOT reach a running process: ``_MCP_AVAILABLE`` is a
+#: module-level constant read at import, so the runtime must be restarted.
+MCP_SDK_UNAVAILABLE = "mcp_sdk_unavailable"
 
 #: The admission LANE — the runtime surface a persona turn runs on. Distinct
 #: from ``mcp_lane``'s entry-point lane (``harness`` / ``chat`` / …), which
@@ -164,9 +185,27 @@ _MCP_TOOLSET_PREFIX = "mcp-"
 #:
 #: ``cold`` — no live session, so ``register_mcp_servers`` spawned the server
 #: process and completed the MCP handshake before anything could be listed.
-#: Measured on the same server: **3,197 ms** — ~400x the warm path.
+#: Measured **3,197 ms** on that same 60-tool stdio server.
 #:
-#: These exist as a RECORDED fact because the difference was being inferred.
+#: **That number is ONE server's spawn, and it is not a discriminator**
+#: (corrected 2026-08-26; this docstring was one of the two places carrying the
+#: bad rule of thumb). An earlier revision read as "~3,200 ms means a real cold
+#: spawn", and ``launcher_qa`` — a compiled Dart exe — spawns cold in **~100 ms**,
+#: so that rule reads a genuine spawn as a fast failure. It sent a whole
+#: investigation down the wrong branch. Spawn cost is a property of the SERVER,
+#: not of the path, and no threshold separates the two.
+#:
+#: **The honest discriminator is the SET, never the clock**: a non-empty
+#: ``admitted`` on the outcome, equivalently a non-empty
+#: ``mcp_lane.registered_mcp_server_names()`` (the operator-facing spelling is
+#: ``mcp_admitted_servers`` on ``profile_timing``). The clock only ever separated
+#: ~0 ms from "something happened", and ~0 ms has its own code now
+#: (:data:`MCP_SDK_UNAVAILABLE`). No code here reads the elapsed time to decide
+#: anything: ``profile_runner`` records ``mcp_admission_cold_servers`` by counting
+#: THIS label, and the label is read from the transport map.
+#:
+#: These labels exist as a RECORDED fact because the difference was being
+#: inferred.
 #: ``PERF_SEND_ANALYSIS_2026-08-09`` (F2/T2) attributed a flat 2.35–3.4 s per
 #: turn to "re-registration of an unchanged server set" and proposed caching the
 #: registration. The measurement says registration is the 6 ms half and the spawn
@@ -1290,8 +1329,31 @@ def admit_mcp_servers(
     registered = registered_mcp_server_names()
     admitted = tuple(name for name in admission.server_names if name in registered)
     missed = tuple(name for name in admission.server_names if name not in registered)
+    # WHY nothing registered, before WHICH server did not. A runtime with no MCP
+    # client registers nothing for every server at once, and saying "the server
+    # did not connect" of a server nothing ever tried to reach is the sentence
+    # that cost weeks (see MCP_SDK_UNAVAILABLE). Read only on the production
+    # path: a caller-supplied ``register`` is not the SDK's registrar, so the
+    # flag says nothing about what it did.
+    sdk_missing = bool(missed) and register is None and not mcp_sdk_available()
     unregistered = tuple(
         McpAdmissionDenial(
+            server=name,
+            code=MCP_SDK_UNAVAILABLE,
+            summary=(
+                f"'{name}' registered nothing because this hermes runtime has no MCP "
+                "client installed — not because the server is unavailable."
+            ),
+            fix_hint=(
+                "Install the optional MCP client into the runtime's venv "
+                '(pip install "hermes-agent[mcp]" — the `mcp` extra in pyproject.toml) '
+                "and then RESTART the hermes runtime: availability is read once at "
+                "import, so an install does not reach a running process. Nothing about "
+                "the server, its command or its declaration needs changing."
+            ),
+        )
+        if sdk_missing
+        else McpAdmissionDenial(
             server=name,
             code=MCP_NOT_REGISTERED_ON_LANE,
             summary=(
@@ -1570,6 +1632,30 @@ def classify_admission_transport(servers: Iterable[str] | None) -> dict[str, str
         return {}
     live = _live_mcp_sessions()
     return {name: (TRANSPORT_WARM if name in live else TRANSPORT_COLD) for name in names}
+
+
+def mcp_sdk_available() -> bool:
+    """Does this RUNTIME have an MCP client at all?
+
+    The single place ``agent_runtime`` reads ``tools/mcp_tool._MCP_AVAILABLE``.
+    That flag is set once at import from ``try: from mcp import ClientSession``,
+    so it answers exactly one question — is the optional ``mcp`` pip extra in
+    this venv — and it answers it for the life of the process. A pip install
+    into a running serve does not change it; the runtime has to be restarted.
+
+    Read HERE rather than inferred from an empty registration, because those two
+    are the facts :data:`MCP_SDK_UNAVAILABLE` exists to separate. Fails to the
+    pessimistic side: an unimportable ``tools.mcp_tool`` is a runtime that
+    cannot register anything either, and reporting that as "the server did not
+    connect" is the mislabelling this function was added to stop.
+    """
+
+    try:
+        from tools.mcp_tool import _MCP_AVAILABLE
+    except Exception:  # pragma: no cover - tools.mcp_tool is importable in-process
+        logger.debug("MCP admission could not read the SDK availability flag", exc_info=True)
+        return False
+    return bool(_MCP_AVAILABLE)
 
 
 def _live_mcp_sessions() -> frozenset[str]:

@@ -1048,6 +1048,36 @@ One asymmetry worth knowing: the board DOES send `expect_revision`
 `mission_board_card_panel.dart:233`), while the office's argv arms deliberately
 omit it — the office's revision guard lives on the RPC lane only.
 
+### One idempotency key names ONE verb
+
+The board's receipt namespace is one directory per BOARD
+(`paths.board_idempotency_path`), and `add_card`, `edit_card` and `move_card`
+all consult it through the same `BoardStore._idempotent_replay`. Until
+2026-09-02 a receipt recorded only `{idempotency_key, card_id, recorded_at}`, so
+a key presented to a SECOND verb replayed the first verb's card and the second
+write silently did not happen — `move_card` under `add_card`'s key returned the
+freshly-added card, unmoved, with a card-shaped ack no caller could tell from a
+real move.
+
+The receipt now records the `verb` that wrote it (`BoardStore
+._record_idempotency`), and a replay whose recorded verb is not the presenting
+one refuses `errors.IdempotencyKeyVerbMismatch` — a message naming BOTH verbs,
+CLI code `idempotency_key_verb_mismatch`, exit family 2, never retryable.
+
+Two decisions ride with it:
+
+- **It is a different class from `IdempotentReplayUnresolved`, not a reuse.**
+  The two refusals disagree about `retryable`: unresolved means a damaged FILE
+  an operator repairs before the identical call succeeds (exit 7, retryable),
+  and this means a wrong REQUEST that will be refused identically forever (exit
+  2, cure = a key of its own). One code would have made the envelope's
+  `retryable` half lie about half the calls carrying it.
+- **A receipt with no `verb` is honoured exactly as before.** Those predate the
+  field; refusing them would turn every in-flight key on every existing board
+  into a hard failure at upgrade, to protect against a crossing that already
+  happened. Only a receipt that STATES a different verb is refused, and the
+  fence closes as receipts are rewritten.
+
 ## Invariants
 
 1. **A refusal is terminal; only `Unavailable` falls back.** The argv lane is not

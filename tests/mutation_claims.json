@@ -320,7 +320,7 @@
       "path": "hermes_cli/harness_parts/persona_commands.py",
       "symbol": "_cmd_persona_instance_update_profile",
       "operator": "collapse-absent-flag-to-empty-list",
-      "find": "            skills=list(requested_skills) if requested_skills is not None else None,",
+      "find": "            skills=requested_skills,",
       "replace": "            skills=list(requested_skills or []),",
       "test": [
         "{python}",
@@ -335,8 +335,8 @@
       "path": "hermes_cli/harness_parts/persona_commands.py",
       "symbol": "_cmd_agent_create",
       "operator": "drop-argv-param-passthrough",
-      "find": "    requested_skills = getattr(args, \"skills\", None)\n    if requested_skills is not None:\n        params[\"skills\"] = list(requested_skills)",
-      "replace": "    requested_skills = getattr(args, \"skills\", None)",
+      "find": "    requested_skills = list_flag_or_absent(args, \"skills\")\n    if requested_skills is not None:\n        params[\"skills\"] = requested_skills",
+      "replace": "    requested_skills = list_flag_or_absent(args, \"skills\")",
       "test": [
         "{python}",
         "-m",
@@ -3310,6 +3310,141 @@
         "pytest",
         "-q",
         "tests/agent_runtime/test_chat_lane_bundle.py::test_a_degraded_bundle_is_served_to_this_turn_and_then_thrown_away"
+      ]
+    },
+    {
+      "id": "bipv-the-receipt-records-the-verb-that-wrote-it",
+      "path": "agent_runtime/board_store.py",
+      "symbol": "BoardStore._record_idempotency",
+      "operator": "blank-the-recorded-verb",
+      "find": "                \"verb\": str(verb),",
+      "replace": "                \"verb\": \"\",",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_board_store.py::test_the_receipt_records_the_verb_that_wrote_it"
+      ]
+    },
+    {
+      "id": "bipv-a-key-crossing-verbs-is-refused-not-replayed",
+      "path": "agent_runtime/board_store.py",
+      "symbol": "BoardStore._idempotent_replay",
+      "operator": "drop-the-recorded-verb",
+      "find": "        recorded_verb = str(record.get(\"verb\") or \"\").strip()",
+      "replace": "        recorded_verb = \"\"",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_board_store.py::test_a_key_reused_across_verbs_refuses_instead_of_silently_skipping_the_write"
+      ]
+    },
+    {
+      "id": "bipv-the-crossing-refusal-carries-its-own-code",
+      "path": "agent_runtime/errors.py",
+      "symbol": "IdempotencyKeyVerbMismatch",
+      "operator": "share-the-unresolved-code",
+      "find": "    code = \"idempotency_key_verb_mismatch\"",
+      "replace": "    code = \"idempotent_replay_unresolved\"",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_board_store.py::test_the_cross_verb_refusal_is_its_own_exit_family_not_the_unresolved_one"
+      ]
+    },
+    {
+      "id": "bipv-the-crossing-refusal-is-exit-family-two",
+      "path": "hermes_cli/harness_support.py",
+      "symbol": "module",
+      "operator": "move-to-the-retryable-family",
+      "find": "    \"idempotency_key_verb_mismatch\": 2,",
+      "replace": "    \"idempotency_key_verb_mismatch\": 7,",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_board_store.py::test_the_cross_verb_refusal_is_its_own_exit_family_not_the_unresolved_one"
+      ]
+    },
+    {
+      "id": "ctr-a-settled-replay-reports-the-records-state",
+      "path": "agent_runtime/chat_turn_reservations.py",
+      "symbol": "ChatTurnReservation.replay_ack",
+      "operator": "freeze-the-state-at-accepted",
+      "find": "            payload[\"state\"] = self.record.state",
+      "replace": "            payload[\"state\"] = STATE_ACCEPTED",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_serve_rpc_chat_turn.py::test_a_settled_replay_does_not_report_state_accepted"
+      ]
+    },
+    {
+      "id": "mcpsdk-an-absent-client-is-its-own-denial",
+      "path": "agent_runtime/mcp_admission.py",
+      "symbol": "admit_mcp_servers",
+      "operator": "never-blame-the-runtime",
+      "find": "    sdk_missing = bool(missed) and register is None and not mcp_sdk_available()",
+      "replace": "    sdk_missing = False",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_mcp_admission.py::test_a_runtime_with_no_mcp_client_says_so_instead_of_blaming_the_server"
+      ]
+    },
+    {
+      "id": "mcpsdk-the-probe-reads-the-flag",
+      "path": "agent_runtime/mcp_admission.py",
+      "symbol": "mcp_sdk_available",
+      "operator": "assume-the-sdk-is-there",
+      "find": "    return bool(_MCP_AVAILABLE)",
+      "replace": "    return True",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_mcp_admission.py::test_the_sdk_probe_reads_the_flag_and_fails_pessimistically"
+      ]
+    },
+    {
+      "id": "bipv-the-crossing-refusal-escapes-the-catch-all",
+      "path": "hermes_cli/harness_support.py",
+      "symbol": "_error_code_for_exception",
+      "operator": "fall-through-to-internal-error",
+      "find": "    if isinstance(exc, IdempotencyKeyVerbMismatch):\n        return exc.code",
+      "replace": "    if False:\n        return exc.code",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_board_store.py::test_the_cross_verb_refusal_is_its_own_exit_family_not_the_unresolved_one"
+      ]
+    },
+    {
+      "id": "bipv-the-crossing-hint-does-not-say-repair-the-file",
+      "path": "hermes_cli/harness_support.py",
+      "symbol": "_error_hint",
+      "operator": "reuse-the-unresolved-hint",
+      "find": "        \"idempotency_key_verb_mismatch\": \"That --idempotency-key already belongs to a different board verb on this board (the message names both). One key names one gesture: re-run with a key of its own. Retrying this command unchanged will be refused identically.\",",
+      "replace": "        \"idempotency_key_verb_mismatch\": \"The idempotency receipt named in the message records a write whose row cannot be found. Repair or remove that receipt file under boards/<board-id>/idempotency/, or retry with a fresh --idempotency-key, then run the same command again.\",",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_board_store.py::test_the_cross_verb_refusal_is_its_own_exit_family_not_the_unresolved_one"
       ]
     }
   ]

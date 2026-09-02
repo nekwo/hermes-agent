@@ -44,6 +44,7 @@ from agent_runtime.mcp_admission import (
     MCP_ADMISSION_TEARDOWN_FAILED,
     MCP_ADMISSION_TIMEOUT,
     MCP_NOT_REGISTERED_ON_LANE,
+    MCP_SDK_UNAVAILABLE,
     MCP_SERVER_NOT_CONFIGURED,
     READ_ONLY_ALLOWLIST_PROFILE,
     READ_ONLY_EXCLUDED_TOOLS,
@@ -723,6 +724,7 @@ def test_there_is_no_line_without_an_admission_object():
         MCP_ADMISSION_TIMEOUT,
         MCP_ADMISSION_LANE_BUSY,
         MCP_NOT_REGISTERED_ON_LANE,
+        MCP_SDK_UNAVAILABLE,
     ],
 )
 def test_every_denial_code_produces_one_compact_line(code):
@@ -773,6 +775,7 @@ def test_the_line_never_points_at_the_deleted_screenshot_contract():
         MCP_ADMISSION_TIMEOUT,
         MCP_ADMISSION_LANE_BUSY,
         MCP_NOT_REGISTERED_ON_LANE,
+        MCP_SDK_UNAVAILABLE,
     ):
         line = render_mcp_admission_line(_denied(code))
         assert "request_screenshot" not in line

@@ -664,6 +664,12 @@ and the final acceptance are in
   so the caller re-ran the write and `add_card` minted a twin under the key
   that existed to prevent one. Unresolvable now refuses
   (`errors.IdempotentReplayUnresolved`).
+  **The second half, closed 2026-09-02**: the same namespace is per-BOARD and
+  three verbs read it, so a key crossing from `add_card` to `move_card` replayed
+  the other verb's card and the move silently did not happen. The receipt now
+  records its `verb` and a crossing refuses
+  (`errors.IdempotencyKeyVerbMismatch`) — see
+  [06 §One idempotency key names ONE verb](06-office-and-board.md#one-idempotency-key-names-one-verb).
 
 ## Open rows
 

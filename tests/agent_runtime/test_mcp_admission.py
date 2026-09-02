@@ -1268,3 +1268,176 @@ def test_enabled_toolsets_none_is_passed_through_untouched():
     kwargs = _run_capturing(enabled_toolsets=None)
 
     assert kwargs["enabled_toolsets"] is None
+
+
+# ── "no MCP client" is not "the server failed" ──────────────────────────────
+
+
+def test_a_runtime_with_no_mcp_client_says_so_instead_of_blaming_the_server(
+    qa_profile, monkeypatch
+):
+    """The receipt names the RUNTIME, not the healthy half.
+
+    hermes declares the MCP client as an optional pip extra. With it absent,
+    ``tools/mcp_tool`` sets ``_MCP_AVAILABLE = False`` and
+    ``register_mcp_servers`` returns ``[]`` in ~0 ms without reaching a single
+    server — and every such turn used to be reported as
+    ``mcp_not_registered_on_lane``, whose hint says "check the server is running
+    and its command resolves". Those are the two things that are already fine.
+    A standing "the chat lane admits nothing" gap was planned against for weeks
+    on the strength of that sentence (root cause 2026-08-26).
+    """
+
+    from agent_runtime.mcp_admission import MCP_SDK_UNAVAILABLE
+    from tools import mcp_tool
+
+    monkeypatch.setattr(mcp_tool, "_MCP_AVAILABLE", False)
+
+    outcome = admit_mcp_servers(_admission(qa_profile))
+
+    assert outcome.admitted == ()
+    assert [row["code"] for row in outcome.denial_rows()] == [MCP_SDK_UNAVAILABLE]
+    row = outcome.denial_rows()[0]
+    # It names the cure — the extra, by the name pyproject spells it — and the
+    # fact that the cure does not reach a running process.
+    assert "hermes-agent[mcp]" in row["fix_hint"]
+    assert "RESTART" in row["fix_hint"]
+    # And it does not send the operator at the two healthy halves.
+    assert "check the server is running" not in row["fix_hint"].lower()
+    assert MCP_NOT_REGISTERED_ON_LANE not in row["code"]
+
+
+def test_the_server_denial_survives_when_the_sdk_is_present(
+    qa_profile, monkeypatch
+):
+    """The new code must not swallow the one it narrows.
+
+    With the client installed, a server that really did not connect is still
+    ``mcp_not_registered_on_lane`` — the hint about the command resolving is
+    correct in exactly this case.
+    """
+
+    from tools import mcp_tool
+
+    monkeypatch.setattr(mcp_tool, "_MCP_AVAILABLE", True)
+    monkeypatch.setattr(
+        "tools.mcp_tool.register_mcp_servers", lambda _servers: [], raising=False
+    )
+
+    outcome = admit_mcp_servers(_admission(qa_profile))
+
+    assert outcome.admitted == ()
+    assert [row["code"] for row in outcome.denial_rows()] == [MCP_NOT_REGISTERED_ON_LANE]
+
+
+def test_an_injected_registrar_is_never_labelled_by_the_sdk_flag(
+    qa_profile, monkeypatch
+):
+    """A supplied ``register`` is not the SDK's registrar.
+
+    Same rule ``transport_paths`` already follows: a fact read off the live
+    transport is not a fact about a path that was never taken. Labelling a
+    test's or a preview's own registrar with ``mcp_sdk_unavailable`` would be a
+    confident claim about code that did not run.
+    """
+
+    from tools import mcp_tool
+
+    monkeypatch.setattr(mcp_tool, "_MCP_AVAILABLE", False)
+
+    outcome = admit_mcp_servers(_admission(qa_profile), register=lambda _servers: [])
+
+    assert [row["code"] for row in outcome.denial_rows()] == [MCP_NOT_REGISTERED_ON_LANE]
+
+
+def test_the_sdk_probe_reads_the_flag_and_fails_pessimistically(monkeypatch):
+    from agent_runtime.mcp_admission import mcp_sdk_available
+    from tools import mcp_tool
+
+    monkeypatch.setattr(mcp_tool, "_MCP_AVAILABLE", True)
+    assert mcp_sdk_available() is True
+
+    monkeypatch.setattr(mcp_tool, "_MCP_AVAILABLE", False)
+    assert mcp_sdk_available() is False
+
+
+# ── the spawn discriminator is the SET, never the clock ─────────────────────
+
+
+def test_an_instant_registration_that_landed_is_still_admitted(
+    qa_profile, fake_registered_launcher_qa
+):
+    """The elapsed time decides nothing — the fast direction.
+
+    ``TRANSPORT_COLD``'s recorded 3,197 ms was one 60-tool stdio server, and it
+    was read for a while as "~3,200 ms means a real cold spawn". ``launcher_qa``
+    is a compiled Dart exe whose real cold spawn measured ~100 ms, so that rule
+    reads a genuine spawn as a fast failure — it sent a whole investigation down
+    the wrong branch. A registration that LANDED is admitted no matter how fast
+    it was.
+    """
+
+    outcome = admit_mcp_servers(
+        _admission(qa_profile), register=lambda _servers: ["mcp_launcher_qa_t"]
+    )
+
+    assert outcome.admitted == ("launcher_qa",)
+    assert outcome.denial_rows() == []
+
+
+def test_a_slow_registration_that_landed_nothing_is_still_denied(qa_profile):
+    """The elapsed time decides nothing — the slow direction.
+
+    No ``fake_registered_launcher_qa``: the registry stays empty, so the SET
+    says nothing was admitted however long the registrar took. (The fixture is
+    process-global once installed, which is why this cannot share a test with
+    the case above.)
+    """
+
+    def _slow(_servers):
+        time.sleep(0.2)
+        return []
+
+    outcome = admit_mcp_servers(
+        _admission(qa_profile), register=_slow, timeout_seconds=30
+    )
+
+    assert outcome.admitted == ()
+    assert [row["code"] for row in outcome.denial_rows()] == [MCP_NOT_REGISTERED_ON_LANE]
+
+
+def test_no_admission_code_branches_on_an_elapsed_millisecond_count():
+    """A grep-shaped fence for the rule the docstring now states.
+
+    ``duration_ms`` is RECORDED on the outcome and reported by
+    ``profile_runner``; it is never compared. If a comparison appears, the
+    ~3,200 ms rule of thumb has come back as code.
+    """
+
+    import ast
+    import pathlib
+
+    from agent_runtime import mcp_admission
+
+    source = pathlib.Path(mcp_admission.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Compare):
+            continue
+        names = {
+            child.id
+            for child in ast.walk(node)
+            if isinstance(child, ast.Name)
+        } | {
+            child.attr
+            for child in ast.walk(node)
+            if isinstance(child, ast.Attribute)
+        }
+        if names & {"duration_ms", "elapsed_ms", "started"}:
+            offenders.append(ast.unparse(node))
+
+    assert offenders == [], (
+        "an elapsed-time comparison appeared in mcp_admission.py; the honest "
+        f"spawn discriminator is the registered SET, never the clock: {offenders}"
+    )
