@@ -782,6 +782,43 @@ def with_hermes_node_path(env: dict[str, str] | None = None) -> dict[str, str]:
     return merged
 
 
+#: Memoised ``--version`` verdicts from :func:`agent_browser_runnable`, keyed by
+#: the exact path string that was probed.
+#:
+#: The probe is a SUBPROCESS with a 10 s timeout, and the resolvers above it all
+#: retry the same candidates: ``doctor`` walks four of them, ``browser_tool``
+#: walks five, ``dep_ensure`` and ``nous_subscription`` walk three each. Measured
+#: 2026-08-31: one pytest run executed the operator's live
+#: ``.hermes/profiles/alice/node/agent-browser.CMD --version`` **56 times**,
+#: because ``doctor.HERMES_HOME`` is bound at module import and a hermetic test
+#: home cannot redirect it. The gateway fence exempts that spawn — a
+#: ``--version`` call starts nothing — which makes the calls legal, not free.
+#:
+#: What is cached is only the SPAWN. The cheap gates (``None``/empty, the npx
+#: two-token form, ``exists``/``access``) are re-evaluated on every call, so a
+#: path that is deleted, or that becomes a dangling symlink, still answers
+#: ``False`` immediately and freshly — the #48521 case this function exists for
+#: never reaches the cache at all.
+#:
+#: A verdict CAN go stale in one direction: a candidate that exists and exits
+#: non-zero, repaired in place inside the same process. That is the installer's
+#: path, and it is why :func:`reset_agent_browser_probe_cache` exists and why
+#: ``dep_ensure.ensure_dependency`` calls it after a successful install, before
+#: it re-checks.
+_AGENT_BROWSER_PROBE_CACHE: dict[str, bool] = {}
+
+
+def reset_agent_browser_probe_cache() -> None:
+    """Forget every memoised ``--version`` verdict.
+
+    Call this after anything that could change whether an agent-browser
+    candidate RUNS — an install, a heal, a node-tree repair. Clearing is always
+    safe: the next probe simply pays the subprocess again.
+    """
+
+    _AGENT_BROWSER_PROBE_CACHE.clear()
+
+
 def agent_browser_runnable(path: str | None) -> bool:
     """Return True only when *path* is an agent-browser CLI that actually runs.
 
@@ -803,6 +840,12 @@ def agent_browser_runnable(path: str | None) -> bool:
       * The ``"npx agent-browser"`` fallback form (contains a space, not a real
         file) → True; npx resolves and validates the package at run time, so
         there is nothing to stat here.
+
+    The ``--version`` SPAWN is memoised per path for the life of the process
+    (see :data:`_AGENT_BROWSER_PROBE_CACHE`); every cheap gate above it still
+    runs on every call, so the verdict this returns is unchanged. Call
+    :func:`reset_agent_browser_probe_cache` after installing or repairing a
+    candidate in-process.
     """
     if not path:
         return False
@@ -813,6 +856,9 @@ def agent_browser_runnable(path: str | None) -> bool:
     # never even spawn a subprocess for the broken-link case.
     if not os.path.exists(path) or not os.access(path, os.X_OK):
         return False
+    cached = _AGENT_BROWSER_PROBE_CACHE.get(path)
+    if cached is not None:
+        return cached
     import subprocess
 
     try:
@@ -826,8 +872,14 @@ def agent_browser_runnable(path: str | None) -> bool:
             creationflags=windows_hide_flags(),
         )
     except (OSError, subprocess.TimeoutExpired, ValueError):
+        # Cached like any other verdict, and this is the arm that pays most for
+        # not being: a hung binary costs the full 10 s timeout EVERY time a
+        # resolver walks past it.
+        _AGENT_BROWSER_PROBE_CACHE[path] = False
         return False
-    return result.returncode == 0
+    verdict = result.returncode == 0
+    _AGENT_BROWSER_PROBE_CACHE[path] = verdict
+    return verdict
 
 
 def _legacy_path_has_content(path: Path) -> bool:

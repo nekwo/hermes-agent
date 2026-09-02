@@ -158,13 +158,19 @@ def _cmd_persona_list(args) -> int:
     store = PersonaInstanceStore()
     personas = ensure_persisted_personas(cfg)
     personas_by_id = {str(getattr(persona, "id", "") or ""): persona for persona in personas}
-    # S56: the roster is unconditional; the two `enterprise_worker_sessions`
-    # gates went with the block. The reply keys stay so operator tooling that
-    # reads them keeps parsing, and now report the truth.
+    # S56 made the roster unconditional; the two `enterprise_worker_sessions`
+    # gates went with the block, and S56 kept `feature_enabled` /
+    # `assignment_store_enabled` on the reply "so operator tooling that reads
+    # them keeps parsing". A 2026-08-31 trace found no such reader: not in this
+    # repo (the only other `feature_enabled` is skills-sync's, a different key
+    # on a different reply) and not in the launcher, whose `lib/` never names
+    # either and whose CLI contract dump covers argv only. Both were therefore
+    # constants that no one read and that could only ever say `true` — the same
+    # always-true shape AX2 took off the snapshot wire in `s76` — so they are
+    # gone from this reply too. The keys a caller actually branches on (`ok`,
+    # the rows) are untouched.
     instances = store.ensure_for_personas(personas)
     data = {
-        "feature_enabled": True,
-        "assignment_store_enabled": True,
         "persona_instances": [
             persona_instance_summary(instance, personas_by_id.get(str(getattr(instance, "persona_id", "") or "")))
             for instance in instances
@@ -189,13 +195,12 @@ def _cmd_persona_show(args) -> int:
     try:
         instance = store.get(instance_id)
     except Exception:
-        data = {"ok": False, "feature_enabled": True, "error": f"persona instance not found: {value}"}
+        data = {"ok": False, "error": f"persona instance not found: {value}"}
         print(emit_json(data) if args.json else data["error"])
         return 2
     assignments = PersonaAssignmentStore().list_for_persona(instance.persona_id)
     data = {
         "ok": True,
-        "feature_enabled": True,
         "persona_instance": persona_instance_summary(instance, personas_by_id.get(str(getattr(instance, "persona_id", "") or ""))),
         "assignments": [persona_assignment_summary(item) for item in assignments[-25:]],
     }
@@ -370,8 +375,6 @@ def _cmd_persona_assignments(args) -> int:
         assignments = store.list_all()
     data = {
         "ok": True,
-        "feature_enabled": True,
-        "assignment_store_enabled": True,
         "assignments": [persona_assignment_summary(item) for item in assignments],
     }
     if args.json:

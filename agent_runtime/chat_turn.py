@@ -79,6 +79,21 @@ CHAT_STEER_METHOD = "runtime.chat.steer"
 #: server derives from the connection rather than reading off params — see
 #: :func:`normalize_peer_chat_execute`.
 PEER_CHAT_EXECUTE_METHOD = "peer.agent_chat.execute"
+#: THE chat-turn vocabulary: every method whose handler ends in
+#: :func:`perform_chat_turn`. Minted with the peer verb at gateway Stage 7 and
+#: readerless until 2026-09-01, when it was given the reader the three constants
+#: above already claim to serve ("spelled once so the manifest test, the serve
+#: wiring and the handlers cannot drift").
+#:
+#: That claim was only half true. The manifest and tier assertions were written
+#: PER VERB and in two different files — ``test_serve_rpc_chat_turn`` names the
+#: first two, ``test_peer_chat_execute`` names the third — so a fourth chat verb
+#: would have joined the lane with no manifest assertion at all and nothing
+#: would have said so. ``test_serve_rpc_chat_turn`` now enumerates FROM this
+#: tuple, against a live ``serve_rpc.manifest()``, so the day a verb is added
+#: here it is advertised and tiered or the suite reds.
+#:
+#: Add a verb HERE when you add its ``@method`` registration, not after.
 CHAT_TURN_METHODS: tuple[str, ...] = (
     CHAT_MESSAGE_METHOD,
     CHAT_STEER_METHOD,

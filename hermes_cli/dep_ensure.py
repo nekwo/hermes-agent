@@ -186,6 +186,14 @@ def ensure_dependency(
     if result.returncode != 0:
         return False
 
+    # The install script may have just repaired a candidate this process
+    # already probed and found non-runnable. ``agent_browser_runnable``
+    # memoises its ``--version`` spawn per path, so the re-check below would
+    # otherwise replay a verdict taken BEFORE the install.
+    from hermes_constants import reset_agent_browser_probe_cache
+
+    reset_agent_browser_probe_cache()
+
     if check:
         return check()
     return True
