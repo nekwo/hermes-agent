@@ -40,6 +40,7 @@ from agent_runtime.call_authorization import (
 from agent_runtime.chat_turn import (
     CHAT_MESSAGE_METHOD,
     CHAT_STEER_METHOD,
+    CHAT_TURN_METHODS,
     ChatTurnSpawnRefused,
     normalize_chat_message,
     normalize_chat_steer,
@@ -72,6 +73,45 @@ def test_the_manifest_grew_by_two_names_and_the_integer_did_not_move():
     assert serve_rpc.RPC_CONTRACT_VERSION == 1
     # Shape unchanged: the ops ride BESIDE this, they do not join it.
     assert set(manifest) == {"contract", "methods", "tiers"}
+
+
+def test_every_verb_in_the_chat_turn_vocabulary_is_advertised_and_console_tiered():
+    """The reader ``CHAT_TURN_METHODS`` did not have until 2026-09-01.
+
+    Everything else in this section names its verbs by hand, and the peer verb
+    is asserted in a different file entirely. So the two facts that must hold
+    for ANY method whose handler ends in ``perform_chat_turn`` — it is in the
+    manifest, and it is ``console`` — were pinned three times, once per verb,
+    by whoever remembered. A fourth verb added tomorrow inherits nothing from
+    that.
+
+    This enumerates from the tuple instead, and asks the RUNTIME rather than
+    the source: ``serve_rpc.manifest()`` is built by the ``@method`` registry at
+    import, so a verb spelled into the tuple and never registered fails here,
+    and so does one registered at a tier below console. The membership
+    assertion is the direction that matters — a source walk would answer a
+    question about spelling.
+
+    The reverse direction is deliberately NOT asserted. The manifest carries
+    many methods that are not chat turns; what this owns is that the chat-turn
+    vocabulary is a SUBSET of what the server advertises, at the right tier.
+    """
+
+    manifest = serve_rpc.manifest()
+
+    # The tuple is the vocabulary, so an empty or truncated one must not pass
+    # vacuously: it is the thing under test, not the harness.
+    assert len(CHAT_TURN_METHODS) >= 3
+    assert len(set(CHAT_TURN_METHODS)) == len(CHAT_TURN_METHODS)
+    assert CHAT_MESSAGE_METHOD in CHAT_TURN_METHODS
+    assert CHAT_STEER_METHOD in CHAT_TURN_METHODS
+
+    for verb in CHAT_TURN_METHODS:
+        assert verb in manifest["methods"], f"{verb} runs chat turns but is not advertised"
+        assert serve_rpc.method_tier(verb) == TIER_CONSOLE, (
+            f"{verb} runs an agent with tools; a tier below console is a door "
+            "around console"
+        )
 
 
 def test_both_chat_verbs_declare_console_and_a_read_device_is_refused():
