@@ -30,6 +30,41 @@ Headline walls: serial `tests/agent_runtime` 21:27 → **16:39**, serial
 lane (agent_runtime+hermes_cli+cli+state) **17:36, 0 failed, twice**.
 Full verification detail: field notes §§8–14.
 
+**R3 EXECUTED — the operator's own call, stamped 2026-09-01 (append-only;
+nothing above is rewritten).** The operator said *“set it parallel by
+default”* — the human hand R3's condition reserved, and the ruling was taken
+THROUGH that condition rather than around it. Two findings, both verifications
+rather than changes:
+
+1. **The gate was already satisfied, and by the runs this ledger already
+   carries.** R3's condition is parity + repo-integrity twice from a worktree;
+   Stage 3's row is exactly that — **12,492 passed / 0 failed in 18:16** and
+   **12,494 passed / 0 failed in 17:36**, both at 8 workers, both from a
+   throwaway worktree, with `git worktree list` / branch refs / reflog showing
+   only other sessions' additive landings and no ref reset, no `main` move, no
+   stray `%TEMP%\hermes-agent-wt` registration (field notes §14). **No suite
+   was re-run for this stamp**: a third pass adds no evidence the condition
+   asks for, and the full lane carries the updater tests that
+   `git branch -f main origin/main` while other sessions hold live worktrees.
+2. **The flip needed NO code change, because no entry point defaults to
+   serial.** `scripts/run_tests.sh` — the canonical runner AGENTS.md mandates
+   — has no serial branch to flip: it `exec`s `scripts/run_tests_parallel.py`
+   unconditionally, and has since long before this plan. What “default”
+   resolves to at runtime was re-checked on this box the same day: with no
+   `-j`/`--jobs` and no `HERMES_TEST_WORKERS`,
+   `_adaptive_default_jobs(os.cpu_count()=16)` returns **8** against the
+   `_DEFAULT_MAX_WORKERS = 8` cap — the blessed count, reached by default and
+   not by a flag. The documentation half is `dcbb5114cd` (AGENTS.md §Testing).
+   Serial stays reachable and stays documented as the exception: plain
+   `python -m pytest <file>` for single-file debugging, and the
+   `tests/integration` / `tests/e2e` / `tests/docker` lanes the runner
+   deliberately skips.
+
+Standing caveat, unchanged by this stamp: the ruled default's proven SCOPE is
+the 4-directory lane (agent_runtime + hermes_cli + cli + state), while the
+runner default-discovers the whole `tests` tree — the residual under
+§Follow-ups, rowed in the launcher's Mission Control queue.
+
 **Question this answers** (operator, 2026-09-01): *why is the suite slow on
 this machine — is it hangs?* — **No. There are no happy-path hangs** (§4: every
 ≥10 s sleep literal is a kill-target child or a "never responds" thread stub;
