@@ -135,7 +135,7 @@ what the fixture mirror below enforces.
 
 | receipt (grep this) | emitter | consumer |
 |---|---|---|
-| `snapshot_build_core role=… caller=… generation=… build_ms=… offset=… sections_top=… pid=…` | `agent_runtime/snapshot.py:403-411` (fn `:373`, call site `:687`) | operator grep (`role=led` is the build count); `tests/agent_runtime/test_snapshot_build_logging.py:758` pins the prefix |
+| `snapshot_build_core role=… caller=… generation=… build_ms=… offset=… sections_top=… pid=…` | `agent_runtime/snapshot.py:398-408` (fn `:369`, call site `:683`) | operator grep (`role=led` is the build count); `tests/agent_runtime/test_snapshot_build_logging.py:758` pins the prefix |
 | `snapshot_build reason=… waited_ms=… elapsed_ms=… build_ms=… role=… caller=… generation=… offset=… events=…` (+`sections_top=`, +`core_source=`, then `pid=` last) | `agent_runtime/stream.py:135-173` | operator grep; a launcher in the field still parses `elapsed_ms` (`stream.py:100-101`); `tests/agent_runtime/test_stream_build_timing_log.py` |
 | `snapshot_agents_readiness walk_ms=… tool_visibility_ms=… pid=…` | const `snapshot.py:432-434`, emitted `:449-454` | joins `snapshot_build_core` on `pid`; pinned by regex at `tests/agent_runtime/test_agents_readiness_attribution.py:51` |
 | `stream_attach op=… purpose=… … pid=…` | `agent_runtime/stream.py:212-218` | boot-investigation join (third `pid=`-bearing family) |
@@ -150,7 +150,7 @@ what the fixture mirror below enforces.
 | turn-record `phases` block (schema v3) | `agent_runtime/mission_chat_phases.py`; the key lands via `_safe_journal_metadata` (`mission_chat_turns.py:428`, `:487`) → `safe_turn_phases` (`:1230`) | `tool/mission_chat_latency_audit.dart` |
 | `[MissionChatTiming]` / `[MissionChatOutcome]` / `[MissionDropTiming]` | launcher — see the launcher section below | `tool/mission_chat_latency_audit.dart`; drop line read by eye |
 | `[MissionAgentCreate] lane=… gesture=… correlation=… …` and `[MissionOfficeWrite] <ws> retire lane: …` | launcher — see the launcher section below | the placement verb's two lanes, read by eye; the ADOPT line is also read by `mission_office_placement_instance_key_test.dart` |
-| `prompt_observability` rows + `trace_events` | `agent_runtime/prompt_observability.py:108`, persisted `:1198-1233` | `harness prompt-context show --context-id` (`hermes_cli/harness.py:1935`) and the slimmed `chat.final` echo |
+| `prompt_observability` rows + `trace_events` | `agent_runtime/prompt_observability.py:108`, persisted `:1198-1233` | `harness prompt-context show --context-id` (`hermes_cli/harness.py:835-841`) and the slimmed `chat.final` echo |
 
 ### The snapshot build family
 
@@ -353,7 +353,7 @@ keeps the newest 2 rows per `(persona_instance_id, session_id)` lane and ARCHIVE
 the rest, never deletes (`:1185-1187`); an absent catalog is honest absence,
 never a fake empty list (`:1217-1220`). Two consumers: the live `chat.final`
 echo carries a slimmed projection (`slim_chat_final_observability`,
-`persona_commands.py:3522`); evicted rows are
+`persona_commands.py:4495`); evicted rows are
 fetched by `harness prompt-context show --context-id <id> [--json]`
 (`hermes_cli/harness.py:831-841`, handler `:2967-2999`) — read-only, honest
 `not_found` on absence. `trace_events` are the turn's tool-call trace, passed at
@@ -581,9 +581,9 @@ not by trusting the audit's own status.**
 | finding | then | now |
 |---|---|---|
 | `serve_rpc.py` baseline `or 0` — an unreadable event log became watermark 0, killing the sink's baseline gate and re-opening the resync↔restart loop | `baseline_offset = int(...) or 0` | typed absence: `baseline_offset = event_offset_of(watermark)` then an explicit `is None` arm — `agent_runtime/serve_rpc.py:822-823` |
-| empty `patches` shipped as a `patch` frame — the client advanced its watermark having folded nothing | coverable ⇒ promoted | promotion now also requires `batch_carries_patch_rows(batch)`; the honest answer for a pair-less batch is the full core — `agent_runtime/stream.py:808-819`, argued at `:424-452` |
+| empty `patches` shipped as a `patch` frame — the client advanced its watermark having folded nothing | coverable ⇒ promoted | promotion now also requires `batch_carries_patch_rows(batch)`; the honest answer for a pair-less batch is the full core — `agent_runtime/stream.py:808-819`, argued at `:554-581` |
 | `office_surface` could never satisfy the office scope gate, so every folder-only patch frame was dropped with no patch and no resync | `entity == OFFICE_ACTOR_ENTITY` and a slash-prefixed id | one predicate: `office_patch_scope(patch) == workspace_id` — `agent_runtime/serve_office_subscriptions.py:486` |
-| `_usage_lane_detected` — a credential fault DELETED the lane from the Limits panel, and an empty envelope rendered as a positive claim that no provider is signed in | `except Exception: return False` | three outcomes, not two: true / false / **raise**, with the raise caught per provider and the lane emitted `unavailable` naming the exception class — `hermes_cli/harness.py:3704-3721`, `:3952-3955` |
+| `_usage_lane_detected` — a credential fault DELETED the lane from the Limits panel, and an empty envelope rendered as a positive claim that no provider is signed in | `except Exception: return False` | three outcomes, not two: true / false / **raise**, with the raise caught per provider and the lane emitted `unavailable` naming the exception class — `hermes_cli/harness.py:5247-5265`, `:5485-5497` |
 
 The highest-value read-side swallow also closed: the actor-directory read
 skipped undecodable files and returned a shorter list that described itself as

@@ -139,6 +139,10 @@ cites (`upstream-prs/`), not a stubbed walk.
 
 ## Residuals, filed rather than fixed
 
+**RESOLVED 2026-09-02** — the first two are built; see the dated section at
+the end of this file for the census, the ceiling table, and the re-baseline.
+The rest stand.
+
 - **Bare `:N` continuation cites are invisible to the probe.** The canon writes
   `` `harness.py:1873`, `_cmd_characters_auto` at `:4776` `` constantly, and the
   second half carries no path. Eight were found and fixed only because they sat
@@ -167,3 +171,149 @@ cites (`upstream-prs/`), not a stubbed walk.
 - **Ambiguous bare names (35 live, 51 whole-root) are counted, never guessed.**
   Same refusal as the resolution report. Spelling a cite as `agent_runtime/
   models.py` instead of `models.py` moves it into scope for free.
+
+---
+
+# The residuals, answered — 2026-09-02
+
+The two residuals filed above are built, and the third measurement in that list
+(the whole-root `planned/` number) is unchanged and still out of scope. Cut from
+`origin/main` at `b9e7a27988`.
+
+## Residual 1: bare `:N` continuations are no longer invisible
+
+The census first, because it decides how much this was worth: the gated canon
+carries **299 bare `:N` cites against 326 path cites**. Nearly half of every line
+number in the canon was ungated, and the eight fixed in the 2026-09-01 sweep were
+found only because they shared a sentence with a cite the probe had already
+flagged.
+
+`CONTINUATION` reads the token (the whole backtick must BE `:N` / `:N-M`, a
+trailing `+` allowed exactly as `CITE` allows it), `continued_path` resolves the
+path it wears, and `ContinuedCite` presents it to `verdict` through the slice of
+the `re.Match` API that rule reads — so a continuation is judged by the same
+rule, with its OWN subject window, and lands in the same baseline key shape.
+
+**Two scope choices, both measured rather than argued.**
+
+*The sentence, not the paragraph.* Where both scopes resolve they never disagree
+— 56 of 56. The paragraph would resolve 76 more, and the ones read by hand it
+gets WRONG: 01's "`realm_sync.py`: pull applies the ledger
+(`_apply_skill_tombstones`, `:613`)" would inherit *store.py* from a cite two
+sentences up, and 01's `_mission_chat_user_message` pair would inherit
+*models.py*. A wrong path is a fabricated finding; a refusal is only a missed
+one, and this canon already counts its refusals rather than guessing.
+
+*A path MENTION, not a path cite.* 03 writes "`hermes_cli/harness.py:1693`,
+parsed by `agent_runtime/patch_coverage.py::parse_fold_entities_option`,
+`:404`". The `::` form carries no line, so a rule reading only `CITE` skips it
+and hands `:404` to *harness.py* — a fabricated finding produced by the very
+feature meant to catch real ones. This was caught by reading the first run's
+output, not by a test, which is the argument for reading a new gate's findings
+before believing its count.
+
+56 → 78 continuations resolved on that change. 221 are still refused for having
+no path mention in their sentence; the cheapest fix is on the writing side (name
+the file in the sentence), and widening to the paragraph is NOT the answer, for
+the reason measured above.
+
+## Residual 2: the occurrence ceiling, and the number the corpus picked
+
+`MAX_SUBJECT_OCCURRENCES = 20`. A subject occurring more than that many times,
+whole-word, in the cited file is dropped — it answers "is this file about that",
+never "is this LINE". Dropping can only make a cite UNCHECKED or FAILED, so the
+rule cannot turn a red cite green; that direction is pinned by test.
+
+**The sweep.** Over the gated canon, with continuations on, at each candidate:
+
+| ceiling | checked | adjacent | in-symbol | FAILED | unchecked (no subject) | pass→FAILED vs off | pass→unchecked | FAILED→unchecked |
+|---|---|---|---|---|---|---|---|---|
+| 8 | 287 | 152 | 9 | 126 | 74 | 46 | 14 | 8 |
+| 12 | 295 | 164 | 8 | 123 | 66 | 39 | 10 | 4 |
+| 16 | 298 | 173 | 8 | 117 | 63 | 33 | 7 | 4 |
+| **20** | **300** | **179** | **8** | **113** | **61** | **28** | **6** | **3** |
+| 40 | 304 | 193 | 8 | 103 | 57 | 16 | 4 | 1 |
+| off | 309 | 215 | 6 | 88 | 52 | — | — | — |
+
+(The plain ceiling, before the defined-symbol exemption below.)
+
+**What the table does NOT decide, and what does.** Every candidate flips the
+measured coincidence at 07's `persona_commands.py:3522`, so "does it catch 3522"
+chooses nothing. What chooses is the cites each end gets wrong, read one by one:
+
+- **40 is too loose.** 01's `harness.py:616` — cited for `realm sync revert`,
+  and the line is the `resolve` parser — and 01's `hermes_cli/harness.py:1343` —
+  cited for `install-harness-skills`, and the line is a `--max-seconds` argument
+  — are real rot, and at 40 both keep passing on `realm` / `sync` / `install`.
+- **12 and 8 are too tight.** They refuse `board_id` in `board_tool.py` (13-20
+  occurrences), whose cite lands exactly on `_resolve_board_target`, and report
+  a correct cite as rot.
+
+20 is the only candidate that catches every confirmed rot and invents no
+finding. 16 was swept because it sits inside the same gap; 20 is the top of it,
+and a ceiling belongs at the loose end of its safe range.
+
+**The exemption, which the reading forced.** A plain ceiling at 20 still refused
+`store_root` in `paths.py` and reported `paths.py:8` — which IS `def
+store_root()` — as rot. A name the file DEFINES pins a line by construction
+however often it is then called, so `Target.defines` exempts `def`/`class` names
+from the ceiling, on the same AST the `in-symbol` verdict already rests on.
+Without it the rule invents findings in order to stop inventing findings.
+`StoreDriftItem` (01's `realm_sync.py:1315`) and `store_root` are the two it
+saves; `board_id` is not a def and is saved by the 20 instead.
+
+## The re-baseline
+
+64 waived → **91**: 29 added, 2 stale deleted, and 17 cites re-anchored in the
+canon rather than waived. Lane A green, exit 0.
+
+Re-anchored (symbol unmoved, number refreshed):
+
+| doc | was | now | the symbol |
+|---|---|---|---|
+| 01 | `:613` | `:712` | `_apply_skill_tombstones` |
+| 01 | `:898` | `:1048` | `_skill_artifacts` |
+| 01 | `harness.py:616` | `:624-631` | the `revert` parser |
+| 01 | `harness.py:1343` | `:1663` | the `install-harness-skills` parser |
+| 03 | `:841` | `:1102` | `stream_frames` |
+| 03 | `:404` | `:480` | `parse_fold_entities_option` |
+| 03, 04 | `:1954` | `:3039` | `_room_wants_stale_first` |
+| 04 | `:5119` | `:5120` | `_await_bytecode_sweep_winner` |
+| 04 | `:707`, `:733`, `:782` | `:919`, `:945`, `:1003` | `demote_core_reuse`'s three uses |
+| 04 | `serve.py:289` | `:327` | `OPS_STDIO_ONLY` |
+| 05 | `:6409`, `:6863`, `:2734` | `:6416`, `:6870`, `:3409` | the chat-model override |
+| 07 | `snapshot.py:403-411` (fn `:373`, call `:687`) | `:398-408` (fn `:369`, call `:683`) | `_log_snapshot_build_core` |
+| 07 | `harness.py:1935` | `:835-841` | the `prompt-context show` parser |
+| 07 | `persona_commands.py:3522` | `:4495` | `slim_chat_final_observability` |
+| 07 | `:424-452` | `:554-581` | `batch_carries_patch_rows`'s argument |
+| 07 | `harness.py:3704-3721`, `:3952-3955` | `:5247-5265`, `:5485-5497` | `_usage_lane_detected` |
+| ops | `harness.py:1168` | `:1215` | the `retire`/`delete` alias parser |
+
+Two of those were found by the continuation rule and could not have been found
+without it (01's `:613` and `:898`), and two more by the ceiling (01's
+`harness.py:616` and `:1343`). That is the wave paying for itself in the same
+commit that builds it.
+
+The 29 added waivers carry five classes, and the split is the honest half of the
+number: **9 are read-and-confirmed CORRECT cites the probe cannot vouch for** —
+`BACKTICK-SPAN NOISE`, where the "identifiers" are English words a mis-paired
+backtick span produced, and `RECEIPT-KEY SUBJECT`, where the sentence's subjects
+are JSON keys that live at the emitter rather than at the constant. 7 are
+`TABLE ROW`, 9 `PAIRED CITE`, 3 `CONTRACT/DOCSTRING RANGE`, 1 has no symbol left
+after the ceiling. Only the last class is unambiguously the docs' problem; the
+rest are rows for a better rule, said plainly for the same reason the first
+sweep said it.
+
+The largest of those rules is now visible and was not before: `BACKTICKED` pairs
+backticks greedily across prose, so a line with an odd count hands `subjects()`
+a span of ordinary English — `advanced`, `also`, `having`, `honest`, `could`,
+`absent`. That is not a frequency problem and the ceiling cannot answer it.
+
+## Residuals still open
+
+- **221 continuations resolve to no path** because their sentence names no file.
+  Many are table rows and bullet lists whose file is named in the row above.
+- **`BACKTICKED` mis-pairs across prose**, above — the single largest source of
+  junk subjects.
+- **`--exclude planned/` still hides these field notes' own rot**, by the 2026-09-01
+  ruling. The whole-root walk remains one command away.

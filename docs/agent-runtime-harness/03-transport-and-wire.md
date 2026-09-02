@@ -462,7 +462,7 @@ the rule rather than about names. Cross-install media is an open row.
 
 ## 3. The mission-control stream
 
-`agent_runtime/stream.py::stream_frames` (`:841`) is the single producer body.
+`agent_runtime/stream.py::stream_frames` (`:1102`) is the single producer body.
 It yields exactly one `hydrate`, then tails the event log from that frame's
 `watermark.event_offset` (`_resume_offset`, `:305`) emitting `patch`, full-core
 `delta`, and `heartbeat` frames. **An unknown resume position is not byte 0**:
@@ -552,7 +552,7 @@ core-section table, and a `patch` for an entity it cannot fold is strictly WORSE
 than the `delta` it replaced — the consumer pays the patch and then a whole core
 anyway. So it declares: `hermes harness stream --fold-entities a,b`
 (`hermes_cli/harness.py:1693`, parsed by
-`agent_runtime/patch_coverage.py::parse_fold_entities_option`, `:404`)
+`agent_runtime/patch_coverage.py::parse_fold_entities_option`, `:480`)
 or `{"op":"subscribe","lane":"stream","fold_entities":[…]}` (`:2623-2631`).
 Rules, all in `agent_runtime/patch_coverage.py`:
 
@@ -626,7 +626,7 @@ never raises — an instrument must not be why a subscribe fails.
 
 **Who paints the boot's one stale core is a property of the ROOM**, so
 `stream_frames(wants_stale_first=…)` is stated by the caller —
-`serve.py::_room_wants_stale_first` (`:1954`) reads the hub's two subscriber
+`serve.py::_room_wants_stale_first` (`:3039`) reads the hub's two subscriber
 tables at producer-build time, `_cmd_stream` (`runtime_commands.py:611`) states
 `True`, default `False`. It cannot be re-derived inside the producer: the
 subscriber attaching FIRST at boot is the RPC office lane, whose sink discards

@@ -293,7 +293,7 @@ only door. `_board_store_drift` / `_office_store_drift` now build per-item rows
 the four existing counts are DERIVED from those rows, so the count shapes the
 launcher parses are byte-identical and `store_drift.items` is additive beside
 them. `hermes harness realm sync revert <realm> [--item FAMILY:CONTAINER:KEY]…
-[--all] [--dry-run]` (`harness.py:616`, `agent_runtime/realm_revert.py`)
+[--all] [--dry-run]` (`harness.py:624-631`, `agent_runtime/realm_revert.py`)
 realigns those exact rows to the last-pulled upstream already on disk:
 `--yes`-gated like publish/resolve because it is destructive of LOCAL state,
 archive-never-delete so it is recoverable, and **local-only** — no git, no
@@ -420,7 +420,7 @@ advisory `board` digest row of `HUD_FIELDS`.
 `docs/agent-runtime-harness/harness-skills/` is **installed source and stays
 live in place**. It is the repo-side origin
 (`skill_install.harness_skill_source_root`, `agent_runtime/skill_install.py:34`);
-`harness install-harness-skills` (`hermes_cli/harness.py:1343`) copies each
+`harness install-harness-skills` (`hermes_cli/harness.py:1663`) copies each
 package to the single shared canonical root, `get_shared_skills_dir()` —
 root-relative, not per-profile, so every persona references one copy and realm
 sync publishes it (`skill_install.py:38-43`). Never edit the installed copy.
@@ -501,9 +501,9 @@ tombstone covers top-level `foo` AND categorized `<cat>/foo`
 receipt's `archived` array is the truth and its scalar fields are only the
 single-package convenience. Enforcement is entirely client-side, because a
 GitHub-App push has no pre-receive hook, and it closes at three points in
-`realm_sync.py`: pull applies the ledger (`_apply_skill_tombstones`, `:613`,
+`realm_sync.py`: pull applies the ledger (`_apply_skill_tombstones`, `:712`,
 archive-never-delete), pull's auto-adopt skips tombstoned slugs, and publish
-filters them out of the artifact set (`_skill_artifacts`, `:898`). Canonical
+filters them out of the artifact set (`_skill_artifacts`, `:1048`). Canonical
 ids refuse with `skill_installer_owned` — every pull reinstalls the canonical
 set, so a tombstone would fight the installer forever (the R-B ruling); a
 malformed slug refuses with `skill_slug_invalid`; both are exit-code family 2.

@@ -92,6 +92,27 @@ CITE = re.compile(
     r":(\d+)(?:\s*-\s*(\d+))?"
 )
 
+#: The canon's OTHER cite shape, and the one the first cut of this probe could
+#: not see: a bare backticked ``:N`` that continues the path of the cite before
+#: it — ``\`harness.py:1873\`, \`_cmd_characters_auto\` at \`:4776\```. The gated
+#: canon carries 298 of these against 326 path cites, so leaving them invisible
+#: left nearly half the line numbers in the docs ungated; the eight found in the
+#: 2026-09-01 sweep were found only because they shared a sentence with a cite
+#: the probe had already flagged. The whole backtick must BE the token (a
+#: trailing ``+`` allowed, as ``CITE`` allows it) so that prose which merely
+#: opens with a colon cannot be read as a line number.
+CONTINUATION = re.compile(r"`:(\d+)(?:\s*-\s*(\d+))?\+?`")
+
+#: What a continuation inherits FROM: any mention of a Python path, with or
+#: without a line number of its own. Not ``CITE``, and the difference is
+#: measured — 03's sentence reads "hermes_cli/harness.py:1693, parsed by
+#: agent_runtime/patch_coverage.py::parse_fold_entities_option, :404", where
+#: the ``::`` form carries no line and ``CITE`` skips it, so a rule
+#: reading only ``CITE`` hands ``:404`` to *harness.py* and invents a finding.
+#: The nearest preceding FILE the prose names is what a reader inherits, which
+#: is what this matches.
+PATH_MENTION = re.compile(r"(?<![\w/.\-])((?:[\w.\-]+/)*[\w.\-]+\.py)(?![\w])")
+
 #: Identifiers the prose offers as the subject. Read from backticked spans only
 #: — bare prose words are English, and "store" in a sentence is not a claim
 #: about a symbol. Dotted and called forms split on the same pass:
@@ -119,6 +140,35 @@ BOUNDARY = re.compile(
 #: Four characters, because `id` / `ok` / `db` in a backtick match half of every
 #: Python file and would turn the probe green by coincidence.
 MIN_IDENT = 4
+
+#: The other half of that guard, and the one length alone does not give: an
+#: identifier can be long and still be everywhere. A backticked `show`, `final`
+#: or `chat` occurs all over a 5000-line module, so one of them lands in almost
+#: any +/-3 window and passes a cite that is nowhere near its real subject —
+#: measured on `07-observability.md|persona_commands.py:3522`, which passed on
+#: those three while its actual subject `slim_chat_final_observability` sits at
+#: 127/4222/4495. A word occurring more than this many times, whole-word, in the
+#: CITED file is not a locator, so it is dropped from the subjects; a cite left
+#: with no subject is UNCHECKED, never a pass. Dropping can only ever make a
+#: cite unchecked or failed, so this rule cannot turn a red cite green.
+#:
+#: **20, and the corpus picked it, not taste.** Swept over the gated canon at 8 /
+#: 12 / 16 / 20 / 40 (the table is in the field notes). Every candidate flips the
+#: measured coincidence, so "does it catch 3522" does not choose between them.
+#: What chooses is the pair of cites each end gets WRONG, read one by one:
+#:
+#: * **40 is too loose.** `01|harness.py:616` (cited for `realm sync revert`,
+#:   actually the `resolve` parser) and `01|hermes_cli/harness.py:1343` (cited
+#:   for `install-harness-skills`, actually a `--max-seconds` argument) are real
+#:   rot, and at 40 both keep passing on `realm` / `sync` / `install`.
+#: * **12 and 8 are too tight.** They refuse `board_id` in `board_tool.py` (13-20
+#:   occurrences), whose cite is exactly right, and report it as rot.
+#:
+#: 20 is the only candidate that catches every confirmed rot and invents no
+#: finding. 16 is inside the same gap and was swept for that reason; 20 is the
+#: top of it, and a ceiling should sit at the loose end of its safe range so the
+#: rule refuses as few real subjects as it can.
+MAX_SUBJECT_OCCURRENCES = 20
 
 #: Words backticked constantly in this canon that are not the subject of
 #: anything. Kept short and explicit: a long stoplist is a place to hide a
@@ -198,12 +248,12 @@ def paragraph_bounds(lines: list[str], index: int) -> tuple[int, int]:
     return start, end
 
 
-def subject_window(paragraph: str, offset: int, length: int) -> str:
-    """The slice of ``paragraph`` whose backticks may speak for this cite.
+def sentence_bounds(paragraph: str, offset: int, length: int) -> tuple[int, int]:
+    """``(low, high)`` character bounds of the sentence a cite sits in.
 
-    The sentence, not the paragraph: a paragraph that changes subject mid-way
-    would otherwise lend one sentence's symbols to another's cite, and the probe
-    would report rot that is only the writer moving on.
+    Split out from :func:`subject_window` because a bare ``:N`` continuation
+    needs the same bounds to find the path cite it continues, and two scopes
+    that could drift apart would be two rules.
     """
 
     low = max(0, offset - LOOKBACK)
@@ -213,6 +263,18 @@ def subject_window(paragraph: str, offset: int, length: int) -> str:
     after = BOUNDARY.search(paragraph, offset + length, high)
     if after is not None:
         high = after.start()
+    return low, high
+
+
+def subject_window(paragraph: str, offset: int, length: int) -> str:
+    """The slice of ``paragraph`` whose backticks may speak for this cite.
+
+    The sentence, not the paragraph: a paragraph that changes subject mid-way
+    would otherwise lend one sentence's symbols to another's cite, and the probe
+    would report rot that is only the writer moving on.
+    """
+
+    low, high = sentence_bounds(paragraph, offset, length)
     return paragraph[low:high]
 
 
@@ -265,12 +327,53 @@ class Target:
         except SyntaxError:
             self.tree = None
         self._present: dict[str, bool] = {}
+        self._counts: dict[str, int] = {}
+        self._defined: set[str] | None = None
         self._enclosing: dict[int, set[str]] = {}
 
     def has(self, ident: str) -> bool:
         if ident not in self._present:
             self._present[ident] = _whole_word(ident, self.text)
         return self._present[ident]
+
+    def defines(self, ident: str) -> bool:
+        """Does this file ``def``/``class`` ``ident`` anywhere?
+
+        The exemption from ``MAX_SUBJECT_OCCURRENCES``: a name the file DEFINES
+        pins a line by construction, however often it is then used. Without it
+        the ceiling refuses the file's own workhorses — `store_root` in
+        `paths.py`, `StoreDriftItem` in `realm_sync.py` — and reports cites that
+        land exactly on their ``def`` as rot, which is inventing a finding to
+        stop inventing a finding. It rests on the same AST the ``in-symbol``
+        verdict already rests on.
+        """
+
+        if self._defined is None:
+            names: set[str] = set()
+            if self.tree is not None:
+                for node in ast.walk(self.tree):
+                    if isinstance(
+                        node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+                    ):
+                        names.add(node.name)
+            self._defined = names
+        return ident in self._defined
+
+    def occurrences(self, ident: str) -> int:
+        """Whole-word occurrences of ``ident`` in the whole file.
+
+        The measure behind ``MAX_SUBJECT_OCCURRENCES``: presence answers "could
+        this sentence be about that file", frequency answers "could this word
+        possibly point at one line of it".
+        """
+
+        if ident not in self._counts:
+            self._counts[ident] = len(
+                re.findall(
+                    rf"(?<![A-Za-z0-9_]){re.escape(ident)}(?![A-Za-z0-9_])", self.text
+                )
+            )
+        return self._counts[ident]
 
     def window(self, first: int, last: int, radius: int) -> str:
         low = max(1, first - radius)
@@ -301,6 +404,7 @@ def verdict(
     match: "re.Match[str]",
     target: Target,
     radius: int,
+    ceiling: int = MAX_SUBJECT_OCCURRENCES,
 ) -> tuple[str, list[str]]:
     """Judge ONE cite, and say which identifiers the judgement rests on.
 
@@ -324,7 +428,16 @@ def verdict(
     # The cite's own path token is not a subject: `models` matching inside
     # `models.py` would pass every cite in the canon.
     named -= subjects(f"`{token}`")
-    present = sorted(ident for ident in named if target.has(ident))
+    # Presence is not enough: a word that occurs everywhere in the file lands in
+    # some +/-3 window by coincidence and would pass the cite on nothing. It is
+    # dropped from the subjects rather than counted against the cite, so an
+    # over-common word can only ever make a cite UNCHECKED, never FAILED.
+    present = sorted(
+        ident
+        for ident in named
+        if target.has(ident)
+        and (target.occurrences(ident) <= ceiling or target.defines(ident))
+    )
     if not present:
         return NO_SUBJECT, []
 
@@ -334,6 +447,58 @@ def verdict(
     if (target.enclosing(first) | target.enclosing(last)) & set(present):
         return IN_SYMBOL, present
     return FAILED, present
+
+
+class ContinuedCite:
+    """A bare ``:N`` wearing the path of the cite it continues.
+
+    Presented with the slice of the ``re.Match`` API :func:`verdict` reads, so
+    a continuation is judged by exactly the same rule as the cite it continues
+    — including its own subject window, which is taken at the continuation's
+    own position and not at the path cite's.
+    """
+
+    def __init__(self, token: str, match: "re.Match[str]") -> None:
+        self.token = token
+        self.match = match
+
+    def group(self, index: int) -> str | None:
+        if index == 0:
+            return self.match.group(0)
+        if index == 1:
+            return self.token
+        return self.match.group(index - 1)
+
+    def start(self) -> int:
+        return self.match.start()
+
+
+def continued_path(
+    doc_lines: list[str], index: int, match: "re.Match[str]"
+) -> str | None:
+    """The path token a bare ``:N`` inherits, or ``None`` when it has none.
+
+    The nearest preceding path MENTION in the same SENTENCE. Two choices, both
+    measured rather than assumed:
+
+    * The **sentence**, not the paragraph. Where both scopes resolve they never
+      disagree (56 of 56 over the gated canon), and the 76 the paragraph would
+      additionally resolve include ones it gets WRONG — "realm_sync.py: pull
+      applies the ledger (_apply_skill_tombstones, :613)" would inherit
+      *store.py* from a cite two sentences up. A wrong path is a
+      fabricated finding; a refusal is only a missed one.
+    * A path **mention**, not a path cite: see ``PATH_MENTION``.
+
+    A continuation with no path mention before it in its sentence is counted,
+    never guessed.
+    """
+
+    start, end = paragraph_bounds(doc_lines, index)
+    paragraph = "\n".join(doc_lines[start : end + 1])
+    offset = sum(len(doc_lines[i]) + 1 for i in range(start, index)) + match.start()
+    low, _ = sentence_bounds(paragraph, offset, len(match.group(0)))
+    preceding = list(PATH_MENTION.finditer(paragraph, low, offset))
+    return preceding[-1].group(1) if preceding else None
 
 
 class Finding:
@@ -358,17 +523,74 @@ class Walk:
     def __init__(self) -> None:
         self.docs = 0
         self.cites_seen = 0
+        self.continuations_seen = 0
         self.checked = 0
         self.adjacent = 0
         self.in_symbol = 0
         self.failures: list[Finding] = []
         self.unchecked_no_subject = 0
         self.unresolved = 0
+        self.continuations_unresolved = 0
         self.past_end = 0
         self.duplicate_keys: list[str] = []
 
 
-def walk(root: str, exclude: list[str], radius: int) -> Walk:
+def _judge_one(
+    result: Walk,
+    doc: str,
+    lines: list[str],
+    index: int,
+    match,
+    paths: set[str],
+    by_name: dict[str, list[str]],
+    targets: dict[str, Target],
+    seen_keys: set[str],
+    radius: int,
+    ceiling: int,
+) -> None:
+    """Resolve one cite's file, judge it, and record the outcome.
+
+    Shared by the two cite shapes so that a bare ``:N`` cannot end up on a
+    softer rule than the path cite it continues — the only difference between
+    them is how the path was arrived at.
+    """
+
+    token, first_raw, last_raw = match.group(1), match.group(2), match.group(3)
+    resolved = resolve_path(token, paths, by_name)
+    if resolved is None:
+        result.unresolved += 1
+        return
+    if resolved not in targets:
+        targets[resolved] = Target(resolved)
+    target = targets[resolved]
+    outcome, present = verdict(lines, index, match, target, radius, ceiling)
+    if outcome == PAST_END:
+        result.past_end += 1
+        return
+    if outcome == NO_SUBJECT:
+        result.unchecked_no_subject += 1
+        return
+    result.checked += 1
+    if outcome == ADJACENT:
+        result.adjacent += 1
+        return
+    if outcome == IN_SYMBOL:
+        result.in_symbol += 1
+        return
+    cite = f"{token}:{first_raw}" + (f"-{last_raw}" if last_raw else "")
+    key = f"{doc}|{token}:{first_raw}"
+    if key in seen_keys:
+        result.duplicate_keys.append(key)
+    seen_keys.add(key)
+    result.failures.append(Finding(key, doc, index + 1, cite, present, resolved))
+
+
+def walk(
+    root: str,
+    exclude: list[str],
+    radius: int,
+    ceiling: int = MAX_SUBJECT_OCCURRENCES,
+) -> Walk:
     paths, by_name = _tracked()
     docs = sorted(
         path
@@ -386,36 +608,20 @@ def walk(root: str, exclude: list[str], radius: int) -> Walk:
         lines = (REPO_ROOT / doc).read_bytes().decode("utf-8", "replace").splitlines()
         for index, line in enumerate(lines):
             for match in CITE.finditer(line):
-                token, first_raw, last_raw = match.group(1), match.group(2), match.group(3)
                 result.cites_seen += 1
-                resolved = resolve_path(token, paths, by_name)
-                if resolved is None:
-                    result.unresolved += 1
+                _judge_one(
+                    result, doc, lines, index, match, paths, by_name, targets,
+                    seen_keys, radius, ceiling,
+                )
+            for match in CONTINUATION.finditer(line):
+                result.continuations_seen += 1
+                token = continued_path(lines, index, match)
+                if token is None:
+                    result.continuations_unresolved += 1
                     continue
-                if resolved not in targets:
-                    targets[resolved] = Target(resolved)
-                target = targets[resolved]
-                outcome, present = verdict(lines, index, match, target, radius)
-                if outcome == PAST_END:
-                    result.past_end += 1
-                    continue
-                if outcome == NO_SUBJECT:
-                    result.unchecked_no_subject += 1
-                    continue
-                result.checked += 1
-                if outcome == ADJACENT:
-                    result.adjacent += 1
-                    continue
-                if outcome == IN_SYMBOL:
-                    result.in_symbol += 1
-                    continue
-                cite = f"{token}:{first_raw}" + (f"-{last_raw}" if last_raw else "")
-                key = f"{doc}|{token}:{first_raw}"
-                if key in seen_keys:
-                    result.duplicate_keys.append(key)
-                seen_keys.add(key)
-                result.failures.append(
-                    Finding(key, doc, index + 1, cite, present, resolved)
+                _judge_one(
+                    result, doc, lines, index, ContinuedCite(token, match), paths,
+                    by_name, targets, seen_keys, radius, ceiling,
                 )
     return result
 
@@ -433,11 +639,14 @@ def run(
     radius: int,
     baseline_path: Path,
     write_baseline: bool,
+    ceiling: int = MAX_SUBJECT_OCCURRENCES,
 ) -> int:
-    result = walk(root, exclude, radius)
+    result = walk(root, exclude, radius, ceiling)
 
     print(f"cite-adjacency probe (+/-{radius} lines) over {result.docs} docs under {root}/")
     print(f"  python cites seen         : {result.cites_seen}")
+    print(f"  bare :N continuations     : {result.continuations_seen}")
+    print(f"  subject occurrence ceiling: {ceiling}")
     print(f"  machine-checkable         : {result.checked}")
     print(f"    passed, adjacent        : {result.adjacent}")
     print(f"    passed, inside symbol   : {result.in_symbol}")
@@ -445,6 +654,7 @@ def run(
     print(f"  unchecked (no subject)    : {result.unchecked_no_subject}")
     print(f"  unchecked (path ambiguous): {result.unresolved}")
     print(f"  unchecked (line past EOF) : {result.past_end}")
+    print(f"  unchecked (:N, no path)   : {result.continuations_unresolved}")
     if result.duplicate_keys:
         print(
             f"  NOTE: {len(result.duplicate_keys)} duplicate baseline key(s) "
@@ -514,6 +724,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", default=DEFAULT_ROOT)
     parser.add_argument("--window", type=int, default=3)
+    parser.add_argument(
+        "--occurrence-ceiling",
+        type=int,
+        default=MAX_SUBJECT_OCCURRENCES,
+        help="an identifier occurring more than this many times in the cited "
+        "file is not a locator and is dropped from the subjects. Raising it is "
+        "how a cite passes on a word like `show`; see MAX_SUBJECT_OCCURRENCES.",
+    )
     parser.add_argument("--baseline", default=DEFAULT_BASELINE)
     parser.add_argument(
         "--write-baseline",
@@ -530,6 +748,7 @@ def main(argv: list[str] | None = None) -> int:
             args.window,
             REPO_ROOT / args.baseline,
             args.write_baseline,
+            args.occurrence_ceiling,
         )
     except RuntimeError as error:
         print(f"cite-adjacency probe could not run: {error}", file=sys.stderr)

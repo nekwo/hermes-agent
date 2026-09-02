@@ -18,7 +18,13 @@ after every candidate.
   because a 40 was hand-passed. Splitting the diff, the cap's other cure, is
   not available to a landing whose whole point is that the stages land together.
 - **CI** passes `--max-candidates 20` in the `mutation-claims` job, with the
-  reason for each raise written in the comment beside the call site.
+  reason for each raise written in the comment beside the call site. That one
+  line is now PINNED: `tests/scripts/test_mutation_cap_matches_workflow.py`
+  parses the number out of the workflow's own step and out of this bullet and
+  fails when they disagree. It hand-types neither, so raising CI's cap reds
+  the pin until this line is updated — which is the mechanism the paragraph
+  above was asking for after being wrong twice. Keep the bullet's shape
+  (**CI**, the job id, and the flag on one line); that is what the test reads.
 
 The doctrine behind all three is one rule: the enforced number is readable
 beside the command that enforces it, with the reason in the command line rather

@@ -45,7 +45,7 @@ inside the thing measured (`_boot_clock.py:29-31`).
 Two segments have had work aimed at them, and both landed. **`bytecode_sweep_ms`** — two hermes
 processes booting against one checkout is a REAL concurrency, so the sweep is claimed with
 `O_EXCL` and the loser waits rather than overwriting the winner's claim
-(`hermes_cli/main.py:5079-5097`, `:5119`, stale-lock break `:5039`;
+(`hermes_cli/main.py:5079-5097`, `:5120`, stale-lock break `:5039`;
 `tests/hermes_cli/test_bytecode_sweep_lock.py`). **`harness_parser_ms`** — the
 `hermes_cli.harness` import used to drag a full plugin-discovery walk in through
 `tool_visibility` → `model_tools`; it is now function-local (`tool_visibility.py:85`), guarded
@@ -277,7 +277,7 @@ event at all, and an offset key cannot see them at any price.
 A mismatch does not mean a blank canvas: `take_stale_first_core` serves the last persisted core
 **labeled stale** while the build runs (`core_cache.py:3817`, `stream.py:1274`). The one-shot
 belongs to the SUBSCRIBER, not the process — derived at producer-build time by
-`serve.py::_room_wants_stale_first` (`:1954`) — because a boot starts two `stream_frames`
+`serve.py::_room_wants_stale_first` (`:3039`) — because a boot starts two `stream_frames`
 generators and the module-global version handed the allowance to whichever raced first. A
 forced-refresh one-shot is refused the stale core outright.
 
@@ -408,8 +408,8 @@ residue above, exactly as predicted. That re-take stays owed
 
 ## Stage 10 — demote builds and same-offset core reuse
 
-`agent_runtime/demote_core_reuse.py`, consumed only by `agent_runtime/stream.py` (`:707`,
-`:733`, `:782`). The waste: three `snapshot_build reason=demote role=led` lines at the SAME
+`agent_runtime/demote_core_reuse.py`, consumed only by `agent_runtime/stream.py` (`:919`,
+`:945`, `:1003`). The waste: three `snapshot_build reason=demote role=led` lines at the SAME
 offset 89961793 on 2026-08-22 10:50, `build_ms` 3017 / 3210 / 2388, identical fingerprint.
 `build_snapshot`'s coalescer cannot merge them — it is deliberately strict, and a caller
 arriving mid-build waits for the NEXT build rather than riding the in-flight one. That rule is
@@ -463,7 +463,7 @@ TIMEOUT the pool is joined with `wait=False` and the process leaves via `os._exi
 `concurrent.futures` registers an atexit hook that JOINS every worker thread, so an interpreter
 carrying a stuck worker hangs on the way out. Deadline `DEFAULT_DRAIN_DEADLINE_SECONDS = 30.0`.
 
-`shutdown` is stdio-only (`OPS_STDIO_ONLY`, `serve.py:289`). There is no shutdown hook for the
+`shutdown` is stdio-only (`OPS_STDIO_ONLY`, `serve.py:327`). There is no shutdown hook for the
 snapshot prewarm, the persona-prewarm worker, or the delivery drain: all three are daemons,
 deliberately, because a process on its way down must not wait on a cache fill.
 

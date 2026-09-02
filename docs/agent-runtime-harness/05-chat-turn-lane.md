@@ -116,8 +116,8 @@ chat-session override  >  instance override  >  persona default  >  config defau
 ```
 
 The chat-session override persists under `mission_control_chat_model_override`
-(`persona_commands.py:6409`, `agent_runtime/persona_chat_history.py:234`) via
-`_resolve_chat_model_override` (`:6863`), called at `:2734`. Its scope is literally
+(`persona_commands.py:6416`, `agent_runtime/persona_chat_history.py:234`) via
+`_resolve_chat_model_override` (`:6870`), called at `:3409`. Its scope is literally
 `mission_control_chat_session` (`:5788`, inside `_chat_effective_model_payload`) — per-thread,
 not per-instance. Values validate against
 `^[A-Za-z0-9_.:/@+-]{1,200}$` (`:5285`); a violation is a typed refusal, a persist failure is

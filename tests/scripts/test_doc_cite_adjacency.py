@@ -286,3 +286,186 @@ def test_the_window_widens_with_the_radius(radius):
     outcome, _ = judge(doc, 0, radius=radius)
 
     assert outcome == (probe.ADJACENT if radius >= 3 else probe.FAILED)
+
+
+# --------------------------------------------------------------------------
+# Bare `:N` continuation cites (2026-09-02). The canon writes `harness.py:1873`
+# and then `at :4776`, and the first cut of this probe could not see the second
+# half at all: 299 of them against 326 path cites in the gated canon.
+# --------------------------------------------------------------------------
+
+
+def judge_continuation(doc: str, line_index: int, radius: int = 3):
+    """Resolve the bare `:N` on a line and run the SAME rule over it."""
+
+    lines = doc.splitlines()
+    match = probe.CONTINUATION.search(lines[line_index])
+    assert match is not None, f"no `:N` on line {line_index}: {lines[line_index]!r}"
+    token = probe.continued_path(lines, line_index, match)
+    if token is None:
+        return None, []
+    return probe.verdict(
+        lines, line_index, probe.ContinuedCite(token, match), target(), radius
+    )
+
+
+def test_a_bare_continuation_inherits_the_preceding_path_and_is_judged_the_same():
+    """The rowed residual: `fake_module.py:5`, `publish_chat_head_home` at `:5`
+    carries no path on its second half, and the line is still wrong."""
+
+    doc = (
+        "The pointer is written in one place (`fake_module.py:5`,\n"
+        "`publish_chat_head_home` at `:5`), and nowhere else.\n"
+    )
+
+    outcome, present = judge_continuation(doc, 1)
+
+    assert outcome == probe.FAILED
+    assert present == ["publish_chat_head_home"]
+
+
+def test_the_same_continuation_at_the_right_line_passes():
+    """ANTI-VACUITY: same sentence, same inherited path, only the number moves."""
+
+    doc = (
+        "The pointer is written in one place (`fake_module.py:5`,\n"
+        "`publish_chat_head_home` at `:12`), and nowhere else.\n"
+    )
+
+    outcome, present = judge_continuation(doc, 1)
+
+    assert outcome == probe.ADJACENT
+    assert present == ["publish_chat_head_home"]
+
+
+def test_a_continuation_inherits_a_path_that_carries_no_line_number():
+    """Measured on 03-transport-and-wire.md, and the reason the rule reads a path
+    MENTION rather than a path CITE.
+
+    The canon writes ``module.py::symbol`` with no line, and a rule that only
+    looked at ``CITE`` skipped it and handed the `:N` to the file cited BEFORE
+    it — a fabricated finding, not a missed one.
+    """
+
+    doc = (
+        "Parsed by `other/module.py:900`, then by\n"
+        "`agent_runtime/fake_module.py::publish_chat_head_home`, `:12`.\n"
+    )
+    lines = doc.splitlines()
+    match = probe.CONTINUATION.search(lines[1])
+
+    assert probe.continued_path(lines, 1, match) == "agent_runtime/fake_module.py"
+
+
+def test_a_continuation_with_no_path_in_its_sentence_is_refused_not_guessed():
+    """Same refusal as an ambiguous bare name. Lending a continuation the path
+    of a cite from a neighbouring sentence is how a probe invents a finding —
+    measured: 76 of the canon's continuations would inherit a paragraph-scoped
+    path, and the ones checked by hand inherit the WRONG file.
+    """
+
+    doc = (
+        "`agent_runtime/fake_module.py:12` is the writer. A different claim\n"
+        "entirely mentions `publish_chat_head_home` at `:5`.\n"
+    )
+    lines = doc.splitlines()
+    match = probe.CONTINUATION.search(lines[1])
+
+    assert probe.continued_path(lines, 1, match) is None
+
+
+def test_the_gate_counts_continuations_it_could_not_resolve():
+    """An unresolved continuation must be VISIBLE, not silently dropped: this is
+    the number that says how much of the canon the rule still cannot read."""
+
+    result = probe.walk(LIVE_ROOT, LIVE_EXCLUDE, 3)
+
+    assert result.continuations_seen > 0
+    assert result.continuations_unresolved > 0
+    assert result.continuations_unresolved < result.continuations_seen
+
+
+# --------------------------------------------------------------------------
+# The subject occurrence ceiling (2026-09-02).
+# --------------------------------------------------------------------------
+
+
+COMMON = (
+    '"""A module in which `pointer` is everywhere and pins nothing."""\n\n\n'
+    + "".join(f"pointer_{n} = 'pointer'\n" for n in range(30))
+    + "\n\ndef publish_chat_head_home(store_root):\n    return store_root\n"
+    # Called as well as defined, so the exemption below is doing real work: a
+    # name used exactly once would clear any ceiling on its own.
+    + "\n\nHEAD = publish_chat_head_home\n"
+)
+
+
+def common_target() -> probe.Target:
+    return probe.Target("agent_runtime/common_module.py", COMMON)
+
+
+def test_an_identifier_that_occurs_everywhere_is_not_a_locator():
+    """The measured coincidence, reproduced.
+
+    `07-observability.md|persona_commands.py:3522` passed because its sentence
+    also backticks `show`, `final` and `chat`, one of which landed in the +/-3
+    window — while its real subject sits at 127/4222/4495. A word the file uses
+    everywhere answers "is this file about that" and never "is this LINE".
+    """
+
+    doc = "The `pointer` table (`common_module.py:8`) is built once.\n"
+    lines = doc.splitlines()
+    match = probe.CITE.search(lines[0])
+
+    outcome, present = probe.verdict(lines, 0, match, common_target(), 3)
+
+    assert outcome == probe.NO_SUBJECT
+    assert present == []
+
+
+def test_the_same_identifier_under_the_ceiling_is_still_a_locator():
+    """ANTI-VACUITY: the ceiling is a frequency rule, not a word ban. Raise it
+    past the identifier's own count and the very same cite passes."""
+
+    doc = "The `pointer` table (`common_module.py:8`) is built once.\n"
+    lines = doc.splitlines()
+    match = probe.CITE.search(lines[0])
+
+    outcome, present = probe.verdict(lines, 0, match, common_target(), 3, ceiling=100)
+
+    assert outcome == probe.ADJACENT
+    assert present == ["pointer"]
+
+
+def test_a_name_the_file_defines_is_exempt_from_the_ceiling():
+    """A ``def``/``class`` name pins a line by construction, however often the
+    file then calls it. Without the exemption the ceiling refuses a file's own
+    workhorses — `store_root` in `paths.py`, `StoreDriftItem` in `realm_sync.py`
+    — and reports cites landing exactly on their ``def`` as rot, which is
+    inventing a finding in order to stop inventing findings.
+    """
+
+    doc = "`publish_chat_head_home` (`common_module.py:34`) writes it.\n"
+    lines = doc.splitlines()
+    match = probe.CITE.search(lines[0])
+
+    outcome, present = probe.verdict(lines, 0, match, common_target(), 3, ceiling=1)
+
+    assert common_target().occurrences("publish_chat_head_home") > 1
+    assert outcome == probe.ADJACENT
+    assert present == ["publish_chat_head_home"]
+
+
+def test_the_ceiling_can_never_turn_a_red_cite_green():
+    """The direction that makes the rule safe: dropping a subject can only make
+    a cite FAILED or UNCHECKED, never ADJACENT. A gate whose new rule could
+    silence an existing failure would need its own audit; this one cannot."""
+
+    doc = "The `pointer` table (`common_module.py:8`) is built once.\n"
+    lines = doc.splitlines()
+    match = probe.CITE.search(lines[0])
+    loose, _ = probe.verdict(lines, 0, match, common_target(), 3, ceiling=100)
+    tight, _ = probe.verdict(lines, 0, match, common_target(), 3, ceiling=4)
+
+    assert loose == probe.ADJACENT
+    assert tight in (probe.NO_SUBJECT, probe.FAILED)
