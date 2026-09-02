@@ -93,6 +93,7 @@ __all__ = [
     "rearm_delivery",
     "record_completion",
     "record_dispatch",
+    "remote_media_completions",
     "release_delivery_claim",
     "restore_undelivered_dispatches",
     "running_dispatches",
@@ -317,6 +318,59 @@ def _text(value: Any, limit: int) -> str:
     return text[:limit]
 
 
+#: Bound on ONE completion's media map, and on the two strings each row carries.
+#: The map arrives from ANOTHER INSTALL, so it is not merely large-by-accident
+#: input, it is input a peer chooses — and this row is written into a database
+#: this install reads on every media index. The mint on the far side is already
+#: bounded (``media_handles.MAX_REPLY_ARTIFACTS``); this is the same bound
+#: enforced by the RECEIVER, because a bound only the sender applies is a bound.
+MEDIA_MAP_LIMIT = 16
+MEDIA_REFERENCE_LIMIT = 1024
+MEDIA_HANDLE_LIMIT = 128
+
+
+def _media_rows(media: Any) -> list[dict[str, Any]]:
+    """Normalise a completion's media map into the four keys the row stores.
+
+    Shape-checked and bounded HERE rather than trusted, because this is the
+    door between a peer's answer and this install's durable store. Anything that
+    is not a row of the right shape is dropped: a malformed entry is a picture
+    that will not resolve, and keeping it would only move the failure to the
+    fetch, where it reads as a server fault instead of as an absent handle.
+
+    Semantic validation — is that handle well formed, is that extension in the
+    image allowlist — is deliberately NOT here. ``media_handles`` owns those
+    rules and re-applies them every time it folds a stored row into a scope
+    (``remote_artifacts_from_completions``), so a store that learned them would
+    be a second copy of a policy, free to disagree with the first.
+    """
+
+    if not isinstance(media, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for entry in media:
+        if len(rows) >= MEDIA_MAP_LIMIT:
+            break
+        if not isinstance(entry, dict):
+            continue
+        reference = _text(entry.get("reference"), MEDIA_REFERENCE_LIMIT)
+        handle = _text(entry.get("handle"), MEDIA_HANDLE_LIMIT)
+        if not reference or not handle:
+            continue
+        size = entry.get("size_bytes")
+        rows.append(
+            {
+                "reference": reference,
+                "handle": handle,
+                "media_type": _text(entry.get("media_type"), 120),
+                "size_bytes": int(size)
+                if isinstance(size, int) and not isinstance(size, bool)
+                else 0,
+            }
+        )
+    return rows
+
+
 def _supervised_here() -> set[str]:
     """Dispatch ids a live supervisor in THIS process is still answering for.
 
@@ -536,6 +590,7 @@ def record_completion(
     total_tokens: Any = None,
     visibility: dict[str, Any] | None = None,
     remote: dict[str, Any] | None = None,
+    media: list[dict[str, Any]] | None = None,
     only_if_running: bool = False,
 ) -> bool:
     """Record the target turn's outcome and arm the row for delivery.
@@ -568,6 +623,21 @@ def record_completion(
     column because it is only knowable once the leg is finished, which is the
     line ``visibility`` already drew: the column beside it
     (``remote_install_id``) carries the half that is true at dispatch time.
+
+    ``media`` (Stage P4, ruling R-P3) is the ``reference → handle`` map the
+    TARGET install minted for its reply's ``MEDIA:`` lines. It rides the same
+    blob for the third time and for the same reason, plus one this field owns:
+    **the map must outlive the process that carried it.** The forged reply stays
+    in the sender's transcript after a restart, so the pictures it names have to
+    stay fetchable after a restart, and a map held only in the supervisor's
+    memory would make "can I open this image" depend on whether the serve has
+    been bounced since the dispatch landed.
+
+    It stays on the ROW and the ``dispatch.completed`` event carries only a
+    COUNT. That is the 4096-byte event payload cap respected by construction
+    rather than by hoping a map is small: sixteen entries of absolute Windows
+    paths plus 71-character handles is several kilobytes, and a store write
+    whose event was refused for size is a write no consumer would ever see.
     """
 
     settled = str(state or STATE_UNKNOWN)
@@ -585,6 +655,9 @@ def record_completion(
         result["visibility"] = dict(visibility)
     if isinstance(remote, dict) and remote:
         result["remote"] = dict(remote)
+    media_rows = _media_rows(media)
+    if media_rows:
+        result["media"] = media_rows
     guard = " AND state=?" if only_if_running else ""
     params: list[Any] = [
         settled,
@@ -654,6 +727,11 @@ def record_completion(
             # stays exactly the bytes it has always been.
             remote_install_id=(remote or {}).get("install_id") or None,
             remote_reason=(remote or {}).get("reason") or None,
+            # COUNT, never the map. See the ``media`` paragraph above: the
+            # payload cap is 4096 bytes and one map can exceed it, so what the
+            # event says is that pictures arrived and how many, and the row
+            # says which.
+            media_count=len(media_rows) or None,
         )
     _prune()
     return updated
@@ -1087,6 +1165,53 @@ def list_dispatches(
         "WHERE sender_session_id=? ORDER BY dispatched_at DESC LIMIT ?",
         (scope, bounded),
     )
+
+
+def remote_media_completions(*, limit: int = 128) -> list[dict[str, Any]]:
+    """Every stored cross-install completion that carried a media map.
+
+    Stage P4. The source ``media_handles.build_media_scope`` folds into the
+    REMOTE half of this install's media scope — and it is a DERIVATION from the
+    store that already knows the answer, never a registry, for exactly the
+    reason the local half is derived from the chat mirror: a second copy of "what
+    pictures exist" drifts, and drifts toward promising bytes nobody can produce.
+
+    Unscoped by sender, unlike :func:`list_dispatches`, and the asymmetry is
+    deliberate. That verb answers an AGENT asking about its own work, where a
+    missing caller identity is a reason to show less. This one answers the
+    install's own media scope, whose reachability rule is one layer out and
+    already stated: a console caller may read this install's chats, the forged
+    replies are in them, and the pictures those replies declare are therefore in
+    scope. Scoping by sender here would hide a picture from the operator looking
+    at the very message that declares it.
+
+    Newest first, so a truncating fold keeps what a client is most likely
+    rendering — ``build_media_scope``'s ordering rule, applied to the second
+    source.
+    """
+
+    bounded = max(1, min(int(limit or 128), 500))
+    rows = _query(
+        "WHERE remote_install_id != '' AND state IN (?, ?, ?) "
+        "ORDER BY completed_at DESC LIMIT ?",
+        (STATE_COMPLETED, STATE_ERROR, STATE_UNKNOWN, bounded),
+    )
+    completions: list[dict[str, Any]] = []
+    for row in rows:
+        result = row.get("result") or {}
+        if not isinstance(result, dict):
+            continue
+        media = result.get("media")
+        if not isinstance(media, list) or not media:
+            continue
+        completions.append(
+            {
+                "dispatch_id": row.get("dispatch_id"),
+                "peer_install_id": row.get("remote_install_id") or "",
+                "media": media,
+            }
+        )
+    return completions
 
 
 # --------------------------------------------------------------------------

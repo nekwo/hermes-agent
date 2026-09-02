@@ -150,10 +150,27 @@ CALLER_PEER = "peer"
 #: connection that somehow reached the dispatcher without a device stamp.
 CALLER_UNKNOWN = "unknown"
 
-#: **Exactly what a paired install may call on this one.** Two names, and the
+#: **Exactly what a paired install may call on this one.** Three names, and the
 #: shortness is still the design: Stage 6 proved an edge exists (``peer.ping``,
 #: which answers "are you there" and touches nothing), Stage 7 lets that edge
-#: carry ONE thing (``peer.agent_chat.execute``, a chat turn).
+#: carry ONE thing (``peer.agent_chat.execute``, a chat turn), and Stage P4 lets
+#: it carry the PICTURES that turn's own reply declared.
+#:
+#: **The third entry is Stage P4's widening (ruling R-P3) and this is its
+#: reason.** ``peer.media.get`` is read-only, it takes a ``sha256:<64 hex>``
+#: handle and nothing else, and its scope is this install's ordinary media scope
+#: — the artifacts declared by chats a caller of this install may already read.
+#: So it hands a paired install exactly what that install's own agent's reply
+#: already told it about: B ran the turn, B's reply named the picture, and this
+#: is B answering for the bytes behind a name B minted. Nothing new becomes
+#: reachable; what changes is that the pointer resolves.
+#:
+#: What it deliberately is NOT: a browse. There is no ``peer.media.index``, so a
+#: peer cannot enumerate this install's artifacts — it can only spend a handle
+#: it was given, and a guessed one is ``unknown_handle`` like any other. That
+#: asymmetry is the same one Stage 8 built the whole family on (the reference
+#: travels out, never in), applied one boundary further: a peer never learns a
+#: path and never learns what else exists.
 #:
 #: **The second entry is a deliberate widening and this comment is its reason.**
 #: Canon 06's remote-connector table draws the line in a sentence — *agents
@@ -180,7 +197,7 @@ CALLER_UNKNOWN = "unknown"
 #: whole registry against this set rather than naming those two, because a rule
 #: pinned by two literals stops being pinned the moment a third verb arrives.
 PEER_METHOD_ALLOWLIST: frozenset[str] = frozenset(
-    {"peer.ping", "peer.agent_chat.execute"}
+    {"peer.ping", "peer.agent_chat.execute", "peer.media.get"}
 )
 
 #: **Verbs whose authority is a KIND and not a strength** — the machine owner at

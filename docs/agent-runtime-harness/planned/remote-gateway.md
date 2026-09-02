@@ -1039,3 +1039,107 @@ registry test covers both verbs automatically because it asserts the RULE.
 6. **No Stage C screenshot of a remote picture rendering.** The launcher half is
    proven against a real serve at the connector and at the widget seam; a
    captured proof of a phone painting a desktop's screenshot is still owed.
+
+---
+
+## Stage P4 notes (hermes half) — landed 2026-09-01
+
+Cross-install media, consuming launcher ruling **R-P3**
+(`docs/mission_control/planned/remote-parity-and-two-machine-proof.md` §2).
+This closes Stage 8's honest gap 2 ("Cross-install media is not built.
+`PEER_METHOD_ALLOWLIST` untouched by design. An operator on install A cannot
+fetch an artifact from install B even through a chat B ran. Open row.").
+
+Full session record, including where §P4's spec disagreed with the code:
+[remote-gateway-p4-field-notes-2026-09-01.md](remote-gateway-p4-field-notes-2026-09-01.md).
+
+### What shipped, in the order it landed
+
+1. **The mint on B** — `media_handles.mint_reply_media`, stamped onto the
+   mission-chat payload by `persona_commands._stamp_reply_media` at all five
+   reply-carrying sites, **gated on `--requested-by peer:`**. Only the install
+   that holds the bytes can hash them, so only it can mint.
+2. **The carry** — `dispatch_store.record_completion(media=...)` puts the map on
+   the ROW (`result_json`, beside `visibility` and `remote`); the
+   `dispatch.completed` event carries `media_count` and never the map, because
+   the payload cap is 4096 bytes. `agent_chat_dispatch._run_remote_dispatch`
+   reads `payload["media"]` and passes it — the one line the spec was reaching
+   for when it named the wrong file for the mint.
+3. **The fold on A** — `dispatch_store.remote_media_completions` +
+   `media_handles.remote_artifacts_from_completions` turn stored maps into
+   `RemoteMediaArtifact` scope rows, re-validating every field (handle grammar,
+   absolute path, image extension, re-derived `media_type`) because the map was
+   written by another install.
+4. **The proxy** — `agent_runtime/media_proxy.py`: cache first, then one dial,
+   then the returned bytes verified against the handle before they are served or
+   cached. `runtime.media.get` grows the arm; the reply is shaped exactly like a
+   local one.
+5. **The keyhole** — `peer.media.get` registered `tier=console` and added to
+   `PEER_METHOD_ALLOWLIST` (the single named widening R-P3 authorised). It
+   resolves the LOCAL scope only, so the lane cannot chain.
+
+### Deviations from the plan, and the argument for each
+
+1. **The mint is in `persona_commands.py`, not `agent_chat_dispatch.py`.**
+   `_run_remote_dispatch` runs on A; A cannot hash B's files. The only code
+   that runs on B and holds the reply is B's mission-chat handler, and its
+   payload is the only B→A channel that does not require a second verb — which
+   R-P3's one-new-verb budget forbade. Field notes §1.
+2. **The mint is gated on the peer origin** rather than unconditional. A local
+   turn's `MEDIA:` path already resolves on the machine that renders it, so an
+   ungated mint would hash every local reply's images to write a field with no
+   reader.
+3. **`runtime.media.index` rows gained `"remote"` on BOTH kinds**, not just on
+   remote ones. `peer.ping`'s rule: a client must never read a fact out of a
+   key's absence. Launcher decoders ignore unknown keys, so it is additive
+   there; hermes' producer pin moved deliberately.
+4. **`peer.media.get` takes no `remote` half**, spelled as
+   `build_media_scope(remote_completions=())` rather than trusted to a later
+   check. That argument is the whole of the lane's acyclicity: no A→B→C, no
+   fan-out to bound, no way for two paired installs to bounce a fetch.
+
+### What the acceptance proves
+
+`tests/agent_runtime/test_gateway_peer_cross_install_media_e2e.py`, two real
+serve children, two roots, real TLS with a real pin, real HMAC:
+
+- a `console` device paired with A indexes and fetches a picture that exists
+  only on B's root, and the bytes are sha256-equal to B's file;
+- A's index names the remote row with `remote: true` and its peer, and claims
+  NO local path for it;
+- **B is then STOPPED and the same handle still opens** — the strongest
+  available form of "a second fetch costs zero peer dials", because it is B's
+  process being gone rather than a counter this test could have miscounted;
+- an UNCACHED remote handle, with B down, converges on
+  `peer_unreachable` naming the install;
+- a guessed digest is `unknown_handle` and a path-shaped handle is
+  `handle_invalid`, unchanged by the remote half existing;
+- a `read`-tier device is refused the whole family with `scope_denied`.
+
+The seams the wire cannot isolate — the mint's gate, the carry, the fold's
+re-validation, the proxy's verify-and-cache, the keyhole's local-only scope —
+are pinned in `tests/agent_runtime/test_cross_install_media.py` and the P4
+section of `tests/agent_runtime/test_serve_rpc_media.py`, and each load-bearing
+line carries a `p4-*` claim in `tests/mutation_claims.json`.
+
+### Honest gaps
+
+1. **Still one machine.** Stage 1's gap, inherited unchanged. Both listeners
+   bind loopback; O2 closes it.
+2. **The dispatch that produces the map is synthesised in the e2e** — a real
+   cross-install reply needs a provider turn on B. The supervisor's own write of
+   that row is pinned separately on the real payload shape. O2 step 4 joins the
+   halves.
+3. **The proxy dials inline on the serve reader loop**, so an unreachable peer
+   stalls it for up to 5 s before answering. Local handles unaffected; each
+   picture is proxied at most once ever. Moving the media family off the reader
+   loop is filed, not half-done.
+4. **A→B→C is refused rather than routed.** By design; recorded so it is a
+   decision and not an omission.
+5. **`peer.media.get`'s scope is B's whole local media scope**, not the
+   artifacts of the one dispatch that asked. That is the family's existing
+   reachability rule; narrowing it would need the per-dispatch registry Stage 8
+   refused on purpose.
+6. **Non-image and over-cap media still have no lane** (Stage 8 gap 4,
+   deliberately kept open by R-P4), and **no Stage C shot** exists of a remote
+   picture rendering (Stage 8 gap 6).

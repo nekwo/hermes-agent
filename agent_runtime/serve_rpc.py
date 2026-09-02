@@ -2738,15 +2738,19 @@ def _runtime_media_index(
         "contract": MEDIA_CONTRACT,
         "cap_bytes": media_handles.MAX_FETCH_BYTES,
         "truncated": scope.truncated,
-        "artifacts": [
-            artifact.describe()
-            for artifact in sorted(
-                scope.artifacts.values(), key=lambda item: item.reference
-            )
-        ],
+        # Both halves, one ordering. A remote row (Stage P4) describes itself as
+        # ``remote: true`` with the peer that holds it and NO path — because
+        # there is no file here to name, and a row that claimed one would send
+        # a client to a `File(path)` that cannot exist.
+        "artifacts": [artifact.describe() for artifact in scope.rows()],
         "scanned": {
             "logs": scope.logs_scanned,
             "declarations": scope.declarations_seen,
+            # Stage P4's second source, counted beside the first for the same
+            # reason ``truncated`` exists: a client that sees zero completions
+            # scanned knows the remote half was never derived, rather than
+            # inferring it from an absence of remote rows.
+            "completions": scope.completions_scanned,
         },
     }
     if correlation_id is not None:
@@ -2794,13 +2798,31 @@ def _runtime_media_get(
     "viewer" is an operator saying *look at my level*, not *stream me every
     proof screenshot on the machine*.
 
-    **A peer is refused, and the allowlist was NOT touched to arrange it.**
-    ``PEER_METHOD_ALLOWLIST`` admits nothing it was not edited to admit, so
-    registering this verb excluded it by construction — the property Stage 6's
-    iterated registry test asserts about the RULE rather than about two names.
-    Cross-install media is a real question and it is not this stage's: an
-    install's artifacts are its operator's, and a paired install is another
-    runtime whose agents drive it.
+    **A peer is still refused THIS verb, and Stage P4 did not change that.**
+    ``PEER_METHOD_ALLOWLIST`` admits nothing it was not edited to admit, and
+    what P4 edited it to admit is :func:`_peer_media_get` — a narrower verb that
+    resolves LOCAL rows only. A peer calling ``runtime.media.get`` would be
+    asking this install to proxy on its behalf, i.e. to spend a third install's
+    edge for a caller that never approved it; the arm below is for the DEVICE
+    lane, whose caller is an operator holding a screen on the install that owns
+    the peer edge.
+
+    **The proxy arm (Stage P4, ruling R-P3).** A handle that resolves to a
+    :class:`~agent_runtime.media_handles.RemoteMediaArtifact` — an artifact a
+    paired install minted for a cross-install reply forged into this install's
+    chat — is fetched through ``agent_runtime.media_proxy``: one dial, the bytes
+    verified against the handle, cached by content address, served in a reply
+    shaped exactly like a local one. The client cannot tell, and has nothing it
+    would do differently if it could.
+
+    **The honest cost of that arm, stated where the budget note already is.**
+    This lane answers inline on the reader loop, so a remote handle whose peer is
+    switched off stalls the loop for the proxy's dial timeout
+    (``media_proxy.PEER_DIAL_TIMEOUT_SECONDS``, deliberately a short 5 s for this
+    reason) before answering ``peer_unreachable``. A LOCAL handle is unaffected,
+    the cache means a picture is proxied at most once ever, and moving the media
+    family off the reader loop is a filed follow-up rather than something this
+    stage half-did.
     """
 
     from agent_runtime import media_handles
@@ -2847,7 +2869,17 @@ def _runtime_media_get(
             resolved.refusal_data(),
         )
 
-    data = media_handles.read_artifact_bytes(resolved)
+    if isinstance(resolved, media_handles.RemoteMediaArtifact):
+        # Stage P4's proxy arm. The client asked THIS install and this install
+        # answers — it simply has to spend a peer edge to do it. Nothing about
+        # the reply's shape changes, which is the point: a device cannot tell a
+        # proxied artifact from a local one and has nothing to do differently
+        # if it could.
+        from agent_runtime import media_proxy
+
+        data = media_proxy.fetch_remote_artifact(resolved)
+    else:
+        data = media_handles.read_artifact_bytes(resolved)
     if isinstance(data, media_handles.MediaRefusal):
         return err(
             rid,
@@ -3038,4 +3070,137 @@ def _peer_agent_chat_execute(
         return err(rid, refusal.code, refusal.message, refusal.data)
     result = dict(outcome.result or {})
     result["peer"] = peer_install_id
+    return ok(rid, result)
+
+
+# ── peer.media.get ───────────────────────────────────────────────────────────
+#
+# Stage P4 (ruling R-P3). The third verb on the peer surface and the second one
+# that hands anything over. It exists because of an asymmetry Stage 8 built and
+# Stage 7 then made visible: install B runs a turn, B's reply declares an image
+# on B's disk, and the reply is forged into A's chat — where the picture is a
+# path to a machine A cannot read. B minted the handle at reply time (it holds
+# the bytes; nobody else can hash them) and the map rode the completion home.
+# This verb is the other end: A spends that handle, B answers with the bytes.
+#
+# It is deliberately the ONLY new door, and it is a keyhole rather than a door:
+# no index, no reference, no path, no enumeration. A peer can spend a name it
+# was given and can learn nothing else — which is the reference-out/handle-in
+# asymmetry of the whole family, applied across an install boundary.
+
+
+@method("peer.media.get", tier=TIER_CONSOLE)
+def _peer_media_get(
+    rid: Any, params: dict, context: RpcContext | None = None
+) -> dict:
+    """Hand ONE local artifact's bytes to a PAIRED INSTALL, named by handle.
+
+    Params: ``handle`` (required, ``sha256:<64 hex>``); ``correlation_id``
+    (optional, echoed).
+
+    Result: :func:`_runtime_media_get`'s, plus ``peer`` — the install id this
+    server proved about the caller, echoed for the reason ``peer.ping`` echoes
+    it. Refusals are the same family and the same words, because a client that
+    had to learn a second refusal vocabulary for the same question would be
+    branching on which hop answered.
+
+    **It resolves the LOCAL half of the scope and nothing else, and that is what
+    makes the lane acyclic.** A handle this install holds only as a REMOTE row —
+    one IT learned from a third install — is ``unknown_handle`` here, not a
+    second proxy hop. So there is no chain to bound, no A→B→C fan-out to
+    reason about, and no way for two paired installs to bounce a fetch between
+    them. Where the bytes are is where the answer comes from.
+
+    **The tier says ``console`` and the tier is not what admits a peer** —
+    ``peer.agent_chat.execute``'s note, unchanged. What admits a peer is
+    ``call_authorization.PEER_METHOD_ALLOWLIST``, which Stage P4 widened by this
+    one name with its reason attached. What the ``console`` word says is that
+    handing over raw file bytes wants a level-mutation-strength credential:
+    ``read`` is deliberately open to a caller the transport could not place, and
+    that is precisely the caller who must not pull files off a disk.
+
+    **A non-peer is REFUSED rather than defaulted**, the same way
+    ``peer.agent_chat.execute`` refuses one — including a legitimate local
+    console client, which already has ``runtime.media.get`` and gets a strictly
+    larger scope from it.
+    """
+
+    from agent_runtime import media_handles
+
+    caller = None if context is None else context.caller
+    peer_install_id = None if caller is None else caller.peer_install_id
+    if not peer_install_id:
+        return err(
+            rid,
+            ERR_HANDLER_FAILED,
+            "peer.media.get answers a PAIRED INSTALL, and this connection "
+            "proved none; a local client fetches artifacts with "
+            "runtime.media.get",
+            {"reason": PEER_CHAT_NOT_A_PEER_REASON},
+        )
+
+    try:
+        correlation_id = _correlation_id_param(params)
+    except _CorrelationIdRefused as refused:
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            refused.message,
+            {"reason": CORRELATION_ID_INVALID_REASON},
+        )
+
+    raw = params.get("handle")
+    if raw is None:
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            "invalid params: handle is required",
+            {"reason": media_handles.REASON_HANDLE_INVALID},
+        )
+    # The grammar first, on the RAW argument, before a scope is derived — the
+    # ordering ``runtime.media.get`` states its reason for, and the reason it
+    # matters MORE here: this caller is on another machine, so "make the server
+    # hash its disk" would be a remote-triggered cost.
+    if not isinstance(raw, str) or not media_handles.HANDLE_RE.match(raw.strip()):
+        return err(
+            rid,
+            ERR_HANDLER_FAILED,
+            "peer.media.get names an artifact by handle "
+            "(sha256:<64 hex>); it does not accept a path",
+            {"reason": media_handles.REASON_HANDLE_INVALID},
+        )
+
+    # ``remote_completions=()`` is the acyclicity, spelled as an argument rather
+    # than trusted to a later check: the scope this verb resolves against simply
+    # does not contain the remote half.
+    scope = media_handles.build_media_scope(remote_completions=())
+    resolved = media_handles.resolve_handle(raw, scope)
+    if isinstance(resolved, media_handles.MediaRefusal):
+        return err(
+            rid,
+            ERR_HANDLER_FAILED,
+            f"peer.media.get refused: {resolved.reason}",
+            resolved.refusal_data(),
+        )
+
+    data = media_handles.read_artifact_bytes(resolved)
+    if isinstance(data, media_handles.MediaRefusal):
+        return err(
+            rid,
+            ERR_HANDLER_FAILED,
+            f"peer.media.get refused: {data.reason}",
+            data.refusal_data(),
+        )
+
+    result: dict[str, Any] = {
+        "contract": MEDIA_CONTRACT,
+        "handle": resolved.handle,
+        "media_type": resolved.media_type,
+        "size_bytes": len(data),
+        "encoding": "base64",
+        "data": base64.b64encode(data).decode("ascii"),
+        "peer": peer_install_id,
+    }
+    if correlation_id is not None:
+        result["correlation_id"] = correlation_id
     return ok(rid, result)

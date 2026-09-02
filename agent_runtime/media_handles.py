@@ -80,15 +80,50 @@ refuses the video — which is the refusal being right, not the cap being small.
 No ranging is built, because nothing this machine has produced needs it; a
 client is told the cap by name (:data:`REASON_ARTIFACT_TOO_LARGE` carries
 ``cap_bytes`` and ``size_bytes``) rather than left to infer it.
+
+Cross-install media: a SECOND row kind, and only one of them has a path
+---------------------------------------------------------------------
+
+Stage P4 (ruling R-P3). A cross-install dispatch's reply is forged into install
+A's chat carrying a ``MEDIA:`` line that names a path on install **B**. A holds
+no bytes for it and can never hash it, so A cannot mint that handle — B does, at
+reply time (:func:`mint_reply_media`), and the ``reference → handle`` map rides
+the dispatch completion home (``dispatch_store.record_completion``'s ``media``
+argument). What lands in A's scope is therefore a :class:`RemoteMediaArtifact`:
+the handle B minted, the reference the transcript already shows, the peer that
+holds the bytes, and **no path** — because there is no file on this disk to name
+and a nullable path field would be an invitation to open one.
+
+Two dataclasses rather than one with ``path: Path | None`` is that argument
+expressed in the type: :func:`read_artifact_bytes` takes the local kind and only
+the local kind, so "read the bytes of a row that has none" is not a branch
+anybody can forget — it does not typecheck. A remote row is served by
+``serve_rpc``'s proxy arm instead, which dials the peer, verifies the returned
+bytes against the handle (free, because the handle IS the digest) and caches
+them here by content address (:func:`write_cached_bytes`). The cache needs no
+invalidation protocol for the same reason the handle needs no version: it names
+BYTES.
+
+**Local wins on a collision.** The same file on both installs mints the same
+handle — that is what content addressing means — and :meth:`MediaScope.get`
+answers with the local row, so a fetch this disk can answer never spends a peer
+dial.
+
+**Both bounds apply on both hops, unchanged.** The extension allowlist is
+enforced by B when it mints and again by A when it folds a stored map into its
+scope, because A must never take B's word for what kind of file a handle names;
+the 5 MiB cap is checked by B's ``runtime``-side read, by A's fold, and by the
+proxy against the bytes that actually arrive.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -100,6 +135,9 @@ __all__ = [
     "MAX_FETCH_BYTES",
     "MAX_SCOPE_ARTIFACTS",
     "MAX_SCOPE_LOGS",
+    "MAX_REPLY_ARTIFACTS",
+    "MAX_REMOTE_ARTIFACTS",
+    "MAX_REMOTE_COMPLETIONS",
     "SCOPE_LOG_TAIL_BYTES",
     "IMAGE_EXTENSIONS",
     "MEDIA_TYPES",
@@ -109,14 +147,20 @@ __all__ = [
     "REASON_ARTIFACT_TOO_LARGE",
     "REASON_ARTIFACT_UNREADABLE",
     "MediaArtifact",
+    "RemoteMediaArtifact",
     "MediaScope",
     "MediaRefusal",
     "handle_for_bytes",
     "media_declarations",
+    "mint_reply_media",
     "parse_media_declaration",
     "build_media_scope",
+    "remote_artifacts_from_completions",
     "resolve_handle",
     "read_artifact_bytes",
+    "remote_cache_path",
+    "read_cached_bytes",
+    "write_cached_bytes",
     "reset_digest_memo",
 ]
 
@@ -137,6 +181,24 @@ MAX_FETCH_BYTES = 5 * 1024 * 1024
 MAX_SCOPE_ARTIFACTS = 512
 MAX_SCOPE_LOGS = 256
 SCOPE_LOG_TAIL_BYTES = 2 * 1024 * 1024
+
+#: How many artifacts ONE reply may mint handles for (Stage P4). Small on
+#: purpose and not a guess: the mint hashes every file it accepts, it runs on
+#: install B inside the turn the operator is waiting on, and the whole measured
+#: corpus of ``MEDIA:``-carrying replies on this machine declares one image.
+#: A reply that declares more than this keeps its extra references — they are
+#: TEXT, and the launcher renders them exactly as it does an unfetchable one —
+#: it simply mints no handles for them, which is the same "no handle for that
+#: picture" state a local scope already has a word for.
+MAX_REPLY_ARTIFACTS = 16
+
+#: Bounds on the REMOTE half of one scope derivation: how many stored
+#: cross-install completions are read, and how many rows they may contribute.
+#: The local bounds' argument, applied to the second source — this derivation
+#: also runs inline on the reader loop, and a sender that dispatched a thousand
+#: times must not turn one ``runtime.media.index`` into a thousand-row reply.
+MAX_REMOTE_COMPLETIONS = 128
+MAX_REMOTE_ARTIFACTS = 256
 
 #: The extension allowlist, and therefore the whole of what a handle can name.
 #: Spelled here rather than imported: ``agent_runtime`` does not depend on the
@@ -233,6 +295,53 @@ class MediaArtifact:
             "media_type": self.media_type,
             "size_bytes": self.size_bytes,
             "fetchable": self.fetchable,
+            # STATED on every row rather than only on the remote ones, for
+            # ``peer.ping``'s reason: a client must never have to read a fact
+            # out of a key's ABSENCE. ``false`` here is what every row said
+            # implicitly before Stage P4, said out loud.
+            "remote": False,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteMediaArtifact:
+    """One artifact a PAIRED INSTALL holds, named by a handle it minted.
+
+    The sibling of :class:`MediaArtifact` and deliberately not a mode of it: it
+    has no ``path``, because there is no file on this disk, and giving it a
+    nullable one would make every reader of the local kind responsible for
+    remembering that. See the module docstring's cross-install section.
+
+    ``size_bytes`` is what B reported when it minted. It is a HINT here and
+    never a promise — the proxy re-checks the bytes that actually arrive
+    against both the cap and the handle — but it is an honest one to publish,
+    because it is what lets a client see ``fetchable: false`` for an over-cap
+    remote artifact without spending a round trip to learn it.
+    """
+
+    handle: str
+    reference: str
+    peer_install_id: str
+    media_type: str
+    size_bytes: int
+
+    @property
+    def fetchable(self) -> bool:
+        return self.size_bytes <= MAX_FETCH_BYTES
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            "handle": self.handle,
+            "reference": self.reference,
+            "media_type": self.media_type,
+            "size_bytes": self.size_bytes,
+            "fetchable": self.fetchable,
+            "remote": True,
+            # Which install to ask, disclosed because the client already knows
+            # it: the dispatch it read the reply from names the same id, and a
+            # surface that can say "this picture lives on <machine>" tells an
+            # operator something true that a bare spinner does not.
+            "peer_install_id": self.peer_install_id,
         }
 
 
@@ -265,9 +374,38 @@ class MediaScope:
     logs_scanned: int
     declarations_seen: int
     truncated: bool
+    #: Stage P4. Artifacts a paired install holds, folded from stored
+    #: cross-install completions. Defaulted so every existing construction of
+    #: this class — tests included — keeps meaning "no remote rows" rather than
+    #: having to be rewritten to say so.
+    remote: dict[str, RemoteMediaArtifact] = field(default_factory=dict)
+    #: How many stored cross-install completions the remote fold read.
+    completions_scanned: int = 0
 
-    def get(self, handle: str) -> MediaArtifact | None:
-        return self.artifacts.get(handle)
+    def get(self, handle: str) -> MediaArtifact | RemoteMediaArtifact | None:
+        """The artifact a handle names, LOCAL first.
+
+        The ordering is the cheap answer winning: content addressing means the
+        same file on both installs mints one handle, so a row present in both
+        halves is the same bytes and the local one costs no peer dial.
+        """
+
+        local = self.artifacts.get(handle)
+        if local is not None:
+            return local
+        return self.remote.get(handle)
+
+    def rows(self) -> list[MediaArtifact | RemoteMediaArtifact]:
+        """Every artifact in scope, local and remote, ordered by reference.
+
+        One ordering over both halves rather than local-then-remote: a client
+        joins on the reference and never on position, and a stable total order
+        is what keeps two indexes of one unchanged scope byte-identical.
+        """
+
+        merged: dict[str, MediaArtifact | RemoteMediaArtifact] = dict(self.remote)
+        merged.update(self.artifacts)
+        return sorted(merged.values(), key=lambda item: (item.reference, item.handle))
 
 
 def handle_for_bytes(data: bytes) -> str:
@@ -323,12 +461,120 @@ def media_declarations(text: Any) -> list[str]:
     return seen
 
 
+def mint_reply_media(
+    text: Any, *, max_artifacts: int = MAX_REPLY_ARTIFACTS
+) -> list[dict[str, Any]]:
+    """Handles for the images ONE reply declares, minted on the install that
+    holds them.
+
+    Stage P4 / ruling R-P3, and the mint has to be here — on install B, inside
+    the turn — because a handle is a digest of BYTES and only the machine with
+    the file can compute one. Install A receives this list on the dispatch
+    completion and folds it into its own scope
+    (:func:`remote_artifacts_from_completions`); it could not have derived a
+    single row of it from the reply text, which names paths on a disk it cannot
+    read.
+
+    Returns ``[{reference, handle, media_type, size_bytes}, …]``, deduplicated
+    by reference, in declaration order, bounded by ``max_artifacts``.
+    ``fetchable`` is deliberately NOT carried: it is a function of
+    :data:`MAX_FETCH_BYTES` and the size, and the install that will actually
+    serve the bytes must apply its OWN cap rather than inherit a verdict from
+    the one that minted.
+
+    Never raises. A reply is a turn's whole output and a hashing failure must
+    not cost the operator that turn, so a file that cannot be read contributes
+    no row — the same "declared and not on this disk" state
+    :func:`build_media_scope` already has an answer for.
+    """
+
+    minted: list[dict[str, Any]] = []
+    try:
+        references = media_declarations(text)
+    except Exception:  # pragma: no cover - defensive; the parser is pure
+        return []
+    for reference in references:
+        if len(minted) >= max_artifacts:
+            break
+        try:
+            artifact = _artifact_for(reference)
+        except Exception:  # pragma: no cover - _artifact_for swallows its own
+            continue
+        if artifact is None:
+            continue
+        minted.append(
+            {
+                "reference": artifact.reference,
+                "handle": artifact.handle,
+                "media_type": artifact.media_type,
+                "size_bytes": artifact.size_bytes,
+            }
+        )
+    return minted
+
+
+def remote_artifacts_from_completions(
+    completions: Iterable[Any], *, max_artifacts: int = MAX_REMOTE_ARTIFACTS
+) -> tuple[dict[str, RemoteMediaArtifact], bool]:
+    """Stored cross-install completions → the remote half of a scope.
+
+    ``completions`` is an iterable of ``{peer_install_id, media: [...]}`` rows —
+    :func:`agent_runtime.dispatch_store.remote_media_completions`'s shape, taken
+    as an argument so this stays a pure function of its input and the store stays
+    injectable in a test.
+
+    **Every row is re-validated here, and that is not belt-and-braces.** The
+    ``media`` list was written by ANOTHER INSTALL. Trusting its ``media_type``
+    would let a paired install put ``text/plain`` — or an extension outside
+    :data:`IMAGE_EXTENSIONS` — into this install's namespace and then serve
+    whatever it liked under it, which is exactly the exfiltration the allowlist
+    exists to make unrepresentable. So the handle must match :data:`HANDLE_RE`,
+    the reference must be an absolute path with an allowlisted image extension,
+    and the media type is RE-DERIVED from that extension rather than read off
+    the row. A row that fails any of those is dropped silently: it is not an
+    error on this install, and a peer that sends junk gets no handle rather than
+    an argument.
+
+    Returns ``(rows, truncated)``. First writer wins on a duplicate handle,
+    which is the newest completion (the store hands them back newest-first) —
+    same bytes either way, so the choice only decides which peer gets dialled.
+    """
+
+    rows: dict[str, RemoteMediaArtifact] = {}
+    truncated = False
+    for completion in completions or ():
+        if not isinstance(completion, dict):
+            continue
+        peer_install_id = str(completion.get("peer_install_id") or "").strip()
+        if not peer_install_id:
+            # A media map with nobody to ask is not a fetchable artifact; it is
+            # a row that would refuse on every fetch while claiming to be in
+            # scope, which is worse than absent.
+            continue
+        entries = completion.get("media")
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if len(rows) >= max_artifacts:
+                truncated = True
+                continue
+            artifact = _remote_artifact_for(entry, peer_install_id)
+            if artifact is None or artifact.handle in rows:
+                continue
+            rows[artifact.handle] = artifact
+    return rows, truncated
+
+
 def build_media_scope(
     *,
     root: Path | None = None,
     max_artifacts: int = MAX_SCOPE_ARTIFACTS,
     max_logs: int = MAX_SCOPE_LOGS,
     tail_bytes: int = SCOPE_LOG_TAIL_BYTES,
+    remote_completions: Iterable[Any] | None = None,
+    max_remote_artifacts: int = MAX_REMOTE_ARTIFACTS,
 ) -> MediaScope:
     """Derive, right now, the set of artifacts a chat-reading caller may fetch.
 
@@ -344,18 +590,33 @@ def build_media_scope(
 
     Ordering is newest-log-first so that a truncating scan keeps what a client is
     most likely rendering. Within a log the order is the file's own.
+
+    ``remote_completions`` (Stage P4) is the SECOND source: stored cross-install
+    dispatch completions carrying the ``reference → handle`` maps paired
+    installs minted. ``None`` reads the store; an explicit (possibly empty)
+    iterable is the injection seam a test uses. It never raises either — a
+    store that will not open contributes no remote rows, which degrades this
+    install to exactly the scope it had before Stage P4.
     """
+
+    remote_source = (
+        _remote_media_completions() if remote_completions is None else remote_completions
+    )
+    remote_rows, remote_truncated = remote_artifacts_from_completions(
+        remote_source, max_artifacts=max_remote_artifacts
+    )
+    completions_scanned = len(list(remote_source)) if isinstance(remote_source, list) else 0
 
     directory = root if root is not None else _live_log_root()
     if directory is None:
-        return MediaScope({}, 0, 0, False)
+        return MediaScope({}, 0, 0, remote_truncated, remote_rows, completions_scanned)
 
     try:
         logs = [p for p in directory.glob("*.jsonl") if p.is_file()]
     except OSError:
-        return MediaScope({}, 0, 0, False)
+        return MediaScope({}, 0, 0, remote_truncated, remote_rows, completions_scanned)
     logs.sort(key=paths.safe_mtime, reverse=True)
-    truncated = len(logs) > max_logs
+    truncated = remote_truncated or len(logs) > max_logs
     logs = logs[:max_logs]
 
     artifacts: dict[str, MediaArtifact] = {}
@@ -380,10 +641,14 @@ def build_media_scope(
                 continue
             by_reference[reference] = artifact.handle
             artifacts[artifact.handle] = artifact
-    return MediaScope(artifacts, scanned, declarations, truncated)
+    return MediaScope(
+        artifacts, scanned, declarations, truncated, remote_rows, completions_scanned
+    )
 
 
-def resolve_handle(handle: Any, scope: MediaScope) -> MediaArtifact | MediaRefusal:
+def resolve_handle(
+    handle: Any, scope: MediaScope
+) -> MediaArtifact | RemoteMediaArtifact | MediaRefusal:
     """Turn a caller's argument into an artifact, or into a typed refusal.
 
     THE boundary. The grammar check runs first and on the RAW argument, so a
@@ -392,6 +657,12 @@ def resolve_handle(handle: Any, scope: MediaScope) -> MediaArtifact | MediaRefus
     :data:`REASON_HANDLE_INVALID` with no ``stat``, no ``open`` and no
     ``Path()`` constructed anywhere in this process. That ordering is the reason
     there is no traversal surface to argue about.
+
+    A well-formed handle resolves against BOTH halves of the scope (Stage P4),
+    local first, and the cap is applied to a remote row from the size its
+    minting install reported — so an over-cap artifact on another machine is
+    refused here, before any dial, with the same
+    :data:`REASON_ARTIFACT_TOO_LARGE` a local one gets.
     """
 
     if not isinstance(handle, str):
@@ -442,7 +713,169 @@ def read_artifact_bytes(artifact: MediaArtifact) -> bytes | MediaRefusal:
     return data
 
 
+# ── the proxy cache (Stage P4) ───────────────────────────────────────────────
+#
+# A content-addressed cache is the one kind that needs no invalidation
+# protocol: the key IS the digest, so an entry can never be stale — it is
+# either the bytes the handle names or it is not an entry at all. That property
+# is what makes the fetch lane's second hop free rather than merely cheap, and
+# it is the whole reason Stage 8 minted handles over content instead of paths.
+
+
+#: Where cached peer bytes live. Under the INSTALL's root, beside
+#: ``gateway/peers.json``, and reached through ``peer_store_root()`` for that
+#: function's own stated reason: ``persona_profile_context`` flips
+#: ``HERMES_HOME`` process-globally during a persona turn, so the ambient
+#: answer depends on which unrelated persona happened to be mid-turn. A cached
+#: artifact belongs to the install, exactly as a peer edge does.
+MEDIA_CACHE_DIRNAME = "media_cache"
+
+
+def remote_cache_path(handle: str, *, root: Path | None = None) -> Path | None:
+    """Where the bytes for ``handle`` would be cached, or ``None``.
+
+    ``None`` for anything that is not a well-formed handle — which is also the
+    reason this is safe to build a path from at all. The filename is the HEX
+    of the digest and nothing else: 64 characters from ``[0-9a-f]``, so no
+    caller-supplied string ever reaches a path segment and there is no
+    traversal question to answer, only the grammar there already was.
+    """
+
+    if not isinstance(handle, str) or not HANDLE_RE.match(handle.strip()):
+        return None
+    digest = handle.strip()[len(HANDLE_PREFIX) :]
+    try:
+        base = root if root is not None else _peer_store_root()
+    except Exception:  # pragma: no cover - defensive; a cache must never raise
+        return None
+    if base is None:
+        return None
+    return base / "gateway" / MEDIA_CACHE_DIRNAME / f"{digest}.bin"
+
+
+def read_cached_bytes(handle: str, *, root: Path | None = None) -> bytes | None:
+    """Cached bytes for ``handle``, VERIFIED, or ``None``.
+
+    The verification is not paranoia about our own writes; it is what keeps the
+    cache from being a way to launder bytes into a content-addressed namespace.
+    The file sits on a disk other things can touch, and serving whatever is at
+    ``<digest>.bin`` without re-hashing would mean the handle stopped naming
+    bytes the moment anybody edited one. A mismatch DELETES the entry and
+    answers ``None``, so the next fetch re-dials rather than serving a lie
+    forever.
+    """
+
+    path = remote_cache_path(handle, root=root)
+    if path is None:
+        return None
+    try:
+        if not path.is_file():
+            return None
+        if path.stat().st_size > MAX_FETCH_BYTES:
+            return None
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if handle_for_bytes(data) != handle.strip():
+        try:
+            path.unlink()
+        except OSError:  # pragma: no cover - best effort
+            pass
+        return None
+    return data
+
+
+def write_cached_bytes(handle: str, data: bytes, *, root: Path | None = None) -> bool:
+    """Cache verified bytes under their handle. Best effort by contract.
+
+    Verified HERE as well as by the caller, because this is the door: a write
+    whose bytes do not hash to the name would poison every later read, and the
+    check costs one pass over at most 5 MiB against a dial that costs a LAN
+    round trip.
+
+    ``False`` for anything not written — a bad handle, a mismatch, a disk that
+    refused. A cache that cannot write is a fetch that costs a dial next time,
+    never a fetch that fails, so no caller branches on this except to say so in
+    a log.
+    """
+
+    path = remote_cache_path(handle, root=root)
+    if path is None or not isinstance(data, bytes):
+        return False
+    if len(data) > MAX_FETCH_BYTES or handle_for_bytes(data) != handle.strip():
+        return False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Write-then-rename: a reader that opens a half-written file would hash
+        # it, find a mismatch, and DELETE the entry the writer is still filling.
+        temporary = path.with_name(f"{path.name}.{os.getpid()}.part")
+        temporary.write_bytes(data)
+        temporary.replace(path)
+    except OSError:
+        return False
+    return True
+
+
 # ── internals ───────────────────────────────────────────────────────────────
+
+
+def _peer_store_root() -> Path | None:
+    try:
+        from .gateway_targets import peer_store_root
+
+        return peer_store_root()
+    except Exception:  # pragma: no cover - defensive; the cache must never raise
+        return None
+
+
+def _remote_media_completions() -> list[dict[str, Any]]:
+    """Stored cross-install completions carrying a media map, newest first.
+
+    Function-local import and total by construction, for
+    :func:`build_media_scope`'s reason: a scope derivation that raised would
+    turn a store hiccup into a refused fetch of a LOCAL picture, and the honest
+    failure direction here is "no remote pictures", never "no pictures".
+    """
+
+    try:
+        from . import dispatch_store
+
+        return dispatch_store.remote_media_completions(limit=MAX_REMOTE_COMPLETIONS)
+    except Exception:  # pragma: no cover - defensive
+        return []
+
+
+def _remote_artifact_for(
+    entry: dict[str, Any], peer_install_id: str
+) -> RemoteMediaArtifact | None:
+    """One row of a peer's media map → a remote artifact, or ``None``.
+
+    See :func:`remote_artifacts_from_completions` for why every field is
+    re-derived rather than trusted.
+    """
+
+    handle = entry.get("handle")
+    if not isinstance(handle, str) or not HANDLE_RE.match(handle.strip()):
+        return None
+    reference = entry.get("reference")
+    if not isinstance(reference, str) or not reference.strip():
+        return None
+    reference = reference.strip()
+    if not _ABSOLUTE_PATH_RE.match(reference):
+        return None
+    media_type = MEDIA_TYPES.get(_extension(reference))
+    if media_type is None:
+        return None
+    size = entry.get("size_bytes")
+    if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+        return None
+    return RemoteMediaArtifact(
+        handle=handle.strip(),
+        reference=reference,
+        peer_install_id=peer_install_id,
+        media_type=media_type,
+        size_bytes=size,
+    )
 
 
 def _live_log_root() -> Path | None:

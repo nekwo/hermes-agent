@@ -106,7 +106,11 @@ def test_the_index_names_the_artifact_the_cap_and_what_the_scan_cost(seeded):
     assert result["contract"] == serve_rpc.MEDIA_CONTRACT
     assert result["cap_bytes"] == media_handles.MAX_FETCH_BYTES
     assert result["truncated"] is False
-    assert result["scanned"] == {"logs": 1, "declarations": 1}
+    # Stage P4 added the second source's counter. ``completions: 0`` is the
+    # honest reading of a machine that has dispatched nothing across an install
+    # boundary, and it is STATED rather than absent so a client can tell "no
+    # remote pictures" from "this runtime never derives them".
+    assert result["scanned"] == {"logs": 1, "declarations": 1, "completions": 0}
     assert result["artifacts"] == [
         {
             "handle": "sha256:" + hashlib.sha256(payload).hexdigest(),
@@ -114,6 +118,9 @@ def test_the_index_names_the_artifact_the_cap_and_what_the_scan_cost(seeded):
             "media_type": "image/png",
             "size_bytes": len(payload),
             "fetchable": True,
+            # Stage P4, and present on EVERY row for ``peer.ping``'s reason: a
+            # client must never read a fact out of a key's absence.
+            "remote": False,
         }
     ]
 
@@ -334,3 +341,185 @@ def test_the_family_joined_the_set_without_moving_the_integer():
     assert manifest["contract"] == 1
     assert serve_rpc.RPC_CONTRACT_VERSION == 1
     assert set(manifest) == {"contract", "methods", "tiers"}
+
+
+# ── Stage P4: peer.media.get, and the proxy arm on runtime.media.get ─────────
+#
+# The keyhole and the door it is a keyhole in. What is pinned here is the
+# dispatcher layer for both: who is turned away, what a path-shaped argument
+# lands in, and — the property the whole lane's acyclicity rests on — that the
+# peer verb resolves the LOCAL half of the scope and nothing else.
+
+PEER_GET = "peer.media.get"
+
+
+def _peer_call(params: dict, rid: str = "p1") -> dict:
+    return serve_rpc.handle_request(
+        {"jsonrpc": "2.0", "id": rid, "method": PEER_GET, "params": params},
+        serve_rpc.RpcContext(caller=PEER, transport=TRANSPORT_GATEWAY),
+    )
+
+
+def _far_completions(monkeypatch, handle: str, size: int) -> None:
+    """Stand a stored cross-install map in front of the scope derivation.
+
+    Patched at ``dispatch_store``'s function rather than at the scope's
+    parameter, so what is exercised is the wiring ``build_media_scope`` actually
+    uses in production — the seam a test that passed ``remote_completions=``
+    directly would step around.
+    """
+
+    monkeypatch.setattr(
+        "agent_runtime.dispatch_store.remote_media_completions",
+        lambda **_k: [
+            {
+                "dispatch_id": "d1",
+                "peer_install_id": "install-b",
+                "media": [
+                    {
+                        "reference": "X:\\Eternia\\artifacts\\on-b.png",
+                        "handle": handle,
+                        "media_type": "image/png",
+                        "size_bytes": size,
+                    }
+                ],
+            }
+        ],
+    )
+
+
+def test_the_peer_keyhole_serves_a_local_artifact_to_a_paired_install(seeded):
+    reply = _peer_call({"handle": "sha256:" + hashlib.sha256(seeded[1]).hexdigest()})
+
+    assert base64.b64decode(reply["result"]["data"]) == seeded[1]
+    assert reply["result"]["encoding"] == "base64"
+    # Echoed for ``peer.ping``'s reason: the dialler confirms it was recognised
+    # as the install it meant to be, which no client-side check can tell it.
+    assert reply["result"]["peer"] == "inst_far_away"
+
+
+def test_the_peer_keyhole_refuses_a_caller_that_proved_no_install(seeded):
+    """A local console client is refused too, and that is the case worth
+    spelling: it already has ``runtime.media.get``, whose scope is strictly
+    larger."""
+
+    reply = _call(
+        PEER_GET, {"handle": "sha256:" + hashlib.sha256(seeded[1]).hexdigest()}
+    )
+
+    assert reply["error"]["data"]["reason"] == serve_rpc.PEER_CHAT_NOT_A_PEER_REASON
+
+
+def test_the_peer_keyhole_takes_a_handle_and_never_a_path(seeded):
+    reply = _peer_call({"handle": str(seeded[0])}, rid="p2")
+
+    assert reply["error"]["data"] == {"reason": media_handles.REASON_HANDLE_INVALID}
+
+
+def test_the_peer_keyhole_resolves_no_remote_row_so_the_lane_cannot_chain(
+    seeded, monkeypatch
+):
+    """THE acyclicity pin. A handle this install holds only as a REMOTE row —
+    one it learned from a third install — is ``unknown_handle`` to a peer, not
+    a second proxy hop. So there is no A to B to C fan-out to bound, and no way
+    for two paired installs to bounce a fetch between them."""
+
+    far = "sha256:" + "b" * 64
+    _far_completions(monkeypatch, far, 64)
+
+    # This install DOES hold it in scope for its own console client — the row
+    # resolves and the fetch gets as far as the proxy…
+    local_view = _call(GET, {"handle": far})
+    assert local_view["error"]["data"]["reason"] != media_handles.REASON_UNKNOWN_HANDLE
+
+    # …and a peer asking for the same handle is told nobody HERE has those bytes.
+    reply = _peer_call({"handle": far}, rid="p3")
+
+    assert reply["error"]["data"] == {"reason": media_handles.REASON_UNKNOWN_HANDLE}
+
+
+def test_the_index_names_a_remote_row_without_claiming_a_local_path(
+    seeded, monkeypatch
+):
+    far = "sha256:" + "c" * 64
+    _far_completions(monkeypatch, far, 64)
+
+    rows = _call(INDEX)["result"]
+
+    remote = [row for row in rows["artifacts"] if row["remote"]]
+    assert remote == [
+        {
+            "handle": far,
+            "reference": "X:\\Eternia\\artifacts\\on-b.png",
+            "media_type": "image/png",
+            "size_bytes": 64,
+            "fetchable": True,
+            "remote": True,
+            "peer_install_id": "install-b",
+        }
+    ]
+    # The local artifact is still there and still says it is local.
+    assert any(row["remote"] is False for row in rows["artifacts"])
+    assert rows["scanned"]["completions"] == 1
+
+
+def test_a_console_client_fetching_a_remote_handle_is_answered_by_the_proxy(
+    seeded, monkeypatch
+):
+    """The arm's whole point: the reply is shaped exactly like a local one, so a
+    client cannot tell a proxied artifact from a local one and has nothing it
+    would do differently if it could."""
+
+    from agent_runtime import media_proxy
+
+    bytes_on_b = b"\x89PNG\r\n\x1a\n" + b"over-there" * 7
+    far = "sha256:" + hashlib.sha256(bytes_on_b).hexdigest()
+    _far_completions(monkeypatch, far, len(bytes_on_b))
+    monkeypatch.setattr(
+        media_proxy, "fetch_remote_artifact", lambda artifact, **_k: bytes_on_b
+    )
+
+    reply = _call(GET, {"handle": far}, caller=_device(TIER_CONSOLE))["result"]
+
+    assert base64.b64decode(reply["data"]) == bytes_on_b
+    assert reply["handle"] == far
+    assert reply["media_type"] == "image/png"
+    assert set(reply) == {
+        "contract",
+        "handle",
+        "media_type",
+        "size_bytes",
+        "encoding",
+        "data",
+    }
+
+
+def test_a_proxy_refusal_reaches_the_client_as_the_lanes_own_typed_frame(
+    seeded, monkeypatch
+):
+    from agent_runtime import media_proxy
+
+    far = "sha256:" + "d" * 64
+    _far_completions(monkeypatch, far, 64)
+    monkeypatch.setattr(
+        media_proxy,
+        "fetch_remote_artifact",
+        lambda artifact, **_k: media_handles.MediaRefusal(
+            media_proxy.REASON_PEER_UNREACHABLE, {"peer_install_id": "install-b"}
+        ),
+    )
+
+    reply = _call(GET, {"handle": far})
+
+    assert reply["error"]["data"] == {
+        "reason": media_proxy.REASON_PEER_UNREACHABLE,
+        "peer_install_id": "install-b",
+    }
+
+
+def test_the_keyhole_joined_the_manifest_without_moving_the_integer():
+    manifest = serve_rpc.manifest()
+
+    assert PEER_GET in manifest["methods"]
+    assert manifest["tiers"][PEER_GET] == TIER_CONSOLE
+    assert manifest["contract"] == 1

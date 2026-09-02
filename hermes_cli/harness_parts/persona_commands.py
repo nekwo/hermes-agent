@@ -2261,6 +2261,7 @@ def _mission_chat_busy_outcome(
                 ),
             }
             _stamp_turn_visibility(data, reply_text)
+            _stamp_reply_media(data, reply_text, args)
             _mission_chat_emit(
                 args, data, f"mission chat reply for {normalized_persona}"
             )
@@ -2483,6 +2484,64 @@ def _stamp_turn_visibility(data: dict, reply_text, *, chat_result=None) -> dict:
         messages=getattr(chat_result, "messages", None),
         raw=getattr(chat_result, "raw", None),
     ).as_dict()
+    return data
+
+
+#: The payload key carrying the ``reference → handle`` map minted for a
+#: peer-executed turn's reply. Named here, read by
+#: ``tools/agent_chat_dispatch._run_remote_dispatch``, and by nothing else.
+REPLY_MEDIA_KEY = "media"
+
+
+def _stamp_reply_media(data: dict, reply_text, args) -> dict:
+    """Mint content handles for a PEER-EXECUTED reply's ``MEDIA:`` lines.
+
+    Stage P4 / ruling R-P3. This is install **B**, answering a turn install A
+    dispatched to it. The reply is about to travel home carrying
+    ``MEDIA:<absolute path>`` lines that name files on THIS disk, and A can
+    never mint handles for them: a handle is a digest of BYTES and A has none.
+    So the mint happens here, at reply time, and the map rides the completion —
+    which is the only channel between the two installs that does not require a
+    second verb, because the payload this function stamps IS what
+    ``peer.agent_chat.execute``'s frame lane carries back.
+
+    **Gated on the peer origin, and the gate is the one fact that is already
+    true.** ``--requested-by peer:<install id>`` is set by
+    ``chat_turn.normalize_peer_chat_execute`` from a connection whose HMAC
+    verified, and it is the ONLY spelling that reaches this handler for a
+    cross-install turn. A local turn mints nothing, which is not an
+    optimisation but the honest answer: on this machine the ``MEDIA:`` path IS
+    the pointer, every local surface opens it directly, and hashing every image
+    of every local turn would spend real I/O to produce a field with no reader.
+
+    Absent, never empty. A reply that declared no image carries no key at all,
+    so a local payload is byte-identical to what it has always been and a
+    consumer never has to tell "no pictures" from "an older runtime".
+
+    Total by construction, like :func:`_stamp_turn_visibility` beside it and for
+    the same reason: one call site is inside an exception handler, and a raise
+    here would replace a real failure with this one and corrupt the
+    one-JSON-object stdout contract on the way out.
+    """
+
+    try:
+        requested_by = str(getattr(args, "requested_by", "") or "")
+        from agent_runtime.chat_turn import PEER_REQUESTED_BY_PREFIX
+
+        if not requested_by.startswith(PEER_REQUESTED_BY_PREFIX):
+            return data
+        from agent_runtime.media_handles import mint_reply_media
+
+        minted = mint_reply_media(reply_text)
+        if minted:
+            data[REPLY_MEDIA_KEY] = minted
+    except Exception:  # noqa: BLE001 - a picture is never worth losing a turn
+        import logging
+
+        logging.getLogger(__name__).debug(
+            "reply media mint failed; the reply travels without handles",
+            exc_info=True,
+        )
     return data
 
 
@@ -3539,6 +3598,7 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
             "journal_state": TURN_STATE_PROJECTED,
         }
         _stamp_turn_visibility(data, reply_text)
+        _stamp_reply_media(data, reply_text, args)
         _stamp_finalization(data)
         _mission_chat_emit(args, data, f"mission chat reply for {normalized_persona}")
         return 0
@@ -3620,6 +3680,7 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
             "next_expected": "duplicate client message id replayed from the canonical Mission Control chat transcript",
         }
         _stamp_turn_visibility(data, reply_text)
+        _stamp_reply_media(data, reply_text, args)
         _stamp_finalization(data)
         _mission_chat_emit(args, data, f"mission chat reply for {normalized_persona}")
         return 0
@@ -4440,6 +4501,7 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
             ),
         }
         _stamp_turn_visibility(data, reply_text, chat_result=chat_result)
+        _stamp_reply_media(data, reply_text, args)
         _stamp_finalization(data)
         stream_emitter.finish(
             state="completed",
@@ -4568,6 +4630,7 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
         # the turn — the reply may well be real and visible, and saying so is
         # what lets a repair retry be told apart from a silent turn.
         _stamp_turn_visibility(data, reply_text, chat_result=chat_result)
+        _stamp_reply_media(data, reply_text, args)
         _stamp_finalization(data)
         _mission_chat_emit(args, data, data["blocker"])
         return 2

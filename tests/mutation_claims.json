@@ -3041,6 +3041,201 @@
         "-q",
         "tests/agent_runtime/test_scope_straddle_invariant.py::test_an_ordinary_switch_inside_one_realm_leaves_the_realm_pointer_alone"
       ]
+    },
+    {
+      "id": "p4-reply-media-mint-loses-its-peer-gate",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_stamp_reply_media",
+      "operator": "drop-origin-gate",
+      "find": "        if not requested_by.startswith(PEER_REQUESTED_BY_PREFIX):\n            return data\n",
+      "replace": "        if False:\n            return data\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_cross_install_media.py::test_a_peer_executed_reply_carries_the_map_and_a_local_one_carries_nothing"
+      ]
+    },
+    {
+      "id": "p4-remote-leg-drops-the-far-installs-map",
+      "path": "tools/agent_chat_dispatch.py",
+      "symbol": "_run_remote_dispatch",
+      "operator": "drop-argument",
+      "find": "            media=payload.get(\"media\"),\n",
+      "replace": "            media=None,\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_cross_install_media.py::test_the_remote_leg_puts_the_far_installs_map_on_the_row"
+      ]
+    },
+    {
+      "id": "p4-peer-media-type-is-taken-on-trust",
+      "path": "agent_runtime/media_handles.py",
+      "symbol": "_remote_artifact_for",
+      "operator": "trust-remote-field",
+      "find": "    media_type = MEDIA_TYPES.get(_extension(reference))\n",
+      "replace": "    media_type = entry.get(\"media_type\") or MEDIA_TYPES.get(_extension(reference))\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_cross_install_media.py::test_the_media_type_is_re_derived_and_never_read_off_the_peers_row"
+      ]
+    },
+    {
+      "id": "p4-remote-fold-admits-a-row-with-no-peer-to-ask",
+      "path": "agent_runtime/media_handles.py",
+      "symbol": "remote_artifacts_from_completions",
+      "operator": "drop-guard",
+      "find": "        if not peer_install_id:\n",
+      "replace": "        if False:\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_cross_install_media.py::test_a_map_with_no_peer_to_ask_contributes_nothing"
+      ]
+    },
+    {
+      "id": "p4-scope-prefers-the-peer-over-this-disk",
+      "path": "agent_runtime/media_handles.py",
+      "symbol": "MediaScope.get",
+      "operator": "invert-resolution-order",
+      "find": "        local = self.artifacts.get(handle)\n        if local is not None:\n            return local\n        return self.remote.get(handle)\n",
+      "replace": "        remote = self.remote.get(handle)\n        if remote is not None:\n            return remote\n        return self.artifacts.get(handle)\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_cross_install_media.py::test_a_scope_reports_both_halves_and_prefers_the_local_row"
+      ]
+    },
+    {
+      "id": "p4-proxy-serves-whatever-the-peer-returned",
+      "path": "agent_runtime/media_proxy.py",
+      "symbol": "fetch_remote_artifact",
+      "operator": "drop-content-verification",
+      "find": "    if media_handles.handle_for_bytes(answer) != artifact.handle:\n",
+      "replace": "    if False:\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_cross_install_media.py::test_bytes_that_do_not_hash_to_the_handle_are_refused_and_never_cached"
+      ]
+    },
+    {
+      "id": "p4-proxy-dials-even-when-it-holds-the-bytes",
+      "path": "agent_runtime/media_proxy.py",
+      "symbol": "fetch_remote_artifact",
+      "operator": "drop-cache-read",
+      "find": "    cached = media_handles.read_cached_bytes(artifact.handle, root=store_root)\n",
+      "replace": "    cached = None\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_cross_install_media.py::test_a_first_fetch_dials_once_and_a_second_dials_never"
+      ]
+    },
+    {
+      "id": "p4-cache-serves-a-tampered-entry",
+      "path": "agent_runtime/media_handles.py",
+      "symbol": "read_cached_bytes",
+      "operator": "drop-content-verification",
+      "find": "    if handle_for_bytes(data) != handle.strip():\n",
+      "replace": "    if False:\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_cross_install_media.py::test_a_tampered_cache_entry_is_deleted_rather_than_served"
+      ]
+    },
+    {
+      "id": "p4-completion-event-carries-the-whole-map",
+      "path": "agent_runtime/dispatch_store.py",
+      "symbol": "record_completion",
+      "operator": "widen-event-payload",
+      "find": "            media_count=len(media_rows) or None,\n",
+      "replace": "            media_count=len(media_rows) or None,\n            media=media_rows or None,\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_cross_install_media.py::test_the_completion_event_carries_a_count_and_never_the_map"
+      ]
+    },
+    {
+      "id": "p4-store-takes-the-peers-map-unbounded",
+      "path": "agent_runtime/dispatch_store.py",
+      "symbol": "_media_rows",
+      "operator": "drop-bound",
+      "find": "        if len(rows) >= MEDIA_MAP_LIMIT:\n            break\n",
+      "replace": "        if False:\n            break\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_cross_install_media.py::test_the_store_bounds_a_map_the_far_install_chose"
+      ]
+    },
+    {
+      "id": "p4-peer-keyhole-would-proxy-a-third-install",
+      "path": "agent_runtime/serve_rpc.py",
+      "symbol": "_peer_media_get",
+      "operator": "widen-resolution-scope",
+      "find": "    scope = media_handles.build_media_scope(remote_completions=())\n",
+      "replace": "    scope = media_handles.build_media_scope()\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_serve_rpc_media.py::test_the_peer_keyhole_resolves_no_remote_row_so_the_lane_cannot_chain"
+      ]
+    },
+    {
+      "id": "p4-media-get-never-reaches-the-proxy-arm",
+      "path": "agent_runtime/serve_rpc.py",
+      "symbol": "_runtime_media_get",
+      "operator": "drop-branch",
+      "find": "    if isinstance(resolved, media_handles.RemoteMediaArtifact):\n",
+      "replace": "    if False:\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_serve_rpc_media.py::test_a_console_client_fetching_a_remote_handle_is_answered_by_the_proxy"
+      ]
+    },
+    {
+      "id": "p4-peer-keyhole-answers-a-caller-that-proved-nothing",
+      "path": "agent_runtime/serve_rpc.py",
+      "symbol": "_peer_media_get",
+      "operator": "drop-provenance-guard",
+      "find": "    if not peer_install_id:\n",
+      "replace": "    if False:\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_serve_rpc_media.py::test_the_peer_keyhole_refuses_a_caller_that_proved_no_install"
+      ]
     }
   ]
 }

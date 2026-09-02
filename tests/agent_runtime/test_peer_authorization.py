@@ -136,16 +136,23 @@ def test_a_peer_naming_no_method_is_refused_rather_than_defaulted():
     assert authorize_call(TIER_CONSOLE, PEER, method=None).ok is False
 
 
-def test_the_allowlist_is_exactly_its_two_verbs_and_both_methods_exist():
+def test_the_allowlist_is_exactly_its_three_verbs_and_all_methods_exist():
     """A membership set naming a verb nobody registered would be an allowlist
     that admits nothing — green, and describing a lane that does not work.
 
-    Stage 7 widened it by ONE name, and the literal here is the counterweight
-    that makes the widening cost something: a set spelled out in a test is a set
-    nobody grows without editing this line and saying why."""
+    Stage 7 widened it by ONE name and Stage P4 by one more, and the literal
+    here is the counterweight that makes each widening cost something: a set
+    spelled out in a test is a set nobody grows without editing this line and
+    saying why.
+
+    P4's name is ``peer.media.get`` (ruling R-P3): read-only, handle-only, and
+    LOCAL-scope-only on the far side, so a paired install can spend a handle
+    that install's own reply minted and can enumerate nothing. The argument
+    lives on ``PEER_METHOD_ALLOWLIST`` and on the handler; this line is the
+    price."""
 
     assert PEER_METHOD_ALLOWLIST == frozenset(
-        {"peer.ping", "peer.agent_chat.execute"}
+        {"peer.ping", "peer.agent_chat.execute", "peer.media.get"}
     )
     for name in PEER_METHOD_ALLOWLIST:
         assert name in serve_rpc.method_names()

@@ -2203,6 +2203,8 @@ def test_the_reclaim_pair_joins_the_manifest_without_moving_the_contract_version
         # family: ``peer.*`` verbs are about the EDGE between two
         # installs and touch no level. Additive, so the integer holds.
         "peer.agent_chat.execute",
+        # Stage P4 (R-P3), additive: the cross-install FETCH keyhole.
+        "peer.media.get",
         "peer.ping",
         "runtime.agent.create",
         # Added by S5 after this literal was written; the pin had been red ever

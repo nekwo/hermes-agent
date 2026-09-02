@@ -882,6 +882,15 @@ def _run_remote_dispatch(dispatch_id: str, spec: dict[str, Any]) -> None:
             total_tokens=payload.get("total_tokens"),
             visibility=TurnVisibility.from_payload(payload).as_dict(),
             remote=remote,
+            # Stage P4 (R-P3). The far install minted these — it is the only one
+            # that could, because a handle is a digest of bytes it alone holds —
+            # and this is the ONLY moment they are in reach of the row that has
+            # to outlive them. The reply text lands in the sender's transcript
+            # with `MEDIA:` lines naming paths on B's disk; without the map, A's
+            # media scope can never name those pictures and every fetch answers
+            # `unknown_handle`. Read here, validated by `dispatch_store` (shape)
+            # and by `media_handles` (grammar, allowlist, cap) — never trusted.
+            media=payload.get("media"),
         )
         return
 

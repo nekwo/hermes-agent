@@ -95,6 +95,11 @@ def test_level_mutations_are_console_and_reads_are_read() -> None:
     # every proof screenshot on the machine.
     assert tiers["runtime.media.get"] == TIER_CONSOLE
     assert tiers["runtime.media.index"] == TIER_CONSOLE
+    # Stage P4's cross-install keyhole says the same word for the same reason:
+    # it is an egress of file bytes, so it declares the credential strength an
+    # egress wants. What actually admits a peer is the allowlist, never a tier
+    # — ``test_peer_authorization`` owns that half.
+    assert tiers["peer.media.get"] == TIER_CONSOLE
 
 
 def test_adding_the_tiers_block_did_not_move_the_contract_integer() -> None:
