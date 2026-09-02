@@ -169,7 +169,12 @@ def test_the_instance_ids_come_off_the_gated_scan_never_a_second_directory_walk(
         scan = real_scan(self, workspace_id, **kwargs)
         return type(scan)(
             [a for a in scan.actors if a.actor_key != "personainst_latecomer_agent_2"],
-            scan.unreadable,
+            # ``unreadable_files``, not the derived ``unreadable`` int: the field
+            # became UnreadableActorFiles and a CONSTRUCTOR is not one of the
+            # readers the property was kept for. Its twin in
+            # tests/agent_runtime/test_office_sync.py was migrated; this one was
+            # not, and reddened `main` until the push lane looked.
+            scan.unreadable_files,
         )
 
     monkeypatch.setattr(OfficeStore, "scan_actors", _scan_without_the_latecomer)
