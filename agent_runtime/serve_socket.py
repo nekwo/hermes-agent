@@ -1914,6 +1914,9 @@ class ServeSocketClient:
         verifier: str,
         client: str,
         client_build: str | None = None,
+        display_name: str | None = None,
+        endpoints: Any = None,
+        cert_fingerprint: str | None = None,
         expect_hello_contract: int | None = HELLO_CONTRACT_VERSION,
     ) -> dict[str, Any] | None:
         """The GATEWAY lane's PEER hello: same frames, a per-INSTALL credential.
@@ -1930,6 +1933,21 @@ class ServeSocketClient:
         holds; see ``gateway_peers``' docstring for why both ends store the
         digest and key the HMAC with it directly, and for the honest limit of
         that. It never goes on the wire, in either direction.
+
+        **S2c adds three OPTIONAL fields and they are not credentials.**
+        ``peer_display_name`` / ``peer_endpoints`` / ``peer_cert_fingerprint``
+        are the same three the JOIN hello has always carried, on the ordinary
+        hello too, so the far side's CACHE is refreshed by every connection
+        rather than only by a re-``join``. Before this, an install that changed
+        networks became unreachable until an operator re-ran a ceremony they had
+        no reason to suspect was needed.
+
+        They are ASSERTIONS and are treated as such at the far end: bounded and
+        cleaned by ``gateway_peers``, written to ``peers_cache.json``, and never
+        to the trust row — in particular the announced fingerprint becomes a
+        rotation NOTICE and never the pin. ``_credential_kind`` is untouched,
+        because none of the three is a credential and a hello that carries them
+        still names exactly one.
         """
 
         from .gateway_peers import peer_proof
@@ -1940,19 +1958,27 @@ class ServeSocketClient:
             raise ServeHelloProtocolError(
                 "server_hello carried no usable nonce", frame=greeting
             )
-        self.send(
-            {
-                "op": "hello",
-                "client": client,
-                "client_build": client_build,
-                "peer_install_id": peer_install_id,
-                # `self._port` again — the port THIS client dialled, from its own
-                # socket rather than from anything the greeting claims.
-                "proof": peer_proof(
-                    verifier, nonce, port=self._port, peer_install_id=peer_install_id
-                ),
-            }
-        )
+        frame: dict[str, Any] = {
+            "op": "hello",
+            "client": client,
+            "client_build": client_build,
+            "peer_install_id": peer_install_id,
+            # `self._port` again — the port THIS client dialled, from its own
+            # socket rather than from anything the greeting claims.
+            "proof": peer_proof(
+                verifier, nonce, port=self._port, peer_install_id=peer_install_id
+            ),
+        }
+        # Omitted rather than sent as null when a caller has nothing to say, so
+        # a hello from a client that does not know these keys and a hello from
+        # one that has no address to offer are the same bytes.
+        if display_name:
+            frame["peer_display_name"] = display_name
+        if endpoints:
+            frame["peer_endpoints"] = endpoints
+        if cert_fingerprint:
+            frame["peer_cert_fingerprint"] = cert_fingerprint
+        self.send(frame)
         return self.read_frame()
 
     def peer_join_hello(

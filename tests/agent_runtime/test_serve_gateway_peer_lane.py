@@ -285,15 +285,28 @@ def test_peer_ping_answers_over_the_gateway_listener_with_the_peer_credential():
     assert answer["result"]["peer"] == FAR_INSTALL
 
 
-def test_the_last_seen_stamp_lands_on_the_row_after_a_handshake():
+def test_the_last_seen_stamp_lands_on_the_cache_after_a_handshake():
+    """S2c: the stamp still lands on every verified hello — in
+    ``peers_cache.json``, and the credential store is not touched at all."""
+
+    from agent_runtime.gateway_peers import (
+        REACHABILITY_REACHABLE,
+        peer_store_path,
+        read_peer_cache,
+    )
+
     credential = pair_peer()
-    assert lookup_peer(_store_root(), FAR_INSTALL).last_seen is None
+    assert read_peer_cache(_store_root()) == {}
+    before = peer_store_path(_store_root()).read_bytes()
 
     with running_serve() as handle:
         with peer_client(handle, credential) as (_c, reply):
             assert reply["event"] == "hello_ok"
 
-    assert lookup_peer(_store_root(), FAR_INSTALL).last_seen
+    cached = read_peer_cache(_store_root())[FAR_INSTALL]
+    assert cached.last_seen
+    assert cached.reachability == REACHABILITY_REACHABLE
+    assert peer_store_path(_store_root()).read_bytes() == before
 
 
 # ── the exclusion, over the wire ─────────────────────────────────────────────

@@ -150,11 +150,16 @@ CALLER_PEER = "peer"
 #: connection that somehow reached the dispatcher without a device stamp.
 CALLER_UNKNOWN = "unknown"
 
-#: **Exactly what a paired install may call on this one.** Three names, and the
+#: **Exactly what a paired install may call on this one.** Four names today and
+#: six after S2b, and the
 #: shortness is still the design: Stage 6 proved an edge exists (``peer.ping``,
 #: which answers "are you there" and touches nothing), Stage 7 lets that edge
-#: carry ONE thing (``peer.agent_chat.execute``, a chat turn), and Stage P4 lets
-#: it carry the PICTURES that turn's own reply declared.
+#: carry ONE thing (``peer.agent_chat.execute``, a chat turn), Stage P4 lets it
+#: carry the PICTURES that turn's own reply declared, and S2/S2b/S2c let it
+#: carry what an operator can already see on the far machine — who is there
+#: (``peer.roster.list``), what one thread said (``peer.thread.read``), and what
+#: changed (``peer.announce``). Nothing on this list mutates a level, and
+#: nothing on it writes a credential.
 #:
 #: **The third entry is Stage P4's widening (ruling R-P3) and this is its
 #: reason.** ``peer.media.get`` is read-only, it takes a ``sha256:<64 hex>``
@@ -196,8 +201,44 @@ CALLER_UNKNOWN = "unknown"
 #: agents never mint or retire agents on another install; a test iterates the
 #: whole registry against this set rather than naming those two, because a rule
 #: pinned by two literals stops being pinned the moment a third verb arrives.
+#: **The fourth entry is S2c's widening (R-IP12) and this comment is its
+#: reason.** ``peer.announce`` is the only name here that WRITES, and what it
+#: writes is the caller's own row in ``peers_cache.json`` — a file that gates
+#: nothing, authenticates nobody, and is by construction unreachable from
+#: ``verify_peer_proof``. It exists because the alternative to being TOLD is
+#: polling: before it, a rename, a moved address, a rotated certificate and a
+#: revocation on the far side were all discovered as the next call's failure,
+#: by an agent that had already written the message.
+#:
+#: Three properties keep it from being a write into this install's trust. The
+#: row is addressed by ``context.caller.peer_install_id`` and there is no
+#: parameter that could name another install. Nothing it sets is consulted by
+#: any credential path — an announced fingerprint becomes a rotation NOTICE
+#: beside the pin, never the pin. And ``revoked_you`` is ONE-WAY: an announce
+#: may set it, and only a trust write (a re-pair) clears it, so no install can
+#: announce itself back into an edge this operator cut.
+#:
+#: **The fifth and sixth land with S2b, and they are reads** (R-IP9).
+#: ``peer.roster.list`` answers "who is addressable on you", projected by B's
+#: own workspace rules — so A never guesses at a scope only B can resolve. And
+#: ``peer.thread.read`` answers with the tail of ONE thread the caller was
+#: already handed the session id for: it is the read half of a pointer this
+#: install's own dispatch delivery has been printing since Stage 7, which until
+#: now resolved to nothing on the machine that received it.
+#:
+#: Both are narrow in the same way ``peer.media.get`` is: no enumeration, no
+#: browse, nothing reachable that the caller was not already told about. A
+#: roster is scoped to one workspace; a thread read requires the ``target`` as
+#: well as the ``session_id`` and applies the SAME lane guard the local
+#: ``agent_chat_open`` applies, so a session id that is not part of that
+#: teammate's chat lane is ``foreign_session`` here exactly as it is there.
 PEER_METHOD_ALLOWLIST: frozenset[str] = frozenset(
-    {"peer.ping", "peer.agent_chat.execute", "peer.media.get"}
+    {
+        "peer.ping",
+        "peer.agent_chat.execute",
+        "peer.media.get",
+        "peer.announce",
+    }
 )
 
 #: **Verbs whose authority is a KIND and not a strength** — the machine owner at

@@ -76,7 +76,7 @@ def test_the_verb_is_registered_allowlisted_and_declares_console():
     assert PEER_CHAT_EXECUTE_METHOD in PEER_METHOD_ALLOWLIST
 
 
-def test_the_peer_surface_is_exactly_three_verbs_wide():
+def test_the_peer_surface_is_exactly_four_verbs_wide():
     """Widening is meant to be a visible line in a diff. This is the line that
     makes it visible in the SUITE — and it did: Stage P4's ``peer.media.get``
     reddened this file as well as ``test_peer_authorization``'s literal, which
@@ -85,7 +85,15 @@ def test_the_peer_surface_is_exactly_three_verbs_wide():
     dispatcher's own authorize walk answers it)."""
 
     assert PEER_METHOD_ALLOWLIST == frozenset(
-        {"peer.ping", PEER_CHAT_EXECUTE_METHOD, "peer.media.get"}
+        {
+            "peer.ping",
+            PEER_CHAT_EXECUTE_METHOD,
+            "peer.media.get",
+            # S2c. The only WRITING name on the surface, and what it writes is
+            # the caller's own cache row — see ``test_peer_announce.py`` for the
+            # three properties that keep it there.
+            "peer.announce",
+        }
     )
     registry = serve_rpc.method_names()
     allowed = [

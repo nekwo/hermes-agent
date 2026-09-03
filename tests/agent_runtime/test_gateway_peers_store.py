@@ -534,14 +534,46 @@ def test_revoke_is_idempotent_and_refuses_an_install_nobody_paired(tmp_path):
     assert missing.reason == "unknown_peer"
 
 
-def test_note_peer_seen_stamps_and_never_raises(tmp_path):
-    _pair(tmp_path)
-    note_peer_seen(tmp_path, PEER_B)
-    assert lookup_peer(tmp_path, PEER_B).last_seen
+def test_note_peer_seen_stamps_the_cache_and_never_raises(tmp_path):
+    """S2c MOVED this write, and the move is the sidecar's whole point.
 
-    # Bookkeeping must never be the thing that fails an authentication.
+    Before it, the one thing the NETWORK wrote into a credential store was this
+    stamp — a cache fact living in a trust file, which is exactly the confusion
+    the frozensets were added to make visible. Now ``peers.json`` is trust only,
+    and "can the network change this?" is answered by which FILE a fact is in.
+
+    The trust row is asserted UNCHANGED byte-for-byte, because "the write moved"
+    and "the write also still happens over there" are different claims and only
+    the first one is interesting if the second is not checked.
+    """
+
+    from agent_runtime.gateway_peers import (
+        REACHABILITY_REACHABLE,
+        peer_cache_path,
+        read_peer_cache,
+    )
+
+    _pair(tmp_path)
+    before = peer_store_path(tmp_path).read_bytes()
+
+    note_peer_seen(tmp_path, PEER_B)
+
+    cached = read_peer_cache(tmp_path)[PEER_B]
+    assert cached.last_seen
+    assert cached.last_hello_at == cached.last_seen
+    assert cached.reachability == REACHABILITY_REACHABLE
+    assert cached.unreachable_since is None
+    assert lookup_peer(tmp_path, PEER_B).last_seen is None
+    assert peer_store_path(tmp_path).read_bytes() == before
+
+    # Bookkeeping must never be the thing that fails an authentication. An id
+    # nobody paired writes a cache row and no credential — which is harmless
+    # and is why this is not guarded: the cache is not an authority for
+    # anything, so a row in it grants nothing.
     note_peer_seen(tmp_path, "inst_never_paired")
     note_peer_seen(tmp_path, "")
+    assert peer_store_path(tmp_path).read_bytes() == before
+    assert peer_cache_path(tmp_path).exists()
 
 
 # ── endpoints ────────────────────────────────────────────────────────────────
@@ -821,3 +853,347 @@ def test_dial_peer_refuses_an_expired_row_before_it_opens_a_socket(tmp_path, mon
         gateway_peers.dial_peer(tmp_path, PEER_A)
 
     assert "expired" in str(raised.value)
+
+
+# ── S2c: the cache sidecar, the predicate, and the revision memo ─────────────
+
+
+def test_the_cache_row_shape_is_exactly_the_cache_fields(tmp_path):
+    """The trust row's rule, applied to the other half of the split. A field
+    added to the sidecar without being classified fails here — which is the
+    point, because the alternative is a new key nobody ever decides the
+    authority for."""
+
+    from agent_runtime.gateway_peers import (
+        PEER_CACHE_CONTRACT,
+        PEER_CACHE_ROW_FIELDS,
+        peer_cache_path,
+    )
+
+    _pair(tmp_path)
+    note_peer_seen(tmp_path, PEER_B)
+
+    stored = json.loads(peer_cache_path(tmp_path).read_bytes().decode())
+    assert stored["contract"] == PEER_CACHE_CONTRACT
+    assert set(stored["peers"][PEER_B]) == PEER_CACHE_ROW_FIELDS
+    # …and the two halves do not overlap beyond the join key. A field in both
+    # files would be a fact with two authorities, which is the exact confusion
+    # the split retires.
+    assert not (PEER_CACHE_ROW_FIELDS & (PEER_ROW_TRUST_FIELDS - {"peer_install_id"}))
+
+
+def test_the_trust_file_no_longer_carries_last_seen(tmp_path):
+    """S2c's move, asserted at the SHAPE rather than at one writer: before it,
+    the one thing the network wrote into a credential store was this stamp."""
+
+    _pair(tmp_path)
+    stored = json.loads(peer_store_path(tmp_path).read_bytes().decode())
+
+    assert "last_seen" not in stored["peers"][PEER_B]
+    assert "last_seen" not in PEER_ROW_CACHE_FIELDS
+    assert PEER_ROW_CACHE_FIELDS == frozenset(
+        {"display_name", "endpoints", "cert_fingerprint"}
+    )
+
+
+def test_a_legacy_row_that_still_carries_last_seen_decodes_and_is_shown(tmp_path):
+    """Deleting a fact an operator can already see is a worse migration than
+    reading one nothing writes. A pre-S2c row keeps rendering its stamp; new
+    rows answer ``None`` there and the live value is the cache's."""
+
+    _pair(tmp_path)
+    raw = json.loads(peer_store_path(tmp_path).read_bytes().decode())
+    raw["peers"][PEER_B]["last_seen"] = "2026-01-01T00:00:00+00:00"
+    peer_store_path(tmp_path).write_bytes(json.dumps(raw).encode("utf-8"))
+
+    assert lookup_peer(tmp_path, PEER_B).last_seen == "2026-01-01T00:00:00+00:00"
+
+
+def test_no_cache_writer_can_change_a_trust_field(tmp_path):
+    """Every cache writer, run in turn, with hostile payloads where one is
+    accepted — and ``peers.json`` byte-identical afterwards.
+
+    Not "the values are unchanged": the BYTES are. A cache writer opening that
+    file at all is what this test exists to catch, because the split is a real
+    boundary only while the two writer sets are disjoint.
+    """
+
+    from agent_runtime.gateway_peers import (
+        apply_peer_announce,
+        cache_peer_hello,
+        cache_peer_roster,
+        note_dial_result,
+    )
+
+    _pair(tmp_path)
+    before = peer_store_path(tmp_path).read_bytes()
+
+    note_peer_seen(tmp_path, PEER_B)
+    cache_peer_hello(
+        tmp_path,
+        PEER_B,
+        display_name="renamed",
+        endpoints=[{"host": "10.9.9.9", "port": 1}],
+        cert_fingerprint="cd" * 32,
+    )
+    note_dial_result(tmp_path, PEER_B, ok=False, error="boom")
+    note_dial_result(tmp_path, PEER_B, ok=True)
+    cache_peer_roster(tmp_path, PEER_B, workspace_id="ws-1", rows=[{"handle": "dev"}])
+    apply_peer_announce(
+        tmp_path,
+        PEER_B,
+        {
+            "display_name": "hijacked",
+            "cert_fingerprint": "ef" * 32,
+            "revoked": False,
+            "secret_verifier": "0" * 64,
+            "expires_at": "2099-01-01T00:00:00+00:00",
+            "revoked_you": True,
+        },
+    )
+
+    assert peer_store_path(tmp_path).read_bytes() == before
+
+
+def test_dial_order_is_cache_endpoints_then_trust_and_the_pin_is_always_trust(
+    tmp_path, monkeypatch
+):
+    """Freshest first, deduped — and the PIN never moves.
+
+    The cache holds what the peer said most recently; the trust row holds what
+    it said at pairing time. Trying the fresher address first is what lets a
+    laptop that changed networks keep working. Pinning the trust row's
+    fingerprint on every attempt regardless is what stops a peer nominating the
+    certificate it is checked against.
+    """
+
+    from agent_runtime import gateway_peers, serve_socket
+    from agent_runtime.gateway_identity import set_display_name
+
+    set_display_name(tmp_path, "this install")
+    record_peer(
+        tmp_path,
+        peer_install_id=PEER_A,
+        secret="f" * 64,
+        display_name="workstation",
+        endpoints=[{"host": "10.0.0.4", "port": 9000}],
+        cert_fingerprint="ab" * 32,
+    )
+    gateway_peers.apply_peer_announce(
+        tmp_path,
+        PEER_A,
+        {
+            "endpoints": [
+                {"host": "10.0.0.9", "port": 8765},
+                {"host": "10.0.0.4", "port": 9000},
+            ],
+            "cert_fingerprint": "cd" * 32,
+        },
+    )
+
+    attempts = []
+
+    class _Client:
+        def __init__(self, host, port, **kwargs):
+            attempts.append((host, port, kwargs.get("cert_fingerprint")))
+
+        def connect(self):
+            raise OSError("refused")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(serve_socket, "ServeSocketClient", _Client)
+
+    with pytest.raises(ConnectionError):
+        gateway_peers.dial_peer(tmp_path, PEER_A)
+
+    # The announced address first, the pairing-time one second, no duplicate.
+    assert [(host, port) for host, port, _fp in attempts] == [
+        ("10.0.0.9", 8765),
+        ("10.0.0.4", 9000),
+    ]
+    # And every attempt pinned the TRUST row's fingerprint, never the announced
+    # one — the single most important assertion about this loop.
+    assert {fingerprint for _h, _p, fingerprint in attempts} == {"ab" * 32}
+
+
+def test_usable_peers_excludes_revoked_expired_and_revoked_you(tmp_path):
+    """THE predicate. Three conditions, and each is a different way for an edge
+    to be dead — this operator's decision, a clock, and the far operator's
+    decision — so all three are excluded and each has its own reason."""
+
+    from agent_runtime.gateway_peers import apply_peer_announce, usable_peers
+
+    record_peer(tmp_path, peer_install_id="inst_live", secret="a" * 64, display_name="live")
+    record_peer(
+        tmp_path, peer_install_id="inst_revoked", secret="b" * 64, display_name="revoked"
+    )
+    record_peer(
+        tmp_path,
+        peer_install_id="inst_expired",
+        secret="c" * 64,
+        display_name="expired",
+        expires_at="2000-01-01T00:00:00+00:00",
+    )
+    record_peer(tmp_path, peer_install_id="inst_cut", secret="d" * 64, display_name="cut")
+    revoke_peer(tmp_path, "inst_revoked")
+    apply_peer_announce(tmp_path, "inst_cut", {"revoked_you": True})
+
+    assert [peer.record.peer_install_id for peer in usable_peers(tmp_path)] == [
+        "inst_live"
+    ]
+
+
+def test_ref_is_the_name_when_unique_else_the_id(tmp_path):
+    """``ref`` is computed across the whole usable SET, because "is this name
+    unique" is a question about the set. A row that answered it alone would hand
+    out a display name the resolver then refuses as ambiguous — a spelling the
+    system printed and will not accept."""
+
+    from agent_runtime.gateway_peers import usable_peers
+
+    record_peer(tmp_path, peer_install_id="inst_one", secret="a" * 64, display_name="mac")
+    record_peer(tmp_path, peer_install_id="inst_two", secret="b" * 64, display_name="mac")
+    record_peer(
+        tmp_path, peer_install_id="inst_solo", secret="c" * 64, display_name="studio"
+    )
+
+    refs = {peer.record.peer_install_id: peer.ref for peer in usable_peers(tmp_path)}
+
+    assert refs["inst_solo"] == "studio"
+    assert refs["inst_one"] == "inst_one"
+    assert refs["inst_two"] == "inst_two"
+
+
+# ── the events, and the revision memo ────────────────────────────────────────
+
+
+def test_every_store_door_emits_its_event_with_ids_and_never_a_secret(
+    tmp_path, monkeypatch
+):
+    """Ids and counts only. An event log is where facts go to be read later by
+    people who were not there, and the 4096-byte cap is a hard append-time
+    refusal — so a payload carrying a verifier, a code, an endpoint list or a
+    roster body would be both a leak and a size risk. What a row HOLDS is in the
+    row; what HAPPENED to it is here."""
+
+    from agent_runtime import gateway_peers
+    from agent_runtime.decision_contract_registry import event_catalog
+
+    seen: list = []
+    monkeypatch.setattr(
+        gateway_peers,
+        "_emit_peer_event",
+        lambda event_type, payload: seen.append((event_type, payload)),
+    )
+
+    credential = _pair(tmp_path)
+    note_peer_seen(tmp_path, PEER_B)
+    gateway_peers.cache_peer_roster(
+        tmp_path, PEER_B, workspace_id="ws-1", rows=[{"handle": "dev"}]
+    )
+    gateway_peers.note_dial_result(tmp_path, PEER_B, ok=False, error="refused")
+    revoke_peer(tmp_path, PEER_B)
+
+    assert {event for event, _ in seen} == {
+        "gateway.peer.recorded",
+        "gateway.peer.reachability",
+        "gateway.peer.roster",
+        "gateway.peer.revoked",
+    }
+    catalog = event_catalog()
+    for event, payload in seen:
+        contract = catalog[event]
+        allowed = set(contract["summary_fields"]) | set(contract["detail_fields"])
+        assert set(payload) <= allowed, (event, set(payload) - allowed)
+        rendered = json.dumps(payload)
+        assert len(rendered.encode("utf-8")) < 4096
+        assert credential.secret not in rendered
+        assert "secret_verifier" not in rendered
+        assert "10.0.0" not in rendered
+        assert "handle" not in rendered
+
+
+def test_a_process_that_reads_a_revision_it_neither_wrote_nor_seeded_emits_external_write_once(
+    tmp_path, monkeypatch
+):
+    """The revision memo's ONE remaining job (R-S2-8).
+
+    Every write door emits from its own process — the ``realm.sync`` precedent —
+    so a CLI ``peers join`` beside a running serve is already visible with no
+    check. What is left is a write that emitted NOTHING: an editor on
+    ``peers.json``, or a binary that predates S2c. A stat, taken on reads that
+    were happening anyway; never a timer.
+    """
+
+    import time
+
+    from agent_runtime import gateway_peers
+
+    _pair(tmp_path)
+    seen: list = []
+    monkeypatch.setattr(
+        gateway_peers,
+        "_emit_peer_event",
+        lambda event_type, payload: seen.append((event_type, payload)),
+    )
+    gateway_peers._LAST_SEEN_REVISION.clear()
+
+    gateway_peers.note_peer_store_read(tmp_path)  # seeds
+    assert seen == []
+
+    raw = json.loads(peer_store_path(tmp_path).read_bytes().decode())
+    raw["peers"][PEER_B]["display_name"] = "renamed by hand"
+    time.sleep(0.02)
+    peer_store_path(tmp_path).write_bytes(json.dumps(raw).encode("utf-8"))
+
+    gateway_peers.note_peer_store_read(tmp_path)
+    assert [event for event, _ in seen] == ["gateway.peer.updated"]
+    assert seen[0][1]["change"] == "external_write"
+    assert seen[0][1]["store"] == "trust"
+
+    # ONCE. A second read at the same revision is not news.
+    gateway_peers.note_peer_store_read(tmp_path)
+    assert len(seen) == 1
+
+
+def test_a_fresh_process_seeds_on_first_read_and_emits_nothing(tmp_path, monkeypatch):
+    """A process with no baseline cannot claim "this changed" — so a CLI verb
+    that runs once and exits never emits an external-write event, and the
+    long-lived serve is the process that notices."""
+
+    from agent_runtime import gateway_peers
+
+    _pair(tmp_path)
+    note_peer_seen(tmp_path, PEER_B)
+
+    seen: list = []
+    monkeypatch.setattr(
+        gateway_peers, "_emit_peer_event", lambda t, p: seen.append((t, p))
+    )
+    gateway_peers._LAST_SEEN_REVISION.clear()
+
+    gateway_peers.note_peer_store_read(tmp_path)
+
+    assert seen == []
+
+
+def test_a_write_this_process_made_is_never_reported_as_external(tmp_path, monkeypatch):
+    """Every writer adopts the revision it wrote, so the memo reports only what
+    somebody ELSE did."""
+
+    from agent_runtime import gateway_peers
+
+    _pair(tmp_path)
+    gateway_peers.note_peer_store_read(tmp_path)
+
+    seen: list = []
+    monkeypatch.setattr(
+        gateway_peers, "_emit_peer_event", lambda t, p: seen.append((t, p))
+    )
+
+    note_peer_seen(tmp_path, PEER_B)
+    gateway_peers.note_peer_store_read(tmp_path)
+
+    assert [event for event, _ in seen] == ["gateway.peer.reachability"]

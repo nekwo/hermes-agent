@@ -175,3 +175,148 @@ def test_a_revoked_row_is_not_offered_as_a_hint(tmp_path):
     refusal = gt.resolve_install_target(tmp_path, parsed)
     assert refusal.reason == gt.REASON_UNKNOWN_INSTALL
     assert "workstation" not in refusal.message
+
+
+# ── S2 / S2c: the three ways an edge is dead, and one predicate ──────────────
+
+
+def test_an_expired_row_refuses_with_peer_expired_and_a_revoked_you_row_with_its_own_reason(
+    tmp_path,
+):
+    """Three reasons where there used to be one, because an operator acts
+    differently on each: a revoked edge is a ceremony to re-run at both
+    machines, an expired one is a credential to renew, and ``peer_revoked_you``
+    is the FAR operator's decision — which no amount of work at this machine
+    will fix. Before the announce edge existed, the third was indistinguishable
+    from the far install being down."""
+
+    from agent_runtime.gateway_peers import apply_peer_announce, record_peer, revoke_peer
+    from agent_runtime.gateway_targets import (
+        REASON_PEER_EXPIRED,
+        REASON_PEER_REVOKED,
+        REASON_PEER_REVOKED_YOU,
+        TargetRefusal,
+        parse_install_target,
+        resolve_install_target,
+    )
+
+    record_peer(tmp_path, peer_install_id="inst_gone", secret="a" * 64, display_name="gone")
+    record_peer(
+        tmp_path,
+        peer_install_id="inst_old",
+        secret="b" * 64,
+        display_name="old",
+        expires_at="2000-01-01T00:00:00+00:00",
+    )
+    record_peer(tmp_path, peer_install_id="inst_cut", secret="c" * 64, display_name="cut")
+    revoke_peer(tmp_path, "inst_gone")
+    apply_peer_announce(tmp_path, "inst_cut", {"revoked_you": True})
+
+    for name, reason in (
+        ("gone", REASON_PEER_REVOKED),
+        ("old", REASON_PEER_EXPIRED),
+        ("cut", REASON_PEER_REVOKED_YOU),
+    ):
+        refusal = resolve_install_target(
+            tmp_path, parse_install_target(f"@{name}/dev")
+        )
+        assert isinstance(refusal, TargetRefusal), name
+        assert refusal.reason == reason, name
+
+
+def test_the_hint_lists_usable_refs_only(tmp_path):
+    """A suggestion the runtime prints must be one it would then accept. Listing
+    a revoked name — or an ambiguous one — would hand an operator a spelling
+    that fails for a second reason after they retype it."""
+
+    from agent_runtime.gateway_peers import record_peer, revoke_peer
+    from agent_runtime.gateway_targets import parse_install_target, resolve_install_target
+
+    record_peer(tmp_path, peer_install_id="inst_live", secret="a" * 64, display_name="mac")
+    record_peer(tmp_path, peer_install_id="inst_dead", secret="b" * 64, display_name="old")
+    record_peer(tmp_path, peer_install_id="inst_dup1", secret="c" * 64, display_name="twin")
+    record_peer(tmp_path, peer_install_id="inst_dup2", secret="d" * 64, display_name="twin")
+    revoke_peer(tmp_path, "inst_dead")
+
+    refusal = resolve_install_target(tmp_path, parse_install_target("@nobody/dev"))
+
+    assert "mac" in refusal.message
+    assert "old" not in refusal.message
+    # The duplicated NAME is not offered; the two ids that would actually
+    # resolve are.
+    assert "twin" not in refusal.message
+    assert "inst_dup1" in refusal.message and "inst_dup2" in refusal.message
+
+
+def test_the_predicate_is_byte_identical_between_the_resolver_and_the_directory(
+    tmp_path,
+):
+    """ONE predicate, three readers (R-S2-16). Before it, the resolver checked
+    ``revoked``, the HUD listed everything and a tool would have invented a
+    third rule — so an operator could see a peer in one place and be refused it
+    in another with no way to tell which was right.
+
+    Asserted both ways round: every usable id resolves, and every paired id that
+    is NOT usable refuses.
+    """
+
+    from agent_runtime.gateway_peers import (
+        apply_peer_announce,
+        list_peers,
+        record_peer,
+        revoke_peer,
+        usable_peers,
+    )
+    from agent_runtime.gateway_targets import (
+        TargetRefusal,
+        parse_install_target,
+        resolve_install_target,
+    )
+
+    record_peer(tmp_path, peer_install_id="inst_live", secret="a" * 64, display_name="mac")
+    record_peer(tmp_path, peer_install_id="inst_dead", secret="b" * 64, display_name="old")
+    record_peer(
+        tmp_path,
+        peer_install_id="inst_old",
+        secret="c" * 64,
+        display_name="lapsed",
+        expires_at="2000-01-01T00:00:00+00:00",
+    )
+    record_peer(tmp_path, peer_install_id="inst_cut", secret="d" * 64, display_name="cut")
+    revoke_peer(tmp_path, "inst_dead")
+    apply_peer_announce(tmp_path, "inst_cut", {"revoked_you": True})
+
+    usable_ids = [peer.record.peer_install_id for peer in usable_peers(tmp_path)]
+    assert usable_ids == ["inst_live"]
+
+    for record in list_peers(tmp_path):
+        outcome = resolve_install_target(
+            tmp_path, parse_install_target(f"@{record.peer_install_id}/dev")
+        )
+        if record.peer_install_id in usable_ids:
+            assert outcome.install_id == record.peer_install_id
+        else:
+            assert isinstance(outcome, TargetRefusal), record.peer_install_id
+
+
+def test_resolve_install_ref_is_the_matcher_both_doors_share(tmp_path):
+    """Two matchers would be two answers to "which machine is @mac", and the
+    second would be discovered by an operator whose message went somewhere the
+    roster said it would not."""
+
+    from agent_runtime.gateway_peers import record_peer
+    from agent_runtime.gateway_targets import (
+        parse_install_target,
+        resolve_install_ref,
+        resolve_install_target,
+    )
+
+    record_peer(tmp_path, peer_install_id="inst_live", secret="a" * 64, display_name="mac")
+
+    by_ref = resolve_install_ref(tmp_path, "mac")
+    by_target = resolve_install_target(tmp_path, parse_install_target("@mac/dev"))
+
+    assert by_ref.peer_install_id == by_target.install_id == "inst_live"
+    # …and the id spelling reaches the same row, which is the ordering rule the
+    # resolver's docstring states: an id always wins over a name.
+    assert resolve_install_ref(tmp_path, "inst_live").peer_install_id == "inst_live"

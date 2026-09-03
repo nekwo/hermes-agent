@@ -495,6 +495,12 @@ def build_parser(parent_subparsers) -> None:
     gateway_peers_revoke.add_argument(
         "peer_install_id", help="The install id from `harness gateway peers list`"
     )
+    gateway_peers_revoke.add_argument(
+        "--no-announce",
+        dest="no_announce",
+        action="store_true",
+        help="Skip telling the other install it was revoked (offline, or when it must not be contacted); it learns at its next call",
+    )
     _add_stage42_global_args(gateway_peers_revoke, controls=frozenset({"dry_run"}))
     gateway_peers_revoke.set_defaults(func=_cmd_gateway_peers_revoke)
 
@@ -2227,6 +2233,20 @@ def _cmd_gateway_rename(args) -> int:
         if not identity.ok:
             return _gateway_identity_error(identity, args=args)
         row = _gateway_install_row(identity)
+        # S2c: tell every paired install what we are called now. A display name
+        # is CACHE at the far end (`gateway_peers`' split) — the install itself
+        # is the authority for its own name — so a rename that nobody announced
+        # left every peer showing the old one until its next hello, which for an
+        # install that is rarely dialled could be days. Best-effort and
+        # off-thread; a rename does not wait on a LAN.
+        try:
+            from agent_runtime.gateway_announce import announce_in_background
+
+            announce_in_background(
+                root, {"display_name": identity.display_name}
+            )
+        except Exception:  # noqa: BLE001 — courtesy channel, never the write
+            pass
 
     envelope = attach_root_observability(_object_envelope("gateway_install", row))
     if dry_run:

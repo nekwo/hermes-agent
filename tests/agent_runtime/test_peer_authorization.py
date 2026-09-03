@@ -136,23 +136,35 @@ def test_a_peer_naming_no_method_is_refused_rather_than_defaulted():
     assert authorize_call(TIER_CONSOLE, PEER, method=None).ok is False
 
 
-def test_the_allowlist_is_exactly_its_three_verbs_and_all_methods_exist():
+def test_the_allowlist_is_exactly_its_verbs_and_all_methods_exist():
     """A membership set naming a verb nobody registered would be an allowlist
     that admits nothing — green, and describing a lane that does not work.
 
-    Stage 7 widened it by ONE name and Stage P4 by one more, and the literal
-    here is the counterweight that makes each widening cost something: a set
-    spelled out in a test is a set nobody grows without editing this line and
-    saying why.
+    Stage 7 widened it by ONE name, Stage P4 by one more, and S2c by a fourth,
+    and the literal here is the counterweight that makes each widening cost
+    something: a set spelled out in a test is a set nobody grows without editing
+    this line and saying why.
 
     P4's name is ``peer.media.get`` (ruling R-P3): read-only, handle-only, and
     LOCAL-scope-only on the far side, so a paired install can spend a handle
-    that install's own reply minted and can enumerate nothing. The argument
-    lives on ``PEER_METHOD_ALLOWLIST`` and on the handler; this line is the
-    price."""
+    that install's own reply minted and can enumerate nothing.
+
+    S2c's is ``peer.announce`` (R-IP12), and it is the only name here that
+    WRITES. What it writes is the caller's own row in ``peers_cache.json`` — a
+    file that gates nothing and that no credential path reads — and the three
+    properties that keep it from being more than that are asserted in
+    ``test_peer_announce.py``: the row is addressed by the id the transport
+    proved and there is no parameter for another, an announced fingerprint is a
+    notice and never the pin, and ``revoked_you`` is one-way. The arguments live
+    on ``PEER_METHOD_ALLOWLIST`` and on the handler; this line is the price."""
 
     assert PEER_METHOD_ALLOWLIST == frozenset(
-        {"peer.ping", "peer.agent_chat.execute", "peer.media.get"}
+        {
+            "peer.ping",
+            "peer.agent_chat.execute",
+            "peer.media.get",
+            "peer.announce",
+        }
     )
     for name in PEER_METHOD_ALLOWLIST:
         assert name in serve_rpc.method_names()

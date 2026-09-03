@@ -392,4 +392,28 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "dispatch.dropped": EventContract("dispatch.dropped", "Detached dispatch delivery abandoned", ("dispatch_id", "reason"), ("attempts",)),
     "dispatch.delivery_backlog": EventContract("dispatch.delivery_backlog", "Undelivered dispatch completions exceed the retention cap", ("pending", "cap"), ()),
     "dispatch.outcome_superseded": EventContract("dispatch.outcome_superseded", "A different outcome landed on an already-delivered dispatch", ("dispatch_id", "settled"), ("previous",)),
+    # Peer-store mutations (S2c, R-IP12). Every write door in
+    # ``gateway_peers`` rides one of these, for the standing store reason: the
+    # stream/read-model pipeline is watermark-gated on the EventLog, so an
+    # event-less peer write is invisible to every consumer until an unrelated
+    # event happens to advance the offset — and a CLI ``peers join`` beside a
+    # running serve is exactly that write. Emitting from the WRITING process
+    # (the ``realm.sync.*`` precedent) is what makes the join visible with no
+    # restart.
+    #
+    # **Ids and counts only.** No secret, no endpoint list, no roster body, no
+    # display name — the 4096-byte cap is a hard append-time refusal, and these
+    # rows describe a credential store that a person who was not there will
+    # read later. What a row holds is in the row; what happened to it is here.
+    # ``grant_id`` rides detail on all five (R-IP17: one errand, one token, every
+    # party writes it), and ``store_revision`` so an operator correlating an
+    # external edit with a mtime has the number in the same place.
+    "gateway.peer.recorded": EventContract("gateway.peer.recorded", "Peer install recorded", ("peer_install_id", "source"), ("grant_id", "store_revision")),
+    "gateway.peer.revoked": EventContract("gateway.peer.revoked", "Peer install revoked", ("peer_install_id", "announced"), ("grant_id", "store_revision")),
+    # ``store`` is "trust" or "cache" and ``change`` names WHICH fact moved, so
+    # a reader can tell an announced rename from a fingerprint rotation from an
+    # external write without opening either file.
+    "gateway.peer.updated": EventContract("gateway.peer.updated", "Peer row updated", ("store", "change"), ("peer_install_id", "grant_id", "store_revision")),
+    "gateway.peer.roster": EventContract("gateway.peer.roster", "Peer roster cached", ("peer_install_id", "count"), ("workspace_id", "fetched_at", "grant_id", "store_revision")),
+    "gateway.peer.reachability": EventContract("gateway.peer.reachability", "Peer reachability changed", ("peer_install_id", "reachability"), ("unreachable_since", "error", "grant_id", "store_revision")),
 }

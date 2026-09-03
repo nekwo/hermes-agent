@@ -237,7 +237,13 @@ REMOVED_EVENT_TYPES = frozenset(
 # SAME commit as its emitter (``PersonaInstanceStore.replicate_instance`` /
 # ``apply_replicated_steering``), per S55; this counter went red on it and was
 # moved deliberately, which is again the counter working.
-SURVIVING_EVENT_COUNT = 59
+# S2c registered the five ``gateway.peer.*`` types (59 -> 64) in the SAME commit
+# as their emitters, per S55: ``gateway_peers`` writes ``recorded`` from both
+# ceremonies, ``revoked`` from the revoke door, ``updated`` from every cache
+# writer and from the external-write memo, ``roster`` from the roster cache, and
+# ``reachability`` from the dial result on a change of word. This counter went
+# red on that commit and was moved deliberately — which is the counter working.
+SURVIVING_EVENT_COUNT = 64
 
 
 def test_the_unemittable_event_types_are_no_longer_registered():

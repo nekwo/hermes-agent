@@ -666,7 +666,9 @@ def _gateway_authenticator(store_root: Any):
 
     from agent_runtime.gateway_peers import (
         PeerCredential,
+        cache_peer_hello,
         note_peer_seen,
+        note_peer_store_read,
         redeem_peer_code,
         verify_peer_proof,
     )
@@ -732,6 +734,12 @@ def _gateway_authenticator(store_root: Any):
             )
 
         if kind == "peer_install_id":
+            # S2c (R-S2-8). The revision read that makes an EXTERNAL write
+            # visible, taken on a read this lane was making anyway. The serve is
+            # the process that notices because it is the one that reads
+            # repeatedly; a fresh CLI process seeds on its first read and emits
+            # nothing, having no baseline to claim a change against.
+            note_peer_store_read(store_root)
             peer = verify_peer_proof(
                 store_root,
                 message.get("peer_install_id"),
@@ -742,6 +750,17 @@ def _gateway_authenticator(store_root: Any):
             if not peer.ok or peer.record is None:
                 return _reject()
             note_peer_seen(store_root, peer.record.peer_install_id)
+            # …and the three OPTIONAL facts the hello may carry about itself,
+            # after the proof and never before it: these are assertions by a
+            # party that has now authenticated, and writing them for a caller
+            # that had not would let an unpaired stranger grow this file.
+            cache_peer_hello(
+                store_root,
+                peer.record.peer_install_id,
+                display_name=message.get("peer_display_name"),
+                endpoints=message.get("peer_endpoints"),
+                cert_fingerprint=message.get("peer_cert_fingerprint"),
+            )
             return HelloAuthOutcome(
                 ok=True, peer_install_id=peer.record.peer_install_id
             )
@@ -2608,6 +2627,36 @@ def serve_loop(
                         },
                     }
                 )
+        # S2c. ONE announce per boot, on a background thread, telling every
+        # usable peer where this install is now reachable and what certificate
+        # it presents. It is the push that makes a machine which changed
+        # networks findable again without an operator re-running a ceremony they
+        # had no reason to suspect was needed — the far side's cache endpoints
+        # are tried before its pairing-time ones (`dial_peer`), so the new
+        # address wins on the next call.
+        #
+        # Once per boot and never on a timer: this is news, and news that
+        # repeats is a poll wearing a push's clothes. A peer that was off simply
+        # rests `unreachable` in our cache until its own next hello refreshes
+        # both sides.
+        if gateway_block.get("outcome") == "listening" and store_root_path is not None:
+            try:
+                from agent_runtime.gateway_announce import announce_in_background
+                from hermes_cli.harness_parts.gateway_commands import (
+                    _candidate_endpoints,
+                )
+
+                announce_in_background(
+                    store_root_path,
+                    {
+                        "endpoints": _candidate_endpoints(store_root_path),
+                        "cert_fingerprint": gateway_block.get("cert_fingerprint"),
+                        "display_name": install_block.get("display_name"),
+                    },
+                )
+            except Exception:  # noqa: BLE001 — courtesy channel, never the boot
+                pass
+
         # 4. DISCOVERY. Multiple runtime roots legitimately coexist on this
         #    machine (QA lanes, isolated worktree roots), and until now
         #    "how many serves are running against this root, on what code"
@@ -3600,6 +3649,18 @@ def serve_loop(
             }
 
         def _connections_frame() -> dict[str, Any]:
+            # S2c (R-S2-8). One stat on a read this frame was making anyway.
+            # The serve is the process that NOTICES an external write because it
+            # is the one that reads repeatedly; a fresh CLI process seeds on its
+            # first read and emits nothing, having no baseline to claim a change
+            # against.
+            if store_root_path is not None:
+                try:
+                    from agent_runtime.gateway_peers import note_peer_store_read
+
+                    note_peer_store_read(store_root_path)
+                except Exception:
+                    pass
             payload: dict[str, Any] = {"event": "socket_connections", "boot_id": boot_id}
             with lane_lock:
                 server = socket_server

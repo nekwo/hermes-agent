@@ -4511,6 +4511,14 @@
           "required": false,
           "type": null
         },
+        "--no-announce": {
+          "action": "store_true",
+          "canonical": "--no-announce",
+          "choices": null,
+          "nargs": 0,
+          "required": false,
+          "type": null
+        },
         "--no-color": {
           "action": "store_true",
           "canonical": "--no-color",

@@ -59,7 +59,9 @@ __all__ = [
     "REASON_AMBIGUOUS_INSTALL",
     "REASON_EMPTY_INSTALL",
     "REASON_EMPTY_TARGET",
+    "REASON_PEER_EXPIRED",
     "REASON_PEER_REVOKED",
+    "REASON_PEER_REVOKED_YOU",
     "REASON_UNKNOWN_INSTALL",
     "InstallTarget",
     "ResolvedInstallTarget",
@@ -68,6 +70,7 @@ __all__ = [
     "is_install_qualified",
     "parse_install_target",
     "peer_store_root",
+    "resolve_install_ref",
     "resolve_install_target",
 ]
 
@@ -94,6 +97,17 @@ REASON_EMPTY_TARGET = "install_qualifier_target_empty"
 REASON_UNKNOWN_INSTALL = "unknown_peer_install"
 REASON_AMBIGUOUS_INSTALL = "ambiguous_peer_install"
 REASON_PEER_REVOKED = "peer_revoked"
+#: S2. The credential lapsed (R-IP15 as amended). Its own reason because the
+#: operator's next move differs from a revocation's: nobody decided this, a
+#: clock ran out, and the cure is a fresh introduction rather than an argument
+#: about whether the edge should exist.
+REASON_PEER_EXPIRED = "peer_expired"
+#: S2c. The FAR operator cut the edge and told us so (``peer.announce``). A
+#: third word rather than folding into ``peer_revoked``, because "you revoked
+#: them" and "they revoked you" send an operator to different machines — and
+#: before the announce edge existed this state was indistinguishable from the
+#: far install being down.
+REASON_PEER_REVOKED_YOU = "peer_revoked_you"
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,63 +280,26 @@ def resolve_install_target(
     to iterate first — because "the message went to the other DESKTOP-QJ7DDV2"
     is not a failure an operator can debug after the fact.
 
-    A REVOKED row refuses with its own reason rather than reading as unknown.
-    The two are different facts and an operator acts differently on each: an
-    unknown name is a typo or a pairing that never happened, a revoked one is a
-    ceremony that has to be re-run at both machines. ``dial_peer`` refuses a
-    revoked row too — this is not that check moved, it is the same verdict
-    reached before any work starts, so a revoked edge costs no attempt.
+    An UNUSABLE row refuses with its own reason rather than reading as unknown,
+    and S2/S2c made that three reasons where it was one. The facts are
+    different and an operator acts differently on each: an unknown name is a
+    typo or a pairing that never happened; a revoked row is a ceremony to re-run
+    at both machines; an expired one is a credential to renew; and
+    ``peer_revoked_you`` is the far operator's decision, which no amount of work
+    at this machine will fix. ``dial_peer`` refuses the first three too — this
+    is not that check moved, it is the same verdict reached before any work
+    starts, so an unusable edge costs no attempt.
+
+    The matching half lives in :func:`resolve_install_ref` so the directory tool
+    and the send path share one answer to "which machine is @mac".
     """
 
-    from .gateway_peers import list_peers
     from .persona_assignments import safe_assignment_token
 
-    root = Path(store_root)
-    try:
-        rows = list_peers(root)
-    except Exception as exc:  # pragma: no cover - defensive; an unreadable store
-        return TargetRefusal(
-            REASON_UNKNOWN_INSTALL,
-            f"this install's peer store could not be read ({type(exc).__name__}), "
-            "so no cross-install target can be resolved.",
-        )
-
-    ref = parsed.install_ref
-    folded = ref.casefold()
-    by_id = [row for row in rows if row.peer_install_id == ref]
-    matches = by_id or [
-        row for row in rows if (row.display_name or "").casefold() == folded
-    ]
-    if not matches:
-        known = sorted(
-            {row.display_name for row in rows if not row.revoked and row.display_name}
-        )
-        hint = (
-            f" Paired installs: {', '.join(known[:8])}."
-            if known
-            else " No install is paired with this one yet; an operator runs "
-            "`harness gateway peers pair` here and `join` there."
-        )
-        return TargetRefusal(
-            REASON_UNKNOWN_INSTALL,
-            f"no paired install matches {ref!r}.{hint}",
-        )
-    if len(matches) > 1:
-        candidates = tuple(sorted(row.peer_install_id for row in matches))
-        return TargetRefusal(
-            REASON_AMBIGUOUS_INSTALL,
-            f"{len(matches)} paired installs are called {ref!r}. Address one by "
-            "its install id instead of its name.",
-            candidates=candidates,
-        )
-    record = matches[0]
-    if record.revoked:
-        return TargetRefusal(
-            REASON_PEER_REVOKED,
-            f"the edge to {record.display_name!r} ({record.peer_install_id}) is "
-            "revoked at this install; an operator has to re-run the pairing "
-            "ceremony at both machines before it can carry anything.",
-        )
+    resolved = resolve_install_ref(store_root, parsed.install_ref)
+    if isinstance(resolved, TargetRefusal):
+        return resolved
+    record = resolved
     handle = (
         parsed.target
         if safe_assignment_token(parsed.target).startswith("personainst_")
@@ -333,4 +310,112 @@ def resolve_install_target(
         display_name=record.display_name,
         target=parsed.target,
         target_instance_id=handle,
+    )
+
+
+def resolve_install_ref(store_root: Path | str, install_ref: str):
+    """Match one install REF — a display name or an install id — to a usable row.
+
+    Factored out of :func:`resolve_install_target` when S2b's
+    ``agent_chat_installs`` needed the same matcher without a target half. Two
+    matchers would be two answers to "which machine is @mac", and the second one
+    would be discovered by an operator whose message went somewhere the roster
+    said it would not.
+
+    Returns a ``PeerRecord`` or a :class:`TargetRefusal`.
+
+    **It matches against ``usable_peers`` and names the reason from the full
+    list** (R-S2-16). The two halves are separate on purpose: what an address
+    may RESOLVE to is the usable set, so no send can land on an edge the runtime
+    has written off; but a refusal is allowed to know more than the resolver, so
+    an operator whose message bounced learns *revoked*, *expired* or *they
+    revoked you* instead of the flat "no such install" all three used to be.
+    """
+
+    from .gateway_peers import list_peers, usable_peers
+
+    root = Path(store_root)
+    ref = str(install_ref or "").strip()
+    try:
+        usable = usable_peers(root)
+    except Exception as exc:  # pragma: no cover - defensive; an unreadable store
+        return TargetRefusal(
+            REASON_UNKNOWN_INSTALL,
+            f"this install's peer store could not be read ({type(exc).__name__}), "
+            "so no cross-install target can be resolved.",
+        )
+
+    folded = ref.casefold()
+    by_id = [row.record for row in usable if row.record.peer_install_id == ref]
+    matches = by_id or [
+        row.record
+        for row in usable
+        if (row.record.display_name or "").casefold() == folded
+    ]
+    if len(matches) > 1:
+        return TargetRefusal(
+            REASON_AMBIGUOUS_INSTALL,
+            f"{len(matches)} paired installs are called {ref!r}. Address one by "
+            "its install id instead of its name.",
+            candidates=tuple(sorted(row.peer_install_id for row in matches)),
+        )
+    if matches:
+        return matches[0]
+
+    # Nothing usable matched. The FULL list is consulted only now, and only to
+    # name the reason — an unusable row can explain a refusal and can never
+    # satisfy an address.
+    return _refuse_unmatched(root, ref, usable, list_peers(root))
+
+
+def _refuse_unmatched(root, ref: str, usable, every_row):
+    """Why nothing usable matched *ref*, in the operator's own vocabulary."""
+
+    from .gateway_peers import read_peer_cache
+
+    folded = ref.casefold()
+    unusable = [
+        row
+        for row in every_row
+        if row.peer_install_id == ref or (row.display_name or "").casefold() == folded
+    ]
+    if unusable:
+        record = unusable[0]
+        if record.revoked:
+            return TargetRefusal(
+                REASON_PEER_REVOKED,
+                f"the edge to {record.display_name!r} ({record.peer_install_id}) is "
+                "revoked at this install; an operator has to re-run the pairing "
+                "ceremony at both machines before it can carry anything.",
+            )
+        if record.expired:
+            return TargetRefusal(
+                REASON_PEER_EXPIRED,
+                f"the credential for {record.display_name!r} "
+                f"({record.peer_install_id}) expired at {record.expires_at}; an "
+                "operator introduces the two installs again to renew it.",
+            )
+        cached = read_peer_cache(root).get(record.peer_install_id)
+        if cached is not None and cached.revoked_you:
+            return TargetRefusal(
+                REASON_PEER_REVOKED_YOU,
+                f"{record.display_name!r} ({record.peer_install_id}) revoked this "
+                f"install at {cached.revoked_you_at}; the row here is intact but "
+                "that machine will refuse us until an operator over there pairs "
+                "again.",
+            )
+
+    # The hint lists USABLE refs only — the exact spellings an address would
+    # resolve, so a suggestion the runtime prints is never one it would then
+    # refuse as ambiguous or revoked.
+    known = sorted({row.ref for row in usable if row.ref})
+    hint = (
+        f" Paired installs: {', '.join(known[:8])}."
+        if known
+        else " No install is paired with this one yet; an operator runs "
+        "`harness gateway peers pair` here and `join` there."
+    )
+    return TargetRefusal(
+        REASON_UNKNOWN_INSTALL,
+        f"no paired install matches {ref!r}.{hint}",
     )

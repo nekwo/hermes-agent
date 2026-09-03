@@ -3313,3 +3313,133 @@ def _peer_media_get(
     if correlation_id is not None:
         result["correlation_id"] = correlation_id
     return ok(rid, result)
+
+
+# ── peer.announce ────────────────────────────────────────────────────────────
+#
+# S2c (R-IP12: one local store, pushed never polled, filtered never copied).
+# The only WRITING verb on the peer surface, and what it writes is the caller's
+# own row in ``peers_cache.json`` — a file that gates nothing and that no
+# credential path reads. It exists because the alternative to being told is
+# polling: before it, a rename, a moved address, a rotated certificate and a
+# revocation on the far side were each discovered as the NEXT call's failure, by
+# an agent that had already written the message.
+
+
+#: The announce lane's own shape number, beside ``PEER_PING_CONTRACT``'s and for
+#: its reason: it describes this verb's params and result and nothing else, so a
+#: later widening does not tell every ``runtime.*`` client that something moved.
+PEER_ANNOUNCE_CONTRACT = 1
+
+#: A payload that carries an install id different from the caller's. Its own
+#: reason rather than a generic invalid-params, because the two are different
+#: mistakes: a malformed field is a client bug, and this is a client asking to
+#: write somebody else's row.
+PEER_ANNOUNCE_NAMES_OTHER_REASON = "announce_names_other_install"
+
+
+@method("peer.announce", tier=TIER_CONSOLE)
+def _peer_announce(rid: Any, params: dict, context: RpcContext | None = None) -> dict:
+    """Tell this install what changed about YOU. Writes the caller's cache row, only.
+
+    Params: ``contract`` (optional, echoed), ``display_name``, ``endpoints``,
+    ``cert_fingerprint``, ``roster_changed`` (bool), ``revoked_you`` (bool),
+    ``correlation_id`` — all optional; an announce with none of them is a
+    liveness stamp and is accepted.
+
+    Result::
+
+        {accepted: true, contract: 1, peer: <caller's install id>,
+         cache_written: [field names], correlation_id?: <token>}
+
+    **There is no install-id parameter, and that absence is the security
+    property.** The row written is ``rows[context.caller.peer_install_id]`` —
+    the id the TRANSPORT proved against a verifier in ``gateway/peers.json``,
+    which is not readable from and not writable by anything in ``params``. It is
+    the same posture ``normalize_peer_chat_execute`` takes with ``requested_by``
+    and for the same reason: *the field a peer could type does not exist.* A
+    payload that names another install is REFUSED rather than ignored (a caller
+    doing that is either confused or probing, and both deserve to be told); one
+    that names its own is ignored, because a client echoing what it already
+    proved is harmless.
+
+    **Three things this cannot do**, each by construction rather than by a check
+    somebody has to remember. It cannot write a credential —
+    ``apply_peer_announce`` opens the cache file and no other. It cannot
+    un-revoke: ``revoked_you`` is one-way and both it and the trust ``revoked``
+    are cleared only by a trust write, so no install can announce itself back
+    into an edge this operator cut. And it cannot move the dial pin: an
+    announced fingerprint is recorded as a ``fingerprint_rotation`` NOTICE for
+    an operator to act on, never applied, because a peer that could nominate the
+    certificate it is checked against could become a different machine.
+
+    **The tier says ``console``**, and here that word is doing real work rather
+    than being the honest answer to a map's question. ``read`` is deliberately
+    open to a caller the transport could not place (``peer.media.get``'s
+    argument), and a caller the transport could not place is precisely the one
+    that must not write a row this install will act on. What ADMITS a peer is
+    still the allowlist, not the tier.
+
+    **``roster_changed`` drops the cached roster; it never fetches one.** A
+    handler that answered an inbound announce by dialling back would make one
+    push edge into a loop with two installs in it. The next read fetches, when
+    somebody actually wants it.
+    """
+
+    from agent_runtime.gateway_peers import apply_peer_announce
+    from agent_runtime.gateway_targets import peer_store_root
+
+    caller = None if context is None else context.caller
+    peer_install_id = None if caller is None else caller.peer_install_id
+    if not peer_install_id:
+        return err(
+            rid,
+            ERR_HANDLER_FAILED,
+            "peer.announce records what a PAIRED INSTALL says about itself, and "
+            "this connection proved none; there is no local caller this verb "
+            "would mean anything for",
+            {"reason": PEER_CHAT_NOT_A_PEER_REASON},
+        )
+
+    try:
+        correlation_id = _correlation_id_param(params)
+    except _CorrelationIdRefused as refused:
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            refused.message,
+            {"reason": CORRELATION_ID_INVALID_REASON},
+        )
+
+    for key in ("peer_install_id", "install_id"):
+        named = params.get(key)
+        if named is None:
+            continue
+        if not isinstance(named, str) or named.strip() != peer_install_id:
+            return err(
+                rid,
+                ERR_INVALID_PARAMS,
+                "peer.announce writes the row of the install the transport "
+                "proved, and this payload names a different one. There is no "
+                "parameter for choosing whose row to write.",
+                {"reason": PEER_ANNOUNCE_NAMES_OTHER_REASON},
+            )
+
+    payload = dict(params)
+    if correlation_id is not None:
+        payload["correlation_id"] = correlation_id
+    written = apply_peer_announce(peer_store_root(), peer_install_id, payload)
+
+    result: dict[str, Any] = {
+        "accepted": True,
+        "contract": PEER_ANNOUNCE_CONTRACT,
+        "peer": peer_install_id,
+        # WHICH fields landed, so a caller that announced a rename can tell an
+        # accepted-and-applied from an accepted-and-dropped without a second
+        # round trip. An empty list is a legal answer: an announce with nothing
+        # in it is a liveness stamp.
+        "cache_written": written,
+    }
+    if correlation_id is not None:
+        result["correlation_id"] = correlation_id
+    return ok(rid, result)
