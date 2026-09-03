@@ -56,7 +56,11 @@ against `agent_runtime.personas` (`tests/agent_runtime/test_tombstone_registry.p
 s11 rows). A definition can be withheld without being deleted:
 `persona_lifecycle.py`'s `DISABLED_ROLE_TOKENS` / `MOTHBALLED_*` keep it in the
 administrative catalog but never let it acquire a live instance
-(`is_runtime_persona`).
+(`is_runtime_persona`). Since S0a (2026-09-03) the persona's `toolsets` field is
+LEGACY DISPLAY on the harness lane: the capability declaration is the bound
+PROFILE's top-level `toolsets:` key, read by `personas.declared_lane_toolsets`
+and defaulting to `harness_core` (canon 05 §4c). The field is still carried,
+still travels on realm publish, and admits nothing.
 
 **2 — Durable persona instance (the placement).** `PersonaInstance`
 (`models.py:310`). Stable identity, outlives any one chat. Ids are structurally

@@ -28,13 +28,17 @@ The invariants this module exists to hold
    admits none; role names do not narrow or widen that data-owned set. Machine
    resolution and permission-mode filtering may still narrow it.
 3. **``unbounded`` must never cross the declared set.** The chat lane's
-   ``unbounded`` mode resolves ``all_registered_toolsets()`` — which, in a
-   long-lived multi-persona harness process, would include another persona's
-   admitted MCP toolsets. ``scope_toolsets_to_admission`` is applied AFTER
-   permission-mode resolution and strips every ``mcp-*`` toolset (and alias)
-   this run was not admitted. Since R2 the registry is ALSO empty between
-   admitted runs (see below), so this is now the second line of defence rather
-   than the only one.
+   ``unbounded`` mode USED to resolve ``all_registered_toolsets()`` — which, in
+   a long-lived multi-persona harness process, includes another persona's
+   admitted MCP toolsets. Since S0a A1 (2026-09-03) both modes resolve the
+   persona's own declaration (``personas.declared_lane_toolsets``), so no
+   foreign ``mcp-*`` name reaches the scope in the first place.
+   ``scope_toolsets_to_admission`` is still applied AFTER permission-mode
+   resolution and still strips every ``mcp-*`` toolset (and alias) this run was
+   not admitted: the property must hold by construction, not by the shape of
+   today's declarations. Since R2 the registry is ALSO empty between admitted
+   runs (see below), so this is the third line of defence rather than the
+   only one.
 4. **Registration is single-flight and bounded.** ``tools.registry`` and
    ``tools/mcp_tool._servers`` are process-global and a serve process is
    multi-persona (``ThreadPoolExecutor(4)``), so two interleaved admissions
@@ -1016,10 +1020,12 @@ def scope_toolsets_to_admission(
     """Keep only the MCP toolsets THIS run was admitted; add the admitted ones.
 
     Applied after permission-mode resolution, which is what makes the
-    ``unbounded`` rule hold: ``unbounded`` resolves ``all_registered_toolsets()``,
-    and in a warm multi-persona process that set can contain another persona's
-    admitted ``mcp-*`` toolsets. Stripping them here means no permission mode can
-    widen the admitted set — the security acceptance property.
+    ``unbounded`` rule hold by construction. It was load-bearing while
+    ``unbounded`` resolved ``all_registered_toolsets()`` — in a warm
+    multi-persona process that set contains another persona's admitted ``mcp-*``
+    toolsets. Since S0a A1 both modes resolve the persona's own declaration, so
+    this is defensive; it stays because "no permission mode can widen the
+    admitted set" must not depend on what today's profiles happen to declare.
 
     Non-MCP toolsets pass through untouched and in order.
     """

@@ -3,6 +3,7 @@ from agent_runtime.personas import (
     AgentRole,
     AutonomyLevel,
     PERSONA_BLOCKED_TOOLS,
+    declared_lane_toolsets,
     effective_toolsets,
     validate_toolsets,
 )
@@ -23,9 +24,23 @@ def persona(role, toolsets):
 
 
 def test_role_tokens_do_not_filter_configured_toolsets():
+    """There is NO role ceiling — and since S0a there is no per-persona list either.
+
+    ``validate_toolsets`` is the normalizer this test was always really about: a
+    role token does not filter the list handed to it. What moved on 2026-09-03 is
+    WHOSE list the lane reads — ``effective_toolsets`` answers the bound profile's
+    declaration (``declared_lane_toolsets``), not ``persona.toolsets`` — so the
+    field-shaped half of this assertion is made against the normalizer and the
+    lane half is asserted for what it now is.
+    """
+
     pm = persona(AgentRole.PM, ["file", "terminal", "code_execution", "todo"])
 
-    assert effective_toolsets(pm) == ["file", "terminal", "code_execution", "todo"]
+    assert validate_toolsets(pm.toolsets) == ["file", "terminal", "code_execution", "todo"]
+    # The persona field admits nothing; the profile declaration does.
+    assert effective_toolsets(pm) == list(declared_lane_toolsets(pm).toolsets)
+    assert "harness_core" not in effective_toolsets(pm)  # expanded to members
+    assert "terminal" in effective_toolsets(pm)
 
 
 def test_blocked_tools_are_exposed_for_runtime_filtering():
@@ -61,4 +76,8 @@ def test_explicit_persona_samples_are_valid():
 def test_pm_role_remains_available_for_explicit_legacy_configuration():
     pm = persona(AgentRole.PM, ["file", "terminal", "todo"])
 
-    assert effective_toolsets(pm) == ["file", "terminal", "todo"]
+    # The legacy role still resolves as data (this is the subject); its declared
+    # capability comes from the profile lane default since S0a, so the persona
+    # field is asserted through the normalizer that still reads it.
+    assert validate_toolsets(pm.toolsets) == ["file", "terminal", "todo"]
+    assert declared_lane_toolsets(pm).source == "profile_unresolved"

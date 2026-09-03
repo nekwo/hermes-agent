@@ -152,14 +152,19 @@ def test_unbounded_default_reaches_the_chat_lane_block_and_toolsets():
         _blocked_tool_names_for_chat,
         _enabled_toolsets_for_chat,
     )
+    from agent_runtime.personas import effective_toolsets
 
     persona = _persona()
 
     assert _blocked_tool_names_for_chat(persona, session_id="chat-1") == []
     toolsets = _enabled_toolsets_for_chat(persona, session_id="chat-1")
-    # The chat-lane cost policy cuts ``browser``; unbounded resolves the full
-    # registry instead, so its presence is the observable difference.
+    # The chat-lane cost policy cuts ``browser``; unbounded ships the persona's
+    # DECLARATION unscoped (S0a A1 — it no longer resolves the whole registry),
+    # and ``browser`` is a ``harness_core`` member, so its presence is still the
+    # observable difference between the two tiers.
     assert "browser" in toolsets
+    # And the declaration is what it ships — not 32 registered toolset names.
+    assert set(toolsets) == set(effective_toolsets(persona))
 
 
 # ── 2. an operator can configure the old posture back ───────────────────────
@@ -510,7 +515,15 @@ def test_persona_safety_tools_are_visible_again_under_the_default():
     # ``send_message`` is deliberately not asserted here: it is service-gated
     # (``check_fn``) and simply not registered without a messaging platform
     # configured, which is a capability fact, not a permission one.
-    assert {"delegate_task", "memory", "cronjob"} <= final
+    #
+    # ``cronjob`` moved into that same class on 2026-09-03 (S0a A1): the harness
+    # lane now admits by the profile's DECLARATION (``harness_core``), which does
+    # not name the ``cronjob`` toolset, so the tool is absent for want of a
+    # declaration rather than for want of permission. It is still un-blocked —
+    # asserted below — which is the fact this test exists to pin. A profile that
+    # wants it back writes ``toolsets: [harness_core, cronjob]``.
+    assert {"delegate_task", "memory"} <= final
+    assert "cronjob" not in blocked
 
 
 def test_unbounded_never_widens_the_admitted_mcp_set():

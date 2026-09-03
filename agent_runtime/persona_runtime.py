@@ -30,7 +30,7 @@ from .mcp_lane import mission_chat_mcp_lane_line
 from .models import AgentPersona
 from .mission_chat_clarify import MissionChatClarifyCapture
 from .mission_chat_workdir import mission_chat_workdir_for_persona
-from .personas import all_registered_toolsets, blocked_tool_names, effective_toolsets
+from .personas import blocked_tool_names, effective_toolsets
 from .profile_context import resolve_persona_profile
 from .provider_health import assert_provider_health_for_persona
 from .terminal_envelope import scope_for_persona as terminal_envelope_scope_for_persona
@@ -701,20 +701,31 @@ def _enabled_toolsets_for_chat(
     ``config.chat_lane_restore_toolsets``). Worker/dev task lanes never call this
     — they resolve toolsets via ``effective_toolsets`` directly.
 
+    BOTH branches start from the SAME declaration since S0a A1 (2026-09-03):
+    ``effective_toolsets(persona)`` = the bound profile's ``toolsets:`` key, or
+    ``harness_core`` when it declares nothing (``personas.declared_lane_toolsets``).
+    ``unbounded`` used to resolve ``all_registered_toolsets()`` — every toolset in
+    the process — which is why every persona had the same 79-tool surface with 17
+    hygiene-withheld names on every turn. What ``unbounded`` still bypasses is the
+    cost policy and the blocklist; what it no longer does is widen the declaration.
+
     The MCP admission scope is applied LAST, after permission-mode resolution, on
-    purpose: ``unbounded`` resolves ``all_registered_toolsets()``, which in a warm
-    multi-persona process can contain another persona's admitted ``mcp-*``
-    toolsets. Scoping after the mode is what makes "no permission mode can widen
-    the admitted MCP set" true rather than aspirational. The same pure helper
+    purpose. It was load-bearing while ``unbounded`` resolved the whole registry
+    (which in a warm multi-persona process contains another persona's admitted
+    ``mcp-*`` toolsets); on the declared set it is defensive — no ``mcp-*`` name
+    reaches it unless the profile named one — and it stays, because "no permission
+    mode can widen the admitted MCP set" must be true by construction rather than
+    by the shape of today's declarations. The same pure helper
     runs again at agent construction (``profile_runner._enabled_toolsets_for_run``)
     so no lane can bypass it; running it here keeps the operator-facing preview
     honest about the same boundary."""
 
     options = permission_options_for_chat(persona, session_id=session_id)
-    if permission_mode_is_unbounded(options.permission_mode):
-        resolved = all_registered_toolsets()
-    else:
-        resolved = _augment_chat_capabilities(persona, list(effective_toolsets(persona)))
+    # Idempotent: agent_chat / board / clarify are ``harness_core`` members, so
+    # the augmentation is a no-op on the default declaration and still adds them
+    # for a profile that declared a narrower list of its own.
+    resolved = _augment_chat_capabilities(persona, list(effective_toolsets(persona)))
+    if not permission_mode_is_unbounded(options.permission_mode):
         resolved = scope_chat_lane_toolsets(
             resolved, restore=chat_lane_restore_toolsets(persona.id)
         )
@@ -745,8 +756,8 @@ def chat_lane_capability_drops(
     authority; the kept list and the drop list cannot disagree.
 
     ``unbounded`` returns no drops because that mode genuinely bypasses the cost
-    policy (``_enabled_toolsets_for_chat`` resolves the full registry) — a row
-    there would report a drop that did not happen. ``permission_mode`` may be
+    policy (``_enabled_toolsets_for_chat`` ships the declared set unscoped) — a
+    row there would report a drop that did not happen. ``permission_mode`` may be
     passed to account for a HYPOTHETICAL mode (the ``persona tool-diff
     --permission-mode`` preview); left ``None`` the stored chat permission for
     ``session_id`` is resolved, exactly as a live turn would.
@@ -908,13 +919,10 @@ def apply_chat_lane_tool_scope(
     absence instead of a by-design, restorable cost cut.
     """
 
-    permission = permission_options_for_chat(persona, session_id=session_id)
-    if permission_mode_is_unbounded(permission.permission_mode):
-        configured = all_registered_toolsets()
-    else:
-        configured = _augment_chat_capabilities(
-            persona, list(effective_toolsets(persona))
-        )
+    # ONE declaration on both modes (S0a A1): the ``all_registered_toolsets()``
+    # arm that used to answer here for ``unbounded`` is what made the preview
+    # report 32 configured toolsets / 79 tools for every persona alike.
+    configured = _augment_chat_capabilities(persona, list(effective_toolsets(persona)))
     options.configured_toolsets = configured
     options.enabled_toolsets = _enabled_toolsets_for_chat(persona, session_id=session_id)
     options.chat_lane_blocked_tool_names = _blocked_tool_names_with_registry_hygiene(

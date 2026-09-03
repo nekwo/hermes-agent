@@ -231,10 +231,12 @@ def test_the_prewarm_fills_the_PERSONA_keyed_readiness_memo_the_create_reads(
     It would read zero even if the warm had resolved some OTHER persona.
 
     ``_cached_tool_names_for_toolsets`` cannot close that gap either, and the
-    reason is worth recording: under the runtime's UNBOUNDED default
-    ``_enabled_toolsets_for_chat`` resolves ``all_registered_toolsets()``
-    (``persona_runtime.py:669``), so its lru key is persona-INDEPENDENT and one
-    persona's entry answers every other's. An assertion on its miss count looks
+    reason is worth recording: its lru key is the TOOLSET LIST, and every
+    persona whose profile declares nothing resolves the same ``harness_core``
+    members (S0a A1, 2026-09-03 — before it, ``_enabled_toolsets_for_chat``
+    resolved ``all_registered_toolsets()`` for every persona alike, which was
+    persona-independent for a different reason). Either way one persona's entry
+    answers every other's, so an assertion on its miss count looks
     persona-specific and is not.
 
     ``_cached_profile_readiness_for_visibility``'s memo IS keyed per persona

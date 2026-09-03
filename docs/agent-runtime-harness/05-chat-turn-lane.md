@@ -151,20 +151,40 @@ does on the lane (`agent_runtime/persona_runtime.py`):
   `send_message`, `cronjob`) does not apply to the default posture. Registry-hygiene names are still
   unioned at agent construction on every lane — hygiene is junk removal, not a permission tier
   (`:594-597`).
-- `_enabled_toolsets_for_chat` (`:639-660`) runs permission mode → toolset resolution → chat
-  capability augmentation → the T3/T6a cost policy → the MCP admission scope, and `unbounded`
-  bypasses the cost policy. `file` / `terminal` / `code_execution` / `browser` / `vision` are
-  therefore present on a default turn; a *bounded* persona restores them via
+- `_enabled_toolsets_for_chat` (`:684`) runs the DECLARATION (§4c) → chat capability augmentation →
+  the T3/T6a cost policy → the MCP admission scope, and `unbounded` bypasses the cost policy, never
+  the declaration. `file` / `terminal` / `code_execution` / `browser` / `vision` are
+  therefore present on a default turn because `harness_core` names them; a *bounded* persona
+  restores what the cost policy cut via
   `agent_runtime.personas.<id>.chat_lane_restore_toolsets`.
 - `agent_chat`, `board` and `clarify` are unconditional chat capabilities
   (`_CHAT_CAPABILITY_TOOLSETS`, `:902`) regardless of the persona's configured list; `clarify` is
   additionally un-blocked by name on the bounded lane (`:603`), which has a clarify bridge.
 
-`apply_chat_lane_tool_scope` (`:834-885`) is the display-parity door: it threads the REAL chat-lane
-resolution onto the operator preview, so `persona tool-diff` stops reporting the persona's raw
-configured set (under unbounded it sets `configured_toolsets = all_registered_toolsets()`,
-`:867-868`), and carries the typed account of what the scoping removed
-(`chat_lane_capability_drops`, `:688`) — survivors alone were never an account of removals.
+`apply_chat_lane_tool_scope` (`:890`) is the display-parity door: it threads the REAL chat-lane
+resolution onto the operator preview, so `persona tool-diff` reports what the turn ships. It sets
+`configured_toolsets` from the same declaration on BOTH modes since S0a; the
+`all_registered_toolsets()` arm it used to take under `unbounded` is what made every persona's
+preview read 32 toolsets / 79 tools. It also carries the typed account of what the scoping removed
+(`chat_lane_capability_drops`, `:744`) — survivors alone were never an account of removals.
+
+### 4c. The declared toolset (S0a, 2026-09-03)
+
+The harness lane admits by the persona's BOUND PROFILE `toolsets:` key, read by
+`declared_lane_toolsets` (`agent_runtime/personas.py:224`) and handed to every caller through
+`effective_toolsets` (`:328`). A profile that declares nothing — or only the upstream default
+`["hermes-cli"]` that `hermes_cli/config_defaults.py` writes for an unset key — resolves
+`HARNESS_LANE_DEFAULT_TOOLSETS` (`agent_runtime/personas.py:170`) = `harness_core`, reported as
+`toolset_declaration.source: lane_default`; any other list is honored verbatim as `profile_config`;
+an unresolvable profile home resolves the same default as `profile_unresolved`. A YAML fault
+resolves narrow, never wide. `harness_core` (`toolsets.py:406`) is a composite of 15 member
+toolsets — `agent_chat`, `board`, `clarify`, `delegation`, `terminal`, `file`, `web`, `browser`,
+`browser-cdp`, `skills`, `memory`, `todo`, `session_search`, `vision`, `code_execution` — expanded
+to those NAMES by `expand_toolset_names` (`:861`) so the cost policy, which drops by name, still
+sees them. Measured 2026-09-03 on all four mission personas: **43 callable tools, 0 withheld,
+`model_tool_tokens` 1149** (was 79 / 17 / 2142). The per-persona `AgentPersona.toolsets` list is
+LEGACY DISPLAY: it is reported as `persona_toolsets` / `toolset_declaration.persona_list` with
+`persona_toolsets_in_force: false` and admits nothing.
 
 ### 4a. One visibility resolve per turn (`agent_runtime/chat_lane_bundle.py`, 2026-08-23)
 
@@ -262,9 +282,11 @@ admission. The invariants it holds (`:19-63`):
    parameters and the "role-admitted" wire text (`:130-132`, `:707-712`, `:789-791`). The `role` on
    the decision record (`:352`, `:382`) is REPORTING only.
 3. **`unbounded` never crosses the declared set.** `scope_toolsets_to_admission` (`:956`) runs AFTER
-   permission-mode resolution and strips every `mcp-*` toolset this run was not admitted — necessary
-   because `all_registered_toolsets()` in a multi-persona serve process would otherwise include
-   another persona's admitted surface.
+   permission-mode resolution and strips every `mcp-*` toolset this run was not admitted. It was
+   load-bearing while `unbounded` resolved `all_registered_toolsets()` in a multi-persona serve
+   process (that set includes another persona's admitted surface); since S0a §4c the resolved set is
+   the profile's declaration, so the scope is DEFENSIVE — it keeps the property true by construction
+   rather than by the shape of today's declarations, and it stays.
 4. **Single-flight and bounded in time.** An interleaved second admission is refused as
    `mcp_admission_lane_busy` (`:123`); an over-budget registration degrades to
    `mcp_admission_timeout` (`:124`) and the turn continues without those tools.

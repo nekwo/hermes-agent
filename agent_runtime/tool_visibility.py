@@ -24,8 +24,8 @@ from .permission_modes import permission_mode_is_unbounded
 from .personas import (
     PERSONA_BLOCKED_TOOLS,
     REGISTRY_HYGIENE_BLOCKED_TOOLS,
-    all_registered_toolsets,
     blocked_tool_names,
+    declared_lane_toolsets,
     effective_toolsets,
     role_from_persona,
 )
@@ -204,6 +204,7 @@ def resolve_tool_visibility(
     configured_toolsets = list(opts.configured_toolsets or resolved_toolsets)
     role_allowed_toolsets = list(resolved_toolsets)
     persona_toolsets = list(getattr(persona, "toolsets", []) or [])
+    declaration = declared_lane_toolsets(persona)
     # Registry hygiene NEVER yields to a permission mode: ``profile_runner``
     # unions ``REGISTRY_HYGIENE_BLOCKED_TOOLS`` at agent construction on EVERY
     # lane, unbounded included, because deregistering upstream kanban/feishu junk
@@ -278,7 +279,15 @@ def resolve_tool_visibility(
         "workdir": str(opts.workdir) if opts.workdir is not None else None,
         "runtime_root": str(opts.runtime_root) if opts.runtime_root is not None else None,
         "profile_toolsets": resolved_toolsets,
+        # LEGACY DISPLAY, not an admission input (S0a R-S0a-3). The per-persona
+        # list is read by nothing on the harness lane since A1; it is reported
+        # here, and inside ``toolset_declaration.persona_list``, so a divergence
+        # from the profile's declaration is VISIBLE rather than obeyed. The
+        # follow-up row deletes the field from the model (store schema, realm
+        # sync, launcher card) — this stage makes it inert.
         "persona_toolsets": persona_toolsets,
+        "persona_toolsets_in_force": False,
+        "toolset_declaration": declaration.row(),
         "configured_toolsets": configured_toolsets,
         "effective_toolsets": resolved_toolsets,
         "excluded_toolsets": excluded_toolsets,
@@ -617,10 +626,18 @@ def _clean_names(values) -> list[str]:
 
 
 def _resolved_toolsets(persona: AgentPersona, options: ToolVisibilityOptions, *, unbounded: bool) -> list[str]:
+    """The toolsets this preview resolves for — ONE answer for both modes (S0a A1).
+
+    ``unbounded`` used to return ``all_registered_toolsets()`` here, which is why
+    an unbounded preview reported 32 configured toolsets and 79 callable tools for
+    every persona alike (17 of them withheld as registry hygiene, every turn). The
+    preview now walks the same declaration the chat lane admits by
+    (``personas.declared_lane_toolsets`` via ``effective_toolsets``); an explicit
+    ``enabled_toolsets`` from a caller that already resolved the lane still wins.
+    """
+
     if options.enabled_toolsets is not None:
         return list(options.enabled_toolsets)
-    if unbounded:
-        return all_registered_toolsets()
     return effective_toolsets(persona)
 
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from .models import AgentPersona
@@ -150,8 +150,193 @@ def blocked_tool_names() -> frozenset[str]:
     return PERSONA_BLOCKED_TOOLS
 
 
+# ── the harness lane's ONE capability declaration (S0a A1, 2026-09-03) ───────
+#
+# Read ``docs/agent-runtime-harness/planned/s0a-atlas-cleanup.md`` §0.2 before
+# changing any of this. The short version: nothing on the harness lane used to
+# read a profile's ``toolsets:`` key at all. The shipped permission posture is
+# ``unbounded`` and that branch resolved ``all_registered_toolsets()`` — every
+# toolset registered in the process — so Neko, both devs and QA had
+# byte-identical 79-tool surfaces, 17 of them withheld as registry hygiene every
+# single turn, while three copies of a per-persona ``toolsets`` list (profile
+# config, store row, realm-sync body) were consulted by nobody.
+#
+# Now the profile's top-level ``toolsets:`` IS the declaration, and this module
+# is the one reader. The persona-level ``AgentPersona.toolsets`` field is legacy
+# display (R-S0a-3): it is reported as ``persona_list`` in the projections and
+# admits nothing.
+
+#: What the harness lane resolves for a profile that declares nothing of its own.
+HARNESS_LANE_DEFAULT_TOOLSETS: tuple[str, ...] = ("harness_core",)
+
+#: ``ToolsetDeclaration.source`` values.
+TOOLSET_SOURCE_PROFILE_CONFIG = "profile_config"
+TOOLSET_SOURCE_LANE_DEFAULT = "lane_default"
+TOOLSET_SOURCE_PROFILE_UNRESOLVED = "profile_unresolved"
+
+#: The upstream CLI default (``hermes_cli.config_defaults.DEFAULT_CONFIG``).
+#: Read as the default it IS rather than as an operator's choice — see
+#: R-S0a-2. Kept as a literal fallback for the (import-error) case where the
+#: CLI package cannot be reached from this module.
+_UPSTREAM_DEFAULT_TOOLSETS: tuple[str, ...] = ("hermes-cli",)
+
+
+@dataclass(frozen=True)
+class ToolsetDeclaration:
+    """What ONE persona's bound profile declares for the harness lane.
+
+    ``toolsets`` is the expanded, validated member list the lane admits by;
+    ``declared`` is what the config literally said (or the lane default);
+    ``source`` says which of the two it was and why.
+    """
+
+    toolsets: tuple[str, ...]
+    declared: tuple[str, ...]
+    source: str
+    profile: str | None = None
+    config_path: str | None = None
+    #: The legacy per-persona list, verbatim, for VISIBILITY only (A2). Never an
+    #: admission input — a divergence from ``declared`` is reported, not obeyed.
+    persona_list: tuple[str, ...] = ()
+
+    def row(self) -> dict[str, object]:
+        return {
+            "toolsets": list(self.toolsets),
+            "declared": list(self.declared),
+            "source": self.source,
+            "profile": self.profile,
+            "config_path": self.config_path,
+            "persona_list": list(self.persona_list),
+        }
+
+
+def _upstream_default_toolsets() -> frozenset[str]:
+    try:
+        from hermes_cli.config_defaults import DEFAULT_CONFIG
+
+        values = DEFAULT_CONFIG.get("toolsets") or []
+        names = frozenset(str(name).strip() for name in values if str(name or "").strip())
+        return names or frozenset(_UPSTREAM_DEFAULT_TOOLSETS)
+    except Exception:  # pragma: no cover - defensive; the literal is the same value
+        return frozenset(_UPSTREAM_DEFAULT_TOOLSETS)
+
+
+def declared_lane_toolsets(persona: AgentPersona) -> ToolsetDeclaration:
+    """The harness lane's capability declaration for ``persona``.
+
+    Resolution (R-S0a-2), from the persona's BOUND profile — not the ambient
+    ``HERMES_HOME`` — so the answer does not change with the operator's active
+    profile:
+
+    * no bound/resolvable profile home ⇒ the lane default, ``profile_unresolved``
+    * ``toolsets:`` absent, not a list, empty, or exactly the upstream default
+      ``["hermes-cli"]`` ⇒ the lane default, ``lane_default``
+    * anything else ⇒ that list verbatim, ``profile_config``
+
+    Treating the bare ``["hermes-cli"]`` as undeclared is reading the upstream
+    default as the default it is (``hermes_cli.config_defaults`` writes it for an
+    unset key), not overriding an operator: any list an operator actually wrote —
+    ``[harness_core, spotify]``, or a stale explicit ``[hermes-cli, …]`` — is
+    honored verbatim and shows up as ``profile_config`` in ``tool-diff``.
+
+    Never raises and never widens: a YAML fault resolves to the narrow lane
+    default, the same asymmetry ``default_permission_mode`` applies to an
+    unparseable permission mode.
+
+    Cheap and registry-free: path arithmetic plus the mtime-cached YAML parse
+    ``profile_readiness`` already performs, then a static ``TOOLSETS`` expansion.
+    It must NEVER import ``model_tools`` — the toolset-NAME half of an agent
+    create is import-free because of that (S0a A6a), and
+    ``tests/agent_runtime/test_toolset_declaration.py`` asserts it in a
+    subprocess.
+    """
+
+    from toolsets import expand_toolset_names
+
+    persona_list = tuple(
+        str(name).strip()
+        for name in (getattr(persona, "toolsets", None) or ())
+        if str(name or "").strip()
+    )
+
+    def _resolved(
+        declared: tuple[str, ...],
+        source: str,
+        *,
+        profile: str | None,
+        config_path: str | None,
+    ) -> ToolsetDeclaration:
+        return ToolsetDeclaration(
+            toolsets=tuple(validate_toolsets(expand_toolset_names(declared))),
+            declared=declared,
+            source=source,
+            profile=profile,
+            config_path=config_path,
+            persona_list=persona_list,
+        )
+
+    profile_name = str(getattr(persona, "hermes_profile", "") or "").strip() or None
+    try:
+        from .parse_cache import cached_yaml_file
+        from .profile_context import resolve_persona_profile
+
+        binding = resolve_persona_profile(persona)
+        profile_name = binding.hermes_profile or profile_name
+        if binding.profile_home is None:
+            return _resolved(
+                HARNESS_LANE_DEFAULT_TOOLSETS,
+                TOOLSET_SOURCE_PROFILE_UNRESOLVED,
+                profile=profile_name,
+                config_path=None,
+            )
+        config_path = binding.profile_home / "config.yaml"
+        raw = cached_yaml_file(config_path, default={}) or {}
+        value = raw.get("toolsets") if isinstance(raw, dict) else None
+    except Exception:  # pragma: no cover - defensive; a declaration read must never break a turn
+        _LOGGER.debug("declared_lane_toolsets: read failed for %r", getattr(persona, "id", None), exc_info=True)
+        return _resolved(
+            HARNESS_LANE_DEFAULT_TOOLSETS,
+            TOOLSET_SOURCE_LANE_DEFAULT,
+            profile=profile_name,
+            config_path=None,
+        )
+
+    path_text = str(config_path)
+    if not isinstance(value, list):
+        return _resolved(
+            HARNESS_LANE_DEFAULT_TOOLSETS,
+            TOOLSET_SOURCE_LANE_DEFAULT,
+            profile=profile_name,
+            config_path=path_text,
+        )
+    names = tuple(str(name).strip() for name in value if str(name or "").strip())
+    if not names or set(names) == set(_upstream_default_toolsets()):
+        return _resolved(
+            HARNESS_LANE_DEFAULT_TOOLSETS,
+            TOOLSET_SOURCE_LANE_DEFAULT,
+            profile=profile_name,
+            config_path=path_text,
+        )
+    return _resolved(
+        names,
+        TOOLSET_SOURCE_PROFILE_CONFIG,
+        profile=profile_name,
+        config_path=path_text,
+    )
+
+
 def effective_toolsets(persona: AgentPersona) -> list[str]:
-    return validate_toolsets(persona.toolsets)
+    """The toolsets this persona's harness lane admits by.
+
+    ONE authority since S0a A1: the profile's declaration
+    (:func:`declared_lane_toolsets`), expanded to member toolset names. Every
+    existing caller — the chat chokepoint's bounded branch, the visibility
+    preview, the snapshot agents drawer, the worker/dev task lanes — follows
+    from here, which is what retires ``AgentPersona.toolsets`` as an admission
+    input in one place rather than five.
+    """
+
+    return list(declared_lane_toolsets(persona).toolsets)
 
 
 #: Why a profile-backed chat persona inherited nothing. Typed so the fail-CLOSED

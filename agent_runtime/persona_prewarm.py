@@ -54,10 +54,12 @@ not an intention:
   ``session_id=None``, which is what this module passes — returns before even
   that read;
 * ``apply_chat_lane_tool_scope`` composes ``effective_toolsets`` /
-  ``all_registered_toolsets`` / ``chat_lane_capability_drops`` /
-  ``mission_chat_workdir_for_persona``, all pure reads — and since 2026-09-02
-  the ``all_registered_toolsets`` half is a registry lookup with no probe at
-  all, which is why the check_fn bullet above is struck;
+  ``chat_lane_capability_drops`` / ``mission_chat_workdir_for_persona``, all
+  pure reads — the ``all_registered_toolsets`` half became a probe-free registry
+  lookup on 2026-09-02 (which is why the check_fn bullet above is struck) and
+  left this path entirely on 2026-09-03 (S0a A1: ``effective_toolsets`` answers
+  the profile's declaration from static ``TOOLSETS`` + the mtime-cached profile
+  YAML, with no registry read at all for the toolset NAMES);
 * ``profile_readiness_for_persona`` routes its provider check through
   ``probe_runtime_provider``, the named NON-persisting resolver that exists
   precisely so a readiness read cannot move ``auth.json``

@@ -18,7 +18,6 @@ from agent_runtime.persona_runtime import GPTPersonaRuntime
 from agent_runtime.profile_runner import AgentRunResult
 from agent_runtime.personas import (
     REGISTRY_HYGIENE_BLOCKED_TOOLS,
-    all_registered_toolsets,
     effective_toolsets,
 )
 from tests.agent_runtime.persona_samples import sample_personas
@@ -107,10 +106,19 @@ def make_task_and_run():
     return task, run
 
 
-def _unbounded_chat_toolsets():
-    """What ``unbounded`` actually resolves on the chat lane."""
+def _unbounded_chat_toolsets(persona):
+    """What ``unbounded`` actually resolves on the chat lane.
 
-    return all_registered_toolsets()
+    Since S0a A1 (2026-09-03) that is the persona's DECLARATION — the bound
+    profile's ``toolsets:`` key, or ``harness_core`` when it declares nothing —
+    with the chat capabilities augmented on; it is no longer
+    ``all_registered_toolsets()``. What ``unbounded`` still skips is the cost
+    policy and the blocklist, so this helper deliberately does NOT scope.
+    """
+
+    from agent_runtime.persona_runtime import _augment_chat_capabilities
+
+    return _augment_chat_capabilities(persona, list(effective_toolsets(persona)))
 
 
 def test_chat_permission_unbounded_reaches_actual_agent_request(tmp_path, monkeypatch):
@@ -129,9 +137,9 @@ def test_chat_permission_unbounded_reaches_actual_agent_request(tmp_path, monkey
     runtime.mission_chat_reply(qa, "can you write now?", permission_session_id=session_id)
 
     fake = FakeAIAgent.instances[0]
-    # `unbounded` resolves the whole live registry. The retired mission creation
-    # toolset is absent from that registry rather than filtered per turn.
-    assert fake.kwargs["enabled_toolsets"] == _unbounded_chat_toolsets()
+    # `unbounded` ships the persona's declared set unscoped. The retired mission
+    # creation toolset is absent from the registry rather than filtered per turn.
+    assert fake.kwargs["enabled_toolsets"] == _unbounded_chat_toolsets(qa)
     # T6c registry hygiene rides every construction, unbounded included:
     # kanban/feishu are registry junk, not a permission tier, so the escape
     # hatch does not resurrect them.
@@ -156,7 +164,7 @@ def test_chat_permission_unbounded_one_turn_expires_after_success(tmp_path, monk
     runtime.mission_chat_reply(neko, "run the command", permission_session_id=session_id)
 
     fake = FakeAIAgent.instances[0]
-    assert fake.kwargs["enabled_toolsets"] == _unbounded_chat_toolsets()
+    assert fake.kwargs["enabled_toolsets"] == _unbounded_chat_toolsets(neko)
     # Registry hygiene applies even on the unbounded turn (see the QA test above).
     assert set(fake.kwargs["blocked_tool_names"]) == set(REGISTRY_HYGIENE_BLOCKED_TOOLS)
     record = store.get(persona_id=neko.id, session_id=session_id)
@@ -1019,8 +1027,17 @@ def test_profile_role_sentinel_resolves_to_supervisor_capabilities():
     )
 
     assert role_from_persona(profile) == "profile"
-    # The profile's own toolsets survive the supervisor-ceiling intersection.
-    assert effective_toolsets(profile) == ["file", "search", "session_search", "todo", "skills"]
+    # No ceiling intersects anything — and since S0a the lane reads the bound
+    # PROFILE's declaration rather than this field, so what has to hold is that
+    # the sentinel role resolves and the declaration answers for it.
+    from agent_runtime.personas import declared_lane_toolsets
+
+    declaration = declared_lane_toolsets(profile)
+    assert declaration.source in {"lane_default", "profile_config", "profile_unresolved"}
+    assert effective_toolsets(profile) == list(declaration.toolsets)
+    assert declaration.persona_list == (
+        "file", "search", "session_search", "todo", "skills",
+    )
 
 
 def test_mission_chat_reply_runs_for_profile_persona(tmp_path, monkeypatch):

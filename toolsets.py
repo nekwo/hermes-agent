@@ -393,7 +393,48 @@ TOOLSETS = {
         # non-configurable-toolset recovery loop in hermes_cli/tools_config.py).
         "posture": True,
     },
-    
+
+    # Mission Control harness lane (S0a, 2026-09-03). The ONE toolset an
+    # Eternia persona profile declares — read on the harness lane by
+    # ``agent_runtime.personas.declared_lane_toolsets``, which resolves it for
+    # any profile that declares nothing (or only the upstream ``hermes-cli``
+    # default). Composition is by TOOLSET NAME, not by tool name, so a tool
+    # registered into one of these members later joins without an edit here,
+    # and so the bounded lane's cost policy (which drops by toolset name) can
+    # still see ``browser``/``vision``/``file`` after
+    # ``expand_toolset_names``.
+    "harness_core": {
+        "description": (
+            "Mission Control harness lane: the fork's agent-to-agent chat and board "
+            "tools plus the conversational core. The ONE toolset an Eternia persona "
+            "profile declares; integrations (spotify, discord, homeassistant, "
+            "yuanbao, bfl, video_gen, computer_use, cronjob, image_gen) are opt-in by "
+            "name beside it. Membership is by toolset so a tool registered into one "
+            "of these later joins without an edit here."
+        ),
+        "tools": [],
+        # ``agent_chat`` and ``board`` are REGISTRY-ONLY toolsets (registered by
+        # tools/agent_chat_tool.py and tools/board_tool.py); they have no static
+        # TOOLSETS entry, so the static view of this bundle resolves without
+        # them and the registry view resolves with them. That is the existing
+        # ``TestResolveToolsetIncludeRegistry`` shape, not a new one.
+        # ``browser-cdp`` is a member in its own right, not folded into
+        # ``browser``: ``browser_cdp`` / ``browser_dialog`` are REGISTERED under
+        # the ``browser-cdp`` toolset while the static ``browser`` entry also
+        # lists them. Resolution by tool name (``model_tools.get_tool_definitions``
+        # → ``resolve_toolset``) would ship them from ``browser`` alone;
+        # resolution by registry membership (``tool_visibility._tool_names_for_toolsets``)
+        # would not — 43 tools on the turn against 41 in the preview. Naming the
+        # toolset makes both lenses answer 43. (The plan's A1 snippet listed 14
+        # includes but its own census, ratchet numbers and 15-row manual table
+        # all count ``browser-cdp``; see the field notes.)
+        "includes": [
+            "agent_chat", "board", "clarify", "delegation", "terminal", "file",
+            "web", "browser", "browser-cdp", "skills", "memory", "todo",
+            "session_search", "vision", "code_execution",
+        ],
+    },
+
     # ==========================================================================
     # Full Hermes toolsets (CLI + messaging platforms)
     #
@@ -809,12 +850,57 @@ def resolve_multiple_toolsets(toolset_names: List[str]) -> List[str]:
         List[str]: Combined list of all tool names (deduplicated)
     """
     all_tools = set()
-    
+
     for name in toolset_names:
         tools = resolve_toolset(name)
         all_tools.update(tools)
-    
+
     return sorted(all_tools)
+
+
+def expand_toolset_names(names) -> List[str]:
+    """Replace a composite toolset with its member toolset NAMES, recursively.
+
+    A composite here is a ``TOOLSETS`` entry that has ``includes`` and no direct
+    ``tools`` of its own (``harness_core``, ``safe``, ``hermes-gateway``). Leaf
+    toolsets, composites that DO carry their own tools (``debugging``),
+    registry-only names (``agent_chat``, ``board``, ``mcp-*``) and unknown names
+    pass through unchanged.
+
+    Order-preserving and deduped: the first appearance of a name wins, and a
+    cycle or diamond contributes its members once.
+
+    Static by construction — it reads only the ``TOOLSETS`` dict and never
+    touches the tool registry, so a caller can answer "which toolsets does this
+    persona declare" without importing ``model_tools`` (S0a A6a). Callers that
+    need the TOOL names still resolve through ``resolve_toolset``.
+
+    Why names and not tools: the bounded chat lane's cost policy
+    (``agent_runtime.chat_lane_toolsets.scope_chat_lane_toolsets``) drops by
+    toolset NAME, so a declaration left as ``["harness_core"]`` would slip past
+    a policy that removes ``browser``.
+    """
+
+    out: List[str] = []
+    seen: Set[str] = set()
+
+    def _walk(name: str, visiting: Set[str]) -> None:
+        text = str(name or "").strip()
+        if not text or text in seen:
+            return
+        definition = TOOLSETS.get(text)
+        includes = list(definition.get("includes", []) or []) if definition else []
+        tools = list(definition.get("tools", []) or []) if definition else []
+        if not definition or not includes or tools or text in visiting:
+            seen.add(text)
+            out.append(text)
+            return
+        for member in includes:
+            _walk(member, visiting | {text})
+
+    for entry in names or []:
+        _walk(entry, set())
+    return out
 
 
 def _get_plugin_toolset_names() -> Set[str]:
