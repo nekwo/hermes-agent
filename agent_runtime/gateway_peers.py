@@ -11,6 +11,35 @@ and ``pairing.json``. One row per peer::
     {peer_install_id, display_name, endpoints, cert_fingerprint,
      secret_verifier, approved_at, last_seen, revoked, revoked_at}
 
+Two kinds of field in one row: TRUST, and CACHE (R-IP14)
+---------------------------------------------------------
+
+Every key above is one of exactly two things, and the split is worth stating
+because the file's own name covers only half of it:
+
+* **Trust** — ``peer_install_id``, ``secret_verifier``, ``approved_at``,
+  ``revoked``, ``revoked_at``. Written by a ceremony (:func:`redeem_peer_code`,
+  :func:`record_peer`) or by :func:`revoke_peer`, and by nothing else. The
+  network never moves one of these, and that is what makes this a credential
+  store rather than a directory.
+* **Cache** — ``display_name``, ``endpoints``, ``cert_fingerprint``,
+  ``last_seen``. What the far install TOLD us, at pairing or on a hello. The
+  install itself is the authority for its own name, addresses and certificate;
+  these are copies, and a copy that has gone stale is a stale copy rather than
+  a wrong answer — provided every reader knows which kind it is holding.
+
+The two sets are declared as :data:`PEER_ROW_TRUST_FIELDS` and
+:data:`PEER_ROW_CACHE_FIELDS` beside :func:`_row`, and a test asserts they
+partition its keys exactly — so a new field cannot be added without being
+classified. That is the whole mechanism: a label nothing checks is a comment.
+
+The honest residue, stated rather than fixed here: ``last_seen`` is a cache
+fact the NETWORK writes into a trust file on every verified hello
+(:func:`note_peer_seen`). S2c moves it and the other cache fields to a sidecar
+(``peers_cache.json``, R-IP12a), at which point this file is trust only. Until
+then the write stays exactly where it is — the frozensets are what will let
+that move be mechanical rather than archaeological.
+
 R5, and why the ceremony has two operators in it
 -------------------------------------------------
 
@@ -147,6 +176,8 @@ __all__ = [
     "PEER_AUTH_UNKNOWN",
     "PEER_PROOF_ALGORITHM",
     "PEER_PROOF_CONTRACT",
+    "PEER_ROW_CACHE_FIELDS",
+    "PEER_ROW_TRUST_FIELDS",
     "PEER_SECRET_BYTES",
     "PEER_STORE_CONTRACT",
     "PEER_STORE_FILENAME",
@@ -268,6 +299,17 @@ class PeerRecord:
     leaked into an operator surface" unrepresentable rather than merely
     unintended — ``DeviceRecord``'s argument, and it holds harder here because a
     peer secret is live at BOTH ends.
+
+    Which side each field is on (module docstring, R-IP14):
+
+    * ``peer_install_id``, ``approved_at``, ``revoked``, ``revoked_at`` —
+      TRUST. This install decided them; nothing on the wire moves them.
+    * ``display_name``, ``endpoints``, ``cert_fingerprint``, ``last_seen`` —
+      CACHE. ``display_name`` is the name-at-pairing (the far install's own
+      word for itself, from the join hello on A or its ``install`` block on B)
+      and is never refreshed here; ``endpoints`` and ``cert_fingerprint`` are
+      likewise pairing-time copies, refreshed only by a re-``join``; and
+      ``last_seen`` is the one the network writes on every verified hello.
     """
 
     peer_install_id: str
@@ -863,6 +905,26 @@ def dial_peer(
 # ── internals ────────────────────────────────────────────────────────────────
 
 
+#: The row's TRUST half: written by a ceremony or by :func:`revoke_peer`, never
+#: by the network. See the module docstring (R-IP14).
+PEER_ROW_TRUST_FIELDS = frozenset(
+    {
+        "peer_install_id",
+        "secret_verifier",
+        "approved_at",
+        "revoked",
+        "revoked_at",
+    }
+)
+
+#: The row's CACHE half: what the far install told us, at pairing or on a
+#: hello. The install is the authority for each of these about ITSELF; this is
+#: a copy, and S2c moves the copies to ``peers_cache.json`` (R-IP12a).
+PEER_ROW_CACHE_FIELDS = frozenset(
+    {"display_name", "endpoints", "cert_fingerprint", "last_seen"}
+)
+
+
 def _row(
     *,
     peer_install_id: str,
@@ -878,6 +940,14 @@ def _row(
     halves of an edge cannot end up with differently-shaped rows — which is the
     kind of divergence that only shows up months later, on the side nobody
     tested.
+
+    Its keys are exactly :data:`PEER_ROW_TRUST_FIELDS` ∪
+    :data:`PEER_ROW_CACHE_FIELDS`, asserted in
+    ``tests/agent_runtime/test_gateway_peers_store.py``. A field added here
+    without being classified fails that test, which is the point: R-IP14's rule
+    is that a fact has one authority and every other copy is a labelled cache,
+    and the label has to be machine-readable for S2c's sidecar to be a move
+    rather than a re-derivation.
     """
 
     return {

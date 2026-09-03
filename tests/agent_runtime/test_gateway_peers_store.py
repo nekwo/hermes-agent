@@ -39,6 +39,8 @@ from agent_runtime.gateway_peers import (
     PEER_AUTH_OK,
     PEER_AUTH_REVOKED,
     PEER_AUTH_UNKNOWN,
+    PEER_ROW_CACHE_FIELDS,
+    PEER_ROW_TRUST_FIELDS,
     PeerCredential,
     PeerPairingCode,
     PeerRecord,
@@ -117,6 +119,61 @@ def test_a_redeem_writes_the_row_and_hands_the_secret_back_exactly_once(tmp_path
     assert record.revoked is False
     assert record.last_seen is None
     assert record.approved_at
+
+
+def test_the_row_shape_is_exactly_trust_fields_plus_cache_fields(tmp_path):
+    """R-IP14's split, made machine-readable so it cannot rot into a comment.
+
+    ``peers.json`` holds two KINDS of fact: credentials this install decided
+    (trust) and copies of what the far install told us (cache). S2c moves the
+    second kind to ``peers_cache.json``; for that move to be mechanical rather
+    than archaeological, the classification has to live beside ``_row`` and be
+    checked. A field added without being classified fails here — which is the
+    whole point, because the alternative is a new key that nobody ever decides
+    the authority for.
+    """
+
+    credential = _pair(
+        tmp_path,
+        display_name="the laptop",
+        endpoints=[{"host": "10.0.0.9", "port": 8765}],
+        cert_fingerprint="ab" * 32,
+    )
+    stored = json.loads(peer_store_path(tmp_path).read_bytes().decode())
+    keys = set(stored["peers"][PEER_B])
+
+    assert keys == PEER_ROW_TRUST_FIELDS | PEER_ROW_CACHE_FIELDS
+    assert not (PEER_ROW_TRUST_FIELDS & PEER_ROW_CACHE_FIELDS)
+    # The two facts the split is FOR, spelled out rather than left to the
+    # reader: the credential is trust, and the far install's own name is not.
+    assert "secret_verifier" in PEER_ROW_TRUST_FIELDS
+    assert "display_name" in PEER_ROW_CACHE_FIELDS
+    assert credential.secret not in json.dumps(stored)
+
+
+def test_record_and_redeem_write_the_same_key_set(tmp_path):
+    """Both write paths go through ``_row``, so the two halves of one edge
+    cannot end up with differently-shaped rows — the divergence that only shows
+    up months later, on the side nobody tested."""
+
+    _pair(tmp_path / "a")
+    record_peer(
+        tmp_path / "b",
+        peer_install_id=PEER_A,
+        secret="f" * 64,
+        display_name="workstation",
+        endpoints=[{"host": "10.0.0.4", "port": 9000}],
+        cert_fingerprint="cd" * 32,
+    )
+
+    def keys(root, peer_install_id):
+        raw = json.loads(peer_store_path(root).read_bytes().decode())
+        return set(raw["peers"][peer_install_id])
+
+    assert keys(tmp_path / "a", PEER_B) == keys(tmp_path / "b", PEER_A)
+    assert keys(tmp_path / "b", PEER_A) == (
+        PEER_ROW_TRUST_FIELDS | PEER_ROW_CACHE_FIELDS
+    )
 
 
 def test_the_stored_row_holds_the_digest_and_never_the_secret(tmp_path):

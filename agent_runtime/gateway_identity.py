@@ -10,6 +10,16 @@ from Stage 4, an install picker on a phone — can tell two installs apart:
     {"install_id": "<uuid4>", "display_name": "workstation",
      "created_at": "2026-08-27T12:00:00.000000+00:00"}
 
+**``display_name`` is what this install calls ITSELF, published as a CACHE
+fact** (R-IP14). It rides the ``install`` block of every greeting, and a
+launcher holding it treats it as the *offline name*: the one name an operator
+reads is the ACCOUNT's device name, joined to this install by ``install_id``,
+and this is the labelled fallback shown when that join has no answer. ``harness
+gateway rename`` stays the install operator's verb for the install's own name
+and reaches nothing else. The caveat the frames already carry belongs beside
+that: they echo the identity this SESSION greeted with, so a rename reaches a
+paired launcher on the next serve restart rather than on the next greeting.
+
 **Nothing in this file is secret.** The id travels on the ``ready`` / ``hello_ok``
 / ``version`` greeting frames in the clear, and it authenticates nobody: proving
 you may talk to this runtime is ``serve_auth``'s job today and the device/peer

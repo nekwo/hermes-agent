@@ -12,7 +12,12 @@ Two files, both under ``<store_root>/gateway/`` beside ``install.json``:
 
 * ``devices.json`` — the paired devices. One row each:
   ``{device_id, name, tier, verifier, created_at, last_seen, revoked,
-  revoked_at}``.
+  revoked_at}``. Two kinds of field in that row (R-IP14; ``gateway_peers``'
+  module docstring states the same split in full): ``name`` and ``last_seen``
+  are CACHE facts — what the device called itself at redemption, and when the
+  network last saw it — while ``device_id``, ``tier``, ``verifier``,
+  ``created_at`` and the two revocation fields are TRUST, written by the
+  ceremony or by a revoke and never by a hello.
 * ``pairing.json`` — the SHORT-LIVED half: pending codes (hashed, salted) and
   the failed-redeem counter that arms the lockout. Nothing durable lives here;
   a lost ``pairing.json`` costs an operator one re-run of ``harness gateway
