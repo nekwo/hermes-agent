@@ -591,6 +591,43 @@ def persona_records_from_config(cfg: AgentRuntimeConfig | None = None):
     return list(personas.values())
 
 
+def persona_skill_sources(cfg: AgentRuntimeConfig | None = None) -> dict[str, dict[str, Any]]:
+    """Which tier answered each persona's ``skills``, and what the config lost.
+
+    S0a A6c — ACCOUNTING ONLY, no write. The persona→skill seed row asked why a
+    config ``skills:`` addition does not reach a placement. The mechanism is the
+    same store-wins merge as toolsets (``ensure_persisted_personas`` merges
+    ``{**catalog, **stored}``), but the ANSWER is different and does not
+    transfer: skills have a store-writing verb with its own supersede clock
+    (``persona set-skills`` → ``AgentPersona.skills_override_issued_at``) and the
+    launcher's Skills console writes through it, so for skills the STORE is the
+    authority BY DESIGN. A config-side seed that won over it would reintroduce
+    the two-writer problem that clock exists to arbitrate.
+
+    So this stage ships visibility instead of a new writer: ``skills_source``
+    says which tier the effective list came from, and ``catalog_only_skills``
+    names the config entries the store row does not carry — the silent
+    difference an operator previously had to diff two files to see.
+    """
+
+    from .store import AgentStore
+
+    cfg = cfg or load_agent_runtime_config()
+    stored = {persona.id: persona for persona in AgentStore().list_all()}
+    catalog = {persona.id: persona for persona in persona_records_from_config(cfg)}
+    rows: dict[str, dict[str, Any]] = {}
+    for persona_id in set(stored) | set(catalog):
+        stored_row = stored.get(persona_id)
+        catalog_row = catalog.get(persona_id)
+        effective = list(getattr(stored_row or catalog_row, "skills", []) or [])
+        declared = list(getattr(catalog_row, "skills", []) or []) if catalog_row else []
+        rows[persona_id] = {
+            "skills_source": "store" if stored_row is not None else "catalog",
+            "catalog_only_skills": [name for name in declared if name not in effective],
+        }
+    return rows
+
+
 def ensure_persisted_personas(cfg: AgentRuntimeConfig | None = None):
     """Return the persisted persona store plus data-declared config records."""
     from .store import AgentStore

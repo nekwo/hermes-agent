@@ -23,7 +23,7 @@ from hermes_cli.profiles import list_profiles
 from hermes_cli.flag_binding import list_flag_or_empty
 
 from agent_runtime.cli_format import emit_json, emit_json_line
-from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config, mission_chat_clarify_token_binding, resolve_mission_chat_max_seconds
+from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config, mission_chat_clarify_token_binding, persona_skill_sources, resolve_mission_chat_max_seconds
 from agent_runtime.continuity import return_summary_to_parent_session
 from agent_runtime.dispatch_session_policy import (
     derive_dispatch_title,
@@ -3623,6 +3623,7 @@ def _cmd_agent_list(args) -> int:
             try:
                 cfg = load_agent_runtime_config(Path(profile.path) / "config.yaml")
                 personas = ensure_persisted_personas(cfg)
+                skill_sources = persona_skill_sources(cfg)
                 # Same asymmetry `ensure_persisted_personas(cfg)` already has:
                 # the config side comes from the ENUMERATED profile's
                 # config.yaml, the store side from the ACTIVE runtime root
@@ -3635,7 +3636,11 @@ def _cmd_agent_list(args) -> int:
             for persona in personas:
                 rows.append(
                     _agent_definition_row(
-                        persona, source_profile=profile.name, bindings=bindings, roster=personas
+                        persona,
+                        source_profile=profile.name,
+                        bindings=bindings,
+                        roster=personas,
+                        skill_sources=skill_sources,
                     )
                 )
     else:
@@ -3645,6 +3650,7 @@ def _cmd_agent_list(args) -> int:
         except Exception:
             bindings = {}
         personas = ensure_persisted_personas(cfg)
+        skill_sources = persona_skill_sources(cfg)
         for persona in personas:
             rows.append(
                 _agent_definition_row(
@@ -3652,6 +3658,7 @@ def _cmd_agent_list(args) -> int:
                     source_profile=active_profile_name(),
                     bindings=bindings,
                     roster=personas,
+                    skill_sources=skill_sources,
                 )
             )
     deduped: dict[tuple[str, str | None], dict] = {}
@@ -3676,6 +3683,7 @@ def _agent_definition_row(
     source_profile: str | None,
     bindings: dict | None = None,
     roster: Sequence[AgentPersona] | None = None,
+    skill_sources: dict | None = None,
 ) -> dict:
     """One `agent list` row.
 
@@ -3714,6 +3722,16 @@ def _agent_definition_row(
         "profile": persona.hermes_profile,
         "persona_spellings": accepted_persona_spellings(persona, list(roster or [persona])),
         "skills": list(getattr(persona, "skills", []) or []),
+        # S0a A6c: WHICH tier answered ``skills``, and what the config declared
+        # that the store row does not carry. ``ensure_persisted_personas``
+        # resolves that disagreement store-wins and said nothing, so a config
+        # ``skills:`` addition that never reached a placement was invisible here.
+        # Accounting only — this verb writes nothing; ``persona set-skills`` is
+        # the store-writing door and keeps its supersede clock.
+        **((skill_sources or {}).get(persona.id) or {
+            "skills_source": "catalog",
+            "catalog_only_skills": [],
+        }),
         "source_profile": source_profile,
         "state": "available",
         "updated_at": None,
