@@ -1368,6 +1368,41 @@ detached 11 unpushed commits on 2026-08-01. Per-file hermetic subprocesses are
 the mitigation; re-verified 2026-09-02 from a linked worktree with refs, reflog
 and worktree registrations byte-identical before and after.
 
+### Unattended reporting
+
+Pushes are instant now (2026-09-03 ruling: both repos' pre-push hooks are
+gone, hermes `504953f6ad`) and hermes' own CI is largely inert (billing), so
+the checks that used to run on every push to `release` — the validated suite
+and any mutation-claim drift — now run only when someone happens to run them
+by hand. Nothing catches a `main` that goes red between two people's runs, or
+a refactor that silently moves a claimed line off its claimed source spelling
+(`scripts/changed_line_mutation_check.py` needs its `find` needle to still be
+present at the claimed symbol — see the mutation-gate rows in the Mission
+Control queue).
+
+`scripts/unattended_suite_run.ps1` is a REPORT, not a gate — nothing consumes
+its exit code besides Task Scheduler's own run history and whoever reads the
+file it writes. It runs two things and writes one dated Markdown report to
+`qa-artifacts/unattended-suite-<UTC timestamp>.md` (git-ignored; the
+directory itself is kept via `qa-artifacts/.gitkeep`), plus the raw stdout of
+each command beside it:
+
+1. `scripts/run_tests.sh` on the validated four-directory scope (see above —
+   never the whole-tree default).
+2. `scripts/changed_line_mutation_check.py --list --base origin/main` — the
+   inventory lane. `--list` never mutates the tree (it returns before the
+   mutating section of that script runs), so this is safe to run unattended
+   and on any schedule without the `.mutation_gate.lock` concerns a real
+   mutating run has.
+
+`scripts/hermes-unattended-suite-task.xml` is a Windows Scheduled Task
+definition that calls it on a cadence. **Nothing in this repo registers it.**
+The operator enables it by hand — edit its two `REPLACE-ME` markers (point
+them at the primary checkout, not a worktree) and either import it
+(`schtasks /Create /TN "Hermes Unattended Suite" /XML
+scripts\hermes-unattended-suite-task.xml`) or use it as a template in Task
+Scheduler's GUI. The XML's own header comment carries the full run-book.
+
 ### The hermes CLI contract dump
 
 `scripts/dump_cli_contract.py` walks this repo's argparse tree and gates

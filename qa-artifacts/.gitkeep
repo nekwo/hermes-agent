@@ -1,0 +1,3 @@
+Keeps this directory in the tree. Its contents (dated unattended-suite
+reports from scripts/unattended_suite_run.ps1) are git-ignored — see
+.gitignore. See AGENTS.md §Testing, "Unattended reporting".

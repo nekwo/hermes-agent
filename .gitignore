@@ -213,3 +213,10 @@ native/fts5_cjk/*.so
 # tool/test_quality/README.md). Worktree-local, cleared in a `finally`, and
 # cleared by hand after a crash — never source.
 .mutation_gate.lock
+
+# Dated reports from scripts/unattended_suite_run.ps1 (the unattended
+# validated-suite + mutation-inventory lane; see AGENTS.md §Testing). Machine-
+# and run-local, never source. The directory itself is kept via
+# qa-artifacts/.gitkeep.
+/qa-artifacts/*
+!/qa-artifacts/.gitkeep

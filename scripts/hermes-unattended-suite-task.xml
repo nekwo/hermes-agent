@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-16"?>
+<!--
+  Windows Scheduled Task definition for hermes' unattended suite report.
+
+  Mission Control queue row, "Where does hermes' suite run unattended, now
+  that no push gate runs it?" (2026-09-03) — both repos' pre-push hooks are
+  gone (hermes 504953f6ad) and pushes are instant by ruling; the checks that
+  used to run on every push to `release` now run only when someone runs them
+  by hand, and hermes' own CI is largely inert. This task is what runs
+  scripts/unattended_suite_run.ps1 on a schedule, so the validated suite and
+  the mutation-claim inventory get a report on a cadence instead of never.
+
+  THIS DEFINITION IS NOT REGISTERED BY ANYTHING IN THIS REPO. Per the wave's
+  own instruction, the operator enables it by hand:
+
+    1. Edit the two REPLACE-ME markers below (the repo root's Arguments path
+       and, if desired, the ScheduledDate/StartBoundary). Point it at the
+       PRIMARY checkout, not a worktree — worktrees are transient.
+    2. Import it:
+         schtasks /Create /TN "Hermes Unattended Suite" /XML "scripts\hermes-unattended-suite-task.xml"
+       (or Task Scheduler GUI: Action > Import Task...)
+    3. `schtasks /Query /TN "Hermes Unattended Suite" /V /FO LIST` to confirm,
+       and `schtasks /Run /TN "Hermes Unattended Suite"` for a one-off dry
+       run before trusting the schedule.
+
+  The task RUNS UNDER WHATEVER ACCOUNT the operator configures at import
+  time (the <Principal> block below defaults to the interactively logged-on
+  user, "run only when user is logged on" — change to a service account and
+  S4U if it must run unattended through a lock screen; that choice is the
+  operator's, not this file's).
+
+  This is a REPORT, not a gate — nothing consumes the task's result besides
+  the operator reading it and Task Scheduler's own run history. It writes to
+  <repo>\qa-artifacts\unattended-suite-<UTC timestamp>.md (git-ignored).
+-->
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Runs hermes' validated test suite (tests/agent_runtime tests/hermes_cli tests/cli tests/state) plus the mutation-claim inventory (--list --base origin/main), and writes a dated Markdown report under qa-artifacts/. Report-only; does not block anything. See AGENTS.md §Testing, "Unattended reporting".</Description>
+    <URI>\Hermes Unattended Suite</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <!-- Daily at 03:00 local time. Adjust to taste; the report is cheap to
+         re-run and the point is a REGULAR cadence, not this exact hour. -->
+    <CalendarTrigger>
+      <StartBoundary>2026-09-04T03:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByDay>
+        <DaysInterval>1</DaysInterval>
+      </ScheduleByDay>
+    </CalendarTrigger>
+  </Triggers>
+  <Principal id="Author">
+    <LogonType>InteractiveToken</LogonType>
+    <RunLevel>LeastPrivilege</RunLevel>
+  </Principal>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <!-- run_tests.sh's Lane B scope alone runs ~18 min (ledger measurement);
+         give the whole task real headroom rather than let Task Scheduler
+         kill it mid-run. -->
+    <ExecutionTimeLimit>PT2H</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>powershell.exe</Command>
+      <!-- REPLACE-ME: point -File at THIS SCRIPT in the PRIMARY checkout,
+           e.g. X:\Eternia\hermes-agent\scripts\unattended_suite_run.ps1 —
+           not a worktree path, which does not outlive its lane. -->
+      <Arguments>-NoProfile -ExecutionPolicy Bypass -File "REPLACE-ME\scripts\unattended_suite_run.ps1"</Arguments>
+      <!-- REPLACE-ME: the primary checkout's own root; the script also
+           accepts -RepoRoot explicitly if this WorkingDirectory guess is
+           ever wrong. -->
+      <WorkingDirectory>REPLACE-ME</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
