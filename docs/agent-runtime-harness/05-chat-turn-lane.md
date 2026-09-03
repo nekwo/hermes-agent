@@ -109,14 +109,14 @@ emitter is built ~1,100 lines in and its clock cannot see the profile bootstrap.
 ## 3. Model selection
 
 Four tiers, highest wins, resolved once in `_chat_effective_model_payload`
-(`persona_commands.py:6946`):
+(`persona_commands.py:6953`):
 
 ```
 chat-session override  >  instance override  >  persona default  >  config default
 ```
 
 The chat-session override persists under `mission_control_chat_model_override`
-(`persona_commands.py:6478`, `agent_runtime/persona_chat_history.py:234`) via
+(`persona_commands.py:6485`, `agent_runtime/persona_chat_history.py:234`) via
 `_resolve_chat_model_override` (`:6932`), called at `:3471`. Its scope is literally
 `mission_control_chat_session` (`:5788`, inside `_chat_effective_model_payload`) — per-thread,
 not per-instance. Values validate against
