@@ -296,6 +296,34 @@ def test_a_sink_that_raises_is_dropped_and_never_fails_the_write(store):
     assert registry.subscriber_count() == 0
 
 
+def test_the_notification_describes_the_store_that_was_WRITTEN(store, monkeypatch):
+    """Threaded from the writer, never re-derived.
+
+    Every function in ``gateway_peers`` takes its root as an INPUT because
+    several roots coexist on this machine (Stage 6's whole subject is two of
+    them at once). A notification that resolved its own root could describe a
+    different store from the one the write landed in — the same class of bug the
+    input rule exists to prevent — so the root travels with the event.
+    """
+
+    sink = _Sink()
+    _call("runtime.gateway.peers.subscribe", sink=sink)
+
+    # Only AFTER the subscribe: that handler legitimately resolves the root
+    # itself (it has no write in hand). What must not re-derive is the fan-out
+    # behind a write that already named one.
+    monkeypatch.setattr(
+        "agent_runtime.gateway_targets.peer_store_root",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("the notification re-derived its own root")
+        ),
+    )
+    record_peer(store, peer_install_id=PEER_B, secret="e" * 64, display_name="studio")
+
+    assert len(sink.notifications) == 1
+    assert sink.notifications[0]["params"]["peer"]["display_name"] == "studio"
+
+
 def test_a_runtime_with_no_subscriber_pays_nothing(store, monkeypatch):
     """Checked before any store read, so a serve with no launcher attached does
     not open two files on every peer write."""

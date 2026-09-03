@@ -49,6 +49,7 @@ it. One directory, two readers.
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 from typing import Any, Callable
 
 __all__ = [
@@ -236,7 +237,9 @@ class PeerDirectorySubscriptions:
 PEER_DIRECTORY_SUBSCRIPTIONS = PeerDirectorySubscriptions()
 
 
-def publish_peer_event(event_type: str, payload: dict[str, Any]) -> None:
+def publish_peer_event(
+    event_type: str, payload: dict[str, Any], *, store_root: Any = None
+) -> None:
     """Turn one ``gateway.peer.*`` event into a ``changed`` notification.
 
     Wired into ``gateway_peers``' own emitter so the two lanes cannot disagree
@@ -252,6 +255,14 @@ def publish_peer_event(event_type: str, payload: dict[str, Any]) -> None:
     different audience with a different rule: it goes to this install's own
     console, over a local socket, and its whole job is to spare that console a
     fetch.
+
+    ``store_root`` is the root the write actually LANDED in, threaded from the
+    writer rather than re-derived. Every function in ``gateway_peers`` takes its
+    root as an input because several roots coexist on this machine, and a
+    notification that resolved its own could describe a different store from the
+    one that changed — the same class of bug the input rule exists to prevent.
+    ``None`` falls back to the head home's root, which is the right answer for
+    the one caller that has no root in hand (a serve reading its own directory).
 
     ``peer`` is ``null`` when the row is gone — which today only happens if
     something removed it out of band, since a revoke KEEPS the row. Modelled
@@ -274,7 +285,7 @@ def publish_peer_event(event_type: str, payload: dict[str, Any]) -> None:
         )
         from .gateway_targets import peer_store_root
 
-        root = peer_store_root()
+        root = Path(store_root) if store_root is not None else peer_store_root()
         revision = list(peer_store_revision(root))
         if peer_install_id:
             record = next(

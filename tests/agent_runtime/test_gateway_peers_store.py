@@ -1085,7 +1085,7 @@ def test_every_store_door_emits_its_event_with_ids_and_never_a_secret(
     monkeypatch.setattr(
         gateway_peers,
         "_emit_peer_event",
-        lambda event_type, payload: seen.append((event_type, payload)),
+        lambda event_type, payload, **_kw: seen.append((event_type, payload)),
     )
 
     credential = _pair(tmp_path)
@@ -1136,7 +1136,7 @@ def test_a_process_that_reads_a_revision_it_neither_wrote_nor_seeded_emits_exter
     monkeypatch.setattr(
         gateway_peers,
         "_emit_peer_event",
-        lambda event_type, payload: seen.append((event_type, payload)),
+        lambda event_type, payload, **_kw: seen.append((event_type, payload)),
     )
     gateway_peers._LAST_SEEN_REVISION.clear()
 
@@ -1170,7 +1170,7 @@ def test_a_fresh_process_seeds_on_first_read_and_emits_nothing(tmp_path, monkeyp
 
     seen: list = []
     monkeypatch.setattr(
-        gateway_peers, "_emit_peer_event", lambda t, p: seen.append((t, p))
+        gateway_peers, "_emit_peer_event", lambda t, p, **_kw: seen.append((t, p))
     )
     gateway_peers._LAST_SEEN_REVISION.clear()
 
@@ -1190,7 +1190,7 @@ def test_a_write_this_process_made_is_never_reported_as_external(tmp_path, monke
 
     seen: list = []
     monkeypatch.setattr(
-        gateway_peers, "_emit_peer_event", lambda t, p: seen.append((t, p))
+        gateway_peers, "_emit_peer_event", lambda t, p, **_kw: seen.append((t, p))
     )
 
     note_peer_seen(tmp_path, PEER_B)

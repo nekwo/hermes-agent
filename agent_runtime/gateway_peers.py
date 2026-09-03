@@ -730,6 +730,7 @@ def revoke_peer(
             "announced": bool(announced),
             **({"grant_id": str(correlation)} if correlation else {}),
         },
+        store_root=store_root,
     )
     return record
 
@@ -931,6 +932,7 @@ def redeem_peer_code(
                         else {}
                     ),
                 },
+                store_root=store_root,
             )
             return PeerCredential(
                 peer_install_id=peer_install_id,
@@ -1012,6 +1014,7 @@ def record_peer(
             "source": "join",
             **({"grant_id": str(correlation)} if correlation else {}),
         },
+        store_root=store_root,
     )
     return record
 
@@ -1788,6 +1791,7 @@ def note_peer_store_read(store_root: Path | str) -> None:
             "change": "external_write",
             "store_revision": list(revision),
         },
+        store_root=store_root,
     )
 
 
@@ -2008,7 +2012,7 @@ def _touch_cache(
     if event_type is not None:
         payload = {"peer_install_id": resolved, **(event_payload or {})}
         payload.update({k: v for k, v in (event_detail or {}).items() if v is not None})
-        _emit_peer_event(event_type, payload)
+        _emit_peer_event(event_type, payload, store_root=store_root)
         return
 
     reachability = fields.get("reachability")
@@ -2023,17 +2027,30 @@ def _touch_cache(
         }
         if error:
             detail["error"] = str(error)[:200]
-        _emit_peer_event(PEER_EVENT_REACHABILITY, detail)
+        _emit_peer_event(PEER_EVENT_REACHABILITY, detail, store_root=store_root)
         return
 
     _emit_peer_event(
         PEER_EVENT_UPDATED,
         {"store": "cache", "change": change, "peer_install_id": resolved},
+        store_root=store_root,
     )
 
 
-def _emit_peer_event(event_type: str, payload: dict[str, Any]) -> None:
+def _emit_peer_event(
+    event_type: str, payload: dict[str, Any], *, store_root: Path | str | None = None
+) -> None:
     """Append one ``gateway.peer.*`` event from THIS process. Best effort.
+
+    ``store_root`` is the root that was actually WRITTEN, threaded from the
+    caller rather than re-derived. Every function in this module takes its root
+    as an INPUT for the reason the module docstring gives — several roots
+    coexist on this machine and Stage 6's whole subject is two of them at once —
+    and the S2d push lane inherits that: a notification that resolved its own
+    root could describe a different store from the one the write landed in,
+    which is the same class of bug the input rule exists to prevent. The
+    EventLog append is unaffected (it is per-process, not per-root); this is for
+    the fan-out below it.
 
     The ``realm_sync._append_realm_sync_event`` precedent, and its reason: the
     stream/read-model pipeline is watermark-gated on the EventLog, so a store
@@ -2070,6 +2087,6 @@ def _emit_peer_event(event_type: str, payload: dict[str, Any]) -> None:
     try:
         from .serve_gateway_peers_rpc import publish_peer_event
 
-        publish_peer_event(event_type, dict(payload))
+        publish_peer_event(event_type, dict(payload), store_root=store_root)
     except Exception:  # noqa: BLE001 — a notification is never the mutation
         pass
