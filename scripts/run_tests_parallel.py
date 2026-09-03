@@ -1171,6 +1171,19 @@ def main() -> int:
         fail_count -= 1
         tests_passed += summary.get("passed", 0)
         tests_failed += summary.get("failed", 0)
+        # The straggler's outcomes count toward collection exactly as the
+        # pool's do. Without this the nothing-ran guard below can only ever see
+        # the KILLED first attempt, which by definition collected nothing:
+        # measured 2026-09-02 on tests/hermes_cli/test_harness_characters_cli.py,
+        # a file that timed out at 8 workers and passed at 1-worker isolation
+        # printed "RETRY PASS … (95 tests)", "95 tests passed, 0 failed" and
+        # then "✗ NO TESTS RAN — 0 collected" over the same run. Same key set
+        # as _on_done, for the same reason: an all-skipped platform-gated file
+        # DID collect.
+        tests_collected += sum(
+            summary.get(key, 0)
+            for key in ("passed", "failed", "skipped", "errors", "xfailed", "xpassed")
+        )
         if rc == 0:
             pass_count += 1
             print(

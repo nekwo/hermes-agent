@@ -3495,7 +3495,7 @@
     {
       "id": "longrun-drain-terminates-over-a-live-generation",
       "path": "hermes_cli/harness_parts/serve.py",
-      "symbol": "serve_loop/_drain_monitor terminal",
+      "symbol": "serve_loop._drain_monitor/terminal",
       "operator": "hold-only-for-chat-turns",
       "find": "                        \"terminal\": not (chat_turn_ids or long_run_ids),",
       "replace": "                        \"terminal\": not chat_turn_ids,",
@@ -4226,6 +4226,53 @@
         "-q",
         "tests/agent_runtime/test_harness_doctor.py::test_the_join_sweep_reads_a_receipt_only_for_an_orphan",
         "--timeout=180"
+      ]
+    },
+    {
+      "id": "w7-the-backtick-span-pairs-across-the-line-again",
+      "path": "scripts/doc_cite_adjacency.py",
+      "symbol": "_spans",
+      "operator": "pair-across-line-boundaries",
+      "find": "    return [span for line in text.split(\"\\n\") for span in BACKTICKED.findall(line)]",
+      "replace": "    return BACKTICKED.findall(text)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/scripts/test_doc_cite_adjacency.py::test_a_backtick_span_never_pairs_across_a_line_boundary"
+      ]
+    },
+    {
+      "id": "w7-the-definition-walk-stops-descending-into-blocks",
+      "path": "scripts/changed_line_mutation_check.py",
+      "symbol": "_qualified_definitions",
+      "operator": "skip-block-bodies",
+      "find": "            elif isinstance(child, BLOCK_STATEMENTS):",
+      "replace": "            elif isinstance(child, ()):",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/scripts/test_mutation_claim_anchoring.py::test_a_def_nested_in_a_try_is_anchorable_by_its_own_symbol",
+        "tests/scripts/test_mutation_claim_anchoring.py::test_a_bare_nested_name_resolves_when_it_is_unambiguous"
+      ]
+    },
+    {
+      "id": "w7-the-straggler-retry-bills-no-collection",
+      "path": "scripts/run_tests_parallel.py",
+      "symbol": "main/the straggler pass",
+      "operator": "zero-the-straggler-collection",
+      "find": "        tests_collected += sum(\n            summary.get(key, 0)\n            for key in (\"passed\", \"failed\", \"skipped\", \"errors\", \"xfailed\", \"xpassed\")\n        )",
+      "replace": "        tests_collected += 0",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_run_tests_parallel.py::test_a_straggler_retry_that_passes_is_not_reported_as_zero_collected",
+        "tests/test_run_tests_parallel.py::test_a_straggler_that_recovers_only_skips_still_counts_as_collection"
       ]
     }
   ]

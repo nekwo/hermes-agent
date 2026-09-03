@@ -17,7 +17,29 @@ judgements underneath them:
 
 from __future__ import annotations
 
+import pytest
+
 from scripts import doc_cite_report as report
+
+#: The live-canon test's cost is its CORPUS and its GIT calls, and the repo-wide
+#: per-test cap does not know that. Measured 2026-09-02 on the Windows dev box:
+#: importing ``scripts.doc_cite_report`` is 0.54 s and there is no module fixture
+#: at all, so nothing here is slow before collection; ``report.main`` over the
+#: gated canon is 26.6 / 40.0 / 46.0 s across three runs, of which 32.1 s is 356
+#: ``git`` subprocesses (``cat-file -e`` then ``merge-base --is-ancestor``, two
+#: per distinct sha, ~90 ms each to spawn on Windows) and 0.9 s is 634
+#: ``_line_count`` reads. Against ``pyproject.toml``'s ``--timeout=30`` that is
+#: green on an idle box and dead under an 8-worker suite — which is how it was
+#: reported as "times out before collection": that is the wording of
+#: ``run_tests_parallel``'s bucket ("collection/import error, timeout before
+#: collection, etc."), not a diagnosis.
+#:
+#: So the cap is DECLARED here with the number beside it rather than left to a
+#: hand-passed ``--timeout=600``, the same repair
+#: ``tests/test_coverage_claims_resolve.py`` carries. It stays far under
+#: ``run_tests_parallel``'s 300 s per-FILE wall, which remains the real bound on
+#: a hang: this buys headroom for a slow corpus walk, not for a loop.
+_LIVE_CANON_TIMEOUT_SECONDS = 180
 
 
 def test_only_a_cite_with_a_line_number_is_a_cite():
@@ -88,6 +110,7 @@ def test_a_suffix_path_resolves_only_when_it_is_unique():
     )
 
 
+@pytest.mark.timeout(_LIVE_CANON_TIMEOUT_SECONDS)
 def test_the_report_exits_zero_over_the_live_canon(capsys):
     """Advisory means advisory. Run over the real docs — which really do carry
     dead cites — and the exit code is still 0, because the moment this can fail

@@ -548,9 +548,9 @@ Auto-discovery: any `tools/*.py` file with a top-level `registry.register()` cal
 
 The registry handles schema collection, dispatch, availability checking, and error wrapping. All handlers MUST return a JSON string.
 
-**Path references in tool schemas**: If the schema description mentions file paths (e.g. default output directories), use `display_hermes_home()` to make them profile-aware. The schema is generated at import time, which is after `_apply_profile_override()` sets `HERMES_HOME`.
+**Path references in tool schemas**: If the schema description mentions file paths (e.g. default output directories), use `display_hermes_home()` to make them profile-aware. The schema is generated at import time, which in a hermes CLI process is after `_apply_profile_override()` sets `HERMES_HOME` — a schema string is a LABEL, which is the one thing safe to freeze at import (see rule 3 under "Rules for profile-safe code" for why anything that then READS the filesystem is not).
 
-**State files**: If a tool stores persistent state (caches, logs, checkpoints), use `get_hermes_home()` for the base directory — never `Path.home() / ".hermes"`. This ensures each profile gets its own state.
+**State files**: If a tool stores persistent state (caches, logs, checkpoints), use `get_hermes_home()` for the base directory — never `Path.home() / ".hermes"`, and resolve it at call time rather than into a module constant (rule 3 again). This ensures each profile gets its own state.
 
 **Agent-level tools** (todo, memory): intercepted by `run_agent.py` before `handle_function_call()`. See `tools/todo_tool.py` for the pattern.
 
@@ -1191,9 +1191,43 @@ automatically scope to the active profile.
    print("Config saved to ~/.hermes/config.yaml")
    ```
 
-3. **Module-level constants are fine** — they cache `get_hermes_home()` at import time,
-   which is AFTER `_apply_profile_override()` sets the env var. Just use `get_hermes_home()`,
-   not `Path.home() / ".hermes"`.
+3. **Resolve `get_hermes_home()` at CALL time, not at module scope.** A
+   module-level `X = get_hermes_home() / "..."` is safe only in a process that
+   is a hermes CLI entrypoint, where `_apply_profile_override()` has run before
+   the import. It is NOT safe under pytest: `_profile_bootstrap.is_hermes_cli_entrypoint`
+   deliberately gates the override off there (an import must not re-parse
+   pytest's argv or point the whole session at the operator's live profile), the
+   module is imported at COLLECTION, and the autouse hermetic-home fixture
+   redirects `HERMES_HOME` *afterwards* — so the constant stays frozen on the
+   operator's real store while every caller believes it moved. This is not
+   hypothetical: it deposited fixture chat sessions into the live `state.db`,
+   and `hermes doctor`'s `PRAGMA integrity_check` ran against the developer's
+   real database.
+
+   `hermes_state._resolve_default_db_path` is the canonical pattern — resolve
+   live via `get_hermes_home()`, while still honoring an explicitly reassigned
+   module constant so `monkeypatch.setattr` isolation keeps working:
+   ```python
+   # GOOD — re-resolves per call, and a pinned constant still wins
+   def _resolve_default_db_path() -> Path:
+       if DEFAULT_DB_PATH != _IMPORT_DEFAULT_DB_PATH:
+           return DEFAULT_DB_PATH
+       return get_hermes_home() / "state.db"
+
+   # BAD — frozen at import, which under pytest is before the fixture moves HERMES_HOME
+   DB_PATH = get_hermes_home() / "state.db"
+   ```
+
+   `tests/test_no_frozen_hermes_home.py` is the gate: it imports every module
+   that mentions `get_hermes_home()` under a fresh `HERMES_HOME` and reports each
+   module-level attribute still holding that path. It carries a ledger of the
+   existing frozen names (mostly upstream `gateway/` / `tools/` / `cron/` files a
+   fork rewrite would collide on) and **fails on a stale entry**, so converting a
+   module means deleting its line. Do not add to it.
+
+   A frozen name is defensible only when it is a LABEL and never a filesystem
+   read — `display_hermes_home()` for a printed path is the example, and
+   `hermes_cli/doctor.py` states that split at its own module top.
 
 4. **Tests that mock `Path.home()` must also set `HERMES_HOME`** — since code now uses
    `get_hermes_home()` (reads env var), not `Path.home() / ".hermes"`:

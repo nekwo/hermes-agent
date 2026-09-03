@@ -54,16 +54,38 @@ HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 #: for one: a definition inside a module-level platform fork.
 #: ``agent_runtime/locks.py`` defines ``_try_acquire``/``_prepare``/
 #: ``_release`` twice, once per arm of ``if os.name == "nt"``.
-#: ``_qualified_definitions`` walks only a module's direct children, so neither
-#: copy is reachable — and teaching it to descend the branches would not help,
-#: because the two copies then collide and an ambiguous symbol is refused by
-#: design. There IS no unambiguous node, so
+#: ``_qualified_definitions`` now descends into blocks (2026-09-02), so both
+#: copies ARE reachable — and that does not help, exactly as this note predicted
+#: before the descent existed: the two collide under one name and an ambiguous
+#: symbol is refused by design. There IS no unambiguous node, so
 #: ``hh6-posix-file-lock-ignores-its-deadline`` anchors at ``module`` and says
 #: which arm it means in its label (``module/_try_acquire (POSIX arm)``). Its
 #: selection is therefore line-based, which is what has been selecting and
 #: killing it on `ubuntu-latest` all along; ``platforms`` is what keeps it from
 #: reporting SURVIVED off POSIX.
 WHOLE_MODULE_SYMBOLS = frozenset({"module", "module scope", "module-scope"})
+
+#: Statements whose bodies the definition walk descends WITHOUT adding a name:
+#: a block introduces nesting, not a naming scope. ``ExceptHandler`` and
+#: ``match_case`` are in the list because they are the body-carrying children
+#: of ``Try`` and ``Match`` rather than statements in their own right.
+BLOCK_STATEMENTS: tuple[type[ast.AST], ...] = tuple(
+    node
+    for node in (
+        ast.If,
+        ast.Try,
+        getattr(ast, "TryStar", None),
+        ast.With,
+        ast.AsyncWith,
+        ast.For,
+        ast.AsyncFor,
+        ast.While,
+        getattr(ast, "Match", None),
+        getattr(ast, "match_case", None),
+        ast.ExceptHandler,
+    )
+    if node is not None
+)
 
 #: The hosts a claim can declare itself bound to. Two, because two is what the
 #: tree distinguishes: ``agent_runtime/locks.py`` is the only module with a
@@ -193,6 +215,20 @@ def _qualified_definitions(tree: ast.Module) -> dict[str, list[ast.AST]]:
     ``try``). An anchor over an ambiguous name is refused rather than guessed —
     guessing is how a claim ends up mutating a line in a symbol it does not
     name, which is the whole defect this anchoring replaces.
+
+    **A block is not a naming scope, so the walk descends through it** (2026-09-02).
+    ``try:`` / ``if:`` / ``with:`` / ``for:`` / ``while:`` / ``match:`` bodies
+    carry no name of their own, so a ``def`` inside one belongs to whatever
+    ``def``/``class`` encloses the block: ``serve_loop._drain_monitor`` is the
+    helper `serve.py` defines inside a ``try:`` inside ``serve_loop``. Before
+    this it was reachable by NO symbol — the claim had to name the outer
+    function and say which line it meant in prose
+    (``serve_loop/_drain_monitor terminal``), which hands the ``find`` the outer
+    function's whole span and every sibling copy of the line in it. Every
+    block-nested helper in the repo was unanchorable the same way.
+
+    Python's own ``__qualname__`` spells these with a ``<locals>`` segment; this
+    does not, because a claim's ``symbol`` is a thing a human types.
     """
 
     found: dict[str, list[ast.AST]] = {}
@@ -216,6 +252,9 @@ def _qualified_definitions(tree: ast.Module) -> dict[str, list[ast.AST]]:
                         record(prefix + target.id, child)
             elif isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name):
                 record(prefix + child.target.id, child)
+            elif isinstance(child, BLOCK_STATEMENTS):
+                # Same prefix: the block adds nesting, not a name.
+                walk(child, prefix)
 
     walk(tree, "")
     return found

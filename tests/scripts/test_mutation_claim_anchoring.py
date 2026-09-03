@@ -237,6 +237,120 @@ def test_a_needle_outside_the_named_symbol_names_where_it_actually_lives(tmp_pat
         gate._anchor_claim(text, claim)
 
 
+BLOCK_NESTED = '''\
+def serve_loop():
+    outer_limit = 5
+    try:
+        def _drain_monitor(state):
+            limit = 5
+            return limit
+    finally:
+        def _decoy(state):
+            limit = 5
+            return limit
+'''
+
+
+def test_a_def_nested_in_a_try_is_anchorable_by_its_own_symbol(tmp_path):
+    """The queue row: `serve_loop._drain_monitor`, defined inside a `try:`.
+
+    The walk used to descend only through `def`/`class` children, so a helper
+    defined inside a `try:` / `if:` / `with:` was reachable by NO symbol — the
+    claim had to name the outer function and say which line it meant in prose
+    (`serve_loop/_drain_monitor terminal`), which puts the `find` back inside
+    the outer function's whole span and gives it every sibling's copy of the
+    same line to collide with.
+    """
+
+    target = tmp_path / "serve.py"
+    target.write_text(BLOCK_NESTED, encoding="utf-8")
+    claim = _claim(
+        "nested", target, "serve_loop._drain_monitor", "            limit = 5",
+        "            limit = 99", [],
+    )
+
+    assert gate._anchor_claim(BLOCK_NESTED, claim).lines == {5}
+
+
+def test_the_sibling_nested_def_is_anchored_when_the_claim_names_it(tmp_path):
+    """ANTI-VACUITY for the case above: same file, same `find`, the other
+    block-nested symbol — and the anchor moves. So {5} was the symbol's doing
+    and not an artefact of which copy comes first."""
+
+    target = tmp_path / "serve.py"
+    target.write_text(BLOCK_NESTED, encoding="utf-8")
+    claim = _claim(
+        "sibling", target, "serve_loop._decoy", "            limit = 5",
+        "            limit = 99", [],
+    )
+
+    assert gate._anchor_claim(BLOCK_NESTED, claim).lines == {9}
+
+
+def test_the_outer_symbol_still_spans_the_whole_function(tmp_path):
+    """The nested name is a NARROWER scope, not a replacement: naming the outer
+    function still resolves, and still holds the lines outside the helpers."""
+
+    target = tmp_path / "serve.py"
+    target.write_text(BLOCK_NESTED, encoding="utf-8")
+    claim = _claim(
+        "outer", target, "serve_loop", "    outer_limit = 5",
+        "    outer_limit = 99", [],
+    )
+
+    assert gate._anchor_claim(BLOCK_NESTED, claim).lines == {2}
+
+
+def test_a_bare_nested_name_resolves_when_it_is_unambiguous(tmp_path):
+    """The suffix rule reaches a block-nested def too — `_drain_monitor` alone
+    is the only definition of that name, so it resolves exactly as
+    `OfficeStore.upsert_actor` resolves from `upsert_actor`."""
+
+    target = tmp_path / "serve.py"
+    target.write_text(BLOCK_NESTED, encoding="utf-8")
+    claim = _claim(
+        "bare-nested", target, "_drain_monitor", "            limit = 5",
+        "            limit = 99", [],
+    )
+
+    assert gate._anchor_claim(BLOCK_NESTED, claim).lines == {5}
+
+
+PLATFORM_FORK = '''\
+import os
+
+if os.name == "nt":
+    def _try_acquire():
+        limit = 5
+        return limit
+else:
+    def _try_acquire():
+        limit = 5
+        return limit
+'''
+
+
+def test_a_name_defined_once_per_arm_of_a_platform_fork_is_refused_not_guessed(
+    tmp_path,
+):
+    """`agent_runtime/locks.py`'s shape, and the reason it anchors at `module`.
+
+    Descending into blocks makes both copies visible, and two nodes under one
+    name is ambiguous BY DESIGN — an anchor that guessed an arm would splice
+    the mutation into the platform this run is not on. The refusal names the
+    count and says how to qualify.
+    """
+
+    target = tmp_path / "locks.py"
+    target.write_text(PLATFORM_FORK, encoding="utf-8")
+    claim = _claim(
+        "forked", target, "_try_acquire", "        limit = 5", "        limit = 99", [],
+    )
+
+    with pytest.raises(RuntimeError, match=r"symbol is ambiguous .*: _try_acquire"):
+        gate._anchor_claim(PLATFORM_FORK, claim)
+
+
 def test_module_scope_still_means_the_whole_file(tmp_path):
     """Back-compat for the claims that have no definition to name — an import,
     a module constant, a decorator argument. `module` is a spelling, not a

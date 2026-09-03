@@ -118,6 +118,9 @@ PATH_MENTION = re.compile(r"(?<![\w/.\-])((?:[\w.\-]+/)*[\w.\-]+\.py)(?![\w])")
 #: about a symbol. Dotted and called forms split on the same pass:
 #: `agent_create.perform_agent_create`, `agent_chat_send(wait=false)`.
 IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+#: One backticked span, matched WITHIN A SINGLE LINE — see :func:`_spans` for
+#: why the line boundary is where this rule stops.
 BACKTICKED = re.compile(r"`([^`]+)`")
 
 #: Hard caps on the sentence scope, for prose that never punctuates. Asymmetric
@@ -278,11 +281,45 @@ def subject_window(paragraph: str, offset: int, length: int) -> str:
     return paragraph[low:high]
 
 
+def _spans(text: str) -> list[str]:
+    """Backticked spans, paired LINE BY LINE and never across a boundary.
+
+    The rule the junk-subject class asked for. ``BACKTICKED`` pairs greedily,
+    so a line whose backticks do not balance — a ``````` fence, a code span
+    the writer left open, a table row this window's own cut sliced through —
+    hands its stray backtick the NEXT line's opening one. Every span after it
+    in the window then inverts: the "identifiers" are the ordinary English
+    sitting between two real code spans, which is where `advanced`, `also`,
+    `having` and `honest` came from. Eight of the 2026-09-02 waivers were that,
+    on cites read and confirmed CORRECT, and the occurrence ceiling cannot
+    answer it — the words are common, but so are real short symbols.
+
+    **The cost, measured rather than waved past.** This canon hard-wraps at ~80
+    columns, so ~90 of its code spans are written across two lines and this
+    rule stops reading them. Dropping a subject can only make a cite UNCHECKED
+    or FAILED, never turn a red cite green — the same safety direction the
+    ceiling rests on — and over the gated canon the whole change moved 190→193
+    adjacent, 90→80 FAILED, and 61→67 unchecked, retiring 14 waivers against 4
+    new findings that were then read one by one (three were real rot in the
+    canon, one is the table-row blind spot).
+
+    **The rule that keeps the wrap was tried and is worse.** Carrying an
+    unclosed span into a line that is ITSELF unbalanced preserves a hard wrap,
+    but the subject window is a character slice: when it cuts mid-span both
+    boundary lines come back odd and the junk returns. Measured, that variant
+    kept `07-observability.md|agent_runtime/stream.py:135-173` green on
+    `advanced` / `having` / `honest` — a cite whose emitter had moved sixty
+    lines away, which the strict rule reports.
+    """
+
+    return [span for line in text.split("\n") for span in BACKTICKED.findall(line)]
+
+
 def subjects(text: str) -> set[str]:
     """Identifiers the prose offers, from backticked spans only."""
 
     found: set[str] = set()
-    for span in BACKTICKED.findall(text):
+    for span in _spans(text):
         for ident in IDENT.findall(span):
             if len(ident) >= MIN_IDENT and ident not in STOPWORDS:
                 found.add(ident)

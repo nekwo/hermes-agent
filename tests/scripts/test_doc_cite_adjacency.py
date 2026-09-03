@@ -202,6 +202,48 @@ def test_short_identifiers_are_not_subjects():
     assert found == {"value", "store_root"}
 
 
+def test_a_backtick_span_never_pairs_across_a_line_boundary():
+    """The junk-subject class: an unbalanced line used to swallow the prose.
+
+    A line whose backticks do not balance — a markdown fence, a code span the
+    writer left open, a table row the subject window sliced through — hands its
+    stray backtick the next line's OPENING one, and every span after it in the
+    window is inverted: the "identifiers" become the ordinary English sitting
+    between two real code spans. Eight of the 2026-09-02 waivers were exactly
+    that, on cites read and confirmed CORRECT.
+    """
+
+    text = "an open ` span\nand `_log_agents_readiness_split` prints nothing"
+
+    assert probe.subjects(text) == {"_log_agents_readiness_split"}
+
+
+def test_a_balanced_line_still_gives_up_every_span_it_carries():
+    """The rule refuses a BOUNDARY, not a line: a balanced line is untouched."""
+
+    text = "`first_symbol` then prose then `second_symbol`\nand `third_symbol`"
+
+    assert probe.subjects(text) == {"first_symbol", "second_symbol", "third_symbol"}
+
+
+def test_a_hard_wrapped_span_is_the_measured_cost_of_the_rule():
+    """A span this canon wrapped at ~80 columns is lost, and that is deliberate.
+
+    Losing a subject can only ever make a cite UNCHECKED or FAILED — never turn
+    a red cite green — which is the same safety direction the occurrence
+    ceiling rests on. The alternative rule that KEEPS the wrap (carry an
+    unclosed span into a line that is itself unbalanced) re-creates the junk
+    whenever the subject window's own cut leaves both boundary lines odd:
+    measured, that is how `07|stream.py:135-173` — a cite whose emitter had
+    moved 60 lines — passed on `advanced` / `having` / `honest` instead of
+    being reported.
+    """
+
+    text = "the `persona\ninstance delete` alias"
+
+    assert probe.subjects(text) == set()
+
+
 def test_the_probe_fails_loud_on_a_zero_cite_walk(capsys):
     """An unrun gate is indistinguishable from a passing one.
 

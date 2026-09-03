@@ -346,8 +346,6 @@ def test_zero_collected_across_run_fails_and_says_so(tmp_path: Path) -> None:
     assert "NOT a pass" in proc.stdout
 
 
-
-
 def test_node_id_selector_runs_the_named_test(tmp_path: Path) -> None:
     """``file.py::test_alpha`` runs that test instead of discovering nothing."""
     probe_dir = _make_probe_dir(tmp_path)
@@ -499,3 +497,101 @@ def test_file_list_split_keeps_windows_drive_letters(tmp_path: Path) -> None:
         "tests/b.py",
     ]
     assert mod._split_discovery_roots("tests:packages") == ["tests", "packages"]
+
+
+def _drive_main_over_one_file(
+    mod, monkeypatch, tmp_path: Path, attempts: list[tuple[int, str, dict]]
+) -> int:
+    """Run the runner's ``main`` over one probe file, scripting each attempt.
+
+    In-process on purpose: the thing under test is the SUMMARY's accounting,
+    and driving it through a real pytest subprocess would pay ~30 s of this
+    repo's collection per attempt to observe an integer.
+    """
+    probe = tmp_path / "test_straggler_probe.py"
+    probe.write_text("def test_one():\n    assert True\n", encoding="utf-8")
+    calls: list[Path] = []
+
+    def fake_once(file, pytest_args, repo_root, file_timeout):
+        rc, output, summary = attempts[min(len(calls), len(attempts) - 1)]
+        calls.append(file)
+        return file, rc, output, summary, 1.0
+
+    monkeypatch.setattr(mod, "_run_one_file_once", fake_once)
+    # The real one writes test_durations.json into the checkout.
+    monkeypatch.setattr(mod, "_save_durations", lambda *a, **k: None)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["run_tests_parallel.py", "--files", str(probe), "-j", "1",
+         "--file-retries", "0", "--file-timeout", "5"],
+    )
+    return mod.main()
+
+
+_KILLED_ATTEMPT = (124, _TIMEOUT_OUTPUT, {"passed": 0, "failed": 0})
+
+
+def test_a_straggler_retry_that_passes_is_not_reported_as_zero_collected(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """The straggler's collection counts, or the run contradicts itself.
+
+    Observed 2026-09-02 on ``tests/hermes_cli/test_harness_characters_cli.py``:
+    the file tripped the per-file wall clock at 8 workers, collected nothing
+    into the killed attempt, then passed at 1-worker isolation — and the run
+    printed ``RETRY PASS … (95 tests)`` and ``Summary: 95 tests passed, 0
+    failed`` followed by ``✗ NO TESTS RAN — 0 collected``. ``tests_collected``
+    was accumulated ONLY inside the pool's ``_on_done`` callback, so every
+    outcome the straggler pass recovered was invisible to the nothing-ran
+    guard. A banner that says "not a pass" over a pass is one an operator
+    learns to ignore, which is the whole reason the guard exists.
+    """
+    mod = _load_runner_module()
+
+    code = _drive_main_over_one_file(
+        mod, monkeypatch, tmp_path,
+        [_KILLED_ATTEMPT, (0, "95 passed", {"passed": 95, "failed": 0})],
+    )
+    out = capsys.readouterr().out
+
+    assert "RETRY PASS" in out, out
+    assert "95 tests passed" in out, out
+    assert "NO TESTS RAN" not in out, out
+    assert code == 0, out
+
+
+def test_a_straggler_that_recovers_nothing_still_trips_the_guard(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """ANTI-VACUITY: the guard is quieted by a real COLLECTION, not by the
+    straggler pass having run. Same shape, but the retry is killed too, so the
+    run really did collect nothing and must still say so."""
+    mod = _load_runner_module()
+
+    code = _drive_main_over_one_file(
+        mod, monkeypatch, tmp_path, [_KILLED_ATTEMPT, _KILLED_ATTEMPT]
+    )
+    out = capsys.readouterr().out
+
+    assert "RETRY FAIL" in out, out
+    assert "NO TESTS RAN" in out, out
+    assert code == 1, out
+
+
+def test_a_straggler_that_recovers_only_skips_still_counts_as_collection(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """The pool callback counts skips, xfails and errors as collection, and the
+    straggler must count them the same way: a platform-gated file that reports
+    "2 skipped" on its isolation re-run DID collect, and the guard exists for a
+    run that collected nothing at all."""
+    mod = _load_runner_module()
+
+    code = _drive_main_over_one_file(
+        mod, monkeypatch, tmp_path,
+        [_KILLED_ATTEMPT, (0, "2 skipped", {"passed": 0, "failed": 0, "skipped": 2})],
+    )
+    out = capsys.readouterr().out
+
+    assert "NO TESTS RAN" not in out, out
+    assert code == 0, out

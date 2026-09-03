@@ -313,7 +313,11 @@ a span of ordinary English — `advanced`, `also`, `having`, `honest`, `could`,
 
 - **221 continuations resolve to no path** because their sentence names no file.
   Many are table rows and bullet lists whose file is named in the row above.
-- **`BACKTICKED` mis-pairs across prose**, above — the single largest source of
-  junk subjects.
+- ~~**`BACKTICKED` mis-pairs across prose**, above — the single largest source of
+  junk subjects.~~ **CLOSED 2026-09-02**: `subjects()` pairs LINE BY LINE and
+  never across a boundary (`_spans`). 15 waivers retired, 4 findings the junk
+  had been hiding surfaced and were answered in the canon, and the ~90
+  hard-wrapped spans this costs are the measured price — see
+  `tooling-residue-field-notes-2026-09-02.md` §1.
 - **`--exclude planned/` still hides these field notes' own rot**, by the 2026-09-01
   ruling. The whole-root walk remains one command away.
