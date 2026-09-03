@@ -441,8 +441,13 @@ harness gateway id --json
 harness gateway peers list --json  -> count 0, items []
 ```
 
-Whole-suite sweep, `bash scripts/run_tests.sh tests/agent_runtime tests/hermes_cli`
-(~9,770 tests): **one red, and it is a pre-existing wall-clock flake** —
+Whole-suite sweep, `bash scripts/run_tests.sh tests/agent_runtime tests/hermes_cli`:
+
+```
+=== Summary: 1014 files, 12186 tests passed, 1 failed (100% complete) in 1508.2s (8 workers) ===
+```
+
+**That one red is a pre-existing wall-clock flake** —
 `test_read_model_slo::test_synthetic_snapshot_full_build_within_rd0_slo`, which
 asserts `build_ms <= 2000` and measured 2938 under 8-worker contention. Measured
 rather than assumed:
