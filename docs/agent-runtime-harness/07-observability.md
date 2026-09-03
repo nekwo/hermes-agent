@@ -381,7 +381,7 @@ keeps the newest 2 rows per `(persona_instance_id, session_id)` lane and ARCHIVE
 the rest, never deletes (`:1185-1187`); an absent catalog is honest absence,
 never a fake empty list (`:1217-1220`). Two consumers: the live `chat.final`
 echo carries a slimmed projection (`slim_chat_final_observability`,
-`persona_commands.py:4495`); evicted rows are
+`persona_commands.py:4541`); evicted rows are
 fetched by `harness prompt-context show --context-id <id> [--json]`
 (`hermes_cli/harness.py:831-841`, handler `:2967-2999`) — read-only, honest
 `not_found` on absence. `trace_events` are the turn's tool-call trace, passed at
