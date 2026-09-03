@@ -14,8 +14,8 @@ lane and nothing below carries a task frame.
 spawns the Launcher bridge otherwise pays a ~3s import tax on
 (`hermes_cli/harness_parts/serve.py:1-7`). Requests arrive as NDJSON, one frame
 per line, and dispatch into the **existing** harness argparse tree unchanged:
-`dispatch_argv` (`serve.py:1531`) builds a fresh parser per request
-(`_build_harness_parser`, `:1519`) and calls the same `_cmd_*` handler the CLI
+`dispatch_argv` (`serve.py:1567`) builds a fresh parser per request
+(`_build_harness_parser`, `:1554`) and calls the same `_cmd_*` handler the CLI
 would, including the harness error-envelope contract — argv arrives verbatim as
 the bridge already builds it, which keeps the per-call CLI fallback
 byte-identical to the served path. **`ready` is a BOOT frame, not a request
@@ -590,7 +590,7 @@ merge the client cannot vouch for (`PATCH_VALUE_BUDGET_BYTES`, `:115-116`).
 core-section table, and a `patch` for an entity it cannot fold is strictly WORSE
 than the `delta` it replaced — the consumer pays the patch and then a whole core
 anyway. So it declares: `hermes harness stream --fold-entities a,b`
-(`hermes_cli/harness.py:1693`, parsed by
+(`hermes_cli/harness.py:1738`, parsed by
 `agent_runtime/patch_coverage.py::parse_fold_entities_option`)
 or `{"op":"subscribe","lane":"stream","fold_entities":[…]}` (`:2623-2631`).
 Rules, all in `agent_runtime/patch_coverage.py`:
@@ -653,7 +653,7 @@ existed the log named none of them:
 
 | Caller | `op` / `purpose` | Site |
 |---|---|---|
-| socket/stdio op lane | `subscribe` / `stream_lane` | `serve.py:2791` |
+| socket/stdio op lane | `subscribe` / `stream_lane` | `serve.py:2867` |
 | RPC office lane | `runtime.office.subscribe` / `office_patch` | `serve_office_subscriptions.py:902` |
 | argv CLI | `harness_stream` / `cli_stream` | `runtime_commands.py:621-622` |
 
@@ -665,7 +665,7 @@ never raises — an instrument must not be why a subscribe fails.
 
 **Who paints the boot's one stale core is a property of the ROOM**, so
 `stream_frames(wants_stale_first=…)` is stated by the caller —
-`serve.py::_room_wants_stale_first` (`:3118`) reads the hub's two subscriber
+`serve.py::_room_wants_stale_first` (`:3193`) reads the hub's two subscriber
 tables at producer-build time, `_cmd_stream` (`runtime_commands.py:611`) states
 `True`, default `False`. It cannot be re-derived inside the producer: the
 subscriber attaching FIRST at boot is the RPC office lane, whose sink discards
@@ -688,7 +688,7 @@ workspace id that failed the private "id under `<workspace_id>/`" restatement
 becomes a resync notification; an UNKNOWN frame type takes the same branch
 deliberately. Drops are typed, never silent: a subscriber outrunning its bounded
 buffer gets `subscription_dropped` naming which of the two bounds tripped —
-frame count or bytes — then is unsubscribed (`serve.py:4086`).
+frame count or bytes — then is unsubscribed (`serve.py:4182`).
 
 ## 7. The PUSH-vs-RPC boundary, and the fork boundary
 

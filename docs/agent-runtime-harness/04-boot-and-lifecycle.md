@@ -22,14 +22,14 @@ runtime. Everything else launcher-side belongs to the Launcher's docs.
 
 ## Stage 1 — interpreter and import tax (`interpreter_ms` and its segments)
 
-`_cmd_serve` starts a `BootTimeline` as its first instruction (`serve.py:4868-4870`).
+`_cmd_serve` starts a `BootTimeline` as its first instruction (`serve.py:4956-4958`).
 Everything before that instant is `interpreter_ms`: process creation → the command's own first
 statement, resolved through psutil and **simply absent when the platform will not give a
 creation time** (`agent_runtime/boot_timeline.py:108-118`). That one number used to be the
 whole story, and on the 2026-08-17 cold boot it was 20,421 ms. It is now split by
 module-global anchors written by the four places that can see the boundaries
 (`hermes_cli/_boot_clock.py:47-61`), merged on by `_annotate_import_tax`
-(`serve.py:1720`):
+(`serve.py:1756`):
 
 `interpreter_boot_ms` (process creation → `main.py`'s first statement: interpreter + `site` +
 package import) · `main_import_ms` (`main.py`'s 71 module-scope import statements, 166 imported
@@ -56,7 +56,7 @@ through subprocesses after recording that the originally specified assertion was
 ## Stages 2-3 — `booting`, then registry, head pointer, root anchor
 
 The `booting` frame is emitted before ANY heavy boot work, carrying `boot: timeline.stamps()`
-(`serve.py:1840`). A supervising launcher can tell a live cold boot from a wedged child by
+(`serve.py:1876`). A supervising launcher can tell a live cold boot from a wedged child by
 this frame alone — which is what keeps a short watchdog from killing a cold boot mid-flight and
 respawning into another cold boot forever (2026-07-26 kill-loop incident).
 
@@ -76,9 +76,9 @@ the capture is two env reads, and its `core_cache` import is ~90% dependencies t
 pays for before `ready` anyway. Then three cheap marked phases:
 
 - `chat_registry_ms` — the persona-chat hot-session registry, sized from
-  `load_root_runtime_config().persona_chat` (`serve.py:1959-1965`).
+  `load_root_runtime_config().persona_chat` (`serve.py:1995-2001`).
 - `head_publish_ms` — `publish_chat_head_home()`, the ONE writer of the shared chat-head pointer
-  (`serve.py:1973-1976`). Without it a later plain CLI turn degrades to its own profile database
+  (`serve.py:2009-2012`). Without it a later plain CLI turn degrades to its own profile database
   and mints transcripts where the cockpit never looks.
 - `root_anchor_ms` — publishes `agent_runtime.store_root` into the platform-default home's
   `config.yaml`, so an ambient process with no `HERMES_HOME` resolves THIS serve's real runtime
@@ -140,7 +140,7 @@ a crash leaves it.
 
 ## Stage 5 — the hygiene sweeps
 
-**Orphaned turns** (`orphaned_turn_sweep_ms`, `serve.py:2704` →
+**Orphaned turns** (`orphaned_turn_sweep_ms`, `serve.py:2780` →
 `agent_runtime/persona_chat_continuity.py:891`). A native turn holds the OS-backed root lease for
 its entire execution and the kernel releases it when the holder dies, so "in-flight record AND
 acquirable lease" is proof the turn can no longer settle itself; a session whose lease is HELD is
@@ -149,7 +149,7 @@ requested after — so repaired records project as typed `turn_interrupted` mark
 instead of a console stuck "running" forever. When anything flips, a `state.reconciled` event is
 appended so already-connected watermark-gated consumers converge too. Best-effort.
 
-**Detached dispatches** (`dispatch_restore_ms`, `serve.py:2720`). Same moment, same reason:
+**Detached dispatches** (`dispatch_restore_ms`, `serve.py:2796`). Same moment, same reason:
 a row still marked `running` whose owning process is provably gone can never finish, and the
 sender is owed that answer. Identity-verified — a recycled PID is not the old owner — and
 fail-open. Both counts ride the ready frame when nonzero.
@@ -157,11 +157,11 @@ fail-open. Both counts ride the ready frame when nonzero.
 ## Stage 6 — `ready`, and the one prewarm thread
 
 The ready frame carries `boot_id`, `build`, `auth`, `instance`, `socket`, the RPC manifest, the
-ops manifest, and `boot_timeline` (`serve.py:1730-1774`). The blocks are **always present, never
+ops manifest, and `boot_timeline` (`serve.py:1766-1810`). The blocks are **always present, never
 conditional on success**: a missing block would read as "old runtime", while a block whose fields
 say `error:…` reads as what it is.
 
-The prewarm thread starts **just before** `frames.emit(ready_frame)` (`serve.py:1827-1853`), not
+The prewarm thread starts **just before** `frames.emit(ready_frame)` (`serve.py:1863-1889`), not
 after. The launcher's first request lands within milliseconds of that frame and only the build
 that STARTED FIRST can be shared; if the request wins the race it leads its own build and the
 warmup queues a redundant second one behind it. Starting a daemon thread costs microseconds, so
@@ -171,7 +171,7 @@ warmup queues a redundant second one behind it. Starting a daemon thread costs m
 `HY-H2`, and `serve.py:1715-1716` records two independent investigations reaching it). The
 read-model build runs first, the provider warmup (`_load_openai_cls`, `shared_ssl_context`,
 `verify_ca_bundle`, `get_tool_definitions`) second, and since 2026-08-23 the persona-chat
-actor prewarm (Stage 9a) third — all on the same thread (`serve.py:1611-1621`, `:1060-1086`).
+actor prewarm (Stage 9a) third — all on the same thread (`serve.py:1647-1657`, `:1060-1086`).
 The first two used to be two threads; under the GIL the provider's ~5-8 s of CPU was
 subtracted from the build the launcher's canvas is waiting on, and nothing it warms is
 consumable before that canvas is authoritative. The third step inherits that reasoning twice
@@ -204,7 +204,7 @@ comparison that matters; a six-boot sample reading 1,488-2,990 was the narrower 
 ## Stage 7 — the first read-model core, and why it is cold
 
 `_prewarm_read_model_snapshot` calls `build_snapshot(build_info={"caller": "prewarm"})`
-(`serve.py:1551`). Naming the caller is what makes this build appear in the log at all:
+(`serve.py:1587`). Naming the caller is what makes this build appear in the log at all:
 until the builder emitted its own receipt, every `snapshot_build` line in the boot window
 belonged to a caller that RODE this build — which is how one build came to look like three.
 The receipt (`agent_runtime.snapshot`), live 2026-08-22 15:46:38:
@@ -278,7 +278,7 @@ event at all, and an offset key cannot see them at any price.
 A mismatch does not mean a blank canvas: `take_stale_first_core` serves the last persisted core
 **labeled stale** while the build runs (`core_cache.py:3817`, `stream.py:1274`). The one-shot
 belongs to the SUBSCRIBER, not the process — derived at producer-build time by
-`serve.py::_room_wants_stale_first` (`:3118`) — because a boot starts two `stream_frames`
+`serve.py::_room_wants_stale_first` (`:3193`) — because a boot starts two `stream_frames`
 generators and the module-global version handed the allowance to whichever raced first. A
 forced-refresh one-shot is refused the stale core outright.
 
@@ -495,7 +495,7 @@ deliberately, because a process on its way down must not wait on a cache fill.
     `tests/agent_runtime/test_serve_cwd_serialization_invariant.py`.
 11. **A frozen `snapshot.json` / `read_model.db` mtime says nothing about liveness** — a live
     serve answers from in-memory lanes and a 20 s payload cache (`_CACHEABLE_ARGV`,
-    `_READ_CACHE_MAX_AGE_SECONDS = 20.0`, `serve.py:932`). Check frames, not mtimes.
+    `_READ_CACHE_MAX_AGE_SECONDS = 20.0`, `serve.py:968`). Check frames, not mtimes.
     Stronger since Stage 6 (2026-08-22): both files now have NO writer at all —
     the lane that produced them is retired — so a copy left on disk is a legacy
     artifact and its mtime is not merely uninformative, it is meaningless.

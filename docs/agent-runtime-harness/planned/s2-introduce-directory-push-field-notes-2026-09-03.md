@@ -129,3 +129,255 @@ R-S2-18 the "introduce unreachable" test.
 ## Builder's record (append below; one entry per commit)
 
 _(empty — the builder fills this)_
+
+
+---
+
+## Builder's record (Opus, 2026-09-03)
+
+Worktree `X:/wt/s2-hermes`, branch `feat/s2-introduce-directory-push`, rebased
+onto `origin/main` at `71be9a183f` before the first commit. Nothing outside the
+worktree was written; the live store was not touched at all this session (the
+planner's three read-only measurements stand). No push.
+
+**Build order was S2 -> S2c -> S2b -> S2d**, not the plan's S2 -> S2b -> S2c.
+The orchestrator's dispatch set that order and it turned out to be the better
+one: S2c lands `usable_peers`, so S2b's `agent_chat_installs` and the resolver
+read the final predicate from the start, and the plan's "land the tool on
+`list_peers` minus revoked, then swap the predicate in — one commit" (R-S2-16)
+never had to happen. One consequence, recorded as a deviation below: the
+allowlist grew in two steps rather than one.
+
+### The one derived detail the plan left me (§3, "the seeding detail")
+
+**How the S2b parity e2e seeds a persona on root B**, confirmed against
+`agent_runtime/config.py`:
+
+* `load_agent_runtime_config` (`config.py:112-172`) reads the YAML, takes
+  `top["agent_runtime"]` as `raw`, and `raw.get("personas", {})` into
+  `AgentRuntimeConfig.personas` (`:60`, `:169`).
+* `persona_records_from_config` (`:532-541`) walks `cfg.personas.items()` —
+  each KEY is the persona id, each VALUE a dict of overrides — and builds an
+  `AgentPersona` through `_persona_from_overrides` (`:643-656`), where `role`
+  defaults to `PROFILE_ROLE_SENTINEL` and `model`/`provider`/`api_mode` fall
+  back to the config defaults.
+* `ensure_persisted_personas` (`:631-640`) merges that catalog under the
+  `AgentStore` rows, and `PersonaInstanceStore.ensure_for_personas` turns each
+  into a canonical instance — which is what `addressable_roster` then projects.
+
+So the fixture writes into B's sandbox `HERMES_HOME/config.yaml`:
+
+```yaml
+remote_gateway:
+  listen: "127.0.0.1"
+  port: 0
+agent_runtime:
+  personas:
+    dev:
+      display_name: Dev
+      role: dev
+```
+
+beside the `remote_gateway` block `_sandbox_env` already writes
+(`test_gateway_peer_two_roots_e2e.py:82-88`). No `AgentStore` write and no CLI
+call is needed: the config catalog IS a persona for every reader in the chain
+above. **Note for whoever runs the e2e**: the persona still needs a model/provider
+the sandbox can resolve for a TURN to complete, but `peer.roster.list` and
+`agent_chat_installs` need only that the instance EXISTS and resolves through
+`_resolve_mission_chat_persona_id`, which the config catalog gives them.
+
+### Per-step record
+
+**S2 — `d379982759`.** `gateway_capabilities.py` (new, imports nothing so the
+serve and a cold CLI read one tuple); `expires_at` on both credential rows,
+classified TRUST, with both verifiers refusing AFTER the proof and the wire
+still collapsed; requester scoping (peer half checked, device half labelled
+`account_device_id`); `harness gateway introduce`; `peers join
+--expect-fingerprint` / `--correlation`; `gateway id` gaining `endpoints` /
+`endpoints_source` / `listener` / `capabilities`; `store_file_io.stamp_passed`
+as the reader half of `iso_stamp`. Named pins moved: `test_serve_gateway_lane.py`
+`:239` and `:338`. `tests/fixtures/hermes_cli_contract.json` regenerated
+(sha256 `8cd52731…` at S2, `86837537…` after S2c's `--no-announce`).
+
+**S2c — `36a9be9b32`.** `peers_cache.json` with its own row shape, contract and
+partition test; `note_peer_seen` MOVED to it and `last_seen` dropped from `_row`;
+five `gateway.peer.*` contracts emitted from the writing process; the revision
+memo; `peer.announce` (allowlist + handler + `apply_peer_announce`);
+`gateway_announce.py` with the revoke ordering; `usable_peers` and
+`resolve_install_ref`; `peers list` gaining `cache` / `usable` /
+`unusable_reason` / `ref`; hello refresh; `dial_peer` cache-endpoints-first with
+the trust pin always. Named pins moved: `test_gateway_peers_store.py` (the
+partition is derived, so it re-derived itself; `note_peer_seen`'s test moved
+deliberately), `test_serve_gateway_peer_lane.py:288`,
+`test_s15_event_contract_pruning.py` 59 -> 64, the allowlist literals, and every
+stream golden + `MANIFEST.sha256` (`decision_contract_hash` moved).
+
+**S2b — `485f33a7f6`.** `peer_directory.py` (roster projection, far-target scope,
+the shared `read_chat_lane_tail`, the HUD block); `peer.roster.list` /
+`peer.thread.read`; `tools/agent_chat_remote.py`'s callers; `agent_chat_installs`
+(44th tool); `@install/` on `agent_chat_open` and `agent_chat_threads`; the
+`clarify_token_not_portable` refusal; the HUD `installs` field and the `also_on`
+residency note. Named pins moved: the allowlist literals again (four -> six),
+`test_harness_core_ratchet.py` (43 -> 44, 1149 -> 1177 — both RE-MEASURED, see
+below), `test_harness_tool_inventory.py`'s count, and the three inventory
+artifacts.
+
+**S2d — the launcher's push door.** Scope addendum from the orchestrator
+mid-build, sourced from the Stage 3 launcher plan §0.6 + S3-R13. See its own
+section below.
+
+### The measurement behind the ratchet move (R-S2-17)
+
+Re-measured, not adjusted:
+
+```
+resolve_tool_visibility(neko_supervisor, permission_mode=unbounded)
+  -> final_tool_count 44, model_tool_tokens 1177
+```
+
+`DECLARED_TOOL_COUNT = 44`, `DECLARED_TOKEN_ESTIMATE = 1177` (was 43 / 1149).
+`agent_chat_installs`' schema description is deliberately short for that reason.
+Three inventory artifacts regenerated (`--check` green, 44 tools / 15 toolsets,
+sha256 `36780ed3…`), and two Operate rows written by hand before the last regen
+so the generated block carries them.
+
+### Deviations from the plan, each with its reason
+
+1. **No `agent_runtime/correlation.py`.** R-S2-14 allowed one "if the fence is
+   not already importable without pulling `serve_rpc`". It is:
+   `state_patches.normalize_correlation_id` / `CORRELATION_ID_MAX_LEN` have no
+   heavy imports, and `serve_rpc._correlation_id_param` itself defers to them.
+   Both CLI sites import from there. A new module would have been a third name
+   for one rule.
+2. **`tools/agent_chat_remote.py` landed with S2c, not S2b.** The outbound
+   announce is its first caller, and S2c ran first. Its tool callers arrived in
+   S2b as planned.
+3. **The allowlist grew in two steps.** `peer.announce` in S2c;
+   `peer.roster.list` / `peer.thread.read` in S2b, the commit that REGISTERS
+   them. Adding all three in S2c would have reddened
+   `test_the_peer_prefix_is_the_declaration_that_it_touches_no_level` (every
+   registered `peer.*` name == the allowlist) on two names nothing served —
+   which is that test working.
+4. **The refusal WORD leads the message on the two `join` refusals.**
+   `emit_harness_error` carries only `error_class` in `safe_details` (it does not
+   accept extra detail), so the message is the one channel this lane has for a
+   machine-readable reason. `tls_fingerprint_mismatch: …` and
+   `tls_fingerprint_invalid: …` lead their sentences. R-IP17 asks for one
+   enumerated set of reason codes; this is how they are readable.
+5. **`PeerRecord.last_seen` was KEPT as a legacy read** rather than deleted.
+   R-S2-7 says `_decode_peer` "tolerates and ignores" a legacy `last_seen`;
+   ignoring it would have deleted a fact an operator can already see on a
+   pre-S2c store. `_row` no longer writes it, `PEER_ROW_CACHE_FIELDS` no longer
+   names it, and `peers list` overwrites the top-level key from the cache when
+   there is one — so the ack stays additive and the live answer comes from the
+   file that owns it.
+6. **`revoked_you`'s exit is `_clear_revoked_you`, called from the two trust
+   writers.** R-S2-9 says the flag is cleared "only by a trust write"; a one-way
+   flag with NO exit would mean a re-pair produced an edge every reader still
+   treated as dead. The exit is a property of the call graph (two callers, both
+   credential writers), asserted in `test_peer_announce.py` through the ceremony
+   rather than through the helper.
+7. **`runtime.gateway.peers.list` exists beside `subscribe`** (S2d). Not in
+   S3-R13's three surfaces. A caller with no push channel is refused by
+   `subscribe` — otherwise the registry fills with sinks nothing will write to —
+   and such a caller then needs a door. One method, same body, no registration.
+
+### Two bugs found while building, both worth naming
+
+1. **`_cache_row(**merged)` collided with its own positional `peer_install_id`.**
+   Every stored row carries that key, so the FIRST write to a fresh row
+   succeeded (nothing to merge) and every write after it raised `TypeError`
+   into `_touch_cache`'s best-effort `except` and silently did nothing. Found by
+   the `last_seen`-after-a-handshake test going red for a reason that made no
+   sense, then traced by wrapping `_touch_cache`. `_cache_row` takes a DICT now,
+   and the id stays positional because it is the one field a merge must not be
+   able to change.
+2. **`store_file_io.store_lock` falls through WITHOUT the lock rather than
+   raising** (its own docstring says so, and argues correctly that the cost is a
+   lost update rather than a corrupt store). That trade is right for the
+   credential stores, whose writers are ceremonies an operator runs one at a
+   time. It is wrong for the CACHE, whose writers are a handshake on the
+   listener thread, a dial from a tool and an announce fan-out on a background
+   thread — all inside ONE serve process, all merging into one row. Added
+   `_CACHE_WRITE_LOCK` (a module-level `threading.Lock`) on top of the file
+   lock, held only across the read-modify-write.
+
+### S2d — the Stage 3 lane's dependency (launcher S3-R13)
+
+Added to this lane by the orchestrator mid-build. The decisive measurement is
+the launcher plan's §0.3/§0.6: **the launcher's hermes stream carries no
+events.** Its hydrate core is `agents, boards, offices, persona_instances,
+running_work, …`, its fold entities are `persona_instance, incident, office_*,
+scope`, and hermes reads `event_log.tail(20)` only for parity warnings. So S2c's
+five `gateway.peer.*` contracts reach a stream consumer, a snapshot and an
+operator, and reach a launcher NEVER. Canon 03 invariant 6 routes new
+server->client push over JSON-RPC notifications; S2d is that.
+
+Shipped:
+
+* `agent_runtime/serve_gateway_peers_rpc.py` — `peer_directory_row` /
+  `peer_directory_rows` (the CLI verb's row shape, so the push lane and the
+  greet lane agree), `PeerDirectorySubscriptions` (a sink registry, released
+  from the same disconnect path the office lane's is), and `publish_peer_event`.
+* `runtime.gateway.peers.subscribe` (TIER_READ) — directory + registration in
+  one call, for `runtime.office.subscribe`'s reason. Refuses a caller with no
+  push channel and names `…list` in the refusal.
+* `runtime.gateway.peers.list` (TIER_READ) — the same body, no subscription.
+* `runtime.gateway.peers.roster` (TIER_CONSOLE) — the fetch-through. A launcher
+  cannot call `peer.roster.list` (a PEER method; it holds a DEVICE credential),
+  so it asks its own hermes, which IS that install's peer. Caches before
+  replying so the reply and the notification describe one roster.
+* Notification `runtime.gateway.peers.changed {contract, event, peer_install_id,
+  peer|null, store_revision, grant_id?}`, fanned out from **the same
+  `_emit_peer_event` call site** the EventLog append happens at — one write, one
+  process, one moment, so the two lanes cannot disagree about WHEN.
+
+**No watermark, no sequence gate, no re-baseline receipt**, unlike the office
+lane, and the reason is the DATA: an office patch is a delta, so a subscriber
+that misses one is out of sync; a peer-directory notification carries the whole
+row, so a dropped frame costs one row's freshness until that row next changes.
+Inventing the three mechanisms would guard a failure this shape does not have.
+
+**The KIND gate.** All three joined `LOCAL_CONSOLE_METHODS`. S3-R13 says "stdio
+owner + local console", and that is a KIND and not a strength — the directory is
+the operator's own map of their network (which machines they paired, what those
+are called, the addresses they answer at), and `roster` additionally DIALS on
+the caller's behalf, so admitting a remote caller would let a paired device
+spend this install's peer credential. The tier vocabulary has two words, both
+about strength; `LOCAL_CONSOLE_METHODS` is the existing answer to kind (WS4 /
+R-B). A console-tier DEVICE is refused, and that case is asserted by name.
+
+Named pins that moved for S2d, each deliberately:
+`test_scope_use_methods.py` (the set is no longer only the two scope verbs — the
+test now pins the SCOPE half exactly and leaves the peer half to S2d's own
+file), `test_serve_rpc_authorization.py`'s gate walk (a `LOCAL_CONSOLE_METHODS`
+read verb IS refused by the gate, which is the opposite of the plain read arm
+and is the whole point of the set), and the literal method-set lists in
+`test_serve_rpc_office{,_subscribe,_upsert}.py`, which grew by all six names
+this wave adds.
+
+### OWED cross-repo at landing (none of it closable from this worktree)
+
+1. **`tests/fixtures/hermes_cli_contract.json`** -> launcher
+   `test/features/mission_control/fixtures/hermes_cli_contract.json`, byte
+   mirror. Moved by S2 (`gateway introduce` + its four flags, `peers join
+   --expect-fingerprint` / `--correlation`) and by S2c (`peers revoke
+   --no-announce`). Final sha256 `86837537988fdfcf8b06acbe1c6571025f923f86b27451da2823bad78f0cd210`,
+   191 command paths. Then `flutter test
+   test/features/mission_control/harness_capability_argv_test.dart`.
+2. **Every regenerated stream golden + `MANIFEST.sha256`** ->
+   launcher `test/fixtures/harness_stream/`. S2c registered five events, so
+   `decision_contract_hash` moved on every golden that carries it. Files:
+   `delta.json`, `delta_agent_create_narrow_profile.json`, `delta_batch.json`,
+   `hydrate.json`, `hydrate_authoritative_same_offset.json`,
+   `hydrate_running_work_owner.json`, `hydrate_stale_first.json`,
+   `MANIFEST.sha256`. Then `python tool/test_quality/check_producer_contracts.py
+   --hermes-root=<checkout> --no-generate` and `flutter test
+   test/features/mission_control/mission_stream_contract_fixture_test.dart`, and
+   update the README's CROSS-STACK COPY STATUS block as S0a's was.
+3. **The Agent Command Atlas artifact**, regenerated from
+   `docs/agent-runtime-harness/harness-skills/harness-runtime-model/references/tool-inventory.json`
+   (S2b's `agent_chat_installs`; 44 tools, sha256 `36780ed3d8aec5a5`).
+4. **S2d is now LANDED on this branch**, which closes the launcher plan's OWED
+   item (4): S3c's E1 arm has its three methods and its notification, and S3b's
+   Refresh has `runtime.gateway.peers.roster`.

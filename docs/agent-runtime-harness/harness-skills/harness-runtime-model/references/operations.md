@@ -185,7 +185,7 @@ python -m hermes_cli.main harness persona instance delete personainst_<placement
    **The delete lane (2026-08-27) — three facts that change how you drive and read it:**
 
    - **`delete` is the operator's verb; `retire` is the same door.** `harness persona
-     instance delete` is a full alias of `retire` (`hermes_cli/harness.py:1215` —
+     instance delete` is a full alias of `retire` (`hermes_cli/harness.py:1260` —
      `add_parser("retire", aliases=["delete"])`), same flags, same behaviour. The rename
      is deliberate and stops at the surface: the RPC method, the capability id
      `persona.instance.retire`, the event types, and every internal symbol keep `retire`,

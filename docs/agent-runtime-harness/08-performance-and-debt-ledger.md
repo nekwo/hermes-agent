@@ -127,7 +127,7 @@ carry the boot-side half).
 ### 3. Per-domain store read caches in the serve — OPEN, re-verified 2026-08-22
 
 Archived doc 14's item 1, and still item 1. The serve's `_PollResponseCache`
-(`serve.py:1145`; renamed from `_ReadModelCache` in the duplicate-implementation
+(`serve.py:1181`; renamed from `_ReadModelCache` in the duplicate-implementation
 retirement, Stage 2 — the old name was the third thing in this repo wearing
 "read model", and Stage 6 has since deleted the first, so the phrase now means
 two things: this repo's live core cache and the directory it lives in) is a
@@ -211,6 +211,21 @@ alice instances (`model_override_issued_at: 2026-08-22T14:49:24Z` on the live ro
 mission chats measured on luna the same day. The base persona still cascades to the
 profile default — offered to the operator, not yet ruled. Row 6's tool-schema diet is
 now unblocked (its gate was this row).
+
+### 8. The A→B→A cross-install cycle guard — OPEN, BY DESIGN
+
+A cross-install dispatch is a fresh chain root on the receiving install: the
+relay depth/cycle policy is a fact about ONE process's turn stack, and B's turn
+runs under B's own concurrency cap, budget and drain. So A→B→A is not bounded by
+the guard that bounds A→A→A, and S2b's read verbs do not change that (they read;
+they start no turn).
+
+Named here rather than left implicit because the S2 wave made the surface wider
+without touching it: `peer.roster.list` lets an agent SEE the far roster, so the
+shape "ask them, they ask us back" is now one an agent can plan rather than
+stumble into. The parent plan's §4 records it as still open by design; the fix,
+when it is worth one, is a chain token that survives the wire rather than a
+depth counter that does not.
 
 ### Refusals with a measurement — do NOT re-propose
 

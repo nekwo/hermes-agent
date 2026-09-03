@@ -414,6 +414,38 @@ ambient fallback (`:37-39`). Public surface: `resolve_chat_session_scope` (`:381
 an assistant message, through the same `mirrored_persona_chat_append` seam every other explicit
 persona-chat append uses — refs and a distillation, never the child transcript.
 
+### Cross-install continuity (S2b, R-IP10)
+
+Everything above holds when the target is on another install, with exactly two
+differences and both are stated on the refusal that enforces them.
+
+**`session_id` crosses; `clarify_token` does not.** A session id is a name the
+far install minted and handed back on the dispatch completion, and it means the
+same thing on both machines. A clarify token is minted by THIS install's clarify
+gateway and resolves against THIS install's pending questions, so carrying it
+across would hand the far side a token it cannot look up. `agent_chat_send`
+refuses an install-qualified target that carries one, as
+`clarify_token_not_portable`, and the refusal names the route rather than only
+the wall: answer them with `session_id` set to the session the delivery reported
+as "Their thread".
+
+**There is no shared default thread across installs.** Locally the default
+session is the one this pair has been using; on another install the default is
+that install's most recently established thread with anybody, which is almost
+never the one the caller means. So `agent_chat_open("@mac/dev")` with no
+`session_id` is refused `remote_session_required` — before any dial — and names
+the same source for the id.
+
+**The far read is a real read.** `agent_chat_open` with an `@install/` target
+calls `peer.thread.read`, which requires the `target` as well as the
+`session_id` and applies the SAME lane guard the local read applies
+(`_session_belongs_to_chat_lane`, through the shared
+`peer_directory.read_chat_lane_tail`). So a session id that is not part of that
+teammate's chat lane is `foreign_session` on either machine, and a paired
+install can spend a pointer it was given and discover nothing else. Until S2b
+that pointer — printed on every cross-install delivery since Stage 7 — resolved
+to nothing on the machine that received it.
+
 ## 9. The agent create path
 
 `runtime.agent.create` (`serve_rpc.py::_runtime_agent_create`) performs roster row + chat root +
