@@ -38,6 +38,7 @@ from .events import EventLog
 from .locks import board_lock
 from .models import Board, BoardCard, BoardColumn, Event
 from .serde import from_jsonable, safe_id, to_jsonable
+from .sync_merge import merge_archived_ledgers
 
 #: The three card verbs that share one board's idempotency namespace. Recorded
 #: ON the receipt (``_record_idempotency``) and checked on replay
@@ -558,13 +559,25 @@ class BoardStore:
         ``revision`` and the timestamps, so the caller's ``baseline[key] =
         remote_hash`` stays keyed off the remote CONTENT.
 
-        Verbatim in every field, ``archived_card_ids`` INCLUDED — and that is the
-        one place this verb deliberately does not copy its office twin. The
-        surface twin UNIONS that ledger (C1) because adopting it wholesale erases
-        a tombstone the peer has not heard of; the board pull has always
-        overwritten it and this change does not alter one byte it writes. Making
-        the two families agree is a real row and a separate one: it moves the
-        resurrection guard, which is a decision about data, not about events.
+        Verbatim in every field EXCEPT ``archived_card_ids``, which is UNIONED
+        with the local ledger (:func:`sync_merge.merge_archived_ledgers`) —
+        operator ruling 2026-09-03, closing the last leg of the H1 asymmetry.
+        That field is not the peer's opinion about this board: it is the
+        resurrection guard, and the pull is the one lane that can reach it from
+        outside this machine. Adopting it wholesale erased any tombstone the
+        peer had not heard of, which is a deletion of the exact evidence
+        ``classify_board_pull(..., locally_archived=…)`` reads to refuse a
+        resurrection. Reachable, not theoretical: publish records the LOCAL hash
+        as the baseline, so an install that archives a card and publishes is
+        ``unchanged`` on its next pull — and one peer edit away from
+        ``take_remote`` over its own ledger.
+
+        The merge is hash-neutral wherever nothing was actually lost (the peer's
+        order leads, so a local subset re-hashes to the remote's exact list); it
+        is deliberately hash-CHANGING when a local-only id survives, which leaves
+        the board classified as locally edited until the next publish carries the
+        fuller ledger back to the realm. That is the honest state: this install
+        now holds a ledger the realm has not seen.
         """
 
         bid = safe_id(board.board_id)
@@ -574,6 +587,16 @@ class BoardStore:
         board.updated_by = _safe_actor(updated_by)
         with board_lock(bid):
             existed = self.exists(bid)
+            if existed:
+                # Read INSIDE the lock that will hold for the write: a local
+                # archive racing this pull must land on one side of the union or
+                # the other, never between the read and the write. The surface
+                # twin's discipline, for the surface twin's reason.
+                board.archived_card_ids = merge_archived_ledgers(
+                    board.archived_card_ids,
+                    self.get(bid).archived_card_ids,
+                    cap=ARCHIVED_LEDGER_CAP,
+                )
             _write_board(board)
             if existed:
                 self._emit(

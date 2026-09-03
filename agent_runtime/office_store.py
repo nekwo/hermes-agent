@@ -62,6 +62,7 @@ from .models import Event, OfficeActor, OfficeItem, OfficeSurface
 # home for a constant four other modules needed.
 from .redaction import SECRET_ASSIGNMENT_RE
 from .serde import from_jsonable, safe_id, to_jsonable
+from .sync_merge import merge_archived_ledgers as _merge_archived_ledgers
 
 ARCHIVED_LEDGER_CAP = 5000
 MAX_ITEMS_PER_ACTOR = 32
@@ -69,66 +70,18 @@ MAX_FOLDERS = 64
 
 
 def merge_archived_ledgers(peer_keys, local_keys) -> list[str]:
-    """Union two ``archived_actor_keys`` ledgers — peer order first, local tail.
+    """Union two ``archived_actor_keys`` ledgers at THIS family's ledger cap.
 
-    The resurrection guard is a LEDGER, and a ledger that one side can overwrite
-    guards nothing: :meth:`OfficeStore.adopt_remote_surface` wrote the peer's
-    list verbatim, so a pull from a member that had never heard of a key this
-    install archived silently erased that key's tombstone. The archived FILE
-    survives, which is why the fence's OR-semantics papered the hole over; the
-    ledger half — the half ``classify_three_way_pull(..., locally_archived=)``
-    reads — did not.
-
-    Two properties, both load-bearing, neither an accident of the expression:
-
-    * **the peer's list leads, in the peer's order.** When the local ledger is a
-      subset of the peer's (the converged case, and the common one) the result is
-      the peer's list byte-for-byte, so ``office_content_hash`` still matches the
-      remote and a pull that changed nothing stays a no-op. Local-first ordering
-      would re-hash every converged surface and hand the next pull a permanent
-      "unpublished" local edit over identical content.
-    * **local-only keys land at the TAIL**, which is the end the
-      ``[-ARCHIVED_LEDGER_CAP:]`` truncation keeps. Under cap pressure the keys
-      that survive are the ones THIS install archived — the ones whose
-      resurrection this store is the only witness to.
-
-    Deduplicated on first occurrence: ``_archive_actor_locked`` cannot produce a
-    repeat locally, so a duplicate can only have arrived from a peer, and
-    carrying it forward would spend cap budget on a key already guarded.
-
-    THE PROPAGATION DIRECTION, stated because the union is what makes it total:
-    a key that enters this ledger on ANY store travels — the union keeps it, the
-    next publish carries it into the realm, and every member that pulls
-    afterwards reads it as ``locally_archived`` and will archive that actor.
-    **Writing a key into this ledger is therefore REALM-WIDE intent, not a local
-    note**, and it is one-way: the ledger has no "un-tombstone" that syncs
-    (``restore_actor`` drops the key locally, and the next pull from any peer
-    that still holds it puts it back).
-
-    The consequence this store cannot currently see, recorded here rather than
-    guessed at: an archive taken as a RECEIVER-SIDE REPAIR — evicting a desk
-    whose instance never existed on this machine, the realm-pulled orphan — is
-    indistinguishable in this list from an AUTHORED delete, and the union
-    exports both. Live on 2026-08-30: the Mac store's ledger holds
-    ``personainst_neko_supervisor_agent_9682caf4`` from exactly such a repair
-    while the actor is alive and correctly linked at its ORIGIN, a Windows store
-    that has not yet pulled; the first pull after the Mac publishes will archive
-    it there. That case matches the operator's intent, so the union is right as
-    it stands and losing tombstones remains the worse failure. The TYPED SPLIT —
-    an authored tombstone versus a local eviction that mints no realm-visible
-    one — belongs with the delete lane that decides between the two verbs
-    (Track A1's hermes half), not with this merge.
+    The rule itself is :func:`sync_merge.merge_archived_ledgers`, lifted there
+    on 2026-09-03 when ``BoardStore.adopt_remote_board`` took the same union
+    over ``archived_card_ids`` — read that docstring for why the union exists,
+    why the peer's order leads, and what the ledger means realm-wide. This
+    wrapper exists so the cap that binds an office ledger stays this module's
+    fact and every existing office caller keeps its two-argument spelling.
     """
 
-    merged: list[str] = []
-    seen: set[str] = set()
-    for key in (*(peer_keys or ()), *(local_keys or ())):
-        text = str(key)
-        if text in seen:
-            continue
-        seen.add(text)
-        merged.append(text)
-    return merged[-ARCHIVED_LEDGER_CAP:]
+    return _merge_archived_ledgers(peer_keys, local_keys, cap=ARCHIVED_LEDGER_CAP)
+
 
 #: Stage-42 error code for the desk fence, and the wire's ``data.reason``.
 #: One spelling per lane rather than two vocabularies for one refusal, and the

@@ -1132,12 +1132,27 @@ routes through them too, keeping its own `realm_sync_revert` attribution, so the
 revert lane's "writes nothing a pull could not have written" promise holds for
 four families through four store doors.
 
-Two things deliberately did NOT change. The bytes are identical — every field
-verbatim including `archived_card_ids`, so the board family does NOT get the
-office surface's C1 ledger UNION here; that moves the resurrection guard and is
-a decision about data, filed as its own row. And board events stay uncovered on
-the patch lane (`patch_coverage.py:33`), so what a pull now reaches is the
-honest full-core delta, not a promotion.
+One thing deliberately did not change: board events stay uncovered on the patch
+lane (`patch_coverage.py:33`), so what a pull now reaches is the honest
+full-core delta, not a promotion.
+
+**The one field an adopt does NOT take verbatim is `archived_card_ids`** — it is
+UNIONED with the local ledger (operator ruling 2026-09-03, the board family's
+half of the office surface's C1). The 2026-09-02 event lane deliberately left it
+alone because it moves the resurrection guard, which is a decision about DATA
+rather than about events; the ruling closed it. The rule itself is
+`sync_merge.merge_archived_ledgers`, which both families now call with their own
+`ARCHIVED_LEDGER_CAP` — one rule, one copy, because a rule with two copies is
+free to disagree with itself. Adopting a peer's ledger wholesale erases any
+tombstone the peer never heard of, which deletes the exact evidence
+`classify_board_pull(..., locally_archived=…)` reads to refuse a resurrection;
+publish records the LOCAL hash, so an install that archives a card and publishes
+is `unchanged` on its next pull and one peer edit away from `take_remote` over
+its own ledger. The peer's list leads in the peer's order, so a local SUBSET
+re-hashes to the remote's exact list and a converged pull stays a no-op; a
+local-only id survives at the tail (the end the cap keeps) and leaves the board
+honestly classified as locally edited until the next publish carries the fuller
+ledger back to the realm.
 
 ### One idempotency key names ONE verb
 

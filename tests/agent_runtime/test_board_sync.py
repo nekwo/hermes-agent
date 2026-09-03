@@ -359,6 +359,73 @@ def test_adopting_a_board_a_member_has_never_had_emits_created(tmp_path):
     assert created[0].payload["workspace_id"] == "ws_peer_only"
 
 
+def test_pull_that_adopts_a_board_def_keeps_a_locally_archived_card_id(tmp_path):
+    """The resurrection guard is a LEDGER, and a ledger one side can overwrite
+    guards nothing — the office family's C1, ported to the board family.
+
+    This is the reachable path, not a hypothetical: publish records the LOCAL
+    hash as the baseline, so an install that archives a card and publishes is
+    ``unchanged`` on its next pull and exactly one peer edit away from
+    ``take_remote`` over its own ledger. Before the union, the adopted def
+    landed with the peer's ``archived_card_ids`` verbatim and this install's
+    tombstone was gone — after which the next pull carrying that card reads
+    ``locally_archived=False`` and resurrects it.
+    """
+
+    realm_id, ws = _make_realm_workspace()
+    store = BoardStore()
+    card = store.add_card(workspace_id=ws, title="Local one")
+    board_id = board_models.default_board_id(ws)
+    store.archive_card(card.card_id, board_id=board_id)
+    assert store.get(board_id).archived_card_ids == [card.card_id]
+    # ...and published: the baseline now holds the local hash, ledger included.
+    update_board_baseline_after_sync(realm_id, [board_id])
+
+    # A peer that never heard of that card renames the board.
+    remote_board = store.get(board_id)
+    remote_board.archived_card_ids = []
+    remote_board.title = "Renamed by a peer"
+    subtree = _remote_subtree(tmp_path, remote_board, [])
+
+    apply_board_pull(realm_id, subtree)
+
+    adopted = store.get(board_id)
+    assert adopted.title == "Renamed by a peer"
+    assert adopted.archived_card_ids == [card.card_id]
+
+
+def test_the_board_ledger_union_is_hash_neutral_when_nothing_was_lost(tmp_path):
+    """``merge_archived_ledgers``' peer-order-leads property, at the board seam.
+
+    When the local ledger is a SUBSET of the peer's — the converged case, and
+    the common one — the merged list is the peer's byte-for-byte, so the
+    adopted board still hashes to the remote content the pull just wrote into
+    the baseline. Local-first ordering would re-hash every converged board and
+    hand the next pull a permanent "unpublished" local edit over identical
+    content.
+    """
+
+    realm_id, ws = _make_realm_workspace()
+    store = BoardStore()
+    card = store.add_card(workspace_id=ws, title="Local one")
+    board_id = board_models.default_board_id(ws)
+    store.archive_card(card.card_id, board_id=board_id)
+    update_board_baseline_after_sync(realm_id, [board_id])
+
+    # The peer holds this install's tombstone AND one of its own, ahead of it.
+    remote_board = store.get(board_id)
+    remote_board.archived_card_ids = ["card_peer_only", card.card_id]
+    subtree = _remote_subtree(tmp_path, remote_board, [])
+    remote_hash = board_models.board_content_hash(remote_board)
+
+    apply_board_pull(realm_id, subtree)
+
+    adopted = store.get(board_id)
+    assert adopted.archived_card_ids == ["card_peer_only", card.card_id]
+    assert board_models.board_content_hash(adopted) == remote_hash
+    assert read_board_baseline(realm_id)[f"{board_id}:board"] == remote_hash
+
+
 # ── H1: store-drift honesty (_board_store_drift) ──────────────────────────
 
 

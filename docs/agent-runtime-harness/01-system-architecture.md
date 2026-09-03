@@ -461,20 +461,27 @@ invisible until an unrelated write happened to wake the pipeline. The office
 family closed the identical asymmetry in H1 (`f810bd2ac`); the board family now
 has its twin verbs, `BoardStore.adopt_remote_board` / `adopt_remote_card`, and
 both `apply_board_pull` and `realm_revert._adopt_from_upstream` route through
-them. The bytes written are unchanged, so nothing about pull classification
-moves: `board_content_hash` excludes `updated_by`, `revision` and the
-timestamps, so stamping `updated_by="realm_sync"` (`"realm_sync_revert"` on the
-revert lane) is hash-neutral and the baseline still keys off the REMOTE content.
-Board events stay UNCOVERED on the patch lane by design, so what a pull now
-reaches is the honest full-core delta it should always have reached.
+them. Stamping `updated_by="realm_sync"` (`"realm_sync_revert"` on the revert
+lane) is hash-neutral — `board_content_hash` excludes `updated_by`, `revision`
+and the timestamps — so the baseline still keys off the REMOTE content. Board
+events stay UNCOVERED on the patch lane by design, so what a pull now reaches is
+the honest full-core delta it should always have reached.
+
+**One field an adopt does not take verbatim**, since the 2026-09-03 ruling:
+`archived_card_ids` is UNIONED with the local ledger through the shared
+`sync_merge.merge_archived_ledgers`, the same rule the office surface's C1 arm
+calls. See [06 § the adopt verbs](06-office-and-board.md) for why the guard
+cannot be a field one side may overwrite.
 
 Three properties make it converge across machines without a merge engine: the
 default board id is deterministic (`board_default_<workspace_id>`,
 `board_models.py:39`) with default columns on fixed ids and behaviour keyed on
 `kind`, never `title` (`models.py:92-105`); archive-never-delete, with an
 `archived_card_ids` ledger blocking a pulled remote copy from resurrecting a
-locally archived card; and card position is a fractional `order_key` whose moves
-allocate the midpoint between neighbours (`board_order`).
+locally archived card — a ledger the pull UNIONS rather than overwrites, so a
+peer that never heard of a tombstone cannot erase it; and card position is a
+fractional `order_key` whose moves allocate the midpoint between neighbours
+(`board_order`).
 
 Agents reach it through the upstream-owned `tools/board_tool.py`, where
 resolution is now **two rungs**, not three — explicit `board_id`, else the active

@@ -54,9 +54,10 @@ the create receipt (`agent_create_phases.py:23-24`) then inherited verbatim.
    `correlation_id` for the gesture chain (`OfficeStore._emit`, which normalizes
    the token and threads it onto the event and the `state.patched` row). See
    `mission_chat_latency_audit.dart:23-40` in the launcher. (Symbols, not lines:
-   the `office_store.py:173-196` cite this row carried had drifted onto the
+   the `office_store.py` LINE RANGE this row once carried had drifted onto the
    position-policy alias and the `ActorScan` docstring — a range about actor
-   completeness, with no `correlation_id` in it.)
+   completeness, with no `correlation_id` in it. It is spelled without its
+   numbers here on purpose: a cite naming the drift would drift with it.)
 7. **A span boundary is a fact about bytes, not intent.** The "provider
    first_byte" span opened before `run_conversation` had begun and so wore the
    provider's name over hermes assembly; `request_assembled` (`:84`, marked
@@ -617,8 +618,8 @@ The highest-value read-side swallow also closed: the actor-directory read
 skipped undecodable files and returned a shorter list that described itself as
 complete, so `actors_truncated` computed 0 over it. It now returns a typed
 `ActorScan(actors, unreadable)` so the two facts travel together
-(`agent_runtime/office_store.py` — `ActorScan` at `:187`, `read_actor_dir` at
-`:362`, `OfficeStore.scan_actors` at `:1110`). Since AX5 that scan is the ONLY
+(`agent_runtime/office_store.py` — `ActorScan` at `:219`, `read_actor_dir` at
+`:432`, `OfficeStore.scan_actors` at `:1224`). Since AX5 that scan is the ONLY
 actor read: the `list_actors` thin view that returned `.actors` and dropped
 `.unreadable` is deleted, so dropping the count is now something a call site
 WROTE rather than a default it inherited. Since AX6 the reader is module-level

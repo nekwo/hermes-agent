@@ -862,8 +862,23 @@
       ]
     },
     {
+      "id": "c1-board-pull-adopts-the-peer-ledger-wholesale",
+      "path": "agent_runtime/board_store.py",
+      "symbol": "BoardStore.adopt_remote_board",
+      "operator": "drop-archived-ledger-union",
+      "find": "                board.archived_card_ids = merge_archived_ledgers(\n                    board.archived_card_ids,\n                    self.get(bid).archived_card_ids,\n                    cap=ARCHIVED_LEDGER_CAP,\n                )",
+      "replace": "                board.archived_card_ids = list(board.archived_card_ids)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_board_sync.py::test_pull_that_adopts_a_board_def_keeps_a_locally_archived_card_id"
+      ]
+    },
+    {
       "id": "c1-ledger-union-leads-with-the-local-list",
-      "path": "agent_runtime/office_store.py",
+      "path": "agent_runtime/sync_merge.py",
       "symbol": "merge_archived_ledgers",
       "operator": "reverse-union-order",
       "find": "    for key in (*(peer_keys or ()), *(local_keys or ())):",
