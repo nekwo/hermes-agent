@@ -381,7 +381,7 @@ keeps the newest 2 rows per `(persona_instance_id, session_id)` lane and ARCHIVE
 the rest, never deletes (`:1185-1187`); an absent catalog is honest absence,
 never a fake empty list (`:1217-1220`). Two consumers: the live `chat.final`
 echo carries a slimmed projection (`slim_chat_final_observability`,
-`persona_commands.py:4541`); evicted rows are
+`persona_commands.py:4557`); evicted rows are
 fetched by `harness prompt-context show --context-id <id> [--json]`
 (`hermes_cli/harness.py:831-841`, handler `:2967-2999`) — read-only, honest
 `not_found` on absence. `trace_events` are the turn's tool-call trace, passed at
@@ -611,7 +611,7 @@ not by trusting the audit's own status.**
 | `serve_rpc.py` baseline `or 0` — an unreadable event log became watermark 0, killing the sink's baseline gate and re-opening the resync↔restart loop | `baseline_offset = int(...) or 0` | typed absence: `baseline_offset = event_offset_of(watermark)` then an explicit `is None` arm — `agent_runtime/serve_rpc.py:885-886` |
 | empty `patches` shipped as a `patch` frame — the client advanced its watermark having folded nothing | coverable ⇒ promoted | promotion now also requires `batch_carries_patch_rows(batch)`; the honest answer for a pair-less batch is the full core — `agent_runtime/stream.py:808-819`, argued at `:554-581` |
 | `office_surface` could never satisfy the office scope gate, so every folder-only patch frame was dropped with no patch and no resync | `entity == OFFICE_ACTOR_ENTITY` and a slash-prefixed id | one predicate: `office_patch_scope(patch) == workspace_id` — `agent_runtime/serve_office_subscriptions.py:486` |
-| `_usage_lane_detected` — a credential fault DELETED the lane from the Limits panel, and an empty envelope rendered as a positive claim that no provider is signed in | `except Exception: return False` | three outcomes, not two: true / false / **raise**, with the raise caught per provider and the lane emitted `unavailable` naming the exception class — `hermes_cli/harness.py:5428-5446`, `:5666-5678` |
+| `_usage_lane_detected` — a credential fault DELETED the lane from the Limits panel, and an empty envelope rendered as a positive claim that no provider is signed in | `except Exception: return False` | three outcomes, not two: true / false / **raise**, with the raise caught per provider and the lane emitted `unavailable` naming the exception class — `hermes_cli/harness.py:5446-5464`, `:5684-5696` |
 
 The highest-value read-side swallow also closed: the actor-directory read
 skipped undecodable files and returned a shorter list that described itself as
