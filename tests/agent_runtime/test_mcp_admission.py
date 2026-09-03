@@ -913,7 +913,21 @@ def test_profile_authority_suppresses_a_false_cross_persona_drop(
     assert rows == []
 
 
-def test_an_admitted_but_unregistered_server_still_reports_the_r0_row(qa_profile):
+def test_an_admitted_but_unregistered_server_reports_no_row(qa_profile):
+    """R-S0a-4, 2026-09-03 — this test asserted the OPPOSITE and was wrong.
+
+    "Admitted AND registered in this process" made the STEADY state a failure.
+    The preview process registers no MCP at all, and inside the serve
+    ``teardown_mcp_admission`` drops the run's registry scope at the end of every
+    admitted run — so "admitted, not currently registered" is what admission
+    normally looks like between runs. Live receipt on 2026-09-03: all four
+    mission personas reported 1-3 ``mcp_not_registered_on_lane`` rows for servers
+    ``--explain-mcp`` listed as admitted with `denied: []`.
+
+    Registration is receipted where it happens (``mcp_admitted_servers`` on the
+    turn record); admission is receipted here, as ``admitted_mcp_servers``.
+    """
+
     rows = admission_requirement_failures(
         _admission(qa_profile),
         declared_servers=["launcher_qa"],
@@ -921,7 +935,58 @@ def test_an_admitted_but_unregistered_server_still_reports_the_r0_row(qa_profile
         registered_servers=[],
     )
 
-    assert [row["code"] for row in rows] == [MCP_NOT_REGISTERED_ON_LANE]
+    assert rows == []
+
+
+def test_an_admitted_server_that_was_denied_keeps_its_typed_denial(qa_profile):
+    """Precedence 2 survives precedence 1's widening: a DENIAL still speaks.
+
+    ANTI-VACUITY for the case above — if "admitted ⇒ no row" had been written as
+    "never emit a row", this would go silent too.
+    """
+
+    import dataclasses as _dc
+
+    from agent_runtime.mcp_admission import McpAdmissionDenial
+
+    admission = _admission(qa_profile)
+    denied = _dc.replace(
+        admission,
+        server_names=(),
+        denied=(
+            McpAdmissionDenial(
+                server="launcher_qa",
+                code="mcp_admission_timeout",
+                summary="registration exceeded its budget",
+                fix_hint="retry the turn",
+            ),
+        ),
+    )
+
+    rows = admission_requirement_failures(
+        denied, declared_servers=["launcher_qa"], lane="harness", registered_servers=[]
+    )
+
+    assert [row["code"] for row in rows] == ["mcp_admission_timeout"]
+
+
+def test_a_declared_server_that_was_never_admitted_keeps_the_r0_row(qa_profile):
+    """Precedence 3, the other anti-vacuity arm: an UNADMITTED declaration is
+    still an honest drop, so the zero this stage ratchets to is a fact about
+    admission and not a silenced accounting lane."""
+
+    admission = _admission(qa_profile)
+
+    rows = admission_requirement_failures(
+        admission,
+        declared_servers=["launcher_qa", "some_other_server"],
+        lane="harness",
+        registered_servers=[],
+    )
+
+    assert [(row["code"], row["server"]) for row in rows] == [
+        (MCP_NOT_REGISTERED_ON_LANE, "some_other_server")
+    ]
 
 
 def test_with_admission_disabled_the_rows_are_exactly_the_r0_rows(qa_profile):

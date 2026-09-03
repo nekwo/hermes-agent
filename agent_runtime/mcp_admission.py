@@ -1132,9 +1132,18 @@ def admission_requirement_failures(
 
     One row per declared server, at most, resolved by precedence:
 
-    1. Admitted AND actually registered in this process ⇒ **no row**. This is
-       the "visibility is truthful both ways" half — once admission works, the
-       R0 drop row must stop being emitted for that server.
+    1. Admitted (and not denied) ⇒ **no row** (R-S0a-4, 2026-09-03). It used to
+       be "admitted AND registered in THIS process", which made the STEADY state
+       report as a failure: the CLI preview process registers no MCP at all, and
+       inside the serve ``teardown_mcp_admission`` removes the run's registry
+       scope at the end of every admitted run, so "admitted, not currently
+       registered" is what admission normally looks like from outside a run. All
+       three mission personas reported 1-3 ``mcp_not_registered_on_lane`` rows
+       for servers they were, in fact, admitted. Per-run registration is
+       receipted where it happens (``mcp_admitted_servers`` /
+       ``mcp_admission_transport`` on the turn record); the preview reports the
+       admitted names under ``admitted_mcp_servers``. Cross-persona silencing is
+       impossible because ``admission.server_names`` is already per-persona.
     2. Admission produced a typed denial ⇒ that denial's row, which is strictly
        more actionable than the generic lane row.
     3. Otherwise ⇒ the existing R0 ``mcp_not_registered_on_lane`` row.
@@ -1157,10 +1166,13 @@ def admission_requirement_failures(
         if registered_servers is None
         else frozenset(str(name).strip() for name in registered_servers or [])
     )
-    # Admitted for THIS persona and registered in this process. Intersecting is
-    # what stops one persona's live admission from silencing another persona's
-    # honest drop row.
-    effective = frozenset(admission.server_names) & registered
+    # Admitted for THIS persona. NOT intersected with what is registered right
+    # now: registration is per-run and torn down after it, so the intersection
+    # answered "is a run in flight in this process" rather than "was this persona
+    # admitted" (R-S0a-4). ``registered`` is still threaded to the lane rows
+    # below, where an UNADMITTED declaration is judged against what the process
+    # actually holds.
+    effective = frozenset(admission.server_names)
     denials = {denial.server: denial for denial in admission.denied}
 
     rows: list[dict[str, Any]] = []
@@ -1175,7 +1187,7 @@ def admission_requirement_failures(
         unresolved.append(name)
     rows.extend(
         mcp_lane_requirement_failures(
-            declared_servers=unresolved, lane=lane, registered_servers=effective
+            declared_servers=unresolved, lane=lane, registered_servers=registered | effective
         )
     )
     return rows

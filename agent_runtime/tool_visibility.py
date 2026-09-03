@@ -245,7 +245,7 @@ def resolve_tool_visibility(
     ]
     readiness = profile_readiness or _profile_readiness_for_visibility(persona)
     entry_point_lane = str(opts.entry_point_lane or "").strip() or current_entry_point_lane()
-    requirement_failures = _requirement_failures(
+    requirement_failures, admitted_mcp_servers = _requirement_failures(
         persona,
         opts,
         lane=entry_point_lane,
@@ -322,6 +322,10 @@ def resolve_tool_visibility(
         # the by-design "MCP never registers on the harness lane" drop read as
         # "nothing is wrong" — see ``mcp_lane``.
         "requirement_failures": requirement_failures,
+        # What admission WOULD grant this persona on this lane (R-S0a-4).
+        # Additive and empty when admission is disabled; it exists so that
+        # "admitted is not a failure" does not become "admitted is invisible".
+        "admitted_mcp_servers": admitted_mcp_servers,
         "mutation_boundary": _mutation_boundary(final_tools),
         "expires_at": opts.expires_at,
         "turns_remaining": opts.turns_remaining,
@@ -339,15 +343,17 @@ def _requirement_failures(
     row proved out (see ``chat_lane_toolsets`` and the audit's G5). Composition,
     in order:
 
-    * **MCP** — with admission disabled (the default, and every deployment until
-      an operator flips the flag) exactly the R0 answer: one
-      ``mcp_not_registered_on_lane`` row per declared server the lane never
-      registers. With admission enabled it is truthful in BOTH directions: a
-      server this persona was admitted and that actually registered stops
-      producing a drop row, and a server denied for a typed reason reports THAT
-      reason instead of the generic lane row. The admission resolve is skipped
-      entirely when the flag is off, so the default path costs nothing beyond
-      the R0 read it already performed.
+    * **MCP** — with admission disabled (the default until an operator flips the
+      flag) exactly the R0 answer: one ``mcp_not_registered_on_lane`` row per
+      declared server the lane never registers. With admission enabled it is
+      truthful in BOTH directions: a server this persona was ADMITTED stops
+      producing a drop row (R-S0a-4 — per-run registration is not the test,
+      because admission is torn down after every run), and a server denied for a
+      typed reason reports THAT reason instead of the generic lane row. The
+      admitted names travel on the row itself as ``admitted_mcp_servers`` so
+      "no failure" is not the same as "nothing happened". The admission resolve
+      is skipped entirely when the flag is off, so the default path costs
+      nothing beyond the R0 read it already performed.
     * **Chat-lane cost policy** — one row per toolset / tool the policy removed,
       but only for callers that actually modeled a chat lane and threaded the
       typed drops. A worker-lane resolve threads none and claims none.
@@ -356,15 +362,20 @@ def _requirement_failures(
 
     Rows are appended in that order so the MCP payload of an
     MCP-declaring persona stays byte-identical to what R0/R1 emitted.
+
+    Returns ``(rows, admitted_server_names)`` — the admission is resolved here
+    and threaded out rather than resolved a second time by the caller.
     """
 
     declared = declared_mcp_server_names(persona)
+    admitted: list[str] = []
     if not declared or not admission_enabled():
         rows = mcp_lane_requirement_failures(declared_servers=declared, lane=lane)
     else:
         admission = resolve_mcp_admission(
             persona, lane=LANE_MISSION_CHAT, permission_mode=opts.permission_mode
         )
+        admitted = sorted(admission.server_names)
         rows = admission_requirement_failures(
             admission, declared_servers=declared, lane=lane
         )
@@ -375,7 +386,7 @@ def _requirement_failures(
     )
     if opts.mission_chat_workdir is not None:
         rows.extend(opts.mission_chat_workdir.rows(entry_point_lane=lane))
-    return rows
+    return rows, admitted
 
 
 def turn_tool_context_for_persona(

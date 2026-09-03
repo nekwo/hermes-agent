@@ -207,7 +207,10 @@ def mcp_lane_requirement_failures(
                 "lane never calls discover_mcp_tools(). An operator can run the persona "
                 "on an MCP-registering lane (e.g. `hermes -p <profile> chat`); there is "
                 f"no harness-side fallback contract for {name} to take on this lane, so "
-                "otherwise report the drop and finish the turn without it."
+                "otherwise report the drop and finish the turn without it. "
+                "With `agent_runtime.mcp_admission.enabled: true` a server the persona "
+                "declares is admitted per run and does not produce this row; check "
+                "`--explain-mcp` and the turn record's `mcp_admitted_servers`."
             ),
         }
         for name in declared
