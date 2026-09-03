@@ -1605,3 +1605,170 @@ def test_the_census_names_a_retire_that_left_its_desk_standing(
     # new count and not a health change.
     assert census["health"] == "defect"
     assert _report["summary"]["finding_counts"]["orphan_actors"] == 2
+
+
+# ── the four sweeps, asked directly ─────────────────────────────────────────
+#
+# The census's read-and-gate is one thing and its four questions are another,
+# and until the extraction only the first was reachable: every case below had to
+# be posed by writing two real stores and running the whole doctor. These ask
+# each sweep the one thing it decides, on a world handed to it — which is what
+# the classifiers beside them (``_desk_litter_reason``,
+# ``_duplicate_placement_reason``, ``_orphan_actor_reason``) have always had and
+# the loop around them never did.
+
+
+def _item(kind: str, item_id: str, *, persona_id=None, minted_kind=None):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        kind=kind, item_id=item_id, persona_id=persona_id, minted_kind=minted_kind
+    )
+
+
+def _actor(actor_key: str, *, persona_id, instance_id="", state="live", items=()):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        actor_key=actor_key,
+        persona_id=persona_id,
+        persona_instance_id=instance_id,
+        state=state,
+        items=tuple(items),
+    )
+
+
+def _scan(*actors):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(actors=list(actors), unreadable=0)
+
+
+def test_the_binding_sweep_drops_archived_actors_and_keeps_the_order(
+    isolate_agent_runtime_root,
+):
+    """The one resolution every other sweep reads. An archived actor is not part
+    of any of the four questions — it is the state the retire leaves behind — so
+    it is dropped HERE rather than re-tested in each sweep."""
+
+    from agent_runtime.harness_doctor import _census_live_actor_bindings
+
+    bindings = _census_live_actor_bindings(
+        _scan(
+            _actor("a-live", persona_id="qa", instance_id="personainst_qa_x"),
+            _actor("a-gone", persona_id="qa", instance_id="personainst_qa_y",
+                   state="archived"),
+            _actor("a-class", persona_id="qa"),
+        )
+    )
+
+    assert [actor.actor_key for actor, _ in bindings] == ["a-live", "a-class"]
+    # A class-keyed actor keeps its empty binding rather than being dropped: it
+    # is out of the JOIN by construction, but the desk and duplicate sweeps
+    # still have to see its items.
+    assert bindings[1][1] == ""
+
+
+def test_the_join_sweep_reads_a_receipt_only_for_an_orphan(isolate_agent_runtime_root):
+    """Placed and orphaned out of the same pass, plus the ids this workspace
+    referenced — and the receipt resolver is touched ONCE, for the orphan. A
+    census that read a receipt per actor would pay the healthy path for the
+    broken one's diagnosis."""
+
+    from agent_runtime.harness_doctor import (
+        ORPHAN_ACTOR_INSTANCE_UNKNOWN,
+        _census_join_workspace,
+    )
+
+    asked: list[str] = []
+
+    def _receipt_for(instance_id):
+        asked.append(instance_id)
+        return None
+
+    bindings = [
+        (_actor("a-ok", persona_id="qa", instance_id="i-live"), "i-live"),
+        (_actor("a-orphan", persona_id="qa", instance_id="i-gone"), "i-gone"),
+        (_actor("a-class", persona_id="qa"), ""),
+    ]
+
+    placed, orphans, referenced = _census_join_workspace(
+        "ws1",
+        bindings,
+        live_rows={"i-live": object()},
+        retired=frozenset(),
+        receipt_for=_receipt_for,
+    )
+
+    assert [row["actor_key"] for row in placed] == ["a-ok"]
+    assert [row["actor_key"] for row in orphans] == ["a-orphan"]
+    assert orphans[0]["reason"] == ORPHAN_ACTOR_INSTANCE_UNKNOWN
+    # The class-keyed actor referenced nothing — it names no instance to claim.
+    assert referenced == {"i-live", "i-gone"}
+    assert asked == ["i-gone"]
+
+
+def test_the_desk_sweep_needs_the_agent_items_of_actors_it_has_not_reached(
+    isolate_agent_runtime_root,
+):
+    """Why the agent-item pass is separate and comes first. The desk on the FIRST
+    actor is paired by an agent item on the SECOND, so a single fused pass would
+    call it widowed on any directory order that read the desk first."""
+
+    from agent_runtime.harness_doctor import (
+        DESK_LITTER_AGENT_MISSING,
+        _census_agent_item_bindings,
+        _census_desk_litter,
+    )
+
+    desk_holder = _actor(
+        "a-desks", persona_id="qa", instance_id="i-live",
+        items=[_item("desk", "desk-1", persona_id="qa"),
+               _item("desk", "desk-2", persona_id="widow")],
+    )
+    agent_holder = _actor(
+        "a-agents", persona_id="qa", instance_id="i-live",
+        items=[_item("agent", "agent-1", persona_id="qa")],
+    )
+    bindings = [(desk_holder, ""), (agent_holder, "i-live")]
+
+    litter = _census_desk_litter(
+        "ws1",
+        bindings,
+        agent_bindings=_census_agent_item_bindings(bindings),
+        live_instance_ids=frozenset({"i-live"}),
+        live_persona_ids={"qa", "widow"},
+        retired=frozenset(),
+    )
+
+    assert [row["item_id"] for row in litter] == ["desk-2"]
+    assert litter[0]["reason"] == DESK_LITTER_AGENT_MISSING
+    assert litter[0]["persona_id"] == "widow"
+
+
+def test_the_duplicate_sweep_counts_holders_and_not_mentions(
+    isolate_agent_runtime_root,
+):
+    """One actor listing an id twice is ONE holder — the fault is two ROWS
+    claiming one placement, which is the mirror of the write fence's
+    "distinct ids per persona"."""
+
+    from agent_runtime.harness_doctor import _census_duplicate_placements
+
+    twice_in_one = _actor(
+        "a-1", persona_id="qa", instance_id="i-1",
+        items=[_item("desk", "d-1"), _item("desk", "d-1"), _item("agent", "solo")],
+    )
+    the_other_holder = _actor(
+        "a-2", persona_id="qa", instance_id="i-1", items=[_item("agent", "d-1")]
+    )
+
+    only_one_row = _census_duplicate_placements("ws1", [(twice_in_one, "i-1")])
+    assert only_one_row == []
+
+    two_rows = _census_duplicate_placements(
+        "ws1", [(twice_in_one, "i-1"), (the_other_holder, "i-1")]
+    )
+    assert [row["item_id"] for row in two_rows] == ["d-1"]
+    assert two_rows[0]["kinds"] == ["agent", "desk"]
+    assert [holder["actor_key"] for holder in two_rows[0]["holders"]] == ["a-1", "a-2"]

@@ -23,6 +23,20 @@ six minutes after a serve boot): ``registry_probe_rounds=27`` inside a 1,313 ms
 ``request_received → context_built`` span — the same sweep, paid three times
 over, on a turn where nothing about the chat had changed since the previous one.
 
+**2026-09-02: the ``check_fn`` half of that walk is gone.**
+``personas.all_registered_toolsets`` asked ``get_available_toolsets()`` for a
+list of NAMES, and that call ran ``_toolset_has_exposable_tools`` — one
+availability round per toolset — to compute an ``available`` boolean the caller
+discarded. It now asks ``get_registered_toolset_names()``, whose key set is
+identical by construction, and resolves NO probe. The receipts quoted above
+(``registry_probe_rounds=27``) were true when measured and are now historical:
+the composition this module caches is still worth caching, but the probe storm
+is no longer the reason. Probes still run where they are actually READ —
+``registry.get_definitions`` re-checks every ``check_fn`` at agent-construction
+time on its own TTL. See
+``docs/agent-runtime-harness/planned/serve-small-batch-field-notes-2026-09-02.md``
+§2.
+
 The 15/30 s TTL memos underneath (``tool_visibility._PROFILE_READINESS_TTL_SECONDS``,
 ``tools.registry._CHECK_FN_TTL_SECONDS``) are tuned for one snapshot BUILD, not
 for operator cadence: two consecutive operator messages are minutes apart, so

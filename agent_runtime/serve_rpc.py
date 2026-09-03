@@ -227,6 +227,54 @@ def notification(method_name: str, params: dict) -> dict:
     return {"jsonrpc": JSONRPC_VERSION, "method": method_name, "params": params}
 
 
+#: What a handler returns instead of a frame when its reply is coming LATER,
+#: from the transport's worker lane, on the same ``id``.
+#:
+#: A SENTINEL rather than ``None`` and rather than an exception, for one reason
+#: each. ``None`` is what a dispatcher gets from a handler that forgot to
+#: return, and the two must not look alike at the one place that decides whether
+#: to write a frame. And an exception would be caught by
+#: :func:`handle_request`'s own boundary and turned into ``-32000`` — the
+#: boundary is right about every other escape and would be exactly wrong about
+#: this one. Compared by IDENTITY (:func:`is_deferred`), never by shape, so no
+#: result a handler could legitimately build can be mistaken for it.
+DEFERRED: dict[str, Any] = {"deferred": True}
+
+
+def is_deferred(frame: Any) -> bool:
+    """True for the one object :data:`DEFERRED` is."""
+
+    return frame is DEFERRED
+
+
+def deferred_reply(
+    rid: Any, method_name: str, build: Callable[[], dict]
+) -> Callable[[], dict]:
+    """Wrap ``build`` so the worker lane ALWAYS has a frame to emit.
+
+    :func:`handle_request`'s try/except is the boundary that keeps a handler
+    fault off the reader loop; a deferred handler runs after that boundary has
+    returned, so it needs its own copy of it or a raise on a pool worker becomes
+    a client that waits forever for a reply nobody will ever write. Same code,
+    same ``reason``, same ``method`` — deliberately identical, because "the
+    handler blew up" must not read differently to a client depending on which
+    thread it blew up on.
+    """
+
+    def _run() -> dict:
+        try:
+            return build()
+        except Exception as exc:  # noqa: BLE001 - the boundary is the point
+            return err(
+                rid,
+                ERR_HANDLER_FAILED,
+                f"handler error: {exc}",
+                {"reason": "handler_failed", "method": method_name},
+            )
+
+    return _run
+
+
 @dataclass(frozen=True)
 class RpcContext:
     """WHO is calling — the half of a request that is not in its ``params``.
@@ -273,6 +321,20 @@ class RpcContext:
     which is the honest state for a test-built context, and the chat methods
     REFUSE on it rather than falling back to running the turn inline: an inline
     chat turn would stall every other client on this serve for its whole length.
+
+    ``spawn_reply`` is the fourth, and it is ``spawn_chat_turn``'s argument made
+    general. A chat turn hands the pool a whole REQUEST and acks; this hands the
+    pool the rest of THIS request — a zero-argument callable returning the very
+    frame the handler would have returned — and the transport emits it on the
+    same ``id`` when it is done. It exists because a handler that BLOCKS is not
+    only the chat turn: ``runtime.media.get``'s proxy arm dials another machine,
+    and a machine that is switched off is a stall on a loop every other request
+    from that client is queued behind. ``None`` means the caller has no worker
+    lane, and a handler that finds it absent answers on this thread — which is
+    honest for a test-built context and for a transport with no pool, and is why
+    this seam does not have to refuse the way ``spawn_chat_turn`` does: the work
+    it defers is bounded at its own source, so the fallback is a bad latency
+    rather than an unbounded hold. It returns True when the work was accepted.
     """
 
     connection_key: str | None = None
@@ -280,6 +342,7 @@ class RpcContext:
     emit: Callable[[dict], None] | None = None
     caller: RpcCaller = STDIO_OWNER
     spawn_chat_turn: Callable[[str, list[str], str], None] | None = None
+    spawn_reply: Callable[[Callable[[], dict]], bool] | None = None
 
     def push(self, method_name: str, params: dict) -> bool:
         """Send one notification to THIS caller. False when there is no channel.
@@ -2815,14 +2878,22 @@ def _runtime_media_get(
     shaped exactly like a local one. The client cannot tell, and has nothing it
     would do differently if it could.
 
-    **The honest cost of that arm, stated where the budget note already is.**
-    This lane answers inline on the reader loop, so a remote handle whose peer is
-    switched off stalls the loop for the proxy's dial timeout
-    (``media_proxy.PEER_DIAL_TIMEOUT_SECONDS``, deliberately a short 5 s for this
-    reason) before answering ``peer_unreachable``. A LOCAL handle is unaffected,
-    the cache means a picture is proxied at most once ever, and moving the media
-    family off the reader loop is a filed follow-up rather than something this
-    stage half-did.
+    **The dial is NOT on the reader loop, and that is the one thing about this
+    arm that moved after P4.** P4 shipped it inline and filed the cost: a remote
+    handle whose peer is switched off parked the loop for the proxy's own
+    timeouts — up to ``PEER_DIAL_TIMEOUT_SECONDS`` to give up dialling, up to
+    ``PEER_READ_TIMEOUT_SECONDS`` more if the far install accepted and then went
+    quiet — and every other request from that client waited behind a machine
+    that was not even on. The fetch now goes to the transport's worker lane
+    through ``RpcContext.spawn_reply`` and the finished frame is emitted there,
+    on this same ``id``. Three things deliberately did NOT move: the frame (byte
+    for byte, refusals included), the bound (``media_proxy``'s two timeouts are
+    still the only clock — a watchdog on the reader would be a second one, and
+    a second clock is how the long-run lane learned not to bound work anywhere
+    but at its source), and the LOCAL arm, which never dialled and still answers
+    on the reader. What moved is arrival ORDER: a client correlates on ``id``,
+    which JSON-RPC 2.0 §6 already requires of it and which this lane's own
+    clients (``media_proxy._ask``) already do.
     """
 
     from agent_runtime import media_handles
@@ -2877,9 +2948,47 @@ def _runtime_media_get(
         # if it could.
         from agent_runtime import media_proxy
 
-        data = media_proxy.fetch_remote_artifact(resolved)
+        def _proxied() -> dict:
+            return _media_get_frame(
+                rid,
+                resolved,
+                media_proxy.fetch_remote_artifact(resolved),
+                correlation_id,
+            )
+
+        # …and the DIAL is the transport's to wait on, not the reader's. The
+        # frame built above is the one built below; only the thread that builds
+        # it moves. A transport with no worker lane falls through and answers
+        # here, which is what every direct-call test does.
+        spawn = None if context is None else context.spawn_reply
+        if spawn is not None and spawn(
+            deferred_reply(rid, "runtime.media.get", _proxied)
+        ):
+            return DEFERRED
+        data: bytes | media_handles.MediaRefusal = media_proxy.fetch_remote_artifact(
+            resolved
+        )
     else:
         data = media_handles.read_artifact_bytes(resolved)
+    return _media_get_frame(rid, resolved, data, correlation_id)
+
+
+def _media_get_frame(
+    rid: Any,
+    resolved: Any,
+    data: Any,
+    correlation_id: str | None,
+) -> dict:
+    """The bytes (or the refusal) behind a resolved handle → ONE reply frame.
+
+    Lifted out of :func:`_runtime_media_get` so the proxy arm can build its
+    answer on a pool worker and the local arm can build it on the reader, from
+    the same six lines. A second copy is how "a client cannot tell a proxied
+    artifact from a local one" would quietly stop being true.
+    """
+
+    from agent_runtime import media_handles
+
     if isinstance(data, media_handles.MediaRefusal):
         return err(
             rid,

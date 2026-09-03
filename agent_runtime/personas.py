@@ -247,9 +247,29 @@ def profile_chat_toolsets(profile_id: str, personas: list[AgentPersona] | tuple[
 
 
 def all_registered_toolsets() -> list[str]:
-    from model_tools import get_available_toolsets
+    """Every toolset NAME the registry holds. No availability verdict.
 
-    return sorted(str(name) for name in get_available_toolsets().keys())
+    Through ``get_registered_toolset_names`` and not ``get_available_toolsets``,
+    which answers the SAME key set — both are ``{entry.toolset for entry in <one
+    snapshot>}`` — plus an ``available`` boolean per toolset that this caller
+    discards. That boolean is the whole cost: it runs every toolset's
+    ``check_fn``, which probes binaries, reads env and builds external clients.
+    Measured warm on this checkout, first call: **3.96 s**, and this function is
+    on ``perform_agent_create``'s path — the permission preview
+    ``persona_instance_summary`` projects onto the wire row it emits — so an
+    agent create paid four seconds of machine-capability probing to learn a list
+    of strings the registry already had.
+
+    ``from model_tools import`` and not ``from tools.registry import`` on
+    purpose: importing ``model_tools`` is what POPULATES that registry, and a
+    reader that reached the singleton directly would read an EMPTY one and
+    answer "there are no toolsets" — a silent wrong answer, exactly the trap
+    ``tool_visibility._ensure_tool_registry_populated`` documents.
+    """
+
+    from model_tools import get_registered_toolset_names
+
+    return [str(name) for name in get_registered_toolset_names()]
 
 
 # ── profile → persona promotion ───────────────────────────────────────────────

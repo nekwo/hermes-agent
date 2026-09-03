@@ -60,7 +60,10 @@ Pinned semantics (do not "tidy" these)
   ``registry_probe_rounds=27`` inside one 1,313 ms context build. They now read
   one bundle, memoized on the lane's own identity; the AUTHORITIES are
   unchanged and are exactly the functions the bundle calls. See
-  :mod:`agent_runtime.chat_lane_bundle` for the key and its staleness surface.
+  :mod:`agent_runtime.chat_lane_bundle` for the key and its staleness surface. That
+  receipt is HISTORICAL since 2026-09-02: ``all_registered_toolsets`` stopped
+  asking for an availability verdict it discarded, so this walk resolves no
+  probe at all; the once-per-turn resolution stands on the composition it saves.
 * **The reuse key is a function of actor IDENTITY, never of row liveness — and
   never of ambient process state.** :func:`mission_chat_runtime_signature` folds
   the persona, the instance, the permission answer and the runtime config

@@ -1342,6 +1342,27 @@ class _SafeSink:
             self.write_failures += 1
 
 
+def _emit_deferred_reply(build: Any, sink: Any) -> None:
+    """Finish ONE deferred method reply on a pool worker and write it.
+
+    ``build`` is already exception-proofed by ``serve_rpc.deferred_reply`` — it
+    returns a typed ``-32000`` rather than raising, because a raise here would
+    be a client waiting forever for a frame nobody writes. The belt below is for
+    the write itself: the socket lane's sink swallows a dead client
+    (:class:`_SafeSink`), and stdout's deliberately does not, so a stdio client
+    that went away must not take a pool worker's thread down with it.
+    """
+
+    try:
+        frame = build()
+    except BaseException:  # pragma: no cover - deferred_reply already caught it
+        return
+    try:
+        sink.emit(frame)
+    except Exception:
+        pass
+
+
 class _ArgvRequest:
     __slots__ = (
         "rid",
@@ -4528,19 +4549,50 @@ def serve_loop(
                     if chat_request.key in inflight:
                         inflight_futures[chat_request.key] = chat_future
 
+            # The SECOND seam onto the pool, and the general one. A chat turn is
+            # a whole request handed over and acked; this is the TAIL of one
+            # request handed over — a callable that returns the very frame the
+            # handler would have returned — so the method lane keeps its
+            # request/response shape and only the thread that finishes the work
+            # moves. ``runtime.media.get``'s proxy arm is the first caller: it
+            # dials another machine, and a machine that is switched off parked
+            # this loop for the dial's whole timeout with every other request
+            # from that client queued behind it.
+            #
+            # Refused while DRAINING, which puts the deferral on the same side
+            # of the drain as the pool it uses: a drain is waiting for the pool
+            # to empty, and handing it new work is the opposite of that. The
+            # handler answers inline instead — the pre-existing behaviour, for
+            # the seconds a drain lasts.
+            def _spawn_reply(build: Any) -> bool:
+                if drain_state is not None:
+                    return False
+                try:
+                    pool.submit(_emit_deferred_reply, build, sink)
+                except RuntimeError:
+                    # The pool is already shutting down. False, so the handler
+                    # answers on this thread rather than a client waiting for a
+                    # frame no worker will ever write.
+                    return False
+                return True
+
             if serve_rpc.is_rpc_frame(message):
-                sink.emit(
-                    serve_rpc.handle_request(
-                        message,
-                        serve_rpc.RpcContext(
-                            connection_key=getattr(connection, "key", None),
-                            transport=getattr(connection, "transport", "stdio"),
-                            emit=sink.emit,
-                            caller=caller_for_connection(connection),
-                            spawn_chat_turn=_spawn_chat_turn,
-                        ),
-                    )
+                rpc_frame = serve_rpc.handle_request(
+                    message,
+                    serve_rpc.RpcContext(
+                        connection_key=getattr(connection, "key", None),
+                        transport=getattr(connection, "transport", "stdio"),
+                        emit=sink.emit,
+                        caller=caller_for_connection(connection),
+                        spawn_chat_turn=_spawn_chat_turn,
+                        spawn_reply=_spawn_reply,
+                    ),
                 )
+                # The ONE frame this lane does not write: the handler took the
+                # deferral and the worker owns the reply now. Compared by
+                # identity, so no result a handler builds can land here.
+                if not serve_rpc.is_deferred(rpc_frame):
+                    sink.emit(rpc_frame)
                 return None
             if _is_gateway(connection):
                 # THE ARGV LANE IS NOT REACHABLE FROM A DEVICE, and this is the

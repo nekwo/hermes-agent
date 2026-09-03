@@ -1236,10 +1236,10 @@
     {
       "id": "hh11-the-census-canonicalizes-the-actor-side-of-the-join",
       "path": "agent_runtime/harness_doctor.py",
-      "symbol": "_placement_census_report",
+      "symbol": "_census_live_actor_bindings",
       "operator": "read-the-actor-binding-raw",
-      "find": "            (actor, _census_instance_key(actor.persona_instance_id, persona_id=actor.persona_id))",
-      "replace": "            (actor, str(actor.persona_instance_id or \"\").strip())",
+      "find": "        (actor, _census_instance_key(actor.persona_instance_id, persona_id=actor.persona_id))",
+      "replace": "        (actor, str(actor.persona_instance_id or \"\").strip())",
       "test": [
         "{python}",
         "-m",
@@ -4120,6 +4120,112 @@
         "pytest",
         "-q",
         "tests/agent_runtime/test_agent_create_service.py::test_a_replay_whose_instance_is_gone_returns_the_recorded_skills_unchanged"
+      ]
+    },
+    {
+      "id": "w5-media-get-dials-on-the-reader-again",
+      "path": "agent_runtime/serve_rpc.py",
+      "symbol": "_runtime_media_get",
+      "operator": "drop-deferral",
+      "find": "        if spawn is not None and spawn(\n",
+      "replace": "        if False and spawn(\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_serve_rpc_media.py::test_a_peer_that_never_answers_no_longer_delays_the_next_request"
+      ]
+    },
+    {
+      "id": "w5-the-reply-seam-is-not-wired-to-the-pool",
+      "path": "hermes_cli/harness_parts/serve.py",
+      "symbol": "serve_loop/_handle_message spawn_reply wiring",
+      "operator": "unwire-seam",
+      "find": "                        spawn_reply=_spawn_reply,\n",
+      "replace": "                        spawn_reply=None,\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_serve_rpc_media.py::test_a_peer_that_never_answers_no_longer_delays_the_next_request"
+      ]
+    },
+    {
+      "id": "w5-the-deferred-sentinel-is-written-to-the-wire",
+      "path": "agent_runtime/serve_rpc.py",
+      "symbol": "is_deferred",
+      "operator": "break-identity-check",
+      "find": "    return frame is DEFERRED\n",
+      "replace": "    return False\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_serve_rpc_media.py::test_a_peer_that_never_answers_no_longer_delays_the_next_request"
+      ]
+    },
+    {
+      "id": "w5-a-deferred-fault-escapes-instead-of-answering",
+      "path": "agent_runtime/serve_rpc.py",
+      "symbol": "deferred_reply",
+      "operator": "drop-worker-boundary",
+      "find": "            return err(\n                rid,\n                ERR_HANDLER_FAILED,\n                f\"handler error: {exc}\",\n                {\"reason\": \"handler_failed\", \"method\": method_name},\n            )\n",
+      "replace": "            raise\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_serve_rpc_media.py::test_a_deferred_handler_fault_is_the_typed_frame_it_would_be_inline"
+      ]
+    },
+    {
+      "id": "w5-toolset-names-probe-every-check-fn-again",
+      "path": "agent_runtime/personas.py",
+      "symbol": "all_registered_toolsets",
+      "operator": "restore-availability-probe",
+      "find": "    from model_tools import get_registered_toolset_names\n\n    return [str(name) for name in get_registered_toolset_names()]\n",
+      "replace": "    from model_tools import get_available_toolsets\n\n    return sorted(str(name) for name in get_available_toolsets().keys())\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_tool_visibility_import_deferral.py::test_the_registered_toolset_names_cost_no_availability_probe"
+      ]
+    },
+    {
+      "id": "w5-the-names-accessor-answers-through-the-verdict",
+      "path": "model_tools.py",
+      "symbol": "get_registered_toolset_names",
+      "operator": "restore-availability-probe",
+      "find": "    return registry.get_registered_toolset_names()\n",
+      "replace": "    return sorted(registry.get_available_toolsets().keys())\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_tool_visibility_import_deferral.py::test_the_registered_toolset_names_cost_no_availability_probe"
+      ]
+    },
+    {
+      "id": "w5-the-join-sweep-claims-a-class-keyed-actor",
+      "path": "agent_runtime/harness_doctor.py",
+      "symbol": "_census_join_workspace",
+      "operator": "drop-class-keyed-skip",
+      "find": "        if not instance_id:\n",
+      "replace": "        if False:\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_harness_doctor.py::test_the_join_sweep_reads_a_receipt_only_for_an_orphan",
+        "--timeout=180"
       ]
     }
   ]

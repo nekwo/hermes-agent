@@ -14,8 +14,8 @@ lane and nothing below carries a task frame.
 spawns the Launcher bridge otherwise pays a ~3s import tax on
 (`hermes_cli/harness_parts/serve.py:1-7`). Requests arrive as NDJSON, one frame
 per line, and dispatch into the **existing** harness argparse tree unchanged:
-`dispatch_argv` (`serve.py:1510`) builds a fresh parser per request
-(`_build_harness_parser`, `:1498`) and calls the same `_cmd_*` handler the CLI
+`dispatch_argv` (`serve.py:1531`) builds a fresh parser per request
+(`_build_harness_parser`, `:1519`) and calls the same `_cmd_*` handler the CLI
 would, including the harness error-envelope contract — argv arrives verbatim as
 the bridge already builds it, which keeps the per-call CLI fallback
 byte-identical to the served path. **`ready` is a BOOT frame, not a request
@@ -474,6 +474,31 @@ measured on this machine exceeds the cap.
 verbs by construction — the property the iterated registry test asserts about
 the rule rather than about names. Cross-install media is an open row.
 
+**The proxy arm's dial is off the reader loop (2026-09-02).** Stage P4 shipped
+it inline and filed the cost: a handle that resolves to a `RemoteMediaArtifact`
+made this loop wait on another machine's power state — up to
+`media_proxy.PEER_DIAL_TIMEOUT_SECONDS` to give up dialling, up to
+`PEER_READ_TIMEOUT_SECONDS` more if the far install accepted and then went
+quiet — with every other request from that client queued behind it. The fetch
+now goes to the SAME worker pool the chat lane uses, through
+`RpcContext.spawn_reply`, and the finished frame is emitted from the worker on
+this request's own `id`.
+
+The seam is `spawn_chat_turn`'s argument made general: a chat turn hands the
+pool a whole request and acks, this hands it the TAIL of one — a callable
+returning the frame the handler would have returned. A handler that takes it
+returns `serve_rpc.DEFERRED`, and the dispatcher's one job is not to write that
+sentinel (`serve_rpc.is_deferred`). Three things deliberately did not move: the
+frame (byte for byte, refusals included), the bound (`media_proxy`'s two
+timeouts stay the only clock — a watchdog on the reader would be a second one,
+and the long-run lane's rule is that work is bounded at its source), and the
+LOCAL arm, which never dialled. What moved is arrival ORDER, which JSON-RPC
+2.0 §6 already requires a client to tolerate and which this lane's own clients
+already do (`media_proxy._ask` correlates on `id` and skips the rest). The seam
+declines while DRAINING — a drain is waiting for that pool to empty — and a
+handler that finds it absent (a test-built context, a transport with no pool)
+answers on its own thread.
+
 ## 3. The mission-control stream
 
 `agent_runtime/stream.py::stream_frames` (`:1102`) is the single producer body.
@@ -628,7 +653,7 @@ existed the log named none of them:
 
 | Caller | `op` / `purpose` | Site |
 |---|---|---|
-| socket/stdio op lane | `subscribe` / `stream_lane` | `serve.py:2770` |
+| socket/stdio op lane | `subscribe` / `stream_lane` | `serve.py:2791` |
 | RPC office lane | `runtime.office.subscribe` / `office_patch` | `serve_office_subscriptions.py:902` |
 | argv CLI | `harness_stream` / `cli_stream` | `runtime_commands.py:621-622` |
 
@@ -640,7 +665,7 @@ never raises — an instrument must not be why a subscribe fails.
 
 **Who paints the boot's one stale core is a property of the ROOM**, so
 `stream_frames(wants_stale_first=…)` is stated by the caller —
-`serve.py::_room_wants_stale_first` (`:3097`) reads the hub's two subscriber
+`serve.py::_room_wants_stale_first` (`:3118`) reads the hub's two subscriber
 tables at producer-build time, `_cmd_stream` (`runtime_commands.py:611`) states
 `True`, default `False`. It cannot be re-derived inside the producer: the
 subscriber attaching FIRST at boot is the RPC office lane, whose sink discards
@@ -663,7 +688,7 @@ workspace id that failed the private "id under `<workspace_id>/`" restatement
 becomes a resync notification; an UNKNOWN frame type takes the same branch
 deliberately. Drops are typed, never silent: a subscriber outrunning its bounded
 buffer gets `subscription_dropped` naming which of the two bounds tripped —
-frame count or bytes — then is unsubscribed (`serve.py:4065`).
+frame count or bytes — then is unsubscribed (`serve.py:4086`).
 
 ## 7. The PUSH-vs-RPC boundary, and the fork boundary
 

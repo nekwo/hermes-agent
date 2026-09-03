@@ -865,6 +865,223 @@ def _persona_has_retired_instance(persona_id: str, retired: frozenset[str]) -> b
     )
 
 
+# ── the census's four per-workspace sweeps ───────────────────────────────────
+#
+# Lifted out of :func:`_placement_census_report`, which read the two stores,
+# gated them, and then ran four different questions over one workspace loop with
+# a pure classifier beside each. The READ and the GATE stay where they are —
+# they are the part that has to happen once, in order, for the whole census —
+# and what moves is everything after them: each sweep now takes the already-
+# gated world and answers with rows, so it can be asked a question directly
+# instead of only through two live stores and a doctor section.
+#
+# They share ONE argument on purpose: ``bindings``, the ``(actor, instance_id)``
+# pairs :func:`_census_live_actor_bindings` resolves once per workspace. Every
+# sweep needs the actor side of its comparison spelled the way the roster side
+# is, and three copies of that resolution is precisely how the two stores came
+# to disagree about the same persona.
+
+
+def _census_live_actor_bindings(scan: Any) -> list[tuple[Any, str]]:
+    """The workspace's LIVE actors, each with its canonical instance binding.
+
+    ONE canonical binding per live actor, resolved once here and read by every
+    sweep below, so the actor side of every comparison in this workspace is
+    spelled the way the roster side is. See :func:`_census_instance_key` for
+    what a raw read cost.
+    """
+
+    return [
+        (actor, _census_instance_key(actor.persona_instance_id, persona_id=actor.persona_id))
+        for actor in scan.actors
+        if actor.state != "archived"
+    ]
+
+
+def _census_join_workspace(
+    workspace_id: str,
+    bindings: list[tuple[Any, str]],
+    *,
+    live_rows: dict[str, Any],
+    retired: frozenset[str],
+    receipt_for: Any,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], set[str]]:
+    """The roster/office join for one workspace: placed, orphans, referenced.
+
+    ``receipt_for`` is a resolver rather than a store, and that is what keeps
+    this a function of its arguments: the caller owns the per-census memo, so a
+    clean store still reaches zero reads and a test can ask this the retire
+    question without a retirement archive on disk. The third element is the set
+    of instance ids this workspace REFERENCED, which the caller folds across
+    workspaces to decide what is unplaced — returned rather than mutated
+    through, because "which rows did this workspace claim" is an answer and not
+    a side effect.
+    """
+
+    ws_placed: list[dict[str, Any]] = []
+    ws_orphans: list[dict[str, Any]] = []
+    referenced: set[str] = set()
+
+    for actor, instance_id in bindings:
+        if not instance_id:
+            # A class-keyed actor answers no roster question: it is keyed on
+            # the persona, not on an instance, so it is out of this join by
+            # construction rather than by omission.
+            continue
+        referenced.add(instance_id)
+        row = {
+            "workspace_id": workspace_id,
+            "actor_key": actor.actor_key,
+            "persona_id": actor.persona_id,
+            "persona_instance_id": instance_id,
+        }
+        if instance_id in live_rows:
+            ws_placed.append(row)
+        else:
+            # H-H4: WHICH orphan, keyed on the two facts the store holds — a
+            # retirement tombstone, and a retire receipt naming this actor key.
+            row["reason"] = _orphan_actor_reason(
+                actor_key=actor.actor_key,
+                instance_id=instance_id,
+                retired=retired,
+                receipt=receipt_for(instance_id),
+            )
+            ws_orphans.append(row)
+    return ws_placed, ws_orphans, referenced
+
+
+def _census_agent_item_bindings(
+    bindings: list[tuple[Any, str]],
+) -> dict[str, list[str]]:
+    """Per persona, the instance bindings of every ``agent`` ITEM in the workspace.
+
+    A separate pass from the desk sweep and not a fold into it. The desk sweep
+    must be able to ask "does an agent item for this persona exist ANYWHERE in
+    this workspace", and a single pass could only ask "…in an actor I have
+    already read", which is an answer that depends on directory order.
+    """
+
+    from .office_store import _normalize_persona_id
+
+    agent_bindings: dict[str, list[str]] = {}
+    for actor, binding in bindings:
+        for item in actor.items or ():
+            if getattr(item, "kind", None) != "agent":
+                continue
+            persona = _normalize_persona_id(item.persona_id) or _normalize_persona_id(
+                actor.persona_id
+            )
+            if persona:
+                agent_bindings.setdefault(persona, []).append(binding)
+    return agent_bindings
+
+
+def _census_desk_litter(
+    workspace_id: str,
+    bindings: list[tuple[Any, str]],
+    *,
+    agent_bindings: dict[str, list[str]],
+    live_instance_ids: frozenset[str],
+    live_persona_ids: set[str],
+    retired: frozenset[str],
+) -> list[dict[str, Any]]:
+    """Desk items whose agent half is missing, stale, personaless or never was.
+
+    Over the SAME live actors of the SAME fully-read world as the join, and a
+    ``notice`` rather than a defect for the reason the section docstring gives:
+    a litter desk renders as exactly what it is.
+    """
+
+    from .office_store import _normalize_persona_id
+
+    ws_litter: list[dict[str, Any]] = []
+    for actor, binding in bindings:
+        for item in actor.items or ():
+            if getattr(item, "kind", None) != "desk":
+                continue
+            persona = _normalize_persona_id(item.persona_id) or _normalize_persona_id(
+                actor.persona_id
+            )
+            if not persona:
+                # A persona-less desk answers no pairing question — there is
+                # nothing to pair it WITH. Out of the sweep by construction,
+                # which is also the shape the parked "desks become standalone
+                # artifacts" ruling would make the common one.
+                continue
+            reason = _desk_litter_reason(
+                minted_kind=item.minted_kind,
+                on_live_instance_actor=bool(binding) and binding in live_instance_ids,
+                agent_item_bindings=tuple(agent_bindings.get(persona, ())),
+                live_instance_ids=live_instance_ids,
+                persona_known=(
+                    persona in live_persona_ids
+                    or _persona_has_retired_instance(persona, retired)
+                ),
+            )
+            if reason is None:
+                continue
+            ws_litter.append(
+                {
+                    "workspace_id": workspace_id,
+                    "actor_key": actor.actor_key,
+                    "item_id": item.item_id,
+                    "persona_id": persona,
+                    "persona_instance_id": binding or None,
+                    "reason": reason,
+                }
+            )
+    return ws_litter
+
+
+def _census_duplicate_placements(
+    workspace_id: str, bindings: list[tuple[Any, str]]
+) -> list[dict[str, Any]]:
+    """ITEM ids held by more than one live actor, every holder named (H-H8).
+
+    Over the SAME live actors of the SAME fully-read world. This is the pass
+    that opens ``actor.items`` for the JOIN's sake rather than the desk sweep's:
+    the join is actor-level, so two live actors holding one item id were both
+    counted ``placed`` and the section reported ``ok``.
+
+    Distinct HOLDERS per id, which is the mirror of the write fence's "distinct
+    ids per persona": one actor listing an id twice is one holder, because the
+    fault named here is two ROWS claiming one placement.
+    """
+
+    holders: dict[str, list[dict[str, Any]]] = {}
+    for actor, binding in bindings:
+        seen_in_actor: set[str] = set()
+        for item in actor.items or ():
+            item_id = str(getattr(item, "item_id", "") or "").strip()
+            if not item_id or item_id in seen_in_actor:
+                continue
+            seen_in_actor.add(item_id)
+            holders.setdefault(item_id, []).append(
+                {
+                    "actor_key": actor.actor_key,
+                    "persona_instance_id": binding or None,
+                    "kind": str(getattr(item, "kind", "") or ""),
+                }
+            )
+
+    ws_duplicates: list[dict[str, Any]] = []
+    for item_id, rows in sorted(holders.items()):
+        if len(rows) < 2:
+            continue
+        ws_duplicates.append(
+            {
+                "workspace_id": workspace_id,
+                "item_id": item_id,
+                "kinds": sorted({row["kind"] for row in rows if row["kind"]}),
+                "holders": rows,
+                "reason": _duplicate_placement_reason(
+                    tuple(str(row["persona_instance_id"] or "") for row in rows)
+                ),
+            }
+        )
+    return ws_duplicates
+
+
 def _placement_census_report(_context: _DoctorProbeContext | None = None) -> dict[str, Any]:
     """Per-workspace roster/office join: placed, unplaced rows, orphan actors.
 
@@ -998,148 +1215,47 @@ def _placement_census_report(_context: _DoctorProbeContext | None = None) -> dic
     #: One receipt read per orphaned instance, for the whole census (H-H4).
     retire_receipts: dict[str, dict[str, Any] | None] = {}
 
-    for workspace_id, scan in scans:
-        ws_placed: list[dict[str, Any]] = []
-        ws_orphans: list[dict[str, Any]] = []
-        # ONE canonical binding per live actor, resolved once here and read by
-        # every sweep below, so the actor side of every comparison in this
-        # workspace is spelled the way the roster side is. See
-        # :func:`_census_instance_key` for what a raw read cost.
-        live_actor_bindings = [
-            (actor, _census_instance_key(actor.persona_instance_id, persona_id=actor.persona_id))
-            for actor in scan.actors
-            if actor.state != "archived"
-        ]
-        for actor, instance_id in live_actor_bindings:
-            if not instance_id:
-                # A class-keyed actor answers no roster question: it is keyed on
-                # the persona, not on an instance, so it is out of this join by
-                # construction rather than by omission.
-                continue
-            referenced.add(instance_id)
-            row = {
-                "workspace_id": workspace_id,
-                "actor_key": actor.actor_key,
-                "persona_id": actor.persona_id,
-                "persona_instance_id": instance_id,
-            }
-            if instance_id in live_rows:
-                ws_placed.append(row)
-            else:
-                # H-H4: WHICH orphan, keyed on the two facts the store holds —
-                # a retirement tombstone, and a retire receipt naming this actor
-                # key. The receipt read is per orphaned INSTANCE and memoized,
-                # never per actor and never on the healthy path: a clean store
-                # reaches zero reads, which is what keeps this affordable in a
-                # doctor section that already walks both stores in full.
-                if instance_id not in retire_receipts:
-                    retire_receipts[instance_id] = (
-                        PersonaInstanceStore().read_retire_receipt(instance_id)
-                        if instance_id in retired_instances
-                        else None
-                    )
-                row["reason"] = _orphan_actor_reason(
-                    actor_key=actor.actor_key,
-                    instance_id=instance_id,
-                    retired=retired_instances,
-                    receipt=retire_receipts[instance_id],
-                )
-                ws_orphans.append(row)
+    def _retire_receipt_for(instance_id: str) -> dict[str, Any] | None:
+        """This instance's retire receipt, read at most once per census.
 
-        # The desk sweep, over the SAME live actors of the SAME fully-read
-        # world. Two passes and not one: the second pass must be able to ask
-        # "does an agent item for this persona exist ANYWHERE in this
-        # workspace", and a single pass could only ask "…in an actor I have
-        # already read", which is an answer that depends on directory order.
-        agent_bindings: dict[str, list[str]] = {}
-        for actor, binding in live_actor_bindings:
-            for item in actor.items or ():
-                if getattr(item, "kind", None) != "agent":
-                    continue
-                persona = _normalize_persona_id(item.persona_id) or _normalize_persona_id(
-                    actor.persona_id
-                )
-                if persona:
-                    agent_bindings.setdefault(persona, []).append(binding)
+        The memo is the CALLER's, which is why the join sweep takes a resolver
+        rather than a store: the read is per orphaned INSTANCE, never per actor
+        and never on the healthy path, so a clean store reaches zero reads —
+        what keeps this affordable in a section that already walks both stores
+        in full — and it stays that way across every workspace rather than per
+        workspace.
+        """
 
-        ws_litter: list[dict[str, Any]] = []
-        for actor, binding in live_actor_bindings:
-            for item in actor.items or ():
-                if getattr(item, "kind", None) != "desk":
-                    continue
-                persona = _normalize_persona_id(item.persona_id) or _normalize_persona_id(
-                    actor.persona_id
-                )
-                if not persona:
-                    # A persona-less desk answers no pairing question — there is
-                    # nothing to pair it WITH. Out of the sweep by construction,
-                    # which is also the shape the parked "desks become standalone
-                    # artifacts" ruling would make the common one.
-                    continue
-                reason = _desk_litter_reason(
-                    minted_kind=item.minted_kind,
-                    on_live_instance_actor=bool(binding) and binding in live_instance_ids,
-                    agent_item_bindings=tuple(agent_bindings.get(persona, ())),
-                    live_instance_ids=live_instance_ids,
-                    persona_known=(
-                        persona in live_persona_ids
-                        or _persona_has_retired_instance(persona, retired_instances)
-                    ),
-                )
-                if reason is None:
-                    continue
-                ws_litter.append(
-                    {
-                        "workspace_id": workspace_id,
-                        "actor_key": actor.actor_key,
-                        "item_id": item.item_id,
-                        "persona_id": persona,
-                        "persona_instance_id": binding or None,
-                        "reason": reason,
-                    }
-                )
-
-        # The duplicate-placement sweep (H-H8), over the SAME live actors of the
-        # SAME fully-read world. This is the pass that opens ``actor.items`` for
-        # the JOIN's sake rather than the desk sweep's: the join above is
-        # actor-level, so two live actors holding one item id were both counted
-        # ``placed`` and the section reported ``ok``.
-        #
-        # Distinct HOLDERS per id, which is the mirror of the write fence's
-        # "distinct ids per persona": one actor listing an id twice is one
-        # holder, because the fault named here is two ROWS claiming one
-        # placement.
-        holders: dict[str, list[dict[str, Any]]] = {}
-        for actor, binding in live_actor_bindings:
-            seen_in_actor: set[str] = set()
-            for item in actor.items or ():
-                item_id = str(getattr(item, "item_id", "") or "").strip()
-                if not item_id or item_id in seen_in_actor:
-                    continue
-                seen_in_actor.add(item_id)
-                holders.setdefault(item_id, []).append(
-                    {
-                        "actor_key": actor.actor_key,
-                        "persona_instance_id": binding or None,
-                        "kind": str(getattr(item, "kind", "") or ""),
-                    }
-                )
-
-        ws_duplicates: list[dict[str, Any]] = []
-        for item_id, rows in sorted(holders.items()):
-            if len(rows) < 2:
-                continue
-            ws_duplicates.append(
-                {
-                    "workspace_id": workspace_id,
-                    "item_id": item_id,
-                    "kinds": sorted({row["kind"] for row in rows if row["kind"]}),
-                    "holders": rows,
-                    "reason": _duplicate_placement_reason(
-                        tuple(str(row["persona_instance_id"] or "") for row in rows)
-                    ),
-                }
+        if instance_id not in retire_receipts:
+            retire_receipts[instance_id] = (
+                PersonaInstanceStore().read_retire_receipt(instance_id)
+                if instance_id in retired_instances
+                else None
             )
+        return retire_receipts[instance_id]
+
+    for workspace_id, scan in scans:
+        # Four sweeps, four functions, one resolved binding list between them.
+        # The read and the gate above are what had to happen once and in order;
+        # everything from here is a question asked of the world they produced.
+        bindings = _census_live_actor_bindings(scan)
+        ws_placed, ws_orphans, ws_referenced = _census_join_workspace(
+            workspace_id,
+            bindings,
+            live_rows=live_rows,
+            retired=retired_instances,
+            receipt_for=_retire_receipt_for,
+        )
+        referenced |= ws_referenced
+        ws_litter = _census_desk_litter(
+            workspace_id,
+            bindings,
+            agent_bindings=_census_agent_item_bindings(bindings),
+            live_instance_ids=live_instance_ids,
+            live_persona_ids=live_persona_ids,
+            retired=retired_instances,
+        )
+        ws_duplicates = _census_duplicate_placements(workspace_id, bindings)
 
         placed.extend(ws_placed)
         orphan_actors.extend(ws_orphans)

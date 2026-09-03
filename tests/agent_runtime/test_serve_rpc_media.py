@@ -523,3 +523,117 @@ def test_the_keyhole_joined_the_manifest_without_moving_the_integer():
     assert PEER_GET in manifest["methods"]
     assert manifest["tiers"][PEER_GET] == TIER_CONSOLE
     assert manifest["contract"] == 1
+
+
+# ── the proxy dial is not the reader's to wait on ────────────────────────────
+#
+# Stage P4 shipped the arm INLINE and filed the gap: a remote handle whose peer
+# is switched off parks the reader for the proxy's own timeouts, and every other
+# request that client has in flight waits behind a machine that is not even on.
+# What is pinned below is the property, not the mechanism — a second request on
+# the SAME reader is answered while the dial is still parked — so the seam under
+# it can be re-shaped without rewriting the test that says why it exists.
+
+
+def _read_reply(connection, rid: str, *, limit: int = 200, skipped=None) -> dict:
+    """The next frame carrying THIS rid, skipping whatever else arrives.
+
+    Which is the client behaviour the deferral assumes and JSON-RPC 2.0 §6
+    already requires: a response may arrive in any order and is correlated by
+    id. ``media_proxy._ask`` and ``test_serve_gateway_lane._rpc`` both already
+    read this way.
+
+    ``skipped`` collects what was passed over, so the caller can assert about
+    what the wire did NOT carry — which is the only way to catch a sentinel
+    leaking onto it: a frame with no ``id`` is invisible to every correlating
+    client and would be a silent contract breach rather than a failure.
+    """
+
+    for _ in range(limit):
+        frame = connection.read_frame()
+        if frame is None:
+            raise AssertionError(f"connection closed before a reply to {rid!r}")
+        if frame.get("id") == rid:
+            return frame
+        if skipped is not None:
+            skipped.append(frame)
+    raise AssertionError(f"no reply to {rid!r} within {limit} frames")
+
+
+def test_a_deferred_handler_fault_is_the_typed_frame_it_would_be_inline(seeded):
+    """``handle_request``'s boundary has already returned by the time a deferred
+    body runs, so the wrapper carries its own copy of it. Without one, a raise on
+    a pool worker is a client waiting forever for a frame nobody writes."""
+
+    def _explodes() -> dict:
+        raise RuntimeError("the peer edge blew up mid-fetch")
+
+    frame = serve_rpc.deferred_reply("m9", GET, _explodes)()
+
+    assert frame["id"] == "m9"
+    assert frame["error"]["code"] == serve_rpc.ERR_HANDLER_FAILED
+    assert frame["error"]["data"] == {"reason": "handler_failed", "method": GET}
+    # And a body that returns normally is passed through untouched.
+    assert serve_rpc.deferred_reply("m9", GET, lambda: {"ok": 1})() == {"ok": 1}
+
+
+def test_a_peer_that_never_answers_no_longer_delays_the_next_request(
+    seeded, monkeypatch
+):
+    """THE row. One connection, one reader, two requests: the first is a remote
+    handle whose dial is parked forever, the second is an ordinary read. The
+    read is answered while the dial is still parked, and the media reply lands
+    afterwards on its own id — unchanged in shape, only in arrival order."""
+
+    import threading
+
+    from agent_runtime import media_proxy
+    from tests.agent_runtime.test_serve_socket_lane import (  # noqa: F401
+        WAIT,
+        client,
+        running_serve,
+    )
+
+    far = "sha256:" + "e" * 64
+    _far_completions(monkeypatch, far, 64)
+
+    parked = threading.Event()
+    release = threading.Event()
+
+    def _never_answers(peer_install_id: str):
+        parked.set()
+        release.wait(WAIT)
+        raise ConnectionError("the peer is switched off")
+
+    monkeypatch.setattr(media_proxy, "_dial_peer", _never_answers)
+
+    with running_serve() as handle:
+        with client(handle) as (connection, _hello):
+            connection.send(
+                {"jsonrpc": "2.0", "id": "m-far", "method": GET,
+                 "params": {"handle": far}}
+            )
+            assert parked.wait(WAIT), "the proxy never dialled"
+
+            connection.send(
+                {"jsonrpc": "2.0", "id": "m-index", "method": INDEX, "params": {}}
+            )
+            skipped: list[dict] = []
+            answered = _read_reply(connection, "m-index", skipped=skipped)
+            assert "result" in answered, answered
+            # And the dial is STILL parked — the read did not overtake a reply
+            # that had already been produced.
+            assert not release.is_set()
+
+            release.set()
+            media = _read_reply(connection, "m-far", skipped=skipped)
+
+    # Nothing stood in for the deferred reply on the wire. The sentinel is an
+    # instruction to the dispatcher, not a frame; a client that received it
+    # would file an id-less object it can never correlate or discard.
+    assert serve_rpc.DEFERRED not in skipped
+
+    assert media["error"]["data"] == {
+        "reason": media_proxy.REASON_PEER_UNREACHABLE,
+        "peer_install_id": "install-b",
+    }

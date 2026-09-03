@@ -26,8 +26,16 @@ persona type every expensive input of it misses its memo:
   process lifetime;
 * ``tool_visibility._cached_profile_readiness_for_visibility`` — 15 s TTL;
 * ``profile_readiness._provider_issue`` — 60 s TTL;
-* ``tools.registry._check_fn_cached`` — 30 s TTL per ``check_fn``, and the
-  sweep behind ``all_registered_toolsets()`` runs one probe ROUND per toolset.
+* ~~``tools.registry._check_fn_cached`` — 30 s TTL per ``check_fn``, and the
+  sweep behind ``all_registered_toolsets()`` runs one probe ROUND per
+  toolset.~~ **GONE from this path 2026-09-02.** ``all_registered_toolsets``
+  asked ``get_available_toolsets()`` for a list of NAMES, and that call ran one
+  availability round per toolset to compute an ``available`` boolean it then
+  discarded. It now asks ``get_registered_toolset_names()`` — identical key set
+  by construction — and a create against a deliberately holed ``check_fn``
+  cache probes NOTHING. Measured: 25 rounds → 0, and −1.43 s median on the
+  first call in a fresh interpreter. The header's own "25 registry probe
+  rounds" number above is therefore historical, not current.
 
 Every one of those is PROCESS-WIDE and keyed on inputs a prewarm can reproduce
 before the drop happens. So this module runs the same resolution on a background
@@ -47,7 +55,9 @@ not an intention:
   that read;
 * ``apply_chat_lane_tool_scope`` composes ``effective_toolsets`` /
   ``all_registered_toolsets`` / ``chat_lane_capability_drops`` /
-  ``mission_chat_workdir_for_persona``, all pure reads;
+  ``mission_chat_workdir_for_persona``, all pure reads — and since 2026-09-02
+  the ``all_registered_toolsets`` half is a registry lookup with no probe at
+  all, which is why the check_fn bullet above is struck;
 * ``profile_readiness_for_persona`` routes its provider check through
   ``probe_runtime_provider``, the named NON-persisting resolver that exists
   precisely so a readiness read cannot move ``auth.json``
@@ -62,11 +72,13 @@ correct, only slower.
 Why ONE worker thread and not one per call
 -------------------------------------------
 The palette opens with N persona chips and the launcher's trigger fires once per
-chip. N threads would each find the ``check_fn`` TTL cache cold and each run the
-full toolset sweep — N concurrent ``docker version`` subprocesses, N playwright
-probes — which is the thundering herd the memo exists to prevent, paid all at
-once. Serialising through one worker means the FIRST warm fills the shared
-registry cache and every warm behind it is cheap. The in-flight set makes a
+chip. N threads would each find the remaining per-persona memos cold and each resolve
+the same visibility, which is the thundering herd the memo exists to prevent,
+paid all at once. Serialising through one worker means the FIRST warm fills the
+shared caches and every warm behind it is cheap. (The sharpest version of that
+herd — N concurrent ``docker version`` subprocesses, N playwright probes — was
+the ``check_fn`` sweep, and that sweep is no longer on this path at all; the
+argument for one worker survives it, the illustration does not.) The in-flight set makes a
 repeat call for a persona already queued a no-op rather than a second entry, so
 "call it on every palette open" cannot grow the queue.
 

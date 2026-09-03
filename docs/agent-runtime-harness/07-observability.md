@@ -168,7 +168,7 @@ what the fixture mirror below enforces.
 | `snapshot_agents_readiness walk_ms=… tool_visibility_ms=… pid=…` | const `snapshot.py:432-434`, emitted `:449-454` | joins `snapshot_build_core` on `pid`; pinned by regex at `tests/agent_runtime/test_agents_readiness_attribution.py:51` |
 | `stream_attach op=… purpose=… … pid=…` | `agent_runtime/stream.py:212-218` | boot-investigation join (third `pid=`-bearing family) |
 | `snapshot_core_cache …` / `snapshot_core_cache_write …` / `snapshot_core_shadow …` / `snapshot_core_cache_lane_closed …` | `agent_runtime/core_cache.py` — see the channel table below | `agent_runtime/core_cache_census.py` via `scripts/core_cache_demote_census.py` |
-| `persona_prewarm done persona=… elapsed_ms=…` | const `persona_prewarm.py:127`, emitted `:276-280` | pacing census; pinned at `tests/agent_runtime/test_persona_prewarm.py:520` |
+| `persona_prewarm done persona=… elapsed_ms=…` | const `PREWARM_DONE_RECEIPT` (`persona_prewarm.py:139`), emitted by `_worker` | pacing census; pinned at `tests/agent_runtime/test_persona_prewarm.py:481` |
 | `persona_chat_actor_prewarm root=… outcome=… elapsed_ms=…` | const `persona_chat_actor_prewarm.py` (`CHAT_ACTOR_PREWARM_DONE_RECEIPT`), emitted in `_drain` | did the chat's actor get built before its first message; format pinned at `tests/agent_runtime/test_persona_chat_actor_prewarm.py` |
 | `persona_chat_actor_prewarm pass candidates=… queued=… skipped=… elapsed_ms=…` | const `persona_chat_actor_prewarm.py` (`CHAT_ACTOR_PREWARM_PASS_RECEIPT`), emitted in `prewarm_chat_actors_on_boot` | one line per boot pass; the `candidates`/`queued` gap is `max_hot_sessions` doing its job |
 | `resident_signature_diff root=… components=…` | const `persona_chat_continuity.py` (`RESIDENT_SIGNATURE_DIFF_RECEIPT`), emitted in `PersonaChatRuntimeRegistry.acquire` | why a resident actor was NOT reused: the signature component NAMES that moved (never digests, never values — the components include prompt- and policy-adjacent material). Twin of the turn record's `resident_rebuild_component_<name>` flags; format pinned at `tests/agent_runtime/test_persona_chat_continuity.py` |
@@ -256,7 +256,7 @@ The `agent_create_phases` LOG line still bills only `instance_ms` and its ten
 sub-spans, so a reader wanting the skills cost reads the ack, not the log.
 
 `persona_prewarm done` is the completion half of an otherwise unfalsifiable
-claim — "a start with no finish measures nothing" (`persona_prewarm.py:118-123`).
+claim — "a start with no finish measures nothing" (`persona_prewarm.py:130-135`).
 The clock starts AFTER the queue `get`, so an idle worker never reports a
 minute-long warm (`:255-258`); a warm that RAISED logs a WARNING carrying the
 same elapsed cost, because a census blind to the failures would under-count the
@@ -608,7 +608,7 @@ not by trusting the audit's own status.**
 
 | finding | then | now |
 |---|---|---|
-| `serve_rpc.py` baseline `or 0` — an unreadable event log became watermark 0, killing the sink's baseline gate and re-opening the resync↔restart loop | `baseline_offset = int(...) or 0` | typed absence: `baseline_offset = event_offset_of(watermark)` then an explicit `is None` arm — `agent_runtime/serve_rpc.py:822-823` |
+| `serve_rpc.py` baseline `or 0` — an unreadable event log became watermark 0, killing the sink's baseline gate and re-opening the resync↔restart loop | `baseline_offset = int(...) or 0` | typed absence: `baseline_offset = event_offset_of(watermark)` then an explicit `is None` arm — `agent_runtime/serve_rpc.py:885-886` |
 | empty `patches` shipped as a `patch` frame — the client advanced its watermark having folded nothing | coverable ⇒ promoted | promotion now also requires `batch_carries_patch_rows(batch)`; the honest answer for a pair-less batch is the full core — `agent_runtime/stream.py:808-819`, argued at `:554-581` |
 | `office_surface` could never satisfy the office scope gate, so every folder-only patch frame was dropped with no patch and no resync | `entity == OFFICE_ACTOR_ENTITY` and a slash-prefixed id | one predicate: `office_patch_scope(patch) == workspace_id` — `agent_runtime/serve_office_subscriptions.py:486` |
 | `_usage_lane_detected` — a credential fault DELETED the lane from the Limits panel, and an empty envelope rendered as a positive claim that no provider is signed in | `except Exception: return False` | three outcomes, not two: true / false / **raise**, with the raise caught per provider and the lane emitted `unavailable` naming the exception class — `hermes_cli/harness.py:5388-5406`, `:5626-5638` |
@@ -631,7 +631,7 @@ drift.
 
 1. **A receipt's format string is a contract.** Most are pinned by a test that
    greps the prefix or regex (`test_snapshot_build_logging.py:758`,
-   `test_agents_readiness_attribution.py:51`, `test_persona_prewarm.py:520`,
+   `test_agents_readiness_attribution.py:51`, `test_persona_prewarm.py:481`,
    `test_agent_create_subphases.py:152`, `test_core_cache_channel_table.py`).
 2. **`pid=` is last; variable-length tails are last.** `generations=`, `diff=`
    and `_lane_closed`'s free-form detail span go last because nothing can be
@@ -644,7 +644,7 @@ drift.
    `log_create_subphases` never raises and never measures
    (`agent_create_phases.py:230`).
 5. **Receipts carry timings and ids only.** Never a display name, never a
-   resolved toolset, never operator message text (`persona_prewarm.py:125-126`,
+   resolved toolset, never operator message text (`persona_prewarm.py:137-138`,
    `agent_create_phases.py:64-66`,
    `mission_agent_chat_runtime_controller.dart:1562`).
 6. **Observability rides log receipts, never new keys on the parity envelope.**

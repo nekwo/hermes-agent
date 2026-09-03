@@ -1130,10 +1130,13 @@ line carries a `p4-*` claim in `tests/mutation_claims.json`.
    cross-install reply needs a provider turn on B. The supervisor's own write of
    that row is pinned separately on the real payload shape. O2 step 4 joins the
    halves.
-3. **The proxy dials inline on the serve reader loop**, so an unreachable peer
-   stalls it for up to 5 s before answering. Local handles unaffected; each
-   picture is proxied at most once ever. Moving the media family off the reader
-   loop is filed, not half-done.
+3. ~~**The proxy dials inline on the serve reader loop**, so an unreachable peer
+   stalls it for up to 5 s before answering.~~ CLOSED 2026-09-02: the dial runs
+   on the serve worker pool through `RpcContext.spawn_reply` and the reply is
+   emitted from the worker on the request's own id. The frame, the refusals and
+   `media_proxy`'s two timeouts are unchanged; what moved is arrival order.
+   Pinned by
+   `test_serve_rpc_media.py::test_a_peer_that_never_answers_no_longer_delays_the_next_request`.
 4. **A→B→C is refused rather than routed.** By design; recorded so it is a
    decision and not an omission.
 5. **`peer.media.get`'s scope is B's whole local media scope**, not the

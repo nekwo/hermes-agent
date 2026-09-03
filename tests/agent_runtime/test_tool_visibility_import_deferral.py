@@ -239,3 +239,57 @@ def test_neither_boot_entry_module_loads_model_tools_at_import(entry, tmp_path):
     )
 
     assert result["loaded"] == [], f"importing {entry} loaded {result['loaded']}"
+
+
+# ---------------------------------------------------------------------------
+# The NAMES are not the VERDICT
+# ---------------------------------------------------------------------------
+
+
+def test_the_registered_toolset_names_cost_no_availability_probe(tmp_path):
+    """``all_registered_toolsets`` wants a list of strings, not a verdict.
+
+    ``get_available_toolsets()`` answers the same key set PLUS an ``available``
+    boolean per toolset, and the boolean is the whole cost: it runs every
+    toolset's ``check_fn`` — binaries probed, env read, external clients built.
+    Measured on this checkout, first call, warm cache: **3.96 s**, on top of the
+    4.92 s ``import model_tools`` itself. ``personas.all_registered_toolsets``
+    paid all of it, and every ``perform_agent_create`` pays that function through
+    the permission preview on the wire row it projects
+    (``persona_instance_summary`` → ``apply_chat_lane_tool_scope``), which is why
+    a single census test in a fresh interpreter cost what it did.
+
+    The key sets are equal BY CONSTRUCTION — both are
+    ``{entry.toolset for entry in <the same snapshot>}`` — so this is not a
+    trade of accuracy for speed; it is not asking a question whose answer was
+    thrown away.
+
+    Anti-vacuity. *Mutation:* put ``get_available_toolsets().keys()`` back.
+    *Probed field:* ``tools.registry.probe_rounds_this_thread()``, the runtime's
+    own counter of availability passes that actually EXECUTED a ``check_fn`` —
+    not a timing threshold, which would pass under the mutation on a warm TTL
+    cache. Under the mutation the delta is one round per toolset. The same case
+    asserts the names still arrive, so a "fix" that answers nothing at all does
+    not pass either.
+    """
+
+    result = _run_probe(
+        "from tools import registry as _registry\n"
+        "from agent_runtime.personas import all_registered_toolsets\n"
+        "before = _registry.probe_rounds_this_thread()\n"
+        "names = all_registered_toolsets()\n"
+        "after = _registry.probe_rounds_this_thread()\n"
+        "print(json.dumps({'probe': 'toolset_names',\n"
+        "  'rounds': after - before,\n"
+        "  'count': len(names),\n"
+        "  'sorted': names == sorted(names),\n"
+        "  'sample': names[:4]}))\n",
+        tmp_path,
+    )
+
+    assert result["count"] > 0, "the name list came back empty"
+    assert result["sorted"], f"the names are not sorted: {result['sample']}"
+    assert result["rounds"] == 0, (
+        f"asking for {result['count']} toolset NAMES ran {result['rounds']} "
+        "availability probe rounds"
+    )

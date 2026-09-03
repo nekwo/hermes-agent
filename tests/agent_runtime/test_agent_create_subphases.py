@@ -28,10 +28,21 @@ No test below asserts a millisecond, and none can reproduce those magnitudes:
 process-lifetime state a shared pytest session has already paid for and cannot
 safely un-pay (see :func:`rounds_per_projection_read`). The gates are the
 COUNTED mechanism instead — ``tools.registry``'s probe-round counter, attributed
-per projection read — which says the same thing the milliseconds say on a cold
-box and says it on any box: the rounds are billed to
-``apply_chat_lane_tool_scope`` and to nothing else, and a warm takes them to
-zero.
+per projection read.
+
+**The sweep half of that verdict was RETIRED on 2026-09-02, and the numbers
+above are historical from that date.** ``apply_chat_lane_tool_scope`` reached
+the toolset sweep only through ``personas.all_registered_toolsets``, which asked
+``get_available_toolsets()`` for a list of NAMES and paid one availability round
+per toolset for an ``available`` boolean it discarded; it now asks
+``get_registered_toolset_names()``, identical key set, no probe. A create bills
+ZERO rounds to every one of the three reads, warmed or not, which is what
+:func:`test_a_mint_bills_no_probe_rounds_to_any_projection_read` asserts in
+place of the pair that measured the cost. The registry POPULATE — importing the
+38 modules under ``tools/`` — is untouched and is still the larger half of the
+2,421 ms; it is not counted by this instrument and never was. See
+``docs/agent-runtime-harness/planned/serve-small-batch-field-notes-2026-09-02.md``
+§2.
 """
 
 from __future__ import annotations
@@ -345,25 +356,36 @@ def rounds_per_projection_read(monkeypatch):
     return billed
 
 
-def test_an_unwarmed_mint_bills_its_probe_rounds_to_the_chat_lane_scope_read(
+def test_a_mint_bills_no_probe_rounds_to_any_projection_read(
     seeded_workspace, persona_factory, evict_one_check_fn, rounds_per_projection_read, caplog
 ):
-    """WHERE THE UNWARMED COST LIVES — and it is not where the plan said.
+    """WHERE THE UNWARMED COST LIVES — and since 2026-09-02 the answer is nowhere.
 
-    Every probe round an unwarmed create pays is billed to
-    ``apply_chat_lane_tool_scope``. ``resolve_tool_visibility`` — the call the
-    plan's C2 section, the 3a docstring and this module's own header all name as
-    the inline cost — pays ZERO, because by the time it runs the scope
-    application has already filled every shared cache it would have reached.
+    This case replaces a PAIR. W3-H1 convicted ``apply_chat_lane_tool_scope`` as
+    the read that paid every probe round an unwarmed create ran (``instance_ms``
+    2,781 of which ``chat_lane_scope_ms`` 2,421, ``tool_visibility_ms`` 0), and
+    the gate beside it asserted that a warm took those rounds to zero. Both
+    stopped being able to say anything the day the rounds stopped existing:
+    ``personas.all_registered_toolsets`` — which
+    ``apply_chat_lane_tool_scope`` calls on the unbounded default — asked
+    ``get_available_toolsets()`` for a list of NAMES, and that call ran one
+    availability round per toolset to compute an ``available`` boolean it
+    discarded. It now asks ``get_registered_toolset_names()``, whose key set is
+    identical by construction. The warmed gate became a tautology (zero with or
+    without the warm) and its negative arm became unsatisfiable; the negative
+    arm is what said so, which is the pair working exactly as designed.
 
-    On a cold process the same split shows in milliseconds: ``instance_ms``
-    2,781 with ``chat_lane_scope_ms`` 2,421 and ``tool_visibility_ms`` 0. Those
-    magnitudes are not assertable here (see ``rounds_per_projection_read``);
-    the ordering of the rounds is, and it is the same fact.
+    What is asserted now is the stronger statement neither could make: with the
+    shared ``check_fn`` cache deliberately HOLED, a create bills zero rounds to
+    all three named reads and zero overall. The eviction is still what stops it
+    being run-order dependent — without it the entry is warm from whatever ran
+    earlier and this would pass on the old code too.
 
-    The eviction is what stops this from depending on run order: without it the
-    entry is already warm from whatever ran earlier in the session and the
-    create probes nothing at all.
+    The span attribution the receipt carries is untouched and still asserted:
+    ``chat_lane_scope_ms >= tool_visibility_ms``. What the warm is still worth
+    is an open row for the 3a stage's owner — see
+    ``planned/serve-small-batch-field-notes-2026-09-02.md`` §2; the per-persona
+    readiness memo it fills is still pinned in ``test_persona_prewarm.py``.
     """
 
     persona_factory("subphase_cold")
@@ -375,69 +397,17 @@ def test_an_unwarmed_mint_bills_its_probe_rounds_to_the_chat_lane_scope_read(
     rounds = _probe_rounds() - before
     spans = _spans_of_the_only_receipt(caplog)
 
-    assert rounds > 0, (
-        "the create against a holed check_fn cache probed nothing, so this "
-        "mint is not the unwarmed one the attribution below is about"
-    )
-    assert rounds_per_projection_read["chat_lane_scope"] == rounds, (
-        "the unwarmed create's probe rounds are no longer billed to the "
-        "chat-lane scope application — the convicted cost has moved, and any "
-        f"remedy aimed at it needs re-reading: {rounds_per_projection_read} of "
-        f"{rounds} rounds, spans {spans}"
-    )
-    assert rounds_per_projection_read["tool_visibility"] == 0, (
-        "resolve_tool_visibility now probes on the create path too; the split "
-        f"this stage convicted is no longer clean: {rounds_per_projection_read}"
-    )
-    # The receipt has to AGREE with the attribution, or the instrument the
-    # operator reads and the mechanism the gate counts have come apart.
-    assert spans["chat_lane_scope_ms"] >= spans["tool_visibility_ms"], spans
-
-
-def test_a_warmed_mint_probes_nothing_so_the_warm_fills_the_key_the_create_reads(
-    seeded_workspace, persona_factory, evict_one_check_fn, rounds_per_projection_read, caplog
-):
-    """THE GATE, and the acquittal of the stage's prime suspect.
-
-    ``warm_persona_memos`` resolves with ``session_id=None``; the create
-    resolves with the chat session id it minted moments earlier, and with
-    ``runtime_root``/``task_id``/``goal_id`` the warm never passes. If any memo
-    the projection reaches were keyed on that session-scoped state, the warm
-    would be filling a NEIGHBOURING key and the create behind it would re-probe.
-
-    It does not. Same holed cache, same persona, same create path as the test
-    above — the only difference is the warm, and the rounds go to zero at every
-    one of the three reads. That test is this one's negative arm: without the
-    eviction both would pass with the warm deleted.
-    """
-
-    persona_factory("subphase_warm")
-    evict_one_check_fn()
-
-    from agent_runtime.store import AgentStore
-
-    persona_prewarm.warm_persona_memos(AgentStore().get("subphase_warm"))
-    # The warm reaches the very same three functions the fixture bills, so its
-    # OWN rounds land in the counters. Zeroed here rather than subtracted, so
-    # the assertion below reads as "the create probed nothing" instead of "the
-    # create probed no more than the warm did" — two different claims.
-    rounds_per_projection_read.update(
-        dict.fromkeys(rounds_per_projection_read, 0)
-    )
-
-    before = _probe_rounds()
-    with caplog.at_level(logging.INFO, logger=agent_create_phases.__name__):
-        _create("subphase_warm", "subphase_warm_1_agent_2")
-    rounds = _probe_rounds() - before
-    spans = _spans_of_the_only_receipt(caplog)
-
     assert rounds == 0, (
-        "the create re-probed after a warm ran for the same persona in the same "
-        f"process — the warm filled keys the create does not read ({rounds} "
-        f"rounds, billed {rounds_per_projection_read}, spans {spans})"
+        "a create against a HOLED check_fn cache ran "
+        f"{rounds} availability probe rounds — the create path is asking for an "
+        f"availability verdict again (billed {rounds_per_projection_read}, "
+        f"spans {spans})"
     )
     assert rounds_per_projection_read == {
         "permission_options": 0,
         "chat_lane_scope": 0,
         "tool_visibility": 0,
-    }
+    }, rounds_per_projection_read
+    # The receipt has to AGREE with the attribution, or the instrument the
+    # operator reads and the mechanism the gate counts have come apart.
+    assert spans["chat_lane_scope_ms"] >= spans["tool_visibility_ms"], spans

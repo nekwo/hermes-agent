@@ -181,7 +181,9 @@ class GPTPersonaRuntime:
         # already resolved (permission mode, MCP admission, enabled toolsets,
         # blocked tool names) is read here instead of walking
         # ``permission_options_for_chat`` → ``all_registered_toolsets`` → the
-        # registry ``check_fn`` sweep a fourth time for the request. The
+        # registry ``check_fn`` sweep a fourth time for the request (that last
+        # leg is gone since 2026-09-02 — the toolset NAMES no longer cost an
+        # availability verdict — but the composition is still resolved once). The
         # admission object threaded to the runner below is the SAME object the
         # toolset scope was resolved against, which is the property the old
         # inline resolve existed to guarantee. See

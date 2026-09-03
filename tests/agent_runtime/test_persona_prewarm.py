@@ -164,20 +164,40 @@ def _probe_rounds() -> int:
 
 
 # ── the cost this stage exists to remove ─────────────────────────────────────
+#
+# ONE of the four memos this module warms left the create path entirely on
+# 2026-09-02, and this section is what is left of the pair that measured it.
+#
+# ``tools.registry._check_fn_cached`` (30 s TTL) was reached because
+# ``personas.all_registered_toolsets`` asked ``get_available_toolsets()`` for a
+# list of NAMES, and that call runs one availability round per toolset to
+# compute an ``available`` boolean the caller discarded. It now asks
+# ``get_registered_toolset_names()``, whose key set is identical by
+# construction, and the create path probes NOTHING — measured 25 rounds → 0,
+# and −1.43 s median on the first call in a fresh interpreter (see
+# ``planned/serve-small-batch-field-notes-2026-09-02.md`` §2).
+#
+# Two tests died with that cost and are not replaced by weaker ones. The
+# probe-round GATE ("after a prewarm the create pays no rounds") became
+# vacuous — a create pays none with or without a prewarm — and its anti-vacuity
+# twin ("without the prewarm it pays them again") became unsatisfiable, which is
+# exactly the pair working as designed: the twin is what told us the gate had
+# stopped meaning anything. The surviving gate is
+# ``test_the_prewarm_fills_the_PERSONA_keyed_readiness_memo_the_create_reads``,
+# which was always the honest per-persona witness and says so in its own
+# docstring. Whether the OTHER three memos still justify this stage is an open
+# row for its owner; nothing here answers it.
 
 
-def test_a_cold_create_pays_probe_rounds_and_the_next_one_pays_none(
+def test_a_create_resolves_tool_visibility_without_probing_anything(
     seeded_workspace, persona_factory, evict_one_check_fn
 ):
-    """The C2 mechanism, measured in this process rather than quoted from the
-    plan: the create path really does reach the registry's TTL cache, and the
-    entry the first create fills is the entry the second one rides.
+    """The inverse of the C2 measurement, and now the true statement.
 
-    It holes the cache first rather than trusting the session to be cold. Left
-    to chance this test would pass or fail on whether some earlier FILE in the
-    run had already resolved tool visibility inside the 30 s TTL — an
-    order-dependence that would eventually red on a machine nobody could
-    reproduce.
+    It holes the cache first rather than trusting the session to be cold —
+    without the eviction this would pass on a warm TTL entry left by an earlier
+    file, which is the order-dependence the original pair was written to avoid
+    and the reason the eviction is kept.
     """
 
     persona_factory("prewarm_cost_a")
@@ -190,74 +210,17 @@ def test_a_cold_create_pays_probe_rounds_and_the_next_one_pays_none(
 
     before = _probe_rounds()
     _create("prewarm_cost_b", "prewarm_cost_b_1_agent_2")
-    warm_rounds = _probe_rounds() - before
+    second_rounds = _probe_rounds() - before
 
-    assert cold_rounds > 0, (
-        "a create against a holed check_fn cache resolved tool visibility "
-        "without probing anything — the cost this stage removes is not on the "
-        "create path at all"
+    assert cold_rounds == 0, (
+        "a create against a HOLED check_fn cache ran "
+        f"{cold_rounds} availability probe rounds — the create path is asking "
+        "for an availability verdict again"
     )
-    assert warm_rounds == 0, (
-        "a second create moments later re-probed; the memos are not shared "
-        f"across creates the way C2 says they are ({warm_rounds} rounds)"
-    )
+    assert second_rounds == 0, second_rounds
 
 
 # ── the gate ─────────────────────────────────────────────────────────────────
-
-
-def test_after_a_prewarm_the_create_pays_no_probe_rounds(
-    seeded_workspace, persona_factory, evict_one_check_fn
-):
-    """THE GATE. A create of a never-created persona type, with the shared
-    ``check_fn`` cache deliberately holed first, costs zero probe rounds when a
-    prewarm ran in between.
-
-    The eviction is what stops this from being a tautology: without it the entry
-    is already warm from whatever ran earlier in the session and the assertion
-    would hold with the prewarm deleted. Its twin below runs the identical
-    sequence with the prewarm omitted and demands a NONZERO delta.
-    """
-
-    persona_factory("prewarm_gate_warm")
-
-    evict_one_check_fn()
-    reply = _prewarm({"persona_id": "prewarm_gate_warm"})
-    assert reply["result"]["accepted"] is True
-    _drained()
-
-    before = _probe_rounds()
-    created = _create("prewarm_gate_warm", "prewarm_gate_warm_1_agent_2")
-    delta = _probe_rounds() - before
-
-    assert "error" not in created, created
-    assert delta == 0, (
-        "the create still ran probe rounds after a prewarm — the warm filled "
-        f"keys the create does not read ({delta} rounds)"
-    )
-
-
-def test_without_the_prewarm_the_same_create_pays_the_rounds_again(
-    seeded_workspace, persona_factory, evict_one_check_fn
-):
-    """The gate's negative arm — the reason its zero means anything.
-
-    Identical to the test above with exactly one line removed: the prewarm.
-    """
-
-    persona_factory("prewarm_gate_cold")
-
-    evict_one_check_fn()
-
-    before = _probe_rounds()
-    created = _create("prewarm_gate_cold", "prewarm_gate_cold_1_agent_2")
-    delta = _probe_rounds() - before
-
-    assert "error" not in created, created
-    assert delta > 0, (
-        "a create against a holed check_fn cache probed nothing, so the gate "
-        "above proves nothing about the prewarm"
-    )
 
 
 def test_the_prewarm_fills_the_PERSONA_keyed_readiness_memo_the_create_reads(

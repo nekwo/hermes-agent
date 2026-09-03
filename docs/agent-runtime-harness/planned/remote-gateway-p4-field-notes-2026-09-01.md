@@ -141,14 +141,15 @@ deliberately, which is what makes the shape change visible.
    `test_cross_install_media.py::test_the_remote_leg_puts_the_far_installs_map_on_the_row`.
    The join between those two halves is the seam this stage did not prove
    end-to-end, and O2 step 4 is where it closes.
-3. **The proxy dials INLINE on the serve reader loop**, because
-   `runtime.media.get` does. A remote handle whose peer is switched off stalls
-   that loop for `media_proxy.PEER_DIAL_TIMEOUT_SECONDS` (5 s, deliberately a
-   third of the dispatch lane's, which can afford to wait on a supervisor
-   thread) before answering `peer_unreachable`. A LOCAL handle is unaffected and
-   the cache means any given picture is proxied at most once ever. Moving the
-   media family off the reader loop is a real follow-up and is filed as one
-   rather than half-done here.
+3. ~~**The proxy dials INLINE on the serve reader loop**, because
+   `runtime.media.get` does.~~ CLOSED 2026-09-02 (see
+   `serve-small-batch-field-notes-2026-09-02.md` §1). The follow-up this row
+   filed was taken: the dial runs on the serve worker pool through the new
+   `RpcContext.spawn_reply` seam and the reply is emitted from there on the
+   request's own id. This row's own numbers were also understated — the stall
+   was up to `PEER_DIAL_TIMEOUT_SECONDS` (5 s) to give up dialling AND up to
+   `PEER_READ_TIMEOUT_SECONDS` (30 s) more for an install that accepted and then
+   went quiet.
 4. **A→B→C is refused, not routed.** By design (see the keyhole above). An
    operator on A cannot reach an artifact B learned from C. Nothing has asked
    for it; recorded so it is a decision rather than an omission.

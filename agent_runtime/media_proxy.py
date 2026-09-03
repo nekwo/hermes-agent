@@ -45,17 +45,22 @@ they do not hash to the name, they are not the artifact, and the answer is
 ``unknown_handle`` — the same word this install would use for a digest nobody
 has. A paired install that lied gets no channel out of it.
 
-The honest cost
----------------
+Where this runs, and what still bounds it
+-----------------------------------------
 
-This runs INLINE on the serve reader loop, because ``runtime.media.get`` does.
-A dial to a machine that is off therefore stalls that loop for up to
-:data:`PEER_DIAL_TIMEOUT_SECONDS`, and this is the first verb on the lane whose
-worst case depends on another machine's power state. The timeout is short for
-exactly that reason — a third of the dispatch lane's, which can afford to wait
-because it waits on a supervisor thread — and the gap is recorded rather than
-hidden: a media lane that answered off the reader loop is a real follow-up, and
-it is filed as one.
+NOT on the serve reader loop. Stage P4 shipped it there, because
+``runtime.media.get`` is answered there, and filed the cost: a dial to a machine
+that is off stalled that loop — and every other request from that client — for
+this module's timeouts. Since 2026-09-02 the dispatcher hands the fetch to the
+serve worker pool through ``RpcContext.spawn_reply`` and the reply is emitted
+from the worker on the request's own id; ``_runtime_media_get``'s docstring is
+the authority on that seam.
+
+The timeouts below did NOT relax with the move, and that is deliberate. They are
+this work's own bound, at its source, which is the whole reason no watchdog was
+added on the reader when the dial was there: a second clock over work that
+already carries one is how a wait becomes unattributable. A pool worker is
+cheaper to hold than a reader, not free.
 """
 
 from __future__ import annotations
@@ -83,9 +88,11 @@ PEER_MEDIA_GET_METHOD = "peer.media.get"
 #: How long ONE dial may take before the far install counts as unreachable.
 #: Deliberately a THIRD of ``agent_chat_dispatch.PEER_DIAL_TIMEOUT_SECONDS``
 #: rather than the same number: that constant is spent on a supervisor thread
-#: that may block as long as it likes, and this one is spent on the reader loop
-#: every other client on this serve is waiting behind. A different question
-#: gets a different number, and both say why.
+#: that may block as long as it likes. This one was chosen while the dial was on
+#: the reader loop; it is KEPT at that number now the dial is on a pool worker,
+#: because the pool is bounded too — a wedged fetch holds a worker every other
+#: request on this serve may be queued for. A different question gets a
+#: different number, and both say why.
 PEER_DIAL_TIMEOUT_SECONDS = 5.0
 
 #: How long the far install has to answer once dialled. Larger than the dial —
