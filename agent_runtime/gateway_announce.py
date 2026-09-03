@@ -62,6 +62,7 @@ __all__ = [
     "ANNOUNCE_TIMEOUT_SECONDS",
     "AnnounceReceipt",
     "announce_in_background",
+    "announce_roster_changed",
     "announce_to_peers",
 ]
 
@@ -188,6 +189,41 @@ def announce_in_background(
             pass
 
     threading.Thread(target=_run, name="gateway-announce", daemon=True).start()
+
+
+def announce_roster_changed() -> None:
+    """Tell every paired install our roster moved. Best effort, off-thread.
+
+    R-IP12's push edge applied to the one fact a far install caches and cannot
+    otherwise learn: WHO is addressable here. Before it, a peer's cached roster
+    went stale the moment an agent was created or retired and stayed stale until
+    somebody happened to fetch it again — so an operator on the other machine
+    would address an agent that no longer exists, or fail to see one that does.
+
+    It carries the NOTIFICATION and never the roster: the far side drops its
+    cached copy and fetches when somebody actually wants it. A body here would
+    make one create push N copies of a list nobody may read, and a fetch
+    triggered by an inbound announce would be a loop with two installs in it.
+
+    **One function, two callers** (``perform_agent_create`` and
+    ``perform_agent_retire``), and it lives HERE rather than beside either of
+    them: this module owns the outbound edge, and a copy in each would be two
+    definitions of one courtesy that drift the first time either is tuned.
+
+    Off-thread and swallowed, because a slow install on the far side of a LAN
+    must never be the reason ``harness agent create`` takes five seconds — the
+    whole point of pushing is that it costs the pusher nothing. It resolves its
+    own store root through ``peer_store_root`` for that function's own reason:
+    ``HERMES_HOME`` is flipped process-globally for the length of every persona
+    turn, and a create can happen inside one.
+    """
+
+    try:
+        from .gateway_targets import peer_store_root
+
+        announce_in_background(peer_store_root(), {"roster_changed": True})
+    except Exception:  # noqa: BLE001 — courtesy channel, never the work
+        pass
 
 
 def _announce_once(

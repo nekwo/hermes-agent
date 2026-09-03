@@ -334,33 +334,6 @@ def _already_retired_ack(
 
 
 
-def _announce_roster_changed() -> None:
-    """Tell every paired install our roster moved. Best effort, off-thread.
-
-    R-IP12's push edge, applied to the one fact a far install caches and cannot
-    otherwise learn: WHO is addressable here. Before it, a peer's cached roster
-    went stale the moment an agent was created or retired and stayed stale until
-    somebody happened to fetch it again — so an operator on the other machine
-    would address an agent that no longer exists, or fail to see one that does.
-
-    It carries the NOTIFICATION and never the roster: the far side drops its
-    cached copy and fetches when somebody actually wants it. A body here would
-    make a create push N copies of a list nobody may read, and a fetch triggered
-    by an inbound announce would be a loop with two installs in it.
-
-    Off-thread and swallowed, because a slow install on the far side of a LAN
-    must never be the reason ``harness agent create`` takes five seconds — the
-    whole point of pushing is that it costs the pusher nothing.
-    """
-
-    try:
-        from .gateway_announce import announce_in_background
-        from .gateway_targets import peer_store_root
-
-        announce_in_background(peer_store_root(), {"roster_changed": True})
-    except Exception:  # noqa: BLE001 — courtesy channel, never the work
-        pass
-
 
 def perform_agent_retire(
     params: dict[str, Any], *, caller: Any | None = None
@@ -500,7 +473,11 @@ def perform_agent_retire(
             },
         )
 
-    _announce_roster_changed()
+    # S2c: the roster moved, so every paired install's cached copy is stale.
+    # Off-thread and swallowed inside ``announce_roster_changed``.
+    from .gateway_announce import announce_roster_changed
+
+    announce_roster_changed()
     return AgentRetireOutcome(
         result=_with_correlation({**result, "already_retired": False}, correlation_id)
     )
