@@ -467,6 +467,31 @@ Two reds the sweep DID own, both fixed forward in `aa9e964411`:
   operator's text read; 43 -> 44 for `agent_chat_installs`, re-measured with the
   ratchet.
 
+### Three things found in review after the stages landed
+
+Each is its own commit, and each was a gate or a re-read doing its job rather
+than a discovery:
+
+1. **`_announce_roster_changed` was copied into two modules**
+   (`test_duplicate_helper_bodies`, `aa9e964411`). Folded into
+   `gateway_announce.py` — the module that owns the outbound edge — with both
+   callers importing it. One courtesy with two callers, not two courtesies.
+2. **The peer-directory notification re-derived its own store root**
+   (`c6c3ff09ed`). `publish_peer_event` called `peer_store_root()` while every
+   writer already had a root in hand. On this machine they agree; the point is
+   that they need not, and "store_root is an INPUT, never re-derived" is the
+   rule the whole gateway lane is built on because several roots coexist here.
+   The root now travels with the event from all seven call sites; `None` still
+   falls back for the one caller with no write in hand (the subscribe handler
+   reading its own directory), and the test pins that distinction by exploding
+   on `peer_store_root` only AFTER the subscribe.
+3. **Two readability rows on the tool surface** (`0b7036a7f9`): `_bounded_limit`
+   replaces an inline `isdigit() or isinstance` expression on the far read's
+   `limit` (a provider that hands a tool string numbers would otherwise turn a
+   legal call into an invalid-params refusal), and `agent_chat_installs`' unused
+   `requested_by_session` now says it is the registry's kwarg contract rather
+   than an oversight.
+
 ### Counts, before and after
 
 | | before | after |
