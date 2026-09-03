@@ -2007,6 +2007,7 @@
         "compose",
         "list",
         "migrate-home",
+        "payload-contract",
         "reopen",
         "reroll-direction",
         "reroll-row",
@@ -2411,6 +2412,42 @@
         "harness",
         "characters",
         "migrate-home"
+      ],
+      "positionals": [],
+      "subcommands": []
+    },
+    "harness characters payload-contract": {
+      "exclusive_groups": [],
+      "options": {
+        "--help": {
+          "action": "help",
+          "canonical": "--help",
+          "choices": null,
+          "nargs": 0,
+          "required": false,
+          "type": null
+        },
+        "--json": {
+          "action": "store_true",
+          "canonical": "--json",
+          "choices": null,
+          "nargs": 0,
+          "required": false,
+          "type": null
+        },
+        "-h": {
+          "action": "help",
+          "canonical": "--help",
+          "choices": null,
+          "nargs": 0,
+          "required": false,
+          "type": null
+        }
+      },
+      "path": [
+        "harness",
+        "characters",
+        "payload-contract"
       ],
       "positionals": [],
       "subcommands": []

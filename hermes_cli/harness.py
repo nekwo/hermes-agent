@@ -1905,6 +1905,9 @@ def build_parser(parent_subparsers) -> None:
     characters_sprite.add_argument("--no-sheet", dest="no_sheet", action="store_true", help="Metadata only: drop `spritesheetBase64` (468.8 KiB of it on the live 3-state character, and the sheet bytes are not read at all) and carry `sheet`, the absolute path, in its place. `spritesheetRevision` and every geometry/taxonomy key are unchanged, so a consumer that wants framesByRow/states/rows and reads the file itself pays kilobytes instead of half a megabyte. The default is byte-identical to what it always was")
     characters_sprite.add_argument("--json", action="store_true")
     characters_sprite.set_defaults(func=_cmd_characters_sprite)
+    characters_payload_contract = characters_subs.add_parser("payload-contract", help="Publish the KEY SET every `characters` READ payload can carry — the cross-repo contract the launcher commits and diffs, so the two sides disagree in a file instead of at runtime. Derived by RUNNING the verbs against a throwaway library in a temp directory (the real library is never touched), never from a hand-written list, so a key a producer grows or drops is in the dump the day it moves. Key PATHS only and never a value, so the dump is byte-stable. Conditional keys are marked with the modes that carry them — `spritesheetBase64` and `sheet` are one slot spelled two ways, which a flat key list cannot express")
+    characters_payload_contract.add_argument("--json", action="store_true")
+    characters_payload_contract.set_defaults(func=_cmd_characters_payload_contract)
 
 
 def harness_command(args) -> int:
@@ -4969,6 +4972,38 @@ def _cmd_characters_sprite(args) -> int:
             )
             if accepted
             else ""
+        ),
+    )
+
+
+def _cmd_characters_payload_contract(args) -> int:
+    """Publish the key set of every `characters` READ payload.
+
+    The artifact the launcher's fixture is vendored from. Everything about how
+    the key set is measured — probing rather than declaring, two vocabularies to
+    tell data keys from schema keys, modes for the conditional slot — lives in
+    `hermes_cli/charsheet_payload_contract.py`, which is also where a new
+    payload kind is added.
+
+    It emits through `_characters_emit` like every other `characters` verb, so
+    `--json` prints the document and a bare call prints a human line. There is
+    no draft and no slug: the probes are built and thrown away inside the call.
+    """
+    from hermes_cli.charsheet_payload_contract import build_payload_contract
+
+    document = build_payload_contract()
+    kinds = document["payloads"]
+    return _characters_emit(
+        args,
+        document,
+        "; ".join(
+            f"{name}: {len(kind['keys'])} keys"
+            + (
+                f" ({sum(1 for k in kind['keys'].values() if k['conditional'])} conditional)"
+                if any(k["conditional"] for k in kind["keys"].values())
+                else ""
+            )
+            for name, kind in sorted(kinds.items())
         ),
     )
 
