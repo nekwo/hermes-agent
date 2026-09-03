@@ -641,15 +641,57 @@ the template refuses instead of writing over a set nobody saw. The launcher cano
 half is `EterniaLauncher/docs/mission_control/06-board-and-aux-surfaces.md`
 § "Skills surfaces".
 
-**What this did NOT close: there is no instance re-inherit door.** Once an
-instance has `skill_overrides` set, nothing returns it to `None` —
-`--clear-skills` at the instance tier writes `[]`, "explicitly none", which is a
-different agent from "follow the template again". So "fix the template and let
-existing agents follow" is impossible for any agent the panel has ever touched,
-and the more the template door is used the more agents that door has pinned.
-Deliberately out of scope here (it changes an existing verb's semantics surface —
-`update-profile` would need an `--inherit-skills` arm and the capability an arg)
-and it needs its own ruling; filed as a launcher queue row, not as a silence.
+#### `skill_overrides` is a TRI-state, and all three values now have a door
+
+Closed 2026-09-03 by operator ruling; the gap it closes was left open on purpose
+by D10(ii) above, because a tri-state on a write door earns a ruling rather than
+riding someone else's slice.
+
+| `skill_overrides` | what resolves | the verb that writes it |
+|---|---|---|
+| a non-empty list | exactly that set | `update-profile --skill a --skill b` |
+| `[]` | NO skills — an explicit, pinned empty | `update-profile --clear-skills` |
+| `None` | the persona template, LIVE, re-resolved at every use | `update-profile --inherit-skills` |
+
+Until the third row existed, `skill_overrides` was a **one-way door**: one Save
+at "this agent" scope pinned that agent off its template forever, and the
+template tier shipping made that worse in proportion to its use — "fix the
+persona and let the existing agents follow" silently skipped every agent the
+Skills sheet had already touched, which after 2026-08-27 is the ones an operator
+most recently cared about.
+
+`--inherit-skills` is a SEPARATE arm, not a third value on `--clear-skills` and
+not a `skills=None` sentinel. `skills=None` already means "the caller expressed
+no opinion" through every layer — `hermes_cli.flag_binding.list_flag_or_absent`
+exists to keep it that way, after an empty-list collapse silently erased skill
+sets — so overloading it would put the tri-state's third value on the one
+spelling that must keep meaning "untouched". The three are mutually exclusive:
+two in one call is a `ValueError` at the STORE (so `harness call` and the RPC
+lane get it too, not only argparse), never a precedence rule nobody can read out
+of the argv.
+
+Two seams had collapsed `None` onto `[]` and both are fixed here, because a door
+whose write nothing can observe is not a door:
+
+* `_profile_patch_snapshot` stored `list(skill_overrides or [])`, so an
+  `--inherit-skills` write off an emptied agent **diffed to nothing** and shipped
+  no `state.patched` field at all. A connected launcher went on rendering the
+  agent as customized until its next full snapshot.
+* the `persona_instance.profile_updated` event payload spelled both states `[]`,
+  so its readers could not tell "pinned to no skills" from "follows the
+  template" either.
+
+`persona_instance_summary` and `state_patches._persona_instance_wire_row` were
+already honest (`skill_overrides` travels as `None` or a list, beside the
+RESOLVED `skills`), so no wire field was added — the launcher simply was not
+reading the one that was already there. It reads it now:
+`MissionHarnessPersonaInstance.skillsFollowPersona` asks `containsKey` before
+the value, because Dart's map read collapses "key absent" and "value null" and
+those are two different answers (unknown vs follows-persona). The launcher half
+is the Skills sheet's "Follow <persona>'s default" action, offered only in the
+"This agent" scope and only to an agent the sheet KNOWS is customized, plus the
+roster card's Skills badge — "follows persona" / "customized", and nothing at
+all when the row does not say.
 
 ### The inverse — one call takes an agent off the level, and says what left
 
@@ -1348,11 +1390,11 @@ Two decisions ride with it:
     scope control, the stale-docstring sweep). Its plan file is DELETED, per the
     index rule ([00-index.md](00-index.md) § planned/) —
     `git log --diff-filter=D --oneline -- docs/agent-runtime-harness/planned/persona-template-skills.md`
-    is how you get the sha and the file back. **One named gap stays open and is
-    not this row:** there is no instance re-inherit door — instance
-    `--clear-skills` writes `[]`, never `None` — so an agent the panel has ever
-    touched can never be handed back to the template. It needs its own ruling
-    and is filed in `EterniaLauncher/Launcher_Brain/20 — Active Initiatives/mission-control-queue.md`.
+    is how you get the sha and the file back. **The one named gap it left open is
+    now CLOSED** (operator ruling 2026-09-03): the instance re-inherit door is
+    `update-profile --inherit-skills`, which writes `None` where
+    `--clear-skills` writes `[]`. See § "`skill_overrides` is a TRI-state"
+    above for the three values and the two seams that had collapsed two of them.
   - **Owner decisions still standing on their defaults**, none blocking: D10(iv) `console`
     scope for both methods is no longer prose — it is declared on `rpc.tiers`
     and evaluated at the front door (A1/A3 above); WHICH tiers exist beyond

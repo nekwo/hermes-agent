@@ -1508,6 +1508,7 @@ class PersonaInstanceStore:
         goal_id: str | None = None,
         skills: list[str] | None = None,
         clear_skills: bool = False,
+        inherit_skills: bool = False,
         provider: str | None = None,
         model: str | None = None,
         api_mode: str | None = None,
@@ -1529,7 +1530,40 @@ class PersonaInstanceStore:
         resets all three. A ``model_issued_at`` older than the last applied
         model write raises :class:`StaleModelOverrideWrite` instead of
         clobbering the newer value.
+
+        **The skills lane is a TRI-state, and all three values are reachable
+        from here** (operator ruling 2026-09-03). ``skill_overrides`` has meant
+        three different things since the tier shipped, but only two of them had
+        a door:
+
+        =====================  ==========================================
+        ``skill_overrides``    what the resolver does
+        =====================  ==========================================
+        a non-empty list       use exactly this set
+        ``[]``                 use NO skills — an explicit, pinned empty
+        ``None``               FOLLOW THE TEMPLATE, live, forever after
+        =====================  ==========================================
+
+        ``skills=`` writes the first, ``clear_skills`` writes the second, and
+        until this arm existed nothing wrote the third — so one Save at "this
+        agent" scope pinned that agent off its persona permanently, and the
+        template tier made that worse in proportion to its use: "fix the persona
+        and let the existing agents follow" silently skipped every agent the
+        Skills sheet had ever touched. ``inherit_skills`` is the missing arm.
+
+        It is a SEPARATE argument rather than a third value on ``clear_skills``
+        or a ``skills=None`` sentinel, and that is the ruling rather than a
+        taste call. ``skills=None`` already means "the caller expressed no
+        opinion" throughout this method and every one of its callers
+        (``hermes_cli.flag_binding.list_flag_or_absent`` exists to keep it that
+        way, after an empty-list collapse silently erased skill sets), so
+        overloading it would put the tri-state's third value on the one spelling
+        that must keep meaning "untouched". The three are therefore mutually
+        exclusive and a caller that asks for two gets a ``ValueError`` rather
+        than a precedence rule nobody can see in the argv.
         """
+        if inherit_skills and (clear_skills or skills is not None):
+            raise ValueError("inherit_skills conflicts with skills/clear_skills")
         instance = self.get(persona_instance_id)
         before_patch_fields = self._profile_patch_snapshot(instance)
         changed = False
@@ -1593,8 +1627,14 @@ class PersonaInstanceStore:
             if value and instance.current_task_id != value:
                 instance.current_task_id = value
                 changed = True
-        if skills is not None or clear_skills:
-            value = [] if clear_skills else _safe_skill_overrides(skills or [])
+        if skills is not None or clear_skills or inherit_skills:
+            # ``None`` is the third value, not the absence of one — see the
+            # tri-state table above. The comparison is deliberately ``!=`` on
+            # the raw attribute so ``[] -> None`` registers as a change: those
+            # two resolve to different skill sets the moment the template holds
+            # anything, and reading them as equal would make the inherit door a
+            # silent no-op for exactly the agents that need it.
+            value = None if inherit_skills else ([] if clear_skills else _safe_skill_overrides(skills or []))
             if instance.skill_overrides != value:
                 instance.skill_overrides = value
                 changed = True
@@ -1605,7 +1645,13 @@ class PersonaInstanceStore:
                 "display_name": instance.display_name,
                 "current_chat_goal": instance.current_chat_goal,
                 "goal_id": instance.goal_id,
-                "skill_overrides": list(instance.skill_overrides or []),
+                # ``None`` travels as ``None``: the event's reader cannot tell
+                # "pinned to no skills" from "follows the template" if the two
+                # are spelled the same, and after ``--inherit-skills`` both
+                # states are reachable through this one verb.
+                "skill_overrides": (
+                    list(instance.skill_overrides) if instance.skill_overrides is not None else None
+                ),
                 "provider": instance.provider,
                 "model": instance.model,
                 "api_mode": instance.api_mode,
@@ -2756,14 +2802,24 @@ class PersonaInstanceStore:
         """Operator-editable runtime fields watched for S6 field-patch diffs.
 
         Lists are copied so a before/after comparison is not fooled by in-place
-        mutation of the same underlying object."""
+        mutation of the same underlying object.
+
+        ``skill_overrides`` keeps its ``None`` rather than collapsing to ``[]``,
+        because this dict's ONLY job is the ``!=`` that decides whether a field
+        moved, and those two values are the tri-state's two different answers
+        ("no skills" versus "follow the template"). Collapsed, the
+        ``--inherit-skills`` write diffed to nothing and shipped no
+        ``state.patched`` field at all, so a connected launcher went on
+        rendering the agent as customized until its next full snapshot."""
 
         return {
             "display_name": instance.display_name,
             "current_chat_goal": instance.current_chat_goal,
             "goal_id": instance.goal_id,
             "current_task_id": instance.current_task_id,
-            "skill_overrides": list(instance.skill_overrides or []),
+            "skill_overrides": (
+                list(instance.skill_overrides) if instance.skill_overrides is not None else None
+            ),
             "provider": instance.provider,
             "model": instance.model,
             "api_mode": instance.api_mode,

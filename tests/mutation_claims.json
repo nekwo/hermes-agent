@@ -316,6 +316,36 @@
       ]
     },
     {
+      "id": "inherit-skills-is-just-another-clear",
+      "path": "agent_runtime/persona_assignments.py",
+      "symbol": "PersonaInstanceStore.update_profile",
+      "operator": "collapse-the-tri-state-third-value",
+      "find": "            value = None if inherit_skills else ([] if clear_skills else _safe_skill_overrides(skills or []))",
+      "replace": "            value = [] if (clear_skills or inherit_skills) else _safe_skill_overrides(skills or [])",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_persona_instance_update_profile_skills.py::test_inherit_is_not_the_same_write_as_clear"
+      ]
+    },
+    {
+      "id": "the-patch-snapshot-collapses-none-onto-empty",
+      "path": "agent_runtime/persona_assignments.py",
+      "symbol": "PersonaInstanceStore._profile_patch_snapshot",
+      "operator": "collapse-the-tri-state-third-value",
+      "find": "            \"skill_overrides\": (\n                list(instance.skill_overrides) if instance.skill_overrides is not None else None\n            ),",
+      "replace": "            \"skill_overrides\": list(instance.skill_overrides or []),",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_state_patches.py::test_flag_on_inherit_skills_ships_a_null_skill_overrides_field"
+      ]
+    },
+    {
       "id": "s4-an-omitted-skill-flag-clears-every-instance-override",
       "path": "hermes_cli/harness_parts/persona_commands.py",
       "symbol": "_cmd_persona_instance_update_profile",

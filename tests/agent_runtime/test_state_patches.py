@@ -330,6 +330,54 @@ def test_flag_on_profile_model_override_ships_recomputed_derived_fields(set_delt
     assert "reasoning_supported" in changed
 
 
+def test_flag_on_inherit_skills_ships_a_null_skill_overrides_field(set_delta_patches, isolate_agent_runtime_root):
+    """``[] -> None`` is a CHANGE, and the patch lane has to say so.
+
+    RED-FIRST against ``_profile_patch_snapshot``, which stored
+    ``list(instance.skill_overrides or [])`` — collapsing the tri-state's two
+    non-set values into one. With that collapse an ``--inherit-skills`` write
+    off an emptied agent diffed to NOTHING, so this chokepoint shipped no
+    ``state.patched`` field at all and a connected launcher went on rendering
+    the agent as customized until its next full snapshot. The store write itself
+    was correct the whole time, which is what made it invisible.
+
+    ``skills`` rides with it because the wire map pairs the two
+    (``_PERSONA_INSTANCE_STORE_TO_WIRE``): the launcher renders the resolved
+    set, and after an inherit that set is the PERSONA's.
+    """
+
+    set_delta_patches(True)
+    store = PersonaInstanceStore()
+    instance = mint_free_floating("profile:reviewer", store=store)
+    store.update_profile(instance.id, clear_skills=True)
+    assert store.get(instance.id).skill_overrides == []
+
+    store.update_profile(instance.id, inherit_skills=True)
+
+    changed = _patches()[-1].payload["changed"]
+    assert changed["skill_overrides"] is None
+    # ANTI-VACUITY: the paired wire field ships too, so a client folding only
+    # the derived list is not left showing the emptied set.
+    assert "skills" in changed
+
+
+def test_inherit_skills_refuses_to_ride_with_a_set_or_a_clear(isolate_agent_runtime_root):
+    """The tri-state's three values are mutually exclusive at the STORE, not
+    only at the CLI — ``harness call`` and the RPC lane reach this method
+    without going through argparse."""
+
+    store = PersonaInstanceStore()
+    instance = mint_free_floating("profile:reviewer", store=store)
+    store.update_profile(instance.id, skills=["harness-qa-verdict"])
+
+    with pytest.raises(ValueError):
+        store.update_profile(instance.id, inherit_skills=True, clear_skills=True)
+    with pytest.raises(ValueError):
+        store.update_profile(instance.id, inherit_skills=True, skills=["harness-continuity"])
+    # A refused write writes nothing.
+    assert store.get(instance.id).skill_overrides == ["harness-qa-verdict"]
+
+
 def test_flag_off_profile_update_emits_no_patch(set_delta_patches, isolate_agent_runtime_root):
     set_delta_patches(False)
     store = PersonaInstanceStore()

@@ -5437,6 +5437,13 @@ def _cmd_persona_instance_update_profile(args) -> int:
             # not a fix, and not something a cron script or a remote `call` gets.
             skills=requested_skills,
             clear_skills=bool(getattr(args, "clear_skills", False)),
+            # The third value of the skills tri-state, and the only one that
+            # had no door before 2026-09-03: `--clear-skills` writes `[]`
+            # ("explicitly none"), never `null` ("follow the template again"),
+            # so one Save at "this agent" scope pinned the agent off its
+            # persona forever. `getattr` with a default, like its siblings,
+            # because `harness call` builds an args namespace by hand.
+            inherit_skills=bool(getattr(args, "inherit_skills", False)),
         )
     except ValueError as exc:
         data = {"ok": False, "error": str(exc)}

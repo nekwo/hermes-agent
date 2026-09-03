@@ -8061,6 +8061,14 @@
           "required": false,
           "type": null
         },
+        "--inherit-skills": {
+          "action": "store_true",
+          "canonical": "--inherit-skills",
+          "choices": null,
+          "nargs": 0,
+          "required": false,
+          "type": null
+        },
         "--json": {
           "action": "store_true",
           "canonical": "--json",

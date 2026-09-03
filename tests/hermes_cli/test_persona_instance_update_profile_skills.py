@@ -214,3 +214,149 @@ def test_clear_skills_still_clears(instance_with_two_overrides, capsys):
 
     assert code == 0
     assert _overrides(instance_with_two_overrides) == []
+
+
+def test_inherit_skills_hands_the_agent_back_to_its_persona_default(
+    instance_with_two_overrides, capsys
+):
+    """THE re-inherit door — the third value of the tri-state, ruled 2026-09-03.
+
+    ``--clear-skills`` writes ``[]`` ("explicitly none") and ``--skill`` writes a
+    set; neither writes ``None``, and ``None`` is the ONLY value
+    ``models.apply_instance_model_overrides`` reads as "use the persona's list,
+    live". So before this arm existed a single Save at "this agent" scope pinned
+    that agent off its template permanently, and the template tier made that
+    worse in proportion to its use: "fix the persona and let the existing agents
+    follow" silently skipped every agent the sheet had already touched.
+
+    ANTI-VACUITY, and the reason the assertion is a pair. ``skill_overrides is
+    None`` alone would also pass if the write had done nothing observable, so the
+    RESOLVED set is asserted too: it must now be the PERSONA's
+    ``["harness-qa-verdict"]``, not the two ids this instance was holding. That
+    is the difference between ``None`` and ``[]`` stated in the one place it
+    means something.
+    """
+
+    from agent_runtime.models import apply_instance_model_overrides
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+    from agent_runtime.store import AgentStore
+
+    code = _dispatch(
+        [
+            "harness", "persona", "instance", "update-profile",
+            instance_with_two_overrides,
+            "--inherit-skills",
+            "--json",
+        ]
+    )
+    data = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert data["ok"] is True
+    assert _overrides(instance_with_two_overrides) is None
+
+    instance = PersonaInstanceStore().get(instance_with_two_overrides)
+    resolved = apply_instance_model_overrides(AgentStore().get("qa"), instance)
+    assert resolved.skills == ["harness-qa-verdict"]
+
+
+def test_inherit_is_not_the_same_write_as_clear(
+    instance_with_two_overrides, capsys
+):
+    """``[]`` and ``None`` must stay two different states through the CLI.
+
+    The whole row exists because they were collapsed at the only door that
+    could reach either. If ``--inherit-skills`` were implemented as
+    ``--clear-skills``, this reds: an emptied agent resolves to NO skills while
+    an inheriting one resolves to the template's.
+    """
+
+    from agent_runtime.models import apply_instance_model_overrides
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+    from agent_runtime.store import AgentStore
+
+    assert _dispatch(
+        [
+            "harness", "persona", "instance", "update-profile",
+            instance_with_two_overrides, "--clear-skills", "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    assert _overrides(instance_with_two_overrides) == []
+    emptied = apply_instance_model_overrides(
+        AgentStore().get("qa"), PersonaInstanceStore().get(instance_with_two_overrides)
+    )
+    assert emptied.skills == []
+
+    # ...and the door back out of it is reachable from that same state, which
+    # is the "one-way door" the row named.
+    assert _dispatch(
+        [
+            "harness", "persona", "instance", "update-profile",
+            instance_with_two_overrides, "--inherit-skills", "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    assert _overrides(instance_with_two_overrides) is None
+    inheriting = apply_instance_model_overrides(
+        AgentStore().get("qa"), PersonaInstanceStore().get(instance_with_two_overrides)
+    )
+    assert inheriting.skills == ["harness-qa-verdict"]
+
+
+def test_inherit_and_a_skill_set_in_one_argv_is_refused(
+    instance_with_two_overrides, capsys
+):
+    """Two of the three tri-state values in one call is a REFUSAL, not a
+    precedence rule.
+
+    A silent winner would be unreadable from the argv, and the launcher builds
+    this argv from a capability args map where both keys can be present at once.
+    Exit 2 with the store untouched — the same shape ``clear_model_override``
+    already uses for its own mutually-exclusive lane.
+    """
+
+    code = _dispatch(
+        [
+            "harness", "persona", "instance", "update-profile",
+            instance_with_two_overrides,
+            "--inherit-skills",
+            "--skill", "harness-continuity",
+            "--json",
+        ]
+    )
+    data = json.loads(capsys.readouterr().out)
+
+    assert code == 2
+    assert data["ok"] is False
+    assert "inherit_skills" in data["error"]
+    # Untouched: a refused write writes nothing.
+    assert _overrides(instance_with_two_overrides) == [
+        "harness-qa-verdict",
+        "harness-continuity",
+    ]
+
+
+def test_inherit_and_clear_in_one_argv_is_refused(
+    instance_with_two_overrides, capsys
+):
+    """The other pairing — the two switch flags, which argparse will happily
+    accept together because neither knows about the other."""
+
+    code = _dispatch(
+        [
+            "harness", "persona", "instance", "update-profile",
+            instance_with_two_overrides,
+            "--inherit-skills",
+            "--clear-skills",
+            "--json",
+        ]
+    )
+    data = json.loads(capsys.readouterr().out)
+
+    assert code == 2
+    assert data["ok"] is False
+    assert _overrides(instance_with_two_overrides) == [
+        "harness-qa-verdict",
+        "harness-continuity",
+    ]
