@@ -1424,6 +1424,47 @@ hermetic env) and the fact that `tests/acp` cannot collect from a git
 worktree (`No module named 'acp'`; the editable install resolves to the
 primary checkout — run it from the primary, or name your lanes explicitly).
 
+**Validated scope vs. what the runner discovers by default.**
+`scripts/run_tests_parallel.py` default-discovers the WHOLE `tests` tree
+(`_DEFAULT_ROOTS = ['tests']`, minus the integration/e2e/docker skips above),
+but R3's parity and integrity proof — the evidence the 8-worker default is
+ruled on — was run against **exactly four directories**:
+
+```
+tests/agent_runtime tests/hermes_cli tests/cli tests/state
+```
+
+That four-directory set is Lane B of the push gate (`.githooks/pre-push`) and
+is what "the validated suite" means everywhere else in this doc. A bare
+whole-tree invocation on a green `main` is not a wider proof of the same
+thing — it is a **different, unvalidated scope**, and on this workstation
+(`de710d0b89`, 2026-09-01) it read 31,063 passed / 142 failed. Every one of
+those 142 triages into an environmental class, not a code defect:
+
+- **Provider-network hangs** — a test that reaches a real model-provider
+  endpoint has no such endpoint reachable outside a network-shaped CI runner
+  and hangs or times out instead of failing fast. Not fixable by retrying;
+  the test's own environment gate (an API-key check, a `pytest.mark.skip`) is
+  what is supposed to keep it out of a hermetic run, and a red here usually
+  means that gate is missing or too narrow.
+- **WSL-bash PATH shadow** — on a Windows box with WSL installed, `bash` on
+  `PATH` can resolve to WSL's bash ahead of Git Bash. Anything that shells
+  out expecting Git Bash semantics (path translation, line endings, the
+  installed toolchain) gets WSL's instead and fails in ways that look like a
+  code defect but are a PATH-ordering fact of that machine.
+- **`acp` / `ripgrep` dependency holes** — `tests/acp` cannot collect at all
+  outside the primary checkout (`No module named 'acp'`; the editable install
+  resolves there, not to a worktree — see the bullet above), and a subset of
+  tests need a real `ripgrep` binary on `PATH` that a fresh checkout or a
+  worktree may not have. Both are "this environment does not have the tool
+  the test needs," not a code regression.
+
+Widening the validated scope past these four directories is a scope decision
+with an open row (Mission Control queue, "the ruled default's SCOPE is wider
+than its proof"), not something a hook or a doc edit does unilaterally.
+Details and the full triage: `docs/agent-runtime-harness/planned/hermes-suite-perf.md`
+§"Follow-ups this diagnosis surfaced" (residual 2026-09-01).
+
 **Flake policy:** the runner auto-retries a failing test FILE once in a fresh
 subprocess (`--file-retries`, default 1; `HERMES_TEST_FILE_RETRIES=0` to
 disable). Pass-on-retry counts as green but is printed in a `⚠ FLAKY` summary
