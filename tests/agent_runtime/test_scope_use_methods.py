@@ -139,7 +139,7 @@ def test_the_manifest_carries_both_names_and_the_contract_integer_does_not_move(
     assert manifest["tiers"][REALM_USE_METHOD] == TIER_CONSOLE
 
 
-def test_the_restricted_set_names_exactly_the_two_registered_methods():
+def test_the_restricted_set_names_the_two_registered_scope_methods():
     """``LOCAL_CONSOLE_METHODS`` holds LITERALS, not imports — deliberately, for
     the reason ``PEER_METHOD_ALLOWLIST`` does: ``call_authorization`` is the
     policy module and must not import a service to answer a question about a
@@ -152,11 +152,22 @@ def test_the_restricted_set_names_exactly_the_two_registered_methods():
     added later fails this instead of shipping ungated.
     """
 
-    assert LOCAL_CONSOLE_METHODS == {WORKSPACE_USE_METHOD, REALM_USE_METHOD}
+    # S2d put THREE peer-directory verbs in the same set, and they are a
+    # different KIND of fact from the scope pointers: the directory is the
+    # operator's own map of their network (which machines they paired, what
+    # those are called, the addresses they answer at), and one of the three
+    # DIALS on the caller's behalf. Same gate, same reason — the tier vocabulary
+    # has two words, both about strength, and this is about kind — so this test
+    # asserts the SCOPE half exactly and leaves the peer half to
+    # ``test_serve_gateway_peers_rpc.py``, which owns its argument.
+    assert {WORKSPACE_USE_METHOD, REALM_USE_METHOD} <= LOCAL_CONSOLE_METHODS
     registry = set(serve_rpc.method_names())
     assert LOCAL_CONSOLE_METHODS <= registry, "a restriction on a method that does not exist"
     scope_methods = {name for name in registry if name.endswith((".workspace.use", ".realm.use"))}
-    assert scope_methods == LOCAL_CONSOLE_METHODS, "a scope verb reached the registry ungated"
+    assert scope_methods == {WORKSPACE_USE_METHOD, REALM_USE_METHOD}, (
+        "a scope verb reached the registry ungated"
+    )
+    assert scope_methods <= LOCAL_CONSOLE_METHODS
 
 
 def test_neither_method_joins_the_peer_allowlist():

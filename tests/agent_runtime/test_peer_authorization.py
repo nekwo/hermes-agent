@@ -30,6 +30,7 @@ from agent_runtime.call_authorization import (
     CALLER_DEVICE,
     CALLER_PEER,
     CALLER_UNKNOWN,
+    LOCAL_CONSOLE_METHODS,
     PEER_METHOD_ALLOWLIST,
     REASON_SCOPE_DENIED,
     TIER_CONSOLE,
@@ -121,9 +122,17 @@ def test_a_peer_is_refused_read_verbs_too_which_is_the_arm_ordering(
 
     for name in reads:
         assert authorize_call(TIER_READ, PEER, method=name).ok is False, name
-    # …while the same verbs stay open to the callers A3 and A5 left open.
-    assert authorize_call(TIER_READ, STDIO_OWNER, method=reads[0]).ok is True
-    assert authorize_call(TIER_READ, None, method=reads[0]).ok is True
+
+    # …while the same verbs stay open to the callers A3 and A5 left open. The
+    # sample EXCLUDES ``LOCAL_CONSOLE_METHODS``, and that exclusion is the
+    # correction rather than a convenience: those verbs are restricted by KIND
+    # and not by strength (WS4 / R-B, and S2d's peer-directory door), so "a read
+    # verb is open to ``unknown``" was never a claim about them. Picking one
+    # blindly made this assertion depend on which name sorted first.
+    open_reads = [name for name in reads if name not in LOCAL_CONSOLE_METHODS]
+    assert open_reads, "every read verb is kind-restricted; this proves nothing"
+    assert authorize_call(TIER_READ, STDIO_OWNER, method=open_reads[0]).ok is True
+    assert authorize_call(TIER_READ, None, method=open_reads[0]).ok is True
 
 
 def test_a_peer_naming_no_method_is_refused_rather_than_defaulted():

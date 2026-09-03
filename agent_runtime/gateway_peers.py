@@ -2056,3 +2056,20 @@ def _emit_peer_event(event_type: str, payload: dict[str, Any]) -> None:
         EventLog().append(Event(now(), event_type, None, None, None, dict(payload)))
     except Exception:  # noqa: BLE001 — an evidence channel, never the mutation
         pass
+
+    # S2d. The SAME call site feeds the launcher's push lane, because the
+    # launcher's hermes stream carries no events at all (its hydrate core and
+    # fold entities have no room for one) and canon 03 invariant 6 routes new
+    # server→client push over JSON-RPC notifications instead. Emitting both
+    # from here is what stops the two lanes disagreeing about WHEN something
+    # changed: one write, one process, one moment.
+    #
+    # Imported lazily and guarded: this is a credential store, and it must not
+    # take a hard dependency on the serve's RPC surface — a CLI ``peers join``
+    # runs this function in a process where nobody is subscribed to anything.
+    try:
+        from .serve_gateway_peers_rpc import publish_peer_event
+
+        publish_peer_event(event_type, dict(payload))
+    except Exception:  # noqa: BLE001 — a notification is never the mutation
+        pass

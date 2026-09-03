@@ -267,8 +267,26 @@ PEER_METHOD_ALLOWLIST: frozenset[str] = frozenset(
 #: it admits — here, RESTRICTS — nothing it was not edited to name, so a future
 #: ``console`` verb does not silently join, and widening or narrowing this door
 #: is a visible line in a diff with a reason attached.
+#: **S2d adds three, and they are a different KIND of fact from the first two.**
+#: The scope pointers are refused to a remote caller because parking THIS
+#: install's scope is the desktop operator's move; the peer-directory verbs are
+#: refused because the directory is the operator's own MAP OF THEIR NETWORK —
+#: which machines they have paired, what those machines are called, and the
+#: addresses they answer at. A console-tier phone is a real caller with a real
+#: credential and has no business with that map, and the tier vocabulary cannot
+#: say so: two words, both about strength, and this is about kind.
+#:
+#: ``runtime.gateway.peers.roster`` is here for a second reason as well: it
+#: DIALS another machine on the caller's behalf, so admitting a remote caller
+#: would let a paired device spend this install's peer credential.
 LOCAL_CONSOLE_METHODS: frozenset[str] = frozenset(
-    {"runtime.workspace.use", "runtime.realm.use"}
+    {
+        "runtime.workspace.use",
+        "runtime.realm.use",
+        "runtime.gateway.peers.subscribe",
+        "runtime.gateway.peers.list",
+        "runtime.gateway.peers.roster",
+    }
 )
 
 #: The transport name the gateway listener tags its connections with. Named here

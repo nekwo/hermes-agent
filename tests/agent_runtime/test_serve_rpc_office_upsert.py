@@ -1056,9 +1056,18 @@ def test_the_method_set_grew_and_the_contract_integer_did_not_move():
             # family: ``peer.*`` verbs are about the EDGE between two
             # installs and touch no level. Additive, so the integer holds.
             "peer.agent_chat.execute",
+            # S2c, additive: the ONE writing peer verb, and it writes the
+            # caller's own row in ``peers_cache.json`` — a file that gates
+            # nothing and that no credential path reads.
+            "peer.announce",
             # Stage P4 (R-P3), additive: the cross-install FETCH keyhole.
             "peer.media.get",
             "peer.ping",
+            # S2b, additive: the two READ verbs. A roster scoped to one
+            # workspace, and one thread the caller was already handed the
+            # session id for. Neither enumerates.
+            "peer.roster.list",
+            "peer.thread.read",
             "runtime.agent.create",
             # S5's inverse. The literal here predated it and was never grown,
             # so this pin had been red since ``runtime.agent.retire`` landed —
@@ -1067,6 +1076,12 @@ def test_the_method_set_grew_and_the_contract_integer_did_not_move():
             # Gateway Stage 3, additive.
             "runtime.chat.message",
             "runtime.chat.steer",
+            # S2d, additive: the serve's peer-directory door for its own
+            # launcher. The launcher's hermes stream carries no events, so
+            # canon 03 invariant 6 routes this push over notifications.
+            "runtime.gateway.peers.list",
+            "runtime.gateway.peers.roster",
+            "runtime.gateway.peers.subscribe",
             # Gateway Stage 8, additive: the fetch family joins the set.
             "runtime.media.get",
             "runtime.media.index",
@@ -1086,13 +1101,19 @@ def test_the_method_set_grew_and_the_contract_integer_did_not_move():
     ],
         "tiers": {
             "peer.agent_chat.execute": "console",
+            "peer.announce": "console",
             "peer.media.get": "console",
             "peer.ping": "read",
+            "peer.roster.list": "read",
+            "peer.thread.read": "console",
             "runtime.agent.create": "console",
             "runtime.agent.retire": "console",
             # A chat turn runs an agent with tools; see _runtime_chat_message.
             "runtime.chat.message": "console",
             "runtime.chat.steer": "console",
+            "runtime.gateway.peers.list": "read",
+            "runtime.gateway.peers.roster": "console",
+            "runtime.gateway.peers.subscribe": "read",
             "runtime.media.get": "console",
             "runtime.media.index": "console",
             "runtime.office.get": "read",
@@ -1221,13 +1242,28 @@ def test_the_write_method_is_transport_agnostic_and_answers_on_the_socket():
                 "contract": 1,
                 "methods": [
                     "peer.agent_chat.execute",
+                    # S2c, additive: the ONE writing peer verb, and it writes the
+                    # caller's own row in ``peers_cache.json`` — a file that gates
+                    # nothing and that no credential path reads.
+                    "peer.announce",
                     # Stage P4 (R-P3), additive: the cross-install FETCH keyhole.
                     "peer.media.get",
                     "peer.ping",
+                    # S2b, additive: the two READ verbs. A roster scoped to one
+                    # workspace, and one thread the caller was already handed the
+                    # session id for. Neither enumerates.
+                    "peer.roster.list",
+                    "peer.thread.read",
                     "runtime.agent.create",
                     "runtime.agent.retire",
                     "runtime.chat.message",
                     "runtime.chat.steer",
+                    # S2d, additive: the serve's peer-directory door for its own
+                    # launcher. The launcher's hermes stream carries no events, so
+                    # canon 03 invariant 6 routes this push over notifications.
+                    "runtime.gateway.peers.list",
+                    "runtime.gateway.peers.roster",
+                    "runtime.gateway.peers.subscribe",
                     # Gateway Stage 8, additive: the fetch family joins the set.
                     "runtime.media.get",
                     "runtime.media.index",
@@ -1245,12 +1281,18 @@ def test_the_write_method_is_transport_agnostic_and_answers_on_the_socket():
                 ],
                 "tiers": {
                     "peer.agent_chat.execute": "console",
+                    "peer.announce": "console",
                     "peer.media.get": "console",
                     "peer.ping": "read",
+                    "peer.roster.list": "read",
+                    "peer.thread.read": "console",
                     "runtime.agent.create": "console",
                     "runtime.agent.retire": "console",
                     "runtime.chat.message": "console",
                     "runtime.chat.steer": "console",
+                    "runtime.gateway.peers.list": "read",
+                    "runtime.gateway.peers.roster": "console",
+                    "runtime.gateway.peers.subscribe": "read",
                     "runtime.media.get": "console",
                     "runtime.media.index": "console",
                     "runtime.office.get": "read",

@@ -3418,6 +3418,15 @@ def serve_loop(
             )
 
             _office_subs.release(key)
+            # S2d's lane is namespaced away from both of the above for the same
+            # reason the office lane is, so a departing connection would
+            # otherwise leave a sink the fan-out keeps writing to — which is how
+            # a push registry starts holding a dead socket open.
+            from agent_runtime.serve_gateway_peers_rpc import (
+                PEER_DIRECTORY_SUBSCRIPTIONS as _peer_dir_subs,
+            )
+
+            _peer_dir_subs.release(key)
             if connection is not None:
                 connection.subscribed = False
                 with connection_sinks_lock:

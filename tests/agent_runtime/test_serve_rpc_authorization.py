@@ -36,6 +36,7 @@ from agent_runtime.call_authorization import (
     CALLER_STDIO_OWNER,
     CALLER_UNKNOWN,
     LOCAL_CONSOLE,
+    LOCAL_CONSOLE_METHODS,
     REASON_SCOPE_DENIED,
     REASON_UNKNOWN_TIER,
     STDIO_OWNER,
@@ -134,12 +135,22 @@ def test_every_registered_method_dispatches_through_the_gate():
 
     for name, tier in serve_rpc.method_tiers().items():
         frame = serve_rpc.handle_request(_request(name), refused)
-        if tier == TIER_READ:
+        if tier == TIER_READ and name not in LOCAL_CONSOLE_METHODS:
             # A read is not refused; it is answered (or it refuses on its own
             # terms, e.g. a missing workspace_id). What matters is that the
             # answer is never the GATE's.
             data = frame.get("error", {}).get("data", {})
             assert data.get("reason") != REASON_SCOPE_DENIED, name
+            continue
+        if name in LOCAL_CONSOLE_METHODS:
+            # A KIND restriction, and the gate answers it at whatever tier the
+            # verb declares (WS4 / R-B, and S2d's peer-directory door). So the
+            # refusal IS the gate's here — which is the opposite of the read arm
+            # above and is the whole point of the set: two words in the tier
+            # vocabulary, both about strength, and this one is about kind.
+            assert "result" not in frame, name
+            assert frame["error"]["data"]["reason"] == REASON_SCOPE_DENIED, name
+            assert frame["error"]["data"]["caller"] == CALLER_UNKNOWN, name
             continue
         assert "result" not in frame, name
         assert frame["error"]["code"] == serve_rpc.ERR_HANDLER_FAILED, name
