@@ -183,16 +183,45 @@ matters.
 
 ## Commits, in build order
 
+Shas below are POST-REBASE onto `origin/main` `b4a383a1e8` (see "The rebase"
+below); the pre-rebase shas the earlier draft carried are dead.
+
 | sha | what |
 |---|---|
-| `f86a3d451b` | A1 — `harness_core` + `expand_toolset_names` + `declared_lane_toolsets`; both permission modes start from the declaration; canon 01/05 |
-| `293d4a721c` | A2 — the persona-level lists go inert and visible (projections, `tool-diff` text mode, one log line per config load) |
-| `93764979ad` | A3 — admitted MCP is not a failure (R-S0a-4) + `admitted_mcp_servers` + the ratchet test + the canon 08 ledger row |
-| `bbb2cacd81` | A4 — the emitter, the three generated artifacts, the tools-first Operate table, the drift gate |
-| `454f458d3b` | A6 — `persona_skill_sources` + two `agent list` keys; A6a/A6b measurements recorded |
-| `ebd4daa698` | the gate repair the plan named: three stale coverage claims in `planned/serve-small-batch-field-notes-2026-09-02.md` |
-| `6083c9cca7` | five canon cites re-anchored for the lines A6c added to `harness.py` |
-| `1cf3f80cad` | the cross-repo stream goldens regenerated for `toolset_declaration` — **launcher byte mirror OWED** |
+| `61dd8fbbc3` | A1 — `harness_core` + `expand_toolset_names` + `declared_lane_toolsets`; both permission modes start from the declaration; canon 01/05 |
+| `cfb1fbf6d5` | A2 — the persona-level lists go inert and visible (projections, `tool-diff` text mode, one log line per config load) |
+| `162b1e7a0d` | A3 — admitted MCP is not a failure (R-S0a-4) + `admitted_mcp_servers` + the ratchet test + the canon 08 ledger row |
+| `d5dd25f630` | A4 — the emitter, the three generated artifacts, the tools-first Operate table, the drift gate |
+| `ba7157801d` | A6 — `persona_skill_sources` + two `agent list` keys; A6a/A6b measurements recorded |
+| `029f6a79ad` | the gate repair the plan named: three stale coverage claims in `planned/serve-small-batch-field-notes-2026-09-02.md` |
+| `99ead2f2d1` | the cross-repo stream goldens regenerated for `toolset_declaration` — **launcher byte mirror OWED** |
+| `bb780ab1df` | these field notes |
+| `18c0720f2b` | nine canon cites re-anchored after the rebase (replaces the pre-rebase `6083c9cca7`, which the rebase dropped as empty — main had re-anchored the same cites for its own shift) |
+
+## The rebase (2026-09-03, after the build)
+
+`origin/main` moved 16 commits while S0a was being built and the branch was
+rebased onto `b4a383a1e8`. **Every conflict was a line NUMBER, not a fact**:
+main's `characters payload-contract` command (`1455e03c2d`) added +35 lines to
+`hermes_cli/harness.py` and +46 to `persona_commands.py`, and main re-anchored
+the canon cites for its own shift (`63dade94e2`, `2dc6805041`) — the same cites
+S0a had re-anchored for A2's +16 and A6c's +18. Resolution rule: take main's
+TEXT on every conflicted hunk (so main's payload-contract work is kept whole),
+then re-derive every affected line number from the tree rather than from either
+side's arithmetic (`18c0720f2b`). Nine cites moved; the gate is the check, not
+the argument.
+
+Both sides' code is present and neither was reverted: `git diff origin/main`
+over `hermes_cli/` is exactly S0a's +22 / +16, and `characters payload-contract`
+resolves in the CLI contract dump. Regenerating what the rebase moved:
+
+- `scripts/dump_cli_contract.py --write` → **byte-identical** to what main
+  committed (`190 command paths, sha256 3473f55341db72d5`). S0a adds no parser,
+  so the 190th path is main's new command and nothing of S0a's is missing.
+- `scripts/emit_harness_tool_inventory.py --write` → **byte-identical**
+  (`43 tools across 15 toolsets, sha256 fb01011e909ab4dc`). Main registered no
+  tool into a `harness_core` member toolset, so the inventory did not move.
+- The live after-table below re-measured unchanged after the rebase.
 
 ## The after-table (live, `HERMES_HOME=X:\Eternia\.hermes`, no profile edited)
 
@@ -402,8 +431,9 @@ it from this file is the orchestrator's step after landing.
 |---|---|
 | `scripts/emit_harness_tool_inventory.py --check` | `tool inventory fresh: 43 tools across 15 toolsets, sha256 fb01011e909ab4dc` (exit 0) |
 | `scripts/doc_cite_adjacency.py --root docs/agent-runtime-harness --exclude=archive/ --exclude=planned/` | `UNWAIVED FAILURES: 0` / `STALE WAIVERS … 0` / probe passed |
-| `scripts/dump_cli_contract.py --check` | `CLI contract fresh: 189 command paths, sha256 d4aec8ab76ba4ed6` (argparse untouched) |
-| plan §4 unit batch + the four new/extended files (21 files) | `=== Summary: 21 files, 428 tests passed, 0 failed (100% complete) in 112.6s (6 workers) ===` |
+| `scripts/dump_cli_contract.py --check` | `CLI contract fresh: 190 command paths, sha256 3473f55341db72d5` (post-rebase; 190 = main's new `characters payload-contract`, and S0a adds no parser) |
+| plan §4 unit batch + the new/extended files, pre-rebase (21 files) | `=== Summary: 21 files, 428 tests passed, 0 failed (100% complete) in 112.6s (6 workers) ===` |
+| the same batch + `test_cli_contract_dump.py`, POST-REBASE (22 files) | `=== Summary: 22 files, 432 tests passed, 1 failed (100% complete) in 133.9s (6 workers) ===` — the one failure is main's own, classified below |
 | `scripts/run_tests.sh tests/scripts tests/hermes_cli tests/agent_runtime -j 8` | `=== Summary: 1019 files, 11716 tests passed, 5 failed (100% complete) in 3604.1s (8 workers) ===`, plus 24 files whose per-test 30 s timeout tripped under load and never ran. Every one re-run and classified below. |
 
 ### Every red, classified
@@ -413,7 +443,8 @@ pre-existing red on `main`. Nothing was weakened or baselined to make a number.
 
 | red | verdict |
 |---|---|
+| `test_persona_skill_policy.py::test_charsheet_skill_documents_exactly_the_characters_verbs_hermes_has` (post-rebase) | **RED ON `origin/main` ITSELF, not mine — reported, not fixed.** `AssertionError … Extra items in the right set: 'payload-contract'`. Main's `characters payload-contract` verb (`1455e03c2d`) shipped without adding the verb to the charsheet skill doc this test gates. Classified by checking out `origin/main` (`b4a383a1e8`) in this worktree and running the single test: `1 failed, 25 deselected in 1.76s`. S0a touches neither the `characters` parser nor `harness-charsheet-authoring`. One line in that skill's verb list closes it; it belongs to whoever landed the verb. |
 | `test_stream_contract_fixture.py` (2 tests) | **MINE, fixed** (`1cf3f80cad`). A2's `toolset_declaration` is a new key path inside `core.persona_instances.<id>`, and five cross-repo goldens carry that row. The gate caught exactly what it exists to catch. Regenerated with `scripts/generate_agent_runtime_stream_fixtures.py`; **the launcher's byte mirror is OWED** — see the CROSS-STACK COPY STATUS note the commit adds to `tests/fixtures/stream_frames/README.md`. |
 | `test_serve_drain_accounting.py` · `test_serve_stream_hub.py` · `test_persona_config_projection.py` | **Contention.** All three passed on a clean re-run of the four files: `4 files, 91 tests passed, 0 failed in 52.5s`. Two are wall-clock serve tests ("no `drain_abandoned` frame within 20.0s"); the third had timed out mid-`git commit` inside `publish_realm_sync`. My own fault for running a second suite beside the first — recorded so the next builder does not. |
 | 23 of the 24 "no tests ran" files | **The 30 s per-test timeout under load** (`pyproject.toml` `addopts = --timeout=30`), not failures. Re-run in two clean batches: `24 files, 370 tests passed, 1 failed` then `5 files, 99 tests passed, 1 failed` — the only remaining failure is the row below. The four stubbornest are AST-walk-the-whole-tree tests that take 38-49 s of real work each; run directly, uncontended, they pass: `test_s29_snapshot_dead_local_removal` 6 passed in 43.79 s, `test_s27_snapshot_orphan_tree_removal` + `test_s50_launcher_process_hygiene_removal` 9 passed in 49.37 s, `test_stream_stale_first_routing` 8 passed in 54.50 s. **Classified against the untouched tree**: at `b2a69f0cc3` (the plan commit, checked out in this worktree) the same three files behave identically — two of them only pass on the runner's 1-worker retry. Not caused by S0a. |
-| `test_web_server.py::TestBuildSchemaFromConfig::test_no_single_field_categories` | **Pre-existing red on `main`, not mine.** `AssertionError: Category 'charsheet' has only 1 field(s) — should be merged`. It reads `hermes_cli.web_server.CONFIG_SCHEMA` and nothing else; S0a touches no file in that module's blast radius (`git diff --name-only b2a69f0cc3..HEAD` has zero `web_server` entries). Deterministic — `1 failed, 99 passed, 4 skipped in 28.95 s` on a direct uncontended run. Reported, not fixed: whoever added the single-field `charsheet` category owns it. |
+| `test_web_server.py::TestBuildSchemaFromConfig::test_no_single_field_categories` | **Was a pre-existing red on `main`; main fixed it in `7c8ace9851` and it is GREEN on the rebased branch** (`1 passed` on a direct run). Original finding kept for the record: **not mine.** `AssertionError: Category 'charsheet' has only 1 field(s) — should be merged`. It reads `hermes_cli.web_server.CONFIG_SCHEMA` and nothing else; S0a touches no file in that module's blast radius (`git diff --name-only b2a69f0cc3..HEAD` has zero `web_server` entries). Deterministic — `1 failed, 99 passed, 4 skipped in 28.95 s` on a direct uncontended run. Reported, not fixed: whoever added the single-field `charsheet` category owns it. |
