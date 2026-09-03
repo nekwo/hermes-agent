@@ -104,13 +104,51 @@ class GatewayFenceViolation(RuntimeError):
     """A test (or something it left running) tried to touch the live gateway."""
 
 
-def _real_hermes_root() -> Path | None:
-    """The operator's real store root, captured before any test redirects it.
+#: Env var by which the canonical runner hands this module the operator's real
+#: store root. TEST-ONLY, and deliberately not ``HERMES_REAL_HOME``: that name
+#: is a production variable (``hermes_constants.py`` ``_iter_real_home_candidates``
+#: — the OS-user home an ACP child inherits, not a store root) and
+#: ``tests/conftest.py`` blanks it per test on purpose.
+REAL_ROOT_ENV = "HERMES_TEST_REAL_ROOT"
 
-    Read from ``hermes_constants`` rather than ``os.environ`` so a suite
-    started with ``HERMES_HOME`` already pointing somewhere hermetic still
-    learns the path it must never spawn against.
+
+def _real_hermes_root() -> Path | None:
+    """The operator's real store root — the one this fence must never spawn at.
+
+    Two sources, explicit first:
+
+    1. ``HERMES_TEST_REAL_ROOT``, set by ``scripts/run_tests.sh`` from the
+       production resolver BEFORE it drops the environment.
+    2. ``hermes_constants.get_default_hermes_root()``, for a bare-pytest run
+       from an operator shell — read from ``hermes_constants`` rather than
+       ``os.environ`` so a suite started with ``HERMES_HOME`` already pointing
+       somewhere hermetic still learns the path it must never spawn against.
+
+    The explicit source exists because source 2 is BLIND under the canonical
+    runner, and that was the whole arm's coverage. ``run_tests.sh`` execs
+    ``env -i`` without HERMES_HOME (on purpose — ``tests/conftest.py`` installs
+    a hermetic session home instead), this module imports after that home is
+    already in the environment, and the resolver therefore answered with the
+    throwaway TEMPDIR. Measured on this workstation 2026-09-03::
+
+        run_tests.sh : C:\\...\\Temp\\hermes-test-home-g_quyxlh   (useless)
+        bare pytest  : X:\\Eternia\\.hermes                       (correct)
+
+    A temp directory minted milliseconds earlier appears in no argv, so
+    :func:`_names_real_root` could never fire and the three tests in
+    ``test_gateway_spawn_fence.py`` that drive this arm were asserting against
+    it. The defence existed only on the path nobody is told to use.
+
+    Order matters and explicit must win: under the runner the fallback names
+    the session's hermetic home, and treating THAT as the forbidden root would
+    refuse tests for using the sandbox they were given.
     """
+    explicit = (os.environ.get(REAL_ROOT_ENV) or "").strip()
+    if explicit:
+        try:
+            return Path(explicit).resolve()
+        except Exception:
+            return None
     try:
         from hermes_constants import get_default_hermes_root
 
@@ -473,6 +511,7 @@ def real_root() -> Path | None:
 __all__ = [
     "GatewayFenceViolation",
     "REAL_PAUSE_MARK",
+    "REAL_ROOT_ENV",
     "arm",
     "arm_permanently",
     "classify",

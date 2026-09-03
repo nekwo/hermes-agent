@@ -354,10 +354,19 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
     # HERMES_REAL_HOME". Four independent workarounds for one missing central
     # blank is the argument for blanking centrally.
     #
-    # Unset is what CI has for all of them: ``scripts/run_tests.sh`` forwards only
-    # HERMES_RUN_SLOW_PET_TESTS and HERMES_E2E_BROWSER into the per-file
-    # subprocesses (:182-183), and ``.github/workflows/tests.yml`` sets none of
-    # them. Tests that need one set it explicitly with monkeypatch, after this.
+    # Unset is what CI has for all of them: the HERMES_* names
+    # ``scripts/run_tests.sh`` forwards into the per-file subprocesses are
+    # HERMES_RUN_SLOW_PET_TESTS, HERMES_E2E_BROWSER, HERMES_TEST_TMP_ROOT and
+    # HERMES_TEST_REAL_ROOT — none of which is on this list, all four
+    # test-only — and ``.github/workflows/tests.yml`` sets none of these.
+    # Tests that need one set it explicitly with monkeypatch, after this.
+    #
+    # HERMES_TEST_REAL_ROOT is worth naming here because it looks like the
+    # opposite of this fixture's job: it carries the operator's REAL store root
+    # into the hermetic env. It is not a redirect — nothing production reads it.
+    # It is the FORBIDDEN path, handed to ``tests/hermes_cli/_gateway_fence.py``
+    # so that fence can refuse a spawn aimed at it. HERMES_HOME stays unset and
+    # step 3 below still installs the per-test temp home.
     "HERMES_PROFILE",
     "HERMES_AUTH_HOME",
     "HERMES_SHARED_AUTH_DIR",

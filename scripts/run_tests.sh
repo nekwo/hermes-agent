@@ -11,7 +11,10 @@
 #   * Env vars blanked (conftest.py also does this, but this
 #     is belt-and-suspenders for anyone running pytest outside our
 #     conftest path — e.g. on a single file)
-#   * Proper venv activation (probes .venv, venv, then ~/.hermes/...)
+#   * Proper venv activation (probes .venv, venv, then the shared
+#     canonical test venv — $HERMES_TEST_VENV, ~/.venvs/hermes-test —
+#     then ~/.hermes/...). A worktree with no .venv of its own finds
+#     the shared one with no env vars set.
 #
 # Usage:
 #   scripts/run_tests.sh                            # full suite
@@ -44,14 +47,19 @@
 # prevent — so it is a fact about the interpreter, not a defect in those
 # tests, and it is not being chased (ML-7 / operator ruling R-e, 2026-08-18).
 #
-# If this script refuses with "no virtualenv with pytest found", it means
-# every candidate venv either does not exist or has no pytest INSTALLED —
-# an empty `.venv/` directory counts as the former. Point it at a real one:
+# If this script refuses with "no virtualenv with pytest found", it lists every
+# candidate it probed; each one either does not exist or has no pytest
+# INSTALLED — an empty `.venv/` directory counts as the former. The fix is to
+# build the shared canonical venv (recipe in the probe comment below) or point
+# the script at one you already have:
 #
+#   HERMES_TEST_VENV=/path/to/venv scripts/run_tests.sh tests/hermes_cli
 #   HERMES_PYTHON=/c/Python312/python.exe scripts/run_tests.sh tests/hermes_cli
 #
-# Refusing is deliberate; a venv without pytest reports "0 tests passed",
-# which reads green at a glance.
+# Prefer HERMES_TEST_VENV: it takes a venv (so its pins are whatever that venv
+# pins), where HERMES_PYTHON takes any interpreter — including a system one
+# whose site-packages shadow this repo's pins. Refusing is deliberate; a venv
+# without pytest reports "0 tests passed", which reads green at a glance.
 
 set -euo pipefail
 
@@ -70,10 +78,64 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # .venv — every file then died with "No module named pytest" and the run
 # reported "0 tests passed" (which reads green at a glance even though the
 # exit code is 1). Skip such a venv and keep probing instead.
+#
+# ── The canonical SHARED test venv ────────────────────────────────────────
+#
+# A per-checkout ``.venv`` is the right answer for one checkout and the wrong
+# answer for a machine that carries several. This repo is worked in worktrees
+# (``git worktree add``), and a fresh worktree has no ``.venv`` — so every
+# wave that ran a suite from one had to hand-carry ``HERMES_PYTHON=`` pointed
+# at whatever interpreter happened to have pytest. On the workstation that
+# found this, that was the system ``C:\Python312``: a grab-bag with
+# ``packaging==26.2`` shadowing the repo's pinned ``26.0``, ``mcp==1.28.1``
+# against the pinned ``1.26.0`` and ``starlette==1.0.0`` against ``1.6.0``.
+# Different pins per wave is not a test environment, it is three of them.
+#
+# So the probe now also looks for a venv that lives OUTSIDE every checkout and
+# is therefore shared by all of them, in this order:
+#
+#   1. ``$HERMES_TEST_VENV``        — explicit, wins over the default
+#   2. ``$HOME/.venvs/hermes-test`` — the default
+#
+# Both are PORTABLE. No machine-specific path is spelled in this file, on
+# purpose: a site-local literal in a shared script is a fact about one
+# workstation that everyone else has to read past, and it rots silently when
+# that machine changes. A box whose venv lives elsewhere — on a different
+# volume, beside its checkouts, wherever — links it into place instead:
+#
+#   Windows: New-Item -ItemType Junction \
+#              -Path "$env:USERPROFILE\.venvs\hermes-test" -Target <real path>
+#   POSIX:   ln -s <real path> ~/.venvs/hermes-test
+#
+# ``$HOME/.venvs/hermes-test`` then resolves there with nothing set and nothing
+# site-local committed. ``$HERMES_TEST_VENV`` is the alternative for anyone who
+# would rather not link.
+#
+# Both are absent-safe: a candidate that does not exist, or that exists
+# without pytest, is skipped exactly like the release venv below. Nothing here
+# changes a checkout that HAS its own ``.venv`` — the local one still wins, and
+# CI (which creates one) is byte-for-byte unchanged. Build the shared one from
+# the pins the live install actually runs, not from a system interpreter:
+#
+#   <live venv>/Scripts/python.exe -m pip freeze  # minus the -e editable line
+#   python -m venv <shared>; <shared>/Scripts/python.exe -m pip install \
+#       -r <those pins> pytest pytest-asyncio pytest-timeout setuptools
+#
+# The editable ``-e ...#egg=hermes_agent`` line is dropped ON PURPOSE: it
+# resolves to ONE checkout, and a shared venv that imports the primary
+# checkout's ``hermes_cli`` while you run a worktree's tests is a silent lie.
+# pytest's rootdir insertion (``tests/__init__.py`` makes the repo root the
+# import base) already puts the RUNNING tree on ``sys.path``.
 VENV=""
 VENV_PYTHON=""
 SKIPPED_VENVS=""
-for candidate in "$REPO_ROOT/.venv" "$REPO_ROOT/venv" "$HOME/.hermes/hermes-agent/venv"; do
+VENV_CANDIDATES=("$REPO_ROOT/.venv" "$REPO_ROOT/venv")
+if [ -n "${HERMES_TEST_VENV:-}" ]; then
+  VENV_CANDIDATES+=("$HERMES_TEST_VENV")
+fi
+VENV_CANDIDATES+=("$HOME/.venvs/hermes-test")
+VENV_CANDIDATES+=("$HOME/.hermes/hermes-agent/venv")
+for candidate in "${VENV_CANDIDATES[@]}"; do
   if [ -f "$candidate/bin/activate" ]; then
     if "$candidate/bin/python" -c 'import pytest' 2>/dev/null; then
       VENV="$candidate"
@@ -104,6 +166,10 @@ fi
 
 if [ -n "$VENV" ]; then
   PYTHON="$VENV_PYTHON"
+  # Say WHICH venv won. With a shared candidate in the list, "the suite was
+  # green" is only a fact once you know which pins produced it — and a
+  # worktree's run now silently uses an environment that is not inside it.
+  echo "▶ venv: $VENV"
 elif [ -n "${HERMES_PYTHON:-}" ] && [ -x "$HERMES_PYTHON" ] \
     && "$HERMES_PYTHON" -c 'import pytest' 2>/dev/null; then
   # Guard with an import check: HERMES_PYTHON may point at the RELEASE
@@ -112,8 +178,13 @@ elif [ -n "${HERMES_PYTHON:-}" ] && [ -x "$HERMES_PYTHON" ] \
   PYTHON="$HERMES_PYTHON"
   echo "▶ no local venv — using Nix dev venv via HERMES_PYTHON: $PYTHON"
 else
-  echo "error: no virtualenv with pytest found in $REPO_ROOT/.venv or $REPO_ROOT/venv," >&2
-  echo "       and HERMES_PYTHON is not a python with pytest (enter the Nix devShell or create a venv)" >&2
+  echo "error: no virtualenv with pytest found. Probed, in order:" >&2
+  for candidate in "${VENV_CANDIDATES[@]}"; do
+    echo "         $candidate" >&2
+  done
+  echo "       and HERMES_PYTHON is not a python with pytest (enter the Nix devShell," >&2
+  echo "       create $REPO_ROOT/.venv, or build the shared venv — see the comment" >&2
+  echo "       above the probe in this script)" >&2
   if [ -n "$SKIPPED_VENVS" ]; then
     echo "       (skipped for missing pytest:$SKIPPED_VENVS — install dev extras there, or create $REPO_ROOT/.venv)" >&2
   fi
@@ -171,6 +242,52 @@ echo "  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)"
 
 cd "$REPO_ROOT"
 
+# ── The operator's REAL store root, named for the fence ─────────────────────
+#
+# ``tests/hermes_cli/_gateway_fence.py`` has a "would run hermes against the
+# operator's REAL store" arm. It learns that root by calling the production
+# resolver, ``hermes_constants.get_default_hermes_root()`` — which reads
+# ``HERMES_HOME``. Under BARE pytest, launched from an operator shell where
+# HERMES_HOME names the live store, that answers correctly and the arm works.
+#
+# Under THIS script it did not, and the reason is the `env -i` two lines below:
+# HERMES_HOME is deliberately not forwarded, so ``tests/conftest.py`` mints a
+# throwaway session home, the fence imports AFTER that, and the resolver hands
+# it the TEMPDIR. Measured on this workstation 2026-09-03, before this block:
+#
+#   _REAL_ROOT under run_tests.sh = C:\...\Temp\hermes-test-home-g_quyxlh
+#   _REAL_ROOT under bare pytest  = X:\Eternia\.hermes
+#
+# and a `hermes config get` argv aimed at X:\Eternia\.hermes\profiles\alice
+# classified ALLOWED in the first case, REFUSED in the second.
+#
+# So the whole arm — and the three tests in test_gateway_spawn_fence.py that
+# drive it — was measuring a directory that had existed for a few milliseconds
+# and would never appear in any argv. The defence existed only on the path
+# nobody is told to use.
+#
+# Forwarding HERMES_HOME itself is NOT the fix: conftest must keep installing
+# its own hermetic home, and handing the child the real one would put the live
+# store back in front of every test — the hazard, not the guard. Instead the
+# root travels under a dedicated TEST-ONLY name the fence reads first.
+# HERMES_REAL_HOME was NOT reused: that is a production variable
+# (``hermes_constants.py:1004`` ``_iter_real_home_candidates``, whose first
+# candidate it is — the OS-user home an ACP child inherits, not a
+# store root) and ``tests/conftest.py`` blanks it per test on purpose.
+#
+# Computed with the probed venv python and the production resolver rather than
+# re-derived in shell, so the "which profile dir belongs to which root"
+# unwrapping has exactly one implementation. Fail-soft: if the probe prints
+# nothing the variable is not forwarded and the fence falls back to today's
+# behavior.
+REAL_HERMES_ROOT="$(
+  "$PYTHON" -c 'import sys; sys.path.insert(0, "."); from hermes_constants import get_default_hermes_root; print(get_default_hermes_root())' \
+    2>/dev/null || true
+)"
+if [ -n "$REAL_HERMES_ROOT" ]; then
+  echo "▶ real store root handed to the gateway fence: $REAL_HERMES_ROOT"
+fi
+
 # Fork (Git Bash / MSYS / WSL): a native-Windows "$PYTHON" (…/Scripts/python.exe)
 # cannot open a POSIX-style /x/... or /mnt/x/... script path, so translate the
 # runner path to the spelling Windows itself uses before exec'ing.
@@ -204,6 +321,7 @@ exec env -i \
   ${HERMES_RUN_SLOW_PET_TESTS:+HERMES_RUN_SLOW_PET_TESTS="$HERMES_RUN_SLOW_PET_TESTS"} \
   ${HERMES_E2E_BROWSER:+HERMES_E2E_BROWSER="$HERMES_E2E_BROWSER"} \
   ${HERMES_TEST_TMP_ROOT:+HERMES_TEST_TMP_ROOT="$HERMES_TEST_TMP_ROOT"} \
+  ${REAL_HERMES_ROOT:+HERMES_TEST_REAL_ROOT="$REAL_HERMES_ROOT"} \
   ${EXTRA_PYTHONPATH:+PYTHONPATH="$EXTRA_PYTHONPATH"} \
   ${EXTRA_PYTEST_PLUGINS:+PYTEST_PLUGINS="$EXTRA_PYTEST_PLUGINS"} \
   "$PYTHON" "$RUNNER_PATH" "$@"

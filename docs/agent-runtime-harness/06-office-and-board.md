@@ -1057,7 +1057,7 @@ third was an observability artifact over a real 24 s window.
   test called `monkeypatch.undo()` mid-body, which unwound the package's autouse
   root pin and let the next line write the operator's real store. Both halves
   landed — a structural gate (`tests/agent_runtime/test_no_midtest_monkeypatch_undo.py`)
-  and a teardown tripwire, hoisted 2026-08-18 to `tests/conftest.py:594`
+  and a teardown tripwire, hoisted 2026-08-18 to `tests/conftest.py:603`
   (`_shared_monkeypatch_pin_tripwire`; the incident narrative stays in
   `tests/agent_runtime/conftest.py`'s docstring) — plus a
   first-class `archive_orphaned_surface` verb so the operator can clear the

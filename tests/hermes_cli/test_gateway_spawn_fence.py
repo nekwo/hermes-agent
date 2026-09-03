@@ -26,6 +26,7 @@ import atexit
 import subprocess
 import sys
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -90,6 +91,37 @@ def test_classifier_refuses_a_hermes_run_pointed_at_the_real_store():
     )
     assert reason is not None
     assert "REAL store" in reason
+
+
+def test_the_real_store_root_comes_from_the_runners_env_var_first(monkeypatch):
+    """The arm has to learn the root from somewhere the RUNNER can tell it.
+
+    Resolving it from ``hermes_constants`` alone was blind under
+    ``scripts/run_tests.sh``: that script execs ``env -i`` without
+    ``HERMES_HOME`` on purpose, ``tests/conftest.py`` then mints a throwaway
+    session home, this module imports after that, and the resolver answered
+    with the TEMPDIR. Measured on this workstation 2026-09-03::
+
+        run_tests.sh : C:\\...\\Temp\\hermes-test-home-g_quyxlh  -> ALLOWED
+        bare pytest  : X:\\Eternia\\.hermes                      -> REFUSED
+
+    A directory minted milliseconds earlier appears in no argv, so the arm
+    could not fire and the test above was asserting against it. The runner now
+    hands the root over explicitly, and EXPLICIT MUST WIN: under the runner the
+    fallback names the session's hermetic home, and treating that as the
+    forbidden root would refuse tests for using the sandbox they were given.
+    """
+    handed_over = "/opt/store"
+    monkeypatch.setenv(_gateway_fence.REAL_ROOT_ENV, handed_over)
+    assert _gateway_fence._real_hermes_root() == Path(handed_over).resolve()
+
+    # Absent, it falls back to the production resolver rather than to None.
+    monkeypatch.delenv(_gateway_fence.REAL_ROOT_ENV, raising=False)
+    assert _gateway_fence._real_hermes_root() is not None
+
+    # And the name is NOT the production ``HERMES_REAL_HOME`` (the OS-user home
+    # an ACP child inherits, which tests/conftest.py blanks per test).
+    assert _gateway_fence.REAL_ROOT_ENV == "HERMES_TEST_REAL_ROOT"
 
 
 def test_the_agent_browser_capability_probe_is_not_refused():
