@@ -276,6 +276,20 @@ def persona_instance_baseline_path(realm_id: str) -> Path:
     return realm_sync_root() / safe_path_token(realm_id) / "persona_instance_baseline.json"
 
 
+def persona_instance_dropped_steering_path(realm_id: str) -> Path:
+    # The heal ledger for steering edges phase two DROPPED because the parent
+    # they named was absent; NEVER synced, NEVER published, beside the baseline
+    # it is always read with. It exists because a dropped edge leaves the local
+    # body differing from the remote body while the baseline holds the REMOTE
+    # hash — so every later pull reads the row as local drift (``kept_local``)
+    # and phase two never re-runs for it. The parent the edge named, plus the
+    # remote hash it was dropped against, are the facts that tell that apart
+    # from an operator's own re-steer, and nothing else on disk records them.
+    return (
+        realm_sync_root() / safe_path_token(realm_id) / "persona_instance_dropped_steering.json"
+    )
+
+
 def profile_artifact_baseline_path(realm_id: str) -> Path:
     # realm-sync baseline sidecar for the per-profile FILE family (MEMORY.md,
     # core-context files, persona prompts); NEVER synced, NEVER published.

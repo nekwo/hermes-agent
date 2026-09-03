@@ -3971,6 +3971,156 @@
         "-q",
         "tests/agent_runtime/test_prompt_observability.py::test_a_used_skill_receipt_reports_what_its_preload_cost"
       ]
+    },
+    {
+      "id": "ir-heal-a-dropped-edge-never-re-enters-phase-two",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "apply_persona_instance_pull",
+      "operator": "never-heal-a-kept-local-row",
+      "find": "            if healable:\n                heal_pending[instance_id] = healable\n                written.append((instance_id, remote_body))",
+      "replace": "            if False:\n                heal_pending[instance_id] = healable\n                written.append((instance_id, remote_body))",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_a_dropped_steering_edge_re_applies_itself_once_its_parent_arrives"
+      ]
+    },
+    {
+      "id": "ir-heal-clobbers-an-authored-re-steer",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "_healable_dropped_parents",
+      "operator": "heal-on-the-ledger-alone",
+      "find": "    expected = persona_instance_def_hash(_remote_body_without_edges(remote_body, parents))\n    return parents if expected == local_hash else []",
+      "replace": "    return parents",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_an_operator_re_steer_is_left_alone_by_the_heal"
+      ]
+    },
+    {
+      "id": "ir-heal-ignores-that-the-realm-moved-the-body",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "_healable_dropped_parents",
+      "operator": "drop-the-remote-hash-guard",
+      "find": "    if entry.get(\"remote_hash\") != remote_hash:\n        return []\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_a_ledger_entry_taken_against_a_body_the_realm_has_since_moved_heals_nothing"
+      ]
+    },
+    {
+      "id": "ir-heal-records-drops-no-parent-can-repair",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "apply_persona_instance_pull",
+      "operator": "record-every-drop-not-just-parent-absent",
+      "find": "            {str(row.get(\"parent\") or \"\") for row in dropped if row.get(\"reason\") == \"parent_absent\"}",
+      "replace": "            {str(row.get(\"parent\") or \"\") for row in dropped}",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_a_self_edge_is_not_a_heal_candidate"
+      ]
+    },
+    {
+      "id": "ir-heal-ledger-cleared-by-an-older-peer",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "apply_persona_instance_pull",
+      "operator": "clear-the-ledger-on-an-absent-projection",
+      "find": "    if source is None:\n        # Not published. Never a removal",
+      "replace": "    if source is None:\n        write_dropped_steering_ledger(realm_id, {})\n        # Not published. Never a removal",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_an_older_publisher_never_clears_the_heal_ledger"
+      ]
+    },
+    {
+      "id": "ir-heal-reports-a-healed-row-as-still-local",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "apply_persona_instance_pull",
+      "operator": "account-a-heal-as-kept-local",
+      "find": "            # ``adopted`` and not ``converged``: a travelling field DID move\n            # forward onto an existing row, and ``converged`` promises no write.\n            summary.adopted.append(instance_id)",
+      "replace": "            summary.kept_local.append(instance_id)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_a_dropped_steering_edge_re_applies_itself_once_its_parent_arrives"
+      ]
+    },
+    {
+      "id": "ac-skills-replay-echoes-the-recorded-assignment",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "_observed_skills",
+      "operator": "echo-assigned-from-the-receipt",
+      "find": "        refreshed[\"assigned\"] = list(instance.skill_overrides or [])",
+      "replace": "        refreshed[\"assigned\"] = list(recorded.get(\"assigned\") or [])",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_an_idempotent_replay_re_reads_the_skills_block_instead_of_echoing_the_receipt"
+      ]
+    },
+    {
+      "id": "ac-skills-replay-echoes-the-recorded-installed-hash",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "_observed_skills",
+      "operator": "echo-installed-hash-from-the-receipt",
+      "find": "\"installed_hash\": installed_harness_skill_hash(str(entry.get(\"skill\") or \"\"))",
+      "replace": "\"installed_hash\": entry.get(\"installed_hash\")",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_an_idempotent_replay_re_reads_the_skills_block_instead_of_echoing_the_receipt"
+      ]
+    },
+    {
+      "id": "ac-skills-replay-re-derives-the-recorded-decision",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "_observed_skills",
+      "operator": "re-derive-changed-instead-of-keeping-it",
+      "find": "            {**dict(entry), \"installed_hash\": installed_harness_skill_hash(str(entry.get(\"skill\") or \"\"))}",
+      "replace": "            {**dict(entry), \"changed\": False, \"installed_hash\": installed_harness_skill_hash(str(entry.get(\"skill\") or \"\"))}",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_an_idempotent_replay_re_reads_the_skills_block_instead_of_echoing_the_receipt"
+      ]
+    },
+    {
+      "id": "ac-skills-fresh-is-claimed-on-a-read-that-failed",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "_observed_skills",
+      "operator": "stamp-skills-fresh-unconditionally",
+      "find": "    except Exception:  # noqa: BLE001 - a retired row, a decode fault, a gone root\n        return recorded, False",
+      "replace": "    except Exception:  # noqa: BLE001 - a retired row, a decode fault, a gone root\n        return recorded, True",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_a_replay_whose_instance_is_gone_returns_the_recorded_skills_unchanged"
+      ]
     }
   ]
 }

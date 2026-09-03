@@ -417,6 +417,32 @@ def harness_skill_hash_states(
     return states
 
 
+def installed_harness_skill_hash(skill: str, *, hermes_home: Path | None = None) -> str | None:
+    """The content hash of the INSTALLED package for one canonical id, right now.
+
+    The read-only half of the ``installed_hash`` :func:`install_harness_skill`
+    computes at the end of a write. It exists because that number is an
+    OBSERVATION with a shelf life: the package under
+    :func:`harness_skill_destination` is displaced by the next install of the
+    same id, so a receipt still carrying the hash its own install measured is
+    describing bytes that may no longer be there.
+
+    ``None`` for a non-canonical id (there is no repo package to hash, and the
+    install lane never produces a receipt row for one) and for a destination
+    that does not exist — the same absence :data:`SKILL_HASH_NOT_INSTALLED`
+    names, answered positively rather than guessed.
+    """
+
+    from agent.skill_utils import skill_package_content_hash
+
+    if skill not in HARNESS_SKILLS:
+        return None
+    destination = harness_skill_destination(skill, hermes_home=hermes_home)
+    if not destination.exists():
+        return None
+    return skill_package_content_hash(destination.parent, destination)
+
+
 def harness_skill_hash_mismatches(skill_names: list[str], *, hermes_home: Path | None = None) -> list[str]:
     """The ids whose installed package DIFFERS from the repo package.
 

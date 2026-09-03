@@ -24,7 +24,7 @@ JSON-RPC methods on the serve child today (`agent_runtime/serve_rpc.py`,
 | delete | `runtime.office.remove` | `_runtime_office_remove` | `{actor_key, revision, state}` |
 | folder taxonomy | `runtime.office.surface.update` | `_runtime_office_surface_update` | `{workspace_id, folders, revision}` |
 | realm-sync resolve | `runtime.office.resolve_conflict` | `_runtime_office_resolve_conflict` | `{actor_key, take, state, revision?}` |
-| place an AGENT (roster row + chat root + actor) | `runtime.agent.create` | `_runtime_agent_create` | `{persona_instance_id, actor_key, revision, position, actor, actor_fresh, skills, phases, …}` |
+| place an AGENT (roster row + chat root + actor) | `runtime.agent.create` | `_runtime_agent_create` | `{persona_instance_id, actor_key, revision, position, actor, actor_fresh, skills, skills_fresh, phases, …}` |
 | retire an agent (row + every actor bound to it) | `runtime.agent.retire` | `_runtime_agent_retire` | `{persona_instance_id, archive_path, archived_actor_keys, office_archive_failures, already_retired, correlation_id?, retire_receipt_path? \| first_attempt?, …}` |
 
 **Handlers are named, never `file:line`, and the reason is this table's own
@@ -88,6 +88,18 @@ EterniaLauncher repo).
 > reference. Authority for the stage list, the landed wire contract, and the
 > proof receipts: `docs/mission_control/planned/instance-replication.md` in the
 > EterniaLauncher repo, stamped EXECUTED AND PROVEN LIVE.
+>
+> **The one non-convergence that stage filed is CLOSED, 2026-09-02.** A steering
+> edge whose parent was absent here was dropped by `apply_replicated_steering`,
+> accounted on `steering_dropped`, and never re-applied: the drop left the row
+> reading as local drift, so every later pull answered `kept_local` and phase two
+> does not re-run for those rows. It now heals — `apply_persona_instance_pull`
+> re-enters phase two for exactly the `kept_local` rows whose drift a durable
+> drop ledger (`paths.persona_instance_dropped_steering_path`) fully explains,
+> and leaves an operator's own re-steer alone. `steering_healed: [{key, parent}]`
+> is a new additive list on the ack, which is what lets the launcher's
+> `AGENT LINKS DROPPED` group stop telling the operator the edge will not
+> re-apply itself.
 
 **Intent semantics at this verb (ruled 2026-08-30).** A `runtime.office.remove`
 carrying an operator's click is AUTHORED intent: the tombstone it mints and that

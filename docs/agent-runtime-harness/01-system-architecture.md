@@ -363,6 +363,30 @@ The lane that closes it is one more family applier, and nothing else:
   and an instance simply missing from the projection is `upstream_absent`, never
   a delete: absence is short-answer-shaped and this subsystem has already paid
   for inferring deletion from a short answer.
+- **A dropped steering edge HEALS itself, since 2026-09-02.** Phase two drops an
+  edge whose parent is absent here (refused, unpublished, or canonical) and
+  accounts it on `steering_dropped`. That left the row's local body differing
+  from the remote body while the baseline held the REMOTE hash — so every later
+  pull classified it `kept_local`, and phase two does not re-run for those. The
+  edge was gone for good even on a realm that published the parent one pull
+  later; the H3 field notes filed it as a known non-convergence. Re-running
+  phase two for `kept_local` rows was the obvious cure and stays REFUSED: it
+  would clobber an operator's own re-steer, the one thing `kept_local` exists to
+  protect. What closes it is a durable record of the drop —
+  `paths.persona_instance_dropped_steering_path`, `{instance_id: {parents,
+  remote_hash}}`, never synced and never published — plus one discriminator,
+  `_healable_dropped_parents`: the row re-enters phase two only when the realm
+  has not moved the body since the drop AND the local body is still EXACTLY
+  "remote minus the dropped edge". An operator re-steer differs somewhere the
+  dropped edge cannot account for and is left alone. The ledger is REBUILT by
+  the pass that ran phase two rather than merged, so a healed edge, a HELD row
+  and a row the realm stopped carrying all clear themselves with no expiry rule;
+  the two arms that return before phase two (an older peer's absent projection,
+  an unreadable one) deliberately do not write it. Only `parent_absent` is
+  recorded — a self edge and a cycle are refusals of the remote GRAPH and no
+  arriving parent can repair them. The ack gains one additive list,
+  `steering_healed: [{key, parent}]`, and a healed row is counted in `adopted`
+  because a travelling field did move forward onto an existing row.
 - **Drift and revert reach these rows.** `DRIFT_FAMILY_PERSONA_INSTANCE`
   (`realm_sync.py`) with counts `store_drift.persona_instances` additive
   beside `boards` / `office`, items keyed `{family, container=workspace_id,
@@ -725,6 +749,19 @@ and the final acceptance are in
   can contradict. Three had reached the rule independently, and `agent_retire`
   goes further, sweeping live placements BEFORE the archived-keys read so a
   replay self-heals instead of merely reporting.
+  **What that audit did not ask, and the answer, 2026-09-02**: it swept other
+  LEDGERS and never re-read `agent_create`'s own excluded list. `_reply` kept
+  `skills` beside `persona_instance_id` / `placement_id` / `actor_key` as "the
+  recorded decision", and the block is a MIX — `inherited` is a statement about
+  the request, but `assigned` mirrors `PersonaInstance.skill_overrides` (which
+  `update_profile` mutates) and `installed[].installed_hash` names bytes the
+  next install of the same id displaces. Both observations are now re-read on a
+  replay (`_observed_skills`, `skill_install.installed_harness_skill_hash`)
+  under a `skills_fresh` valve shaped exactly like `actor_fresh`; `inherited`
+  and `installed[].changed` stay verbatim, because re-deriving them would make
+  the ack a second authority for what the key decided. The lesson generalizes:
+  the exclusion list on a re-reading builder is itself a claim, and it has to be
+  audited field by field rather than block by block.
   **The corollary is the half that WAS broken**: "I cannot resolve this
   receipt" is not "there is no receipt". The board answered both with `None`,
   so the caller re-ran the write and `add_card` minted a twin under the key

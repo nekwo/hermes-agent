@@ -924,6 +924,138 @@ def test_an_idempotent_replay_re_reads_the_actor_instead_of_echoing_the_receipt(
     assert OfficeStore().get_actor(WORKSPACE, actor_key).revision == moved_actor.revision
 
 
+def test_an_idempotent_replay_re_reads_the_skills_block_instead_of_echoing_the_receipt(
+    qa_persona, isolated_shared_skills
+):
+    """The ``skills`` block is the last mutable-row field the replay froze.
+
+    :func:`_reply` keeps ``persona_instance_id`` / ``placement_id`` /
+    ``default_chat_session_id`` / ``actor_key`` verbatim as "the recorded
+    decision", and until now ``skills`` rode along with them. It does not
+    belong there: ``assigned`` is read BACK off ``PersonaInstance.skill_overrides``
+    (``run_skills_phase``'s own comment says so), and that field is mutated by
+    ``update_profile`` — the ``persona instance update-profile`` verb, the
+    launcher's skills editor, a realm pull's adopt arm. ``installed_hash`` names
+    the BYTES of an installed package that any later install displaces. Both are
+    OBSERVATIONS wearing a decision's clothes.
+
+    RED-FIRST: on HEAD the replay answers the receipt's
+    ``assigned: ["harness-qa-verdict"]`` and the hash the first install
+    measured, neither of which is true any more.
+
+    WHAT STAYS THE DECISION: ``inherited`` — it is a statement about the
+    REQUEST (was a ``skills`` key sent at all), not about the row, and
+    :func:`_inherited_skills_ack` already spends a paragraph on why re-reading
+    the row there would make the ack a second authority for what this key
+    decided.
+
+    ANTI-VACUITY: the override is changed through the REAL store verb and the
+    installed package through a REAL byte edit, so both re-reads have to differ
+    from the receipt rather than coincidentally agreeing with it.
+    """
+
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    _seed_workspace()
+    key = "skills-replay"
+    first = perform_agent_create(
+        _params(
+            idempotency_key=key,
+            placement_id="qa_skills_replay_agent_2",
+            skills=["harness-qa-verdict"],
+        ),
+        persona=qa_persona,
+    )
+    assert first.refusal is None
+    instance_id = first.result["persona_instance_id"]
+    assert first.result["skills"]["assigned"] == ["harness-qa-verdict"]
+    assert first.result["skills_fresh"] is True
+    recorded_hash = first.result["skills"]["installed"][0]["installed_hash"]
+    assert recorded_hash
+
+    # The operator strips the override, the way ``update-profile`` does.
+    PersonaInstanceStore().update_profile(instance_id, skills=[])
+    assert _overrides(instance_id) == []
+    # And something displaces the installed package's bytes.
+    installed = isolated_shared_skills / "harness-qa-verdict" / "SKILL.md"
+    installed.write_text(
+        installed.read_text(encoding="utf-8") + "\ndisplaced by a later install\n",
+        encoding="utf-8",
+    )
+
+    again = perform_agent_create(
+        _params(
+            idempotency_key=key,
+            placement_id="qa_skills_replay_agent_2",
+            skills=["harness-qa-verdict"],
+        ),
+        persona=qa_persona,
+    )
+
+    assert again.result["idempotent_replay"] is True
+    assert again.result["skills_fresh"] is True
+    # The two OBSERVATIONS, both as they are NOW.
+    assert again.result["skills"]["assigned"] == []
+    assert again.result["skills"]["installed"][0]["installed_hash"] != recorded_hash
+    assert again.result["skills"]["installed"][0]["installed_hash"] is not None
+    # The DECISION, verbatim.
+    assert again.result["skills"]["inherited"] is False
+    assert again.result["skills"]["installed"][0]["skill"] == "harness-qa-verdict"
+    assert (
+        again.result["skills"]["installed"][0]["changed"]
+        == first.result["skills"]["installed"][0]["changed"]
+    )
+    # The witness that the replay wrote nothing: the receipt, and the row itself.
+    assert _reservation_state(key) == "done"
+    assert _overrides(instance_id) == []
+
+
+def test_a_replay_whose_instance_is_gone_returns_the_recorded_skills_unchanged(
+    qa_persona, isolated_shared_skills
+):
+    """``skills_fresh: false`` — the honesty valve, same shape as ``actor_fresh``.
+
+    A row that has been retired since the create cannot be re-read, and the two
+    wrong answers are the same two the actor re-read already refuses:
+    fabricate a block, or raise at a client that only wanted its recorded ack
+    back. The reply degrades to "here is what was recorded, and it may be
+    stale".
+
+    KILLING MUTATION: stamp ``skills_fresh: True`` unconditionally and this reds.
+    """
+
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    _seed_workspace()
+    key = "skills-replay-gone"
+    first = perform_agent_create(
+        _params(
+            idempotency_key=key,
+            placement_id="qa_skills_gone_agent_2",
+            skills=["harness-qa-verdict"],
+        ),
+        persona=qa_persona,
+    )
+    assert first.refusal is None
+    PersonaInstanceStore().retire(
+        first.result["persona_instance_id"], reason="test", requested_by="test"
+    )
+
+    again = perform_agent_create(
+        _params(
+            idempotency_key=key,
+            placement_id="qa_skills_gone_agent_2",
+            skills=["harness-qa-verdict"],
+        ),
+        persona=qa_persona,
+    )
+
+    assert again.result["idempotent_replay"] is True
+    assert again.result["skills_fresh"] is False
+    # Unchanged, not invented.
+    assert again.result["skills"] == first.result["skills"]
+
+
 def test_a_replay_whose_actor_is_gone_says_so_instead_of_inventing_one(
     qa_persona, isolate_agent_runtime_root
 ):

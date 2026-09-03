@@ -483,6 +483,211 @@ def test_a_self_edge_is_dropped(tmp_path):
     assert PersonaInstanceStore().get(INSTANCE_ID).steered_by == []
 
 
+# ── the dropped-edge heal (the H3 known gap, closed 2026-09-02) ───────────
+#
+# Three cases and they are the whole contract: a drop that HEALS once its parent
+# arrives, an authored re-steer that is never touched by the heal, and a parent
+# that never arrives — still dropped, still accounted, every pass.
+
+CHILD = "personainst_aaa_agent_1"
+PARENT = "personainst_zzz_agent_9"
+
+
+def _steered_by(instance_id: str) -> list[str]:
+    return list(PersonaInstanceStore().get(instance_id).steered_by)
+
+
+def test_a_dropped_steering_edge_re_applies_itself_once_its_parent_arrives(tmp_path):
+    """THE non-convergence H3 filed rather than papered over.
+
+    Phase two drops an edge whose parent is absent and accounts it. The local
+    body then differs from the remote body while the baseline holds the REMOTE
+    hash, so every later pull classifies the row ``kept_local`` — and phase two
+    does not re-run for those. Before the heal ledger the edge was gone for
+    good, on a realm that publishes both ends one pull later.
+
+    RED-FIRST: on HEAD the third pull answers ``kept_local`` and the child's
+    ``steered_by`` is still empty.
+
+    ANTI-VACUITY: the parent is published in a LATER pull, never the same one —
+    phase two's own ordering fix already covers the same-pass case, and pinning
+    that here would pass with no heal at all.
+    """
+
+    realm_id, _ = _realm_workspace()
+    child = _body(CHILD, steered_by=[PARENT])
+    _write_remote(tmp_path, child)
+
+    first = apply_persona_instance_pull(realm_id, tmp_path)
+    assert first.replicated == [CHILD]
+    assert first.steering_dropped == [
+        {"key": CHILD, "parent": PARENT, "reason": "parent_absent"}
+    ]
+    assert _steered_by(CHILD) == []
+
+    # The realm has not moved and the parent is still unpublished.
+    second = apply_persona_instance_pull(realm_id, tmp_path)
+    assert second.kept_local == [CHILD]
+    assert second.steering_healed == []
+    assert second.steering_dropped == [
+        {"key": CHILD, "parent": PARENT, "reason": "parent_absent"}
+    ]
+    assert _steered_by(CHILD) == []
+
+    # The parent arrives.
+    _write_remote(tmp_path, child, _body(PARENT))
+    third = apply_persona_instance_pull(realm_id, tmp_path)
+    assert third.replicated == [PARENT]
+    assert third.steering_healed == [{"key": CHILD, "parent": PARENT}]
+    assert third.adopted == [CHILD]
+    assert third.kept_local == []
+    assert third.steering_dropped == []
+    assert _steered_by(CHILD) == [PARENT]
+
+    # And it CONVERGES: the heal is not a write that repeats every pull.
+    fourth = apply_persona_instance_pull(realm_id, tmp_path)
+    assert sorted(fourth.converged) == sorted([CHILD, PARENT])
+    assert fourth.steering_healed == []
+    assert fourth.kept_local == []
+
+
+def test_an_operator_re_steer_is_left_alone_by_the_heal(tmp_path):
+    """The one thing ``kept_local`` exists to protect.
+
+    Re-running phase two for every ``kept_local`` row was considered and
+    REJECTED for exactly this shape: the operator authored their own steering
+    after the drop, so the local body differs from the remote body somewhere the
+    dropped edge cannot explain. The heal must decline, and the pull must keep
+    answering ``kept_local``.
+
+    KILLING MUTATION: heal on the ledger entry alone, without asking whether the
+    local body still equals "remote minus the dropped edge", and the operator's
+    parent is replaced by the realm's.
+    """
+
+    realm_id, _ = _realm_workspace()
+    child = _body(CHILD, steered_by=[PARENT])
+    _write_remote(tmp_path, child)
+    apply_persona_instance_pull(realm_id, tmp_path)
+    assert _steered_by(CHILD) == []
+
+    # The operator wires the child to a parent of their own.
+    local_parent = _local("personainst_own_agent_5")
+    PersonaInstanceStore().set_parents(CHILD, [local_parent.id])
+    assert _steered_by(CHILD) == [local_parent.id]
+
+    _write_remote(tmp_path, child, _body(PARENT))
+    summary = apply_persona_instance_pull(realm_id, tmp_path)
+
+    assert summary.kept_local == [CHILD]
+    assert summary.steering_healed == []
+    assert _steered_by(CHILD) == [local_parent.id]
+
+
+def test_a_parent_that_never_arrives_stays_dropped_and_stays_accounted(tmp_path):
+    """The third case: nothing heals, and the pull says so every pass.
+
+    The launcher's ``AGENT LINKS DROPPED`` group is driven by
+    ``steering_dropped``, so a row that is still dropped has to keep reporting
+    itself — a drop announced once and then silent reads as repaired.
+    """
+
+    realm_id, _ = _realm_workspace()
+    _write_remote(tmp_path, _body(CHILD, steered_by=["personainst_ghost_agent_7"]))
+
+    for _ in range(3):
+        summary = apply_persona_instance_pull(realm_id, tmp_path)
+        assert summary.steering_dropped == [
+            {"key": CHILD, "parent": "personainst_ghost_agent_7", "reason": "parent_absent"}
+        ]
+        assert summary.steering_healed == []
+        assert _steered_by(CHILD) == []
+    assert summary.kept_local == [CHILD]
+
+
+def test_a_self_edge_is_not_a_heal_candidate(tmp_path):
+    """Only ``parent_absent`` is recorded, and the exclusion is the point.
+
+    A self edge and a cycle are refusals of the remote GRAPH — no parent is
+    ever going to arrive and make them valid — so re-running phase two for them
+    every pull would re-report a verdict that cannot change. They leave the row
+    ``kept_local`` exactly as they did before the heal existed.
+    """
+
+    realm_id, _ = _realm_workspace()
+    _write_remote(tmp_path, _body(CHILD, steered_by=[CHILD]))
+    first = apply_persona_instance_pull(realm_id, tmp_path)
+    assert [row["reason"] for row in first.steering_dropped] == ["self_edge"]
+
+    second = apply_persona_instance_pull(realm_id, tmp_path)
+    assert second.kept_local == [CHILD]
+    assert second.steering_dropped == []
+    assert second.steering_healed == []
+
+
+def test_a_ledger_entry_taken_against_a_body_the_realm_has_since_moved_heals_nothing():
+    """The guard the APPLIER cannot reach, asked at the door that carries it.
+
+    Through ``apply_persona_instance_pull`` the recorded ``remote_hash`` and the
+    live one always agree: ``KEEP_LOCAL`` is only reached when the remote equals
+    the baseline, and the baseline is the hash the ledger entry was written
+    beside. That makes the check look redundant — and it is not, for the same
+    reason ``replicate_instance``'s own allowlist is not: the ledger is a
+    SEPARATE durable file from the baseline, so nothing guarantees the next
+    caller (a repair verb, a hand-edited sidecar, a pass that wrote one file and
+    not the other) kept the two in step, and a heal taken on a body the realm
+    has since moved re-applies an edge nobody publishes any more.
+
+    KILLING MUTATION: drop the ``remote_hash`` comparison and this reds.
+    """
+
+    from agent_runtime.persona_instance_sync import (
+        _healable_dropped_parents,
+        _remote_body_without_edges,
+    )
+
+    remote_body = _body(CHILD, steered_by=[PARENT])
+    remote_hash = persona_instance_def_hash(remote_body)
+    local_hash = persona_instance_def_hash(
+        _remote_body_without_edges(remote_body, [PARENT])
+    )
+
+    stale = {CHILD: {"parents": [PARENT], "remote_hash": "a-hash-from-an-older-body"}}
+    assert _healable_dropped_parents(stale, CHILD, remote_body, remote_hash, local_hash) == []
+
+    # The same call with the hash the entry was actually taken against DOES
+    # heal, so the assertion above is about the guard and not the fixture.
+    aligned = {CHILD: {"parents": [PARENT], "remote_hash": remote_hash}}
+    assert _healable_dropped_parents(
+        aligned, CHILD, remote_body, remote_hash, local_hash
+    ) == [PARENT]
+
+
+def test_an_older_publisher_never_clears_the_heal_ledger(tmp_path):
+    """A peer that publishes no projection is not evidence about anything.
+
+    The ledger is rebuilt from the pass that actually ran phase two, so the
+    early return for ``source is None`` has to leave it alone — otherwise one
+    pull in a rotation against an older member forgets every dropped edge on
+    this machine and the heal silently stops being possible.
+    """
+
+    realm_id, _ = _realm_workspace()
+    child = _body(CHILD, steered_by=[PARENT])
+    _write_remote(tmp_path, child)
+    apply_persona_instance_pull(realm_id, tmp_path)
+
+    (tmp_path / "store" / "persona_instances.yaml").unlink()
+    skewed = apply_persona_instance_pull(realm_id, tmp_path)
+    assert skewed.source is None
+    assert skewed.steering_healed == []
+
+    _write_remote(tmp_path, child, _body(PARENT))
+    healed = apply_persona_instance_pull(realm_id, tmp_path)
+    assert healed.steering_healed == [{"key": CHILD, "parent": PARENT}]
+    assert _steered_by(CHILD) == [PARENT]
+
+
 # ── version skew + read failures ──────────────────────────────────────────
 
 
@@ -556,6 +761,7 @@ def test_the_pull_ack_carries_the_summary_under_the_contract_key():
         "retired",
         "source",
         "steering_dropped",
+        "steering_healed",
         "upstream_absent",
     ]
     assert shape["source"] is None

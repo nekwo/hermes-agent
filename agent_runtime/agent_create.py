@@ -1168,6 +1168,71 @@ def _inherited_skills_ack() -> dict[str, Any]:
     return {"assigned": [], "installed": [], "inherited": True}
 
 
+def _stamp_fresh_skills(result: dict[str, Any], skills_ack: dict[str, Any]) -> None:
+    """Attach a skills block this call itself just BUILT.
+
+    ``skills_fresh: True`` is not decoration here: it is trivially true —
+    ``run_skills_phase`` reads ``assigned`` back off the row it has just written
+    and ``installed_hash`` off the package it has just verified, microseconds
+    earlier. The flag exists so a client reads ONE shape whatever answered it,
+    the same rule :func:`_reply` spends on ``actor_fresh``, and it goes through
+    one function so the next arm that renders a skills block cannot ship without
+    it.
+    """
+
+    result["skills"] = skills_ack
+    result["skills_fresh"] = True
+
+
+def _observed_skills(result: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """The recorded skills block with its two OBSERVATIONS re-read — or the
+    recorded block unchanged and ``False``.
+
+    ``assigned`` is read back off ``PersonaInstance.skill_overrides``
+    (``run_skills_phase`` says so in the comment beside its own return) and that
+    field is mutated afterwards by ``update_profile`` — the
+    ``persona instance update-profile`` verb, the launcher's skills editor.
+    ``installed_hash`` names the bytes of a package the next install of the same
+    id displaces. Both are observations, so a replay that echoes them is
+    reporting a world that has moved, exactly as the frozen ``position`` /
+    ``revision`` did before :func:`_reply` re-read the actor.
+
+    What is deliberately NOT re-read: ``inherited``, ``installed[].skill`` and
+    ``installed[].changed``. ``inherited`` is a statement about the REQUEST —
+    whether a ``skills`` key was sent at all — and :func:`_inherited_skills_ack`
+    already spends a paragraph on why re-deriving it from the row would make the
+    ack a second authority for what this key decided. ``changed`` is what THIS
+    install did, a fact about an event, not about the world now.
+
+    ``False`` on every shape that gives nothing to look up with and on every
+    read fault, and the recorded block is then returned UNCHANGED — the same
+    degrade :func:`_live_actor` gets, for the same reason: a client that only
+    wanted its recorded ack back is not served by a fabricated block or by a
+    raise.
+    """
+
+    from .skill_install import installed_harness_skill_hash
+
+    recorded = dict(result.get("skills") or {})
+    instance_id = result.get("persona_instance_id")
+    if not instance_id:
+        return recorded, False
+    try:
+        from .persona_assignments import PersonaInstanceStore
+
+        instance = PersonaInstanceStore().get(str(instance_id))
+        refreshed = dict(recorded)
+        refreshed["assigned"] = list(instance.skill_overrides or [])
+        refreshed["installed"] = [
+            {**dict(entry), "installed_hash": installed_harness_skill_hash(str(entry.get("skill") or ""))}
+            for entry in (recorded.get("installed") or [])
+            if isinstance(entry, dict)
+        ]
+    except Exception:  # noqa: BLE001 - a retired row, a decode fault, a gone root
+        return recorded, False
+    return refreshed, True
+
+
 def _live_actor(result: dict[str, Any]) -> Any | None:
     """The actor this reply is about, read off the live store — or ``None``.
 
@@ -1223,10 +1288,18 @@ def _reply(result: dict[str, Any], *, observed: Any | None = None) -> dict[str, 
     BEFORE that adoption exists rather than after it has been debugged.
 
     What is deliberately NOT stamped here: ``persona_instance_id``,
-    ``placement_id``, ``default_chat_session_id``, ``actor_key`` and
-    ``skills``. Those are IDENTITY and the recorded decision, not observations
-    — re-deriving them would be a second authority for what this key created,
-    and ``actor_key`` in particular is the key the observation was made WITH.
+    ``placement_id``, ``default_chat_session_id`` and ``actor_key``. Those are
+    IDENTITY and the recorded decision, not observations — re-deriving them
+    would be a second authority for what this key created, and ``actor_key`` in
+    particular is the key the observation was made WITH.
+
+    ``skills`` used to be on that list and it did not belong there (2026-09-02).
+    The BLOCK is a mix: ``inherited`` is the recorded decision and stays
+    verbatim, but ``assigned`` mirrors ``PersonaInstance.skill_overrides``,
+    which ``update_profile`` mutates, and ``installed[].installed_hash`` names
+    bytes the next install of the same id displaces. Both are observations, so
+    both are re-read here (:func:`_observed_skills`) under a ``skills_fresh``
+    valve shaped exactly like ``actor_fresh``.
 
     **The "no second write happened" witness moves.** It used to be the ack's
     ``revision``, which is exactly the field this function stops freezing. The
@@ -1247,6 +1320,12 @@ def _reply(result: dict[str, Any], *, observed: Any | None = None) -> dict[str, 
     from .office_models import office_actor_wire_row
 
     result = dict(result)
+    if "skills" in result:
+        # Only a REPLAY arrives carrying one: the fresh and ``placed`` arms
+        # attach theirs after this builder runs, through
+        # :func:`_stamp_fresh_skills`. So this is the recorded block, and its two
+        # observations are re-read for the same reason the actor's are.
+        result["skills"], result["skills_fresh"] = _observed_skills(result)
     actor = observed if observed is not None else _live_actor(result)
     if actor is None:
         result["actor_fresh"] = False
@@ -1382,8 +1461,9 @@ def perform_agent_create(
         {persona_instance_id, persona_id, placement_id, display_name,
          default_chat_session_id, actor_key, revision, workspace_id,
          position: [x, y], actor: {...},
-         skills: {assigned: [...], installed: [{skill, changed, installed_hash}]},
-         actor_fresh: bool,
+         skills: {assigned: [...], inherited: bool,
+                  installed: [{skill, changed, installed_hash}]},
+         actor_fresh: bool, skills_fresh: bool,
          phases: {instance_ms, placement_ms, skills_ms, total_ms},
          idempotent_replay}
 
@@ -1398,6 +1478,14 @@ def perform_agent_create(
     (:func:`_reply`). ``actor_fresh`` is ``false`` when that re-read
     could not be made — the actor was archived, the surface is gone — and the
     recorded row is returned unchanged rather than fabricated.
+
+    The ``skills`` block gets the SAME treatment (2026-09-02) and for the same
+    reason: ``assigned`` mirrors ``PersonaInstance.skill_overrides``, which
+    ``update_profile`` mutates, and ``installed[].installed_hash`` names bytes a
+    later install displaces. Those two are re-read on a replay;
+    ``inherited`` — a statement about the REQUEST — is not. ``skills_fresh``
+    is the valve, present on every reply that carries a block and ``false``
+    when the instance row could not be read.
 
     ``persona`` is the CLI's richer pre-resolved persona object, threaded to
     :func:`normalize_agent_create` so the argv lane's naming behaviour is
@@ -1612,7 +1700,7 @@ def perform_agent_create(
                         )
                     except AgentCreateSkillsRefused as exc:
                         return _skills_refusal(exc, instance_id=instance_id)
-                result["skills"] = skills_ack
+                _stamp_fresh_skills(result, skills_ack)
                 phases = dict(result.get("phases") or {})
                 phases["skills_ms"] = int((time.monotonic() - skills_started) * 1000)
                 phases["total_ms"] = int((time.monotonic() - started) * 1000)
@@ -1996,7 +2084,7 @@ def perform_agent_create(
                     )
                 except AgentCreateSkillsRefused as exc:
                     return _skills_refusal(exc, instance_id=instance.id)
-            result["skills"] = skills_ack
+            _stamp_fresh_skills(result, skills_ack)
             result["phases"]["skills_ms"] = int(
                 (time.monotonic() - skills_started) * 1000
             )

@@ -640,6 +640,70 @@ def write_persona_instance_baseline(realm_id: str, entries: dict[str, str]) -> N
     )
 
 
+def read_dropped_steering_ledger(realm_id: str) -> dict[str, dict[str, Any]]:
+    """Edges phase two dropped for an ABSENT PARENT, and what they were dropped
+    against — ``{instance_id: {"parents": [...], "remote_hash": "..."}}``.
+
+    The durable half of the heal (the H3 known gap, closed 2026-09-02). Read
+    beside the baseline, written by the same pass, never synced and never
+    published.
+
+    A malformed or unreadable file yields ``{}``, and that is the safe
+    direction: the ledger is a repair aid, so its failure mode must be "no heal
+    is attempted", never "an edge is re-applied on the word of a body nobody can
+    vouch for". Entries missing either half are dropped for the same reason —
+    the parent alone cannot say whether the realm has moved since.
+    """
+
+    from . import paths
+
+    path = paths.persona_instance_dropped_steering_path(realm_id)
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    entries = raw.get("entries") if isinstance(raw, dict) else None
+    if not isinstance(entries, dict):
+        return {}
+    ledger: dict[str, dict[str, Any]] = {}
+    for instance_id, entry in entries.items():
+        if not isinstance(entry, dict):
+            continue
+        parents = [str(item) for item in (entry.get("parents") or []) if item]
+        remote_hash = entry.get("remote_hash")
+        if not parents or not isinstance(remote_hash, str):
+            continue
+        ledger[str(instance_id)] = {"parents": parents, "remote_hash": remote_hash}
+    return ledger
+
+
+def write_dropped_steering_ledger(realm_id: str, entries: dict[str, dict[str, Any]]) -> None:
+    """Replace the heal ledger with what the pass that just ran phase two saw.
+
+    REBUILT, never merged, and that is what keeps it from rotting: an entry
+    survives only while the same pass drops the same edge again, so a healed
+    edge, a row the realm stopped carrying, a row that went to HOLD and a row
+    whose remote body moved all clear themselves with no expiry rule and no
+    second pruning walk. The two callers that return BEFORE phase two — an older
+    peer's absent projection, and an unreadable one — deliberately do NOT call
+    this: neither is evidence about a dropped edge, and forgetting every one of
+    them on a single pull in a rotation would silently end the heal.
+    """
+
+    from utils import atomic_json_write
+
+    from . import paths
+
+    atomic_json_write(
+        paths.persona_instance_dropped_steering_path(realm_id),
+        {"schema_version": 1, "entries": entries},
+        indent=2,
+        sort_keys=True,
+    )
+
+
 def instance_baseline_key(instance_id: str) -> str:
     """This family's baseline key. ``instance:<id>``, namespaced because the
     drift/revert lane addresses rows by ``FAMILY:CONTAINER:KEY`` and a bare id
@@ -716,7 +780,15 @@ class PersonaInstancePullSummary:
       file will not decode. Per-entity isolation: the row is untouched, the
       refusal is named, the pull continues.
     - ``steering_dropped`` — phase-two edges naming a parent this machine does
-      not have. Accounted, never silent.
+      not have. Accounted, never silent, and re-accounted on every later pull
+      for as long as the parent stays absent: a drop announced once and then
+      silent reads as repaired.
+    - ``steering_healed`` — edges an EARLIER pull dropped, re-applied here
+      because the parent has since arrived and the local body was still exactly
+      "remote minus the dropped edge". A row that healed is counted in
+      ``adopted`` beside this, because a travelling field did move forward onto
+      an existing row; a row whose local body diverged anywhere else is an
+      operator re-steer and stays ``kept_local``, untouched.
     - ``retired`` / ``retire_held`` — §5.2's retire-follows-the-DESK arm, and
       the desks whose agent could not be archived (a live run binding above
       all). These are driven by the office lane's own ``remote_removed``
@@ -736,6 +808,13 @@ class PersonaInstancePullSummary:
     upstream_absent: list[str] = field(default_factory=list)
     refused: list[dict[str, str]] = field(default_factory=list)
     steering_dropped: list[dict[str, str]] = field(default_factory=list)
+    #: Edges a PREVIOUS pull dropped for an absent parent, re-applied now that
+    #: the parent exists — ``{key, parent}``, the mirror of a
+    #: ``steering_dropped`` row. Additive on the wire (2026-09-02) and the fact
+    #: the launcher's ``AGENT LINKS DROPPED`` group needs before it can stop
+    #: saying the edge "will not re-apply": it now does, on the pull after the
+    #: parent arrives, and the row that healed says so by name.
+    steering_healed: list[dict[str, str]] = field(default_factory=list)
     #: Replicas archived because their DESK left (plan §5.2). Never derived from
     #: an instance's absence — only from the office lane having ARCHIVED the
     #: actor for the same key in this same pull, which is authored intent that
@@ -770,6 +849,7 @@ class PersonaInstancePullSummary:
             "upstream_absent": sorted(set(self.upstream_absent)),
             "refused": list(self.refused),
             "steering_dropped": list(self.steering_dropped),
+            "steering_healed": list(self.steering_healed),
             "retired": sorted(set(self.retired)),
             "retire_held": list(self.retire_held),
             "desk_archived": sorted(set(self.desk_archived)),
@@ -909,6 +989,64 @@ def _retire_replicas_for_removed_desks(
         baseline.pop(instance_baseline_key(actor_key), None)
 
 
+def _remote_body_without_edges(
+    remote_body: dict[str, Any], parents: list[str]
+) -> dict[str, Any]:
+    """The remote body as it would look with ``parents`` never applied.
+
+    ``project_persona_instance`` OMITS structurally-empty values, so a row whose
+    every edge was dropped carries no ``steered_by`` key at all — dropping to
+    ``[]`` instead would hash as a different body and the heal would never
+    recognise its own handiwork.
+    """
+
+    body = dict(remote_body)
+    unwanted = set(parents)
+    remaining = [str(item) for item in (body.get("steered_by") or []) if str(item) not in unwanted]
+    if remaining:
+        body["steered_by"] = remaining
+    else:
+        body.pop("steered_by", None)
+    return body
+
+
+def _healable_dropped_parents(
+    ledger: dict[str, dict[str, Any]],
+    instance_id: str,
+    remote_body: dict[str, Any],
+    remote_hash: str,
+    local_hash: str | None,
+) -> list[str]:
+    """The parents a ``kept_local`` row's local drift is FULLY explained by.
+
+    This is the whole of "tell a dropped edge from an authored re-steer", and it
+    asks two questions rather than trusting the ledger alone:
+
+    * the realm has not moved since the drop (the recorded ``remote_hash`` is
+      still the remote hash) — otherwise the ledger describes a body that no
+      longer exists and the row's drift may be about something else entirely;
+    * the local body is EXACTLY the remote body minus those edges. An operator
+      who re-steered, renamed, or re-pointed the model changed the body
+      somewhere the dropped edge cannot account for, and the answer is to leave
+      it alone. That is the one thing ``kept_local`` exists to protect, and it
+      is why re-running phase two for every ``kept_local`` row was rejected.
+
+    Empty means "not a heal candidate", and the caller reports ``kept_local``
+    exactly as it did before this existed.
+    """
+
+    entry = ledger.get(instance_id)
+    if not entry or local_hash is None:
+        return []
+    if entry.get("remote_hash") != remote_hash:
+        return []
+    parents = [str(item) for item in (entry.get("parents") or [])]
+    if not parents:
+        return []
+    expected = persona_instance_def_hash(_remote_body_without_edges(remote_body, parents))
+    return parents if expected == local_hash else []
+
+
 def apply_persona_instance_pull(
     realm_id: str,
     subtree,
@@ -929,6 +1067,20 @@ def apply_persona_instance_pull(
     same pass has not minted yet. Without the split the outcome would depend on
     the alphabetical order of instance ids.
 
+    **The dropped-edge HEAL (2026-09-02), which is a third thing phase one
+    does.** An edge whose parent is absent is dropped and accounted, and the row
+    is then locally divergent from a remote body the baseline still holds the
+    hash of — so every later pull classified it ``kept_local`` and phase two
+    never re-ran for it. The edge was gone for good even on a realm that
+    published the parent one pull later. Phase one now consults the durable
+    drop ledger (:func:`read_dropped_steering_ledger`) on exactly the
+    ``kept_local`` rows and re-enters phase two for the ones whose local body is
+    still EXACTLY "remote minus the dropped edge" against the SAME remote hash
+    the drop was taken against. Anything else — an operator's own re-steer, a
+    renamed display name, a moved model override — is left alone, because that
+    divergence is what ``kept_local`` exists to protect and re-running phase two
+    for all of it was considered and rejected.
+
     Every write goes through ``PersonaInstanceStore.replicate_instance`` — a
     store door, never a raw file write — so the delta patch, the §1.3
     derivations and the event all happen in one place. A pull that GIVES you an
@@ -947,6 +1099,7 @@ def apply_persona_instance_pull(
         else PersonaInstanceStore()
     )
     baseline = read_persona_instance_baseline(realm_id)
+    dropped_ledger = read_dropped_steering_ledger(realm_id)
 
     # §5.2 FIRST, and independent of the projection. The trigger is the office
     # lane's own ``remote_removed`` archive, not anything in this document — a
@@ -978,6 +1131,11 @@ def apply_persona_instance_pull(
     prefix = instance_baseline_key("")
     baselined_ids = {key[len(prefix):] for key in baseline if key.startswith(prefix)}
     written: list[tuple[str, dict[str, Any]]] = []
+    #: ``{instance_id: [parent, ...]}`` — rows phase one classified ``kept_local``
+    #: whose drift is fully explained by edges an earlier pull dropped. They
+    #: re-enter phase two and their OUTCOME is decided there, because whether
+    #: the parent has actually arrived is phase two's question, not phase one's.
+    heal_pending: dict[str, list[str]] = {}
     # The resurrection guard, from TWO sources that answer the same question at
     # different ranges. The office ledger covers desks archived in any earlier
     # pass; ``summary.retired`` covers the ones THIS pass just archived, which
@@ -1049,7 +1207,18 @@ def apply_persona_instance_pull(
             baseline[key] = remote_hash
             continue
         if decision.action == PullAction.KEEP_LOCAL:
-            summary.kept_local.append(instance_id)
+            # THE heal seam. A row whose local drift is exactly the edges an
+            # earlier pull dropped is not an operator's edit at all — it is this
+            # lane's own unfinished write, and re-entering phase two is what
+            # finishes it. Everything else stays ``kept_local`` untouched.
+            healable = _healable_dropped_parents(
+                dropped_ledger, instance_id, remote_body, remote_hash, local_hash
+            )
+            if healable:
+                heal_pending[instance_id] = healable
+                written.append((instance_id, remote_body))
+            else:
+                summary.kept_local.append(instance_id)
             continue
         if decision.action == PullAction.CONFLICT:
             summary.held.append(instance_id)
@@ -1091,22 +1260,65 @@ def apply_persona_instance_pull(
 
     # --- phase two: the authored steering edges -----------------------------
     #
-    # Only rows this pass WROTE or found converged. A ``held`` row must not have
-    # its graph rewritten by the body it refused to adopt, and a ``kept_local``
-    # row's steering is this machine's own edit.
+    # Only rows this pass WROTE or found converged, plus the HEAL candidates
+    # phase one re-entered. A ``held`` row must not have its graph rewritten by
+    # the body it refused to adopt, and a ``kept_local`` row's steering is this
+    # machine's own edit — unless the ledger says the drift IS a drop this lane
+    # took, which is the one exception and it is decided in phase one.
+    next_ledger: dict[str, dict[str, Any]] = {}
     for instance_id, remote_body in written:
         parents = [str(item) for item in (remote_body.get("steered_by") or [])]
+        pending = heal_pending.get(instance_id)
         try:
-            _, dropped = store.apply_replicated_steering(instance_id, parents, realm_id=realm_id)
+            applied, dropped = store.apply_replicated_steering(
+                instance_id, parents, realm_id=realm_id
+            )
         except Exception as exc:  # noqa: BLE001 — accounted; a bad edge never fails a pull
             summary.steering_dropped.append(
                 {"key": instance_id, "parent": "", "reason": type(exc).__name__}
             )
+            if pending is not None:
+                # The heal did not happen, so the row is what phase one would
+                # have called it, and the ledger entry is carried forward
+                # UNCHANGED — a store fault is not evidence that the edge was
+                # re-applied or that its parent arrived.
+                summary.kept_local.append(instance_id)
+                next_ledger[instance_id] = dict(dropped_ledger[instance_id])
             continue
         for row in dropped:
             summary.steering_dropped.append({"key": instance_id, **row})
+        # Only ``parent_absent`` is recorded for a later heal. A self edge and a
+        # cycle are refusals of the remote GRAPH — no parent is ever going to
+        # arrive and make them valid — so re-entering phase two for them every
+        # pull would re-report a verdict that cannot change.
+        still_absent = sorted(
+            {str(row.get("parent") or "") for row in dropped if row.get("reason") == "parent_absent"}
+            - {""}
+        )
+        if still_absent:
+            next_ledger[instance_id] = {
+                "parents": still_absent,
+                # The hash the drop was taken AGAINST, so a realm that moves the
+                # body afterwards invalidates this entry by construction rather
+                # than by an expiry rule.
+                "remote_hash": persona_instance_def_hash(remote_body),
+            }
+        if pending is None:
+            continue
+        healed = [parent for parent in pending if parent in applied]
+        for parent in healed:
+            summary.steering_healed.append({"key": instance_id, "parent": parent})
+        if healed:
+            # ``adopted`` and not ``converged``: a travelling field DID move
+            # forward onto an existing row, and ``converged`` promises no write.
+            summary.adopted.append(instance_id)
+        else:
+            # Nothing arrived. The row is exactly what phase one would have
+            # called it, and the re-entry cost one store read.
+            summary.kept_local.append(instance_id)
 
     write_persona_instance_baseline(realm_id, baseline)
+    write_dropped_steering_ledger(realm_id, next_ledger)
     return summary
 
 
