@@ -571,7 +571,23 @@ def persona_records_from_config(cfg: AgentRuntimeConfig | None = None):
         if "required_mcp_servers" in overrides:
             p.required_mcp_servers = _string_list(overrides["required_mcp_servers"])
         if "toolsets" in overrides:
+            # STILL READ, deliberately (S0a A2): deleting the reader would make a
+            # config that carries the key silently identical to one that never
+            # did, and the realm-sync body would keep shipping a list nothing in
+            # the runtime could even show. What changed is that the field admits
+            # nothing — the harness lane reads the PROFILE's declaration
+            # (``personas.declared_lane_toolsets``) — so a non-empty list is
+            # announced once per load and reported in every projection as
+            # ``toolset_declaration.persona_list``, never obeyed.
             p.toolsets = validate_toolsets(list(overrides["toolsets"]))
+            if p.toolsets:
+                logger.info(
+                    "agent_runtime.personas.%s.toolsets is legacy and admits nothing "
+                    "(S0a atlas cleanup): %s. The harness lane reads the bound "
+                    "profile's top-level toolsets: key; delete this list.",
+                    persona_id,
+                    ", ".join(p.toolsets),
+                )
     return list(personas.values())
 
 

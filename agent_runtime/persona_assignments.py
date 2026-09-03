@@ -26,7 +26,7 @@ from .models import (
     looks_like_persona_instance_id,
 )
 from .persona_lifecycle import is_runtime_persona
-from .personas import profile_chat_toolsets
+from .personas import declared_lane_toolsets, effective_toolsets, profile_chat_toolsets
 from .serde import from_jsonable, to_jsonable
 from .state_patches import (
     emit_persona_instance_create,
@@ -3632,7 +3632,17 @@ def persona_instance_summary(
         "reasoning_supported": _model_supports_reasoning_effort(
             instance.model or getattr(visibility_persona, "model", None)
         ),
-        "toolsets": list(getattr(visibility_persona, "toolsets", []) or []),
+        # The DECLARED lane toolsets (S0a A2), not the persona's legacy field:
+        # the field is read by no admission path since A1, so projecting it here
+        # made the launcher's instance summary describe a capability set no turn
+        # ever ran with. The legacy list travels beside it, labelled, inside
+        # ``toolset_declaration.persona_list``.
+        "toolsets": effective_toolsets(visibility_persona)
+        if visibility_persona is not None
+        else [],
+        "toolset_declaration": declared_lane_toolsets(visibility_persona).row()
+        if visibility_persona is not None
+        else None,
         "runtime_root": instance.runtime_root,
         "state": state,
         "lifecycle_mode": instance.mode,

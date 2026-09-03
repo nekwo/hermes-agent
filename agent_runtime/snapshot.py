@@ -2561,6 +2561,10 @@ def _agent_summary(agent, *, include_tool_details: bool = False, readiness=None)
         "effective_required_mcp_servers": readiness.get("effective_required_mcp_servers", []),
         "missing_mcp_servers": readiness.get("missing_mcp_servers", []),
         "skill_hash_mismatches": readiness.get("skill_hash_mismatches", []),
+        # The DECLARED lane set (S0a A1 moved the authority into
+        # ``effective_toolsets``): the launcher's agent card "Toolsets" tag block
+        # became truthful with no launcher change, because this row stopped
+        # projecting a per-persona list no admission path reads.
         "toolsets": effective_toolsets(agent),
         "model_configured": bool(agent.model),
         "provider_configured": bool(agent.provider),

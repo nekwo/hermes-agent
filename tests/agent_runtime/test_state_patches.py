@@ -35,6 +35,7 @@ from agent_runtime.config import load_agent_runtime_config
 from agent_runtime.decision_contract_registry import allowed_event_types, validate_event_payload
 from agent_runtime.events import EVENT_PAYLOAD_LIMIT_BYTES, EventLog
 from agent_runtime.models import AgentPersona, Event
+from agent_runtime.personas import effective_toolsets
 from types import SimpleNamespace
 
 Task = SimpleNamespace
@@ -497,7 +498,11 @@ def test_open_chat_create_resolves_the_backing_persona_like_the_snapshot_does(
     changed = _open_chat_patches(store, before)[0]["changed"]
     assert changed["effective_model"] == "gpt-test"
     assert changed["effective_provider"] == "openai-codex"
-    assert changed["toolsets"] == ["file"]
+    # ``toolsets`` on this row is the DECLARED lane set since S0a A2 (the
+    # persona's own ``["file"]`` field admits nothing), so the parity property
+    # is asserted against the declaration rather than against the field.
+    assert changed["toolsets"] == effective_toolsets(persona)
+    assert changed["toolset_declaration"]["persona_list"] == ["file"]
     # And the whole row equals the snapshot's own construction for this instance.
     from agent_runtime.serde import to_jsonable
 

@@ -282,6 +282,22 @@ def _cmd_persona_tool_diff(args) -> int:
         print(emit_json(data))
     else:
         print(f"{visibility['persona_id']}: {visibility['final_tool_count']} tools")
+        # S0a A2: say WHERE the capability came from. Before this, an operator
+        # reading a preview had no way to tell a profile declaration from the
+        # lane default — or to see that the persona-level ``toolsets`` list in
+        # the config/store was being ignored.
+        declaration = visibility.get("toolset_declaration") or {}
+        if declaration:
+            declared = ", ".join(declaration.get("declared") or []) or "-"
+            where = declaration.get("config_path") or "no profile config"
+            print(f"toolsets: {declared} ({declaration.get('source')}, {where})")
+            persona_list = declaration.get("persona_list") or []
+            if persona_list:
+                print(
+                    "persona-level toolsets list ignored (legacy; delete it from "
+                    f"agent_runtime.personas.{visibility['persona_id']}.toolsets): "
+                    + ", ".join(persona_list)
+                )
         envelope = data.get("terminal_envelope")
         if envelope is not None:
             from agent_runtime.terminal_envelope_explain import (
