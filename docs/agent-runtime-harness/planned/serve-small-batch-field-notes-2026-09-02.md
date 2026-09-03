@@ -187,9 +187,22 @@ artifact and a gate to keep it honest, not a row.
 Three tests went red on that four-line change, in two files, and every one of
 them was asserting that the waste EXISTS:
 
-* `test_persona_prewarm.py::test_a_cold_create_pays_probe_rounds_and_the_next_one_pays_none`
-* `test_persona_prewarm.py::test_without_the_prewarm_the_same_create_pays_the_rounds_again`
-* `test_agent_create_subphases.py::test_an_unwarmed_mint_bills_its_probe_rounds_to_the_chat_lane_scope_read`
+* `test_a_cold_create_pays_probe_rounds_and_the_next_one_pays_none` (retired, in
+  `test_persona_prewarm.py`) — replaced by
+  `tests/agent_runtime/test_persona_prewarm.py::test_the_prewarm_fills_the_PERSONA_keyed_readiness_memo_the_create_reads`
+* `test_without_the_prewarm_the_same_create_pays_the_rounds_again` (retired, same
+  file) — replaced by the same per-persona gate
+* `test_an_unwarmed_mint_bills_its_probe_rounds_to_the_chat_lane_scope_read`
+  (retired, in `test_agent_create_subphases.py`) — replaced by
+  `tests/agent_runtime/test_agent_create_subphases.py::test_a_mint_bills_no_probe_rounds_to_any_projection_read`
+
+*(The three retired names are written WITHOUT their `file::test` form on purpose:
+`tests/test_coverage_claims_resolve.py` scans `planned/` and reds on a
+doubled-colon reference that no longer resolves, which is exactly right — a
+coverage claim naming a deleted test is a claim with nothing behind it. The
+history stays readable; the resolvable references point at what replaced them.
+Repointed 2026-09-03 by the S0a builder, which is when the gate was found red on
+`main`.)*
 
 They are the counted half of **Stage 3a of
 `mission-control-agent-drop-latency-2026-08-21`** and of **W3-H1**, and between
