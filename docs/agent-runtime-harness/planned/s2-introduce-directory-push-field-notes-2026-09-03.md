@@ -356,6 +356,130 @@ and is the whole point of the set), and the literal method-set lists in
 `test_serve_rpc_office{,_subscribe,_upsert}.py`, which grew by all six names
 this wave adds.
 
+### The e2e evidence (real serve children, two isolated roots)
+
+`tests/agent_runtime/test_gateway_peer_two_roots_e2e.py` grew five tests; the
+whole live lane is green:
+
+```
+bash scripts/run_tests.sh tests/agent_runtime/test_gateway_peer_two_roots_e2e.py \
+  tests/agent_runtime/test_gateway_peer_cross_install_chat_e2e.py \
+  tests/agent_runtime/test_gateway_peer_cross_install_media_e2e.py
+=== Summary: 3 files, 12 tests passed, 0 failed (100% complete) in 104.5s (8 workers) ===
+```
+
+What each proves, on two real `harness serve` children with real TLS:
+
+* `test_introduce_on_b_join_on_a_and_the_device_half_redeems` — B runs
+  `introduce` once; A joins with `--expect-fingerprint` from the account;
+  the device half redeems against B through `pair_hello` as a phone would.
+  Both ends hold the SAME `expires_at` (asserted as a 29-30 day window, not an
+  equality); the device row carries `account_device_id == "dev-acct-1"` beside
+  its own minted `dev_<hex>`; `grant_payload`'s key set is the backend's;
+  `hello_ok.gateway.capabilities` is the four words verbatim.
+* `test_a_peer_code_scoped_to_one_install_is_refused_to_any_other_on_the_wire`
+  — a THIRD install (C) spends A's code and is refused with the same words a
+  nonexistent code gets; nothing is written on B; A then still redeems it.
+* `test_the_roster_and_one_far_thread_cross_the_wire_on_real_serves` —
+  §0.10 fact 1's proof. A real persona chat thread is seeded on B through
+  `ensure_persona_chat_session` + two `append_message` rows, then READ FROM A
+  via `peer.thread.read`, so the transcript read happens inside B's live serve.
+  Both messages come back in order. A session outside that lane is
+  `foreign_session` over the wire. The roster crosses first with exactly the six
+  projection fields.
+* `test_a_revoke_on_b_reaches_a_as_revoked_you_before_the_next_send` — B's
+  revoke announces first over the still-working edge; A's CACHE carries
+  `revoked_you` while A's own trust row is untouched (`revoked: false`,
+  `usable: false`, `unusable_reason: peer_revoked_you`); A's next
+  `resolve_install_target` refuses on that word.
+* `test_a_cli_join_beside_a_running_serve_is_visible_with_no_restart` — R-IP12
+  E1: the join runs in its own CLI process while A's serve is up, A's serve
+  answers about the new row with no restart, and `gateway.peer.recorded` is on
+  A's EventLog tail.
+
+**The find, and it is the plan's own §0.10 risk firing live.** The far thread
+read first came back `thread_unreadable / chat_scope_unresolved` — which is the
+CORRECT failure (closed, typed, never an empty page). Root cause was the
+FIXTURE, not the door: `publish_chat_head_home` is a no-op for a process that
+named no explicit head, and `_sandbox_env` set `HERMES_HOME` without
+`HERMES_HEAD_HOME`, so no serve in that file had ever published a chat-head
+pointer. The Launcher always sets both (`HERMES_HOME=profiles/<profile>`,
+`HERMES_HEAD_HOME=profiles/base`). The sandbox now sets both, which makes it
+model the configuration that ships rather than one nothing produces — and the
+ambient rung's fail-closed behaviour keeps its own unit test in
+`test_peer_directory.py`. **The §5 argv-lane fallback was NOT needed** and is
+not built.
+
+### Verification
+
+Plan §4, verbatim, all green:
+
+```
+# S2   9 files, 176 tests passed, 0 failed
+# S2b 11 files, 279 tests passed, 0 failed
+# S2c  9 files, 178 tests passed, 0 failed
+# S2d  3 files,  87 tests passed, 0 failed   (the addendum's own set)
+# live 3 files,  12 tests passed, 0 failed   (real serve children, 104.5s)
+python scripts/dump_cli_contract.py --check
+  -> CLI contract fresh: 191 command paths, sha256 86837537988fdfcf
+python scripts/emit_harness_tool_inventory.py --check
+  -> tool inventory fresh: 44 tools across 15 toolsets, sha256 36780ed3d8aec5a5
+python scripts/doc_cite_adjacency.py --exclude archive --exclude planned
+  -> UNWAIVED FAILURES: 0
+```
+
+Read-only live sanity on this box (`HERMES_HOME=X:\Eternia\.hermes`), and the
+operator's store is byte-untouched — `gateway/` still holds only `install.json`,
+so no read created a cache sidecar:
+
+```
+harness gateway id --json
+  -> capabilities ["announce","introduce","roster","thread_read"],
+     endpoints [], endpoints_source "unknown",
+     listener {host: null, port: null, source: "unknown"}
+     (the lane is off on this root, which is the honest empty answer)
+harness gateway peers list --json  -> count 0, items []
+```
+
+Whole-suite sweep, `bash scripts/run_tests.sh tests/agent_runtime tests/hermes_cli`
+(~9,770 tests): **one red, and it is a pre-existing wall-clock flake** —
+`test_read_model_slo::test_synthetic_snapshot_full_build_within_rd0_slo`, which
+asserts `build_ms <= 2000` and measured 2938 under 8-worker contention. Measured
+rather than assumed:
+
+* green in isolation on this branch, three runs: 1.90 s / 1.92 s / 1.62 s;
+* green in isolation with `agent_runtime/`, `tools/` and `hermes_cli/` checked
+  out at `origin/main`, two runs: 1.82 s / 1.75 s;
+* the one thing this wave adds to that path is `_installs_block()`, hoisted to
+  ONCE per snapshot. Measured over an empty store: n=200, mean 0.687 ms.
+
+So the budget was already ~1.8 s of 2.0 s before this branch and a sub-millisecond
+addition is not what tips it; the test is marginal under parallel load. Not
+weakened and not baselined — recorded here with its numbers.
+
+Two reds the sweep DID own, both fixed forward in `aa9e964411`:
+
+* `test_duplicate_helper_bodies` caught `_announce_roster_changed` copied
+  byte-for-byte into `agent_create.py` and `agent_retire.py`. Folded onto one
+  authority in `gateway_announce.py` — the module that owns the outbound edge.
+  The gate was right.
+* `test_persona_tool_diff_declaration` pinned `"dev: 43 tools"` in the
+  operator's text read; 43 -> 44 for `agent_chat_installs`, re-measured with the
+  ratchet.
+
+### Counts, before and after
+
+| | before | after |
+|---|---|---|
+| `harness_core` tools / token estimate | 43 / 1149 | 44 / 1177 |
+| registered `peer.*` methods | 3 | 6 |
+| `PEER_METHOD_ALLOWLIST` | 3 | 6 |
+| registered RPC methods (manifest) | 16 | 22 |
+| registered event contracts | 59 | 64 |
+| `LOCAL_CONSOLE_METHODS` | 2 | 5 |
+| CLI command paths | 191 | 191 (verbs replaced flags one-for-one in the count) |
+| files under `<store_root>/gateway/` | 4 | 5 (`peers_cache.json`) |
+
 ### OWED cross-repo at landing (none of it closable from this worktree)
 
 1. **`tests/fixtures/hermes_cli_contract.json`** -> launcher
