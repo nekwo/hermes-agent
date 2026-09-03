@@ -7,6 +7,44 @@ picture — hermes log receipts in `<HERMES_HOME>/logs/agent.log`, the durable
 turn record's `phases` block, and the launcher's diag log. They join by **id**,
 never by time, and each has a consumer that fails loudly when it reads nothing.
 
+## An unrun gate is indistinguishable from a passing one
+
+**Stated once here, as a standing PRINCIPLE, and cited thereafter** (operator
+ruling 2026-09-03; the launcher's copy is
+`EterniaLauncher/docs/mission_control/07-observability-and-qa.md`). It had been
+the load-bearing argument in at least three plans without ever being written
+down as a rule, which is the same shape it describes: a thing everybody relies
+on and nobody checks.
+
+A green report is the conjunction of two facts — the gate ran, and it passed —
+and a reader who sees only the verdict cannot tell which one they got. So a
+check that did not execute carries the same signal as one that executed and
+found nothing, and it carries it *silently*, which is why the failure mode is
+always measured in days rather than caught in minutes. The evidence in this
+repo is not hypothetical: `main` sat red and unreported from `6979bad59` on
+`test_every_json_verb_states_its_root_or_is_classified`, a whole-program gate,
+because CI on this fork is largely inert and no local lane ran it. The verb was
+fixed in an afternoon; the missing lane was the actual defect
+([AGENTS.md](../../AGENTS.md) § Testing tells the same story from the hook's
+side, and the launcher's `CLAUDE.md` records three further recurrences of the
+class in that repo, one of them inside `test/` itself).
+
+Three consequences this canon actually acts on:
+
+1. **A check whose input is the whole tree must not depend on a trigger set.**
+   A path filter turns a whole-program gate into a gate over the paths someone
+   remembered, and the paths nobody remembered are exactly where it was needed.
+2. **"The gate is green" is only evidence when the run is named.** A verdict in
+   a report, a commit message or a hand-back cites the command and its exit, or
+   it is a claim about a run that may not have happened.
+3. **Removing a lane is a decision about coverage, not about speed.** Both
+   repos' pre-push hooks were deleted on 2026-09-03 by ruling and the checks
+   stayed as tests — which is a deliberate move of WHEN they run, recorded as
+   such, not an unnoticed drift into never.
+
+The rest of this document is about receipts that are RUN. This principle is
+about the ones that are not.
+
 ## The honesty contract
 
 This is the canonical statement. Every timing surface in either repo inherits
@@ -72,35 +110,18 @@ the create receipt (`agent_create_phases.py:23-24`) then inherited verbatim.
    `waited_ms=` (`stream.py:142-145`); `agent_create_phases` repeats
    `instance_ms` from the RPC result (`agent_create_phases.py:83-87`).
 
-**Rule 1 has a LIST form, and 2026-08-31 closed three instances of it** (H1,
-`2638504f9b`). A list that was shortened is as much a silent zero as a phase
-that defaulted, so the office row builder states both ways its actor list can be
-short — `actors_truncated` (the cut WE chose) and `actors_unreadable` (files the
-platform would not open) — and both are REQUIRED keyword arguments of
-`office_summary_row` (`snapshot.py:1718+`), so a caller holding a bare list has
-to say `0` out loud rather than get it by default. The same rule now runs over
-the conflict list: `conflict_guessed_keys` rides the row beside
-`conflict_actor_keys` and names the subset the scan had to GUESS from a
-filename, because a sidecar that will not decode still contributes a key and
-that key is `office_models.actor_file_token(actor_key)` — for a long key NOT the
-actor key, so `harness office resolve-conflict --actor <it>` finds nothing. It
-rides the ROW rather than being re-derived at each reader, for the reason
-`orphan_reason` does: one scan decides it, and a second derivation is free to
-disagree with the list it explains. Both readers act on it — the parity warning
-`office_actor_conflict` carries a `guessed` boolean FIELD (the `orphaned_office`
-rule: discrimination in a field, never in the code, or every existing census of
-the condition zeroes) and appends "filename guess — resolve-conflict will not
-find this key" to the operator sentence; the CLI prints the guess list under
-`--full` beside the keys it qualifies and only there, because the skinny row
-hands over a count and no tokens. Both keys are additive — a row from an older
-core has no such list, which reads as exactly the claim the bare list used to
-make silently. Third instance, same commit and same shape:
-`copy_workspace_content` skipped an undecodable source actor and emitted
-NOTHING, while every other fault in that module (a broken surface, a folder
-write, a refused class key, a failed upsert) degraded to a named row. It now
-warns `office_actors_unreadable` with the count and the SOURCE workspace id
-(`workspace_template.py:123`) — the id an operator has to go back to, not the
-one being created.
+**Rule 1 has a LIST form**: a list that was shortened is as much a silent zero
+as a phase that defaulted, so a row carrying a list must also carry every way
+that list can be short. 2026-08-31 closed three instances of it in the office
+family (H1, `2638504f9b`) — `actors_truncated` / `actors_unreadable` as REQUIRED
+keyword arguments of `office_summary_row`, `conflict_guessed_keys` beside
+`conflict_actor_keys`, and `office_actors_unreadable` out of
+`copy_workspace_content`. **The three, and the parity warnings that carry them,
+are canon in [06 — Office and board](06-office-and-board.md) § "The parity
+warnings the office raises"** and not here: they are facts about the office
+subject, and a reader asking "what warns, and why" should not have to read two
+files that are free to drift. What belongs here is the rule they are instances
+of, which is the paragraph above.
 
 **Rule 1 read from the other side, 2026-08-31 (the instance-replication lane).**
 `result["persona_instance_sync"]` is emitted **unconditionally** on every realm

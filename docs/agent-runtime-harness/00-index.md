@@ -17,7 +17,7 @@ Read in this order for a full picture; each stands alone for its own territory.
 
 | Doc | Domain — the question it answers |
 | --- | --- |
-| [01 — System architecture](01-system-architecture.md) | What the entities ARE: persona template → durable instance → chat root → scene actor; the agent graph; personas and profiles as data; what the mission-lane removal deleted. |
+| [01 — System architecture](01-system-architecture.md) | What the entities ARE: persona template → durable instance → chat root → scene actor; the agent graph; personas and profiles as data; the realm-sync lane (canonical home since 2026-09-03); what the mission-lane removal deleted. |
 | [02 — Runtime data and shapes](02-runtime-data-and-shapes.md) | Where state lives: the store layout, SessionDB, the snapshot core and its sections, the core cache and its fingerprint model, event-log offsets and rotation — and the honest status of the O(world) build. |
 | [03 — Transport and wire](03-transport-and-wire.md) | How shapes leave the process: the serve, the stream and its fold negotiation, patch frames, the RPC lane, the PUSH-vs-RPC fork boundary, and the additive-only wire rule with its cross-repo byte pin. |
 | [04 — Boot and lifecycle](04-boot-and-lifecycle.md) | What happens between spawn and authoritative, stage by stage, each with its receipt: boot timeline, prewarm, the first core build, the cache consult, shutdown. |

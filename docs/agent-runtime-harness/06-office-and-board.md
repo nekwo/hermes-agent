@@ -1082,6 +1082,46 @@ the warm drop-2 pays `chat_lane_scope_ms:0` for a 78 ms create. `sprite_source=a
 on every row — the `qa` persona binds no sheet, so `first_paint` is correctly
 absent and the sprite lane owns none of this.
 
+## The parity warnings the office raises
+
+Moved here from [07 — Observability](07-observability.md) on 2026-09-03 (operator
+ruling): 07 owns the RULE — a list that was shortened is as much a silent zero as
+a phase that defaulted, so a row carrying a list carries every way that list can
+be short — and this file owns the SUBJECT. A reader asking "what warns, and why"
+reads one file, and the two stop being free to drift.
+
+**Two ways an actor list can be short, and the row says both.**
+`actors_truncated` is the cut WE chose; `actors_unreadable` is files the platform
+would not open. Both are REQUIRED keyword arguments of `office_summary_row`
+(`snapshot.py:1718+`), so a caller holding a bare list has to say `0` out loud
+rather than get it by default.
+
+**`conflict_guessed_keys` rides the row beside `conflict_actor_keys`** and names
+the subset the scan had to GUESS from a filename. A sidecar that will not decode
+still contributes a key, and that key is
+`office_models.actor_file_token(actor_key)` — for a long key NOT the actor key,
+so `harness office resolve-conflict --actor <it>` finds nothing. It rides the
+ROW rather than being re-derived at each reader, for the reason `orphan_reason`
+does: one scan decides it, and a second derivation is free to disagree with the
+list it explains. Both readers act on it — the parity warning
+`office_actor_conflict` carries a `guessed` boolean FIELD (the `orphaned_office`
+rule: **discrimination in a field, never in the code**, or every existing census
+of the condition zeroes) and appends "filename guess — resolve-conflict will not
+find this key" to the operator sentence; the CLI prints the guess list under
+`--full` beside the keys it qualifies and only there, because the skinny row
+hands over a count and no tokens. Both keys are additive — a row from an older
+core has no such list, which reads as exactly the claim the bare list used to
+make silently.
+
+**`office_actors_unreadable` out of `copy_workspace_content`**, same commit and
+same shape: it skipped an undecodable source actor and emitted NOTHING, while
+every other fault in that module (a broken surface, a folder write, a refused
+class key, a failed upsert) degraded to a named row. It now warns with the count
+and the SOURCE workspace id (`workspace_template.py:123`) — the id an operator
+has to go back to, not the one being created.
+
+All three landed 2026-08-31 (H1, `2638504f9b`).
+
 ## HUD chips — what the investigation concluded, what shipped
 
 Three header chips read from one parity envelope. The 2026-08-17 investigation's
@@ -1149,6 +1189,12 @@ One asymmetry worth knowing: the board DOES send `expect_revision`
 omit it — the office's revision guard lives on the RPC lane only.
 
 ### The pull's adopt arms, and the day they started emitting
+
+The office and board families' half of the realm pull. The LANE itself — the
+ledgers, the authorization, drift and revert, the instance-replication
+projection — is [01 — System architecture](01-system-architecture.md#realm-sync)
+§ Realm sync; what is here is what these two families do when a pull reaches
+them, which is a fact about the families.
 
 The board family reached the office's H1 shape on 2026-09-02, two days after the
 office did. Until then `board_sync.apply_board_pull` wrote both halves of a

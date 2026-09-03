@@ -219,7 +219,9 @@ Two GATES therefore became vacuous —
 both read zero with the prewarm deleted — and in each case it was their
 anti-vacuity twin that said so by becoming unsatisfiable. That is the pair
 design working, and it is the reason the vacuous gates were removed rather than
-kept green: an unrun gate is indistinguishable from a passing one.
+kept green: an unrun gate is indistinguishable from a passing one
+([07 — Observability](../07-observability.md#an-unrun-gate-is-indistinguishable-from-a-passing-one),
+the canonical statement of that principle).
 
 What replaced them, in each file, is the stronger single statement neither could
 make: *a create against a holed `check_fn` cache probes nothing*. What was NOT
@@ -248,8 +250,9 @@ that added the override measured 10–38 s on this same machine three days ago.
 `--timeout=30` is a HANG detector, not a performance budget, and the failure it
 produced when it fired was not a slow test — it was the claim lane failing its
 BASELINE and reporting "mutation result would be meaningless" instead of any
-verdict at all. An unrun gate is indistinguishable from a passing one; that is
-the sentence `0aab190d4` was written under and it still holds. Re-evaluate when
+verdict at all. An unrun gate is indistinguishable from a passing one
+([07 — Observability](../07-observability.md#an-unrun-gate-is-indistinguishable-from-a-passing-one));
+that is the sentence `0aab190d4` was written under and it still holds. Re-evaluate when
 the toolset-manifest stage lands and the import itself is gone.
 
 ---

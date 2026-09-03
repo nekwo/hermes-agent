@@ -264,6 +264,55 @@ ledger capped at `SKILL_TOMBSTONE_LEDGER_CAP = 200` (`store.py:34`), serialized
 additively at the existing schema version — the delete lane it powers is
 documented under [Skills](#skills).
 
+Realms own what publishes: `skill_publish_mode`
+(`all` | `selected`) and `agent_publish_mode` (`workspace` | `selected`), with
+personas required by a roster or an Office placement pinned regardless, so a
+pulled workspace can never point at an absent persona definition. Stores:
+`WorkspaceStore` (`store.py:173`), `RealmStore` (`:472`); active pointers are
+single files (`paths.active_workspace_path()` / `active_realm_path()`).
+Server-bound realms authorize every sync action against the Eternia backend and
+**fail closed** (`realm_membership.py:1-12`) — which half of which verb that
+gates is [Realm sync](#realm-sync) below.
+
+Workspace scoping is its own authority, and it governs **advertising and
+bare-persona resolution only** (`agent_runtime/workspace_scope.py`):
+
+- `workspace_id` of `None` on an instance means runtime-global — visible and
+  addressable in every workspace.
+- A non-`None` pointer is a "belongs to THIS workspace" claim.
+- A scope of `None` (no active workspace) degrades to unscoped rather than
+  hiding the roster.
+- `exclude_global_canonicals` (`:191`) — a persona's auto-derived canonical row
+  is never advertised into a real workspace scope, because instance means
+  in-level placement.
+- `shadow_canonical_by_placement` (`:150`) — where an in-scope placement
+  exists, a bare persona id lands on the deliberate placement, not the plumbing
+  row.
+
+Explicit `personainst_*` targeting stays legal cross-workspace, and identity
+lookups always read the full unfiltered roster — a steering edge into another
+workspace is a real graph fact even when it is not addressable.
+
+`workspace_template.py` copies authored **structure** between workspaces (office
+taxonomy and placements, the default board's active cards, roster, settings);
+history is never copied.
+
+## Realm sync
+
+The sync LANE, split out of § Realms and workspaces on 2026-09-03 (operator
+ruling). That section defines the entities and the ledgers as DATA; this one
+owns what publish and pull do with them. The subsystem had outgrown being a
+subsection of two other documents — the office and board halves are in
+[06 — Office and board](06-office-and-board.md) § "The pull's adopt arms" and
+§ "The parity warnings the office raises", which are facts about those
+families rather than about the lane, and the transport is in
+[03 — Transport and wire](03-transport-and-wire.md).
+
+### The realm ledgers on a pull
+
+"Those two ledgers" are `deleted_workspace_ids` and `skill_tombstones`, both
+defined in [Realms and workspaces](#realms-and-workspaces) above.
+
 **Both of those ledgers are UNIONED on pull, not adopted** (RD-11, 2026-08-31,
 `4a8d398268`). `_UNIONED_REALM_LEDGERS` (`realm_sync.py`) names them and
 `_pulled_artifact_bytes` merges each by its own rule — set-union for
@@ -280,14 +329,7 @@ the next pull. A stamped entry blocks nothing (`store.active_skill_tombstones`)
 and is the settled history the cap prunes first (`store.prune_settled_ledger`),
 so an inert restore can never evict a live block.
 
-Realms own what publishes: `skill_publish_mode`
-(`all` | `selected`) and `agent_publish_mode` (`workspace` | `selected`), with
-personas required by a roster or an Office placement pinned regardless, so a
-pulled workspace can never point at an absent persona definition. Stores:
-`WorkspaceStore` (`store.py:173`), `RealmStore` (`:472`); active pointers are
-single files (`paths.active_workspace_path()` / `active_realm_path()`).
-Server-bound realms authorize every sync action against the Eternia backend and
-**fail closed** (`realm_membership.py:1-12`).
+### Authorization, and the half it gates
 
 **"Fail closed" is per-HALF for the READ verb, since 2026-09-02.** `publish` and
 `pull` still refuse whole — every byte they touch is a realm-wide assertion, and
@@ -309,6 +351,8 @@ deliberate: a member who has never cloned this realm has no local repo to read,
 and the only way to get one is the clone just refused, so the verb still raises
 with the code it always raised — and attempts no network call on the way there.
 
+### Local drift, and the two exits from it
+
 **Unpublished local drift has two exits, not one, since 2026-08-31**
 (`3e6d8c06f3`). Pull deliberately never clobbers local state, which used to
 leave an operator holding drift they never meant to publish with Publish as the
@@ -322,6 +366,8 @@ realigns those exact rows to the last-pulled upstream already on disk:
 `--yes`-gated like publish/resolve because it is destructive of LOCAL state,
 archive-never-delete so it is recoverable, and **local-only** — no git, no
 network, no `--credential-file`, and it never mints a realm-visible tombstone.
+
+### The instance-replication lane
 
 **A pull that delivers a desk now delivers the AGENT behind it**
 (landed 2026-08-31, H1–H4, tip `a0c171af47`). Until that day the pull adopted
@@ -419,29 +465,6 @@ the operator's chat with the replica produced a real turn record. A realm pull
 delivers a working agent, demonstrated live across two machines — the receipt
 ledger is `docs/mission_control/planned/instance-replication.md` in the
 EterniaLauncher repo.
-
-Workspace scoping is its own authority, and it governs **advertising and
-bare-persona resolution only** (`agent_runtime/workspace_scope.py`):
-
-- `workspace_id` of `None` on an instance means runtime-global — visible and
-  addressable in every workspace.
-- A non-`None` pointer is a "belongs to THIS workspace" claim.
-- A scope of `None` (no active workspace) degrades to unscoped rather than
-  hiding the roster.
-- `exclude_global_canonicals` (`:191`) — a persona's auto-derived canonical row
-  is never advertised into a real workspace scope, because instance means
-  in-level placement.
-- `shadow_canonical_by_placement` (`:150`) — where an in-scope placement
-  exists, a bare persona id lands on the deliberate placement, not the plumbing
-  row.
-
-Explicit `personainst_*` targeting stays legal cross-workspace, and identity
-lookups always read the full unfiltered roster — a steering edge into another
-workspace is a real graph fact even when it is not addressable.
-
-`workspace_template.py` copies authored **structure** between workspaces (office
-taxonomy and placements, the default board's active cards, roster, settings);
-history is never copied.
 
 ## The board
 
