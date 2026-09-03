@@ -770,8 +770,24 @@ def managed_scope_check() -> None:
         check_info(f"managed dir set via HERMES_MANAGED_DIR={managed_dir}")
 
 
-def run_doctor(args):
-    """Run diagnostic checks."""
+def run_doctor(args, *, agent_browser_runnable_override=None):
+    """Run diagnostic checks.
+
+    ``agent_browser_runnable_override`` is a test seam over the agent-browser
+    "does this candidate actually run" probe (``hermes_constants
+    .agent_browser_runnable``), which SPAWNS the candidate with ``--version``.
+    ``None`` (every production call site) reads the module-level import
+    exactly as before — unchanged behavior, and still overridable the old way
+    via ``monkeypatch.setattr(doctor, "agent_browser_runnable", ...)``. A test
+    that wants doctor's REPORT and does not care what is on the operator's
+    live PATH should pass a stub here instead: without it, a real
+    ``agent-browser`` found on PATH (a Node.js global install, or the
+    Hermes-managed one under a live profile) gets actually exec'd during the
+    suite, which is both slow and PATH-dependent — see
+    ``tests/hermes_cli/_gateway_fence.py``'s ``_is_agent_browser_version_probe``
+    exemption for the escape this closes off from a different angle.
+    """
+    _agent_browser_runnable = agent_browser_runnable_override or agent_browser_runnable
     should_fix = getattr(args, 'fix', False)
     ack_target = getattr(args, 'ack', None)
 
@@ -1988,13 +2004,13 @@ def run_doctor(args):
         if agent_browser_path.exists():
             check_ok("agent-browser (Node.js)", "(browser automation)")
             agent_browser_ok = True
-        elif _which_ab and agent_browser_runnable(_which_ab):
+        elif _which_ab and _agent_browser_runnable(_which_ab):
             check_ok("agent-browser", "(browser automation)")
             agent_browser_ok = True
-        elif _managed_ab and agent_browser_runnable(_managed_ab):
+        elif _managed_ab and _agent_browser_runnable(_managed_ab):
             check_ok("agent-browser", "(browser automation)")
             agent_browser_ok = True
-        elif _legacy_ab and agent_browser_runnable(_legacy_ab):
+        elif _legacy_ab and _agent_browser_runnable(_legacy_ab):
             check_ok("agent-browser", "(browser automation)")
             agent_browser_ok = True
         elif _which_ab:

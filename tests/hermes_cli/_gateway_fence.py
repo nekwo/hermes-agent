@@ -262,6 +262,28 @@ def classify(cmd, env=None) -> str | None:
     # reds 19 tests in ``test_doctor.py`` alone (measured with the doctor fix in
     # place). The remaining half is a test-side seam over the real resolver, not
     # a production binding; it is rowed, not done here.
+    #
+    # 2026-09-03: the seam landed (``run_doctor``'s ``agent_browser_runnable_
+    # override`` in ``hermes_cli/doctor.py``, injected by every plain-report
+    # test in ``test_doctor.py`` via a ``_run_doctor`` wrapper) and the 19
+    # ``test_doctor.py`` reds ARE gone -- measured by deleting this exemption's
+    # ``and not _is_agent_browser_version_probe(tokens)`` clause and running
+    # ``test_doctor.py`` (49 passed) plus ``test_gateway_spawn_fence.py`` and
+    # ``test_doctor_command_install.py`` (only ``test_the_agent_browser_
+    # capability_probe_is_not_refused`` reds, which exists to pin this
+    # exemption and is expected to red when it is gone). But `doctor.py` is
+    # not the only production caller: ``hermes_cli/dep_ensure.py``'s
+    # ``_DEP_CHECKS`` (reached from ``cmd_postinstall``, unmocked in
+    # ``test_postinstall_noninteractive.py::
+    # test_postinstall_json_emits_summary_as_final_line``) and
+    # ``hermes_cli/nous_subscription.py`` (unmocked in
+    # ``test_nous_subscription.py::
+    # test_apply_nous_managed_defaults_writes_video_gen_config``) both call
+    # ``agent_browser_runnable`` straight off ``shutil.which("agent-browser")``
+    # with no seam of their own, so deleting the exemption still reds those
+    # two tests. The exemption stays until those two also get a test-side
+    # seam (or their tests get one each) -- not done here; see
+    # `docs/agent-runtime-harness/planned/w10-hermes-field-notes-2026-09-03.md`.
     if _names_real_root(text, env) and not _is_agent_browser_version_probe(tokens):
         return (
             f"it would run hermes against the operator's REAL store ({_REAL_ROOT}). "

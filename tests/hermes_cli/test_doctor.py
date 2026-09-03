@@ -16,6 +16,39 @@ from hermes_cli import doctor as doctor_mod
 from hermes_cli.doctor import _has_provider_env_config
 
 
+def _no_op_agent_browser_runnable(path):
+    """The stub every plain-report test below injects via ``run_doctor``'s
+    ``agent_browser_runnable_override`` seam.
+
+    The real ``hermes_constants.agent_browser_runnable`` SPAWNS the candidate
+    with ``--version`` to tell a genuinely runnable binary from a dangling npm
+    symlink (#48521). A test that only wants doctor's printed report, not an
+    opinion on browser tooling, has no reason to pay for that spawn — and
+    without this seam it does not get a choice: `run_doctor` resolves
+    ``shutil.which("agent-browser")`` against the operator's real PATH, which
+    `run_tests.sh` forwards verbatim, so on a box with agent-browser installed
+    (a live Hermes profile's Node prefix, or a global npm install) the suite
+    was actually executing it. Returning ``False`` unconditionally is fine:
+    every test using this stub either does not assert on the agent-browser
+    line at all, or (the two Termux/managed-browser tests) supplies its own
+    override and does not use this one.
+    """
+    return False
+
+
+def _run_doctor(args, **kwargs):
+    """``doctor_mod.run_doctor``, defaulting to the no-spawn browser stub.
+
+    Tests that need to control agent-browser resolution themselves (the
+    Termux and managed-node-prefix cases) call ``doctor_mod.run_doctor``
+    directly and monkeypatch ``doctor_mod.agent_browser_runnable`` or
+    ``shutil.which`` the way they always have — the override parameter falls
+    back to that live global when nothing is passed, so both styles coexist.
+    """
+    kwargs.setdefault("agent_browser_runnable_override", _no_op_agent_browser_runnable)
+    return doctor_mod.run_doctor(args, **kwargs)
+
+
 class TestDoctorPlatformHints:
     def test_termux_package_hint(self, monkeypatch):
         monkeypatch.setenv("TERMUX_VERSION", "0.118.3")
@@ -112,7 +145,7 @@ class TestDoctorEnvFileEncoding:
         # Run doctor. If the .env read still uses locale encoding, this
         # raises UnicodeDecodeError and the test fails.
         with pytest.raises(SystemExit):
-            doctor_mod.run_doctor(Namespace(fix=False))
+            _run_doctor(Namespace(fix=False))
 
 
     def test_doctor_reads_invalid_utf8_env_via_latin1_fallback(
@@ -135,7 +168,7 @@ class TestDoctorEnvFileEncoding:
         monkeypatch.setitem(sys.modules, "model_tools", fake_model_tools)
 
         with pytest.raises(SystemExit):
-            doctor_mod.run_doctor(Namespace(fix=False))
+            _run_doctor(Namespace(fix=False))
 
 
 class TestDoctorToolAvailabilityOverrides:
@@ -203,7 +236,7 @@ def test_doctor_reports_vercel_backend_diagnostics(monkeypatch, tmp_path):
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        doctor_mod.run_doctor(Namespace(fix=False))
+        _run_doctor(Namespace(fix=False))
 
     out = buf.getvalue()
     assert "Vercel runtime" in out
@@ -260,7 +293,7 @@ class TestDoctorMemoryProviderSection:
         import io, contextlib
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            doctor_mod.run_doctor(Namespace(fix=False))
+            _run_doctor(Namespace(fix=False))
         return buf.getvalue()
 
     def test_no_provider_shows_builtin_ok(self, monkeypatch, tmp_path):
@@ -357,7 +390,7 @@ def test_run_doctor_accepts_named_provider_from_providers_section(monkeypatch, t
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        doctor_mod.run_doctor(Namespace(fix=False))
+        _run_doctor(Namespace(fix=False))
 
     out = buf.getvalue()
     assert "model.provider 'volcengine-plan' is not a recognised provider" not in out
@@ -401,7 +434,7 @@ def test_run_doctor_accepts_stable_key_when_provider_name_differs(
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        doctor_mod.run_doctor(Namespace(fix=False))
+        _run_doctor(Namespace(fix=False))
 
     out = buf.getvalue()
     assert (
@@ -443,7 +476,7 @@ def test_run_doctor_accepts_bare_custom_provider(monkeypatch, tmp_path):
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        doctor_mod.run_doctor(Namespace(fix=False))
+        _run_doctor(Namespace(fix=False))
 
     out = buf.getvalue()
     assert "model.provider 'custom' is not a recognised provider" not in out
@@ -483,7 +516,7 @@ def test_run_doctor_flags_missing_credentials_for_active_openrouter_provider(mon
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        doctor_mod.run_doctor(Namespace(fix=False))
+        _run_doctor(Namespace(fix=False))
 
     out = buf.getvalue()
     assert "model.provider 'openrouter' is set but no API key is configured" in out
@@ -533,7 +566,7 @@ def test_run_doctor_accepts_hermes_provider_ids_that_catalog_aliases(
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        doctor_mod.run_doctor(Namespace(fix=False))
+        _run_doctor(Namespace(fix=False))
 
     out = buf.getvalue()
     assert f"model.provider '{provider}' is not a recognised provider" not in out
@@ -580,7 +613,7 @@ def test_run_doctor_accepts_vendor_slugs_for_named_custom_provider(monkeypatch, 
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        doctor_mod.run_doctor(Namespace(fix=False))
+        _run_doctor(Namespace(fix=False))
 
     out = buf.getvalue()
     assert "model.provider 'custom:hpc-ai' is not a recognised provider" not in out
@@ -628,7 +661,7 @@ def test_run_doctor_accepts_kimi_coding_cn_provider(monkeypatch, tmp_path):
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        doctor_mod.run_doctor(Namespace(fix=False))
+        _run_doctor(Namespace(fix=False))
 
     out = buf.getvalue()
     assert "model.provider 'kimi-coding-cn' is not a recognised provider" not in out
@@ -768,7 +801,7 @@ def test_run_doctor_accepts_bare_custom_provider(monkeypatch, tmp_path):
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        doctor_mod.run_doctor(Namespace(fix=False))
+        _run_doctor(Namespace(fix=False))
 
     out = buf.getvalue()
     assert "model.provider 'custom' is not a recognised provider" not in out
@@ -809,7 +842,7 @@ def test_run_doctor_flags_missing_credentials_for_active_openrouter_provider(mon
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        doctor_mod.run_doctor(Namespace(fix=False))
+        _run_doctor(Namespace(fix=False))
 
     out = buf.getvalue()
     assert "model.provider 'openrouter' is set but no API key is configured" in out
@@ -858,7 +891,7 @@ def test_run_doctor_accepts_hermes_provider_ids_that_catalog_aliases(
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        doctor_mod.run_doctor(Namespace(fix=False))
+        _run_doctor(Namespace(fix=False))
 
     out = buf.getvalue()
     assert f"model.provider '{provider}' is not a recognised provider" not in out
@@ -905,7 +938,7 @@ def test_run_doctor_accepts_kimi_coding_cn_provider(monkeypatch, tmp_path):
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        doctor_mod.run_doctor(Namespace(fix=False))
+        _run_doctor(Namespace(fix=False))
 
     out = buf.getvalue()
     assert "model.provider 'kimi-coding-cn' is not a recognised provider" not in out
@@ -994,7 +1027,7 @@ def test_run_doctor_kimi_cn_env_is_detected_and_probe_is_null_safe(monkeypatch, 
     import io, contextlib
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        doctor_mod.run_doctor(Namespace(fix=False))
+        _run_doctor(Namespace(fix=False))
     out = buf.getvalue()
 
     assert "API key or custom endpoint configured" in out
@@ -1043,7 +1076,7 @@ def test_run_doctor_dashscope_retries_china_endpoint_after_intl_unauthorized(mon
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        doctor_mod.run_doctor(Namespace(fix=False))
+        _run_doctor(Namespace(fix=False))
     out = buf.getvalue()
 
     assert "Alibaba/DashScope" in out
@@ -1102,7 +1135,7 @@ def test_run_doctor_opencode_go_skips_invalid_models_probe(monkeypatch, tmp_path
     import io, contextlib
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        doctor_mod.run_doctor(Namespace(fix=False))
+        _run_doctor(Namespace(fix=False))
     out = buf.getvalue()
 
     assert any(
@@ -1144,7 +1177,7 @@ class TestGitHubTokenCheck:
 
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            run_doctor(Namespace(fix=False))
+            _run_doctor(Namespace(fix=False))
         out = buf.getvalue()
 
         assert "No GITHUB_TOKEN" in out
@@ -1183,7 +1216,7 @@ class TestGitHubTokenCheck:
 
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            run_doctor(Namespace(fix=False))
+            _run_doctor(Namespace(fix=False))
         out = buf.getvalue()
 
         assert "gh auth" in str(call_log) or any(c[0] == "gh" for c in call_log), f"gh not called: {call_log}"
@@ -1247,7 +1280,7 @@ def _run_doctor_with_healthy_oauth_fallback(
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        doctor_mod.run_doctor(Namespace(fix=False))
+        _run_doctor(Namespace(fix=False))
     return buf.getvalue()
 
 
@@ -1353,7 +1386,7 @@ class TestDoctorXaiOAuthStatus:
 
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            doctor_mod.run_doctor(Namespace(fix=False))
+            _run_doctor(Namespace(fix=False))
         return buf.getvalue()
 
 
@@ -1395,7 +1428,7 @@ class TestDoctorXaiOAuthStatus:
 
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            doctor_mod.run_doctor(Namespace(fix=False))
+            _run_doctor(Namespace(fix=False))
         out = buf.getvalue()
         assert "Nous Portal auth" in out
         assert "logged in" in out
@@ -1455,7 +1488,7 @@ class TestDoctorCodexCliHintPlacement:
 
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            doctor_mod.run_doctor(Namespace(fix=False))
+            _run_doctor(Namespace(fix=False))
         return buf.getvalue()
 
     @staticmethod
@@ -1524,7 +1557,7 @@ class TestDoctorStaleMaxIterationsDrift:
 
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf), pytest.raises(SystemExit):
-            doctor_mod.run_doctor(Namespace(fix=fix))
+            _run_doctor(Namespace(fix=fix))
         return buf.getvalue(), hermes_home
 
     def test_detects_drift_warn_only(self, monkeypatch, tmp_path):
@@ -1612,7 +1645,7 @@ class TestDoctorDeprecatedConfigAndEnv:
 
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf), pytest.raises(SystemExit):
-            doctor_mod.run_doctor(Namespace(fix=False))
+            _run_doctor(Namespace(fix=False))
         return buf.getvalue(), hermes_home
 
 
@@ -1660,7 +1693,7 @@ class TestDoctorResolvesTheHomeAtCallTime:
         monkeypatch.setenv("HERMES_HOME", str(home))
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            doctor_mod.run_doctor(Namespace(fix=False))
+            _run_doctor(Namespace(fix=False))
         return buf.getvalue()
 
     def test_the_env_var_alone_redirects_every_profile_relative_read(
