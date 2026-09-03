@@ -1324,6 +1324,15 @@ def agent_chat_open(*, persona_id, session_id=None, limit=20, requested_by_sessi
     return json.dumps(data, default=str)
 
 
+def _bounded_limit(value, *, default: int = 20) -> int:
+    """``value`` as an int, or *default*. Never raises, never a string."""
+
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
 def _remote_thread_read(persona_id, *, session_id, limit):
     """The ``@install/`` branch of :func:`agent_chat_open`, or ``None`` for local.
 
@@ -1383,7 +1392,13 @@ def _remote_thread_read(persona_id, *, session_id, limit):
         {
             "target": parsed.target,
             "session_id": str(session_id).strip(),
-            "limit": int(limit or 20) if str(limit or "").strip().isdigit() or isinstance(limit, int) else 20,
+            # Coerced HERE rather than passed through, because the far handler
+            # fences ``limit`` as an int and refuses anything else — and a
+            # provider that hands a tool its numbers as strings would otherwise
+            # turn a legal call into an invalid-params refusal the caller cannot
+            # act on. The far side still clamps to 1..40; this only makes the
+            # value the right TYPE.
+            "limit": _bounded_limit(limit),
         },
     )
     refusal = outcome.get("refusal")
@@ -1665,6 +1680,13 @@ def _remote_roster_rows(persona_id):
 
 def agent_chat_installs(*, install=None, requested_by_session=None):
     """Which other machines this install can reach, and optionally who is on one.
+
+    ``requested_by_session`` is accepted and NOT used, deliberately: every
+    handler in this module takes it (the registry threads it in from
+    ``kw["session_id"]``), and a directory of MACHINES has no sender scope to
+    narrow — the peers of an install are the same set whoever asks. Dropping the
+    parameter would make this the one tool whose registration reads differently
+    for a reason nobody could see from the call site.
 
     Two shapes from one verb, and the split is the network cost: with no
     ``install`` it reads THIS install's own two files and DIALS NOTHING; with
