@@ -42,7 +42,7 @@
 #   first run in a fresh worktree closer to 20 s.
 #
 # Lane B ── the VALIDATED 4-directory parallel suite lane, on a push that
-#   lands on `refs/heads/main`. `tests/agent_runtime tests/hermes_cli
+#   lands on `refs/heads/release`. `tests/agent_runtime tests/hermes_cli
 #   tests/cli tests/state`, through `scripts/run_tests.sh`. ~18 min.
 #
 # Why classify at all: Lane B costs ~18 minutes (ledger: 12,492/0 in 18:16 and
@@ -51,12 +51,19 @@
 # every push that is not a gate, it is a tax that gets routed around with
 # `--no-verify`, which is the silent skip this hook exists to prevent.
 #
-# Why `main` is the classifier, and why hermes' answer differs from the
-# launcher's: the launcher classifies branch-vs-RELEASE pushes because it has a
-# `release` branch. hermes has none -- `main` IS the shipping branch, and
-# "`main` red, unreported" is literally the row. So the expensive lane rides
-# the ref the row is about, and every other push runs Lane A and is TOLD, in
-# full, which gates did not run and the exact command that runs them.
+# Why `release` is the classifier (operator ruling 2026-09-03, superseding the
+# 2026-09-02 shape that rode `main`): the operator's push-gate relocation ruling
+# of 2026-08-30 already put the launcher's every lane on `refs/heads/release`
+# so that branch and main pushes are instant, and on 2026-09-03, watching a
+# docs-only hermes landing sit behind the 18-minute suite, ruled that hermes
+# main pushes "should be instant" too. The 2026-09-02 argument -- hermes has no
+# `release` branch, so `main` IS the shipping ref -- was true and is now the
+# row instead of the design: the suite rides `refs/heads/release`, which the
+# operator pushes when they want the suite to certify a cut, exactly as the
+# launcher's package lane does. Until a `release` ref exists on origin, Lane B
+# runs by hand (the command is printed on every push) or on the first push
+# that creates it. Every push that is not a release runs Lane A and is TOLD,
+# in full, which gates did not run and the exact command that runs them.
 #
 # A ref line this hook cannot classify is forced to the Lane-B side, never the
 # fast path. Guessing "probably a branch" is how a gate goes quiet.
@@ -172,7 +179,7 @@ fi
 # `git push origin HEAD:main` gives local ref `HEAD` and remote ref
 # `refs/heads/main`, so the REMOTE ref is the one that says where this lands.
 zero="0000000000000000000000000000000000000000"
-lands_on_main=0
+lands_on_release=0
 saw_ref=0
 while read -r local_ref local_sha remote_ref remote_sha; do
     [ -z "${local_ref:-}${remote_ref:-}" ] && continue
@@ -182,21 +189,21 @@ while read -r local_ref local_sha remote_ref remote_sha; do
         continue
     fi
     case "$remote_ref" in
-        refs/heads/main) lands_on_main=1 ;;
+        refs/heads/release) lands_on_release=1 ;;
         refs/heads/*|refs/tags/*) ;;
         *)
             # Unclassifiable ref line: take the EXPENSIVE side. Guessing
             # "probably a branch" is how a gate goes quiet.
-            printf 'pre-push: cannot classify ref line "%s" — treating as a main push.\n' \
+            printf 'pre-push: cannot classify ref line "%s" — treating as a release push.\n' \
                    "$remote_ref" >&2
-            lands_on_main=1
+            lands_on_release=1
             ;;
     esac
 done
 if [ "$saw_ref" = "0" ]; then
     # No ref lines at all (git gave us nothing to classify). Same rule.
-    printf 'pre-push: no ref lines on stdin — treating as a main push.\n' >&2
-    lands_on_main=1
+    printf 'pre-push: no ref lines on stdin — treating as a release push.\n' >&2
+    lands_on_release=1
 fi
 
 # ═══ LANE A — always on ════════════════════════════════════════════════════
@@ -232,12 +239,12 @@ fi
 lane_dirs=${HERMES_PUSH_SUITE_DIRS:-"tests/agent_runtime tests/hermes_cli tests/cli tests/state"}
 lane_cmd="scripts/run_tests.sh $lane_dirs"
 
-if [ "$lands_on_main" = "0" ]; then
-    banner "pre-push lane B: NOT RUN — this push does not land on main."
+if [ "$lands_on_release" = "0" ]; then
+    banner "pre-push lane B: NOT RUN — this push does not land on refs/heads/release (operator ruling 2026-09-03: main and branch pushes are instant)."
     cat >&2 <<EOF
   Lane A passed. The ~18-minute suite lane did not run, and that is by design:
-  it rides pushes that land on refs/heads/main, which is the ref the
-  "main red, unreported" row is about.
+  it rides pushes that land on refs/heads/release, as the launcher's package lane
+  does; the "main red, unreported" row is now answered by that push.
 
   Run it by hand when you want it:
 
@@ -250,12 +257,12 @@ fi
 if [ "${HERMES_PUSH_SUITE_LANE:-}" = "skip" ]; then
     banner "pre-push lane B: SKIPPED BY REQUEST (HERMES_PUSH_SUITE_LANE=skip)"
     cat >&2 <<EOF
-  You are landing on main WITHOUT the validated suite lane. These did not run:
+  You are pushing release WITHOUT the validated suite lane. These did not run:
 
       $lane_cmd
 
   Lane A (cite-adjacency + CLI-contract freshness) DID run and passed.
-  Nothing else did. If main goes red on this commit, this is why.
+  Nothing else did. If release goes red on this commit, this is why.
 
 EOF
     exit 0
@@ -284,7 +291,7 @@ fi
 
 banner "pre-push lane B: the validated parallel suite lane (~18 min)"
 printf '  %s\n' "$lane_cmd" >&2
-printf '  landing on main; set HERMES_PUSH_SUITE_LANE=skip to push without it (loudly).\n\n' >&2
+printf '  pushing release; set HERMES_PUSH_SUITE_LANE=skip to push without it (loudly).\n\n' >&2
 
 # NEVER `pytest` directly — see the WORKTREES section above. `run_tests.sh`
 # gives every file its own hermetic subprocess, which is what keeps the updater
