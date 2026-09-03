@@ -2054,13 +2054,16 @@ def _publish_persona_chat_send_refused_event(
     failed to record is still a refusal, and the caller's typed envelope must
     reach the client unchanged.
 
-    Registered as ``persona_chat.send_refused``. Today the sole caller is the
+    Registered as ``persona_chat.send_refused``. The first caller was the
     ``chat_busy`` branch — the refusal the incident produced and the only one
-    that is genuinely transient. The other pre-lease refusals
-    (``unknown_chat_session``, ``foreign_chat_session``,
-    ``retired_persona_instance``) are terminal and operator-visible by other
-    means; routing them through here is a deliberate extension, not an
-    oversight, and ``error_kind`` is on the payload so it costs one call site.
+    that is genuinely transient. ``_cmd_mission_chat_message``'s three other
+    pre-lease guards (``unknown_chat_session``, ``foreign_chat_session``,
+    ``retired_persona_instance`` — the explicit-session ownership fences and
+    the retired-target pre-flight/mint-race arms) are terminal and
+    operator-visible by other means, but a caller cannot tell a terminal
+    refusal from a transient one without first correlating it, so they are
+    routed through here too: every pre-lease refusal costs one call site and
+    leaves the same durable trace.
     """
 
     owner = lease_owner if isinstance(lease_owner, dict) else {}
@@ -2911,6 +2914,16 @@ def _cmd_mission_chat_message(args) -> int:
             "session_id": session_id,
             "next_expected": "open a server-minted chat root before sending",
         }
+        # Pre-lease refusal: durably recorded the same way `chat_busy` is (see
+        # `_publish_persona_chat_send_refused_event`'s docstring) — the send
+        # never reaches the lease, so this is the only trace it leaves.
+        _publish_persona_chat_send_refused_event(
+            session_id=session_id,
+            client_message_id=client_message_id,
+            persona_id=normalized_persona,
+            persona_instance_id=persona_instance_id,
+            error_kind=ChatErrorKind.UNKNOWN_CHAT_SESSION,
+        )
         _mission_chat_emit(args, data)
         return 2
     if session_id and is_canonical_session_persistence(session_db):
@@ -2959,6 +2972,15 @@ def _cmd_mission_chat_message(args) -> int:
                 "persona_instance_id": persona_instance_id or None,
                 "next_expected": "use the server-minted root returned for this exact persona instance",
             }
+            # Pre-lease refusal — same durable record as `chat_busy`. See
+            # `_publish_persona_chat_send_refused_event`'s docstring.
+            _publish_persona_chat_send_refused_event(
+                session_id=session_id,
+                client_message_id=client_message_id,
+                persona_id=normalized_persona,
+                persona_instance_id=persona_instance_id,
+                error_kind=ChatErrorKind.FOREIGN_CHAT_SESSION,
+            )
             _mission_chat_emit(args, data)
             return 2
         persona_instance_id = owner
@@ -3059,6 +3081,19 @@ def _cmd_mission_chat_message(args) -> int:
                 persona_instance_id=persona_instance_id,
             )
             if premint_refusal is not None:
+                # Only the retired-target arm of this gate is one of the three
+                # pre-lease guard kinds this event exists for; the sibling
+                # `_mission_chat_caller_refusal` arms (missing message,
+                # invalid model override) are argument validation, not chat-
+                # root ownership, and are not routed here.
+                if premint_refusal.get("error_kind") == ChatErrorKind.RETIRED_PERSONA_INSTANCE:
+                    _publish_persona_chat_send_refused_event(
+                        session_id=session_id,
+                        client_message_id=client_message_id,
+                        persona_id=normalized_persona,
+                        persona_instance_id=persona_instance_id,
+                        error_kind=ChatErrorKind.RETIRED_PERSONA_INSTANCE,
+                    )
                 _mission_chat_emit(args, premint_refusal)
                 return 2
             # A fresh thread is only navigable if it is NAMED: nine identical
@@ -3108,6 +3143,17 @@ def _cmd_mission_chat_message(args) -> int:
                 # before its first session-visible one, so a refusal from either
                 # point precedes the titled row that used to survive it.
                 data = _retired_persona_instance_payload(exc)
+                # Pre-lease refusal, same as the pre-flight arm above — durably
+                # recorded via `_publish_persona_chat_send_refused_event`. No
+                # `session_id` yet: the mint that would have established one
+                # never completed.
+                _publish_persona_chat_send_refused_event(
+                    session_id=session_id,
+                    client_message_id=client_message_id,
+                    persona_id=normalized_persona,
+                    persona_instance_id=persona_instance_id,
+                    error_kind=ChatErrorKind.RETIRED_PERSONA_INSTANCE,
+                )
                 _mission_chat_emit(args, data)
                 return 2
             except PersonaChatPersistenceError as exc:
