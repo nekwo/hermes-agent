@@ -12,6 +12,21 @@ and parses them through its real decode + read-model pipeline
 split is structural, not an oversight, and the script names both halves
 (`GENERATED_FRAME_FILES` / `PINNED_ONLY_FILES`).
 
+> **CROSS-STACK COPY STATUS (S0a, 2026-09-03) — OPEN, launcher mirror OWED.**
+> Five generated goldens gained ONE additive key inside every
+> `core.persona_instances.<id>` row: `toolset_declaration` (null in these
+> fixtures, whose rows have no backing persona). It is the S0a atlas cleanup's
+> visibility for the fact that the per-persona `toolsets` list admits nothing —
+> the harness lane reads the bound profile's declaration
+> (`agent_runtime.personas.declared_lane_toolsets`; canon `05-chat-turn-lane.md`
+> §4c). Runtime-safe on the launcher side, which parses these rows by key and
+> ignores unknown ones (`mission_control_snapshot.dart:4830`), so the OWED work
+> is the byte mirror plus its manifest, not a Dart change: copy
+> `delta_agent_create_narrow_profile.json`, `hydrate_authoritative_same_offset.json`,
+> `hydrate_running_work_owner.json`, `hydrate_stale_first.json`,
+> `patch_agent_create.json` and `MANIFEST.sha256` into
+> `test/fixtures/harness_stream/` and update both manifests in the landing wave.
+
 > **CROSS-STACK COPY STATUS (WS1, 2026-09-01) — settled in the same landing.**
 > The instant-workspace-switching wave's `scope` fold entity adds
 > `patch_scope.json` (a workspace switch as ONE patch frame: a single `scope`
