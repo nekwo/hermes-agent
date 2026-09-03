@@ -78,3 +78,56 @@ correct for their caller kind; the launcher is never a peer.
   store, which is exactly what R5 forbids. S0b's Unpair therefore revokes the
   LOCAL peer row first (so the far install's next dial is refused
   deterministically before any turn) and defers the far row.
+
+---
+
+## Builder's record — the hermes half (2026-09-03)
+
+Built on `feat/s0b-add-install-hermes` in worktree `wt/s0b-hermes`, one commit
+(`534b4f32e4`). Scope is exactly S0b-R9: prose plus a machine-readable split
+plus tests. **No wire change, no behaviour change, no store-shape change** —
+`_row()` writes the same nine keys it wrote before.
+
+What landed:
+
+* `agent_runtime/gateway_peers.py` — the module docstring gains a
+  *Two kinds of field in one row: TRUST, and CACHE* section naming both sets
+  and the honest residue (`note_peer_seen` writes a cache fact into a trust
+  file on every verified hello, and stays there until S2c moves it under
+  R-IP12a). `PeerRecord`'s docstring says which side each of its fields is on.
+  `PEER_ROW_TRUST_FIELDS` = `{peer_install_id, secret_verifier, approved_at,
+  revoked, revoked_at}` and `PEER_ROW_CACHE_FIELDS` = `{display_name,
+  endpoints, cert_fingerprint, last_seen}`, declared immediately above `_row`
+  and exported in `__all__`.
+* `agent_runtime/serve_gateway_auth.py` — one sentence: `name` and `last_seen`
+  are the device row's cache half; `device_id`, `tier`, `verifier`,
+  `created_at` and the two revocation fields are trust.
+* `agent_runtime/gateway_identity.py` — one paragraph: `display_name` is what
+  the install calls ITSELF, published as a cache fact, and the one name a
+  launcher shows is the ACCOUNT's device name joined by `install_id`, with this
+  as the labelled offline fallback. The boot-time-echo caveat this survey found
+  is stated beside it rather than left in a plan.
+* `tests/agent_runtime/test_gateway_peers_store.py` — two tests.
+  `test_the_row_shape_is_exactly_trust_fields_plus_cache_fields` asserts the
+  union equals the stored row's keys and the intersection is empty, so a new
+  field fails until classified. `test_record_and_redeem_write_the_same_key_set`
+  asserts both write paths through `_row` land the same key set, which is the
+  claim `_row`'s own docstring makes about the two halves of one edge.
+
+Verified (from this worktree root, never bare pytest, `HERMES_PYTHON` pointed
+at the canonical test venv — a Python 3.12 that is NOT the live serve venv):
+
+* `scripts/run_tests.sh tests/agent_runtime/test_gateway_peers_store.py tests/agent_runtime/test_gateway_identity.py tests/agent_runtime/test_serve_gateway_auth.py`
+  — **3 files, 87 tests passed, 0 failed**.
+* `scripts/run_tests.sh tests/agent_runtime/test_serve_gateway_lane.py tests/agent_runtime/test_serve_gateway_peer_lane.py`
+  — **2 files, 49 tests passed, 0 failed**.
+
+Deviations: none. The one judgement call is the `__all__` placement — the two
+names are inserted in the list's existing alphabetical order rather than
+appended.
+
+What S2c inherits: the frozensets make `peers_cache.json` a MOVE rather than a
+re-derivation — the cache set is already named, and the test fails the moment a
+tenth key appears without a side. The launcher half's build record (the
+Unpair far-side deferral, the connector-factory answer) is in
+`EterniaLauncher/docs/mission_control/planned/s0b-add-install-data-model-field-notes-2026-09-03.md`.
