@@ -89,6 +89,21 @@ def _sandbox_env(base: Path) -> dict[str, str]:
         {
             "HERMES_AGENT_RUNTIME_ROOT": str(base / "runtime"),
             "HERMES_HOME": str(home),
+            # The EXPLICIT head, exactly as the Launcher always starts serve
+            # (`HERMES_HOME=profiles/<profile>`, `HERMES_HEAD_HOME=profiles/base`;
+            # one profile here, so one directory). It is load-bearing rather
+            # than decoration: ``publish_chat_head_home`` is a no-op for a
+            # process that named no head, so without this the boot publishes no
+            # chat-head pointer and every in-serve transcript read degrades to
+            # the ambient rung — which is env-gated and refuses.
+            #
+            # S2b's ``peer.thread.read`` found that live: the far read came back
+            # ``thread_unreadable / chat_scope_unresolved``, which is the
+            # CORRECT failure (closed, typed, never an empty page) for a runtime
+            # nobody told where the transcripts live. Setting the head here
+            # makes the sandbox model the configuration that actually ships,
+            # instead of one no launcher produces.
+            "HERMES_HEAD_HOME": str(home),
             "LOCALAPPDATA": str(local),
             "HOME": str(home),
             "USERPROFILE": str(home),
@@ -420,3 +435,487 @@ def test_a_second_install_cannot_spend_the_code_a_first_one_redeemed(two_install
     # Exactly one edge on A's side, not two and not a replaced one.
     _c, a_rows, _o = a.cli("gateway", "peers", "list")
     assert len(a_rows["items"]) == 1
+
+
+
+def _json_line(output: str) -> dict:
+    """The last JSON object in a snippet's combined stdout+stderr.
+
+    ``_Install.python`` concatenates both streams, and the runtime legitimately
+    writes warnings to stderr (the SQLite WAL advisory fires once per process
+    per database, and a seed that opens a SessionDB trips it AFTER printing).
+    Taking the last line blindly reads that warning as the answer; scanning for
+    the last decodable object reads the answer.
+    """
+
+    for line in reversed(output.strip().splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                return json.loads(line)
+            except json.JSONDecodeError:
+                continue
+    raise AssertionError(f"no JSON object in snippet output: {output[-400:]}")
+
+
+
+# ══ S2 / S2b / S2c acceptance, across the same two real installs ═════════════
+
+
+#: Seeded into B's sandbox config so B has ONE addressable agent for the roster
+#: and the thread read to be about. Confirmed against ``agent_runtime/config.py``:
+#: ``load_agent_runtime_config`` reads ``top["agent_runtime"]["personas"]``
+#: (`:169`), ``persona_records_from_config`` builds an ``AgentPersona`` per KEY
+#: (`:532-541`), ``ensure_persisted_personas`` merges that catalog under the
+#: store (`:631-640`), and ``PersonaInstanceStore.ensure_for_personas`` turns
+#: each into a canonical instance — which is what ``addressable_roster``
+#: projects. No store write and no CLI call is needed: the config catalog IS a
+#: persona for every reader in that chain.
+_PERSONA_CONFIG = b"""agent_runtime:
+  personas:
+    dev:
+      display_name: Dev
+      role: dev
+"""
+
+
+def _seed_persona(install: "_Install") -> None:
+    """Give one install an addressable agent, the way its own config would."""
+
+    config = install.base / "home" / "config.yaml"
+    config.write_bytes(config.read_bytes() + b"\n" + _PERSONA_CONFIG)
+
+
+#: Mint a real persona chat thread on THIS install, with two messages in it, so
+#: a far ``peer.thread.read`` has something to read. Runs in the install's own
+#: environment, through the same durability door the chat lane uses — the point
+#: is a REAL SessionDB row under the head this serve published, because §0.10's
+#: fact 1 is that a transcript read INSIDE the serve process has no precedent.
+_SEED_THREAD_SOURCE = """
+import json, secrets
+from agent_runtime.persona_assignments import (
+    PersonaInstanceStore, canonical_chat_instance_id,
+)
+from agent_runtime.persona_chat_durability import (
+    default_persona_session_db, ensure_persona_chat_session,
+)
+from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
+
+store = PersonaInstanceStore()
+store.ensure_for_personas(list(ensure_persisted_personas(load_agent_runtime_config())))
+handle = canonical_chat_instance_id("dev", None)
+session_id = "persona_chat_" + handle + "_" + secrets.token_hex(6)
+
+db = default_persona_session_db()
+assert ensure_persona_chat_session(
+    session_db=db, session_id=session_id, persona_id="dev", title="the far thread"
+)
+db.append_message(session_id, "user", "how did the build go?")
+db.append_message(session_id, "assistant", "green on both lanes")
+print(json.dumps({"handle": handle, "session_id": session_id}))
+"""
+
+#: Dialled from A with A's own peer row: one JSON-RPC call, one reply printed.
+#: ``sys.argv[1]`` is the method and ``sys.argv[2]`` the params as JSON, so one
+#: snippet serves the roster, the thread read and the announce.
+_PEER_CALL_SOURCE = """
+import json, sys
+from agent_runtime import paths
+from agent_runtime.gateway_peers import list_peers
+from tools.agent_chat_remote import call_peer_method
+
+root = paths.store_root()
+target = [p.peer_install_id for p in list_peers(root)][0]
+outcome = call_peer_method(
+    root, target, sys.argv[1], json.loads(sys.argv[2]),
+    dial_timeout=30.0, reply_timeout=30.0,
+)
+print(json.dumps(outcome))
+"""
+
+#: A's own directory tool, read from A's environment. Proves the tool and the
+#: resolver agree about which installs exist, on real stores.
+_INSTALLS_SOURCE = """
+import json
+from tools.agent_chat_tool import agent_chat_installs
+print(agent_chat_installs())
+"""
+
+_CACHE_SOURCE = """
+import json
+from agent_runtime import paths
+from agent_runtime.gateway_peers import read_peer_cache
+print(json.dumps({k: v.payload() for k, v in read_peer_cache(paths.store_root()).items()}))
+"""
+
+
+@_REAL_CHILD_SPAWN
+@pytest.mark.timeout(E2E_TEST_TIMEOUT_SECONDS)
+def test_introduce_on_b_join_on_a_and_the_device_half_redeems(two_installs):
+    """S2's acceptance, in the order the backend drives it.
+
+    B runs ONE verb and prints one envelope; A joins from it with the account's
+    attested fingerprint; the device half redeems against B as a phone would.
+    Everything that follows — the expiry at both ends, the scoping refusal, the
+    capabilities on the greeting — is asserted against two real serves rather
+    than against a fake, because the whole point of ``introduce`` is that a
+    machine on the other side of a grant can act on its output unattended.
+    """
+
+    a, b = two_installs
+    a_install = a.ready["install"]["install_id"]
+
+    # ── B introduces itself to A, for one account device, under one grant ────
+    code, envelope, output = b.cli(
+        "gateway",
+        "introduce",
+        "--for-install",
+        a_install,
+        "--for-device",
+        "dev-acct-1",
+        "--correlation",
+        "g-two-roots-1",
+    )
+    assert code == 0, output
+    assert envelope["kind"] == "gateway_introduction"
+    assert envelope["install_id"] == b.ready["install"]["install_id"]
+    assert envelope["correlation"] == "g-two-roots-1"
+    assert envelope["endpoints_source"] == "live"
+    assert envelope["cert_fingerprint"] == b.ready["gateway"]["cert_fingerprint"]
+    # The launcher POSTs this object verbatim; its key set is the backend's.
+    assert set(envelope["grant_payload"]) == {
+        "peer_join_payload",
+        "device_pair_payload",
+        "install_id",
+        "endpoints",
+        "cert_fingerprint",
+        "correlation",
+    }
+
+    # ── A joins with the fingerprint the ACCOUNT attests ─────────────────────
+    code, joined, output = a.cli(
+        "gateway",
+        "peers",
+        "join",
+        envelope["grant_payload"]["peer_join_payload"],
+        "--expect-fingerprint",
+        b.ready["gateway"]["cert_fingerprint"],
+        "--correlation",
+        "g-two-roots-1",
+        "--timeout",
+        "60",
+    )
+    assert code == 0, output
+    assert joined["peer_install_id"] == b.ready["install"]["install_id"]
+    assert joined["fingerprint_attested"] is True
+    assert joined["correlation"] == "g-two-roots-1"
+
+    # ── ONE expiry, both ends ───────────────────────────────────────────────
+    # A read it off the ``hello_ok.peered`` frame; B computed it at redemption.
+    # Two ends that each derived their own would lapse minutes — or, with a
+    # skewed clock, days — apart.
+    _c, a_rows, _o = a.cli("gateway", "peers", "list")
+    _c, b_rows, _o = b.cli("gateway", "peers", "list")
+    a_row = a_rows["items"][0]
+    b_row = next(
+        row for row in b_rows["items"] if row["peer_install_id"] == a_install
+    )
+    assert a_row["expires_at"] == b_row["expires_at"]
+    assert a_row["expires_at"] and a_row["expired"] is False
+    assert a_row["usable"] is True
+    # ~30 days out, as a window rather than an equality.
+    from datetime import datetime, timezone
+
+    lifetime = datetime.fromisoformat(a_row["expires_at"]) - datetime.now(timezone.utc)
+    assert 29 * 86400 < lifetime.total_seconds() <= 30 * 86400
+
+    # ── the device half redeems against B, as a phone would ─────────────────
+    scanned = json.loads(envelope["grant_payload"]["device_pair_payload"])
+    from agent_runtime.serve_socket import ServeSocketClient
+
+    connection = ServeSocketClient(
+        scanned["host"],
+        int(scanned["port"]),
+        timeout_seconds=30.0,
+        tls=True,
+        cert_fingerprint=scanned["cert_fingerprint"],
+    )
+    try:
+        connection.connect()
+        reply = connection.pair_hello(pairing_code=scanned["code"], client="the phone")
+    finally:
+        connection.close()
+    assert reply["event"] == "hello_ok", reply
+    assert reply["paired"]["tier"] == "console"
+
+    _c, devices, _o = b.cli("gateway", "devices", "list")
+    device = devices["items"][0]
+    # The ACCOUNT's device id, carried onto the row as a label. It is the join
+    # key an operator's sheet relates this row by, and nothing authenticates
+    # against it — the row's own id was minted here.
+    assert device["account_device_id"] == "dev-acct-1"
+    assert device["device_id"].startswith("dev_")
+    assert device["expires_at"] and device["expired"] is False
+
+    # ── the edge works, and the greeting feature-detects ────────────────────
+    code, output = a.python(_PING_SOURCE)
+    assert code == 0, output
+    answer = _json_line(output)
+    assert answer["reply"]["result"]["pong"] is True
+    assert answer["hello"]["gateway"]["capabilities"] == [
+        "announce",
+        "introduce",
+        "roster",
+        "thread_read",
+    ]
+
+
+@_REAL_CHILD_SPAWN
+@pytest.mark.timeout(E2E_TEST_TIMEOUT_SECONDS)
+def test_a_peer_code_scoped_to_one_install_is_refused_to_any_other_on_the_wire(
+    two_installs, tmp_path
+):
+    """R-S2-4's scoping, proved where it matters: over a real handshake.
+
+    B mints for A. A THIRD install spends the code — and is refused with the
+    same words a code that never existed gets, so the wrong install cannot use
+    the difference to learn a pairing is in flight. The code SURVIVES: A can
+    still redeem it, because A's operator did nothing wrong.
+    """
+
+    a, b = two_installs
+    c = _Install("C", tmp_path / "c")
+    c.start()
+    try:
+        code, envelope, output = b.cli(
+            "gateway", "introduce", "--for-install", a.ready["install"]["install_id"]
+        )
+        assert code == 0, output
+        payload = envelope["grant_payload"]["peer_join_payload"]
+
+        code, _joined, output = c.cli(
+            "gateway", "peers", "join", payload, "--timeout", "60"
+        )
+        assert code != 0
+        assert "refused the join" in output
+        _c, rows, _o = b.cli("gateway", "peers", "list")
+        assert [row["peer_install_id"] for row in rows["items"]] == []
+
+        # …and the install it WAS for still gets its edge.
+        code, joined, output = a.cli(
+            "gateway", "peers", "join", payload, "--timeout", "60"
+        )
+        assert code == 0, output
+        assert joined["peer_install_id"] == b.ready["install"]["install_id"]
+    finally:
+        c.stop()
+
+
+@_REAL_CHILD_SPAWN
+@pytest.mark.timeout(E2E_TEST_TIMEOUT_SECONDS)
+def test_the_roster_and_one_far_thread_cross_the_wire_on_real_serves(tmp_path):
+    """S2b's acceptance, and the proof §0.10 fact 1 asks for.
+
+    **A transcript read inside the serve process had no precedent.** Every
+    transcript read before S2b ran in a CLI or child process;
+    ``persona_chat_session_messages`` resolves its store through
+    ``resolve_chat_session_scope``, whose ambient rung is env-gated and whose
+    head mismatch refuses. This test seeds a REAL thread on B, then reads it
+    from A through ``peer.thread.read`` — so the read happens inside B's live
+    serve, against the head B's own boot published, with the env var unset.
+
+    The roster crosses first, because that is the order an operator works in:
+    who is over there, then what did they say.
+    """
+
+    a = _Install("A", tmp_path / "a")
+    b = _Install("B", tmp_path / "b")
+    _seed_persona(b)
+    a.start()
+    b.start()
+    try:
+        _c, minted, output = b.cli("gateway", "peers", "pair")
+        code, _joined, output = a.cli(
+            "gateway", "peers", "join", _payload_of(minted), "--timeout", "60"
+        )
+        assert code == 0, output
+
+        # ── who is on B ─────────────────────────────────────────────────────
+        code, output = a.python(_PEER_CALL_SOURCE, "peer.roster.list", "{}")
+        assert code == 0, output
+        roster = _json_line(output)
+        assert "refusal" not in roster, roster
+        rows = roster["result"]["rows"]
+        assert [row["persona_id"] for row in rows] == ["dev"], roster
+        row = rows[0]
+        # Exactly the projection fields — no session id, no transcript, no path.
+        assert set(row) == {
+            "handle",
+            "persona_id",
+            "label",
+            "is_canonical_primary",
+            "last_turn_at",
+            "workspace_id",
+        }
+        assert roster["result"]["peer"] == a.ready["install"]["install_id"]
+
+        # ── a real thread on B, then read from A ────────────────────────────
+        code, output = b.python(_SEED_THREAD_SOURCE)
+        assert code == 0, output
+        seeded = _json_line(output)
+
+        code, output = a.python(
+            _PEER_CALL_SOURCE,
+            "peer.thread.read",
+            json.dumps({"target": "dev", "session_id": seeded["session_id"]}),
+        )
+        assert code == 0, output
+        thread = _json_line(output)
+        assert "refusal" not in thread, thread
+        result = thread["result"]
+        assert result["ok"] is True
+        assert result["has_thread"] is True
+        assert result["session_id"] == seeded["session_id"]
+        assert [message["text"] for message in result["messages"]] == [
+            "how did the build go?",
+            "green on both lanes",
+        ]
+        assert result["peer"] == a.ready["install"]["install_id"]
+
+        # ── and a session that is NOT that lane is refused, over the wire ───
+        code, output = a.python(
+            _PEER_CALL_SOURCE,
+            "peer.thread.read",
+            json.dumps(
+                {"target": "dev", "session_id": "persona_chat_somebody_else_0123456789ab"}
+            ),
+        )
+        assert code == 0, output
+        refused = _json_line(output)
+        assert refused["refusal"]["reason"] == "foreign_session", refused
+
+        # ── A's directory tool sees B, and caches its roster ────────────────
+        code, output = a.python(_INSTALLS_SOURCE)
+        assert code == 0, output
+        installs = _json_line(output)
+        assert installs["count"] == 1
+        assert installs["installs"][0]["install_id"] == (
+            b.ready["install"]["install_id"]
+        )
+        # No ``usable`` key, and its absence is the contract: this list IS
+        # ``usable_peers``, so every row in it is usable by construction and a
+        # flag would be a column that is always true. ``peers list`` is the
+        # surface that shows the unusable ones with their reason.
+        assert installs["installs"][0]["ref"]
+        assert installs["installs"][0]["reachability"] in {
+            "unknown",
+            "reachable",
+            "unreachable",
+        }
+    finally:
+        a.stop()
+        b.stop()
+
+
+@_REAL_CHILD_SPAWN
+@pytest.mark.timeout(E2E_TEST_TIMEOUT_SECONDS)
+def test_a_revoke_on_b_reaches_a_as_revoked_you_before_the_next_send(two_installs):
+    """S2c's acceptance (R-IP12 E3 + R-S2-15), end to end.
+
+    Before the announce edge, a revoke on the far side was indistinguishable
+    from that install being down: the send was written, the dial was attempted,
+    and the refusal arrived after the work. Here B's revoke tells A first — over
+    the still-working edge, because the announce goes out BEFORE the local write
+    — and A's very next resolution refuses deterministically, with a reason that
+    names whose decision it was.
+    """
+
+    a, b = two_installs
+
+    _c, minted, _o = b.cli("gateway", "peers", "pair")
+    code, _joined, output = a.cli(
+        "gateway", "peers", "join", _payload_of(minted), "--timeout", "60"
+    )
+    assert code == 0, output
+
+    # A dials once so B knows where to reach it back (the hello refreshes B's
+    # cache with A's own endpoints — the S2c edge that makes the announce
+    # possible at all).
+    code, output = a.python(_PING_SOURCE)
+    assert code == 0, output
+
+    code, revoked, output = b.cli(
+        "gateway", "peers", "revoke", a.ready["install"]["install_id"]
+    )
+    assert code == 0, output
+    assert revoked["revoked"] is True
+    assert revoked["announced"] is True, revoked
+
+    # A heard it — in its CACHE, and only there. B has no authority over A's
+    # credential and did not touch it.
+    code, output = a.python(_CACHE_SOURCE)
+    assert code == 0, output
+    cache = _json_line(output)
+    b_id = b.ready["install"]["install_id"]
+    assert cache[b_id]["revoked_you"] is True
+    assert cache[b_id]["revoked_you_at"]
+    _c, a_rows, _o = a.cli("gateway", "peers", "list")
+    assert a_rows["items"][0]["revoked"] is False
+    assert a_rows["items"][0]["usable"] is False
+    assert a_rows["items"][0]["unusable_reason"] == "peer_revoked_you"
+
+    # …and the next send refuses on that word, deterministically.
+    code, output = a.python(
+        """
+import json
+from agent_runtime import paths
+from agent_runtime.gateway_targets import parse_install_target, resolve_install_target
+from agent_runtime.gateway_peers import list_peers
+target = [p.peer_install_id for p in list_peers(paths.store_root())][0]
+outcome = resolve_install_target(paths.store_root(), parse_install_target("@" + target + "/dev"))
+print(json.dumps({"reason": getattr(outcome, "reason", None)}))
+"""
+    )
+    assert code == 0, output
+    assert _json_line(output)["reason"] == "peer_revoked_you"
+
+
+@_REAL_CHILD_SPAWN
+@pytest.mark.timeout(E2E_TEST_TIMEOUT_SECONDS)
+def test_a_cli_join_beside_a_running_serve_is_visible_with_no_restart(two_installs):
+    """R-IP12 E1, proved rather than assumed.
+
+    The join runs in its own CLI process while A's serve is up. Every peer write
+    emits its event from the WRITING process (the ``realm.sync`` precedent), so
+    the serve's own next read sees the row with no restart and no watcher — and
+    the event is on the log a stream consumer is watermark-gated on.
+    """
+
+    a, b = two_installs
+
+    _c, minted, _o = b.cli("gateway", "peers", "pair")
+    code, _joined, output = a.cli(
+        "gateway", "peers", "join", _payload_of(minted), "--timeout", "60"
+    )
+    assert code == 0, output
+
+    # The SERVE — still the process that booted before the row existed —
+    # answers about it, because nothing here is cached in memory.
+    code, output = a.python(_INSTALLS_SOURCE)
+    assert code == 0, output
+    installs = _json_line(output)
+    assert [row["install_id"] for row in installs["installs"]] == [
+        b.ready["install"]["install_id"]
+    ]
+
+    # …and the event landed on A's own log, from the CLI process that wrote it.
+    code, output = a.python(
+        """
+import json
+from agent_runtime.events import EventLog
+tail = [e.type for e in EventLog().tail(50)]
+print(json.dumps({"recorded": "gateway.peer.recorded" in tail}))
+"""
+    )
+    assert code == 0, output
+    assert _json_line(output)["recorded"] is True
