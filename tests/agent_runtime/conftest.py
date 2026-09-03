@@ -385,8 +385,42 @@ def release_to_implementation(task, *, owner_slots=("dev", "backend_dev")):
     return task
 
 
+#: Four removal-gate modules that each enumerate the SAME production-tree
+#: subset (``rglob`` over the same package list, or the same
+#: ``_production_sources`` walk) through ``_tree_index.parsed`` — a whole,
+#: separate re-parse of ~800 files per file, four times over, when they run
+#: in the same session. Measured 2026-09-03 (this box, no other load): each
+#: module's own walk alone costs 15-27 s, under the per-test 30 s
+#: pytest-timeout ceiling in isolation but the row this fixes was filed
+#: because it is not always alone — a loaded box tips one of the four over.
+#: Letting them share ONE warm cache (instead of clearing between every
+#: module, the default below) means files 2-4 pay only their own
+#: ``ast.walk`` over already-parsed trees, not a second/third/fourth
+#: re-parse. See the mutation-gate timeout row, Mission Control queue,
+#: "hermes' push lane B cannot go GREEN on the operator box".
+_SHARED_TREE_WALK_MODULES = frozenset(
+    {
+        "test_s27_snapshot_orphan_tree_removal",
+        "test_s29_snapshot_dead_local_removal",
+        "test_s49_operator_control_removal",
+        "test_s50_launcher_process_hygiene_removal",
+    }
+)
+
+#: Family members that have finished their module teardown this session but
+#: have not yet triggered the shared-cache clear (because a sibling in the
+#: family was still pending). Module-level so it survives across the
+#: per-module fixture instances that share it; reset to empty the moment the
+#: last pending sibling clears it.
+_shared_tree_walk_finished: set[str] = set()
+
+
+def _short_module_name(module) -> str:
+    return getattr(module, "__name__", "").rsplit(".", 1)[-1]
+
+
 @pytest.fixture(autouse=True, scope="module")
-def _drop_tree_index_between_modules():
+def _drop_tree_index_between_modules(request):
     """Clear the source-walk gates' shared I/O+parse cache at module teardown.
 
     ``tests/agent_runtime/_tree_index.py`` memoizes file text and parsed ASTs
@@ -398,8 +432,33 @@ def _drop_tree_index_between_modules():
     set, held only while that module runs; a module that never touched the
     cache pays one no-op call. See the lifetime section of the module
     docstring in ``_tree_index.py``.
+
+    ONE exception: :data:`_SHARED_TREE_WALK_MODULES`, the four removal-gate
+    modules that all walk the same production-tree subset. For those, the
+    clear is DEFERRED until every family member this session actually
+    collected has finished — determined from ``request.session.items``,
+    which is fixed before any test runs, so this is correct regardless of
+    execution order or a ``-k`` selection that only picks some of the four.
+    Retention while deferred is bounded to one shared walk set (the same
+    bound as any other single module), never more — the moment the last
+    family member finishes, the clear still happens, and every non-family
+    module is completely unaffected by this branch.
     """
     yield
     from tests.agent_runtime import _tree_index
+
+    module_name = _short_module_name(request.module)
+    if module_name in _SHARED_TREE_WALK_MODULES:
+        _shared_tree_walk_finished.add(module_name)
+        collected_family_members = {
+            _short_module_name(item.module)
+            for item in request.session.items
+            if item.module is not None
+            and _short_module_name(item.module) in _SHARED_TREE_WALK_MODULES
+        }
+        if not (collected_family_members - _shared_tree_walk_finished):
+            _tree_index.clear()
+            _shared_tree_walk_finished.clear()
+        return
 
     _tree_index.clear()

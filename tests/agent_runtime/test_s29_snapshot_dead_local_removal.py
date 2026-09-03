@@ -42,6 +42,8 @@ import inspect
 import pathlib
 import textwrap
 
+import pytest
+
 from agent_runtime import snapshot
 
 from tests.agent_runtime import _tree_index
@@ -472,6 +474,11 @@ def test_the_lookalike_live_locals_survive(isolate_agent_runtime_root):
     assert "persona_instances" in snapshot.build_snapshot()
 
 
+# Same full-production-tree parse as test_s27's walk (25-30 s cold, 2026-09-03
+# measurement) — sharing the cache (conftest's `_SHARED_TREE_WALK_MODULES`)
+# makes this fast when test_s27 already warmed it, but this test can also run
+# alone or run first, so it needs its own honest margin.
+@pytest.mark.timeout(60)
 def test_the_reachability_roots_are_back_to_the_real_external_surface():
     """S27's gate seeded two extra roots to protect the test-pinned helpers.
     With them removed, the module must be fully reachable from its REAL external

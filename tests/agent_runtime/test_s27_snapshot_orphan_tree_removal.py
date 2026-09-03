@@ -43,6 +43,8 @@ import inspect
 import pathlib
 import textwrap
 
+import pytest
+
 from agent_runtime import snapshot
 
 from tests.agent_runtime import _tree_index
@@ -339,6 +341,13 @@ def _unreachable_module_level_names(source: str, roots) -> list[str]:
 
 
 
+# A full first-time parse of the production tree measures 25-30 s on a plain
+# box (2026-09-03) — right at the default 30 s pytest-timeout ceiling, and
+# over it under load, which is the row this bump closes. Sharing the parse
+# cache with test_s29 (conftest's `_SHARED_TREE_WALK_MODULES`) helps when
+# both run together but this test can still run alone or run first; the
+# margin covers that case honestly instead of relying on run order.
+@pytest.mark.timeout(60)
 def test_no_module_level_name_is_unreachable_from_the_external_surface():
     """The defect class this stage retires: an island that survives a cut because
     every reference into it comes from inside itself.

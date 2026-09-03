@@ -65,11 +65,18 @@ from __future__ import annotations
 import ast
 import pathlib
 
+import pytest
+
 import agent_runtime
 from agent_runtime.decision_contract_registry import event_catalog
 from tests.agent_runtime import _tree_index
 
 
+# Same six-package parse as test_s49's walk (~20-25 s cold, 2026-09-03
+# measurement) — sharing the cache (conftest's `_SHARED_TREE_WALK_MODULES`)
+# makes this fast when test_s49 already warmed it, but this test can also run
+# alone or run first, so it needs its own honest margin.
+@pytest.mark.timeout(60)
 def test_no_production_module_still_imports_it():
     """Imports are what can resurrect a module, so imports are what this gates —
     read through the AST and scoped to production packages, so the removal-

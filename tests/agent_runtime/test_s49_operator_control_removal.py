@@ -101,6 +101,12 @@ RETIRED_EVENT_TYPES = (
 )
 
 
+# A full first-time parse of the six scanned packages measures ~20-25 s cold
+# (2026-09-03) — close enough to the default 30 s pytest-timeout ceiling that
+# load tips it over. Sharing the cache with test_s50 (conftest's
+# `_SHARED_TREE_WALK_MODULES`) helps when both run together, but this test can
+# run alone or run first, so the margin does not depend on that.
+@pytest.mark.timeout(60)
 def test_no_production_module_still_imports_it():
     """The import graph, not just the file: a dead module that keeps an importer
     is how a deleted subsystem gets resurrected by the next reachability pass.
