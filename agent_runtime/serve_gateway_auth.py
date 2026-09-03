@@ -12,12 +12,24 @@ Two files, both under ``<store_root>/gateway/`` beside ``install.json``:
 
 * ``devices.json`` — the paired devices. One row each:
   ``{device_id, name, tier, verifier, created_at, last_seen, revoked,
-  revoked_at}``. Two kinds of field in that row (R-IP14; ``gateway_peers``'
-  module docstring states the same split in full): ``name`` and ``last_seen``
-  are CACHE facts — what the device called itself at redemption, and when the
-  network last saw it — while ``device_id``, ``tier``, ``verifier``,
-  ``created_at`` and the two revocation fields are TRUST, written by the
-  ceremony or by a revoke and never by a hello.
+  revoked_at, expires_at, account_device_id}``. Two kinds of field in that row
+  (R-IP14; ``gateway_peers``' module docstring states the same split in full):
+  ``name`` and ``last_seen`` are CACHE facts — what the device called itself at
+  redemption, and when the network last saw it — while ``device_id``, ``tier``,
+  ``verifier``, ``created_at``, ``expires_at`` and the two revocation fields are
+  TRUST, written by the ceremony or by a revoke and never by a hello.
+  ``account_device_id`` is a LABEL a hello never writes either: it is copied
+  from the pending entry an ``introduce`` scoped, and nothing authenticates
+  against it (:class:`DeviceRecord`).
+
+  **``expires_at`` is S2's one new credential rule** (R-IP15 as amended).
+  ``None`` means never, and that is what every manual ``harness gateway pair``
+  keeps minting; a code minted by ``harness gateway introduce`` carries
+  :data:`CREDENTIAL_TTL_SECONDS_INTRODUCED` through the pending entry, and the
+  stamp is computed at REDEEM so the code's own ten-minute window is not
+  charged against the credential's thirty days. :func:`verify_device_proof`
+  refuses an expired row AFTER the proof, beside the revocation arm and for the
+  same anti-probing reason, and the wire collapses both into one rejection.
 * ``pairing.json`` — the SHORT-LIVED half: pending codes (hashed, salted) and
   the failed-redeem counter that arms the lockout. Nothing durable lives here;
   a lost ``pairing.json`` costs an operator one re-run of ``harness gateway
@@ -149,13 +161,16 @@ from .gateway_pairing_codes import (
 from .store_file_io import iso_stamp as _iso
 from .store_file_io import os_error_reason as _os_reason
 from .store_file_io import read_json_object as _read_json
+from .store_file_io import stamp_passed as _stamp_passed
 from .store_file_io import store_lock as _file_lock
 from .store_file_io import write_secure_json as _write_secure
 
 __all__ = [
+    "AUTH_EXPIRED",
     "CODE_ALPHABET",
     "CODE_LENGTH",
     "CODE_TTL_SECONDS",
+    "CREDENTIAL_TTL_SECONDS_INTRODUCED",
     "DEFAULT_DEVICE_TIER",
     "DEVICE_STORE_CONTRACT",
     "DEVICE_STORE_FILENAME",
@@ -230,6 +245,29 @@ AUTH_UNKNOWN_DEVICE = "unknown_device"
 AUTH_REVOKED = "device_revoked"
 AUTH_BAD_PROOF = "bad_proof"
 AUTH_MALFORMED = "hello_malformed"
+#: A row whose ``expires_at`` has passed (R-IP15 as amended: an INTRODUCED
+#: credential lives 30 days). Its own outcome rather than a second spelling of
+#: ``device_revoked``, because the operator's next move differs: a revoked
+#: device was thrown out on purpose and should stay out; an expired one is a
+#: device that was fine and needs a fresh introduction. The WIRE still collapses
+#: both into one rejection — see :func:`verify_device_proof`.
+AUTH_EXPIRED = "device_expired"
+
+#: How long a credential MINTED BY ``harness gateway introduce`` lives, in
+#: seconds — thirty days, R-IP15 as amended. ONE constant for both stores
+#: (``gateway_peers`` imports it from here, as it already imports the lock and
+#: the pairing-state helpers), because a device half and a peer half minted by
+#: one ``introduce`` that expired on different days would be an edge whose two
+#: ends disagree about when it died.
+#:
+#: **``None`` is the other legal value and it means "never".** The manual
+#: ceremony (``gateway pair`` / ``peers pair``) keeps minting with no TTL, so a
+#: row written by a pre-S2 build and a row written by today's manual verbs stay
+#: byte-identical: an operator standing at both machines is the provenance, and
+#: expiring that on a clock would lock people out of their own workshop. The TTL
+#: exists for the credential nobody carried by hand — the one a backend grant
+#: introduced — which is exactly the one that should not outlive its errand.
+CREDENTIAL_TTL_SECONDS_INTRODUCED = 30 * 86400
 
 #: The tier a pairing run on the install's own machine confers, per R11 as
 #: ruled: the operator standing at the console IS the account-auth trace, so the
@@ -309,6 +347,33 @@ class DeviceRecord:
     last_seen: str | None
     revoked: bool
     revoked_at: str | None
+    #: When this credential stops working, ISO-8601 UTC, or ``None`` for never
+    #: (R-IP15 as amended). TRUST, not cache: THIS install decided it at mint
+    #: time from :data:`CREDENTIAL_TTL_SECONDS_INTRODUCED`, and nothing on the
+    #: wire can move it — a device that could push its own expiry out would hold
+    #: a credential with no end.
+    expires_at: str | None = None
+    #: The ACCOUNT's device id, when an ``introduce`` named one. A LABEL and not
+    #: a check: hermes never learns an account device id at redeem time (the row
+    #: id is minted ``dev_<hex>`` here), so this is the join key that relates
+    #: this row to the account row an operator sees in the launcher's sheet
+    #: (R-IP14, one bookkeeping) — and nothing authenticates against it.
+    account_device_id: str | None = None
+
+    @property
+    def expired(self) -> bool:
+        """Has :attr:`expires_at` passed? ``False`` when there is none.
+
+        Computed rather than stored, for the reason every "is it stale yet"
+        predicate is: a boolean written at mint time is a fact about the past
+        wearing the tense of the present. An unparseable stamp reads as NOT
+        expired — the same direction ``_decode_device`` fails in for an unknown
+        tier is the SAFE direction there (least privilege) and the opposite one
+        here, because a clock this build cannot read must not silently revoke
+        every device an operator paired.
+        """
+
+        return _stamp_passed(self.expires_at)
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -319,6 +384,9 @@ class DeviceRecord:
             "last_seen": self.last_seen,
             "revoked": self.revoked,
             "revoked_at": self.revoked_at,
+            "expires_at": self.expires_at,
+            "expired": self.expired,
+            "account_device_id": self.account_device_id,
         }
 
 
@@ -491,6 +559,15 @@ def verify_device_proof(
     # else learns anything.
     if record.revoked:
         return DeviceAuth(outcome=AUTH_REVOKED, device_id=device_id, record=record)
+    # Expiry sits in the SAME place as revocation and for the same reason: after
+    # the proof. Checking a stamp before the HMAC would let an unauthenticated
+    # peer sweep device ids and learn which ones have lapsed — and, by
+    # difference, which are live — while holding nothing. It also keeps the two
+    # end-of-life conditions answering in one order everywhere: a revoked AND
+    # expired row reports ``device_revoked``, because that is the decision an
+    # operator made rather than a clock running out.
+    if record.expired:
+        return DeviceAuth(outcome=AUTH_EXPIRED, device_id=device_id, record=record)
     return DeviceAuth(outcome=AUTH_OK, device_id=device_id, record=record)
 
 
@@ -556,6 +633,9 @@ def mint_pairing_code(
     *,
     name: str | None = None,
     tier: str = DEFAULT_DEVICE_TIER,
+    credential_ttl_seconds: int | None = None,
+    for_device_id: str | None = None,
+    correlation: str | None = None,
     now: float | None = None,
 ) -> PairingCode | StoreRefusal:
     """Mint a short-TTL pairing code. The plaintext is returned, never stored.
@@ -591,10 +671,28 @@ def mint_pairing_code(
                     f"{len(pending)} pairing codes are already outstanding "
                     f"(max {MAX_PENDING_CODES}); redeem or wait for them to expire",
                 )
+            # The three ``introduce`` keys ride ``extra`` rather than growing
+            # the pending entry's schema, which is exactly what ``mint_into``'s
+            # merge-UNDER-the-fixed-keys contract is for: a caller cannot
+            # overwrite the kind, the salt or the digest, and a caller that
+            # passes none of them mints the byte-identical entry a pre-S2 build
+            # did. ``for_device_id`` is a LABEL carried to the row (R-S2-4) and
+            # ``correlation`` is the grant id, kept so the redeem-time event can
+            # name the errand — never a row field, never a secret.
             code, request_id, expires_at = mint_into(
                 state,
                 kind=KIND_DEVICE,
-                extra={"tier": tier, "name": _clean_name(name) or None},
+                extra={
+                    "tier": tier,
+                    "name": _clean_name(name) or None,
+                    "credential_ttl_seconds": (
+                        int(credential_ttl_seconds)
+                        if credential_ttl_seconds
+                        else None
+                    ),
+                    "for_device_id": _clean_name(for_device_id) or None,
+                    "correlation": _clean_name(correlation) or None,
+                },
                 now=stamp,
             )
             _write_pairing(store_root, state)
@@ -667,6 +765,11 @@ def redeem_pairing_code(
             )
             tier = str(matched.get("tier") or DEFAULT_DEVICE_TIER)
             tier = tier if tier in TIERS else DEFAULT_DEVICE_TIER
+            ttl = matched.get("credential_ttl_seconds")
+            try:
+                ttl_seconds = int(ttl) if ttl else 0
+            except (TypeError, ValueError):
+                ttl_seconds = 0
             rows = _read_devices(store_root)
             rows[device_id] = {
                 "device_id": device_id,
@@ -677,6 +780,16 @@ def redeem_pairing_code(
                 "last_seen": None,
                 "revoked": False,
                 "revoked_at": None,
+                # Computed at REDEEM and not at mint: the clock that matters is
+                # when the credential started existing, and a code minted ten
+                # minutes before it is spent should not lose ten minutes of its
+                # thirty days. ``None`` when the mint named no TTL, which is
+                # every manual ``harness gateway pair``.
+                "expires_at": _iso(stamp + ttl_seconds) if ttl_seconds else None,
+                # The account's own device id, copied through from the pending
+                # entry. A label — see :class:`DeviceRecord` — and the join key
+                # the launcher's sheet and S3's Unpair relate this row by.
+                "account_device_id": _clean_name(matched.get("for_device_id")) or None,
             }
             _write_devices(store_root, rows)
             return DeviceCredential(
@@ -724,6 +837,14 @@ def _decode_device(row: Any) -> DeviceRecord | None:
         last_seen=(str(row["last_seen"]) if row.get("last_seen") else None),
         revoked=bool(row.get("revoked")),
         revoked_at=(str(row["revoked_at"]) if row.get("revoked_at") else None),
+        # Absent reads as ``None`` — "never expires" — so every row written by a
+        # build that predates S2 keeps working exactly as it did. That is the
+        # whole migration: there is no rewrite pass and no contract bump,
+        # because the only new fact has a legal absent value.
+        expires_at=(str(row["expires_at"]) if row.get("expires_at") else None),
+        account_device_id=(
+            str(row["account_device_id"]) if row.get("account_device_id") else None
+        ),
     )
 
 

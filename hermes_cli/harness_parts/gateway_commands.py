@@ -83,6 +83,7 @@ from hermes_cli.harness_support import (
 )
 
 __all__ = [
+    "cmd_gateway_introduce",
     "cmd_gateway_pair",
     "cmd_gateway_devices_list",
     "cmd_gateway_devices_revoke",
@@ -176,6 +177,37 @@ def _endpoint(store_root) -> dict[str, Any]:
     return {"host": host, "port": port or None, "source": "config"}
 
 
+#: The one sentence every verb on this lane uses for "nothing is listening".
+#: ``peers pair`` printed it as a NOTE and :func:`cmd_gateway_introduce` raises
+#: it as a REFUSAL; the words are identical on purpose, because an operator
+#: reading a launcher's error and an operator reading a terminal note are
+#: looking at the same condition and should not have to recognise two spellings
+#: of it.
+LISTENER_OFF_SENTENCE = (
+    "remote_gateway.listen is off for this root: nothing will accept this code "
+    "until an interface is configured and the runtime restarts."
+)
+
+#: What :func:`cmd_gateway_introduce` prints, compactly, for a launcher to POST
+#: as the backend grant's ``payload``. Declared as a tuple rather than left
+#: implicit in a dict literal so the backend contract (S1 packet §4.1) has one
+#: name on this side and a test can assert the key set without restating it.
+GRANT_PAYLOAD_KEYS = (
+    "peer_join_payload",
+    "device_pair_payload",
+    "install_id",
+    "endpoints",
+    "cert_fingerprint",
+    "correlation",
+)
+
+#: The backend's own ceiling on a fulfil payload (S1 §4.1: compact, ≤ 4096
+#: bytes). Asserted HERE, at the only place that builds the object, so an
+#: envelope that would be rejected on POST is refused on this side with a reason
+#: an operator can act on instead of failing as an opaque 400 later.
+GRANT_PAYLOAD_MAX_BYTES = 4096
+
+
 def cmd_gateway_pair(args) -> int:
     """``harness gateway pair`` — mint a short-TTL code and the QR payload.
 
@@ -256,9 +288,7 @@ def cmd_gateway_pair(args) -> int:
             "the endpoint above is what the config says the NEXT boot will use. "
             "The code is valid either way."
             if endpoint["source"] == "config"
-            else "remote_gateway.listen is off for this root: nothing will "
-            "accept this code until an interface is configured and the runtime "
-            "restarts. The code is valid either way."
+            else LISTENER_OFF_SENTENCE + " The code is valid either way."
         )
 
     envelope = attach_root_observability(_object_envelope("gateway_pairing", row))
@@ -378,7 +408,88 @@ def _install_and_certificate(args):
     return (identity, certificate), 0
 
 
-def _self_endpoints(store_root) -> list[dict]:
+#: Addresses this machine offers a peer, capped at ``gateway_peers.MAX_ENDPOINTS``.
+#: Not a config knob: the cap is the peer row's, and a list longer than the row
+#: can hold would advertise addresses that silently vanish at the far end.
+MAX_CANDIDATE_ENDPOINTS = 4
+
+#: Hosts that are never worth offering another machine. Loopback is this box
+#: talking to itself, link-local is an address that only means something on the
+#: segment that assigned it, and a wildcard is a BIND and not an address at all.
+#: Prefixes rather than a netmask calculation, because this is a filter over
+#: strings the stdlib handed us, and half an address library here would be a
+#: second address model to keep true.
+_UNOFFERABLE_PREFIXES = ("127.", "169.254.", "fe80:")
+_WILDCARD_HOSTS = {"0.0.0.0", "::", "*", ""}
+
+
+def _machine_addresses() -> list[str]:
+    """This machine's dialable addresses, best-effort, stdlib only.
+
+    Called ONLY when the listener bound a wildcard — the case where the config
+    says "every interface" and therefore names none. Three sources in
+    descending confidence, deduped in order:
+
+    1. **The default-route address**, found with the UDP-connect trick: a
+       ``SOCK_DGRAM`` socket is *connected* to a far address and asked what
+       local address the kernel would use. **No packet is sent** — connect on a
+       datagram socket only fixes the peer — so this costs no traffic, needs no
+       reachability, and answers with the cable unplugged. It is first because
+       it answers the actual question (*which of my addresses does traffic leave
+       from*) rather than *which addresses exist*.
+    2. **The hostname's IPv4 records**, which is what the machine calls itself
+       and is usually right on a LAN with mDNS or a DHCP-registering DNS.
+    3. **Global / unique-local IPv6**, last because a v6 address that works is
+       excellent and a v6 address that does not is a dial that hangs before the
+       v4 one is tried.
+
+    Every source is wrapped: name resolution on a laptop that has just changed
+    networks raises in ways not worth a taxonomy, and this function's honest
+    failure is an empty list — the same answer as "no address to offer", which
+    the ack already knows how to say.
+    """
+
+    import socket
+
+    found: list[str] = []
+
+    def _keep(value) -> None:
+        # Zone index off FIRST (``fe80::1%eth0``): a scoped address is
+        # meaningless to the machine we would hand it to, and the prefix test
+        # below has to see the address rather than the interface name.
+        host = str(value or "").strip().lower().split("%", 1)[0]
+        if not host or host in _WILDCARD_HOSTS or host == "::1":
+            return
+        if host.startswith(_UNOFFERABLE_PREFIXES):
+            return
+        if host not in found:
+            found.append(host)
+
+    probe = None
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.connect(("10.255.255.255", 1))
+        _keep(probe.getsockname()[0])
+    except Exception:
+        pass
+    finally:
+        if probe is not None:
+            try:
+                probe.close()
+            except Exception:
+                pass
+
+    for family in (socket.AF_INET, socket.AF_INET6):
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None, family):
+                _keep(info[4][0])
+        except Exception:
+            continue
+
+    return found[:MAX_CANDIDATE_ENDPOINTS]
+
+
+def _candidate_endpoints(store_root) -> list[dict]:
     """Where the OTHER install should dial this one, as a peer row's list.
 
     Built from :func:`_endpoint` — the same three sources, the same confidence
@@ -388,19 +499,47 @@ def _self_endpoints(store_root) -> list[dict]:
     JOIN another install and talk to it. The edge simply works in one direction
     until it listens, and the ack says so rather than leaving the operator to
     find out when a call from the far side never arrives.
+
+    **The wildcard case is where S2 changed the answer, and it is a widening
+    rather than a fix to something wrong.** ``0.0.0.0`` used to return ``[]``
+    with a correct argument attached — a bind is not an address, and writing one
+    into a peer row produces a dial that always fails and looks like the peer
+    being down. What was missing was the other half: an operator who binds a
+    wildcard has not declined to be reachable, they have declined to CHOOSE, and
+    this machine can answer that question itself. So a wildcard now enumerates
+    :func:`_machine_addresses`; a concrete host is still exactly one row;
+    ``unknown`` is still ``[]``.
+
+    Computed in the CLI process, at CLI time, and deliberately NOT put on the
+    greeting frame: interface enumeration is a question whose answer changes
+    when somebody joins a wifi network, and a frame minted at boot would carry a
+    stale one for the life of the serve.
     """
 
     endpoint = _endpoint(store_root)
     host, port = endpoint.get("host"), endpoint.get("port")
     if not host or not port:
         return []
-    if str(host) in {"0.0.0.0", "::"}:
-        # A wildcard bind is what this install LISTENS on, never an address
-        # another machine can dial. Passing it through would write a row whose
-        # every dial fails, and fails in a way that looks like the peer being
-        # down. The operator has to name a reachable address themselves.
-        return []
-    return [{"host": str(host), "port": int(port)}]
+    port = int(port)
+    if str(host).strip().lower() in _WILDCARD_HOSTS:
+        return [{"host": address, "port": port} for address in _machine_addresses()]
+    # A listener pinned to loopback is kept as a row rather than filtered: the
+    # two-roots lane is exactly that shape — two installs on one box, pairing
+    # over 127.0.0.1 on purpose. The filter above exists for ENUMERATED
+    # addresses, where a loopback row would be noise beside a real one.
+    return [{"host": str(host), "port": port}]
+
+
+def _self_endpoints(store_root) -> list[dict]:
+    """Backwards-compatible spelling of :func:`_candidate_endpoints`.
+
+    Kept as a name rather than as a body: ``peers join`` and ``peers pair`` both
+    call it, and S2's point is that the endpoints a hello ADVERTISES and the
+    endpoints ``gateway id`` PRINTS are one list. Two functions with two answers
+    is how an install ends up advertising an address it does not print.
+    """
+
+    return _candidate_endpoints(store_root)
 
 
 def cmd_gateway_peers_pair(args) -> int:
@@ -469,12 +608,256 @@ def cmd_gateway_peers_pair(args) -> int:
             "there when they run `join`, the code is still valid and the join "
             "will simply fail to connect."
             if endpoint["source"] == "config"
-            else "remote_gateway.listen is off for this root: nothing will "
-            "accept this code until an interface is configured and the runtime "
-            "restarts. The code is valid either way."
+            else LISTENER_OFF_SENTENCE + " The code is valid either way."
         )
 
     envelope = attach_root_observability(_object_envelope("gateway_peer_pairing", row))
+    _print_stage42(envelope, args=args, default_output="json")
+    return 0
+
+
+def cmd_gateway_introduce(args) -> int:
+    """``harness gateway introduce`` — one envelope a launcher can post as a grant.
+
+    **A COMPOSITION, not a third ceremony.** It calls ``mint_peer_code`` and
+    ``mint_pairing_code`` — the same two functions ``peers pair`` and ``pair``
+    call, under the same lockout, the same pending cap and the same ten-minute
+    TTL — and prints their two codes in one object shaped the way the backend's
+    fulfil endpoint wants it (S1 packet §4.1). Nothing is stored that those two
+    verbs do not store, and there is no new credential kind. What is new is the
+    scoping: both halves are minted FOR a named requester, and the peer half is
+    genuinely refused to anybody else (``gateway_peers.redeem_peer_code``).
+
+    **Why it refuses when the listener is off, where ``peers pair`` prints a
+    note.** ``peers pair``'s consumer is a human who can read a note, shrug, and
+    go turn the listener on. This verb's consumer is a machine: a launcher posts
+    the envelope to the backend, the requester reads it once and dials, and the
+    dial fails against a door that was never open. A note in that chain is a
+    string nobody renders. So an ``unknown`` endpoint is ``runtime_unavailable``
+    (family 7, retryable — the identical command succeeds after a restart), with
+    ``peers pair``'s own sentence, and a ``config`` endpoint is ALLOWED with a
+    note, because "the serve has not booted yet" is a real and recoverable
+    ordering rather than a lane that is off.
+
+    **Two mints, not one atomic pair.** The pending cap
+    (``MAX_PENDING_CODES = 3``, counted across both ceremonies) can legitimately
+    refuse the second half after the first has been written, and holding one
+    lock across both would not change that — it would only make the refusal
+    arrive with a half-built envelope and no way to report which half failed.
+    So each mint is its own atomic write, the envelope carries ``null`` for a
+    half that did not mint, ``refusals`` names it, and the exit is 0 only when
+    every requested half is present.
+
+    **The codes appear exactly here.** In ``peer.peer_code`` / ``device.code``
+    and inside the two payload strings, on stdout, once. Never in an event,
+    never in a row, never in a log line — the codes discipline
+    (``gateway_pairing_codes``), unchanged, and the reason its ten-minute TTL is
+    allowed to be short.
+    """
+
+    from agent_runtime import paths
+    from agent_runtime.gateway_capabilities import GATEWAY_CAPABILITIES
+    from agent_runtime.gateway_peers import mint_peer_code
+    from agent_runtime.serve_gateway_auth import (
+        CREDENTIAL_TTL_SECONDS_INTRODUCED,
+        StoreRefusal,
+        mint_pairing_code,
+    )
+    from agent_runtime.state_patches import (
+        CORRELATION_ID_MAX_LEN,
+        normalize_correlation_id,
+    )
+
+    root = paths.store_root()
+    for_install_id = str(getattr(args, "for_install", "") or "").strip()
+    for_device_id = str(getattr(args, "for_device", "") or "").strip()
+    if not for_install_id and not for_device_id:
+        # At least one, never both required: a PHONE has no install id (the
+        # device half is all there is to mint for it), and an install being
+        # re-introduced after a rebuild may have no account device row yet. The
+        # parent plan's "both that apply" is exactly this.
+        return emit_harness_error(
+            RuntimeError("no_requester"),
+            args=args,
+            code="invalid_payload",
+            message=(
+                "gateway introduce needs at least one of --for-install (another "
+                "hermes install, which gets the peer half) or --for-device (an "
+                "account device, which gets the device half). With neither there "
+                "is nobody to scope the codes to, and an unscoped code is what "
+                "`harness gateway pair` and `peers pair` already mint."
+            ),
+        )
+
+    raw_correlation = getattr(args, "correlation", None)
+    correlation = None
+    if raw_correlation is not None and str(raw_correlation).strip():
+        # The SAME fence the RPC lane applies to ``correlation_id``
+        # (``serve_rpc._correlation_id_param`` → ``state_patches``), read from
+        # the module that owns the rule rather than restated here — R-IP17 says
+        # the grant id is one token and every party writes it, which is only
+        # true if every party agrees what a legal one looks like. Refused and
+        # never repaired: a sanitized id would print a value neither the backend
+        # nor this install used.
+        correlation = normalize_correlation_id(raw_correlation)
+        if correlation is None:
+            return emit_harness_error(
+                RuntimeError("correlation_id_invalid"),
+                args=args,
+                code="invalid_payload",
+                message=(
+                    "--correlation is the backend grant id and must be a "
+                    f"generated token of at most {CORRELATION_ID_MAX_LEN} "
+                    "characters from [A-Za-z0-9_.:-]"
+                ),
+            )
+
+    resolved, code_or_error = _install_and_certificate(args)
+    if resolved is None:
+        return code_or_error
+    identity, certificate = resolved
+
+    endpoint = _endpoint(root)
+    if endpoint["source"] == "unknown":
+        return emit_harness_error(
+            RuntimeError("gateway_listener_off"),
+            args=args,
+            code="runtime_unavailable",
+            message=LISTENER_OFF_SENTENCE,
+        )
+
+    endpoints = _candidate_endpoints(root)
+    note = getattr(args, "note", None)
+
+    peer_block = None
+    device_block = None
+    refusals: list[dict[str, str]] = []
+    first_refusal = None
+
+    if for_install_id:
+        minted = mint_peer_code(
+            root,
+            note=note,
+            credential_ttl_seconds=CREDENTIAL_TTL_SECONDS_INTRODUCED,
+            for_install_id=for_install_id,
+            correlation=correlation,
+        )
+        if isinstance(minted, StoreRefusal):
+            refusals.append({"half": "peer", "reason": minted.reason})
+            first_refusal = first_refusal or minted
+        else:
+            peer_block = {
+                "peer_code": minted.code,
+                "expires_in_seconds": minted.expires_in_seconds(),
+                "join_payload": json.dumps(
+                    {
+                        "host": endpoint["host"],
+                        "port": endpoint["port"],
+                        "install_id": identity.install_id,
+                        "cert_fingerprint": certificate.fingerprint,
+                        "peer_code": minted.code,
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+            }
+
+    if for_device_id:
+        minted_device = mint_pairing_code(
+            root,
+            name=note,
+            # ``console`` and not the operator's choice: an introduction is the
+            # account saying "this is my own device on my own machine", which is
+            # the exact provenance ``DEFAULT_DEVICE_TIER``'s ruling names. A
+            # ``--tier`` flag here would be a knob whose only safe setting is
+            # the default.
+            tier="console",
+            credential_ttl_seconds=CREDENTIAL_TTL_SECONDS_INTRODUCED,
+            for_device_id=for_device_id,
+            correlation=correlation,
+        )
+        if isinstance(minted_device, StoreRefusal):
+            refusals.append({"half": "device", "reason": minted_device.reason})
+            first_refusal = first_refusal or minted_device
+        else:
+            device_block = {
+                "code": minted_device.code,
+                "tier": minted_device.tier,
+                "expires_in_seconds": minted_device.expires_in_seconds(),
+                "qr_payload": json.dumps(
+                    {
+                        "host": endpoint["host"],
+                        "port": endpoint["port"],
+                        "install_id": identity.install_id,
+                        "cert_fingerprint": certificate.fingerprint,
+                        "code": minted_device.code,
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+            }
+
+    if first_refusal is not None:
+        # The first refusal's family, not a generic one: a pending cap and a
+        # lockout are different next moves and the exit code is how a launcher
+        # tells them apart without parsing prose.
+        return _refusal(first_refusal, args=args)
+
+    # **One writer of the backend's shape.** The launcher POSTs this object
+    # verbatim; building it here rather than letting the launcher assemble it
+    # from the envelope's other keys is what keeps "what fulfil receives" a
+    # decision this repo made once. Its key set is :data:`GRANT_PAYLOAD_KEYS`.
+    grant_payload = {
+        "peer_join_payload": (peer_block or {}).get("join_payload"),
+        "device_pair_payload": (device_block or {}).get("qr_payload"),
+        "install_id": identity.install_id,
+        "endpoints": endpoints,
+        "cert_fingerprint": certificate.fingerprint,
+        "correlation": correlation,
+    }
+    compact = json.dumps(grant_payload, separators=(",", ":"), sort_keys=True)
+    if len(compact.encode("utf-8")) > GRANT_PAYLOAD_MAX_BYTES:
+        # Unreachable at four endpoints and two ~200-byte payloads; asserted
+        # anyway because the alternative is discovering the ceiling as an opaque
+        # 400 from a service this process cannot see.
+        return emit_harness_error(
+            RuntimeError("grant_payload_too_large"),
+            args=args,
+            code="invalid_payload",
+            message=(
+                f"the grant payload is {len(compact.encode('utf-8'))} bytes and "
+                f"the backend accepts {GRANT_PAYLOAD_MAX_BYTES}. Reduce the "
+                "advertised endpoints (remote_gateway.listen can name one "
+                "interface instead of a wildcard)."
+            ),
+        )
+
+    row = {
+        "install_id": identity.install_id,
+        "display_name": identity.display_name,
+        "cert_fingerprint": certificate.fingerprint,
+        "endpoints": endpoints,
+        "endpoints_source": endpoint["source"],
+        "capabilities": list(GATEWAY_CAPABILITIES),
+        "correlation": correlation,
+        "for_install_id": for_install_id or None,
+        "for_device_id": for_device_id or None,
+        "credential_ttl_seconds": CREDENTIAL_TTL_SECONDS_INTRODUCED,
+        "peer": peer_block,
+        "device": device_block,
+        "grant_payload": grant_payload,
+    }
+    if refusals:
+        row["refusals"] = refusals
+    if endpoint["source"] != "live":
+        row["note_endpoint"] = (
+            "no running serve advertised a gateway listener for this root, so "
+            "the endpoint in these payloads is what the config says the NEXT "
+            "boot will use. The codes are valid either way; a requester that "
+            "dials before this root boots simply fails to connect."
+        )
+
+    envelope = attach_root_observability(_object_envelope("gateway_introduction", row))
     _print_stage42(envelope, args=args, default_output="json")
     return 0
 
@@ -578,6 +961,13 @@ def cmd_gateway_peers_join(args) -> int:
     * any dial failure at all, as ``runtime_unavailable`` (family 7, retryable),
       because a listener that is not up yet is exactly the condition where the
       identical command succeeds five seconds later.
+
+    S2 adds a fourth, and it fires BEFORE any socket is opened: with
+    ``--expect-fingerprint`` (R-S2-6), a payload whose ``cert_fingerprint``
+    disagrees with the value the ACCOUNT attests is refused as
+    ``tls_fingerprint_mismatch`` with nothing dialled and nothing written.
+    Without the flag the verb keeps its trust-on-first-use pin and the ack says
+    ``fingerprint_attested: false`` — a weaker posture that announces itself.
     """
 
     from agent_runtime import paths
@@ -589,6 +979,82 @@ def cmd_gateway_peers_join(args) -> int:
     parsed = _parse_join_payload(getattr(args, "payload", None), args)
     if parsed is None:
         return 2
+
+    # ── the attested pin (R-S2-6), decided BEFORE anything is dialled ────────
+    #
+    # Without ``--expect-fingerprint`` this verb is trust-on-first-use: it pins
+    # whatever fingerprint the payload carried, which is exactly as strong as
+    # the channel the operator carried the payload through. That is the manual
+    # ceremony's posture and it stays unchanged — but the ack now SAYS so
+    # (``fingerprint_attested: false``), because a weaker posture nobody
+    # announces is a weaker posture nobody notices.
+    #
+    # With the flag, the fingerprint came from the account (S3 passes
+    # ``DeviceOut.gateway_cert_fingerprint``, which the backend holds because
+    # the far install told the account, signed in). A payload that disagrees is
+    # refused HERE, before a socket exists: dialling first and comparing after
+    # would hand an impostor a completed TLS handshake and a timing signal, and
+    # would burn an attempt on an answer that cannot change.
+    expected = str(getattr(args, "expect_fingerprint", "") or "").strip().lower()
+    attested = bool(expected)
+    if attested:
+        if len(expected) != 64 or any(ch not in "0123456789abcdef" for ch in expected):
+            return emit_harness_error(
+                RuntimeError("tls_fingerprint_invalid"),
+                args=args,
+                code="invalid_payload",
+                message=(
+                    # The reason word LEADS the sentence rather than riding a
+                    # field, because ``emit_harness_error`` carries only the
+                    # exception CLASS in ``safe_details`` — so the message is
+                    # the one channel this lane has for a machine-readable
+                    # reason, and R-IP17 asks for one enumerated set of them.
+                    "tls_fingerprint_invalid: --expect-fingerprint is the "
+                    "account's attested certificate fingerprint and must be 64 "
+                    f"lowercase hex characters (sha256); got {len(expected)}."
+                ),
+            )
+        offered = str(parsed["cert_fingerprint"] or "").strip().lower()
+        if offered != expected:
+            return emit_harness_error(
+                RuntimeError("tls_fingerprint_mismatch"),
+                args=args,
+                code="invalid_payload",
+                message=(
+                    # R-IP17's word first, for the reason above.
+                    "tls_fingerprint_mismatch: the join payload offers "
+                    f"certificate {offered or '(none)'} and the account attests "
+                    f"{expected}. Nothing was dialled and no row was written: a "
+                    "payload whose fingerprint disagrees with the account is "
+                    "either stale or is not the install it names."
+                ),
+            )
+        # From here the PIN is the attested value, not the payload's — they are
+        # equal, and taking the attested one is what makes that an invariant
+        # rather than a coincidence a later edit could break.
+        parsed["cert_fingerprint"] = expected
+
+    raw_correlation = getattr(args, "correlation", None)
+    correlation = None
+    if raw_correlation is not None and str(raw_correlation).strip():
+        from agent_runtime.state_patches import (
+            CORRELATION_ID_MAX_LEN,
+            normalize_correlation_id,
+        )
+
+        correlation = normalize_correlation_id(raw_correlation)
+        if correlation is None:
+            return emit_harness_error(
+                RuntimeError("correlation_id_invalid"),
+                args=args,
+                code="invalid_payload",
+                message=(
+                    "--correlation is the backend grant id and must be a "
+                    f"generated token of at most {CORRELATION_ID_MAX_LEN} "
+                    "characters from [A-Za-z0-9_.:-]"
+                ),
+            )
+
     resolved, code_or_error = _install_and_certificate(args)
     if resolved is None:
         return code_or_error
@@ -676,11 +1142,23 @@ def cmd_gateway_peers_join(args) -> int:
         display_name=remote.get("display_name"),
         endpoints=[{"host": parsed["host"], "port": parsed["port"]}],
         cert_fingerprint=parsed["cert_fingerprint"],
+        # Read off the frame, never derived. The far side computed it at
+        # redemption; a second derivation here would make the two ends of one
+        # edge lapse at two different moments. ``None`` on every edge the manual
+        # ceremony mints, and on every far install that predates S2.
+        expires_at=peered.get("expires_at"),
     )
     if isinstance(outcome, StoreRefusal):
         return _refusal(outcome, args=args)
 
     row = outcome.payload()
+    # Which posture wrote this row, said out loud on the ack. An operator (and
+    # S3's request loop) reading a stored edge should not have to remember which
+    # flags the join was run with to know whether the pin was attested by the
+    # account or merely copied off a payload.
+    row["fingerprint_attested"] = attested
+    if correlation is not None:
+        row["correlation"] = correlation
     # What the OTHER side now holds about us, so one ack answers "is this edge
     # symmetric" without an operator walking to the other machine to check.
     row["this_install"] = {

@@ -3516,6 +3516,7 @@
       "subcommands": [
         "devices",
         "id",
+        "introduce",
         "pair",
         "peers",
         "rename"
@@ -3853,6 +3854,132 @@
       "positionals": [],
       "subcommands": []
     },
+    "harness gateway introduce": {
+      "exclusive_groups": [],
+      "options": {
+        "--correlation": {
+          "action": "store",
+          "canonical": "--correlation",
+          "choices": null,
+          "nargs": 1,
+          "required": false,
+          "type": null
+        },
+        "--fields": {
+          "action": "store",
+          "canonical": "--fields",
+          "choices": null,
+          "nargs": 1,
+          "required": false,
+          "type": null
+        },
+        "--for-device": {
+          "action": "store",
+          "canonical": "--for-device",
+          "choices": null,
+          "nargs": 1,
+          "required": false,
+          "type": null
+        },
+        "--for-install": {
+          "action": "store",
+          "canonical": "--for-install",
+          "choices": null,
+          "nargs": 1,
+          "required": false,
+          "type": null
+        },
+        "--help": {
+          "action": "help",
+          "canonical": "--help",
+          "choices": null,
+          "nargs": 0,
+          "required": false,
+          "type": null
+        },
+        "--json": {
+          "action": "store_true",
+          "canonical": "--json",
+          "choices": null,
+          "nargs": 0,
+          "required": false,
+          "type": null
+        },
+        "--no-color": {
+          "action": "store_true",
+          "canonical": "--no-color",
+          "choices": null,
+          "nargs": 0,
+          "required": false,
+          "type": null
+        },
+        "--note": {
+          "action": "store",
+          "canonical": "--note",
+          "choices": null,
+          "nargs": 1,
+          "required": false,
+          "type": null
+        },
+        "--output": {
+          "action": "store",
+          "canonical": "--output",
+          "choices": [
+            "json",
+            "table",
+            "wide",
+            "yaml"
+          ],
+          "nargs": 1,
+          "required": false,
+          "type": null
+        },
+        "--quiet": {
+          "action": "store_true",
+          "canonical": "--quiet",
+          "choices": null,
+          "nargs": 0,
+          "required": false,
+          "type": null
+        },
+        "-h": {
+          "action": "help",
+          "canonical": "--help",
+          "choices": null,
+          "nargs": 0,
+          "required": false,
+          "type": null
+        },
+        "-o": {
+          "action": "store",
+          "canonical": "--output",
+          "choices": [
+            "json",
+            "table",
+            "wide",
+            "yaml"
+          ],
+          "nargs": 1,
+          "required": false,
+          "type": null
+        },
+        "-q": {
+          "action": "store_true",
+          "canonical": "--quiet",
+          "choices": null,
+          "nargs": 0,
+          "required": false,
+          "type": null
+        }
+      },
+      "path": [
+        "harness",
+        "gateway",
+        "introduce"
+      ],
+      "positionals": [],
+      "subcommands": []
+    },
     "harness gateway pair": {
       "exclusive_groups": [],
       "options": {
@@ -4002,6 +4129,22 @@
     "harness gateway peers join": {
       "exclusive_groups": [],
       "options": {
+        "--correlation": {
+          "action": "store",
+          "canonical": "--correlation",
+          "choices": null,
+          "nargs": 1,
+          "required": false,
+          "type": null
+        },
+        "--expect-fingerprint": {
+          "action": "store",
+          "canonical": "--expect-fingerprint",
+          "choices": null,
+          "nargs": 1,
+          "required": false,
+          "type": null
+        },
         "--fields": {
           "action": "store",
           "canonical": "--fields",

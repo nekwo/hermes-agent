@@ -36,6 +36,7 @@ from contextlib import contextmanager
 import pytest
 
 from agent_runtime.call_authorization import TIER_CONSOLE, TIER_READ
+from agent_runtime.gateway_capabilities import GATEWAY_CAPABILITIES
 from agent_runtime.gateway_tls import certificate_path, read_certificate
 from agent_runtime.serve_gateway_auth import (
     DeviceCredential,
@@ -236,7 +237,14 @@ def test_with_no_config_the_second_listener_does_not_exist_and_the_frame_says_di
     thinks they turned it on can tell the difference."""
 
     with running_serve() as handle:
-        assert handle.ready["gateway"] == {"outcome": "disabled"}
+        # S2 (R-IP16): the capability list rides EVERY outcome, ``disabled``
+        # included, because "does this build know the verb" and "is the LAN door
+        # open" are different questions. The key set is still exact — a block
+        # that grew a field nobody declared would fail here.
+        assert handle.ready["gateway"] == {
+            "outcome": "disabled",
+            "capabilities": list(GATEWAY_CAPABILITIES),
+        }
         assert handle.ready["socket"]["outcome"] == "listening"
         assert handle.ready["socket"]["host"] == "127.0.0.1"
         # Nothing was minted on the way past: no certificate, no key.
@@ -341,7 +349,12 @@ def test_the_ready_frame_publishes_the_gateway_port_and_the_fingerprint(gateway_
             "port",
             "started_at",
             "cert_fingerprint",
+            # S2. Additive, and asserted as a VALUE below rather than merely as
+            # a present key: a capabilities list that drifted from the module's
+            # tuple would be a feature-detection answer nobody could trust.
+            "capabilities",
         }
+        assert block["capabilities"] == list(GATEWAY_CAPABILITIES)
 
 
 def test_a_paired_device_completes_the_handshake_over_tls_with_a_pinned_cert(

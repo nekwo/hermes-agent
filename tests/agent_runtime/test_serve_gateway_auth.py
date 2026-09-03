@@ -417,3 +417,119 @@ def test_last_seen_is_stamped_and_never_fails_a_handshake(tmp_path: Path):
     # id and an unwritable root are both silent.
     note_device_seen(tmp_path, "dev_nope")
     note_device_seen(tmp_path / "does" / "not" / "exist", "dev_nope")
+
+
+# ── S2: expiry, and the account device label ────────────────────────────────
+
+
+def test_a_pairing_code_minted_with_a_ttl_redeems_into_a_row_that_expires(tmp_path):
+    """R-IP15 as amended. The stamp is computed at REDEEM, so a code that waits
+    nine of its ten minutes does not cost the credential nine of its days."""
+
+    from datetime import datetime, timezone
+
+    from agent_runtime.serve_gateway_auth import (
+        CREDENTIAL_TTL_SECONDS_INTRODUCED,
+        DeviceCredential,
+        PairingCode,
+        lookup_device,
+        mint_pairing_code,
+        redeem_pairing_code,
+    )
+
+    minted = mint_pairing_code(
+        tmp_path, credential_ttl_seconds=CREDENTIAL_TTL_SECONDS_INTRODUCED
+    )
+    assert isinstance(minted, PairingCode)
+
+    import time
+
+    at = time.time()
+    credential = redeem_pairing_code(tmp_path, minted.code, now=at)
+    assert isinstance(credential, DeviceCredential)
+
+    record = lookup_device(tmp_path, credential.device_id)
+    assert record.expires_at is not None
+    assert record.expired is False
+    delta = datetime.fromisoformat(record.expires_at) - datetime.fromtimestamp(
+        at, tz=timezone.utc
+    )
+    assert delta.total_seconds() == CREDENTIAL_TTL_SECONDS_INTRODUCED
+    assert record.payload()["expires_at"] == record.expires_at
+
+
+def test_a_pairing_code_minted_without_a_ttl_redeems_into_a_row_that_never_expires(
+    tmp_path,
+):
+    """Every manual ``harness gateway pair``, byte-unchanged. An operator
+    standing at the console is the provenance, and expiring that on a clock
+    would lock people out of their own workshop."""
+
+    from agent_runtime.serve_gateway_auth import (
+        DeviceCredential,
+        lookup_device,
+        mint_pairing_code,
+        redeem_pairing_code,
+    )
+
+    minted = mint_pairing_code(tmp_path)
+    credential = redeem_pairing_code(tmp_path, minted.code)
+    assert isinstance(credential, DeviceCredential)
+
+    record = lookup_device(tmp_path, credential.device_id)
+    assert record.expires_at is None
+    assert record.expired is False
+    assert record.account_device_id is None
+
+
+def test_an_expired_device_is_refused_with_its_own_reason_after_the_proof(tmp_path):
+    """Ordering: a BAD proof on an expired row answers ``bad_proof``, and only a
+    GOOD proof learns the row has lapsed — so an unauthenticated peer cannot
+    sweep device ids for expiries and read live ones off the difference."""
+
+    from agent_runtime.serve_gateway_auth import (
+        AUTH_BAD_PROOF,
+        AUTH_EXPIRED,
+        device_proof,
+        mint_pairing_code,
+        redeem_pairing_code,
+        verify_device_proof,
+    )
+
+    minted = mint_pairing_code(tmp_path, credential_ttl_seconds=60)
+    credential = redeem_pairing_code(tmp_path, minted.code, now=1_000.0)
+
+    good = device_proof(credential.token, "n", port=9000, device_id=credential.device_id)
+
+    bad = verify_device_proof(tmp_path, credential.device_id, "00" * 32, "n", port=9000)
+    assert bad.outcome == AUTH_BAD_PROOF
+    assert bad.record is None
+
+    lapsed = verify_device_proof(tmp_path, credential.device_id, good, "n", port=9000)
+    assert lapsed.outcome == AUTH_EXPIRED
+    assert lapsed.record is not None
+
+
+def test_the_account_device_id_label_lands_on_the_row_and_is_not_a_check(tmp_path):
+    """R-S2-4's honest half. hermes never learns an account device id at redeem
+    time — the row id is minted ``dev_<hex>`` right here — so this field is the
+    join key an operator's sheet relates the row by, and NOTHING authenticates
+    against it. The device code stays a plain bearer for its 600 seconds, which
+    the docstrings say out loud."""
+
+    from agent_runtime.serve_gateway_auth import (
+        lookup_device,
+        mint_pairing_code,
+        redeem_pairing_code,
+    )
+
+    minted = mint_pairing_code(tmp_path, for_device_id="dev-acct-1")
+    credential = redeem_pairing_code(tmp_path, minted.code)
+
+    record = lookup_device(tmp_path, credential.device_id)
+    assert record.account_device_id == "dev-acct-1"
+    # The row id is minted here and is NOT the account's id: two namespaces, and
+    # a surface that conflated them would name the wrong hardware in a log line.
+    assert record.device_id.startswith("dev_")
+    assert record.device_id != "dev-acct-1"
+    assert record.payload()["account_device_id"] == "dev-acct-1"

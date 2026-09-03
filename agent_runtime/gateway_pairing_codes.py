@@ -188,6 +188,26 @@ def mint_into(
     ceremony's tier and device name, the peer ceremony's note. It is merged
     UNDER the fixed keys rather than over them, so a caller cannot overwrite
     ``kind``, the salt or the digest by passing a colliding key.
+
+    S2 (``harness gateway introduce``) puts three more here, on BOTH kinds, and
+    they are named rather than left to be discovered in two call sites:
+
+    * ``credential_ttl_seconds`` — how long the CREDENTIAL this code redeems
+      into lives, or ``None`` for never. Not the code's own TTL, which is
+      :data:`CODE_TTL_SECONDS` and is unchanged; the redeeming side computes
+      ``expires_at`` from this at redemption, so the code's ten minutes are not
+      charged against the credential's thirty days.
+    * ``for_install_id`` — **checked, and only on the PEER kind.** A join hello
+      names the redeemer's own install id in the same frame, so
+      ``gateway_peers.redeem_peer_code`` can refuse a mismatch as ``invalid_code``
+      and charge a failure. There is no equivalent on the device kind: a device
+      id is minted AT redemption, so a device code stays a plain bearer for its
+      600 seconds and ``for_device_id`` below is a label rather than a check.
+    * ``for_device_id`` — the ACCOUNT's device id, copied onto the device row as
+      ``account_device_id`` at redemption. A join key for an operator's sheet,
+      never a credential.
+    * ``correlation`` — the backend grant id (R-IP17), kept so the redeem-time
+      event can name the errand. Never a row field and never a secret.
     """
 
     code = "".join(secrets.choice(CODE_ALPHABET) for _ in range(CODE_LENGTH))

@@ -884,3 +884,53 @@ def test_dial_peer_refuses_a_root_that_cannot_name_itself_rather_than_minting_on
 
     with pytest.raises(ConnectionError, match="no install identity"):
         dial_peer(_store_root(), FAR_INSTALL, timeout_seconds=2.0)
+
+
+def test_the_peered_block_carries_the_expiry_when_the_code_had_a_ttl_and_null_otherwise():
+    """S2 (R-IP15 as amended). ``peered.expires_at`` is ADDITIVE and it has to
+    travel: the redeeming side computed the stamp and the joining side has no
+    other way to learn it, so an edge whose two ends each derived their own
+    would lapse at two different moments — which is the divergence ``_row``
+    exists to prevent.
+
+    ``None`` on every edge the manual ceremony mints, which is what keeps a
+    joining install that predates this key reading exactly what it read before.
+    """
+
+    code = mint_peer_code(_store_root(), credential_ttl_seconds=60)
+    assert isinstance(code, PeerPairingCode)
+
+    with running_serve() as handle:
+        connection = _client(handle)
+        try:
+            reply = connection.peer_join_hello(
+                peer_code=code.code,
+                peer_install_id=FAR_INSTALL,
+                display_name="the laptop",
+            )
+        finally:
+            connection.close()
+
+        assert reply["event"] == "hello_ok"
+        assert reply["peered"]["expires_at"]
+        # Both ends hold the SAME value: what the frame carried is what the
+        # redeeming side stored, not a second derivation of it.
+        assert reply["peered"]["expires_at"] == (
+            lookup_peer(_store_root(), FAR_INSTALL).expires_at
+        )
+
+
+def test_the_manual_ceremony_still_mints_an_edge_that_never_expires():
+    code = mint_peer_code(_store_root())
+
+    with running_serve() as handle:
+        connection = _client(handle)
+        try:
+            reply = connection.peer_join_hello(
+                peer_code=code.code, peer_install_id=FAR_INSTALL
+            )
+        finally:
+            connection.close()
+
+        assert reply["peered"]["expires_at"] is None
+        assert lookup_peer(_store_root(), FAR_INSTALL).expires_at is None

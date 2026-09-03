@@ -422,6 +422,11 @@ def _pairing_block(connection: Any) -> dict[str, Any]:
     secret = getattr(connection, "peer_secret", None)
     if secret:
         connection.peer_secret = None
+        expires_at = getattr(connection, "peer_secret_expires_at", None)
+        # Cleared with the secret and in the same breath: the two are one
+        # one-shot fact, and a slot that outlived its secret would be a stale
+        # expiry on a long-lived object for the rest of the session.
+        connection.peer_secret_expires_at = None
         return {
             # Gateway Stage 6. The joining install writes its own half of the
             # edge from this block; the `install` block on the same frame is
@@ -433,6 +438,13 @@ def _pairing_block(connection: Any) -> dict[str, Any]:
                 # digest of it — see ``gateway_peers`` — so a client that drops
                 # this frame has paired an edge it can never use.
                 "peer_secret": secret,
+                # S2 (R-IP15 as amended). ADDITIVE, and ``None`` on every edge
+                # the manual ceremony mints, so a joining install that predates
+                # this key reads what it always read. It has to travel: the
+                # redeeming side computed the stamp and the joining side has no
+                # other way to learn it, and an edge whose two ends expire on
+                # different days is the divergence ``_row`` exists to prevent.
+                "expires_at": expires_at,
             }
         }
     return {}
@@ -713,6 +725,10 @@ def _gateway_authenticator(store_root: Any):
                 ok=True,
                 peer_install_id=outcome.peer_install_id,
                 issued_peer_secret=outcome.secret,
+                # S2: whatever the mint decided, carried straight through. The
+                # store computed it at redemption; this function neither derives
+                # nor defaults one, so the two ends of the edge hold one value.
+                issued_peer_secret_expires_at=outcome.expires_at,
             )
 
         if kind == "peer_install_id":
@@ -2536,7 +2552,16 @@ def serve_loop(
         #     credential (per DEVICE — `serve_gateway_auth`, not the per-root
         #     token), and the link (TLS, R1). Same dispatcher, same ops, same
         #     stream hub, same drain.
-        gateway_block: dict[str, Any] = {"outcome": "disabled"}
+        # R-IP16 / R-S2-1: the capability list rides EVERY outcome, including
+        # ``disabled``. "Does this hermes know the verb" and "is the LAN door
+        # open" are different questions, and S3's request loop asks the first
+        # over loopback argv against a serve that may legitimately have the
+        # second answered ``no``. Stamped in exactly two places — here, and on
+        # the listener's own block below — so ``ready`` / ``hello_ok`` /
+        # ``version`` are untouched and cannot disagree.
+        from agent_runtime.gateway_capabilities import with_capabilities
+
+        gateway_block: dict[str, Any] = with_capabilities({"outcome": "disabled"})
         if socket_server is not None and store_root_path is not None:
             gateway_server, gateway_block = start_gateway_listener(
                 store_root_path,
@@ -2552,6 +2577,7 @@ def serve_loop(
                 log=_service_log,
                 frame_contract=SERVE_SCHEMA_VERSION,
             )
+            gateway_block = with_capabilities(gateway_block)
             if gateway_server is not None and socket_lock is not None:
                 # RE-PUBLISH the ownership sidecar, now that the second door has
                 # a real port. The first publish happens before this block on

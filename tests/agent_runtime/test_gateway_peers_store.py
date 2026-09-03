@@ -36,6 +36,7 @@ from agent_runtime.gateway_pairing_codes import (
 from agent_runtime.gateway_peers import (
     MAX_ENDPOINTS,
     PEER_AUTH_BAD_PROOF,
+    PEER_AUTH_EXPIRED,
     PEER_AUTH_OK,
     PEER_AUTH_REVOKED,
     PEER_AUTH_UNKNOWN,
@@ -58,6 +59,7 @@ from agent_runtime.gateway_peers import (
     verify_peer_proof,
 )
 from agent_runtime.serve_gateway_auth import (
+    CREDENTIAL_TTL_SECONDS_INTRODUCED,
     DeviceCredential,
     StoreRefusal,
     device_proof,
@@ -148,6 +150,11 @@ def test_the_row_shape_is_exactly_trust_fields_plus_cache_fields(tmp_path):
     # reader: the credential is trust, and the far install's own name is not.
     assert "secret_verifier" in PEER_ROW_TRUST_FIELDS
     assert "display_name" in PEER_ROW_CACHE_FIELDS
+    # S2's one new field, classified out loud. TRUST because the sharpest
+    # version of the reason applies: a peer that could push its own expiry out
+    # would hold a credential with no end, which is exactly the authority
+    # ``revoked`` denies it.
+    assert "expires_at" in PEER_ROW_TRUST_FIELDS
     assert credential.secret not in json.dumps(stored)
 
 
@@ -607,3 +614,210 @@ def test_a_fingerprint_that_is_not_one_reads_as_absent_not_as_a_pin(tmp_path):
         ).cert_fingerprint
         == "ab" * 32
     )
+
+
+# ── S2: expiry, and the code that is scoped to one requester ────────────────
+
+
+def test_a_peer_code_scoped_to_an_install_refuses_any_other_install_and_charges_a_failure(
+    tmp_path,
+):
+    """R-S2-4. A code is a bearer for its ten minutes; a code minted with
+    ``for_install_id`` is a bearer only the named install can spend, because the
+    join hello has to name the redeemer's own id in the same frame.
+
+    The refusal is byte-identical to "no such code" and charges the same
+    failure, so the wrong install cannot use the difference to learn that a
+    pairing is in flight. And the pending entry SURVIVES: the code was not
+    spent, so the install it was meant for can still redeem it inside the window
+    instead of having to re-run the ceremony because somebody guessed at it.
+    """
+
+    from agent_runtime.gateway_pairing_codes import pending_codes
+    from agent_runtime.serve_gateway_auth import _read_pairing
+
+    minted = mint_peer_code(tmp_path, for_install_id=PEER_B)
+    assert isinstance(minted, PeerPairingCode)
+
+    wrong = redeem_peer_code(tmp_path, minted.code, peer_install_id=PEER_A)
+    assert isinstance(wrong, StoreRefusal)
+    assert wrong.reason == "invalid_code"
+    assert "no pending peer code matches" in wrong.detail
+
+    state = _read_pairing(tmp_path)
+    assert int(state.get("failed_redeems") or 0) == 1
+    assert len(pending_codes(state)) == 1
+    assert list_peers(tmp_path) == []
+
+    # …and the install it WAS for still gets its edge.
+    right = redeem_peer_code(tmp_path, minted.code, peer_install_id=PEER_B)
+    assert isinstance(right, PeerCredential)
+    assert [row.peer_install_id for row in list_peers(tmp_path)] == [PEER_B]
+
+
+def test_an_unscoped_code_is_still_spendable_by_anybody_which_is_the_manual_ceremony(
+    tmp_path,
+):
+    """The manual verbs mint without a scope and must keep working exactly as
+    they did: an operator carrying eight characters to a machine they are
+    standing at IS the provenance, and there is nothing for the store to check."""
+
+    minted = mint_peer_code(tmp_path)
+    assert isinstance(minted, PeerPairingCode)
+
+    credential = redeem_peer_code(tmp_path, minted.code, peer_install_id=PEER_A)
+    assert isinstance(credential, PeerCredential)
+    assert credential.expires_at is None
+
+
+def test_a_peer_code_minted_with_a_ttl_redeems_into_a_row_that_expires(tmp_path):
+    """The stamp is computed at REDEEM and not at mint, so a code that sits for
+    nine of its ten minutes does not spend nine minutes of the credential's
+    thirty days."""
+
+    import time
+
+    minted = mint_peer_code(
+        tmp_path, credential_ttl_seconds=CREDENTIAL_TTL_SECONDS_INTRODUCED
+    )
+    assert isinstance(minted, PeerPairingCode)
+
+    at = time.time()
+    credential = redeem_peer_code(
+        tmp_path, minted.code, peer_install_id=PEER_B, now=at
+    )
+    assert isinstance(credential, PeerCredential)
+    assert credential.expires_at is not None
+
+    record = lookup_peer(tmp_path, PEER_B)
+    assert record.expires_at == credential.expires_at
+    assert record.expired is False
+    # ~30 days out, checked as a window rather than an equality so a second of
+    # clock drift inside the call is not a failure.
+    from datetime import datetime, timezone
+
+    delta = datetime.fromisoformat(record.expires_at) - datetime.fromtimestamp(
+        at, tz=timezone.utc
+    )
+    assert abs(delta.total_seconds() - CREDENTIAL_TTL_SECONDS_INTRODUCED) < 5
+
+
+def test_an_expired_peer_is_refused_after_the_proof_with_its_own_reason(tmp_path):
+    """Ordering, asserted rather than assumed: a BAD proof on an expired row
+    answers ``bad_proof``, and only a GOOD proof learns the row has lapsed.
+
+    Checking expiry first would let an unauthenticated peer sweep install ids
+    and learn which are expired — and, by difference, which are live — holding
+    nothing at all. Same argument as the revocation arm, same position.
+    """
+
+    minted = mint_peer_code(tmp_path, credential_ttl_seconds=60)
+    credential = redeem_peer_code(
+        tmp_path, minted.code, peer_install_id=PEER_B, now=1_000.0
+    )
+    assert isinstance(credential, PeerCredential)
+
+    verifier = peer_secret_verifier(credential.secret)
+    good = peer_proof(verifier, "nonce-1", port=9000, peer_install_id=PEER_B)
+
+    import time as _time
+
+    class _Clock:
+        """Freeze "now" past the expiry without touching the stored row."""
+
+    # The row was written against ``now=1000`` with a 60s TTL, so its stamp is
+    # in 1970. Every wall clock this test could run under is past it.
+    fresh = verify_peer_proof(tmp_path, PEER_B, good, "nonce-1", port=9000)
+    assert fresh.outcome == PEER_AUTH_EXPIRED
+    assert fresh.record is not None
+
+    bad = verify_peer_proof(tmp_path, PEER_B, "00" * 32, "nonce-1", port=9000)
+    assert bad.outcome == PEER_AUTH_BAD_PROOF
+    assert bad.record is None
+    assert _time is not None and _Clock is not None  # keep the imports honest
+
+
+def test_a_revoked_and_expired_row_reports_revoked_because_a_decision_outranks_a_clock(
+    tmp_path,
+):
+    minted = mint_peer_code(tmp_path, credential_ttl_seconds=60)
+    credential = redeem_peer_code(
+        tmp_path, minted.code, peer_install_id=PEER_B, now=1_000.0
+    )
+    revoke_peer(tmp_path, PEER_B)
+
+    verifier = peer_secret_verifier(credential.secret)
+    good = peer_proof(verifier, "n", port=9000, peer_install_id=PEER_B)
+
+    assert verify_peer_proof(tmp_path, PEER_B, good, "n", port=9000).outcome == (
+        PEER_AUTH_REVOKED
+    )
+
+
+def test_record_peer_stores_the_expiry_the_far_side_minted(tmp_path):
+    """The joining side takes the stamp it was HANDED rather than deriving one.
+    Two ends of an edge that each computed their own would lapse minutes — or,
+    with a skewed clock, days — apart."""
+
+    outcome = record_peer(
+        tmp_path,
+        peer_install_id=PEER_A,
+        secret="f" * 64,
+        display_name="workstation",
+        endpoints=[{"host": "10.0.0.4", "port": 9000}],
+        expires_at="2099-01-01T00:00:00+00:00",
+    )
+    assert isinstance(outcome, PeerRecord)
+    assert outcome.expires_at == "2099-01-01T00:00:00+00:00"
+    assert outcome.expired is False
+
+    lapsed = record_peer(
+        tmp_path,
+        peer_install_id=PEER_B,
+        secret="e" * 64,
+        expires_at="2000-01-01T00:00:00+00:00",
+    )
+    assert lapsed.expired is True
+
+
+def test_a_row_without_an_expiry_never_expires_so_pre_s2_stores_keep_working(tmp_path):
+    """The whole migration story: the only new fact has a legal absent value, so
+    there is no rewrite pass and no contract bump."""
+
+    _pair(tmp_path)
+    record = lookup_peer(tmp_path, PEER_B)
+
+    assert record.expires_at is None
+    assert record.expired is False
+    assert record.payload()["expires_at"] is None
+    assert record.payload()["expired"] is False
+
+
+def test_dial_peer_refuses_an_expired_row_before_it_opens_a_socket(tmp_path, monkeypatch):
+    """Beside the revocation refusal and for its reason: a credential this side
+    already knows is dead costs no attempt. Proved with a client that raises if
+    it is constructed, so the assertion reads the ORDERING rather than trusting a
+    comment."""
+
+    from agent_runtime import gateway_peers, serve_socket
+
+    record_peer(
+        tmp_path,
+        peer_install_id=PEER_A,
+        secret="f" * 64,
+        display_name="workstation",
+        endpoints=[{"host": "10.0.0.4", "port": 9000}],
+        cert_fingerprint="ab" * 32,
+        expires_at="2000-01-01T00:00:00+00:00",
+    )
+    gateway_peers.record_peer  # the module is the one under test
+
+    def _explode(*args, **kwargs):
+        raise AssertionError("dial_peer opened a socket for an expired row")
+
+    monkeypatch.setattr(serve_socket, "ServeSocketClient", _explode)
+
+    with pytest.raises(ConnectionError) as raised:
+        gateway_peers.dial_peer(tmp_path, PEER_A)
+
+    assert "expired" in str(raised.value)

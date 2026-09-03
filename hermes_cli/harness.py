@@ -369,6 +369,35 @@ def build_parser(parent_subparsers) -> None:
     )
     _add_stage42_global_args(gateway_pair)
     gateway_pair.set_defaults(func=_cmd_gateway_pair)
+    # S2. `introduce` sits under `gateway` rather than under `peers`, and that
+    # placement is the honest one: it mints BOTH halves — a peer code and a
+    # device code — so filing it under `peers` would name half of what it does.
+    # It takes the reader's flag set for `pair`'s reason (a dry run would have
+    # to print codes it did not mint).
+    gateway_introduce = gateway_subs.add_parser(
+        "introduce",
+        help="Mint one envelope a launcher posts as a backend pair-grant: a peer code, a device code, and where to dial this install",
+    )
+    gateway_introduce.add_argument(
+        "--for-install",
+        dest="for_install",
+        help="The hermes install id this introduction is FOR — the peer half is minted scoped to it and no other install can spend it",
+    )
+    gateway_introduce.add_argument(
+        "--for-device",
+        dest="for_device",
+        help="The ACCOUNT device id this introduction is for — copied onto the device row as a join key (a label, not a check)",
+    )
+    gateway_introduce.add_argument(
+        "--correlation",
+        help="The backend grant id, stamped through both mints and every event so all three parties name one errand",
+    )
+    gateway_introduce.add_argument(
+        "--note",
+        help="What this introduction is for, e.g. \"the laptop\" — shown while the codes are pending",
+    )
+    _add_stage42_global_args(gateway_introduce)
+    gateway_introduce.set_defaults(func=_cmd_gateway_introduce)
     gateway_devices = gateway_subs.add_parser(
         "devices",
         help="Devices paired with this install's gateway — list them, or revoke one",
@@ -438,6 +467,15 @@ def build_parser(parent_subparsers) -> None:
     gateway_peers_join.add_argument("--host", help="Override the address in the payload (a second interface, a NAT, a machine that moved)")
     gateway_peers_join.add_argument("--port", type=int, help="Override the port in the payload")
     gateway_peers_join.add_argument("--fingerprint", help="Override the certificate fingerprint to pin; omitting it pins NOTHING, which is weaker")
+    gateway_peers_join.add_argument(
+        "--expect-fingerprint",
+        dest="expect_fingerprint",
+        help="The certificate fingerprint the ACCOUNT attests for that install; a payload that disagrees is refused before anything is dialled",
+    )
+    gateway_peers_join.add_argument(
+        "--correlation",
+        help="The backend grant id this join fulfils; echoed on the receipt so all three parties name one errand",
+    )
     gateway_peers_join.add_argument("--timeout", type=float, default=20.0, help="Seconds to wait for the other install's handshake")
     _add_stage42_global_args(gateway_peers_join)
     gateway_peers_join.set_defaults(func=_cmd_gateway_peers_join)
@@ -2019,13 +2057,57 @@ def _gateway_install_row(identity) -> dict:
     the identity rather than reading one that was already there.
     """
 
-    return {
+    row = {
         "install_id": identity.install_id,
         "display_name": identity.display_name,
         "state": identity.state,
         "created_at": identity.created_at,
         "path": identity.path,
     }
+    # S2 (R-S2-1 / R-S2-2). Four facts a caller currently has to open a socket
+    # to learn, answered by a cold CLI process:
+    #
+    # * ``capabilities`` — what this BUILD can do, so S3's request loop can
+    #   feature-detect over the loopback argv lane without a listener anywhere.
+    #   The same tuple the ``gateway`` block stamps on every greeting, read from
+    #   the one module both sides import.
+    # * ``endpoints`` / ``endpoints_source`` — where another machine should dial
+    #   this one, and how confident that answer is. The SAME list a join payload
+    #   advertises (``_candidate_endpoints``), so what this prints and what a
+    #   hello offers cannot drift.
+    # * ``listener`` — the live block minus nothing secret: an outcome, a host,
+    #   a port and the fingerprint a client pins. The private key is not in it
+    #   and there is no field for one.
+    #
+    # Best-effort as a whole: this verb is read-only by contract and Stage 4's
+    # install picker runs it against roots it does not own, so a store it cannot
+    # read degrades to the identity row rather than to an error.
+    try:
+        from agent_runtime import paths
+        from agent_runtime.gateway_capabilities import GATEWAY_CAPABILITIES
+        from hermes_cli.harness_parts.gateway_commands import (
+            _candidate_endpoints,
+            _endpoint,
+        )
+
+        root = paths.store_root()
+        endpoint = _endpoint(root)
+        row["endpoints"] = _candidate_endpoints(root)
+        row["endpoints_source"] = endpoint["source"]
+        row["listener"] = {
+            "host": endpoint.get("host"),
+            "port": endpoint.get("port"),
+            "source": endpoint["source"],
+        }
+        row["capabilities"] = list(GATEWAY_CAPABILITIES)
+    except Exception:
+        row.setdefault("endpoints", [])
+        row.setdefault("endpoints_source", "unknown")
+        row.setdefault("listener", {"host": None, "port": None, "source": "unknown"})
+        from agent_runtime.gateway_capabilities import GATEWAY_CAPABILITIES
+
+        row.setdefault("capabilities", list(GATEWAY_CAPABILITIES))
+    return row
 
 
 #: ``error:<reason>`` → the harness error taxonomy. Split on the operator's next
@@ -2165,6 +2247,12 @@ def _cmd_gateway_pair(args) -> int:
     from hermes_cli.harness_parts.gateway_commands import cmd_gateway_pair
 
     return cmd_gateway_pair(args)
+
+
+def _cmd_gateway_introduce(args) -> int:
+    from hermes_cli.harness_parts.gateway_commands import cmd_gateway_introduce
+
+    return cmd_gateway_introduce(args)
 
 
 def _cmd_gateway_devices_list(args) -> int:

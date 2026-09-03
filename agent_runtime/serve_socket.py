@@ -685,6 +685,12 @@ class HelloAuthOutcome:
     #: stores, and a single field would let a future edit put a device token on
     #: a peer's greeting by getting one branch wrong.
     issued_peer_secret: str | None = None
+    #: When the credential :attr:`issued_peer_secret` names stops working
+    #: (ISO-8601 UTC), or ``None`` for never — S2, R-IP15 as amended. It rides
+    #: BESIDE the secret rather than being derived on the joining side, because
+    #: the redeeming side is the one that decided it: an edge whose two ends
+    #: computed their own expiry would lapse at two different moments.
+    issued_peer_secret_expires_at: str | None = None
 
 
 # ── connections ──────────────────────────────────────────────────────────────
@@ -721,6 +727,12 @@ class SocketConnection:
     #: connection to an operator, to a log, and to every other attached client.
     pairing_token: str | None = None
     peer_secret: str | None = None
+    #: The expiry that rides with :attr:`peer_secret`, read and cleared in the
+    #: same statement it is (``serve._pairing_block``). Not a secret, and kept
+    #: off ``payload()`` anyway: it is meaningless without the credential it
+    #: describes, and a field that outlived the one-shot would be a stale answer
+    #: waiting to be read.
+    peer_secret_expires_at: str | None = None
     subscribed: bool = False
     frames_out: int = 0
     bytes_out: int = 0
@@ -1380,6 +1392,7 @@ class ServeSocketServer:
         connection.pairing_token = outcome.issued_token
         connection.peer_install_id = outcome.peer_install_id
         connection.peer_secret = outcome.issued_peer_secret
+        connection.peer_secret_expires_at = outcome.issued_peer_secret_expires_at
         self._rate_limiter.record_success()
         # Symmetry the first pass missed: a completed handshake proves the lane
         # is reachable and answering, so the SILENCE throttle has nothing left

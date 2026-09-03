@@ -9,7 +9,7 @@ runtime, on another machine, that an operator approved on BOTH sides.
 and ``pairing.json``. One row per peer::
 
     {peer_install_id, display_name, endpoints, cert_fingerprint,
-     secret_verifier, approved_at, last_seen, revoked, revoked_at}
+     secret_verifier, approved_at, last_seen, revoked, revoked_at, expires_at}
 
 Two kinds of field in one row: TRUST, and CACHE (R-IP14)
 ---------------------------------------------------------
@@ -18,10 +18,16 @@ Every key above is one of exactly two things, and the split is worth stating
 because the file's own name covers only half of it:
 
 * **Trust** — ``peer_install_id``, ``secret_verifier``, ``approved_at``,
-  ``revoked``, ``revoked_at``. Written by a ceremony (:func:`redeem_peer_code`,
-  :func:`record_peer`) or by :func:`revoke_peer`, and by nothing else. The
-  network never moves one of these, and that is what makes this a credential
-  store rather than a directory.
+  ``revoked``, ``revoked_at``, ``expires_at``. Written by a ceremony
+  (:func:`redeem_peer_code`, :func:`record_peer`) or by :func:`revoke_peer`, and
+  by nothing else. The network never moves one of these, and that is what makes
+  this a credential store rather than a directory. ``expires_at`` (S2, R-IP15 as
+  amended) is trust for the sharpest version of that reason: a peer that could
+  push its own expiry out would hold a credential with no end, which is exactly
+  the authority ``revoked`` denies it. ``None`` means never and is what the
+  manual ceremony keeps minting; a thirty-day stamp is what an ``introduce``
+  mints, and BOTH ends of the edge hold the same one because it rides
+  ``hello_ok.peered.expires_at`` rather than being recomputed on the far side.
 * **Cache** — ``display_name``, ``endpoints``, ``cert_fingerprint``,
   ``last_seen``. What the far install TOLD us, at pairing or on a hello. The
   install itself is the authority for its own name, addresses and certificate;
@@ -61,8 +67,17 @@ approval flag on a row: a flag can be set by whatever wrote the row.
 "Agents can never initiate pairing" — and the residual, named honestly
 ---------------------------------------------------------------------
 
-The four peer verbs are CLI verbs and have NO wire twin: there is no
-``gateway.*`` RPC method that mints, redeems, lists or revokes a peer. A remote
+The peer verbs are CLI verbs and have NO wire twin: there is no ``gateway.*``
+RPC method that mints, redeems, lists or revokes a peer. **S2's ``harness
+gateway introduce`` is the fifth and changes nothing about that**: it is a
+COMPOSITION of :func:`mint_peer_code` and
+:func:`~agent_runtime.serve_gateway_auth.mint_pairing_code` in one envelope for
+a launcher to post as a backend grant — two existing mints, no third ceremony,
+no new store, and no method. It inherits this paragraph's residual exactly (a
+local agent with a shell can run it) and adds one real narrowing the manual verb
+does not have: a code minted with ``for_install_id`` is spendable only by the
+install it names (:func:`redeem_peer_code`), so an intercepted introduction buys
+an attacker an edge with nobody. A remote
 caller therefore cannot reach them through the method lane (nothing to call)
 and cannot reach them through the argv lane either, because **the argv lane is
 refused outright to every gateway connection** (Stage 1, ``serve.py``'s
@@ -161,15 +176,23 @@ from .gateway_pairing_codes import (
     note_failed_redeem,
     pending_codes,
 )
-from .serve_gateway_auth import StoreRefusal, _read_pairing, _store_lock, _write_pairing
+from .serve_gateway_auth import (
+    CREDENTIAL_TTL_SECONDS_INTRODUCED,
+    StoreRefusal,
+    _read_pairing,
+    _store_lock,
+    _write_pairing,
+)
 from .store_file_io import iso_stamp as _iso
 from .store_file_io import os_error_reason as _os_reason
 from .store_file_io import read_json_object as _read_json
+from .store_file_io import stamp_passed as _stamp_passed
 from .store_file_io import write_secure_json as _write_secure
 
 __all__ = [
     "MAX_ENDPOINTS",
     "PEER_AUTH_BAD_PROOF",
+    "PEER_AUTH_EXPIRED",
     "PEER_AUTH_MALFORMED",
     "PEER_AUTH_OK",
     "PEER_AUTH_REVOKED",
@@ -241,6 +264,10 @@ PEER_AUTH_UNKNOWN = "unknown_peer"
 PEER_AUTH_REVOKED = "peer_revoked"
 PEER_AUTH_BAD_PROOF = "bad_proof"
 PEER_AUTH_MALFORMED = "hello_malformed"
+#: A row whose ``expires_at`` has passed. Its own outcome rather than a second
+#: spelling of ``peer_revoked``, for :data:`~agent_runtime.serve_gateway_auth.AUTH_EXPIRED`'s
+#: reason: an operator re-runs a ceremony for one and does nothing for the other.
+PEER_AUTH_EXPIRED = "peer_expired"
 
 
 # ── typed results ────────────────────────────────────────────────────────────
@@ -283,6 +310,12 @@ class PeerCredential:
     peer_install_id: str
     secret: str
     display_name: str
+    #: When the edge this redemption just wrote stops working, ISO-8601 UTC, or
+    #: ``None`` for never. Returned so the redeeming side can put it on the ONE
+    #: ``hello_ok`` that carries the secret: the joining install has no other
+    #: way to learn it, and two ends of one edge that expire on different days
+    #: is precisely the divergence :func:`_row` exists to prevent.
+    expires_at: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -320,6 +353,23 @@ class PeerRecord:
     last_seen: str | None
     revoked: bool
     revoked_at: str | None
+    #: TRUST, and the one new field S2 adds to this row. ``None`` means never,
+    #: which is what the manual ceremony keeps writing. The far install holds
+    #: the SAME value (it rides ``hello_ok.peered.expires_at``), so both ends of
+    #: an edge lapse together rather than one refusing while the other keeps
+    #: dialling.
+    expires_at: str | None = None
+
+    @property
+    def expired(self) -> bool:
+        """Has :attr:`expires_at` passed? ``False`` when there is none.
+
+        Fails toward LIVE on an unreadable stamp — see
+        ``store_file_io.stamp_passed`` for why that direction, and why it is the
+        opposite of the direction ``_decode_device`` fails in for a tier.
+        """
+
+        return _stamp_passed(self.expires_at)
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -331,6 +381,8 @@ class PeerRecord:
             "last_seen": self.last_seen,
             "revoked": self.revoked,
             "revoked_at": self.revoked_at,
+            "expires_at": self.expires_at,
+            "expired": self.expired,
         }
 
 
@@ -562,6 +614,14 @@ def verify_peer_proof(
         return PeerAuth(
             outcome=PEER_AUTH_REVOKED, peer_install_id=peer_install_id, record=record
         )
+    # Expiry sits beside revocation, AFTER the proof, for the same anti-probing
+    # reason and in the same order: a row that is both reports ``peer_revoked``,
+    # because a decision an operator made outranks a clock. Distinguished here,
+    # collapsed on the wire.
+    if record.expired:
+        return PeerAuth(
+            outcome=PEER_AUTH_EXPIRED, peer_install_id=peer_install_id, record=record
+        )
     return PeerAuth(
         outcome=PEER_AUTH_OK, peer_install_id=peer_install_id, record=record
     )
@@ -627,7 +687,13 @@ def revoke_peer(
 
 
 def mint_peer_code(
-    store_root: Path | str, *, note: str | None = None, now: float | None = None
+    store_root: Path | str,
+    *,
+    note: str | None = None,
+    credential_ttl_seconds: int | None = None,
+    for_install_id: str | None = None,
+    correlation: str | None = None,
+    now: float | None = None,
 ) -> PeerPairingCode | StoreRefusal:
     """Mint a short-TTL PEER code. The plaintext is returned, never stored.
 
@@ -662,8 +728,27 @@ def mint_peer_code(
                     "codes alike); redeem or wait for them to expire",
                 )
             cleaned = clean_display_name(note) or None
+            # Three ``introduce`` keys on the pending entry, merged UNDER the
+            # fixed ones (``mint_into``'s contract), so a caller that passes
+            # none of them mints the byte-identical entry a pre-S2 build did.
+            #
+            # ``for_install_id`` is the one that is genuinely CHECKED — see
+            # :func:`redeem_peer_code`. The peer half can be scoped because the
+            # join hello names the redeemer's own install id; the device half
+            # cannot, and its label says so out loud rather than looking like a
+            # check that never fires (R-S2-4).
             code, request_id, expires_at = mint_into(
-                state, kind=KIND_PEER, extra={"note": cleaned}, now=stamp
+                state,
+                kind=KIND_PEER,
+                extra={
+                    "note": cleaned,
+                    "credential_ttl_seconds": (
+                        int(credential_ttl_seconds) if credential_ttl_seconds else None
+                    ),
+                    "for_install_id": str(for_install_id or "").strip()[:128] or None,
+                    "correlation": str(correlation or "").strip()[:64] or None,
+                },
+                now=stamp,
             )
             _write_pairing(store_root, state)
             return PeerPairingCode(
@@ -730,12 +815,43 @@ def redeem_peer_code(
                 return StoreRefusal(
                     "invalid_code", "no pending peer code matches (or it expired)"
                 )
-            matched_id, _matched = found
+            matched_id, matched = found
+
+            # **The scoping check (R-S2-4), and it is a real one.** A code is a
+            # bearer for its ten minutes; an ``introduce`` that named the
+            # install it was minted FOR turns it into a bearer only that install
+            # can spend, because the join hello has to name the redeemer's own
+            # id in the same frame. A mismatch is refused as ``invalid_code``
+            # and CHARGES a failure — the same answer, and the same cost, as a
+            # code that does not exist — so the wrong install cannot use the
+            # difference between "not for you" and "no such code" to learn that
+            # a pairing is in flight.
+            #
+            # The pending entry is left ALONE on this path: the code was not
+            # spent, so the operator's own install can still redeem it inside
+            # the window rather than having to re-run the ceremony because
+            # somebody else guessed at it.
+            wanted_install = str(matched.get("for_install_id") or "").strip()
+            if wanted_install and wanted_install != peer_install_id:
+                note_failed_redeem(state, now=stamp)
+                _write_pairing(store_root, state)
+                return StoreRefusal(
+                    "invalid_code", "no pending peer code matches (or it expired)"
+                )
 
             del pending_codes(state)[matched_id]
             state["failed_redeems"] = 0
             state["locked_until"] = 0.0
             _write_pairing(store_root, state)
+
+            ttl = matched.get("credential_ttl_seconds")
+            try:
+                ttl_seconds = int(ttl) if ttl else 0
+            except (TypeError, ValueError):
+                ttl_seconds = 0
+            # Computed at REDEEM, not at mint: the credential starts existing
+            # now, and the code's own window should not be charged against it.
+            expires_at = _iso(stamp + ttl_seconds) if ttl_seconds else None
 
             secret = secrets.token_hex(PEER_SECRET_BYTES)
             name = clean_display_name(display_name) or peer_install_id
@@ -747,10 +863,14 @@ def redeem_peer_code(
                 cert_fingerprint=_clean_fingerprint(cert_fingerprint),
                 secret=secret,
                 stamp=stamp,
+                expires_at=expires_at,
             )
             _write_peers(store_root, rows)
             return PeerCredential(
-                peer_install_id=peer_install_id, secret=secret, display_name=name
+                peer_install_id=peer_install_id,
+                secret=secret,
+                display_name=name,
+                expires_at=expires_at,
             )
     except OSError as exc:
         return StoreRefusal(_os_reason(exc), str(exc))
@@ -764,6 +884,7 @@ def record_peer(
     display_name: Any = None,
     endpoints: Any = None,
     cert_fingerprint: Any = None,
+    expires_at: Any = None,
     now: float | None = None,
 ) -> PeerRecord | StoreRefusal:
     """Write the OTHER half of the edge, on the joining install.
@@ -778,6 +899,12 @@ def record_peer(
     whole difference between this function and :func:`redeem_peer_code`. A peer
     edge has exactly one secret; the side that did not mint it must store the
     one it was given or the two rows describe different credentials.
+    
+    ``expires_at`` travels the same way and for the same reason: it is read off
+    ``hello_ok.peered`` (the redeeming side computed it) rather than recomputed
+    here. A joining install that derived its own would put a second authority on
+    one fact, and the two ends of an edge would lapse minutes — or, with a
+    skewed clock, days — apart.
     """
 
     peer_install_id = str(peer_install_id or "").strip()
@@ -798,6 +925,7 @@ def record_peer(
                 cert_fingerprint=_clean_fingerprint(cert_fingerprint),
                 secret=str(secret).strip(),
                 stamp=stamp,
+                expires_at=(str(expires_at).strip() or None) if expires_at else None,
             )
             _write_peers(store_root, rows)
             record = _decode_peer(rows[peer_install_id])
@@ -847,6 +975,15 @@ def dial_peer(
     if record.revoked:
         raise ConnectionError(
             f"install {peer_install_id!r} is revoked at this root; re-pair it first"
+        )
+    # Beside the revocation and BEFORE any socket, for the revocation's reason:
+    # a credential this side already knows is dead costs no attempt. Unlike the
+    # verifier arms, order does not matter here — nothing is being probed, this
+    # is our own store telling us not to bother.
+    if record.expired:
+        raise ConnectionError(
+            f"the credential for install {peer_install_id!r} expired at "
+            f"{record.expires_at}; an operator re-introduces the edge to renew it"
         )
     # The VERIFIER, not a secret: both ends of a peer edge store ``sha256(secret)``
     # and key the HMAC with it, which is what makes the edge symmetric — either
@@ -914,6 +1051,12 @@ PEER_ROW_TRUST_FIELDS = frozenset(
         "approved_at",
         "revoked",
         "revoked_at",
+        # S2. TRUST and not cache, and the classification is the argument: THIS
+        # install decided the lifetime at mint time (or was handed it once, on
+        # the one frame that carries the secret), and no later hello may move
+        # it. A peer that could push its own expiry out would hold a credential
+        # with no end — which is the same authority ``revoked`` denies it.
+        "expires_at",
     }
 )
 
@@ -933,6 +1076,7 @@ def _row(
     cert_fingerprint: str | None,
     secret: str,
     stamp: float,
+    expires_at: str | None = None,
 ) -> dict[str, Any]:
     """One stored row. The ONE place a peer row's shape is written.
 
@@ -960,6 +1104,7 @@ def _row(
         "last_seen": None,
         "revoked": False,
         "revoked_at": None,
+        "expires_at": expires_at,
     }
 
 
@@ -978,6 +1123,10 @@ def _decode_peer(row: Any) -> PeerRecord | None:
         last_seen=(str(row["last_seen"]) if row.get("last_seen") else None),
         revoked=bool(row.get("revoked")),
         revoked_at=(str(row["revoked_at"]) if row.get("revoked_at") else None),
+        # Absent reads as "never expires", so every row a pre-S2 build wrote
+        # keeps working untouched. There is no migration pass because the only
+        # new fact has a legal absent value.
+        expires_at=(str(row["expires_at"]) if row.get("expires_at") else None),
     )
 
 
