@@ -84,7 +84,7 @@ correct for their caller kind; the launcher is never a peer.
 ## Builder's record — the hermes half (2026-09-03)
 
 Built on `feat/s0b-add-install-hermes` in worktree `wt/s0b-hermes`, one commit
-(`534b4f32e4`). Scope is exactly S0b-R9: prose plus a machine-readable split
+(`556995303a`, post-rebase). Scope is exactly S0b-R9: prose plus a machine-readable split
 plus tests. **No wire change, no behaviour change, no store-shape change** —
 `_row()` writes the same nine keys it wrote before.
 
