@@ -4381,8 +4381,13 @@ def _cmd_characters_migrate_home(args) -> int:
         for row in moved
     ]
     lines += [f"  stamped {row['id']}  {row['directory']}" for row in stamped]
+    # The skipped arm was the exception the comment above did not know it had:
+    # a refusal is the row an operator has to ACT on — the entry is still
+    # sitting somewhere and they have to go look at it — so it is the last one
+    # that may print an id the collision pair makes ambiguous.
     lines += [
-        f"  skipped {row['kind']} {row.get('id') or row.get('slug')}  {row['reason']}"
+        f"  skipped {row['kind']} {row.get('id') or row.get('slug')}  "
+        f"{row['directory']}  {row['reason']}"
         for row in skipped
     ]
     return _characters_emit(args, receipt, "\n".join(lines))

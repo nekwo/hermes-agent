@@ -37,6 +37,11 @@ import inspect
 
 import pytest
 
+from tests.agent_runtime.namespace_reads import (
+    namespace_reads,
+    unresolved_reader_calls,
+)
+
 
 def _persona_commands() -> dict:
     from hermes_cli.harness import build_parser
@@ -75,14 +80,24 @@ def test_tool_diff_namespace_carries_no_mission_record_attributes():
 
 def test_the_handler_no_longer_reads_the_retired_namespace_attributes():
     """A parser-only reap would leave the read reachable from any future caller
-    that sets the attribute another way."""
+    that sets the attribute another way.
+
+    Asked of the READ rather than of one way of typing it. These two lines were
+    ``"args.task_id" not in source``, which recognised the attribute spelling
+    and nothing else — ``getattr(args, "task_id", None)`` and, since
+    `a3b48a06a2`, ``flag_given(args, "task_id")`` both walked through it green.
+    The census and its both-directions proof live in
+    ``tests.agent_runtime.namespace_reads`` /
+    ``test_s26_retired_mission_chat_task_goal_flags.py``, because the sibling
+    gate there had the SAME hole spelled the other way round.
+    """
 
     # persona_commands.py is exec'd into harness.py's globals, not imported.
     from hermes_cli import harness
 
     source = inspect.getsource(harness._cmd_persona_tool_diff)
-    assert "args.task_id" not in source
-    assert "args.goal_id" not in source
+    assert namespace_reads(source).isdisjoint({"task_id", "goal_id"})
+    assert unresolved_reader_calls(source) == []
 
 
 def test_the_surviving_flags_still_work():

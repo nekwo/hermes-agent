@@ -37,7 +37,9 @@ WHAT EACH GATE IS, AND WHY IT IS THAT KIND
   never be written" -- which is the one shape a source walk is the right
   instrument for: over-approximation is the safe direction. It matches on AST
   SHAPE, not on text, so a respelling (``or list()``, different quotes, a line
-  break) is caught rather than admitted.
+  break) is caught rather than admitted -- including ``or []`` written onto one
+  of the readers below, which is the collapse recommitted one layer up and the
+  spelling this file's own fix made available (see ``_is_args_read``).
 * the READER tests and the PARSER-TIER test are POSITIVE guarantees, so neither
   rests on a source walk. The readers are executed against real
   ``argparse.Namespace`` objects; the parser tier is asserted against the LIVE
@@ -54,6 +56,7 @@ from pathlib import Path
 
 import pytest
 
+from hermes_cli import flag_binding
 from hermes_cli.flag_binding import (
     flag_given,
     list_flag_or_absent,
@@ -64,6 +67,11 @@ from hermes_cli.flag_binding import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_ROOT = REPO_ROOT / "hermes_cli"
 BINDING_MODULE = PACKAGE_ROOT / "flag_binding.py"
+
+#: The declared reader names, off the module's own ``__all__`` — a fourth
+#: reader added to that seam tomorrow is inside the ban the moment it is
+#: written. See :func:`_is_args_read`.
+_FLAG_BINDING_READERS = frozenset(flag_binding.__all__)
 
 
 # ---------------------------------------------------------------------------
@@ -152,10 +160,30 @@ def test_the_reader_hands_back_a_list_the_caller_may_keep():
 
 
 def _is_args_read(node: ast.AST) -> bool:
-    """``args.X`` or ``getattr(args, "X", ...)`` — either spelling."""
+    """A read of the argparse namespace, in any of the THREE live spellings.
+
+    ``args.X``, ``getattr(args, "X", ...)``, and a call to one of the readers
+    this module's own subject exports — ``list_flag_or_empty(args, "X")``. The
+    third one exists because of ``a3b48a06a2``, and the ban has to see it for a
+    reason the other two censuses do not share: ``or []`` written onto a
+    DECLARED reader is the collapse re-committed one layer up, by a handler that
+    had already been pointed at the right seam. Recognising only the spellings
+    the readers REPLACED would leave the ban blind to the population it created.
+
+    The reader names come off ``flag_binding.__all__``, never a list typed here.
+    """
 
     if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
         return node.value.id == "args"
+    if (
+        isinstance(node, ast.Call)
+        and (getattr(node.func, "id", None) or getattr(node.func, "attr", None))
+        in _FLAG_BINDING_READERS
+        and node.args
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "args"
+    ):
+        return True
     if (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
@@ -236,6 +264,12 @@ def test_the_ban_actually_recognises_the_shape_it_bans():
     The four spellings below are the ones that were live, plus the two that
     would have walked through a grep. A ban nobody has watched fire is a ban
     that might be matching nothing at all.
+
+    Lines 5 and 6 are the spelling the ban itself created. ``or []`` written
+    onto a DECLARED reader re-collapses absent into empty one layer up, and it
+    is what the next handler is most likely to reach for, because the reader is
+    now the ordinary way to read a flag. A ban that recognised only the two
+    spellings it replaced would be blind to exactly the population it produced.
     """
 
     module = ast.parse(
@@ -243,6 +277,8 @@ def test_the_ban_actually_recognises_the_shape_it_bans():
         "b = args.ids or []\n"
         "c = getattr(args, 'ids', None) or list()\n"
         "d = args.ids or {}\n"
+        "e = list_flag_or_absent(args, 'ids') or []\n"
+        "f = flag_binding.list_flag_or_absent(args, 'ids') or ()\n"
     )
     hits = []
     for node in ast.walk(module):
@@ -252,7 +288,7 @@ def test_the_ban_actually_recognises_the_shape_it_bans():
                 if _is_args_read(left) and _is_empty_collection(right):
                     hits.append(node.lineno)
 
-    assert hits == [1, 2, 3, 4]
+    assert hits == [1, 2, 3, 4, 5, 6]
 
 
 def test_the_ban_leaves_a_non_empty_or_default_alone():

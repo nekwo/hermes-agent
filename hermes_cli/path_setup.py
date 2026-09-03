@@ -10,7 +10,14 @@ across reinstalls), we write a tiny **wrapper shim** into one stable directory
 and put *that* directory on PATH:
 
   * Windows: ``%LOCALAPPDATA%\\hermes\\bin\\hermes.cmd``
-  * POSIX:   ``~/.local/bin/hermes``
+  * POSIX:   ``$HOME/.local/bin/hermes``
+
+Both are read out of the ENVIRONMENT, and an unset variable means no shim
+rather than a fallback (see :func:`_shim_install_dir`). That is what gives a
+process spawning ``hermes postinstall`` as a child — the launcher's installer,
+an E2E test — a lever over where the shim lands: the in-process seam the test
+suite monkeypatches does not reach a subprocess, and a shim is durable, on
+somebody's PATH, and bakes the ``HERMES_HOME`` of whatever run wrote it.
 
 The shim also bakes ``HERMES_HOME`` (only when the caller hasn't already set
 it), so a manually-run ``hermes`` sees the same state root the launcher/
@@ -166,13 +173,26 @@ def _shim_install_dir() -> "str | None":
     so before this seam existed any test that reached postinstall wrote a real
     shim into the developer's real home with the test's temp ``HERMES_HOME``
     baked into it.
+
+    **The environment is the sole authority on both platforms, and an absent
+    variable is a REFUSAL.** That monkeypatched seam reaches in-process callers
+    only; ``hermes postinstall`` spawned as a CHILD — by a test, by the
+    launcher's installer — resolves this for real inside the child. The Windows
+    arm was already fenced on ``LOCALAPPDATA``. The POSIX arm read
+    ``Path.home()``, which consults ``HOME`` and then falls back to the password
+    database, so a spawner that cleared its environment still got the operator's
+    real home — and a durable shim on their PATH defaulting ``HERMES_HOME`` to a
+    directory the run then deleted (measured on an operator's Mac). Reading
+    ``$HOME`` directly is what makes "set it in the child's env" a lever that
+    works, and makes "no home stated" mean NO SHIM rather than somebody else's.
     """
+    variable = "LOCALAPPDATA" if _IS_WINDOWS else "HOME"
+    root = os.environ.get(variable)
+    if not root:
+        return None
     if _IS_WINDOWS:
-        local_appdata = os.environ.get("LOCALAPPDATA")
-        if not local_appdata:
-            return None
-        return os.path.join(local_appdata, "hermes", "bin")
-    return os.path.join(str(Path.home()), ".local", "bin")
+        return os.path.join(root, "hermes", "bin")
+    return os.path.join(root, ".local", "bin")
 
 
 def _shim_file_name() -> str:
@@ -216,7 +236,15 @@ def register_hermes_command(hermes_home: Path) -> PathSetupResult:
 
     bin_dir = _shim_install_dir()
     if not bin_dir:
-        result.note = "LOCALAPPDATA not set; PATH shim skipped."
+        # Name the variable that would have answered on THIS platform: the note
+        # said LOCALAPPDATA unconditionally, which on POSIX names a variable
+        # that platform does not have.
+        variable = "LOCALAPPDATA" if _IS_WINDOWS else "HOME"
+        result.note = (
+            f"{variable} is not set, so there is no directory to install the "
+            f"`hermes` shim into; PATH shim skipped. Set {variable} in this "
+            f"process's environment and re-run `hermes postinstall`."
+        )
         result.error = "shim_dir_unresolved"
         return result
     shim = os.path.join(bin_dir, _shim_file_name())

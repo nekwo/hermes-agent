@@ -18,7 +18,10 @@ FINDING B — ``drain_complete.requests_completed`` could UNDER-COUNT.
     to an operator as work the restart dropped.
 
 Both are pinned at the ``serve_loop`` seam with injected streams, which is where
-they were reproduced.
+they were reproduced. EVERY test in this file is that seam — there is no
+live-fire arm here and there never was, so a test in it earns its keep by the
+state it can HOLD (a widened window, a barrier full of workers), never by
+standing closer to production than its neighbours.
 """
 
 from __future__ import annotations
@@ -448,8 +451,16 @@ def test_the_completion_count_cannot_miss_a_request_that_just_landed(monkeypatch
 
 @pytest.mark.parametrize("concurrency", [8])
 def test_the_completion_count_matches_the_exits_under_concurrency(concurrency):
-    """The shape the reviewer saw flake (5 reported for 8 exits), kept as a
-    live-fire check next to the deterministic pin above.
+    """The counter does not lose a completion when eight land at once.
+
+    NOT a live-fire check, which is what this docstring used to call it. Nothing
+    in this file runs a real serve: this test drives the same ``serve_loop``
+    seam through the same injected pipe and sink as the deterministic pin above
+    it, and the only thing it adds is CONTENTION — eight pool workers finishing
+    together against one counter, where the pin drives a single request through
+    a widened window. Calling it live fire promised a second, independent kind
+    of evidence that was never here, and made this test read as the one that
+    would catch what a seam test could not.
 
     ``requests_completed`` counts what completed DURING THE DRAIN — ``_run``
     reads ``drain_state`` at exit time and a ``None`` there means no drain was

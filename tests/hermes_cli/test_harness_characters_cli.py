@@ -1437,6 +1437,32 @@ def test_migrate_home_without_json_names_both_addresses_on_every_row(fake, capsy
     assert "stamped" in line
 
 
+def test_the_skipped_line_names_the_directory_its_own_comment_promises(fake, capsys):
+    """The arm that was exempt from "every line names the DIRECTORY".
+
+    A refusal is the row an operator most needs addressed: the entry is still
+    sitting somewhere and they have to go look at it. Printing
+    ``{kind} {id} {reason}`` named neither the directory it is in nor — when two
+    directories share one id, which is the live shape this store has — which of
+    them the line was about.
+    """
+    directory = _legacy_store(capsys)
+    draft_id = directory.name
+    occupied = drafts_dir() / draft_id
+    occupied.mkdir(parents=True, exist_ok=True)
+    (occupied / "draft.json").write_text('{"id": "already here"}', encoding="utf-8")
+
+    args = parser().parse_args(["harness", "characters", "migrate-home"])
+    assert args.func(args) == 0
+    out = capsys.readouterr().out
+
+    skipped = [row for row in out.splitlines() if row.strip().startswith("skipped ")]
+    assert len(skipped) == 1
+    assert str(directory) in skipped[0]
+    assert draft_id in skipped[0]
+    assert "exists" in skipped[0]
+
+
 # ────────────────────────────── the error shape ──────────────────────────────
 
 

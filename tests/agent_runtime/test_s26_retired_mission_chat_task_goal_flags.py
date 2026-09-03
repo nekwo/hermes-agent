@@ -29,6 +29,11 @@ import argparse
 
 import pytest
 
+from tests.agent_runtime.namespace_reads import (
+    namespace_reads,
+    unresolved_reader_calls,
+)
+
 
 def _harness_commands() -> dict:
     from hermes_cli.harness import build_parser
@@ -161,6 +166,51 @@ def test_mission_chat_message_handler_never_writes_the_retired_task_bound_mode()
     assert 'instance.mode = "task_bound"' not in source
     assert "instance.current_task_id =" not in source
     assert "instance.goal_id =" not in source
-    # And the argv the write fed is gone from the namespace read, too.
-    assert 'getattr(args, "task_id"' not in source
-    assert 'getattr(args, "goal_id"' not in source
+    # And the argv the write fed is gone from the namespace read, too — asked
+    # of the READ, not of one way of typing it. This pair of lines used to be
+    # `'getattr(args, "task_id"' not in source`, which recognised exactly the
+    # spelling that happened to be in the handler the day it was written:
+    # `args.task_id`, single quotes, or `flag_given(args, "task_id")` all walked
+    # straight through it. See `tests.agent_runtime.namespace_reads`.
+    assert namespace_reads(source).isdisjoint({"task_id", "goal_id"})
+    # A reader whose flag name is computed is "I cannot tell", not "absent".
+    assert unresolved_reader_calls(source) == []
+
+
+def test_the_read_census_sees_all_three_spellings_and_no_bare_string():
+    """Both directions of the census the two retirement gates are built on.
+
+    A gate that asserts a read is GONE is only as good as its idea of what a
+    read looks like, and it fails SILENTLY — green forever — the moment a
+    spelling escapes it. `a3b48a06a2` invented the third spelling and this and
+    ``test_s27_tool_diff_task_goal_flags.py`` each knew exactly one.
+
+    The right half is the hole the census must keep: a bare string constant is
+    not a read. Crediting one would let this file's own docstring, which names
+    ``task_id`` several times over, make the gate below unfalsifiable.
+    """
+
+    credited = namespace_reads(
+        """
+def handler(args):
+    a = args.task_id
+    b = getattr(args, 'goal_id', None)
+    c = list_flag_or_empty(args, "skills")
+    d = flag_binding.list_flag_or_absent(args, "realms")
+    e = flag_given(args, "root")
+    return a, b, c, d, e
+"""
+    )
+    assert credited == {"task_id", "goal_id", "skills", "realms", "root"}
+
+    noted = namespace_reads(
+        "#: --task-id was retired in S26\n"
+        "TOMBSTONES = ['task_id']\n"
+        "other.task_id\n"
+        "helper('goal_id')\n"
+    )
+    assert noted == set()
+
+    assert unresolved_reader_calls("v = list_flag_or_empty(args, name)\n") == [
+        "1 list_flag_or_empty(...)"
+    ]

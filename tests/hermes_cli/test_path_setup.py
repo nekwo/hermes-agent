@@ -50,25 +50,89 @@ class TestShimInstallDir:
     the suite pin ONE seam instead of redirecting ``HOME`` (which
     ``_hermetic_environment`` rules out), so the derivation needs its own
     assertions here, where no file is created.
+
+    Both platform arms are driven by ``_IS_WINDOWS`` rather than skipped off
+    the running OS: the subject is a two-line derivation, and the arm that is
+    skipped is the arm that rots.
     """
 
-    @pytest.mark.skipif(os.name == "nt", reason="POSIX shim layout")
     def test_posix_is_home_local_bin(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(path_setup.Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.setattr(path_setup, "_IS_WINDOWS", False)
+        monkeypatch.setenv("HOME", str(tmp_path))
 
         assert _REAL_SHIM_INSTALL_DIR() == str(tmp_path / ".local" / "bin")
 
-    @pytest.mark.skipif(os.name != "nt", reason="Windows shim layout")
+    def test_posix_reads_home_from_the_env_not_the_password_database(
+        self, tmp_path, monkeypatch
+    ):
+        """``$HOME`` is the sole authority, so a spawner can actually redirect it.
+
+        ``Path.home()`` consults ``HOME`` first and the passwd entry after, so a
+        subprocess that cleared its environment still resolved a real home. That
+        is how a `hermes postinstall` spawned as a CHILD — by a test, or by the
+        launcher's installer — wrote a genuine shim into an operator's
+        `~/.local/bin` with the run's throwaway `HERMES_HOME` baked in as the
+        default state root, measured on an operator's Mac.
+        """
+        monkeypatch.setattr(path_setup, "_IS_WINDOWS", False)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(
+            path_setup.Path, "home", staticmethod(lambda: Path("/not/this/one"))
+        )
+
+        assert _REAL_SHIM_INSTALL_DIR() == str(tmp_path / ".local" / "bin")
+
+    def test_posix_without_home_resolves_to_nothing(self, monkeypatch):
+        """The POSIX twin of the LOCALAPPDATA refusal below.
+
+        No home stated is not "use whichever home this box's passwd file names".
+        It is a directory this run does not have, and the shim is a durable
+        artifact on somebody's PATH — so the answer is to skip with a receipt,
+        which is what the Windows arm has always done.
+        """
+        monkeypatch.setattr(path_setup, "_IS_WINDOWS", False)
+        monkeypatch.delenv("HOME", raising=False)
+
+        assert _REAL_SHIM_INSTALL_DIR() is None
+
     def test_windows_is_localappdata_hermes_bin(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(path_setup, "_IS_WINDOWS", True)
         monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
 
         assert _REAL_SHIM_INSTALL_DIR() == str(tmp_path / "hermes" / "bin")
 
-    @pytest.mark.skipif(os.name != "nt", reason="Windows shim layout")
     def test_windows_without_localappdata_resolves_to_nothing(self, monkeypatch):
+        monkeypatch.setattr(path_setup, "_IS_WINDOWS", True)
         monkeypatch.delenv("LOCALAPPDATA", raising=False)
 
         assert _REAL_SHIM_INSTALL_DIR() is None
+
+    @pytest.mark.parametrize(
+        ("is_windows", "variable", "expected"),
+        [(False, "HOME", "HOME"), (True, "LOCALAPPDATA", "LOCALAPPDATA")],
+    )
+    def test_the_skip_names_the_variable_that_would_have_answered(
+        self, monkeypatch, tmp_path, is_windows, variable, expected
+    ):
+        """A skipped shim is only actionable if it says what to set.
+
+        The note was hard-coded to ``LOCALAPPDATA``, which on POSIX named a
+        variable that platform does not have — and the POSIX arm could not
+        reach it at all before this fence existed.
+        """
+        monkeypatch.setattr(path_setup, "_IS_WINDOWS", is_windows)
+        monkeypatch.delenv(variable, raising=False)
+        # The autouse `_isolate_hermes_shim_dir` fixture replaces this seam for
+        # every test in the tree; this one is ABOUT the seam, so it hands the
+        # production derivation back.
+        monkeypatch.setattr(path_setup, "_shim_install_dir", _REAL_SHIM_INSTALL_DIR)
+        monkeypatch.setattr(path_setup, "_resolve_hermes_exe", lambda: str(tmp_path / "hermes"))
+
+        result = path_setup.register_hermes_command(tmp_path / ".hermes")
+
+        assert result.error == "shim_dir_unresolved"
+        assert result.shim_path is None
+        assert expected in result.note
 
 
 class TestResolveHermesExe:

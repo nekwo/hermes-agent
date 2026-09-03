@@ -229,10 +229,12 @@ def migrate_characters_home(source: Path, destination: Path, *, source_home: str
       directories keep their leaf names (so a stored binding's ``draftId`` and
       ``load()`` both keep resolving) and installed characters keep their slugs.
     * **A collision is a per-entry refusal.** A destination that already holds
-      the leaf or the slug lands in ``skipped`` with a reason and its source is
-      left untouched — never a merge, never an overwrite. Archive-never-delete
-      makes that the only available answer: a move that lands intact destroys
-      nothing, and a move that cannot land must destroy nothing either.
+      the leaf or the slug lands in ``skipped`` with a reason, its ``directory``
+      (the source it is still sitting in — an id cannot address it, because the
+      live store holds an id-collision pair) and its source is left untouched —
+      never a merge, never an overwrite. Archive-never-delete makes that the
+      only available answer: a move that lands intact destroys nothing, and a
+      move that cannot land must destroy nothing either.
     * **Nothing is deleted, the emptied tree included.** The source
       ``characters/`` directory is left standing as its own tombstone — it is
       the only thing left saying a per-home store was ever there, and it is what
@@ -257,8 +259,19 @@ def migrate_characters_home(source: Path, destination: Path, *, source_home: str
         return receipt
 
     def _relocate(child: Path, target: Path, row: dict) -> None:
+        # Every refusal carries the SOURCE directory beside the id or slug, for
+        # the reason `backfill-home`'s receipt does: the live store holds an
+        # id-collision pair (`<id>` and `<id>.backup-…`, one id inside both
+        # `draft.json` files), so two refusals list under one id and the
+        # directory is the only field that says which entry a row is about. A
+        # moved row already carries it as `from`; the installed arm's
+        # "not an installed character" skip already carried it; this arm did
+        # not, and an operator has to go look at exactly the entry it refused.
+        left_where_it_is = {**row, "directory": str(child)}
         if target.exists():
-            skipped.append({**row, "reason": f"destination already exists: {target}"})
+            skipped.append(
+                {**left_where_it_is, "reason": f"destination already exists: {target}"}
+            )
             return
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -267,7 +280,7 @@ def migrate_characters_home(source: Path, destination: Path, *, source_home: str
             # A cross-volume rename, a lock, a permission — the entry stays where
             # it is and the receipt says why. Reported rather than raised so one
             # stuck entry cannot strand the rest of the store half-migrated.
-            skipped.append({**row, "reason": f"could not move: {exc}"})
+            skipped.append({**left_where_it_is, "reason": f"could not move: {exc}"})
             return
         moved.append({**row, "from": str(child), "to": str(target)})
 

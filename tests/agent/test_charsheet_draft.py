@@ -1972,6 +1972,49 @@ def test_a_destination_collision_is_refused_per_entry_and_leaves_the_source_inta
     assert json.loads((occupied / "draft.json").read_text(encoding="utf-8"))["id"] == "already here"
 
 
+def test_every_skipped_row_names_the_directory_the_entry_was_left_in(tmp_path):
+    """A refusal has to say WHICH entry it refused, and the id cannot.
+
+    The collision pair is the case that proves it: two source directories carry
+    the same id inside their `draft.json` files, so when the library already
+    holds one leaf BOTH refusals list under one id — and the source directory is
+    the only field that tells the two rows apart. The installed arm's "not an
+    installed character" skip has carried a `directory` since it was written;
+    the relocation arm carried none, which is the same asymmetry `backfill-home`
+    was fixed for.
+    """
+    root = tmp_path / "root"
+    home = _legacy_store(root, "alice")
+    source = home / "characters"
+    drafts = source / DRAFTS_DIRNAME
+    _plant_draft(drafts, "20260824-140756-cd645a")
+    _plant_draft(
+        drafts,
+        "20260824-140756-cd645a.backup-2026-08-25-nefix",
+        id="20260824-140756-cd645a",
+    )
+    destination = root / "shared" / "characters"
+    for leaf in ("20260824-140756-cd645a", "20260824-140756-cd645a.backup-2026-08-25-nefix"):
+        (destination / DRAFTS_DIRNAME / leaf).mkdir(parents=True)
+    # An unrecognised tree beside them, so the two skip arms are compared in one
+    # receipt rather than in two tests that could drift apart.
+    (source / "not-a-character").mkdir()
+
+    receipt = migrate_characters_home(source, destination, source_home=str(home))
+
+    assert receipt["moved"] == []
+    assert [row["directory"] for row in receipt["skipped"]] == [
+        str(drafts / "20260824-140756-cd645a"),
+        str(drafts / "20260824-140756-cd645a.backup-2026-08-25-nefix"),
+        str(source / "not-a-character"),
+    ]
+    # The pair is genuinely indistinguishable without it.
+    assert [row.get("id") for row in receipt["skipped"][:2]] == [
+        "20260824-140756-cd645a",
+        "20260824-140756-cd645a",
+    ]
+
+
 def test_the_id_collision_pair_moves_as_two_entries_under_one_id(tmp_path):
     """The live shape, from the alice home: `<id>` and `<id>.backup-…` side by side.
 

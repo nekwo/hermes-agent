@@ -87,6 +87,27 @@ def _dimensions() -> dict[str, str]:
     }
 
 
+#: Every bound in the two-process contention test below, in seconds.
+#:
+#: The rendezvous itself is event-based (a ``multiprocessing.Barrier``); these
+#: are hang detectors and nothing the test proves depends on their value. The
+#: join was bounded at 15 s, which on an eight-worker run is the same order as
+#: two ``spawn``-context interpreters re-importing this module — so the bound
+#: could expire on a correct store and report it as a transaction defect. The
+#: barrier gets one too: without it, a sibling that dies before reaching the
+#: rendezvous parks the survivor forever and the join times out on a process
+#: that will never move.
+#:
+#: Larger than ``pyproject.toml``'s repo-wide ``--timeout=30``, which is why the
+#: test carries its own marker: a bound above the per-test cap can never report,
+#: because pytest-timeout kills the test first and prints a thread dump instead
+#: of the sentence naming what was still running. Declaring the marker is the
+#: pattern the repo already settled on for a test whose honest cost exceeds the
+#: default (see ``tests/test_coverage_claims_resolve.py``).
+_PROCESS_SYNC_TIMEOUT = 120.0
+_TEST_TIMEOUT = 180
+
+
 def _record_model_calls_in_process(
     database_path: str,
     outbox_directory: str,
@@ -94,7 +115,7 @@ def _record_model_calls_in_process(
     start_barrier: Any | None = None,
 ) -> None:
     if start_barrier is not None:
-        start_barrier.wait()
+        start_barrier.wait(timeout=_PROCESS_SYNC_TIMEOUT)
     store = SharedMetricsStore(Path(database_path), Path(outbox_directory))
     for _ in range(count):
         store.record_model_call(_dimensions(), "test-version")
@@ -318,7 +339,23 @@ def test_concurrent_package_builders_commit_one_delta(tmp_path):
 
 
 
+@pytest.mark.timeout(_TEST_TIMEOUT)
 def test_cross_process_model_call_updates_are_transactional(tmp_path):
+    """Twenty recorded calls survive two processes writing the same store at once.
+
+    What the wall clock is doing here, and what it is not. The barrier holds the
+    contention — both processes are inside ``record_model_call`` together, which
+    is the state this is about — and the count at the end is the verdict. The
+    join is only how the test learns the writers are finished; its bound is a
+    hang detector at ``_PROCESS_SYNC_TIMEOUT``, and a bound that can expire on a
+    correct store (15 s was that, against two ``spawn`` interpreters on a loaded
+    runner) turns a slow box into a reported transaction defect.
+
+    Whatever happens, the children are reaped: a survivor left running after a
+    failed assertion is a leak into the rest of the run, and this file is one of
+    the three the flake policy's wall-clock rule was written against.
+    """
+
     database_path = tmp_path / "metrics.sqlite3"
     outbox_directory = tmp_path / "outbox"
     context = mp.get_context("spawn")
@@ -331,12 +368,20 @@ def test_cross_process_model_call_updates_are_transactional(tmp_path):
         for _ in range(2)
     ]
 
-    for process in processes:
-        process.start()
-    for process in processes:
-        process.join(timeout=15)
-        assert not process.is_alive()
-        assert process.exitcode == 0
+    try:
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=_PROCESS_SYNC_TIMEOUT)
+            assert not process.is_alive(), (
+                f"a writer was still running after {_PROCESS_SYNC_TIMEOUT}s"
+            )
+            assert process.exitcode == 0
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=_PROCESS_SYNC_TIMEOUT)
 
     restarted = SharedMetricsStore(database_path, outbox_directory)
     assert restarted.counter_snapshot()[0]["value"] == 20

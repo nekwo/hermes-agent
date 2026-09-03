@@ -1,5 +1,6 @@
 import argparse
 import ast
+import inspect
 import json
 import os
 import subprocess
@@ -949,8 +950,51 @@ def _stage42_parser_ownership(
     ]
 
 
+def _flag_binding_reader_names() -> frozenset[str]:
+    """The declared readers that name their flag as an argument, off ``__all__``.
+
+    THE THIRD SPELLING. ``a3b48a06a2`` routed twenty-five flag reads through
+    :mod:`hermes_cli.flag_binding`, where the dest is a string constant in the
+    reader's ``name`` slot (``list_flag_or_empty(args, "fields")``) and the
+    ``getattr`` happens a frame down against a variable. A census that knows
+    only ``args.<dest>`` and the ``getattr`` string form reads such a handler as
+    consuming nothing, and this gate then reports a live flag as
+    advertised-and-unhonored — the exact red `858c12c7a0` fixed on
+    ``test_harness_flag_and_control_reachability.py``.
+
+    Read off ``__all__`` and the live signatures rather than typed here: a list
+    of spellings maintained by hand is what went blind in the first place. A
+    reader whose first two parameters are not ``(args, name)`` fails
+    configuration here instead of being counted at a position it does not have.
+    """
+
+    from hermes_cli import flag_binding
+
+    names = []
+    for name in flag_binding.__all__:
+        params = list(inspect.signature(getattr(flag_binding, name)).parameters)
+        assert params[:2] == ["args", "name"], (
+            f"hermes_cli.flag_binding.{name} exports the shape {params} — this "
+            "census reads the dest out of the `name` argument, so a reader with "
+            "a different shape has to be taught here rather than silently "
+            "counted at the wrong position"
+        )
+        names.append(name)
+    return frozenset(names)
+
+
+_FLAG_BINDING_READERS = _flag_binding_reader_names()
+
+
 class _Stage42FunctionVisitor(ast.NodeVisitor):
-    """Collect one function body without crediting nested definitions."""
+    """Collect one function body without crediting nested definitions.
+
+    Three read spellings and no fourth — attribute access, the ``getattr``
+    string form, and a dest named to a declared ``flag_binding`` reader (see
+    :func:`_flag_binding_reader_names`). A bare string constant anywhere else is
+    deliberately not a read: crediting one would let a retirement note naming a
+    removed flag keep that flag's registration looking honored.
+    """
 
     def __init__(self, module: str, qualname: str) -> None:
         self.module = module
@@ -978,6 +1022,14 @@ class _Stage42FunctionVisitor(ast.NodeVisitor):
             and len(node.args) >= 2
             and isinstance(node.args[0], ast.Name)
             and node.args[0].id == "args"
+            and isinstance(node.args[1], ast.Constant)
+            and isinstance(node.args[1].value, str)
+        ):
+            self.reads.add(node.args[1].value)
+        called = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+        if (
+            called in _FLAG_BINDING_READERS
+            and len(node.args) > 1
             and isinstance(node.args[1], ast.Constant)
             and isinstance(node.args[1].value, str)
         ):
@@ -1280,6 +1332,45 @@ def handler(args):
         reads=reads,
         calls=calls,
     ) == [(handler, "cursor")]
+
+
+def test_stage42_honored_gate_credits_a_dest_read_through_a_flag_binding_reader():
+    """The third reader spelling, on the census this gate is built from.
+
+    `a3b48a06a2` re-spelled twenty-five flag reads onto
+    :mod:`hermes_cli.flag_binding`, where the dest is a STRING ARGUMENT to a
+    named reader and the ``getattr`` happens a frame down inside
+    ``flag_binding._raw`` against a variable. This visitor knew two spellings —
+    ``args.<dest>`` and the ``getattr(args, "<dest>")`` string form — so a
+    stage42 dest re-spelled that way would read as consumed by nobody and this
+    gate would report a live flag as advertised-and-unhonored. That is the same
+    blindness `858c12c7a0` fixed on the reachability gate, and the same cure:
+    the reader names come off ``flag_binding.__all__``, never a list typed here.
+
+    The right half is the hole a census like this must keep: a bare string
+    constant is NOT a read. Counting one would let a retirement note that names
+    a removed flag keep that flag's gate green.
+    """
+
+    reads, _calls = _stage42_function_facts(
+        [
+            (
+                "fixture.cli",
+                """
+def handler(args):
+    fields = list_flag_or_empty(args, "fields")
+    roots = flag_binding.list_flag_or_absent(args, "root")
+    if flag_given(args, "watch"):
+        pass
+    noted("cursor")
+    return fields, roots
+""",
+            )
+        ]
+    )
+
+    assert {"fields", "root", "watch"} <= reads[("fixture.cli", "handler")]
+    assert "cursor" not in reads[("fixture.cli", "handler")]
 
 
 def test_stage42_honored_gate_accepts_a_supported_qualified_shared_consumer():

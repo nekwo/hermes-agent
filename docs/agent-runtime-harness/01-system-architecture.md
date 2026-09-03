@@ -657,7 +657,7 @@ directional character sheets behind `hermes harness` verbs
 (`hermes_cli/harness.py:3001+`), and a placement carries its sprite as
 `OfficeItem.pet_slug` (`models.py:174`). Since 2026-08-31 the interactive
 per-verb lane has a one-shot sibling: `harness characters auto`
-(`harness.py:4756`, `_cmd_characters_auto` at `:4755`, shipped `2321a2a9c3`,
+(`harness.py:4761`, `_cmd_characters_auto` at `:4760`, shipped `2321a2a9c3`,
 plan stamped a ledger at `8e0617a458`) drives turnaround → approve → generate →
 compose → install in ONE process, printing a receipt line per stage. It is for
 an operator's explicit "drive it all the way" ask and nothing else, because it

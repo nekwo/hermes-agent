@@ -4274,6 +4274,52 @@
         "tests/test_run_tests_parallel.py::test_a_straggler_retry_that_passes_is_not_reported_as_zero_collected",
         "tests/test_run_tests_parallel.py::test_a_straggler_that_recovers_only_skips_still_counts_as_collection"
       ]
+    },
+    {
+      "id": "w7-the-migrate-refusal-names-the-directory-it-left-the-entry-in",
+      "path": "agent/charsheet/draft.py",
+      "symbol": "migrate_characters_home/_relocate",
+      "operator": "drop-source-directory-from-the-refusal",
+      "find": "        left_where_it_is = {**row, \"directory\": str(child)}\n",
+      "replace": "        left_where_it_is = dict(row)\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_charsheet_draft.py::test_every_skipped_row_names_the_directory_the_entry_was_left_in"
+      ]
+    },
+    {
+      "id": "w7-the-migrate-home-skipped-line-prints-the-directory",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_cmd_characters_migrate_home",
+      "operator": "drop-directory-from-the-skipped-line",
+      "find": "        f\"  skipped {row['kind']} {row.get('id') or row.get('slug')}  \"\n        f\"{row['directory']}  {row['reason']}\"\n",
+      "replace": "        f\"  skipped {row['kind']} {row.get('id') or row.get('slug')}  \"\n        f\"{row['reason']}\"\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_characters_cli.py::test_the_skipped_line_names_the_directory_its_own_comment_promises"
+      ]
+    },
+    {
+      "id": "w7-an-unset-home-is-no-shim-not-somebody-elses-home",
+      "path": "hermes_cli/path_setup.py",
+      "symbol": "_shim_install_dir",
+      "operator": "restore-the-password-database-fallback",
+      "find": "    variable = \"LOCALAPPDATA\" if _IS_WINDOWS else \"HOME\"\n    root = os.environ.get(variable)\n    if not root:\n        return None\n",
+      "replace": "    variable = \"LOCALAPPDATA\" if _IS_WINDOWS else \"HOME\"\n    root = os.environ.get(variable) or (None if _IS_WINDOWS else str(Path.home()))\n    if not root:\n        return None\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_path_setup.py::TestShimInstallDir::test_posix_without_home_resolves_to_nothing",
+        "tests/hermes_cli/test_path_setup.py::TestShimInstallDir::test_posix_reads_home_from_the_env_not_the_password_database"
+      ]
     }
   ]
 }
