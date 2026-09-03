@@ -3443,3 +3443,227 @@ def _peer_announce(rid: Any, params: dict, context: RpcContext | None = None) ->
     if correlation_id is not None:
         result["correlation_id"] = correlation_id
     return ok(rid, result)
+
+
+# ── peer.roster.list / peer.thread.read ──────────────────────────────────────
+#
+# S2b (R-IP9). The two READ verbs. Since Stage 7 an agent on install A has been
+# able to send to ``@B/neko`` and have the reply delivered back; what it could
+# not do was anything a person does before and after sending — see who is on B,
+# or read the thread it was just handed. The dispatch delivery has been printing
+# "Their thread: persona_chat_… (agent_chat_open with this session_id …)", a
+# pointer that resolved to NOTHING on the machine that received it. These two
+# doors make that sentence true.
+#
+# Both are thin: the projection, the guard and the reader all live in
+# ``peer_directory``, shared byte-for-byte with the local tool, so the far door
+# and the near door cannot drift into two answers about one thread.
+
+
+#: Refused when ``peer.thread.read``'s reader answered ``ok: False``. Its own
+#: word rather than the reader's, because the reader's vocabulary
+#: (``chat_scope_unresolved``, ``session_db_unavailable``, …) describes THIS
+#: install's storage and means nothing to a caller on another machine — so the
+#: caller branches on one stable string and the detail rides ``data``.
+PEER_THREAD_UNREADABLE_REASON = "thread_unreadable"
+
+#: Refused when the named target is not a teammate here. Shared spelling with
+#: the local tool's own refusal, so an agent that reads both surfaces learns one
+#: word for one condition.
+PEER_UNSUPPORTED_PERSONA_REASON = "unsupported_persona"
+
+#: The lane guard's refusal, likewise shared with ``agent_chat_open``: the
+#: session named is not part of that teammate's chat lane.
+PEER_FOREIGN_SESSION_REASON = "foreign_session"
+
+
+@method("peer.roster.list", tier=TIER_READ)
+def _peer_roster_list(rid: Any, params: dict, context: RpcContext | None = None) -> dict:
+    """Who is addressable on THIS install, projected by THIS install's rules.
+
+    Params: ``target`` (optional — the address the caller means to use, which is
+    what decides the workspace); ``correlation_id`` (optional, echoed).
+
+    Result::
+
+        {contract: 1, peer, workspace_id, count, truncated, rows, at}
+
+    where each row is ``{handle, persona_id, label, is_canonical_primary,
+    last_turn_at, workspace_id}``.
+
+    **B projects; A never filters.** A roster is not a list of rows, it is the
+    answer to *who is addressable from this scope*, and the scope rules —
+    workspace narrowing, canonical-row shadowing, placement-beats-plumbing —
+    belong to this install. Handing the raw instance list over and letting the
+    caller apply them would be a second implementation of
+    ``workspace_scope.addressable_roster`` that drifts the first time either
+    side is edited, and the drift would surface as an agent addressing a
+    teammate this install does not consider addressable.
+
+    **``target`` decides the workspace, and answering the SAME question the send
+    path answers is the point.** A bare ``@B/dev`` turn resolves in B's ACTIVE
+    workspace (a peer turn carries no ``--workspace-id``); a
+    ``personainst_*`` handle resolves in that instance's own. A roster scoped
+    one way and a send resolved another would offer a teammate the very next
+    message could not reach.
+
+    **The tier is ``read``** and it is the honest answer: these are the same
+    facts ``runtime.office.get`` hands a read-tier device — names and handles of
+    agents on a level, no transcript, no credential, no path. What ADMITS a peer
+    is the allowlist, as always.
+    """
+
+    from agent_runtime.peer_directory import (
+        peer_roster_projection,
+        resolve_far_target_scope,
+    )
+
+    caller = None if context is None else context.caller
+    peer_install_id = None if caller is None else caller.peer_install_id
+    if not peer_install_id:
+        return err(
+            rid,
+            ERR_HANDLER_FAILED,
+            "peer.roster.list answers a PAIRED INSTALL about who is addressable "
+            "here; this connection proved none, and a local client already has "
+            "agent_chat_threads",
+            {"reason": PEER_CHAT_NOT_A_PEER_REASON},
+        )
+
+    try:
+        correlation_id = _correlation_id_param(params)
+    except _CorrelationIdRefused as refused:
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            refused.message,
+            {"reason": CORRELATION_ID_INVALID_REASON},
+        )
+
+    target = params.get("target")
+    if target is not None and (not isinstance(target, str) or len(target) > 200):
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            "invalid params: target must be a string of at most 200 characters "
+            "or omitted",
+            {"reason": PEER_UNSUPPORTED_PERSONA_REASON},
+        )
+
+    projection = peer_roster_projection(
+        scope_workspace_id=resolve_far_target_scope(target)
+    )
+    result = {**projection, "peer": peer_install_id}
+    if correlation_id is not None:
+        result["correlation_id"] = correlation_id
+    return ok(rid, result)
+
+
+@method("peer.thread.read", tier=TIER_CONSOLE)
+def _peer_thread_read(rid: Any, params: dict, context: RpcContext | None = None) -> dict:
+    """The bounded tail of ONE thread on this install, named by target AND session.
+
+    Params: ``target`` and ``session_id`` (both REQUIRED); ``limit`` (optional,
+    clamped 1..40); ``correlation_id`` (optional, echoed).
+
+    Result: ``agent_chat_open``'s dict plus ``contract`` and ``peer``.
+
+    **``target`` is required, and that is the security decision in this
+    handler.** With only a session id this would be a transcript reader: a
+    caller could spend any session id it ever saw against any thread on this
+    machine. With the target, the SAME lane guard the local ``agent_chat_open``
+    applies runs here — ``_session_belongs_to_chat_lane``, through the shared
+    ``peer_directory.read_chat_lane_tail`` — so a session that is not part of
+    that teammate's chat lane is ``foreign_session`` exactly as it is locally. A
+    paired install can spend a pointer it was handed and can discover nothing
+    else, which is ``peer.media.get``'s asymmetry applied to conversations.
+
+    **The tier is ``console``** because transcript text is the operator's own
+    conversation: ``read`` is deliberately open to a caller the transport could
+    not place, and that is precisely the caller who must not read what people
+    said to each other.
+
+    **A failed read is ``thread_unreadable``, never an empty page.** The reader
+    has its own vocabulary for storage faults (``chat_scope_unresolved``,
+    ``chat_scope_mismatch``, ``session_db_unavailable``) and it describes THIS
+    install's storage, so it rides in ``data`` while the caller branches on one
+    stable word. Answering ``count: 0`` for an unread transcript would be the
+    single most misleading result available here — an agent checking whether a
+    teammate replied would conclude they had not.
+
+    **The env var is never set.** ``resolve_chat_session_scope``'s ambient rung
+    is gated behind ``HERMES_ALLOW_AMBIENT_CHAT_READS``, and a peer door that
+    set it would quietly grant itself more scope than the local tool has. If the
+    scope refuses, the refusal travels.
+    """
+
+    from agent_runtime.peer_directory import PEER_THREAD_CONTRACT, read_chat_lane_tail
+
+    caller = None if context is None else context.caller
+    peer_install_id = None if caller is None else caller.peer_install_id
+    if not peer_install_id:
+        return err(
+            rid,
+            ERR_HANDLER_FAILED,
+            "peer.thread.read answers a PAIRED INSTALL with one thread it was "
+            "already given the session id for; this connection proved none, and "
+            "a local client has agent_chat_open",
+            {"reason": PEER_CHAT_NOT_A_PEER_REASON},
+        )
+
+    try:
+        correlation_id = _correlation_id_param(params)
+    except _CorrelationIdRefused as refused:
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            refused.message,
+            {"reason": CORRELATION_ID_INVALID_REASON},
+        )
+
+    target = params.get("target")
+    session_id = params.get("session_id")
+    for name, value in (("target", target), ("session_id", session_id)):
+        if not isinstance(value, str) or not value.strip() or len(value) > 200:
+            return err(
+                rid,
+                ERR_INVALID_PARAMS,
+                f"invalid params: {name} is required and must be a non-empty "
+                "string of at most 200 characters. peer.thread.read names the "
+                "teammate AND the thread, so the same lane guard the local read "
+                "applies can run here.",
+                {"reason": PEER_UNSUPPORTED_PERSONA_REASON},
+            )
+    limit = params.get("limit")
+    if limit is not None and not isinstance(limit, int):
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            "invalid params: limit must be an integer or omitted",
+            {"reason": PEER_UNSUPPORTED_PERSONA_REASON},
+        )
+
+    data = read_chat_lane_tail(target, session_id=session_id, limit=limit or 20)
+    if data.get("ok") is False:
+        kind = str(data.get("error_kind") or "")
+        # Three distinct refusals, in this order, because an operator (and a
+        # calling agent) acts differently on each: an unknown teammate is a
+        # target to fix, a foreign session is a pointer that does not belong to
+        # that lane, and everything else is this install's storage answering.
+        if kind == PEER_UNSUPPORTED_PERSONA_REASON:
+            reason = PEER_UNSUPPORTED_PERSONA_REASON
+        elif kind == PEER_FOREIGN_SESSION_REASON:
+            reason = PEER_FOREIGN_SESSION_REASON
+        else:
+            reason = PEER_THREAD_UNREADABLE_REASON
+        return err(
+            rid,
+            ERR_HANDLER_FAILED,
+            str(data.get("error") or reason),
+            {"reason": reason, "error_kind": kind or reason},
+        )
+
+    result = {**data, "contract": PEER_THREAD_CONTRACT, "peer": peer_install_id}
+    if correlation_id is not None:
+        result["correlation_id"] = correlation_id
+    return ok(rid, result)

@@ -153,11 +153,11 @@ incident sections. If you are looking for one, it is gone, not missing.
 
 <!-- BEGIN GENERATED: harness_core inventory -->
 
-43 tools · generated from the registry by `scripts/emit_harness_tool_inventory.py` · do not edit by hand. If a tool exists for it, the tool is the answer; the full table with descriptions is `references/tool-inventory.md`.
+44 tools · generated from the registry by `scripts/emit_harness_tool_inventory.py` · do not edit by hand. If a tool exists for it, the tool is the answer; the full table with descriptions is `references/tool-inventory.md`.
 
 | toolset | tools | use it for |
 |---|---|---|
-| `agent_chat` | `agent_chat_dispatches` · `agent_chat_log_path` · `agent_chat_open` · `agent_chat_send` · `agent_chat_threads` | teammates: list, message, read, dispatches, transcript path |
+| `agent_chat` | `agent_chat_dispatches` · `agent_chat_installs` · `agent_chat_log_path` · `agent_chat_open` · `agent_chat_send` · `agent_chat_threads` | teammates: list, message, read, dispatches, transcript path |
 | `board` | `board_card_add` · `board_cards` | record follow-up work — planning state only |
 | `clarify` | `clarify` | ask the operator a question mid-turn |
 | `delegation` | `delegate_task` | hand a bounded subtask to a helper with fresh context |
@@ -185,9 +185,10 @@ for rows where no tool exists.
 
 | Do | In-turn tool (first choice) | CLI (only where no tool exists) |
 |---|---|---|
-| see who your teammates are / which instances you can reach | `agent_chat_threads` (read-only, no mint) | — |
+| see who your teammates are / which instances you can reach | `agent_chat_threads` (read-only, no mint; `@install/…` reaches a far install) | — |
+| see which other installs (machines) you can reach, and who is on them | `agent_chat_installs` (read-only; `install=` fetches that install's roster) | the HUD's `Installs` line already names them — this is the fresh read |
 | message a teammate and get the reply in this turn | `agent_chat_send` (`wait=true`; `wait=false` to dispatch and continue) | `hermes harness mission-chat message …` is the OPERATOR's path, not yours |
-| read what a teammate said | `agent_chat_open` (tail) · `agent_chat_log_path` (full transcript path, then `read_file` / `search_files`) | — |
+| read what a teammate said | `agent_chat_open` (tail; `@install/…` reads a far thread, `session_id` required there) · `agent_chat_log_path` (full transcript path, then `read_file` / `search_files`) | — |
 | see your background dispatches | `agent_chat_dispatches` | — |
 | track follow-up work | `board_card_add` · `board_cards` — planning state only | `hermes harness board card add …` (operator path) |
 | ask the operator a question | `clarify` | — |

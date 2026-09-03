@@ -140,10 +140,10 @@ def test_the_allowlist_is_exactly_its_verbs_and_all_methods_exist():
     """A membership set naming a verb nobody registered would be an allowlist
     that admits nothing — green, and describing a lane that does not work.
 
-    Stage 7 widened it by ONE name, Stage P4 by one more, and S2c by a fourth,
-    and the literal here is the counterweight that makes each widening cost
-    something: a set spelled out in a test is a set nobody grows without editing
-    this line and saying why.
+    Stage 7 widened it by ONE name, Stage P4 by one more, S2c by a fourth and
+    S2b by two, and the literal here is the counterweight that makes each
+    widening cost something: a set spelled out in a test is a set nobody grows
+    without editing this line and saying why.
 
     P4's name is ``peer.media.get`` (ruling R-P3): read-only, handle-only, and
     LOCAL-scope-only on the far side, so a paired install can spend a handle
@@ -156,7 +156,17 @@ def test_the_allowlist_is_exactly_its_verbs_and_all_methods_exist():
     ``test_peer_announce.py``: the row is addressed by the id the transport
     proved and there is no parameter for another, an announced fingerprint is a
     notice and never the pin, and ``revoked_you`` is one-way. The arguments live
-    on ``PEER_METHOD_ALLOWLIST`` and on the handler; this line is the price."""
+    on ``PEER_METHOD_ALLOWLIST`` and on the handler; this line is the price.
+
+    S2b's two are READS (R-IP9): ``peer.roster.list`` answers who is addressable
+    here, projected by THIS install's own workspace rules so the caller never
+    guesses at a scope only this install can resolve; and ``peer.thread.read``
+    answers with the tail of ONE thread the caller was already handed the
+    session id for. Both are narrow the way ``peer.media.get`` is — no
+    enumeration beyond one workspace, no path, no browse — and
+    ``peer.thread.read`` requires the ``target`` as well as the session, so the
+    SAME lane guard the local ``agent_chat_open`` applies runs on the far side
+    too."""
 
     assert PEER_METHOD_ALLOWLIST == frozenset(
         {
@@ -164,6 +174,8 @@ def test_the_allowlist_is_exactly_its_verbs_and_all_methods_exist():
             "peer.agent_chat.execute",
             "peer.media.get",
             "peer.announce",
+            "peer.roster.list",
+            "peer.thread.read",
         }
     )
     for name in PEER_METHOD_ALLOWLIST:

@@ -331,6 +331,25 @@ def agent_chat_send(
                 error_kind="remote_requires_detached",
                 target_persona=persona_id,
             )
+        if resolved_clarify_token:
+            # **R-IP10's one exception, said out loud.** Every local messaging
+            # feature crosses an install boundary except this: a clarify token
+            # is minted by THIS install's clarify gateway and resolves against
+            # THIS install's pending questions, so carrying it to another
+            # machine would hand the far side a token it cannot look up. The
+            # continuity that DOES cross is the session id — which the dispatch
+            # delivery already reported as "Their thread" — so the refusal names
+            # the route rather than only the wall.
+            return _refusal(
+                f"a clarify_token belongs to this install and cannot answer a "
+                f"question asked on {install_qualifier.install_ref}. Answer them "
+                "by naming their thread instead: send with session_id set to the "
+                "session_id your dispatch delivery reported as 'Their thread', "
+                "and your answer lands in the conversation the question came "
+                "from.",
+                error_kind="clarify_token_not_portable",
+                target_persona=persona_id,
+            )
         remote_target = resolve_install_target(peer_store_root(), install_qualifier)
         if isinstance(remote_target, TargetRefusal):
             # DETERMINISTIC, so it fails fast here and burns no attempt — the
@@ -918,7 +937,9 @@ AGENT_CHAT_THREADS_SCHEMA = {
                     "Optional filter: a single persona id or personainst_* handle to list just that "
                     "teammate's thread. Omit to list your addressable teammates on this level — each "
                     "persona's deliberate placement, with the plumbing canonical row shown only when "
-                    "the persona has no placement on your level."
+                    "the persona has no placement on your level. Prefix with @install/ (e.g. "
+                    "'@mac/dev') to list a teammate on another paired install instead; "
+                    "agent_chat_installs names the installs you can reach."
                 ),
             },
         },
@@ -948,7 +969,10 @@ AGENT_CHAT_OPEN_SCHEMA = {
                 "type": "string",
                 "description": (
                     "Optional specific thread to review. Omit to review the default thread with the "
-                    "target. Must belong to the target's chat lane; otherwise the read is refused."
+                    "target. Must belong to the target's chat lane; otherwise the read is refused. "
+                    "REQUIRED when persona_id names another install (@mac/dev): there is no shared "
+                    "default thread across installs — pass the session_id your dispatch delivery "
+                    "reported as 'Their thread'."
                 ),
             },
             "limit": {
@@ -958,6 +982,28 @@ AGENT_CHAT_OPEN_SCHEMA = {
             },
         },
         "required": ["persona_id"],
+    },
+}
+
+
+AGENT_CHAT_INSTALLS_SCHEMA = {
+    "name": "agent_chat_installs",
+    "description": (
+        "List the other INSTALLS (machines) paired with this one — which are reachable right now, and optionally who is on one of them. Read-only: it never pairs, never mints and never sends. Use it before addressing @install/persona so you name a machine that is actually reachable and a teammate that is actually there. Disambiguator: agent_chat_installs lists MACHINES; agent_chat_threads lists teammates on this machine (or, with @install/, on one of theirs)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "install": {
+                "type": "string",
+                "description": (
+                    "Optional: an install's name or id (from a previous call) to fetch THAT "
+                    "install's roster of addressable agents. Omit to list the paired installs "
+                    "themselves without contacting any of them."
+                ),
+            },
+        },
+        "required": [],
     },
 }
 
@@ -1015,6 +1061,14 @@ def agent_chat_threads(*, persona_id=None, requested_by_session=None):
             "agent_chat is disabled on this runtime (HERMES_AGENT_CHAT_SCOPE=off). "
             "Tell the operator instead of retrying."
         )
+
+    # S2b (R-S2-12). SYNTAX first, before anything looks at the filter: an
+    # ``@install/target`` that will not parse must refuse rather than fall
+    # through to the local roster, which would list teammates on THIS machine
+    # under a heading naming another. ``None`` means local, exactly as before.
+    remote = _remote_roster_rows(persona_id)
+    if remote is not None:
+        return remote
 
     from agent_runtime import workspace_scope
     from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
@@ -1242,90 +1296,113 @@ def agent_chat_open(*, persona_id, session_id=None, limit=20, requested_by_sessi
             "Tell the operator instead of retrying."
         )
 
-    from agent_runtime.persona_chat_history import (
-        MAX_PERSONA_CHAT_MESSAGE_TAIL,
-        persona_chat_session_messages,
+    from agent_runtime.peer_directory import read_chat_lane_tail
+
+    # S2b (R-S2-12). SYNTAX first, before anything looks at the target, for
+    # ``agent_chat_send``'s reason: an ``@install/target`` that will not parse
+    # must refuse rather than fall through to the local lane, because falling
+    # through would read a thread on THIS machine when the caller named another.
+    # ``None`` is the ordinary case and means local — a property of the parser
+    # rather than a default.
+    remote = _remote_thread_read(
+        persona_id, session_id=session_id, limit=limit
+    )
+    if remote is not None:
+        return remote
+
+    # ONE implementation, two doors: this body and ``peer.thread.read`` both
+    # call ``read_chat_lane_tail``. The lane guard is what stands between
+    # "review our thread" and "read any transcript on this machine", and a
+    # second copy of it for the far door would be a second place to widen it by
+    # accident.
+    data = read_chat_lane_tail(
+        persona_id,
+        session_id=session_id,
+        limit=limit,
+        requested_by_session=requested_by_session,
+    )
+    return json.dumps(data, default=str)
+
+
+def _remote_thread_read(persona_id, *, session_id, limit):
+    """The ``@install/`` branch of :func:`agent_chat_open`, or ``None`` for local.
+
+    Split out rather than inlined so the local path above reads as it did before
+    S2b: one call to the shared reader, nothing else.
+    """
+
+    from agent_runtime.gateway_targets import (
+        TargetRefusal,
+        parse_install_target,
+        peer_store_root,
+        resolve_install_target,
     )
 
-    target, refusal = _resolve_chat_lane_target(
-        persona_id, requested_by_session=requested_by_session, verb="agent_chat_open"
-    )
-    if refusal is not None:
-        return refusal
-    resolved_persona = target.persona
-    handle = target.handle
-    default_session = target.default_session
-
-    try:
-        bounded = max(1, min(int(limit or 20), MAX_PERSONA_CHAT_MESSAGE_TAIL))
-    except (TypeError, ValueError):
-        bounded = 20
-
-    requested_session = (str(session_id).strip() or None) if session_id else None
-    if requested_session is not None:
-        if not _session_belongs_to_chat_lane(requested_session, handle=handle, default_session=default_session):
-            return _refusal(
-                f"session {requested_session!r} is not part of {resolved_persona}'s chat lane; "
-                "agent_chat_open only reviews your shared thread with the target, not arbitrary sessions.",
-                error_kind="foreign_session",
-                target_persona=resolved_persona,
-            )
-        target_session = requested_session
-    else:
-        target_session = default_session
-
-    if not target_session:
-        # Never chatted — honest empty result, no session minted.
-        return json.dumps(
-            {
-                "ok": True,
-                "target_persona": resolved_persona,
-                "handle": handle,
-                "session_id": None,
-                "has_thread": False,
-                "count": 0,
-                "messages": [],
-            },
-            default=str,
-        )
-
-    data = persona_chat_session_messages(session_id=target_session, limit=bounded)
-    if data.get("ok") is False:
-        # Propagate the read failure. Flattening it into the success envelope
-        # below would hand the calling agent ``count: 0`` over an unread
-        # transcript — the single most misleading answer available here, because
-        # an agent checking whether a teammate replied would conclude they did
-        # not and act on that.
+    parsed = parse_install_target(persona_id)
+    if parsed is None:
+        return None
+    if isinstance(parsed, TargetRefusal):
         return _refusal(
-            f"could not read {resolved_persona}'s thread {target_session}: "
-            f"{data.get('error') or data.get('error_kind') or 'unknown error'}. "
-            "This is NOT an empty thread — the transcript was not read.",
-            error_kind=data.get("error_kind") or "session_db_unavailable",
-            target_persona=resolved_persona,
-            handle=handle,
-            session_id=target_session,
+            parsed.message, error_kind=parsed.reason, target_persona=persona_id
         )
-    messages = [
+
+    if not str(session_id or "").strip():
+        # **There is no "our default thread" on another install.** Locally the
+        # default session is the one this pair has been using; across a boundary
+        # the far install has its own default, which is the most recently
+        # established thread with ANYBODY and is almost never the one the caller
+        # means. So the thread must be named — and the refusal says where the
+        # name came from, because the dispatch delivery already printed it.
+        return _refusal(
+            f"{persona_id} is on another install, and there is no shared default "
+            "thread across installs. Name the thread: pass session_id — the "
+            "session_id your dispatch delivery reported as 'Their thread'.",
+            error_kind="remote_session_required",
+            target_persona=persona_id,
+        )
+
+    root = peer_store_root()
+    resolved = resolve_install_target(root, parsed)
+    if isinstance(resolved, TargetRefusal):
+        extra = (
+            {"candidates": list(resolved.candidates)} if resolved.candidates else {}
+        )
+        return _refusal(
+            resolved.message,
+            error_kind=resolved.reason,
+            target_persona=persona_id,
+            **extra,
+        )
+
+    from tools.agent_chat_remote import call_peer_method
+
+    outcome = call_peer_method(
+        root,
+        resolved.install_id,
+        "peer.thread.read",
         {
-            "role": message.get("role"),
-            "text": message.get("text"),
-            "timestamp": message.get("timestamp"),
-        }
-        for message in (data.get("messages") or [])
-    ]
-    return json.dumps(
-        {
-            "ok": True,
-            "target_persona": resolved_persona,
-            "handle": handle,
-            "session_id": target_session,
-            "has_thread": True,
-            "count": len(messages),
-            "redaction_status": data.get("redaction_status"),
-            "messages": messages,
+            "target": parsed.target,
+            "session_id": str(session_id).strip(),
+            "limit": int(limit or 20) if str(limit or "").strip().isdigit() or isinstance(limit, int) else 20,
         },
-        default=str,
     )
+    refusal = outcome.get("refusal")
+    if refusal:
+        return _refusal(
+            str(refusal.get("message") or refusal.get("reason")),
+            error_kind=str(refusal.get("reason")),
+            target_persona=persona_id,
+        )
+    result = dict(outcome.get("result") or {})
+    result["install"] = {
+        "install_id": resolved.install_id,
+        "display_name": resolved.display_name,
+    }
+    # Spelled the way the grammar accepts, so the answer names an address the
+    # caller could use again rather than a bare persona id that would resolve
+    # locally.
+    result["target_persona"] = f"@{parsed.install_ref}/{result.get('target_persona') or parsed.target}"
+    return json.dumps(result, default=str)
 
 
 def agent_chat_log_path(
@@ -1476,6 +1553,241 @@ def _chat_lane_session_ids(target) -> list:
     return found
 
 
+def _remote_roster_rows(persona_id):
+    """The ``@install/`` branch of :func:`agent_chat_threads`, or ``None`` locally.
+
+    Answers in the LOCAL threads-row shape rather than in the peer method's own
+    projection shape, because a tool that returned two different row schemas
+    depending on where the teammate lives would make every consumer branch on
+    residency to read a name. What differs is the ``handle`` — spelled as the
+    full ``@install/handle`` address, so a row an agent reads is a row it can
+    send to — and ``has_thread``, which is ``null`` rather than ``false``: this
+    install genuinely does not know whether the caller has a thread with that
+    far teammate, and ``false`` would be a claim.
+    """
+
+    from agent_runtime.gateway_targets import (
+        TargetRefusal,
+        parse_install_target,
+        peer_store_root,
+        resolve_install_target,
+    )
+
+    parsed = parse_install_target(persona_id)
+    if parsed is None:
+        return None
+    if isinstance(parsed, TargetRefusal):
+        # ``@mac/`` is refused by the parser today (``install_qualifier_target_empty``)
+        # and STAYS refused: the verb for "everyone on that machine" is
+        # ``agent_chat_installs``, and letting an empty target mean "all" would
+        # give one spelling two meanings.
+        return _refusal(
+            parsed.message, error_kind=parsed.reason, target_persona=persona_id
+        )
+
+    root = peer_store_root()
+    resolved = resolve_install_target(root, parsed)
+    if isinstance(resolved, TargetRefusal):
+        extra = {"candidates": list(resolved.candidates)} if resolved.candidates else {}
+        return _refusal(
+            resolved.message,
+            error_kind=resolved.reason,
+            target_persona=persona_id,
+            **extra,
+        )
+
+    from agent_runtime.gateway_peers import cache_peer_roster
+    from tools.agent_chat_remote import call_peer_method
+
+    outcome = call_peer_method(
+        root,
+        resolved.install_id,
+        "peer.roster.list",
+        {"target": parsed.target},
+    )
+    refusal = outcome.get("refusal")
+    if refusal:
+        return _refusal(
+            str(refusal.get("message") or refusal.get("reason")),
+            error_kind=str(refusal.get("reason")),
+            target_persona=persona_id,
+        )
+    result = outcome.get("result") or {}
+    rows = [row for row in (result.get("rows") or []) if isinstance(row, dict)]
+
+    # Cache what we just fetched, so the HUD's install lines can render a roster
+    # without dialling anything (R-IP11). The fetch already happened; keeping it
+    # is free, and NOT keeping it would mean the only way to see who is on
+    # another machine is to ask again every turn.
+    try:
+        cache_peer_roster(
+            root,
+            resolved.install_id,
+            workspace_id=result.get("workspace_id"),
+            rows=rows,
+        )
+    except Exception:  # pragma: no cover - bookkeeping is never the work
+        pass
+
+    wanted = str(parsed.target or "").strip()
+    install_block = {
+        "install_id": resolved.install_id,
+        "display_name": resolved.display_name,
+    }
+    threads = []
+    for row in rows:
+        handle = str(row.get("handle") or "")
+        persona = str(row.get("persona_id") or "")
+        if wanted and wanted not in {handle, persona}:
+            continue
+        threads.append(
+            {
+                "persona_id": persona,
+                "persona_instance_id": handle,
+                "handle": f"@{parsed.install_ref}/{handle}",
+                "display_name": row.get("label") or handle,
+                "has_thread": None,
+                "last_activity": row.get("last_turn_at"),
+                "install": install_block,
+            }
+        )
+    return json.dumps(
+        {
+            "ok": True,
+            "count": len(threads),
+            "install": install_block,
+            "workspace_id": result.get("workspace_id"),
+            "threads": threads,
+        },
+        default=str,
+    )
+
+
+def agent_chat_installs(*, install=None, requested_by_session=None):
+    """Which other machines this install can reach, and optionally who is on one.
+
+    Two shapes from one verb, and the split is the network cost: with no
+    ``install`` it reads THIS install's own two files and DIALS NOTHING; with
+    one, it makes exactly one call to that machine and caches what comes back.
+    An operator (or an agent) orienting itself should not have to spend a round
+    trip per paired machine to find out which ones are worth addressing.
+
+    The rows are ``usable_peers`` verbatim — the SAME predicate the resolver
+    reads — so every install listed here is one a send would resolve, and every
+    paired install NOT listed is one a send would refuse. A directory that
+    offered an edge the resolver had written off would be a list an agent
+    learns to distrust.
+    """
+
+    if _scope_off():
+        return _refusal(
+            "agent_chat is disabled on this runtime (HERMES_AGENT_CHAT_SCOPE=off). "
+            "Tell the operator instead of retrying."
+        )
+
+    from agent_runtime.gateway_peers import usable_peers
+    from agent_runtime.gateway_targets import peer_store_root
+
+    root = peer_store_root()
+
+    wanted = str(install or "").strip()
+    if wanted:
+        return _install_roster(root, wanted)
+
+    try:
+        peers = usable_peers(root)
+    except Exception as exc:  # pragma: no cover - defensive; an unreadable store
+        return _refusal(
+            f"this install's peer store could not be read ({type(exc).__name__}), "
+            "so no other install can be named.",
+            error_kind="peer_store_unreadable",
+        )
+
+    installs = []
+    for peer in peers:
+        cache = peer.cache
+        installs.append(
+            {
+                # The spelling the grammar accepts — a display name when it is
+                # unique, otherwise the id — so a value read here is an address
+                # ``@ref/target`` resolves rather than one the resolver would
+                # refuse as ambiguous.
+                "ref": peer.ref,
+                "install_id": peer.record.peer_install_id,
+                "display_name": (
+                    (cache.announced_display_name if cache is not None else None)
+                    or peer.record.display_name
+                ),
+                "endpoints_count": len(peer.record.endpoints),
+                "approved_at": peer.record.approved_at,
+                "expires_at": peer.record.expires_at,
+                "reachability": cache.reachability if cache is not None else "unknown",
+                "last_seen": cache.last_seen if cache is not None else None,
+                "roster_cached_at": (
+                    (cache.roster or {}).get("fetched_at")
+                    if cache is not None and isinstance(cache.roster, dict)
+                    else None
+                ),
+            }
+        )
+    return json.dumps(
+        {"ok": True, "count": len(installs), "installs": installs}, default=str
+    )
+
+
+def _install_roster(root, install_ref: str):
+    """One install's roster of addressable agents, fetched and cached."""
+
+    from agent_runtime.gateway_peers import cache_peer_roster
+    from agent_runtime.gateway_targets import TargetRefusal, resolve_install_ref
+    from tools.agent_chat_remote import call_peer_method
+
+    resolved = resolve_install_ref(root, install_ref)
+    if isinstance(resolved, TargetRefusal):
+        extra = {"candidates": list(resolved.candidates)} if resolved.candidates else {}
+        return _refusal(resolved.message, error_kind=resolved.reason, **extra)
+
+    outcome = call_peer_method(
+        root, resolved.peer_install_id, "peer.roster.list", {}
+    )
+    refusal = outcome.get("refusal")
+    if refusal:
+        return _refusal(
+            str(refusal.get("message") or refusal.get("reason")),
+            error_kind=str(refusal.get("reason")),
+        )
+    result = outcome.get("result") or {}
+    rows = [row for row in (result.get("rows") or []) if isinstance(row, dict)]
+    try:
+        cache_peer_roster(
+            root,
+            resolved.peer_install_id,
+            workspace_id=result.get("workspace_id"),
+            rows=rows,
+        )
+    except Exception:  # pragma: no cover - bookkeeping is never the work
+        pass
+    return json.dumps(
+        {
+            "ok": True,
+            "install": {
+                "install_id": resolved.peer_install_id,
+                "display_name": resolved.display_name,
+            },
+            "workspace_id": result.get("workspace_id"),
+            "count": len(rows),
+            "truncated": bool(result.get("truncated")),
+            # Each row spelled as the FULL address, so a roster line is
+            # actionable rather than merely informative.
+            "roster": [
+                {**row, "address": f"@{install_ref}/{row.get('handle')}"}
+                for row in rows
+            ],
+        },
+        default=str,
+    )
+
+
 registry.register(
     name="agent_chat_send",
     toolset="agent_chat",
@@ -1539,6 +1851,18 @@ registry.register(
     ),
     description="Review the recent message tail of your shared thread with a teammate (read-only, no mint).",
     emoji="📖",
+)
+
+registry.register(
+    name="agent_chat_installs",
+    toolset="agent_chat",
+    schema=AGENT_CHAT_INSTALLS_SCHEMA,
+    handler=lambda args, **kw: agent_chat_installs(
+        install=args.get("install"),
+        requested_by_session=kw.get("session_id"),
+    ),
+    description="List the other installs (machines) paired with this one, or one install's agent roster (read-only, no mint).",
+    emoji="🖧",
 )
 
 registry.register(

@@ -156,6 +156,14 @@ HUD_FIELDS: tuple[HudField, ...] = (
     HudField("roster", volatile=False, summary="addressable on-level agents"),
     HudField("steering", volatile=False, summary="who steers this lane, and whom it steers"),
     HudField("board", volatile=False, summary="advisory Mission Board digest"),
+    # S2b / R-IP11. STABLE, not volatile, and that is a claim about the data
+    # rather than a convenience: every fact in it is read from this install's own
+    # two peer files, which change when a ceremony or a push edge changes them
+    # and not once per turn. Hashing it is therefore cheap and correct — an
+    # agent whose paired installs did not move gets the cached body, and one
+    # whose peer just went unreachable gets a fresh one. (``turn_budget`` is
+    # volatile because it moves every turn by construction; this does not.)
+    HudField("installs", volatile=False, summary="paired installs, cached rosters, residency"),
     HudField("turn_budget", volatile=True, summary="wall-clock window left on THIS turn"),
     HudField(
         CAPABILITY_HUD_KEY,
@@ -582,6 +590,56 @@ def _roster_block(roster: Iterable[Any], *, self_id: str | None) -> list[dict[st
     return entries
 
 
+def _installs_block() -> list[dict[str, Any]]:
+    """The paired-install rows for the HUD. Best effort, and it DIALS NOTHING.
+
+    Wrapped here rather than at each feeder so both — the chat turn and the
+    observability snapshot — resolve it through one call, and so the "``[]`` on
+    any failure" guarantee is stated once. The peer store lives at the HEAD
+    home's root and never the ambient one (``gateway_targets.peer_store_root``'s
+    argument): ``HERMES_HOME`` is flipped process-globally for the length of
+    every persona turn, which is exactly when this runs.
+    """
+
+    try:
+        from .gateway_targets import peer_store_root
+        from .peer_directory import installs_hud_block
+
+        return installs_hud_block(peer_store_root())
+    except Exception:
+        return []
+
+
+def _stamp_residency(
+    roster_block: list[dict[str, Any]], installs: list[dict[str, Any]]
+) -> None:
+    """Mark each local entry that also appears in a CACHED far roster.
+
+    Matched on ``persona_instance_id`` — the handle, which is minted once and is
+    the same string on both machines when an instance was replicated — rather
+    than on the display name, which two unrelated agents can share. A name match
+    here would produce a residency claim that is simply wrong, and a wrong claim
+    in a HUD is worse than an absent one because an agent acts on it.
+
+    Mutates in place because it is decorating the block that is about to be
+    rendered, and returns nothing so no caller mistakes it for a projection.
+    """
+
+    by_handle: dict[str, list[dict[str, Any]]] = {}
+    for install in installs:
+        for row in install.get("roster") or ():
+            handle = str((row or {}).get("handle") or "").strip()
+            if not handle:
+                continue
+            by_handle.setdefault(handle, []).append(
+                {"ref": install.get("ref"), "last_turn_at": row.get("last_turn_at")}
+            )
+    for entry in roster_block:
+        elsewhere = by_handle.get(str(entry.get("persona_instance_id") or ""))
+        if elsewhere:
+            entry["also_on"] = elsewhere
+
+
 def _parent_refs(instance: Any) -> list[str]:
     """The steering-parent ref set of an instance (fan-in aware): the
     authoritative ``steered_by`` list, falling back to ``[spawned_by]`` for
@@ -674,6 +732,7 @@ def resolve_situational_hud(
     board: dict[str, Any] | None = None,
     turn_budget: dict[str, Any] | None = None,
     capability: dict[str, Any] | None = None,
+    installs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Assemble the typed situational snapshot for one lane.
 
@@ -715,8 +774,26 @@ def resolve_situational_hud(
         hud["mission"] = mission
 
     roster_block = _roster_block(roster, self_id=self_id)
+
+    # S2b (R-IP11): residency, stamped onto the LOCAL roster before it is
+    # rendered. An instance that also exists on a paired install gains
+    # ``also_on``, so an agent about to address a teammate can see that the same
+    # persona is running over there too — the fact that, unseen, produces two
+    # briefings sent to what the sender thought was one agent.
+    #
+    # From the CACHED roster only. The HUD never dials: a prompt block whose
+    # assembly depended on a machine that might be asleep would make every turn's
+    # opening as slow as the slowest peer.
+    install_rows = list(installs or ())
+    if roster_block and install_rows:
+        _stamp_residency(roster_block, install_rows)
     if roster_block:
         hud["roster"] = roster_block
+    if install_rows:
+        # Drops when empty, like ``board``: an install with no paired peers
+        # contributes NO line, so the fixtures' HUD bytes are untouched and an
+        # operator reading a single-machine runtime sees nothing about machines.
+        hud["installs"] = install_rows
 
     # Steering is always emitted (unlike the other blocks, which drop when
     # empty): an explicit empty block is the honest "standalone" answer, and
@@ -830,8 +907,28 @@ def render_situational_hud_block(hud: dict[str, Any]) -> str:
         name = entry.get("display_name")
         ref = entry.get("persona_instance_id") or entry.get("ref")
         if _clean(name) and _clean(ref) and name != ref:
-            return f"{name} (@{ref})"
-        return f"@{ref}" if _clean(ref) else str(name or "unknown")
+            rendered = f"{name} (@{ref})"
+        elif _clean(ref):
+            rendered = f"@{ref}"
+        else:
+            rendered = str(name or "unknown")
+        # R-IP11's residency note, on the line the agent already reads. The age
+        # is computed HERE from the cached ``last_turn_at``, never dialled, so
+        # this costs the turn nothing.
+        elsewhere = entry.get("also_on")
+        if isinstance(elsewhere, list) and elsewhere:
+            notes = []
+            for item in elsewhere:
+                if not isinstance(item, dict):
+                    continue
+                age = _age_phrase(item.get("last_turn_at"))
+                notes.append(
+                    f"also on @{item.get('ref')}"
+                    + (f", last turn there {age} ago" if age and age != "just now" else "")
+                )
+            if notes:
+                rendered = f"{rendered} [{'; '.join(notes)}]"
+        return rendered
 
     steering = hud.get("steering") if isinstance(hud.get("steering"), dict) else None
     if steering is not None:
@@ -853,7 +950,78 @@ def render_situational_hud_block(hud: dict[str, Any]) -> str:
         names = ", ".join(_handle(entry) for entry in roster if isinstance(entry, dict))
         lines.append(f"- On level ({len(roster)}): {names}")
 
+    # S2b. After the level, because the level is where this agent works and the
+    # other machines are context for it.
+    installs = hud.get("installs") if isinstance(hud.get("installs"), list) else []
+    if installs:
+        summary = " · ".join(
+            _install_summary(entry) for entry in installs if isinstance(entry, dict)
+        )
+        lines.append(f"- Installs ({len(installs)}): {summary}")
+        for entry in installs:
+            if not isinstance(entry, dict):
+                continue
+            far = [row for row in (entry.get("roster") or ()) if isinstance(row, dict)]
+            if not far:
+                continue
+            # Each handle spelled as the FULL address, the ``_handle`` rule's
+            # own reason: a name without the address it answers to is visible
+            # and not actionable.
+            rendered = ", ".join(
+                f"{row.get('persona_id') or row.get('handle')} "
+                f"(@{entry.get('ref')}/{row.get('handle')})"
+                for row in far
+            )
+            lines.append(f"  - @{entry.get('ref')}: {rendered}")
+
     return "\n".join(lines)
+
+
+def _install_summary(entry: dict[str, Any]) -> str:
+    """``@mac reachable`` / ``@studio unreachable 12 min`` — one install, one phrase.
+
+    The age is rendered from the stamp at RENDER time rather than stored, so a
+    cached HUD body cannot claim a machine went down twelve minutes ago when it
+    has been down for two hours.
+    """
+
+    ref = entry.get("ref") or entry.get("install_id") or "?"
+    word = str(entry.get("reachability") or "unknown")
+    since = entry.get("unreachable_since")
+    if word == "unreachable" and since:
+        age = _age_phrase(since)
+        if age:
+            return f"@{ref} {word} {age}"
+    return f"@{ref} {word}"
+
+
+def _age_phrase(stamp: Any) -> str:
+    """How long ago, in the coarsest useful unit. Empty when unreadable.
+
+    Coarse on purpose: "12 min" is what an operator acts on, and a HUD that said
+    "12 min 41 s" would move every turn and defeat the revision hash the stable
+    block is delivered under.
+    """
+
+    from datetime import datetime, timezone
+
+    text = str(stamp or "").strip()
+    if not text:
+        return ""
+    try:
+        when = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return ""
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    seconds = int((datetime.now(timezone.utc) - when).total_seconds())
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{seconds // 60} min"
+    if seconds < 86400:
+        return f"{seconds // 3600} h"
+    return f"{seconds // 86400} d"
 
 
 def _capped(names: Iterable[Any]) -> tuple[list[str], int]:
@@ -1263,6 +1431,7 @@ def situational_hud_for_instance(
             board=_board_digest_for_workspace(scope_workspace_id),
             turn_budget=turn_budget,
             capability=capability,
+            installs=_installs_block(),
         )
     except Exception:
         return {}

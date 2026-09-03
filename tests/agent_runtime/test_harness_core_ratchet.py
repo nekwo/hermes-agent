@@ -1,4 +1,4 @@
-"""The S0a ratchet: 43 tools, 0 withheld, 0 requirement failures, per persona.
+"""The S0a ratchet: 44 tools, 0 withheld, 0 requirement failures, per persona.
 
 Plan: ``docs/agent-runtime-harness/planned/s0a-atlas-cleanup.md`` §2 A3.
 
@@ -8,7 +8,7 @@ resolved 32 registered toolsets, **79** callable tools, **17** withheld (12
 ``kanban_*`` + 5 ``feishu_*``, hygiene-blocked on every turn because "everything"
 included them) and 1-3 ``requirement_failures`` — every one of those for a server
 ``--explain-mcp`` reported as ADMITTED. After A1-A3: **43 / 0 / 0**, with
-``model_tool_tokens`` 2142 -> 1149.
+``model_tool_tokens`` 2142 -> 1149 (1177 after S2b's ``agent_chat_installs``).
 
 Three things are pinned here, and none of them is a style preference:
 
@@ -39,8 +39,13 @@ HARNESS_CORE_MEMBERS = [
     "web", "browser", "browser-cdp", "skills", "memory", "todo",
     "session_search", "vision", "code_execution",
 ]
-DECLARED_TOOL_COUNT = 43
-DECLARED_TOKEN_ESTIMATE = 1149
+# S2b added ``agent_chat_installs`` to the ``agent_chat`` toolset, which
+# ``harness_core`` includes by NAME — so the count moved without an edit to the
+# member list, which is exactly what that ratchet is for. Both numbers are
+# RE-MEASURED and not adjusted: 44 tools, and the token estimate the live
+# resolver reports for the declared set on this build.
+DECLARED_TOOL_COUNT = 44
+DECLARED_TOKEN_ESTIMATE = 1177
 MISSION_PERSONAS = ("neko_supervisor", "dev", "backend_dev", "qa")
 
 
@@ -73,7 +78,7 @@ def _preview(persona, **options):
 
 
 @pytest.mark.parametrize("persona_id", MISSION_PERSONAS)
-def test_every_mission_persona_resolves_the_same_declared_43(persona_id):
+def test_every_mission_persona_resolves_the_same_declared_count(persona_id):
     persona = _persona(persona_id)
 
     preview = _preview(persona)

@@ -883,3 +883,370 @@ def _seed_persona_chat(persona_id: str, turns, *, persona_instance_id=None):
         db.append_message(session_id=session_id, role="user", content=message)
         db.append_message(session_id=session_id, role="assistant", content=reply)
     return session_id
+
+
+# ── S2b: @install/ on the two read tools, and the clarify wall (R-IP10) ─────
+
+
+def _paired(tmp_path, monkeypatch, install_id="inst_mac", name="mac"):
+    """One usable peer, and every tool pointed at THIS test's store root."""
+
+    from agent_runtime.gateway_peers import record_peer
+
+    record_peer(
+        tmp_path,
+        peer_install_id=install_id,
+        secret="a" * 64,
+        display_name=name,
+        endpoints=[{"host": "10.0.0.4", "port": 9000}],
+        cert_fingerprint="ab" * 32,
+    )
+    monkeypatch.setattr(
+        "agent_runtime.gateway_targets.peer_store_root", lambda: tmp_path
+    )
+    return tmp_path
+
+
+def _answered(monkeypatch, payload):
+    """A ``call_peer_method`` that records its call and answers *payload*."""
+
+    calls = []
+
+    def _call(root, install_id, method, params, **kwargs):
+        calls.append((install_id, method, dict(params)))
+        return payload
+
+    monkeypatch.setattr("tools.agent_chat_remote.call_peer_method", _call)
+    return calls
+
+
+def test_a_far_clarify_token_is_refused_as_not_portable_and_names_the_session_route(
+    tmp_path, monkeypatch
+):
+    """R-IP10's ONE exception. Every local messaging feature crosses an install
+    boundary except this: a clarify token is minted by THIS install's gateway
+    and resolves against THIS install's pending questions, so carrying it would
+    hand the far side a token it cannot look up.
+
+    The refusal names the route rather than only the wall — the continuity that
+    DOES cross is the session id, which the dispatch delivery already printed as
+    "Their thread".
+    """
+
+    from tools.agent_chat_tool import agent_chat_send
+
+    _paired(tmp_path, monkeypatch)
+
+    answer = json.loads(
+        agent_chat_send(
+            persona_id="@mac/dev",
+            message="here is the answer",
+            clarify_token="clarify_abc123",
+            wait=False,
+            requested_by_session="persona_chat_me_0123456789ab",
+        )
+    )
+
+    assert answer["ok"] is False
+    assert answer["error_kind"] == "clarify_token_not_portable"
+    assert "session_id" in answer["error"]
+    assert "Their thread" in answer["error"]
+
+
+def test_wait_true_to_an_install_qualified_target_stays_refused_remote_requires_detached(
+    tmp_path, monkeypatch
+):
+    """Unchanged by S2b, and asserted here so the read verbs landing beside it
+    cannot quietly relax it: the synchronous relay's safety story is made
+    entirely of facts about THIS process, none of which hold across a machine
+    boundary."""
+
+    from tools.agent_chat_tool import agent_chat_send
+
+    _paired(tmp_path, monkeypatch)
+
+    answer = json.loads(
+        agent_chat_send(
+            persona_id="@mac/dev",
+            message="hello",
+            requested_by_session="persona_chat_me_0123456789ab",
+        )
+    )
+
+    assert answer["error_kind"] == "remote_requires_detached"
+
+
+def test_agent_chat_open_on_a_far_thread_reads_through_peer_thread_read(
+    tmp_path, monkeypatch
+):
+    """The pointer the dispatch delivery has been printing since Stage 7 —
+    "Their thread: persona_chat_… (agent_chat_open with this session_id)" —
+    finally resolves. Before S2b it was a local MISS on the machine that
+    received it."""
+
+    from tools.agent_chat_tool import agent_chat_open
+
+    _paired(tmp_path, monkeypatch)
+    calls = _answered(
+        monkeypatch,
+        {
+            "result": {
+                "ok": True,
+                "target_persona": "dev",
+                "handle": "personainst_dev",
+                "session_id": "persona_chat_personainst_dev_0123456789ab",
+                "has_thread": True,
+                "count": 1,
+                "messages": [{"role": "assistant", "text": "done", "timestamp": None}],
+            }
+        },
+    )
+
+    answer = json.loads(
+        agent_chat_open(
+            persona_id="@mac/dev",
+            session_id="persona_chat_personainst_dev_0123456789ab",
+        )
+    )
+
+    assert calls == [
+        (
+            "inst_mac",
+            "peer.thread.read",
+            {
+                "target": "dev",
+                "session_id": "persona_chat_personainst_dev_0123456789ab",
+                "limit": 20,
+            },
+        )
+    ]
+    assert answer["ok"] is True
+    assert answer["install"] == {"install_id": "inst_mac", "display_name": "mac"}
+    # Spelled the way the grammar accepts, so the answer names an address the
+    # caller could use again rather than a bare id that would resolve locally.
+    assert answer["target_persona"] == "@mac/dev"
+
+
+def test_a_far_open_without_a_session_id_is_refused_and_says_where_to_get_one(
+    tmp_path, monkeypatch
+):
+    """There is no "our default thread" on another install: the far side's
+    default is the most recently established thread with ANYBODY, which is
+    almost never the one the caller means."""
+
+    from tools.agent_chat_tool import agent_chat_open
+
+    _paired(tmp_path, monkeypatch)
+    calls = _answered(monkeypatch, {"result": {}})
+
+    answer = json.loads(agent_chat_open(persona_id="@mac/dev"))
+
+    assert answer["error_kind"] == "remote_session_required"
+    assert "Their thread" in answer["error"]
+    # Nothing was dialled: a refusal that could be decided locally never costs a
+    # round trip.
+    assert calls == []
+
+
+def test_a_far_read_refusal_travels_with_its_own_reason(tmp_path, monkeypatch):
+    from tools.agent_chat_tool import agent_chat_open
+
+    _paired(tmp_path, monkeypatch)
+    _answered(
+        monkeypatch,
+        {"refusal": {"reason": "foreign_session", "message": "not that lane"}},
+    )
+
+    answer = json.loads(
+        agent_chat_open(persona_id="@mac/dev", session_id="persona_chat_x_0123456789ab")
+    )
+
+    assert answer["ok"] is False
+    assert answer["error_kind"] == "foreign_session"
+
+
+def test_an_unknown_install_is_refused_before_any_dial(tmp_path, monkeypatch):
+    from tools.agent_chat_tool import agent_chat_open
+
+    _paired(tmp_path, monkeypatch)
+    calls = _answered(monkeypatch, {"result": {}})
+
+    answer = json.loads(
+        agent_chat_open(persona_id="@nowhere/dev", session_id="persona_chat_x_0123456789ab")
+    )
+
+    assert answer["error_kind"] == "unknown_peer_install"
+    assert calls == []
+
+
+def test_agent_chat_threads_lists_the_far_installs_roster_rows(tmp_path, monkeypatch):
+    """Answers in the LOCAL threads-row shape, because a tool that returned two
+    schemas depending on where the teammate lives would make every consumer
+    branch on residency to read a name.
+
+    ``has_thread`` is ``null`` and not ``false``: this install genuinely does
+    not know whether the caller has a thread with that far teammate, and
+    ``false`` would be a claim.
+    """
+
+    from agent_runtime.gateway_peers import read_peer_cache
+    from tools.agent_chat_tool import agent_chat_threads
+
+    _paired(tmp_path, monkeypatch)
+    calls = _answered(
+        monkeypatch,
+        {
+            "result": {
+                "contract": 1,
+                "workspace_id": "ws-1",
+                "count": 1,
+                "rows": [
+                    {
+                        "handle": "personainst_dev_agent_2",
+                        "persona_id": "dev",
+                        "label": "Dev",
+                        "is_canonical_primary": False,
+                        "last_turn_at": "2026-09-03T10:00:00+00:00",
+                        "workspace_id": "ws-1",
+                    }
+                ],
+            }
+        },
+    )
+
+    answer = json.loads(agent_chat_threads(persona_id="@mac/dev"))
+
+    assert calls[0][1] == "peer.roster.list"
+    assert answer["threads"] == [
+        {
+            "persona_id": "dev",
+            "persona_instance_id": "personainst_dev_agent_2",
+            # The FULL address, so a row an agent reads is a row it can send to.
+            "handle": "@mac/personainst_dev_agent_2",
+            "display_name": "Dev",
+            "has_thread": None,
+            "last_activity": "2026-09-03T10:00:00+00:00",
+            "install": {"install_id": "inst_mac", "display_name": "mac"},
+        }
+    ]
+    # …and what was fetched is CACHED, so the HUD's install lines can render a
+    # roster without dialling. The fetch already happened; keeping it is free.
+    assert read_peer_cache(tmp_path)["inst_mac"].roster["rows"][0]["handle"] == (
+        "personainst_dev_agent_2"
+    )
+
+
+def test_an_empty_far_target_stays_refused_because_the_directory_verb_is_installs(
+    tmp_path, monkeypatch
+):
+    """``@mac/`` is refused by the parser today and STAYS refused: the verb for
+    "everyone on that machine" is ``agent_chat_installs``, and letting an empty
+    target mean "all" would give one spelling two meanings."""
+
+    from tools.agent_chat_tool import agent_chat_threads
+
+    _paired(tmp_path, monkeypatch)
+
+    answer = json.loads(agent_chat_threads(persona_id="@mac/"))
+
+    assert answer["error_kind"] == "install_qualifier_target_empty"
+
+
+# ── agent_chat_installs ─────────────────────────────────────────────────────
+
+
+def test_agent_chat_installs_lists_paired_installs_without_dialling_any(
+    tmp_path, monkeypatch
+):
+    """The rows are ``usable_peers`` verbatim — the SAME predicate the resolver
+    reads — so every install listed is one a send would resolve, and every
+    paired install NOT listed is one a send would refuse. A directory that
+    offered an edge the resolver had written off is a list an agent learns to
+    distrust."""
+
+    from agent_runtime.gateway_peers import record_peer, revoke_peer
+    from tools.agent_chat_tool import agent_chat_installs
+
+    _paired(tmp_path, monkeypatch)
+    record_peer(tmp_path, peer_install_id="inst_gone", secret="b" * 64, display_name="gone")
+    revoke_peer(tmp_path, "inst_gone")
+    calls = _answered(monkeypatch, {"result": {}})
+
+    answer = json.loads(agent_chat_installs())
+
+    assert calls == []
+    assert answer["count"] == 1
+    row = answer["installs"][0]
+    assert row["ref"] == "mac"
+    assert row["install_id"] == "inst_mac"
+    assert row["reachability"] == "unknown"
+    assert row["endpoints_count"] == 1
+    # No credential has a field here, and there is nothing to leak.
+    assert "secret_verifier" not in json.dumps(answer)
+
+
+def test_agent_chat_installs_with_an_install_fetches_and_caches_that_roster(
+    tmp_path, monkeypatch
+):
+    from agent_runtime.gateway_peers import read_peer_cache
+    from tools.agent_chat_tool import agent_chat_installs
+
+    _paired(tmp_path, monkeypatch)
+    calls = _answered(
+        monkeypatch,
+        {
+            "result": {
+                "workspace_id": "ws-1",
+                "truncated": False,
+                "rows": [{"handle": "personainst_dev", "persona_id": "dev"}],
+            }
+        },
+    )
+
+    answer = json.loads(agent_chat_installs(install="mac"))
+
+    assert calls == [("inst_mac", "peer.roster.list", {})]
+    assert answer["install"]["install_id"] == "inst_mac"
+    # Each row spelled as the FULL address: a roster line should be actionable.
+    assert answer["roster"][0]["address"] == "@mac/personainst_dev"
+    assert read_peer_cache(tmp_path)["inst_mac"].roster["workspace_id"] == "ws-1"
+
+
+def test_the_directory_and_the_resolver_agree_on_which_installs_exist(
+    tmp_path, monkeypatch
+):
+    """R-S2-16's byte-identity, asserted across the two surfaces an agent
+    actually reads: every id the tool lists resolves, and every paired id it
+    does not list refuses."""
+
+    from agent_runtime.gateway_peers import (
+        apply_peer_announce,
+        list_peers,
+        record_peer,
+        revoke_peer,
+        usable_peers,
+    )
+    from agent_runtime.gateway_targets import (
+        TargetRefusal,
+        parse_install_target,
+        resolve_install_target,
+    )
+    from tools.agent_chat_tool import agent_chat_installs
+
+    _paired(tmp_path, monkeypatch)
+    record_peer(tmp_path, peer_install_id="inst_gone", secret="b" * 64, display_name="gone")
+    record_peer(tmp_path, peer_install_id="inst_cut", secret="c" * 64, display_name="cut")
+    revoke_peer(tmp_path, "inst_gone")
+    apply_peer_announce(tmp_path, "inst_cut", {"revoked_you": True})
+
+    listed = [row["install_id"] for row in json.loads(agent_chat_installs())["installs"]]
+
+    assert listed == [peer.record.peer_install_id for peer in usable_peers(tmp_path)]
+    for record in list_peers(tmp_path):
+        outcome = resolve_install_target(
+            tmp_path, parse_install_target(f"@{record.peer_install_id}/dev")
+        )
+        if record.peer_install_id in listed:
+            assert outcome.install_id == record.peer_install_id
+        else:
+            assert isinstance(outcome, TargetRefusal), record.peer_install_id

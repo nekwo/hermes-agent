@@ -699,3 +699,173 @@ def test_situational_hud_identity_roster_defaults_to_roster():
     child = _instance(id="personainst_dev", display_name="Dev", steered_by=["personainst_neko"])
     hud = resolve_situational_hud(child, roster=[lead, child])
     assert hud["steering"]["steered_by"][0]["display_name"] == "Neko Mission Lead"
+
+
+# ── S2b: the install lines, and the residency note (R-IP11) ─────────────────
+
+
+def _install_row(**overrides):
+    row = {
+        "ref": "mac",
+        "install_id": "inst_mac",
+        "display_name": "the mac",
+        "reachability": "reachable",
+        "roster": [{"handle": "personainst_dev_agent_2", "persona_id": "dev"}],
+        "roster_fetched_at": "2026-09-03T10:00:00+00:00",
+    }
+    row.update(overrides)
+    return row
+
+
+def _peer_instance(instance_id="personainst_qa", display_name="QA", **extra):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        id=instance_id,
+        display_name=display_name,
+        persona_id=extra.pop("persona_id", "qa"),
+        workspace_id=extra.pop("workspace_id", None),
+        steered_by=extra.pop("steered_by", []),
+        spawned_by=extra.pop("spawned_by", None),
+        goal_id=extra.pop("goal_id", None),
+        **extra,
+    )
+
+
+def test_installs_block_drops_when_no_peer_is_paired():
+    """Drops when empty, like ``board``. A single-machine runtime contributes NO
+    line — which is also why the committed stream goldens' HUD bytes are
+    untouched by this field."""
+
+    from agent_runtime.runtime_hud import resolve_situational_hud
+
+    hud = resolve_situational_hud(_peer_instance(), roster=[_peer_instance()], installs=[])
+
+    assert "installs" not in hud
+
+
+def test_the_hud_carries_install_lines_and_a_cached_roster_and_dials_nothing():
+    """Every fact is read from this install's own two peer files. A HUD that
+    dialled would make every turn's opening depend on a machine that might be
+    asleep."""
+
+    from agent_runtime.runtime_hud import (
+        render_situational_hud_block,
+        resolve_situational_hud,
+    )
+
+    hud = resolve_situational_hud(
+        _peer_instance(),
+        roster=[_peer_instance()],
+        installs=[
+            _install_row(),
+            _install_row(
+                ref="studio",
+                install_id="inst_studio",
+                display_name="studio",
+                reachability="unreachable",
+                unreachable_since="2000-01-01T00:00:00+00:00",
+                roster=[],
+                roster_fetched_at=None,
+            ),
+        ],
+    )
+
+    assert [row["ref"] for row in hud["installs"]] == ["mac", "studio"]
+
+    rendered = render_situational_hud_block(hud)
+    assert "- Installs (2): @mac reachable · @studio unreachable" in rendered
+    # The far roster line spells each handle as the FULL address, so the line is
+    # actionable rather than merely informative.
+    assert "  - @mac: dev (@mac/personainst_dev_agent_2)" in rendered
+
+
+def test_a_locally_resident_instance_also_on_a_far_install_carries_the_residency_note(
+):
+    """R-IP11's visible half. Without it, an agent addressing a teammate cannot
+    see that the same persona is running on another machine too — which is the
+    fact that, unseen, produces two briefings sent to what the sender thought
+    was one agent.
+
+    Matched on the HANDLE and never the display name: two unrelated agents can
+    share a name, and a wrong residency claim is worse than an absent one
+    because an agent acts on it.
+    """
+
+    from agent_runtime.runtime_hud import (
+        render_situational_hud_block,
+        resolve_situational_hud,
+    )
+
+    local = _peer_instance(instance_id="personainst_dev_agent_2", display_name="Dev")
+    hud = resolve_situational_hud(
+        local,
+        roster=[local],
+        installs=[
+            _install_row(
+                roster=[
+                    {
+                        "handle": "personainst_dev_agent_2",
+                        "persona_id": "dev",
+                        "last_turn_at": "2000-01-01T00:00:00+00:00",
+                    }
+                ]
+            )
+        ],
+    )
+
+    assert hud["roster"][0]["also_on"] == [
+        {"ref": "mac", "last_turn_at": "2000-01-01T00:00:00+00:00"}
+    ]
+    rendered = render_situational_hud_block(hud)
+    assert "also on @mac, last turn there" in rendered
+
+
+def test_a_name_collision_does_not_produce_a_residency_claim():
+    from agent_runtime.runtime_hud import resolve_situational_hud
+
+    local = _peer_instance(instance_id="personainst_qa", display_name="Dev")
+    hud = resolve_situational_hud(
+        local,
+        roster=[local],
+        installs=[
+            _install_row(
+                roster=[{"handle": "personainst_dev_agent_2", "persona_id": "dev"}]
+            )
+        ],
+    )
+
+    assert "also_on" not in hud["roster"][0]
+
+
+def test_the_unreachable_age_is_rendered_from_the_stamp_and_not_stored():
+    """Computed at RENDER time, so a cached HUD body cannot claim a machine went
+    down twelve minutes ago when it has been down for two hours. Coarse on
+    purpose: a phrase that moved every second would defeat the revision hash the
+    stable block is delivered under."""
+
+    from agent_runtime.runtime_hud import _age_phrase
+
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    assert _age_phrase((now - timedelta(seconds=5)).isoformat()) == "just now"
+    assert _age_phrase((now - timedelta(minutes=12)).isoformat()) == "12 min"
+    assert _age_phrase((now - timedelta(hours=3)).isoformat()) == "3 h"
+    assert _age_phrase((now - timedelta(days=2)).isoformat()) == "2 d"
+    # Unreadable answers with nothing rather than with a wrong number.
+    assert _age_phrase("not a stamp") == ""
+    assert _age_phrase(None) == ""
+
+
+def test_the_installs_field_is_stable_so_it_rides_the_hashed_body():
+    """A claim about the DATA, not a convenience: every fact in the block is read
+    from two files that change when a ceremony or a push edge changes them, not
+    once per turn. So hashing it is cheap and correct — an agent whose paired
+    installs did not move gets the cached body."""
+
+    from agent_runtime.runtime_hud import hud_field, stable_hud_fields
+
+    assert hud_field("installs").volatile is False
+    hud = {"preview": True, "installs": [_install_row()]}
+    assert "installs" in stable_hud_fields(hud)

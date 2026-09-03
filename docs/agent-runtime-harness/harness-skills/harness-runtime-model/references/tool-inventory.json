@@ -8,6 +8,7 @@
       "name": "agent_chat",
       "tools": [
         "agent_chat_dispatches",
+        "agent_chat_installs",
         "agent_chat_log_path",
         "agent_chat_open",
         "agent_chat_send",
@@ -130,6 +131,13 @@
       "mutating": false,
       "gated": false,
       "description": "List your in-flight and recent background dispatches (read-only)."
+    },
+    {
+      "name": "agent_chat_installs",
+      "toolset": "agent_chat",
+      "mutating": false,
+      "gated": false,
+      "description": "List the other installs (machines) paired with this one, or one install's agent roster (read-only, no mint)."
     },
     {
       "name": "agent_chat_log_path",
@@ -427,9 +435,9 @@
     }
   ],
   "counts": {
-    "tools": 43,
+    "tools": 44,
     "toolsets": 15,
-    "token_estimate": 1149
+    "token_estimate": 1177
   },
   "cli_only_verbs": [
     "persona instance open-chat",

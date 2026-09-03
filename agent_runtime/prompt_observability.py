@@ -897,7 +897,7 @@ def snapshot_prompt_observability(
     # module is imported very early. A function-local import keeps module load
     # order robust while still resolving through the single HUD authority.
     from . import workspace_scope
-    from .runtime_hud import resolve_situational_hud
+    from .runtime_hud import _installs_block, resolve_situational_hud
 
     # S47: the ``tasks`` parameter and the ``tasks_by_id`` index built from it
     # are gone. Its only production caller seeded ``tasks = []``, so every lane
@@ -911,6 +911,7 @@ def snapshot_prompt_observability(
     # Materialize once: the roster is reused for every lane's situational HUD
     # (thread count + on-level list) and the input may be a one-shot iterable.
     roster = list(persona_instances)
+    installs = _installs_block()
 
     def _situational_for(instance: Any) -> dict[str, Any]:
         try:
@@ -937,6 +938,12 @@ def snapshot_prompt_observability(
                 workspace=workspace,
                 roster=scoped_roster,
                 identity_roster=roster,
+                # Resolved ONCE per snapshot, outside the per-lane closure, for
+                # the reason ``roster`` is materialised once above: the block is
+                # identical for every lane on this install and re-reading two
+                # files per persona would be a cost proportional to a fact that
+                # does not vary.
+                installs=installs,
             )
         except Exception:
             # Same guarantee as the preview: a situational-HUD failure degrades

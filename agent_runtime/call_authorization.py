@@ -150,8 +150,7 @@ CALLER_PEER = "peer"
 #: connection that somehow reached the dispatcher without a device stamp.
 CALLER_UNKNOWN = "unknown"
 
-#: **Exactly what a paired install may call on this one.** Four names today and
-#: six after S2b, and the
+#: **Exactly what a paired install may call on this one.** Six names, and the
 #: shortness is still the design: Stage 6 proved an edge exists (``peer.ping``,
 #: which answers "are you there" and touches nothing), Stage 7 lets that edge
 #: carry ONE thing (``peer.agent_chat.execute``, a chat turn), Stage P4 lets it
@@ -218,7 +217,7 @@ CALLER_UNKNOWN = "unknown"
 #: may set it, and only a trust write (a re-pair) clears it, so no install can
 #: announce itself back into an edge this operator cut.
 #:
-#: **The fifth and sixth land with S2b, and they are reads** (R-IP9).
+#: **The fifth and sixth are S2b's, and they are reads** (R-IP9).
 #: ``peer.roster.list`` answers "who is addressable on you", projected by B's
 #: own workspace rules — so A never guesses at a scope only B can resolve. And
 #: ``peer.thread.read`` answers with the tail of ONE thread the caller was
@@ -238,6 +237,8 @@ PEER_METHOD_ALLOWLIST: frozenset[str] = frozenset(
         "peer.agent_chat.execute",
         "peer.media.get",
         "peer.announce",
+        "peer.roster.list",
+        "peer.thread.read",
     }
 )
 
