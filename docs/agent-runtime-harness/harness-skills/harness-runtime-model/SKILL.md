@@ -113,7 +113,7 @@ contracts — separate skills, loaded to match the work, never folded in here:
 | configured agent definitions | `hermes harness agent list --json` |
 | durable persona instances (the roster) | `hermes harness persona list --json` |
 | one instance in detail | `hermes harness persona show <persona_instance_id> --json` |
-| an instance's resolved tools and blocks | `hermes harness persona tool-diff --json` |
+| an instance's resolved tools and blocks | `hermes harness persona tool-diff <persona_id> --json` |
 | a chat session's transcript | `hermes harness persona chat history --session-id <root> --json` |
 | stored agent-graph documents | `hermes harness flow list --json` · `hermes harness flow show <graph_id> --json` |
 | planning boards and cards | `hermes harness board list --json` · `hermes harness board show <board_id> --json` |
@@ -149,22 +149,61 @@ expect their output shapes, and do not repeat them to an operator as if they wer
 `harness snapshot --json` is contract 54 and carries no goal, stage, run, proof, or
 incident sections. If you are looking for one, it is gone, not missing.
 
+## In-turn tools
+
+<!-- BEGIN GENERATED: harness_core inventory -->
+
+43 tools · generated from the registry by `scripts/emit_harness_tool_inventory.py` · do not edit by hand. If a tool exists for it, the tool is the answer; the full table with descriptions is `references/tool-inventory.md`.
+
+| toolset | tools | use it for |
+|---|---|---|
+| `agent_chat` | `agent_chat_dispatches` · `agent_chat_log_path` · `agent_chat_open` · `agent_chat_send` · `agent_chat_threads` | teammates: list, message, read, dispatches, transcript path |
+| `board` | `board_card_add` · `board_cards` | record follow-up work — planning state only |
+| `clarify` | `clarify` | ask the operator a question mid-turn |
+| `delegation` | `delegate_task` | hand a bounded subtask to a helper with fresh context |
+| `terminal` | `close_terminal` · `focus_pane` · `open_preview` · `process` · `react_to_message` · `read_terminal` · `terminal` | run commands; the desktop pane verbs are GUI-gated |
+| `file` | `patch` · `read_file` · `search_files` · `write_file` | read, write, patch and search files |
+| `web` | `web_extract` · `web_search` | search the web and pull a page's content |
+| `browser` | `browser_back` · `browser_click` · `browser_console` · `browser_get_images` · `browser_navigate` · `browser_press` · `browser_scroll` · `browser_snapshot` · `browser_type` · `browser_vision` | drive a real browser: navigate, click, type, read, screenshot |
+| `browser-cdp` | `browser_cdp` · `browser_dialog` | raw CDP and dialog handling for the same browser |
+| `skills` | `skill_manage` · `skill_search` · `skill_view` · `skills_list` | find, read and author skills |
+| `memory` | `memory` | durable profile memory |
+| `todo` | `todo` | your own in-turn checklist |
+| `session_search` | `session_search` | search your own past sessions |
+| `vision` | `vision_analyze` | analyze an image |
+| `code_execution` | `execute_code` | run code in the sandbox |
+
+<!-- END GENERATED: harness_core inventory -->
+
 ## Operate
 
-| Do | Command |
-|---|---|
-| find the on-level chat instances to message | `hermes harness persona list --json` → chat-mode `personainst_<role>_agent_<hash>` rows (cross-check Stage C `mission_control.agent` buttons) |
-| continue an existing chat root | `hermes harness persona instance open-chat --persona-instance-id <instance> --persona <id> --session-id <root> --json` (`--session-id` is required unless `--new-session` or `--add-instance`) |
-| create a new server-minted chat on an existing instance | `hermes harness persona instance open-chat --persona-instance-id <instance> --persona <id> --new-session --idempotency-key <key> --json` |
-| message an exact chat root (canonical path) | `hermes harness mission-chat message --persona <id> --persona-instance-id <instance> --session-id <root> --client-message-id <id> --message … --json` |
-| message another agent from inside a turn | the `agent_chat_send` tool |
-| steer an in-flight streamed turn | `hermes harness mission-chat steer --session-id <root> --client-message-id <id> --message … --json` |
-| abandon an outcome-unknown turn | `hermes harness mission-chat turn-resolve --session-id <root> --client-message-id <id> --turn-id <turn> --action abandon --json` |
-| load a skill on the next turn | `hermes harness mission-chat queue-skill --persona <id> --session-id <root> --skill <name> --json` |
-| re-route a steering edge in the agent graph | `hermes harness persona instance steer …` (supports multi-parent fan-in) |
-| replace a whole agent-graph document | `hermes harness flow set …` (reconciles `steered_by` for the instances it references; never creates instances) |
-| track follow-up work | `hermes harness board card add …` — planning state only |
-| return a child's bounded summary to a parent chat | `hermes harness persona instance return-summary …` |
+**Tools first.** If a tool exists for the row, the tool IS the answer — it runs
+inside your turn, mints nothing, and costs no subprocess. A terminal call for a row
+that names a tool is a navigation failure: report it (the command you reached for,
+the tool you should have used) rather than quietly shelling out. The CLI column is
+for rows where no tool exists.
+
+| Do | In-turn tool (first choice) | CLI (only where no tool exists) |
+|---|---|---|
+| see who your teammates are / which instances you can reach | `agent_chat_threads` (read-only, no mint) | — |
+| message a teammate and get the reply in this turn | `agent_chat_send` (`wait=true`; `wait=false` to dispatch and continue) | `hermes harness mission-chat message …` is the OPERATOR's path, not yours |
+| read what a teammate said | `agent_chat_open` (tail) · `agent_chat_log_path` (full transcript path, then `read_file` / `search_files`) | — |
+| see your background dispatches | `agent_chat_dispatches` | — |
+| track follow-up work | `board_card_add` · `board_cards` — planning state only | `hermes harness board card add …` (operator path) |
+| ask the operator a question | `clarify` | — |
+| hand a bounded subtask to a helper with fresh context | `delegate_task` | — |
+| continue an existing chat root | — | `hermes harness persona instance open-chat --persona-instance-id <instance> --persona <id> --session-id <root> --json` (`--session-id` is required unless `--new-session` or `--add-instance`) |
+| create a new server-minted chat on an existing instance | — | `hermes harness persona instance open-chat --persona-instance-id <instance> --persona <id> --new-session --idempotency-key <key> --json` |
+| find the on-level chat instances an OPERATOR can message | — | `hermes harness persona list --json` → chat-mode `personainst_<role>_agent_<hash>` rows (cross-check Stage C `mission_control.agent` buttons) |
+| steer an in-flight streamed turn | — | `hermes harness mission-chat steer --session-id <root> --client-message-id <id> --message … --json` |
+| abandon an outcome-unknown turn | — | `hermes harness mission-chat turn-resolve --session-id <root> --client-message-id <id> --turn-id <turn> --action abandon --json` |
+| load a skill on the next turn | — | `hermes harness mission-chat queue-skill --persona <id> --session-id <root> --skill <name> --json` |
+| re-route a steering edge in the agent graph | — | `hermes harness persona instance steer …` (supports multi-parent fan-in) |
+| replace a whole agent-graph document | — | `hermes harness flow set …` (reconciles `steered_by` for the instances it references; never creates instances) |
+| return a child's bounded summary to a parent chat | — | `hermes harness persona instance return-summary …` |
+
+The complete inventory with descriptions, and the list of verbs that genuinely have
+no tool, is `references/tool-inventory.md`.
 
 ## Persona chat continuity
 

@@ -121,8 +121,9 @@ that table does not carry, plus the payload-shape gotchas that have actually cos
 
 | See | Command |
 |---|---|
+| what tools YOU have this turn | the `## In-turn tools` table in this package's `SKILL.md` (full table with descriptions: `references/tool-inventory.md`). `persona tool-diff` is the OPERATOR's view of the same set — you do not need a subprocess to learn your own hands |
 | the live roster (durable persona instances) | `harness persona list --json` — the loop below starts here every time |
-| an instance's resolved/blocked tools, with the MCP lane | `harness persona-instance detail <instance_id> --json` · `harness persona tool-diff <persona> --explain-mcp --json` |
+| an instance's resolved/blocked tools, with the MCP lane | `harness persona-instance detail <instance_id> --json` · `harness persona tool-diff <persona_id> --explain-mcp --json` (the persona id is POSITIONAL and required; the text mode also prints which profile declared the toolsets) |
 | realms / workspaces | `harness realm list --json` · `harness workspace list --json` — **both answer under `.items`**, not `.realms`/`.workspaces` (verified live 2026-08-24) |
 | live hydrate + delta frames | `harness stream` (NDJSON; `--resync` re-baselines) |
 | redaction-safe observability | `harness observe --json` |

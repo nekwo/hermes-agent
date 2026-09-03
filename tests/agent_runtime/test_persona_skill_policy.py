@@ -91,6 +91,47 @@ def test_runtime_model_skill_documents_graph_and_level_agent_commands():
     assert "QA is a node only if the selected blueprint binds it" in text
 
 
+def test_the_operate_table_routes_in_turn_tools_before_the_terminal():
+    """S0a A4. The preloaded manual named ONE tool in its whole Operate table
+    (``agent_chat_send``) and sent two rows that tools answer to the terminal:
+    "find the on-level chat instances to message" to ``persona list`` when
+    ``agent_chat_threads`` answers it in-turn with no mint, and "track follow-up
+    work" to ``board card add`` when ``board_card_add`` is a tool. An agent
+    reading that shells out for its own hands, every turn.
+
+    The tool NAMES here are also cross-checked against the live registry by
+    ``scripts/emit_harness_tool_inventory.py --check``
+    (``tests/agent_runtime/test_harness_tool_inventory.py``), so a rename cannot
+    leave this file green and the manual pointing at nothing.
+    """
+
+    root = Path(__file__).resolve().parents[2] / "docs" / "agent-runtime-harness" / "harness-skills"
+    text = (root / "harness-runtime-model" / "SKILL.md").read_text(encoding="utf-8")
+
+    for tool in (
+        "agent_chat_threads",
+        "agent_chat_send",
+        "agent_chat_open",
+        "agent_chat_dispatches",
+        "agent_chat_log_path",
+        "board_card_add",
+        "board_cards",
+        "clarify",
+        "delegate_task",
+    ):
+        assert f"`{tool}`" in text, tool
+
+    # The generated inventory is IN the preloaded head, before Operate.
+    assert "## In-turn tools" in text
+    assert text.index("## In-turn tools") < text.index("## Operate")
+    assert "<!-- BEGIN GENERATED: harness_core inventory -->" in text
+    assert "references/tool-inventory.md" in text
+    # The View row that could not run as written (it exits 2 without the id).
+    assert "persona tool-diff <persona_id> --json" in text
+    # And the rule that makes the table mean something.
+    assert "navigation failure" in text
+
+
 def _charsheet_skill_text() -> str:
     root = Path(__file__).resolve().parents[2] / "docs" / "agent-runtime-harness" / "harness-skills"
     return (root / "harness-charsheet-authoring" / "SKILL.md").read_text(encoding="utf-8")
