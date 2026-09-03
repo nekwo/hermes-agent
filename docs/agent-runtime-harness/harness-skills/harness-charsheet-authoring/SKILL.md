@@ -102,6 +102,7 @@ not the slug** (`20260824-140756-cd645a` vs `anime-girl`).
 | `list` | Drafts + installed characters, with their directories. | — |
 | `backfill-home` | Records `hermes_home` — provenance of the authoring RUN, not an address — on library drafts that carry none, using the home THIS run resolved, and on no others. An already-recorded home is never rewritten; `updated` is left untouched. Idempotent, receipted. **Operator-run — do not fire it as part of an authoring flow.** | — |
 | `migrate-home` | Moves THIS home's legacy `<HERMES_HOME>/characters` store into the install-wide library. Drafts keep their directory leaf names and installed characters keep their slugs; a draft carrying no `hermes_home` is stamped with the SOURCE home before it moves. A destination collision is a per-entry refusal, never an overwrite, and nothing is deleted. Idempotent, receipted. **Operator-run — do not fire it as part of an authoring flow.** | — |
+| `payload-contract` | Prints the character PAYLOAD key set hermes publishes, measured from the producers (`--json` for the machine door the launcher's wire-contract gate reads). Read-only; touches no draft and no library. **Tooling — not an authoring verb; never fire it in an authoring flow.** | — |
 | `status --draft <id>` | Stage, spec, per-item QA history with every attempt's `path`. | any |
 | `base --draft <id> --image <path>` | Sets/replaces the identity anchor. | any |
 | `turnaround --draft <id>` | One generation per **authored** direction (`s se e ne n` for the 8-way scheme). | `turnaround` |
