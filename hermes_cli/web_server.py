@@ -1019,6 +1019,11 @@ _CATEGORY_MERGE: Dict[str, str] = {
     # `telemetry.shared_metrics.enabled` is the only schema-surfaced telemetry
     # field — fold it into security alongside the other privacy-posture toggles.
     "telemetry": "security",
+    # `charsheet.provider_timeout_seconds` is the only schema-surfaced
+    # character-sheet field (the block is "behavioural knobs only", per
+    # config_defaults) — fold it into the agent tab beside the other
+    # agent-adjacent sections rather than spawning a one-field orphan category.
+    "charsheet": "agent",
 }
 
 # Display order for tabs — unlisted categories sort alphabetically after these.
