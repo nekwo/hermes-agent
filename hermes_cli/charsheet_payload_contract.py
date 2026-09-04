@@ -39,13 +39,23 @@ envelope keys (``ok``, ``draft``, ``stage``) are keys the launcher decodes too.
 
 DATA KEYS VERSUS SCHEMA KEYS
 ----------------------------
-``framesByRow`` is keyed by row name and ``directions.mirrored`` by compass
-sector: those keys are DATA, and a contract that recorded them would pin the
-probe's own row vocabulary as if it were the schema. Nothing here declares which
-maps are dynamic. Instead every kind is probed TWICE with a deliberately
-different sheet vocabulary (states, frame counts, direction scheme, slug), and
-only the paths BOTH probes agree on are contract paths. A key that moved when
-the vocabulary moved is data, by measurement.
+``framesByRow`` is keyed by row name, ``directions.mirrored`` by compass sector,
+``status.turnaround`` by direction and ``status.rows`` by row key: those keys are
+DATA, and a contract that recorded them would pin the probe's own row vocabulary
+as if it were the schema. Nothing here declares which maps are dynamic. Instead
+every kind is probed TWICE with a deliberately different sheet vocabulary
+(states, frame counts, direction scheme, slug), and only the paths BOTH probes
+agree on are contract paths. A key that moved when the vocabulary moved is data,
+by measurement.
+
+What is UNDER such a map is a different question from what it is KEYED BY, and
+the two used to share one answer: the children were dropped along with the
+names. That is why ``status`` and ``list`` sat outside this contract for a
+week -- every QA item in ``status`` hangs off a data-keyed map, so dropping the
+children dropped the whole item record. The keys of a measured-dynamic map now
+collapse to :data:`DYNAMIC_KEY` (``{}``), the way a list's elements collapse to
+``[]``, so the record is described once and no character's vocabulary is in the
+file.
 
 CONDITIONAL KEYS
 ----------------
@@ -87,7 +97,22 @@ _LIBRARY_ENV = "HERMES_SHARED_CHARACTERS"
 # ── path walking ───────────────────────────────────────────────────────────
 
 
-def _walk(value: Any, path: str, paths: set[str], children: dict[str, set[str]]) -> None:
+#: The segment a data-keyed map's keys collapse to, the way a list's elements
+#: collapse to ``[]``. Spelled the same for every such map on purpose: WHICH
+#: data keys a map is keyed by (direction, row key, slug) is not something this
+#: module measures -- it measures only that the keys MOVED with the vocabulary
+#: -- and a placeholder that named the vocabulary would be a hand-declaration
+#: wearing a measurement's clothes.
+DYNAMIC_KEY = "{}"
+
+
+def _walk(
+    value: Any,
+    path: str,
+    paths: set[str],
+    children: dict[str, set[str]],
+    collapse: frozenset[str] = frozenset(),
+) -> None:
     """Collect every dotted key path in *value*, plus each map's own key set.
 
     A list contributes its ELEMENT shape under ``[]`` -- a payload's list is
@@ -95,22 +120,33 @@ def _walk(value: Any, path: str, paths: set[str], children: dict[str, set[str]])
     row count. *children* records, per path, the keys the map at that path
     carried; comparing those across probes is what tells a record apart from a
     map whose KEYS are data.
+
+    *collapse* names the paths already MEASURED to be keyed by data, and every
+    key of such a map contributes under :data:`DYNAMIC_KEY` instead of its own
+    name -- the same trick as ``[]``, one level up. That is what lets the
+    contract describe what is UNDER a data-keyed map (a QA item's whole status
+    record) without pinning one probe's row vocabulary. It is a second pass by
+    necessity: which maps those are is not known until the probes disagree.
     """
     if isinstance(value, dict):
         children.setdefault(path, set()).update(str(key) for key in value)
+        dynamic = path in collapse
         for key in value:
-            child = f"{path}.{key}" if path else str(key)
+            segment = DYNAMIC_KEY if dynamic else str(key)
+            child = f"{path}.{segment}" if path else segment
             paths.add(child)
-            _walk(value[key], child, paths, children)
+            _walk(value[key], child, paths, children, collapse)
     elif isinstance(value, list):
         for item in value:
-            _walk(item, f"{path}[]", paths, children)
+            _walk(item, f"{path}[]", paths, children, collapse)
 
 
-def _shape_of(document: Any) -> tuple[set[str], dict[str, set[str]]]:
+def _shape_of(
+    document: Any, collapse: frozenset[str] = frozenset()
+) -> tuple[set[str], dict[str, set[str]]]:
     paths: set[str] = set()
     children: dict[str, set[str]] = {}
-    _walk(document, "", paths, children)
+    _walk(document, "", paths, children, collapse)
     return paths, children
 
 
@@ -118,8 +154,8 @@ def _agreed_shape(documents: list[Any]) -> tuple[set[str], set[str]]:
     """``(contract paths, dynamic-keyed paths)`` across parallel probes.
 
     A map whose key set MOVED when the sheet vocabulary moved is keyed by data
-    (``framesByRow`` by row name, ``directions.mirrored`` by sector), so it is
-    reported as one dynamic key and its children are not contract keys at all.
+    (``framesByRow`` by row name, ``turnaround`` by direction), so its keys
+    collapse to :data:`DYNAMIC_KEY` and what is under them is described ONCE.
     Nothing declares which maps those are; the disagreement between the probes
     is the measurement.
 
@@ -127,16 +163,22 @@ def _agreed_shape(documents: list[Any]) -> tuple[set[str], set[str]]:
     exactly the case that motivated this: 8-way and 4-way BOTH mirror ``w``, so
     ``directions.mirrored.w`` survives an intersection and would have pinned one
     probe's sector vocabulary into the contract as if it were schema.
+
+    Two passes, and the second is what ``status``/``list`` need: those payloads
+    keep every QA item under a map keyed by direction or row key, so a rule that
+    dropped a data-keyed map's children dropped the whole item record -- the
+    part a reader actually decodes. Dropping is right for the NAMES and wrong
+    for the SHAPE, and one placeholder segment is the difference.
     """
     shapes = [_shape_of(document) for document in documents]
-    paths = shapes[0][0].intersection(*(shape[0] for shape in shapes[1:]))
     dynamic = {
         path
         for path in shapes[0][1]
         if any(shape[1].get(path) != shapes[0][1][path] for shape in shapes[1:])
     }
-    prefixes = tuple(f"{path}." for path in dynamic if path)
-    return {p for p in paths if not p.startswith(prefixes)}, dynamic & paths
+    collapsed = [_shape_of(document, frozenset(dynamic))[0] for document in documents]
+    paths = collapsed[0].intersection(*collapsed[1:])
+    return paths, dynamic & paths
 
 
 # ── the probes ─────────────────────────────────────────────────────────────
@@ -372,6 +414,56 @@ def _thumb_kind(drafts: list[tuple[str, str, str]]) -> dict:
     )
 
 
+def _status_kind(drafts: list[tuple[str, str, str]]) -> dict:
+    """The whole draft state, item records included.
+
+    ``status`` was outside the contract because its QA items hang off maps keyed
+    by DIRECTION and ROW KEY, and a rule that dropped a data-keyed map's children
+    dropped the item record with them -- which is the part a reader decodes.
+    :data:`DYNAMIC_KEY` is the difference: the names stay out, the shape comes
+    in. It is also where ``hermesHome`` lives, the field whose absence from this
+    dump cost a person a re-run of the verbs to discover.
+    """
+    from hermes_cli.harness import _cmd_characters_status
+
+    measured = _agreed_shape(
+        [_emit(_cmd_characters_status, draft=draft_id) for draft_id, _row, _dir in drafts]
+    )
+    return _kind(
+        argv="harness characters status --draft <id> --json",
+        producer="agent/charsheet/draft.py::CharacterDraft.status_payload",
+        object_path="status",
+        modes={"default": measured},
+    )
+
+
+def _list_kind(drafts: list[tuple[str, str, str]]) -> dict:
+    """Every draft and installed character on this install.
+
+    One document, not two: ``list`` is library-wide, so both probes are already
+    inside a single answer and the two calls cannot disagree with each other.
+    That is not a hole -- what the disagreement rule is for is a map keyed by
+    data, and this payload keys nothing: drafts and characters are LISTS, which
+    the ``[]`` convention has always collapsed. It is measured through
+    :func:`_agreed_shape` all the same, so a map that appears here later is
+    caught by the same rule as everywhere else.
+
+    The second field the row wanted is here: ``drafts[].hermesHome``.
+    """
+    from hermes_cli.harness import _cmd_characters_list
+
+    measured = _agreed_shape([_emit(_cmd_characters_list), _emit(_cmd_characters_list)])
+    return _kind(
+        argv="harness characters list --json",
+        producer=(
+            "hermes_cli/harness.py::_characters_draft_summary / "
+            "_characters_installed_rows"
+        ),
+        object_path="",
+        modes={"default": measured},
+    )
+
+
 # ── the dump ───────────────────────────────────────────────────────────────
 
 
@@ -391,6 +483,8 @@ def build_payload_contract() -> dict:
             payloads = {
                 "sprite": _sprite_kind(probes),
                 "thumb": _thumb_kind(drafts),
+                "status": _status_kind(drafts),
+                "list": _list_kind(drafts),
             }
         finally:
             if previous is None:

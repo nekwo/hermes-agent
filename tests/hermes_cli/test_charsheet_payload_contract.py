@@ -63,11 +63,21 @@ def test_no_probe_local_data_reaches_the_dump(document):
         "contract-probe",
         "idle-ne",
         "bounce-e",
-        "framesByRow.",
-        "directions.mirrored.",
+        "framesByRow.idle",
+        "directions.mirrored.w",
+        "turnaround.s",
         "hermes-payload-contract-",
     ):
         assert leak not in text, f"probe-local data {leak!r} reached the dump"
+    # The only segment allowed under a data-keyed map is the placeholder: what
+    # is UNDER `framesByRow` is contract, what it is KEYED BY is one character.
+    for kind in document["payloads"].values():
+        for parent, entry in kind["keys"].items():
+            if not entry["dynamic"]:
+                continue
+            for path in kind["keys"]:
+                if path.startswith(f"{parent}."):
+                    assert path.startswith(f"{parent}.{contract.DYNAMIC_KEY}"), path
 
 
 def test_a_planted_key_in_the_producer_shows_up_in_the_dump():
@@ -179,7 +189,7 @@ def test_the_two_thumb_item_kinds_are_two_modes_of_one_payload(document):
     assert conditional == ["direction", "frame", "frames", "row"]
 
 
-def test_a_dynamic_map_is_one_key_and_its_children_are_not(document):
+def test_a_dynamic_map_is_measured_and_its_KEYS_never_reach_the_dump(document):
     """`framesByRow` is keyed by ROW NAME: the key is schema, what is under it is data.
 
     Nothing declares which maps those are — the two probes carry different state
@@ -187,13 +197,51 @@ def test_a_dynamic_map_is_one_key_and_its_children_are_not(document):
     with them is data by measurement. The rule matters because the alternative
     (record everything) writes one character's row names into the launcher's
     fixture, where the next character reds it.
+
+    What is under such a map is recorded ONCE, under the placeholder. Recording
+    nothing at all was the older rule, and it is what kept `status` out of this
+    contract entirely: every QA item there hangs off a data-keyed map.
     """
     keys = _keys(document, "sprite")
     dynamic = sorted(path for path, entry in keys.items() if entry["dynamic"])
     assert dynamic == ["character.directions.mirrored", "character.framesByRow"]
     for path in keys:
         for parent in dynamic:
-            assert not path.startswith(f"{parent}."), path
+            if path.startswith(f"{parent}."):
+                assert path.startswith(f"{parent}.{contract.DYNAMIC_KEY}"), path
+
+
+def test_the_read_payloads_the_launcher_decodes_are_all_four(document):
+    """`status` and `list` are decoded by the same reader and were not in here.
+
+    They were left out because their QA items hang off maps keyed by direction
+    and row key, which the old rule dropped whole — so the contract was silent
+    about the two payloads that carry `hermesHome`, the field whose absence cost
+    a person a re-run of the verbs to find.
+    """
+    assert sorted(document["payloads"]) == ["list", "sprite", "status", "thumb"]
+    assert document["payloads"]["status"]["object"] == "status"
+    assert document["payloads"]["list"]["object"] == ""
+    assert "status.hermesHome" in _keys(document, "status")
+    assert "drafts[].hermesHome" in _keys(document, "list")
+
+
+def test_a_data_keyed_map_keeps_its_SHAPE_and_loses_its_NAMES(document):
+    """The placeholder, which is what made `status` describable at all.
+
+    `turnaround` is keyed by direction and `rows` by row key. Recording those
+    keys would write one probe's vocabulary into the launcher's fixture; dropping
+    their children — the rule before this — dropped the item record a reader
+    actually decodes. One placeholder segment separates the two.
+    """
+    keys = _keys(document, "status")
+    for parent in ("status.turnaround", "status.rows"):
+        assert keys[parent]["dynamic"] is True, parent
+        item = f"{parent}.{contract.DYNAMIC_KEY}"
+        assert item in keys
+        for field in ("key", "attempts", "approved", "approvedPath", "current"):
+            assert f"{item}.{field}" in keys
+        assert f"{item}.history[].path" in keys
 
 
 def test_the_envelope_is_in_the_contract_too(document):
@@ -220,7 +268,7 @@ def test_the_verb_prints_the_document(capsys):
     assert args.func(args) == 0
     printed = json.loads(capsys.readouterr().out)
     assert printed["schema"] == contract.SCHEMA
-    assert sorted(printed["payloads"]) == ["sprite", "thumb"]
+    assert sorted(printed["payloads"]) == ["list", "sprite", "status", "thumb"]
 
 
 def test_the_human_line_counts_the_keys(capsys):
@@ -230,4 +278,5 @@ def test_the_human_line_counts_the_keys(capsys):
     assert _cmd_characters_payload_contract(argparse.Namespace(json=False)) == 0
     line = capsys.readouterr().out.strip()
     assert "sprite:" in line and "thumb:" in line
+    assert "status:" in line and "list:" in line
     assert "conditional" in line
