@@ -1,0 +1,57 @@
+{
+  "argv": [
+    "harness",
+    "realm",
+    "sync",
+    "status",
+    "realm_fixture_denied",
+    "--json"
+  ],
+  "exit_code": 0,
+  "stdout": {
+    "agent_publish_mode": "workspace",
+    "agent_selection": [],
+    "agents_published": 0,
+    "ahead": 0,
+    "artifacts": 1,
+    "behind": 0,
+    "conflicts": [],
+    "id": "realm_fixture_denied",
+    "kind": "realm_sync",
+    "last_publish": null,
+    "last_pull": null,
+    "profile_artifacts_held": [],
+    "remote_check_error": "sync_auth_failed",
+    "remote_checked": false,
+    "schema_version": 1,
+    "skill_publish_mode": "all",
+    "skill_selection": [],
+    "skill_tombstones": [],
+    "skills_drift": [],
+    "skills_published": 0,
+    "state": "ahead",
+    "store_drift": {
+      "boards": {
+        "boards_changed": 0,
+        "cards_added": 0,
+        "cards_changed": 0,
+        "cards_removed": 0
+      },
+      "items": [],
+      "office": {
+        "actors_added": 0,
+        "actors_changed": 0,
+        "actors_removed": 0,
+        "offices_changed": 0
+      },
+      "persona_instances": {
+        "instances_added": 0,
+        "instances_changed": 0,
+        "instances_removed": 0
+      }
+    },
+    "sync_repo": "realm_sync/srv_fixture",
+    "unpublished_changes": false,
+    "workspace_statuses": []
+  }
+}

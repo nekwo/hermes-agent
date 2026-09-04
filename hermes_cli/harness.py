@@ -3489,6 +3489,15 @@ def _cmd_realm_adopt(args) -> int:
 def _cmd_realm_sync_status(args) -> int:
     try:
         data = realm_sync_status(args.realm_id, credential=_realm_sync_credential(args))
+    except NotFound as exc:
+        # An unknown realm id is an ARGUMENT error, not a crash. Without this the
+        # store's NotFound escaped the handler uncaught, and the operator got a
+        # traceback whose message is the ABSOLUTE PATH of the realm JSON — the
+        # one thing the error contract forbids on an operator-visible surface.
+        # The sibling verbs that read a realm by id already catch it exactly
+        # here (``_cmd_realm_skill_restore``); this one did not, and the response
+        # fixture for the case is what made that visible.
+        return emit_harness_error(exc, args=args, code="not_found")
     except RealmSyncError as exc:
         return emit_harness_error(exc, args=args)
     _print_stage42(data, args=args, default_output="json")

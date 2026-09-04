@@ -34,7 +34,7 @@ the test and the generator can never disagree about how a fixture is made — an
 requires the result to equal the committed bytes exactly.
 
 Byte equality is achievable here, and that was verified rather than assumed.
-The whole nondeterminism surface of these two envelopes is:
+The whole nondeterminism surface of the two ``work`` envelopes is:
 
 * ``error_id``, minted as ``f"err_{uuid4().hex[:8]}"`` — the generator's
   ``_normalize`` rewrites it to ``err_fixture`` and so does ``_run``, which is
@@ -79,6 +79,37 @@ RED-PROOF (run before this file landed):
    it plants each drift class into a COPY of the committed envelope and requires
    the comparator to reject it. A comparator that had degenerated into
    ``assert True`` would pass this file forever otherwise.
+
+=============================================================================
+THE REALM-SYNC STATUS FAMILY (added 2026-09-04, w13/h2)
+=============================================================================
+
+Three ``realm sync status --json`` envelopes joined the set: the typed refusal
+for an unknown realm, and the two ``remote_checked: false`` codes the Launcher's
+realm-sync sheet CLASSIFIES (``sync_remote_unreachable``, ``sync_auth_failed``).
+The Launcher already refuses any ``remote_check_error`` literal its own
+classifier does not know (``test/architecture/realm_sync_code_vocabulary_test.dart``),
+but that gate can only see the CONSUMER's spellings — nothing proved hermes
+still emits them, or that the envelope has the shape the models parse. These
+fixtures are that producer half, and the Launcher mirrors the bytes.
+
+Unlike the ``work`` pair, these envelopes only exist against runtime STATE, so
+the generator grew per-case ARRANGEMENTS (``FIXTURE_ARRANGEMENTS``) and a
+per-case isolated root. Both are reached from here through ``isolate`` /
+``arrange`` for the same reason ``_parser``/``_run`` are: a gate that arranged
+its own world would compare two different worlds and call the difference drift.
+Both arrangements are OFFLINE — a git ``origin`` pointing at a path inside the
+temp root that was never created, and a schema-valid credential whose
+``realm_id`` belongs to another realm (the mismatch is decided before any
+backend request).
+
+Generating the first of the three found a defect it then fixed:
+``_cmd_realm_sync_status`` did not catch the store's ``NotFound``, so an unknown
+realm id escaped the handler as a traceback whose message is the absolute path
+of the realm JSON. :func:`test_the_unknown_realm_status_is_a_typed_refusal_not_a_crash`
+holds that closed. The four sibling verbs on the same subcommand
+(``pull``/``publish``/``held``/``resolve``) still carry the same omission; that
+is recorded, not fixed here, because this family is scoped to ``status``.
 """
 
 from __future__ import annotations
@@ -111,23 +142,26 @@ def _read(name: str) -> dict:
 def producer(tmp_path, monkeypatch):
     """The real CLI producer, against an isolated home.
 
-    Mirrors the generator's ``main()`` env setup exactly. The home directory is
-    named ``hermes`` on purpose: ``running_work`` publishes the resolved home
-    as ``ambient.home_name = <basename>``, so the name reaches the fixture bytes.
-    """
+    Isolation and per-case ARRANGEMENT both come from the generator
+    (``isolate`` / ``arrange``) instead of being re-implemented here — the same
+    reason ``_parser``/``_run`` do. A ``realm sync status`` envelope only exists
+    against runtime STATE (a realm whose remote is gone; a realm read with
+    somebody else's credential), and a gate that built that state its own way
+    would be comparing two different worlds and calling the difference drift.
 
-    home = tmp_path / "hermes"
-    home.mkdir()
-    (tmp_path / "runtime").mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
-    monkeypatch.setenv("HERMES_HEAD_HOME", str(home))
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+    One root PER CASE, matching the generator, so nothing a case's arrangement
+    leaves behind can reach the next one. The home directory inside each root is
+    named ``hermes`` on purpose: ``running_work`` publishes the resolved home as
+    ``ambient.home_name = <basename>``, so the name reaches the fixture bytes.
+    """
 
     generator = importlib.import_module(_GENERATOR)
     parser = generator._parser()
 
-    def run(argv: list[str]) -> dict[str, Any]:
+    def run(argv: list[str], *, case: str = "ad_hoc") -> dict[str, Any]:
+        root = tmp_path / case.replace(".json", "")
+        generator.isolate(root, setenv=monkeypatch.setenv)
+        generator.arrange(case, root, setenv=monkeypatch.setenv)
         return generator._run(parser, argv)
 
     run.cases = dict(generator.FIXTURE_CASES)  # type: ignore[attr-defined]
@@ -145,7 +179,7 @@ def test_every_fixture_is_re_derivable_from_the_producer(producer):
     """
 
     for name, argv in producer.cases.items():
-        live = producer(argv)
+        live = producer(argv, case=name)
         committed = _read(name)
 
         # Report the structural difference first — a raw dict inequality on a
@@ -341,3 +375,77 @@ def test_work_list_fixture_is_an_accepted_empty_response():
     assert fixture["stdout"]["kind"] == "list"
     assert fixture["stdout"]["item_kind"] == "running_work"
     assert fixture["stdout"]["items"] == []
+
+
+# --------------------------------------------------------------------------- #
+# The realm-sync status family (w13/h2)
+# --------------------------------------------------------------------------- #
+# The launcher classifies `remote_check_error` codes it transcribed by hand from
+# this repo, and `test/architecture/realm_sync_code_vocabulary_test.dart` refuses
+# any code in its suite that its own classifier does not know. That gate can only
+# see the CONSUMER's spellings. These three fixtures are the producer half: the
+# codes stop being mirrored the day hermes stops emitting them.
+
+
+def test_the_realm_sync_status_family_captures_both_classified_codes():
+    """The two codes the launcher's sheet renders, produced not hand-authored.
+
+    ``sync_remote_unreachable`` (fetch failed) and ``sync_auth_failed`` (the
+    remote half was DENIED and the verb degraded to local facts) are the whole
+    reason ``remote_checked``/``remote_check_error`` is a pair. A fixture family
+    that captured only the happy envelope would leave the launcher's two
+    non-trivial render arms driven by strings nobody produced.
+    """
+
+    captured = {
+        name: _read(name)["stdout"]
+        for name in (
+            "realm_sync_status_remote_unreachable.json",
+            "realm_sync_status_auth_denied.json",
+        )
+    }
+    codes = {envelope["remote_check_error"] for envelope in captured.values()}
+    assert codes == {"sync_remote_unreachable", "sync_auth_failed"}
+    for name, envelope in captured.items():
+        assert envelope["kind"] == "realm_sync", name
+        assert envelope["remote_checked"] is False, name
+        # The degrade's whole point: the LOCAL half still answers.
+        for local_field in ("state", "ahead", "behind", "store_drift", "workspace_statuses"):
+            assert local_field in envelope, (name, local_field)
+
+
+def test_the_unknown_realm_status_is_a_typed_refusal_not_a_crash():
+    """Pins the defect this family found, at the bytes.
+
+    ``_cmd_realm_sync_status`` did not catch the store's ``NotFound``, so an
+    unknown realm id left the handler as an uncaught exception whose message is
+    the ABSOLUTE PATH of the realm JSON. Generating this case is what made that
+    visible; this assertion is what keeps it fixed.
+    """
+
+    fixture = _read("realm_sync_status_not_found.json")
+    assert fixture["exit_code"] == ERROR_EXIT_CODES["not_found"]
+    assert fixture["stdout"]["kind"] == "error"
+    assert fixture["stdout"]["error"]["code"] == "not_found"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "realm_sync_status_not_found.json",
+        "realm_sync_status_remote_unreachable.json",
+        "realm_sync_status_auth_denied.json",
+    ],
+)
+def test_no_realm_sync_fixture_carries_a_machine_path(name):
+    """These bytes are mirrored into the Launcher repo verbatim.
+
+    The realm-sync envelope carries ``sync_repo``, which is a DISPLAY path
+    (``_safe_display_path`` — store-relative, or a bare basename). A generator
+    arrangement runs in a temp directory, so a regression that stopped relativising
+    it would bake this machine's temp root into a committed consumer fixture.
+    """
+
+    raw = (FIXTURES / name).read_text(encoding="utf-8")
+    for leak in ("C:\\", "X:\\", "/tmp/", "AppData", "Temp", "hermes-response-fixtures"):
+        assert leak not in raw, f"{name} leaks a machine path fragment {leak!r}"
