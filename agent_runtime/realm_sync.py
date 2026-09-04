@@ -310,6 +310,48 @@ def realm_sync_status(
         # is the same as a loss, so it is surfaced here and resolvable with
         # ``hermes harness realm sync resolve <realm> --key <k> --take …``.
         "profile_artifacts_held": profile_artifacts_held,
+        # The canvas family's accounting, so "this chart is empty because the
+        # drawing did not travel / is held / would not read" is answerable from
+        # the envelope rather than from a store walk. Additive and
+        # absent-tolerant, like every honesty field above it.
+        "flow_graphs": _flow_graph_status_row(realm.id, workspaces),
+    }
+
+
+def _flow_graph_status_row(realm_id: str, workspaces: list[Workspace]) -> dict[str, Any]:
+    """``{publishable, unpublished, held, unreadable}`` for the canvas family.
+
+    **Why this is a top-level key and NOT a fourth ``store_drift`` family**,
+    which is what the stage plan assumed: ``store_drift`` rows are exactly the
+    set the REVERT lane addresses. ``realm_revert`` sorts them through
+    ``_PROCESS_ORDER[row.family]`` — a direct subscript — and dispatches on
+    family for the upstream lookup, the baseline and the store door, so a family
+    added there without a revert arm would hand ``revert --all`` a KeyError and
+    offer the operator an exit that does not exist. A count without a revert arm
+    is honest; a drift row without one is not. The canvas revert arm is its own
+    row.
+
+    ``unpublished`` is the same hash-vs-baseline compare the other families
+    make, spent here only as a count.
+    """
+
+    from .flow_graph_sync import flow_graph_baseline_key, read_flow_graph_baseline
+
+    scan = _office_publish_scan(workspaces)
+    projection = _flow_graph_projection(scan.instance_ids)
+    baseline = read_flow_graph_baseline(realm_id)
+    unpublished = sum(
+        1
+        for graph_id, body_hash in projection.hashes().items()
+        if baseline.get(flow_graph_baseline_key(graph_id)) != body_hash
+    )
+    conflicts = paths.realm_sync_root() / paths.safe_path_token(realm_id) / "flow_graph_conflicts"
+    held = sorted(path.stem for path in conflicts.glob("*.json")) if conflicts.is_dir() else []
+    return {
+        "publishable": len(projection.graphs),
+        "unpublished": unpublished,
+        "held": held,
+        "unreadable": list(projection.unreadable),
     }
 
 

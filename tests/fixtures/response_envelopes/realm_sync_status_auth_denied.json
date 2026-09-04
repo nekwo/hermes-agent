@@ -16,6 +16,12 @@
     "artifacts": 1,
     "behind": 0,
     "conflicts": [],
+    "flow_graphs": {
+      "held": [],
+      "publishable": 0,
+      "unpublished": 0,
+      "unreadable": []
+    },
     "id": "realm_fixture_denied",
     "kind": "realm_sync",
     "last_publish": null,
