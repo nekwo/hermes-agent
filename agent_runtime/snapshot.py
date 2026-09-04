@@ -2645,14 +2645,53 @@ def _profile_templates_cached() -> list:
 
 
 def _available_persona_summary(agents) -> list[dict]:
+    """One placeable row per profile template, carrying the spellings that work.
+
+    The launcher's Presets lane takes ``persona_id`` off these rows verbatim
+    into ``runtime.agent.create`` -> ``--persona``, so a row that advertises a
+    spelling the CLI's own authority withholds places something the operator did
+    not choose. ``profile:<name>`` is exactly such a spelling for a profile that
+    TWO personas declare: it still parses (decision D-U1 exempts every
+    ``profile:`` id from the roster check) but ``profile_persona_resolution``
+    returns no match for an ambiguously-owned profile, so the resolver
+    synthesises a persona with config defaults and NO toolsets — a different
+    agent from the id printed beside it.
+
+    So the spellings come from :func:`agent_create.accepted_persona_spellings`,
+    the one authority for "how may an operator name this row", asked once per
+    OWNER of the profile. Three shapes fall out of that, and the third is why
+    this function still has to think:
+
+    * two or more owners — the authority answers each owner's bare id and
+      withholds ``profile:<name>``, so the row advertises the ids and not the
+      profile spelling.
+    * exactly one owner — bare id first, then ``profile:<name>``, which inherits
+      that owner's defaults.
+    * no owner at all — the template-only placement lane the launcher's library
+      exists for. The per-persona authority cannot answer it (there is no
+      persona to key on) and its synthesis is INTENDED here, so the row supplies
+      ``profile:<name>`` itself and the list is never empty.
+
+    ``backs_persona_id`` follows the same rule for the same reason. It used to
+    be built by a dict comprehension keyed on profile name, which silently kept
+    whichever owner iterated LAST; a row that names one of two owners as the
+    persona it places is the same lie in a different field.
+    """
+
     templates = _profile_templates_cached()
     if not templates:
         return []
-    backs_by_profile = {
-        str(getattr(agent, "hermes_profile", "") or ""): str(getattr(agent, "id", "") or "")
-        for agent in agents
-        if getattr(agent, "hermes_profile", None) and getattr(agent, "id", None)
-    }
+    # Local import: ``agent_create`` reaches into the CLI's persona resolver,
+    # and snapshot builds must not pay that import when there are no templates.
+    from .agent_create import accepted_persona_spellings
+
+    roster = list(agents or [])
+    owners_by_profile: dict[str, list] = {}
+    for agent in roster:
+        profile = str(getattr(agent, "hermes_profile", "") or "").strip()
+        persona_id = str(getattr(agent, "id", "") or "").strip()
+        if profile and persona_id:
+            owners_by_profile.setdefault(profile, []).append(agent)
     summaries: list[dict] = []
     for template in templates:
         profile_name = str(getattr(template, "name", "") or "").strip()
@@ -2670,9 +2709,15 @@ def _available_persona_summary(agents) -> list[dict]:
         description = _safe_text(str(getattr(template, "description", "") or ""))
         if description:
             item["description"] = description
-        backs_persona_id = backs_by_profile.get(profile_name)
-        if backs_persona_id:
-            item["backs_persona_id"] = backs_persona_id
+        owners = owners_by_profile.get(profile_name, [])
+        spellings: list[str] = []
+        for owner in owners:
+            for spelling in accepted_persona_spellings(owner, roster):
+                if spelling and spelling not in spellings:
+                    spellings.append(spelling)
+        item["persona_spellings"] = spellings or [item["persona_id"]]
+        if len(owners) == 1:
+            item["backs_persona_id"] = str(getattr(owners[0], "id", "") or "")
         summaries.append(item)
     return summaries
 
