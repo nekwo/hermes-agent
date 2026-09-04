@@ -42,10 +42,11 @@ The rules the bodies carry are load-bearing, so they live here once:
   a half-written store reads as ``{}`` and fails every credential closed until
   the write finishes, which is correct and is the worst kind of bug to chase.
 - ``store_lock``: the cross-process read-modify-write lock, over a lock path
-  the CALLER supplies. It takes a path rather than a root because
-  ``agent_runtime/locks.py`` holds the same OS primitive but resolves its
-  directory through ``paths.lock_dir()`` — i.e. it re-derives a root — which is
-  what every module in the gateway lane is forbidden to do.
+  the CALLER supplies — one line over ``locks._file_lock`` since R-D27. It is a
+  named door rather than a bare import because the ROOT is the thing the
+  gateway lane may not re-derive: ``locks``' other helpers resolve their
+  directory through ``paths.lock_dir()``, and this one must not, so the path
+  comes from the caller and the primitive comes from ``locks``.
 - ``iso_stamp``: one UTC spelling for every stored timestamp, so two stores
   written in the same ceremony cannot disagree about what "now" looks like.
 
@@ -55,21 +56,21 @@ lives only here.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import subprocess
 import tempfile
-import time
+from contextlib import AbstractContextManager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
-if os.name == "nt":  # pragma: no cover - platform split
-    import errno as _errno
-    import msvcrt
-else:  # pragma: no cover - platform split
-    import fcntl
+# The lock primitive, imported rather than restated (R-D27). ``_file_lock`` is
+# private to ``locks`` only in the sense that its NAME is: every other door in
+# that module derives a path from ``paths.lock_dir()``, and this lane must not,
+# so the path-taking form is the one door it can use. :func:`store_lock` below
+# is that public name for this package.
+from .locks import HarnessLockUnavailable, _file_lock
 
 
 def read_raw_text(path: Path) -> str | None:
@@ -81,7 +82,20 @@ def read_raw_text(path: Path) -> str | None:
     return value or None
 
 
-def os_error_reason(exc: OSError) -> str:
+def os_error_reason(exc: OSError | HarnessLockUnavailable) -> str:
+    """The store-failure vocabulary, one word per condition.
+
+    :class:`~agent_runtime.locks.HarnessLockUnavailable` is in the signature
+    since R-D27 and answers ``unwritable``, which is the same answer it fell
+    into by accident when :func:`store_lock` still swallowed it. Deliberate now
+    and named here rather than at seven call sites: the caller could not perform
+    its write, and ``unwritable`` is exactly what the CLI's ``store_unwritable``
+    family (D4h) is for — the message an operator reads then carries the lock's
+    own sentence, which names the budget and the file it waited on.
+    """
+
+    if isinstance(exc, HarnessLockUnavailable):
+        return "unwritable"
     if isinstance(exc, PermissionError):
         return "permission_denied"
     if isinstance(exc, FileNotFoundError):
@@ -290,69 +304,41 @@ def write_secure_json(path: Path, payload: dict[str, Any]) -> None:
         narrow_windows_acl(path)
 
 
-@contextlib.contextmanager
-def store_lock(path: Path, *, timeout_seconds: float = 10.0) -> Iterator[None]:
+def store_lock(
+    path: Path, *, timeout_seconds: float = 10.0
+) -> AbstractContextManager[None]:
     """Serialise read-modify-write across PROCESSES, on the caller's lock path.
 
     A real concurrency, not a theoretical one: ``harness gateway pair`` runs in
     the operator's shell while the serve process redeems and stamps ``last_seen``
-    from its own. ``agent_runtime/locks.py`` holds the same OS primitive but
-    resolves its directory through ``paths.lock_dir()`` — i.e. it re-derives a
-    root — which is exactly what every module in the gateway lane is forbidden to
-    do, so the primitive is restated here over a path the caller supplied.
+    from its own.
 
-    Falls through WITHOUT the lock rather than raising if it cannot be taken:
-    the alternative is a pairing verb that fails because a lock file is on a
-    filesystem that will not lock, and the writes it guards are atomic-replace
-    either way, so the loss is a lost update and not a corrupt store.
+    **The body is ``locks._file_lock``'s, and it used to be a second copy of
+    it (R-D27).** The copy had drifted into the exact defect that module's
+    docstring records having been rewritten to remove, and worse in both arms:
+    Windows polled ``LK_NBLCK`` to the deadline and then ``break``ed with
+    ``locked = False`` and yielded ANYWAY — so a caller that lost the race did
+    its read-modify-write of ``peers.json`` ten seconds late and unsynchronised,
+    with nothing on the wire, in the store or in the return value able to tell
+    that write from one that held the lock. POSIX never reached a deadline at
+    all: a bare blocking ``flock(fd, LOCK_EX)`` that ignored ``timeout_seconds``
+    outright, so a second open file description in the same process did not
+    stall for ten seconds, it never returned. The two-machine lane has a Mac in
+    it. Measured 2026-09-04 and written up in the D6h field notes' §12.6.
+
+    So the contract is now the one that module already documents, on every
+    platform: one deadline loop, contention polled, a real fault re-raised
+    unwrapped, and running out of time raising
+    :class:`~agent_runtime.locks.HarnessLockUnavailable`. **The block runs only
+    with the lock held** — the yield-unlocked door is gone, and with it the
+    argument that "the loss is a lost update and not a corrupt store": a lost
+    update the process cannot report is not a cost anyone chose, it is one
+    nobody could see. Every caller on this lane already returns a typed
+    ``StoreRefusal`` for a store it could not write and now returns it here too.
+
+    A lock file that cannot even be OPENED (an unwritable directory, a
+    filesystem with no locking) also raises rather than falling through, as the
+    same ``OSError`` the write two lines later would have raised anyway.
     """
 
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        handle = open(path, "a+b")
-    except OSError:
-        yield
-        return
-    try:
-        deadline = time.monotonic() + float(timeout_seconds)
-        locked = False
-        if os.name == "nt":  # pragma: no cover - platform split
-            handle.seek(0, os.SEEK_END)
-            if handle.tell() == 0:
-                handle.write(b"0")
-                handle.flush()
-            handle.seek(0)
-            while True:
-                try:
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-                    locked = True
-                    break
-                except OSError as exc:
-                    if exc.errno not in {_errno.EACCES, _errno.EDEADLK, 13, 36}:
-                        break
-                    if time.monotonic() >= deadline:
-                        break
-                    time.sleep(0.02)
-        else:  # pragma: no cover - platform split
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-                locked = True
-            except OSError:
-                locked = False
-        try:
-            yield
-        finally:
-            if locked:
-                try:
-                    if os.name == "nt":  # pragma: no cover - platform split
-                        handle.seek(0)
-                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-                    else:  # pragma: no cover - platform split
-                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-                except OSError:
-                    pass
-    finally:
-        try:
-            handle.close()
-        except OSError:
-            pass
+    return _file_lock(path, timeout_seconds=timeout_seconds)

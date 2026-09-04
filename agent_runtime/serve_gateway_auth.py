@@ -159,6 +159,7 @@ from .gateway_pairing_codes import (
     pending_codes,
     supersede_pending,
 )
+from .store_file_io import HarnessLockUnavailable
 from .store_file_io import iso_stamp as _iso
 from .store_file_io import os_error_reason as _os_reason
 from .store_file_io import read_json_object as _read_json
@@ -625,7 +626,7 @@ def revoke_device(
             if record is None:  # pragma: no cover - a row we just wrote
                 return StoreRefusal("store_corrupt", "the device row will not decode")
             return record
-    except OSError as exc:
+    except (OSError, HarnessLockUnavailable) as exc:
         return StoreRefusal(_os_reason(exc), str(exc))
 
 
@@ -717,7 +718,7 @@ def mint_pairing_code(
                 name=_clean_name(name) or None,
                 expires_at=expires_at,
             )
-    except OSError as exc:
+    except (OSError, HarnessLockUnavailable) as exc:
         return StoreRefusal(_os_reason(exc), str(exc))
 
 
@@ -809,7 +810,7 @@ def redeem_pairing_code(
             return DeviceCredential(
                 device_id=device_id, token=token, tier=tier, name=name
             )
-    except OSError as exc:
+    except (OSError, HarnessLockUnavailable) as exc:
         return StoreRefusal(_os_reason(exc), str(exc))
 
 
@@ -907,6 +908,12 @@ def _store_lock(store_root: Path | str, *, timeout_seconds: float = 10.0):
     ``gateway_pairing_codes``), so two lock files would be two names for a
     mutual exclusion that has to be one. The filename is historical; the scope
     it protects is the directory.
+
+    Since R-D27 it REFUSES at ``timeout_seconds`` — ``HarnessLockUnavailable``,
+    on every platform — instead of proceeding unlocked, so each caller catches
+    it beside the ``OSError`` it already turned into a typed ``StoreRefusal``.
+    The two best-effort writers (:func:`note_device_seen` and
+    ``gateway_peers._touch_cache``) catch ``Exception`` and were already covered.
     """
 
     return _file_lock(

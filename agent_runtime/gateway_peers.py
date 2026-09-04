@@ -185,6 +185,7 @@ from .serve_gateway_auth import (
     _store_lock,
     _write_pairing,
 )
+from .store_file_io import HarnessLockUnavailable
 from .store_file_io import iso_stamp as _iso
 from .store_file_io import os_error_reason as _os_reason
 from .store_file_io import read_json_object as _read_json
@@ -720,7 +721,7 @@ def revoke_peer(
             record = _decode_peer(row)
             if record is None:  # pragma: no cover - a row we just wrote
                 return StoreRefusal("store_corrupt", "the peer row will not decode")
-    except OSError as exc:
+    except (OSError, HarnessLockUnavailable) as exc:
         return StoreRefusal(_os_reason(exc), str(exc))
     _emit_peer_event(
         PEER_EVENT_REVOKED,
@@ -814,7 +815,7 @@ def mint_peer_code(
             return PeerPairingCode(
                 code=code, request_id=request_id, note=cleaned, expires_at=expires_at
             )
-    except OSError as exc:
+    except (OSError, HarnessLockUnavailable) as exc:
         return StoreRefusal(_os_reason(exc), str(exc))
 
 
@@ -950,7 +951,7 @@ def redeem_peer_code(
                 display_name=name,
                 expires_at=expires_at,
             )
-    except OSError as exc:
+    except (OSError, HarnessLockUnavailable) as exc:
         return StoreRefusal(_os_reason(exc), str(exc))
     # Cleared AFTER the lock closed, which is why the credential is captured
     # above and returned below rather than returned from inside the block.
@@ -1021,7 +1022,7 @@ def record_peer(
             record = _decode_peer(rows[peer_install_id])
             if record is None:  # pragma: no cover - a row we just wrote
                 return StoreRefusal("store_corrupt", "the peer row will not decode")
-    except OSError as exc:
+    except (OSError, HarnessLockUnavailable) as exc:
         return StoreRefusal(_os_reason(exc), str(exc))
     _clear_revoked_you(store_root, peer_install_id, now=stamp)
     # Emitted OUTSIDE the lock: an EventLog append is another store's write, and
@@ -1808,15 +1809,19 @@ _LAST_SEEN_REVISION: dict[str, tuple[int, int]] = {}
 #: **In-process mutual exclusion for the cache's read-modify-write**, on top of
 #: the cross-process file lock and not instead of it.
 #:
-#: ``store_file_io.store_lock`` documents that it falls through WITHOUT the lock
-#: rather than raising when it cannot be taken, and argues correctly that the
-#: cost is a lost update rather than a corrupt store. For the credential stores
-#: that trade is right: their writers are ceremonies an operator runs one at a
-#: time. The CACHE has a different writer set — a handshake on the listener
-#: thread, a dial from a tool, an announce fan-out on a background thread, all
-#: inside ONE serve process and all merging into one row — so a lost update here
-#: is not theoretical, it is what a boot-time announce racing the first hello
-#: does, and it silently drops the field the other writer had just set.
+#: ``store_file_io.store_lock`` used to fall through WITHOUT the lock rather
+#: than raising when it could not be taken, and this lock was the answer to the
+#: lost update that let through. R-D27 closed the fall-through — the store lock
+#: now refuses at its deadline — and this lock is MORE necessary, not less: the
+#: cross-process lock is not reentrant, so two threads of ONE serve process
+#: contending on it no longer lose an update, they spend the whole budget and
+#: one of them refuses. The CACHE is where that would bite: its writers are a
+#: handshake on the listener thread, a dial from a tool and an announce fan-out
+#: on a background thread, all inside one process and all merging into one row.
+#: Serialising them HERE means they queue in memory and reach the file lock one
+#: at a time, so the second writer waits microseconds instead of racing a ten
+#: second refusal — and a boot-time announce racing the first hello still cannot
+#: drop the field the other writer had just set.
 #:
 #: A module-level lock is the whole fix because every write goes through
 #: :func:`_touch_cache`. Held only across the read-modify-write, never across an

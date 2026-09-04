@@ -16,15 +16,25 @@ So the integration cases below build their directory OUTSIDE the profile, on the
 volume this checkout lives on, and strip its inheritance down to what the
 operator's store actually had. A test that used ``tmp_path`` would be green
 against the bug, which is the whole reason the bug reached hardware.
+
+The second half of the file is R-D27 and is the same shape of story: the
+module's OTHER Windows-shaped helper, ``store_lock``, polled to its deadline and
+then ran the caller's read-modify-write anyway, while its POSIX arm ignored the
+deadline outright and blocked forever. Those cases assert on the refusal and on
+the block never running — never on elapsed time alone, which the defect would
+have satisfied.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 import types
 from pathlib import Path
 
@@ -33,8 +43,10 @@ import pytest
 from agent_runtime import store_file_io
 from agent_runtime.store_file_io import (
     WINDOWS_STORE_GRANT,
+    HarnessLockUnavailable,
     narrow_windows_acl,
     prepare_windows_replace,
+    store_lock,
     write_secure_json,
 )
 
@@ -290,3 +302,227 @@ def test_the_narrowing_still_names_exactly_one_principal(hostile_directory):
     ]
     assert len(principals) == 1, _file_acl(target)
     assert (os.environ.get("USERNAME") or "").lower() in principals[0].lower()
+
+
+# ── the lock, on both platforms (R-D27) ──────────────────────────────────────
+#
+# ``store_lock`` used to be a second copy of ``locks._file_lock`` carrying the
+# defect that module was rewritten to remove. Windows polled to the deadline and
+# then yielded WITHOUT the lock, so a caller that lost the race did its
+# read-modify-write of ``peers.json`` ten seconds late and unsynchronised, and
+# nothing — not the store, not the return value, not the wire — could tell that
+# write from one that held the lock. POSIX took a bare blocking
+# ``flock(fd, LOCK_EX)`` and never reached a deadline at all.
+#
+# So these assert on the ERROR and on the block never running, never on timing
+# alone: a test that only measured elapsed time would have passed against the
+# Windows defect, which spent the identical ten seconds and then wrote anyway.
+
+_LOCK_TIMEOUT_SECONDS = 0.5
+
+
+@contextlib.contextmanager
+def _held_in_a_thread(path: Path):
+    """Hold ``path``'s lock on ANOTHER thread for the body of the ``with``.
+
+    Another thread rather than another process because the lock has to be real
+    on both platforms and a subprocess would need an interpreter start inside
+    the half-second budget these tests measure. It contends either way: ``flock``
+    conflicts per open file description and ``msvcrt`` per byte-range request,
+    so a second acquisition from this same process is exactly the contention a
+    second process would raise — which is also the property
+    ``locks._file_lock``'s docstring calls out as deliberate.
+    """
+
+    acquired = threading.Event()
+    release = threading.Event()
+    failure: list[BaseException] = []
+
+    def _hold() -> None:
+        try:
+            with store_lock(path, timeout_seconds=_LOCK_TIMEOUT_SECONDS):
+                acquired.set()
+                release.wait(30)
+        except BaseException as exc:  # pragma: no cover - the fixture failing
+            failure.append(exc)
+            acquired.set()
+
+    holder = threading.Thread(target=_hold, name="store-lock-holder", daemon=True)
+    holder.start()
+    try:
+        assert acquired.wait(10), "the holder thread never took the lock"
+        assert not failure, f"the holder thread could not take the lock: {failure[0]!r}"
+        yield
+    finally:
+        release.set()
+        holder.join(10)
+
+
+def test_a_lock_another_holder_owns_refuses_at_the_deadline(tmp_path):
+    """The contract, in one call: refuse by the budget, and never yield unlocked.
+
+    ``ran`` is the assertion that matters. The old Windows arm reached this same
+    line after the same wait and set it to ``True``, having decided that a lost
+    update was cheaper than a refusal — a trade nobody could audit, because the
+    caller had no way to learn which of the two had happened."""
+
+    lock_path = tmp_path / "gateway" / "devices.lock"
+    ran = False
+    with _held_in_a_thread(lock_path):
+        started = time.monotonic()
+        with pytest.raises(HarnessLockUnavailable) as refusal:
+            with store_lock(lock_path, timeout_seconds=_LOCK_TIMEOUT_SECONDS):
+                ran = True  # pragma: no cover - the defect, if it comes back
+        elapsed = time.monotonic() - started
+
+    assert not ran, (
+        "the block ran while another holder owned the lock — this is the "
+        "unsynchronised read-modify-write R-D27 exists to stop"
+    )
+    assert elapsed < _LOCK_TIMEOUT_SECONDS + 0.5, (
+        f"the refusal took {elapsed:.2f}s against a {_LOCK_TIMEOUT_SECONDS}s "
+        "budget, so the deadline is not the thing bounding the wait"
+    )
+    assert str(lock_path) in str(refusal.value), (
+        "the refusal names the lock file, which is the only way an operator "
+        f"reading the CLI's message learns WHICH store waited: {refusal.value!r}"
+    )
+
+
+def test_the_lock_is_free_again_the_moment_its_holder_leaves(tmp_path):
+    """A refusal is not a wedge: the next caller after a release gets in.
+
+    Pinned because the fix moved the release into ``locks._file_lock``'s
+    ``finally`` and a lock that refused forever would pass the test above."""
+
+    lock_path = tmp_path / "gateway" / "devices.lock"
+    with _held_in_a_thread(lock_path):
+        with pytest.raises(HarnessLockUnavailable):
+            with store_lock(lock_path, timeout_seconds=_LOCK_TIMEOUT_SECONDS):
+                pass  # pragma: no cover - refused above
+
+    ran = False
+    with store_lock(lock_path, timeout_seconds=_LOCK_TIMEOUT_SECONDS):
+        ran = True
+    assert ran, "the lock stayed taken after its holder released it"
+
+
+posix_only = pytest.mark.skipif(
+    os.name == "nt",
+    reason=(
+        "this pins the POSIX arm's own defect: it was a bare blocking "
+        "flock(fd, LOCK_EX) that read timeout_seconds and ignored it, and "
+        "flock conflicts per OPEN FILE DESCRIPTION — so a second acquisition "
+        "inside one process did not stall for the budget, it never returned. "
+        "Windows reaches the same refusal through msvcrt's byte-range lock and "
+        "is pinned by test_the_windows_arm_refuses_rather_than_writing_unlocked."
+    ),
+)
+
+
+@posix_only
+def test_a_nested_acquire_refuses_instead_of_deadlocking_forever(tmp_path):
+    """The Mac's version of the bug, which is worse than the Windows one.
+
+    One thread, one lock, taken twice. Under the old arm this call never
+    returned — and the two-machine lane has a Mac in it, so "it stalls for ten
+    seconds" was never the whole story. The bound below is the test's own
+    watchdog as much as an assertion: it can only be reached at all if the
+    deadline is honoured."""
+
+    lock_path = tmp_path / "gateway" / "devices.lock"
+    started = time.monotonic()
+    with store_lock(lock_path, timeout_seconds=_LOCK_TIMEOUT_SECONDS):
+        with pytest.raises(HarnessLockUnavailable):
+            with store_lock(lock_path, timeout_seconds=_LOCK_TIMEOUT_SECONDS):
+                pass  # pragma: no cover - refused above
+    assert time.monotonic() - started < _LOCK_TIMEOUT_SECONDS + 0.5
+
+
+@windows_only
+def test_the_windows_arm_refuses_rather_than_writing_unlocked(tmp_path):
+    """The measured defect, as a test: it polled to the deadline and yielded.
+
+    Two claims, and the second is the one the old code failed. That the wait is
+    bounded BY the deadline — the elapsed floor proves the poll actually ran to
+    it rather than refusing on the first contended attempt — and that what
+    follows the wait is a refusal and not the block."""
+
+    lock_path = tmp_path / "gateway" / "devices.lock"
+    ran = False
+    with _held_in_a_thread(lock_path):
+        started = time.monotonic()
+        with pytest.raises(HarnessLockUnavailable):
+            with store_lock(lock_path, timeout_seconds=_LOCK_TIMEOUT_SECONDS):
+                ran = True  # pragma: no cover - the defect, if it comes back
+        elapsed = time.monotonic() - started
+
+    assert not ran
+    assert elapsed >= _LOCK_TIMEOUT_SECONDS * 0.9, (
+        f"the refusal came after {elapsed:.2f}s, well inside the "
+        f"{_LOCK_TIMEOUT_SECONDS}s budget — a contended lock must be POLLED to "
+        "the deadline, because the holder usually leaves before it expires"
+    )
+    assert elapsed < _LOCK_TIMEOUT_SECONDS + 0.5
+
+
+# ── the caller's half: the refusal reaches the operator's vocabulary ──────────
+
+
+def test_record_peer_refuses_the_unwritable_family_rather_than_writing_unlocked(
+    tmp_path, monkeypatch
+):
+    """R-D27 through a real caller, to the word the CLI puts on the wire.
+
+    ``record_peer`` is the door D3 run #1 watched fail — the handshake completed
+    and the row was never recorded — so it is the one to prove twice over: the
+    refusal is typed (a ``StoreRefusal``, not a traceback out of a verb), its
+    reason is in the family D4h routes to ``store_unwritable``, and
+    ``peers.json`` is still ABSENT. The last is the point. The old lock let this
+    call write the file ten seconds late with another holder believing it had
+    exclusive access, and a test that only checked the return value would have
+    been just as green against that.
+
+    The budget is shortened through the module's own binding rather than faked:
+    the lock, the contention and the raise are all real, and only the ten
+    seconds a test cannot afford to wait are not."""
+
+    from agent_runtime import gateway_peers
+    from agent_runtime.gateway_identity import gateway_dir
+    from agent_runtime.gateway_peers import PeerRecord, peer_store_path
+
+    real_store_lock = gateway_peers._store_lock
+    monkeypatch.setattr(
+        gateway_peers,
+        "_store_lock",
+        lambda root, **kwargs: real_store_lock(
+            root, timeout_seconds=_LOCK_TIMEOUT_SECONDS
+        ),
+    )
+
+    with _held_in_a_thread(gateway_dir(tmp_path) / "devices.lock"):
+        refusal = gateway_peers.record_peer(
+            tmp_path,
+            peer_install_id="inst_a1b2c3d4",
+            secret="f" * 64,
+            display_name="workstation",
+        )
+
+    assert not isinstance(refusal, PeerRecord), (
+        "the write went through while another holder had the lock"
+    )
+    assert not peer_store_path(tmp_path).exists(), (
+        "peers.json was written by a call that never held the lock"
+    )
+    assert refusal.reason == "unwritable"
+
+    from hermes_cli.harness_parts.gateway_commands import (
+        _REFUSAL_CODES,
+        _STORE_WRITE_REASONS,
+    )
+
+    assert refusal.reason in _STORE_WRITE_REASONS
+    assert _REFUSAL_CODES[refusal.reason] == "store_unwritable", (
+        "a lock this machine could not take is a store this machine could not "
+        "write (family 1), never the network word the sheet used to print"
+    )
