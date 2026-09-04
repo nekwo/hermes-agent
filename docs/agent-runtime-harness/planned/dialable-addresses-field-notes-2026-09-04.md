@@ -500,3 +500,186 @@ narrows the existing target rather than only new files: the first `peers join`
 after the rebuild is the repair. If a store somehow resists, `icacls
 X:\Eternia\.hermes\agent-runtime\gateway\peers.json /grant beast:(R,W,D)` is the
 manual equivalent.
+
+## 11. D5h — the join that completed and told the cache it had not (R-D16)
+
+Branch `feat/d5-join-reachability`, same worktree, from main `3d3a33be3e`.
+Commit `fb99163718`. Nothing here was run against `X:/Eternia/.hermes`.
+
+### 11.1 The receipt, and what it was measuring
+
+D3 run #2, 20:19:19 UTC: the join dialled `192.168.1.39:8765`, redeemed,
+stored the secret, and emitted `gateway.peer.recorded source=join`. The cache
+row for that peer read `reachability: unreachable, unreachable_since
+18:03:17` — a word set two hours and sixteen minutes earlier, by run #1's
+dial, and never touched since. The launcher reads that row, calls the edge
+unusable and re-requests a pairing code every minute, which mints codes on
+the far side for an edge that is already up.
+
+`grep -n note_dial_result` across the repo, before this stage, is the whole
+diagnosis in four lines:
+
+```
+agent_runtime/gateway_peers.py:1181   note_dial_result(root, ..., ok=True)    <- dial_peer
+agent_runtime/gateway_peers.py:1184   note_dial_result(root, ..., ok=False)   <- dial_peer
+agent_runtime/gateway_announce.py:161 note_dial_result(root, ..., ok=ok)      <- the fan-out
+agent_runtime/gateway_peers.py:1518   def note_dial_result(...)
+```
+
+The chat lane and the announce fan-out. No ceremony. `peers join` completes
+a TLS handshake against a listener that answers, and the one function whose
+job is to write that down was never called from it — so a store's word for
+"can I reach this peer" was only ever as fresh as the last CHAT it had.
+
+### 11.2 The MINTING side had the mirror hole, and it is the bigger one
+
+The obvious half is the joiner: it dials, so it should record. The half the
+receipt could not show — because Windows was the joiner both runs — is the
+side that ANSWERS.
+
+`redeem_peer_code` runs inside the serve's hello authenticator
+(`hermes_cli/harness_parts/serve.py`, the `peer_code` arm). It writes the
+peer's TRUST row and returns the secret. It is not a dial, so nothing on that
+path had ever considered recording reachability — and the result is that the
+install which minted the invitation ends the ceremony with a peer row and no
+cache row at all (`reachability: unknown`).
+
+That is inconsistent with the arm immediately below it. A verified
+`peer_install_id` hello already calls `cache_peer_hello`, which sets
+`reachability: reachable` and clears `unreachable_since`: an inbound hello
+from a peer that authenticated IS treated as a reachability fact today. A
+redeemed join hello is the same evidence, plus a code a human minted at this
+machine seconds earlier. So this is one arm catching up with its neighbour,
+not a new posture.
+
+### 11.3 Where the calls went, and why each is where it is
+
+**Joiner, success — AFTER `record_peer`, not before.** A cache row for an
+install this store holds no credential for describes an edge no dial could
+use. Putting the note after the trust write also means the store-unwritable
+refusal (R-D14) still returns without leaving a "reachable" claim behind
+about a pairing that did not land.
+
+**Joiner, failure — on the `no_candidate_answered` path only.** Three other
+refusals sit between the dial and the row, and none of them is a reachability
+fact:
+
+* `tls_fingerprint_mismatch` — the address answered. It is a statement about
+  the install's identity, as that branch's own comment says.
+* `no hello_ok` / `no_peer_secret` — the far side answered and refused a
+  credential. It is up.
+* `install_id_mismatch` — something else is on that address, and the id we
+  would key the row on is the wrong machine's.
+
+Marking any of those unreachable would put a network word on a non-network
+fact, which is exactly the class of defect R-D14 was carved out for.
+
+**The failure detail is the string the refusal prints.** `dial_peer` passes
+`"; ".join(failures)` with `host:port ExcName` entries; the join loop already
+builds `tried` in the same shape (`", ".join(attempts)`, `host:port
+(ExcName)`) for the operator's sentence. Reusing that one string rather than
+rebuilding a parallel one is what stops the cache and the message disagreeing
+about which addresses were tried — the same reasoning D1 used for the refusal
+itself.
+
+**Listener — outside `redeem_peer_code`'s lock.** `locks._file_lock` is
+explicitly NOT reentrant, and `_store_lock` is the gateway DIRECTORY's lock,
+shared by both ceremonies. `note_dial_result` → `_touch_cache` takes that same
+lock. Called inside `redeem_peer_code`'s `with` block it would contend with
+the write it is describing for the full ten-second budget and then be
+swallowed by `_touch_cache`'s own `except Exception: return`: a silent no-op
+that costs ten seconds per join. So the call sits at the serve call site,
+after the store function has returned its `PeerCredential`.
+
+(`_clear_revoked_you` at `gateway_peers.py:929` is inside that same lock and
+reaches `_touch_cache` when the flag is set. That is a latent instance of the
+identical shape. Not touched here — it is not this stage's row — but it is
+worth a queue line.)
+
+### 11.4 What did NOT need changing
+
+* **The event.** `_touch_cache` already emits `gateway.peer.reachability` on a
+  CHANGE of word, with `unreachable_since` and the error detail, and returns
+  before the generic `gateway.peer.updated`. Both new call sites go through
+  `note_dial_result`, so the flip is emitted by construction rather than by a
+  second emitter that could drift.
+* **The lock and the file.** Same reason: one write door for the sidecar.
+  `test_gateway_peers_store.py::test_no_cache_writer_can_change_a_trust_field`
+  compares `peers.json` BYTES across every cache writer, and nothing here adds
+  a writer — it adds two callers of an existing one.
+* **`gateway announce`.** Already records both outcomes, and already exempts a
+  revoke's own announce.
+* **`peers pair` / `gateway introduce`.** They mint; they do not dial. There is
+  nothing they could have measured.
+
+### 11.5 What each test pins
+
+| Test | What breaks without it |
+|---|---|
+| `test_a_completed_join_marks_the_peer_reachable` | the defect itself, with the operator's own starting state seeded (a row already written off by an earlier dial) — and `unreachable_since` CLEARED, not left stamped beside the new word |
+| `test_a_join_that_reached_nothing_marks_the_peer_unreachable` | the failing half, and that the event's `error` carries the same `host:port (ExcName)` string the refusal prints |
+| `test_the_flip_emits_the_same_event_the_chat_dial_emits` | `gateway.peer.reachability`, once, on the change — the subscriber contract. A second emitter, or a per-handshake emit, shows up here |
+| `test_the_reachability_word_lands_in_the_cache_and_not_the_trust_store` | the split at THIS verb: `peers.json` carries no `reachability`, `peers_cache.json` does |
+| `test_a_completed_join_leaves_both_caches_saying_reachable` (two roots) | the listener half, which no single-root test can see: A never runs a CLI join and B never runs a redemption. Also asserts both event logs carry the flip, from the two different processes that wrote it |
+
+The four CLI tests were run red first, against the reverted source: 4 failed,
+38 passed. Three fail on the word, the fourth on `peers_cache.json` not
+existing at all — which is the honest shape of the defect on a fresh root.
+
+### 11.6 Verification
+
+```
+bash scripts/run_tests.sh tests/hermes_cli/test_gateway_peer_verbs.py
+  -> 1 file, 42 passed, 0 failed (27.8s)
+
+bash scripts/run_tests.sh tests/agent_runtime/test_gateway_peer_two_roots_e2e.py \
+  --file-timeout 900
+  -> 1 file, 9 passed, 0 failed (341.4s)
+
+bash scripts/run_tests.sh tests/agent_runtime/test_gateway_peers_store.py \
+  tests/agent_runtime/test_serve_gateway_peer_lane.py --file-timeout 900
+  -> 2 files, 89 passed, 0 failed (20.6s)
+```
+
+`ruff check` clean on all four touched files.
+
+### 11.7 The cite gate, which fifteen lines of `serve.py` turned red
+
+`scripts/doc_cite_adjacency.py` was green on this branch's base and red after
+the change: sixteen canon cites into `hermes_cli/harness_parts/serve.py` sat
+below the insertion point (line 738) and every one of them moved by exactly the
++15 the diff added. Re-anchored mechanically — the same move main's HEAD made
+for the D1 wave's `harness.py` insertions — with the bare `:N` continuation
+spelling handled beside the qualified one.
+
+One extra, and it is a waiver burned rather than a number moved.
+`07-observability.md|serve.py:1751` was in the baseline as a TABLE ROW whose
+reason says *"re-anchoring needs a human reading the row, not a rule"*. The
+insertion happened to slide an unrelated symbol into its ±3 window, so the
+ratchet reported it as a STALE WAIVER — correctly, and for the wrong reason.
+Read it: the row is about the boot timeline riding the `ready` frame, which is
+`ready_frame["boot_timeline"] = timeline.stamps()`, and its sibling cite is the
+`timeline.log_line(...)` call. Both re-anchored to those lines, the waiver
+deleted. That is the human read the entry was waiting for; it is not a +15.
+
+One gate is red and stayed red for a reason that predates this stage, checked by
+re-running it against the base with the docs stashed:
+`tests/test_coverage_claims_resolve.py::test_every_coverage_claim_names_a_test_that_exists`
+(a claim naming
+`test_a_cleared_binding_is_not_stale_because_its_own_event_demotes_the_batch`).
+Not touched — it is not this stage's row.
+
+### 11.8 Owed to D3's re-run
+
+The launcher half (D5l) is what turns this into the behaviour the operator
+sees: the every-minute `requesting attempt 0` drumbeat should stop once the
+edge reads `reachable`. This stage only makes the word true; nothing here
+reads it.
+
+The operator's live cache at
+`X:/Eternia/.hermes/agent-runtime/gateway/peers_cache.json` still holds
+`unreachable_since 18:03:17` for the Mac. It is not repaired by a rebuild —
+it is repaired by the next completed handshake, which is the first `peers
+join` (either direction) after the new build. A chat dial would also do it,
+and always would have; that is why the row was accurate the one time anybody
+looked at it through the chat lane.
