@@ -450,6 +450,153 @@ def test_the_enumerator_drops_loopback_link_local_and_wildcards(monkeypatch):
     assert gateway_commands._machine_addresses() == ["10.0.0.4", "2001:db8::5"]
 
 
+def test_the_default_route_probe_asks_the_internet_and_its_answer_is_offered_first(
+    monkeypatch,
+):
+    """R-D2, on the operator's own measured fixture set.
+
+    This Windows PC has four addresses: a router-granted ``192.168.1.203`` on
+    Wi-Fi, a ``10.97.7.100`` "Local Area Connection" with no gateway, a
+    Hamachi-class ``25.3.92.221``, and a global v6. The old probe connected to
+    ``10.255.255.255``, so the kernel named the 10.x interface, and the only
+    address a machine on the same LAN can reach came out THIRD — which is to say
+    not the one the payload writers hand out.
+
+    The probe's far address is asserted here rather than left implicit: the
+    whole correction is *which question the kernel was asked*, and a test that
+    checked only the resulting order would still pass if a later edit pointed it
+    back at a private range that happened to select the right adapter on the box
+    the suite ran on.
+    """
+
+    import socket
+
+    from hermes_cli.harness_parts import gateway_commands
+
+    asked: list[tuple] = []
+
+    class _Probe:
+        def connect(self, address):
+            asked.append(address)
+
+        def getsockname(self):
+            return ("192.168.1.203", 0)
+
+        def close(self):
+            pass
+
+    def _fake_getaddrinfo(host, port, family=0, *args, **kwargs):
+        rows = {
+            socket.AF_INET: [
+                (socket.AF_INET, 0, 0, "", ("10.97.7.100", 0)),
+                (socket.AF_INET, 0, 0, "", ("25.3.92.221", 0)),
+                (socket.AF_INET, 0, 0, "", ("192.168.1.203", 0)),
+            ],
+            socket.AF_INET6: [
+                (socket.AF_INET6, 0, 0, "", ("2620:9b::1903:5cdd", 0, 0, 0)),
+            ],
+        }
+        return rows.get(family, [])
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: _Probe())
+
+    assert gateway_commands._machine_addresses() == [
+        "192.168.1.203",
+        "10.97.7.100",
+        "25.3.92.221",
+        "2620:9b::1903:5cdd",
+    ]
+    assert asked == [("1.1.1.1", 53)]
+
+
+def test_a_second_address_on_the_default_routes_own_subnet_outranks_other_private_ones(
+    monkeypatch,
+):
+    """Rank 1 of R-D2, which the operator's own machine happens not to exercise.
+
+    Two addresses on the segment the default route is on are both reachable by a
+    peer on that segment; a private address on some other segment is a guess. So
+    "same /24 as the first" sits between "the first" and "private somewhere" —
+    and it is asserted rather than assumed because it is the only rank with
+    arithmetic in it.
+    """
+
+    import socket
+
+    from hermes_cli.harness_parts import gateway_commands
+
+    class _Probe:
+        def connect(self, address):
+            pass
+
+        def getsockname(self):
+            return ("192.168.1.203", 0)
+
+        def close(self):
+            pass
+
+    def _fake_getaddrinfo(host, port, family=0, *args, **kwargs):
+        if family != socket.AF_INET:
+            return []
+        return [
+            (socket.AF_INET, 0, 0, "", ("172.20.5.5", 0)),
+            (socket.AF_INET, 0, 0, "", ("192.168.1.77", 0)),
+            (socket.AF_INET, 0, 0, "", ("192.168.1.203", 0)),
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: _Probe())
+
+    assert gateway_commands._machine_addresses() == [
+        "192.168.1.203",
+        "192.168.1.77",
+        "172.20.5.5",
+    ]
+
+
+def test_the_cap_is_applied_after_the_order_so_the_lan_address_survives_it(
+    monkeypatch,
+):
+    """The half of the S4 failure that a reordering alone would not have fixed.
+
+    :data:`MAX_CANDIDATE_ENDPOINTS` is four, and it is the peer ROW's cap — a
+    list longer than the row holds advertises addresses that vanish at the far
+    end. Truncating a discovery-ordered list can therefore delete the one
+    address that works; truncating a ranked one deletes the worst guesses.
+    """
+
+    import socket
+
+    from hermes_cli.harness_parts import gateway_commands
+
+    class _Probe:
+        def connect(self, address):
+            pass
+
+        def getsockname(self):
+            return ("192.168.1.203", 0)
+
+        def close(self):
+            pass
+
+    def _fake_getaddrinfo(host, port, family=0, *args, **kwargs):
+        if family != socket.AF_INET:
+            return []
+        # Five overlay-class addresses discovered BEFORE the LAN one, which is
+        # how a machine with several virtual adapters enumerates.
+        return [
+            (socket.AF_INET, 0, 0, "", (f"25.3.92.{n}", 0)) for n in range(1, 6)
+        ] + [(socket.AF_INET, 0, 0, "", ("192.168.1.203", 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: _Probe())
+
+    offered = gateway_commands._machine_addresses()
+    assert len(offered) == gateway_commands.MAX_CANDIDATE_ENDPOINTS
+    assert offered[0] == "192.168.1.203"
+
+
 def test_the_endpoints_gateway_id_prints_are_the_endpoints_a_join_payload_advertises(
     capsys, named_install
 ):

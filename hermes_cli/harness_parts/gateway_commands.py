@@ -422,26 +422,114 @@ MAX_CANDIDATE_ENDPOINTS = 4
 _UNOFFERABLE_PREFIXES = ("127.", "169.254.", "fe80:")
 _WILDCARD_HOSTS = {"0.0.0.0", "::", "*", ""}
 
+#: Where the default-route probe *points*. A PUBLIC unicast address, and that is
+#: the whole of R-D2's first half: the probe asks the kernel "which of my
+#: addresses would carry traffic to the INTERNET", and the answer is only that
+#: question if the far address is on the internet. This used to be
+#: ``10.255.255.255``, which asks "which address reaches 10/8" — and on a machine
+#: with a private 10.x adapter beside the Wi-Fi (a VM host bridge, a corporate
+#: virtual NIC) the kernel correctly answers with the 10.x address, so the
+#: router-granted LAN address was ranked below an interface with no gateway at
+#: all. Measured on the operator's Windows PC 2026-09-04: the LAN address
+#: 192.168.1.203 came out THIRD.
+#:
+#: ``1.1.1.1:53`` resolves nothing and is never contacted — see the connect
+#: comment below — so this is a routing-table lookup wearing a socket, not a
+#: dependency on that resolver being up or on this machine having a route at all.
+_DEFAULT_ROUTE_PROBE = ("1.1.1.1", 53)
+
+#: RFC1918, written out. The filter above is deliberately prefix-based ("half an
+#: address library here would be a second address model to keep true") but the
+#: ORDER needs real arithmetic — "shares a /24 with the default route" is not a
+#: string test — so the ordering asks the stdlib's address library rather than
+#: growing a second one out of octet slicing.
+_RFC1918_CIDRS = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+
+
+def _ipv4(host: str):
+    """The host as an ``IPv4Address``, or ``None`` if it is not one.
+
+    ``None`` for every v6 address and for anything that will not parse, because
+    both answers mean the same thing to the ranking below: this row is not a
+    private-LAN candidate and cannot share a /24 with one.
+    """
+
+    import ipaddress
+
+    try:
+        address = ipaddress.ip_address(str(host))
+    except ValueError:
+        return None
+    return address if address.version == 4 else None
+
+
+def _is_rfc1918(host: str) -> bool:
+    import ipaddress
+
+    address = _ipv4(host)
+    if address is None:
+        return False
+    return any(
+        address in ipaddress.ip_network(cidr) for cidr in _RFC1918_CIDRS
+    )
+
+
+def _shares_24(host: str, other: str) -> bool:
+    left, right = _ipv4(host), _ipv4(other)
+    if left is None or right is None:
+        return False
+    return int(left) >> 8 == int(right) >> 8
+
+
+def _address_rank(host: str, default_route: str | None) -> int:
+    """R-D2's order, as a sort key. Lower dials first.
+
+    0. **The default route itself.** The address traffic actually leaves from,
+       and therefore the one a machine on the same LAN can reach.
+    1. **RFC1918 addresses on the default route's own /24.** A second address on
+       the same segment is the next best guess when the first is filtered by a
+       firewall rule that does not cover the whole subnet.
+    2. **Other RFC1918.** A private address somewhere, which is what a LAN peer
+       is most likely to be able to reach.
+    3. **Everything else v4** — a public address, and the Hamachi/Tailscale-class
+       overlays that hand out addresses outside 1918. Sorted here BY RULE and
+       not filtered by adapter name (R-D2): a machine whose only address is one
+       of those still gets offered, because refusing to offer it would make an
+       overlay-only machine unpairable in the name of tidiness.
+    4. **Global v6**, last: a v6 address that works is excellent and a v6
+       address that does not is a dial that hangs before the v4 one is tried.
+    """
+
+    if default_route and host == default_route:
+        return 0
+    if ":" in host:
+        return 4
+    if _is_rfc1918(host):
+        return 1 if default_route and _shares_24(host, default_route) else 2
+    return 3
+
 
 def _machine_addresses() -> list[str]:
-    """This machine's dialable addresses, best-effort, stdlib only.
+    """This machine's dialable addresses, best-effort, stdlib only, IN DIAL ORDER.
 
     Called ONLY when the listener bound a wildcard — the case where the config
-    says "every interface" and therefore names none. Three sources in
-    descending confidence, deduped in order:
+    says "every interface" and therefore names none. Two sources, deduped:
 
     1. **The default-route address**, found with the UDP-connect trick: a
-       ``SOCK_DGRAM`` socket is *connected* to a far address and asked what
-       local address the kernel would use. **No packet is sent** — connect on a
-       datagram socket only fixes the peer — so this costs no traffic, needs no
-       reachability, and answers with the cable unplugged. It is first because
-       it answers the actual question (*which of my addresses does traffic leave
-       from*) rather than *which addresses exist*.
-    2. **The hostname's IPv4 records**, which is what the machine calls itself
-       and is usually right on a LAN with mDNS or a DHCP-registering DNS.
-    3. **Global / unique-local IPv6**, last because a v6 address that works is
-       excellent and a v6 address that does not is a dial that hangs before the
-       v4 one is tried.
+       ``SOCK_DGRAM`` socket is *connected* to :data:`_DEFAULT_ROUTE_PROBE` and
+       asked what local address the kernel would use. **No packet is sent** —
+       connect on a datagram socket only fixes the peer — so this costs no
+       traffic, needs no reachability, and answers with the cable unplugged.
+    2. **The hostname's records**, v4 then v6, which is what the machine calls
+       itself and is usually right on a LAN with mDNS or a DHCP-registering DNS.
+
+    What S4's first hardware attempt changed is that DISCOVERY ORDER is no
+    longer OFFER ORDER. The two sources answer "which addresses exist" in
+    whatever order the resolver feels like, and the list is then capped at
+    :data:`MAX_CANDIDATE_ENDPOINTS` — so on a machine with several adapters the
+    router-granted address could be truncated away entirely by addresses nobody
+    can reach. :func:`_address_rank` decides the order, the cap is applied
+    AFTER it, and the first row is therefore the one R-D4's sheet prints.
 
     Every source is wrapped: name resolution on a laptop that has just changed
     networks raises in ways not worth a taxonomy, and this function's honest
@@ -453,23 +541,25 @@ def _machine_addresses() -> list[str]:
 
     found: list[str] = []
 
-    def _keep(value) -> None:
+    def _keep(value) -> str | None:
         # Zone index off FIRST (``fe80::1%eth0``): a scoped address is
         # meaningless to the machine we would hand it to, and the prefix test
         # below has to see the address rather than the interface name.
         host = str(value or "").strip().lower().split("%", 1)[0]
         if not host or host in _WILDCARD_HOSTS or host == "::1":
-            return
+            return None
         if host.startswith(_UNOFFERABLE_PREFIXES):
-            return
+            return None
         if host not in found:
             found.append(host)
+        return host
 
+    default_route: str | None = None
     probe = None
     try:
         probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        probe.connect(("10.255.255.255", 1))
-        _keep(probe.getsockname()[0])
+        probe.connect(_DEFAULT_ROUTE_PROBE)
+        default_route = _keep(probe.getsockname()[0])
     except Exception:
         pass
     finally:
@@ -486,7 +576,12 @@ def _machine_addresses() -> list[str]:
         except Exception:
             continue
 
-    return found[:MAX_CANDIDATE_ENDPOINTS]
+    # Stable, so two addresses of the same rank keep the order they were
+    # discovered in — the sort decides between KINDS of address and never
+    # reorders within one, which is what makes a two-adapter machine's answer
+    # reproducible run to run.
+    ordered = sorted(found, key=lambda host: _address_rank(host, default_route))
+    return ordered[:MAX_CANDIDATE_ENDPOINTS]
 
 
 def _candidate_endpoints(store_root) -> list[dict]:
