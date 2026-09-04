@@ -1092,6 +1092,104 @@ def test_dial_order_is_cache_endpoints_then_trust_and_the_pin_is_always_trust(
     assert {fingerprint for _h, _p, fingerprint in attempts} == {"ab" * 32}
 
 
+def test_the_chat_dial_names_a_local_network_permission_rather_than_an_oserror(
+    tmp_path, monkeypatch
+):
+    """R-D20 on the CHAT lane, which is the door ``gateway.peer.reachability``
+    is written through.
+
+    Same measurement as ``peers join``'s: on macOS 15 with Local Network privacy
+    never granted, the kernel answers ``EHOSTUNREACH`` for a host on this
+    machine's own /24 with the ARP entry resolved. What this loop wrote for that
+    was ``type(exc).__name__`` — the bare word ``OSError``, which is the least
+    useful thing that can be said about a kernel that knows exactly where that
+    host is and declines to send. The word LEADS the recorded detail so a
+    subscriber can branch on it without parsing an address list.
+    """
+
+    from agent_runtime import gateway_peers, serve_socket
+    from agent_runtime.gateway_identity import set_display_name
+    from hermes_cli.harness_parts import gateway_commands
+
+    set_display_name(tmp_path, "this install")
+    record_peer(
+        tmp_path,
+        peer_install_id=PEER_A,
+        secret="f" * 64,
+        display_name="the mac",
+        endpoints=[{"host": "192.168.1.203", "port": 8765}],
+        cert_fingerprint="ab" * 32,
+    )
+    monkeypatch.setattr(
+        gateway_commands, "_machine_addresses", lambda: ["192.168.1.39"]
+    )
+
+    class _Client:
+        def __init__(self, host, port, **kwargs):
+            pass
+
+        def connect(self):
+            # errno 65 written out: this test runs on Windows too, where
+            # ``errno.EHOSTUNREACH`` is the CRT's 110 and the condition under
+            # test is the errno of the kernel that refused.
+            raise OSError(65, "No route to host")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(serve_socket, "ServeSocketClient", _Client)
+
+    with pytest.raises(ConnectionError) as raised:
+        gateway_peers.dial_peer(tmp_path, PEER_A)
+
+    assert "local_policy: 192.168.1.203:8765" in str(raised.value)
+    row = gateway_peers.read_peer_cache(tmp_path)[PEER_A]
+    assert row.reachability == gateway_peers.REACHABILITY_UNREACHABLE
+
+
+def test_a_chat_dial_that_is_merely_refused_keeps_the_word_it_had(
+    tmp_path, monkeypatch
+):
+    """The narrowing, on this lane too. A host on our own subnet that answers
+    with a reset has proved packets leave this machine, so nothing about a local
+    network permission is involved."""
+
+    from agent_runtime import gateway_peers, serve_socket
+    from agent_runtime.gateway_identity import set_display_name
+    from hermes_cli.harness_parts import gateway_commands
+
+    set_display_name(tmp_path, "this install")
+    record_peer(
+        tmp_path,
+        peer_install_id=PEER_A,
+        secret="f" * 64,
+        display_name="the mac",
+        endpoints=[{"host": "192.168.1.203", "port": 8765}],
+        cert_fingerprint="ab" * 32,
+    )
+    monkeypatch.setattr(
+        gateway_commands, "_machine_addresses", lambda: ["192.168.1.39"]
+    )
+
+    class _Client:
+        def __init__(self, host, port, **kwargs):
+            pass
+
+        def connect(self):
+            raise ConnectionRefusedError("shut")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(serve_socket, "ServeSocketClient", _Client)
+
+    with pytest.raises(ConnectionError) as raised:
+        gateway_peers.dial_peer(tmp_path, PEER_A)
+
+    assert "local_policy" not in str(raised.value)
+    assert "192.168.1.203:8765 ConnectionRefusedError" in str(raised.value)
+
+
 def test_usable_peers_excludes_revoked_expired_and_revoked_you(tmp_path):
     """THE predicate. Three conditions, and each is a different way for an edge
     to be dead — this operator's decision, a clock, and the far operator's

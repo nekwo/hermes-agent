@@ -232,6 +232,7 @@ __all__ = [
     "PeerCredential",
     "PeerPairingCode",
     "PeerRecord",
+    "LOCAL_POLICY",
     "clean_endpoints",
     "dial_peer",
     "list_peers",
@@ -1032,6 +1033,42 @@ def record_peer(
 # ── dialling ─────────────────────────────────────────────────────────────────
 
 
+#: R-D20's word for "this machine's own OS refused to send", spelled once here
+#: so the chat lane and ``peers join`` cannot drift apart. The classifier itself
+#: lives in :mod:`hermes_cli.harness_parts.gateway_commands`, beside the
+#: interface enumeration it has to consult — see :func:`_dial_failure_word`.
+LOCAL_POLICY = "local_policy"
+
+
+def _dial_failure_word(exc: BaseException, host: str) -> str:
+    """What to write beside a failed candidate: ``local_policy`` or the class.
+
+    The classification is R-D20's and it needs to know whether ``host`` is on a
+    segment one of THIS machine's addresses sits on — a question only the
+    interface enumeration in ``gateway_commands`` can answer, which is why the
+    classifier lives there and is reached from here the same way
+    :func:`dial_peer` already reaches ``_candidate_endpoints``: a function-local
+    import, so nothing at module load couples this layer to the CLI one.
+
+    A CLI half that will not import falls back to the exception class, which is
+    exactly what this line printed before D6h. The classification is a BETTER
+    word for a failure, never the only word — a dial that failed must report
+    that it failed whatever else is missing.
+    """
+
+    try:
+        from hermes_cli.harness_parts.gateway_commands import (
+            DIAL_LOCAL_POLICY,
+            classify_dial_error,
+        )
+
+        if classify_dial_error(exc, host) == DIAL_LOCAL_POLICY:
+            return LOCAL_POLICY
+    except Exception:
+        pass
+    return type(exc).__name__
+
+
 def dial_peer(
     store_root: Path | str,
     peer_install_id: str,
@@ -1061,6 +1098,13 @@ def dial_peer(
     close it. Raises ``ConnectionError`` when no endpoint answered — a
     TRANSPORT failure, which is the distinction Stage 7's retry posture rests
     on: unreachable is not refused.
+
+    D6h changes one WORD inside that failure and no control flow (R-D20). An
+    ``EHOSTUNREACH`` against an address on one of this machine's own subnets is
+    macOS 15 Local Network privacy refusing this process, not a route — so the
+    failure it records and raises leads with ``local_policy`` and the
+    ``gateway.peer.reachability`` event carries that instead of a bare
+    ``OSError``. See :func:`_dial_failure_word`.
     """
 
     from .serve_socket import ServeSocketClient
@@ -1145,6 +1189,9 @@ def dial_peer(
             candidates.append(row)
 
     failures: list[str] = []
+    # R-D20's half of the chat lane: the addresses this machine's own OS refused
+    # to send to. See :func:`_dial_failure_word`.
+    policy_refused: list[str] = []
     for endpoint in candidates:
         connection = ServeSocketClient(
             str(endpoint["host"]),
@@ -1168,7 +1215,10 @@ def dial_peer(
                 cert_fingerprint=self_fingerprint,
             )
         except Exception as exc:
-            failures.append(f"{endpoint['host']}:{endpoint['port']} {type(exc).__name__}")
+            word = _dial_failure_word(exc, str(endpoint["host"]))
+            if word == LOCAL_POLICY:
+                policy_refused.append(f"{endpoint['host']}:{endpoint['port']}")
+            failures.append(f"{endpoint['host']}:{endpoint['port']} {word}")
             connection.close()
             continue
         if not isinstance(reply, dict) or reply.get("event") != "hello_ok":
@@ -1181,6 +1231,12 @@ def dial_peer(
         note_dial_result(root, record.peer_install_id, ok=True)
         return connection, reply
     detail = "; ".join(failures)
+    # R-D20: the word LEADS, so ``gateway.peer.reachability`` carries
+    # ``local_policy …`` rather than a bare ``OSError`` and a subscriber can tell
+    # a permission on THIS machine apart from a peer that is down. Same shape as
+    # the ``peers join`` refusal notes, deliberately — one edge, one vocabulary.
+    if policy_refused:
+        detail = f"{LOCAL_POLICY}: {', '.join(policy_refused)}; {detail}"
     note_dial_result(root, record.peer_install_id, ok=False, error=detail)
     raise ConnectionError(
         f"no endpoint on the {peer_install_id!r} row answered: {detail}"
