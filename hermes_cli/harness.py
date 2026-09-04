@@ -1882,7 +1882,13 @@ def build_parser(parent_subparsers) -> None:
     characters_status.set_defaults(func=_cmd_characters_status)
     characters_thumb = characters_subs.add_parser("thumb", help="Write a card-size QA crop of ONE FRAME of one row attempt (chroma keyed out, NEAREST upscale on a flat dark backdrop) and return its path")
     characters_thumb.add_argument("--draft", required=True)
-    characters_thumb.add_argument("--row", required=True, help="An authored row key, e.g. walk-n")
+    # One crop verb, two QA item kinds — the same two budget booleans for both.
+    # A direction reference used to have no crop verb at all, which left the
+    # launcher's card drawing a tile through the whole turnaround stage for want
+    # of an ANSWER, never for want of a safe picture.
+    characters_thumb_item = characters_thumb.add_mutually_exclusive_group(required=True)
+    characters_thumb_item.add_argument("--row", help="An authored row key, e.g. walk-n")
+    characters_thumb_item.add_argument("--direction", default="", help="An authored direction, e.g. e — crops that direction's turnaround REFERENCE instead of a row strip. Mirrored directions are never drawn and are refused. A reference holds one pose, so --frame does not apply to it")
     characters_thumb.add_argument("--attempt", type=int, default=-1, help="Which attempt to crop, 0-based as in `status --json` history; -1 = latest")
     # No defaults spelled here: the numbers live in `draft.DEFAULT_THUMB_SCALE` /
     # `draft.DEFAULT_THUMB_FRAME` and are resolved in the handler, which is also
@@ -4600,6 +4606,7 @@ def _cmd_characters_thumb(args) -> int:
     from agent.charsheet.draft import DEFAULT_THUMB_FRAME, DEFAULT_THUMB_SCALE
 
     row_key = str(getattr(args, "row", "") or "").strip()
+    direction = str(getattr(args, "direction", "") or "").strip()
     attempt = int(getattr(args, "attempt", -1))
     requested_frame = getattr(args, "frame", None)
     frame = DEFAULT_THUMB_FRAME if requested_frame is None else int(requested_frame)
@@ -4608,9 +4615,22 @@ def _cmd_characters_thumb(args) -> int:
     square = bool(getattr(args, "square", False))
 
     def call(draft):
-        result = draft.row_thumb(
-            row_key, attempt=attempt, frame=frame, scale=scale, square=square
-        )
+        if direction:
+            # A reference holds ONE pose. Ignoring `--frame` here would answer a
+            # caller who asked for cell 3 with cell 0 and call it a crop.
+            if requested_frame is not None:
+                raise ValueError(
+                    "--frame addresses a cell of a row STRIP; a direction "
+                    f"reference is one pose, so `--direction {direction}` and "
+                    "--frame cannot be asked for together"
+                )
+            result = draft.direction_thumb(
+                direction, attempt=attempt, scale=scale, square=square
+            )
+        else:
+            result = draft.row_thumb(
+                row_key, attempt=attempt, frame=frame, scale=scale, square=square
+            )
         # An agent reads the human line as often as the payload, and the one
         # thing it must not do with a deep zoom is declare it with `MEDIA:`. So
         # the line says which artifact this is, not just how big it came out.
@@ -4630,10 +4650,20 @@ def _cmd_characters_thumb(args) -> int:
         # padded square is the hero-card crop, a bare cell is what a compare
         # pair's panes align on.
         shape = ", padded square" if result["square"] else ""
+        # WHICH item, in the item's own vocabulary: a row crop names its frame
+        # because an operator judges a row frame by frame, and a reference has
+        # no frame to name. Saying "frame 1 of 1" for a reference would invite
+        # the reader to go looking for frame 2.
+        subject = (
+            f"direction {result['direction']} reference "
+            if direction
+            else f"row {result['row']} "
+        )
+        frames = "" if direction else f"frame {result['frame'] + 1} of {result['frames']}, "
         return result, (
-            f"Draft {draft.id}: row {result['row']} "
+            f"Draft {draft.id}: {subject}"
             f"{_attempt_label(result['attempt'], result['attempts'])}, "
-            f"frame {result['frame'] + 1} of {result['frames']}, "
+            f"{frames}"
             f"cropped at {result['width']}x{result['height']} "
             f"({result['scale']}x{shape}) → {result['path']}{weight}"
         )

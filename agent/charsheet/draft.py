@@ -1265,10 +1265,6 @@ class CharacterDraft:
         """
         row = self._authored_row(row_key)
         store = self.store
-        # This draft's OWN spec, which is the whole point of the second bound:
-        # the sheet a crop is weighed against is the one THIS draft composes,
-        # never the package's largest.
-        spec = self.spec
         key = row_item(row.key)
         if not store.history(key):
             raise ValueError(
@@ -1285,6 +1281,137 @@ class CharacterDraft:
                 + (f" at {source}" if source is not None else "")
             )
         cell = pipeline.frame_cell(source, frame=frame, frames=row.frames)
+        crop = self._finish_thumb(
+            cell,
+            scale=scale,
+            square=square,
+            stem=f"{row.key}-attempt-{index + 1}-frame-{frame + 1}",
+            subject=f"frame of row {row.key!r}",
+            remedies=("a row with more frames to slice",),
+        )
+        logger.info(
+            "charsheet draft %s: row %s attempt %d frame %d cropped at %dx%d → %s",
+            self.id,
+            row.key,
+            index,
+            frame,
+            crop["width"],
+            crop["height"],
+            crop["path"],
+        )
+        return {
+            "row": row.key,
+            "attempt": index,
+            "attempts": len(store.history(key)),
+            "frame": frame,
+            "frames": row.frames,
+            "source": str(source),
+            **crop,
+        }
+
+    def direction_thumb(
+        self,
+        direction: str,
+        *,
+        attempt: int = -1,
+        scale: int = DEFAULT_THUMB_SCALE,
+        square: bool = False,
+    ) -> dict:
+        """Write a card-size QA crop of ONE turnaround DIRECTION reference.
+
+        The same verdict :meth:`row_thumb` publishes for a row, for the other
+        kind of QA item — and it exists because the ABSENCE of a verdict, not
+        any weight, is what made the launcher's card draw a tile through the
+        whole turnaround stage. A reference is generated on a SQUARE canvas by
+        :func:`pipeline.generate_direction_view` and is comfortably inside both
+        bounds at the default scale; there was simply nothing to publish.
+
+        Everything :meth:`row_thumb`'s docstring says about the two bounds and
+        the consumer rule — draw it inline only when BOTH booleans are true,
+        otherwise route it to the fullscreen viewer — holds here unchanged, and
+        holds because it is the same code: one helper weighs, keys, upscales,
+        pads and writes for both kinds.
+
+        **No frame keys, rather than frame keys faked to 0-of-1.** A row strip
+        holds several poses side by side and a reference holds one, so there is
+        nothing to slice and :func:`pipeline.frame_cell` is never called. A
+        payload that answered ``frame: 0, frames: 1`` would be inviting a
+        consumer to offer a frame picker for a picture that has no frames.
+
+        Stage-free for the reason the row crop is: a composed draft is exactly
+        when an operator goes back to ask what the reference looked like, and
+        the references are never deleted.
+        """
+        self._require_authored_direction(direction)
+        store = self.store
+        key = turnaround_item(direction)
+        if not store.history(key):
+            raise ValueError(
+                f"direction {direction!r} has no attempt to crop yet; generate it "
+                f"first (`characters turnaround` or `characters reroll-direction "
+                f"--direction {direction}`)"
+            )
+        index = store.attempt_index(key, attempt)
+        source = store.attempt_path(key, index)
+        if source is None or not source.is_file():
+            raise ValueError(
+                f"attempt {index} of direction {direction!r} has no image on disk"
+                + (f" at {source}" if source is not None else "")
+            )
+        crop = self._finish_thumb(
+            # The reference IS the cell — `reference_cell` is the "nothing to
+            # slice" counterpart of `frame_cell`, and naming it keeps every
+            # decode of a QA source in the module that owns pixels.
+            pipeline.reference_cell(source),
+            scale=scale,
+            square=square,
+            # `turnaround-` prefixed because a direction is a bare compass
+            # sector: `e-attempt-1-x2.png` beside `walk-e-attempt-1-frame-1-x2`
+            # reads as a truncated row key, and the store's own item key is
+            # `turnaround@e` for the same reason.
+            stem=f"turnaround-{direction}-attempt-{index + 1}",
+            subject=f"reference for direction {direction!r}",
+            remedies=(),
+        )
+        logger.info(
+            "charsheet draft %s: direction %s attempt %d cropped at %dx%d → %s",
+            self.id,
+            direction,
+            index,
+            crop["width"],
+            crop["height"],
+            crop["path"],
+        )
+        return {
+            "direction": direction,
+            "attempt": index,
+            "attempts": len(store.history(key)),
+            "source": str(source),
+            **crop,
+        }
+
+    def _finish_thumb(
+        self,
+        cell,
+        *,
+        scale: int,
+        square: bool,
+        stem: str,
+        subject: str,
+        remedies: tuple[str, ...],
+    ) -> dict:
+        """Weigh, key, upscale, pad and write ONE crop; the half both kinds share.
+
+        *cell* is the finished source region — a sliced frame for a row, the
+        whole reference for a direction. *subject* and *remedies* are the only things the
+        two kinds say differently, and they are both refusal prose: WHAT was too
+        big, and which other shapes the caller could ask for instead.
+
+        Split out when the direction arm landed. The two bounds, the refusal
+        threshold, the two backdrops and the pad order are one implementation on
+        purpose — a second copy is how ``cardSafe`` came to mean two different
+        things in two places.
+        """
         # Both bounds are read off the OUTPUT size before anything is allocated:
         # the write ceiling inside `upscale_on_backdrop`, the card budget here,
         # where the default is known. Refusing after the resize would already
@@ -1293,6 +1420,10 @@ class CharacterDraft:
         # output means multiplying by it, and `512 * "2"` is a string.
         scale = pipeline.require_scale(scale)
         square = bool(square)
+        # This draft's OWN spec, which is the whole point of the second bound:
+        # the sheet a crop is weighed against is the one THIS draft composes,
+        # never the package's largest.
+        spec = self.spec
         out_w, out_h = cell.width * scale, cell.height * scale
         # The PADDED size when one is coming: `--square` adds margin to the
         # shorter axis, and every number below — both booleans, the refusal, the
@@ -1304,8 +1435,8 @@ class CharacterDraft:
         within_own_sheet = pipeline.fits_own_sheet(out_w, out_h, spec)
         if not within_console_budget and scale <= DEFAULT_THUMB_SCALE:
             raise ValueError(
-                f"scale {scale} on this {cell.width}x{cell.height} frame of row "
-                f"{row.key!r} would write "
+                f"scale {scale} on this {cell.width}x{cell.height} {subject} "
+                "would write "
                 + ("a square " if square else "")
                 + f"{out_w}x{out_h} "
                 f"= {out_w * out_h:,} pixels, over the "
@@ -1313,8 +1444,9 @@ class CharacterDraft:
                 "fixed ceiling on what a chat card may decode, which is NOT a "
                 "comparison against this draft's own sheet (the payload answers "
                 "that separately as withinOwnSheet); "
-                "ask for --scale 1, or a row with more frames to slice, or "
-                "--scale 3 or more to take it as a viewer artifact carrying "
+                "ask for --scale 1, "
+                + "".join(f"or {remedy}, " for remedy in remedies)
+                + "or --scale 3 or more to take it as a viewer artifact carrying "
                 "withinConsoleBudget: false"
                 + (", or drop --square to take the cell unpadded" if square else "")
             )
@@ -1340,34 +1472,15 @@ class CharacterDraft:
         # `-sq` because the two shapes are two artifacts of the same cell: a card
         # crop and a compare crop must be able to sit in the thumbs directory at
         # once, and an operator must be able to tell which is which by name.
-        out = self.directory / THUMBS_DIRNAME / (
-            f"{row.key}-attempt-{index + 1}-frame-{frame + 1}-x{scale}"
-            f"{'-sq' if square else ''}.png"
-        )
+        out = self.directory / THUMBS_DIRNAME / f"{stem}-x{scale}{'-sq' if square else ''}.png"
         out.parent.mkdir(parents=True, exist_ok=True)
         image.save(out, format="PNG")
-        logger.info(
-            "charsheet draft %s: row %s attempt %d frame %d cropped at %dx%d → %s",
-            self.id,
-            row.key,
-            index,
-            frame,
-            image.width,
-            image.height,
-            out,
-        )
         return {
-            "row": row.key,
-            "attempt": index,
-            "attempts": len(store.history(key)),
-            "frame": frame,
-            "frames": row.frames,
             "scale": scale,
             # Unconditional, like the two booleans below and for the same
             # reason: a consumer deciding WHERE to draw a crop cannot infer the
             # shape from a filename, and the default is a shape too.
             "square": square,
-            "source": str(source),
             "path": str(out),
             "width": image.width,
             "height": image.height,

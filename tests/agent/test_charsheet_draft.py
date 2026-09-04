@@ -1570,6 +1570,92 @@ def test_a_square_crop_over_the_console_ceiling_is_refused_at_the_default_scale(
     )
 
 
+# ─────────────────────── looking at a DIRECTION reference ───────────────────
+
+
+def test_a_direction_reference_crops_with_the_same_two_bounds_as_a_row(draft):
+    """The turnaround stage gets a crop verdict, not a tile.
+
+    A direction reference had no crop verb at all, so the launcher's QA card
+    routed every turnaround item to the fullscreen viewer and drew a tile where
+    a picture belongs — not because the picture was unsafe (a reference is a
+    square canvas well inside both bounds) but because nothing published an
+    ANSWER for it. This is that answer, and it is the SAME two booleans a row
+    crop carries, so one consumer rule covers both kinds.
+    """
+    draft.run_turnaround()
+
+    result = draft.direction_thumb("e", scale=1)
+
+    out = Path(result["path"])
+    assert out.parent == draft.directory / "thumbs"
+    assert out.name == "turnaround-e-attempt-1-x1.png"
+    assert out.is_file()
+    assert result["direction"] == "e"
+    assert (result["attempt"], result["attempts"]) == (0, 1)
+    assert result["source"] == str(draft.store.attempt_path(turnaround_item("e"), 0))
+    assert result["withinConsoleBudget"] is True and result["withinOwnSheet"] is True
+    with Image.open(out) as crop:
+        assert crop.size == (result["width"], result["height"])
+    # A reference is ONE picture: there is no strip to slice, so the two frame
+    # keys a row crop carries are absent rather than faked to 0-of-1.
+    assert "frame" not in result and "frames" not in result and "row" not in result
+
+
+def test_a_direction_crop_reads_the_whole_reference_and_not_a_frame_slice(draft):
+    """The crop is the reference itself, upscaled — nothing is sliced off it.
+
+    `frame_cell` exists because a row strip holds several poses side by side; a
+    reference holds one. Slicing it by a frame count would cut the character in
+    half for no reason, so the direction arm never calls the geometry at all.
+    """
+    draft.run_turnaround()
+    source = draft.store.attempt_path(turnaround_item("e"), 0)
+    with Image.open(source) as opened:
+        reference = opened.size
+
+    result = draft.direction_thumb("e", scale=2)
+
+    assert (result["width"], result["height"]) == (reference[0] * 2, reference[1] * 2)
+
+
+def test_a_direction_crop_pads_square_and_says_so_like_a_row_crop(draft):
+    draft.run_turnaround()
+
+    square = draft.direction_thumb("e", scale=1, square=True)
+
+    assert square["square"] is True
+    assert Path(square["path"]).name.endswith("-sq.png")
+    assert square["width"] == square["height"]
+
+
+def test_a_mirrored_direction_has_no_reference_to_crop(draft):
+    """`w` is derived from `e` at read time; it is never drawn, so it is never
+    a QA item — the same refusal `reroll-direction` and `approve-direction` give.
+    """
+    draft.run_turnaround()
+
+    with pytest.raises(ValueError, match="is not authored for this sheet"):
+        draft.direction_thumb("w")
+
+
+def test_a_direction_with_no_attempt_yet_is_refused_before_anything_is_written(draft):
+    with pytest.raises(ValueError, match="has no attempt to crop yet"):
+        draft.direction_thumb("e")
+
+    assert not (draft.directory / "thumbs").exists(), "the refusal wrote a file anyway"
+
+
+def test_a_direction_crop_is_stage_free_like_a_row_crop(fake, base):
+    """Looking is never out of order: a composed draft is exactly when an
+    operator goes back to ask what the reference looked like.
+    """
+    composed = run_to_composed(base)
+
+    assert composed.stage == "composed"
+    assert composed.direction_thumb("e", scale=1)["direction"] == "e"
+
+
 # ───────────────────────────── the base image ─────────────────────────────
 
 

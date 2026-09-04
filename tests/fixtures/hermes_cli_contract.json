@@ -2866,7 +2866,15 @@
       "subcommands": []
     },
     "harness characters thumb": {
-      "exclusive_groups": [],
+      "exclusive_groups": [
+        {
+          "opts": [
+            "--direction",
+            "--row"
+          ],
+          "required": true
+        }
+      ],
       "options": {
         "--attempt": {
           "action": "store",
@@ -2875,6 +2883,14 @@
           "nargs": 1,
           "required": false,
           "type": "int"
+        },
+        "--direction": {
+          "action": "store",
+          "canonical": "--direction",
+          "choices": null,
+          "nargs": 1,
+          "required": false,
+          "type": null
         },
         "--draft": {
           "action": "store",
@@ -2913,7 +2929,7 @@
           "canonical": "--row",
           "choices": null,
           "nargs": 1,
-          "required": true,
+          "required": false,
           "type": null
         },
         "--scale": {

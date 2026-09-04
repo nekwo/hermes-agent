@@ -839,6 +839,84 @@ def test_thumb_addresses_one_attempt_and_one_frame_at_a_time(fake, base_image, c
     assert [entry["path"] for entry in history] == [first["source"], latest["source"]]
 
 
+def test_thumb_crops_a_turnaround_reference_and_publishes_the_same_two_bounds(
+    fake, base_image, capsys
+):
+    """The turnaround stage gets a crop verdict, in the same payload shape.
+
+    The launcher's QA card decodes `withinConsoleBudget` / `withinOwnSheet` and
+    draws inline only when both hold; with no crop verb for a direction it had
+    no answer to decode and drew a tile for the whole stage. The two booleans
+    ride on this arm for the same reason they ride on the row arm — one consumer
+    rule, both kinds — and the frame keys do NOT, because a reference is one
+    pose.
+    """
+    draft_id = start_draft(capsys, "--base-image", str(base_image))
+    run(["harness", "characters", "turnaround", "--draft", draft_id, "--json"], capsys)
+
+    code, payload = run(
+        ["harness", "characters", "thumb", "--draft", draft_id, "--direction", "e", "--json"],
+        capsys,
+    )
+
+    assert (code, payload["ok"]) == (0, True)
+    assert (payload["direction"], payload["attempt"], payload["draft"]) == ("e", 0, draft_id)
+    assert payload["withinConsoleBudget"] is True and payload["withinOwnSheet"] is True
+    assert "frame" not in payload and "frames" not in payload and "row" not in payload
+    out = Path(payload["path"])
+    assert out.name == "turnaround-e-attempt-1-x2.png"
+    assert out.parent.name == "thumbs"
+    with Image.open(out) as opened, Image.open(payload["source"]) as opened_source:
+        assert opened.size == (payload["width"], payload["height"])
+        assert opened.size == (opened_source.width * 2, opened_source.height * 2), (
+            "a reference has no strip to slice: the whole picture is the cell"
+        )
+
+
+def test_the_human_line_for_a_reference_names_no_frame(fake, base_image, capsys):
+    draft_id = start_draft(capsys, "--base-image", str(base_image))
+    run(["harness", "characters", "turnaround", "--draft", draft_id, "--json"], capsys)
+
+    args = parser().parse_args(
+        ["harness", "characters", "thumb", "--draft", draft_id, "--direction", "e"]
+    )
+    assert args.func(args) == 0
+
+    line = capsys.readouterr().out.strip()
+    assert "direction e reference" in line
+    assert "frame" not in line, "a reference has no frame 1 of 1 to go looking past"
+    assert "attempt 1 of 1" in line
+
+
+def test_thumb_takes_a_row_or_a_direction_and_never_both(fake, base_image, capsys):
+    with pytest.raises(SystemExit):
+        parser().parse_args(
+            ["harness", "characters", "thumb", "--draft", "d", "--row", "walk-e",
+             "--direction", "e"]
+        )
+    with pytest.raises(SystemExit):
+        parser().parse_args(["harness", "characters", "thumb", "--draft", "d"])
+
+
+def test_a_frame_asked_of_a_reference_is_refused_rather_than_ignored(
+    fake, base_image, capsys
+):
+    """Answering "cell 1" with "the whole picture" is the silent-wrong-answer
+    shape; the reference has one pose and the refusal says so.
+    """
+    draft_id = start_draft(capsys, "--base-image", str(base_image))
+    run(["harness", "characters", "turnaround", "--draft", draft_id, "--json"], capsys)
+
+    code, payload = run(
+        ["harness", "characters", "thumb", "--draft", draft_id, "--direction", "e",
+         "--frame", "1", "--json"],
+        capsys,
+    )
+
+    assert (code, payload["ok"]) == (2, False), "the pets refusal shape, exit 2"
+    assert "one pose" in payload["error"]
+
+
 def test_a_missing_attempt_file_travels_as_json_null_and_never_as_an_empty_string(
     fake, base_image, capsys
 ):

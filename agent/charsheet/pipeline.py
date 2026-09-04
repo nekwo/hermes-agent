@@ -496,6 +496,22 @@ def frame_cell(image_or_path, *, frame: int, frames: int):
     return strip.crop((left, 0, right, strip.height))
 
 
+def reference_cell(image_or_path):
+    """The whole of a single-pose image, as the QA cell to crop.
+
+    :func:`frame_cell`'s counterpart for a picture that holds ONE pose — a
+    turnaround direction reference. There is no strip to slice, so the cell IS
+    the image, and the honest way to say that is a named function rather than a
+    ``frames=1`` call into geometry whose whole job is finding the gutters
+    between poses.
+
+    It lives here rather than in the draft machine because decoding pixels is
+    this module's job: the caller weighs a size and writes a file, and never
+    opens one.
+    """
+    return _open_rgba(image_or_path)
+
+
 def upscale_on_backdrop(
     image_or_path,
     *,

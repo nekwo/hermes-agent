@@ -83,6 +83,7 @@ def test_a_planted_key_in_the_producer_shows_up_in_the_dump():
 
     real_sprite = charsheet_draft.sprite_payload
     real_thumb = charsheet_draft.CharacterDraft.row_thumb
+    real_direction_thumb = charsheet_draft.CharacterDraft.direction_thumb
 
     def planted_sprite(slug, **kwargs):
         payload = real_sprite(slug, **kwargs)
@@ -90,8 +91,18 @@ def test_a_planted_key_in_the_producer_shows_up_in_the_dump():
         payload.pop("mime")
         return payload
 
+    # BOTH crop producers, because the thumb kind now has two arms and a key
+    # union across its modes: planting one of them proves nothing about the
+    # union, which is exactly the "present in one mode only" reading the
+    # conditional flag exists for.
     def planted_thumb(self, *args, **kwargs):
         payload = real_thumb(self, *args, **kwargs)
+        payload["plantedBySuite"] = True
+        payload.pop("source")
+        return payload
+
+    def planted_direction_thumb(self, *args, **kwargs):
+        payload = real_direction_thumb(self, *args, **kwargs)
         payload["plantedBySuite"] = True
         payload.pop("source")
         return payload
@@ -102,11 +113,13 @@ def test_a_planted_key_in_the_producer_shows_up_in_the_dump():
     # when a body does that.
     charsheet_draft.sprite_payload = planted_sprite
     charsheet_draft.CharacterDraft.row_thumb = planted_thumb
+    charsheet_draft.CharacterDraft.direction_thumb = planted_direction_thumb
     try:
         planted = contract.build_payload_contract()
     finally:
         charsheet_draft.sprite_payload = real_sprite
         charsheet_draft.CharacterDraft.row_thumb = real_thumb
+        charsheet_draft.CharacterDraft.direction_thumb = real_direction_thumb
 
     assert "character.plantedBySuite" in _keys(planted, "sprite")
     assert "character.mime" not in _keys(planted, "sprite")
@@ -139,6 +152,31 @@ def test_the_conditional_slot_is_two_spellings_of_one_key(document):
         "exactly one slot in the sprite payload is mode-dependent; a second one "
         "is a contract change the launcher's gate has to be taught about"
     )
+
+
+def test_the_two_thumb_item_kinds_are_two_modes_of_one_payload(document):
+    """A row crop and a direction-reference crop, in one contract.
+
+    `thumb` grew a `--direction` arm when the launcher's QA card was found
+    drawing a tile through the whole turnaround stage — not because a reference
+    was too heavy to draw, but because no verb published a VERDICT for one. The
+    two arms answer the same envelope and the same two budget booleans, and
+    differ in exactly the keys their item kind owns, which is what `modes`
+    exists to say.
+    """
+    thumb = document["payloads"]["thumb"]
+    keys = thumb["keys"]
+
+    assert thumb["modes"] == ["direction", "row"]
+    assert keys["row"]["modes"] == ["row"]
+    assert keys["frame"]["modes"] == ["row"] and keys["frames"]["modes"] == ["row"]
+    assert keys["direction"]["modes"] == ["direction"]
+    # The verdict is unconditional in both arms: one consumer rule covers both
+    # kinds, which is the whole reason the direction arm exists.
+    for path in ("withinConsoleBudget", "withinOwnSheet", "path", "square", "source"):
+        assert keys[path]["conditional"] is False, path
+    conditional = sorted(path for path, entry in keys.items() if entry["conditional"])
+    assert conditional == ["direction", "frame", "frames", "row"]
 
 
 def test_a_dynamic_map_is_one_key_and_its_children_are_not(document):

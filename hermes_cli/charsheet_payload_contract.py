@@ -212,13 +212,17 @@ def _install_probe_character(probe: dict) -> str:
     return probe["slug"]
 
 
-def _start_probe_draft(probe: dict, workspace: Path) -> tuple[str, str]:
-    """A draft carrying ONE proposed row attempt; returns ``(draft id, row key)``.
+def _start_probe_draft(probe: dict, workspace: Path) -> tuple[str, str, str]:
+    """A draft carrying one proposed ROW and one proposed DIRECTION reference.
 
-    Nothing is generated: the strip is an 8-pixel-tall solid RGBA image proposed
-    straight into the revision store, which is all ``row_thumb`` needs to crop a
-    cell. The crop is taken at ``--scale 1`` so no bound is anywhere near being
-    the thing under test here -- the KEYS are.
+    Returns ``(draft id, row key, direction)`` -- both QA item kinds, because
+    ``thumb`` crops both and the two payloads are deliberately not the same key
+    set (a reference has no frame to address).
+
+    Nothing is generated: the strip is an 8-pixel-tall solid RGBA image and the
+    reference an 8-pixel square, proposed straight into the revision store,
+    which is all the crop verbs need. Both crops are taken at ``--scale 1`` so
+    no bound is anywhere near being the thing under test here -- the KEYS are.
     """
     from PIL import Image
 
@@ -234,7 +238,11 @@ def _start_probe_draft(probe: dict, workspace: Path) -> tuple[str, str]:
     strip = workspace / f"{probe['slug']}-strip.png"
     Image.new("RGBA", (8 * row.frames, 8), (32, 64, 128, 255)).save(strip)
     draft.store.propose(charsheet_draft.row_item(row.key), strip)
-    return draft.id, row.key
+    direction = probe["spec"].scheme.authored[0]
+    reference = workspace / f"{probe['slug']}-{direction}.png"
+    Image.new("RGBA", (8, 8), (128, 64, 32, 255)).save(reference)
+    draft.store.propose(charsheet_draft.turnaround_item(direction), reference)
+    return draft.id, row.key, direction
 
 
 def _emit(handler: Callable[[Any], int], **args: Any) -> dict:
@@ -310,28 +318,57 @@ def _sprite_kind(probes: list[dict]) -> dict:
     )
 
 
-def _thumb_kind(drafts: list[tuple[str, str]]) -> dict:
+def _thumb_kind(drafts: list[tuple[str, str, str]]) -> dict:
+    """The crop verb's TWO item kinds, as two modes of one payload.
+
+    A row crop and a direction-reference crop share the envelope, the two budget
+    booleans and the shape keys, and differ in exactly the keys their item kind
+    has (``row``/``frame``/``frames`` against ``direction``). Modes are how this
+    dump already says "present here, absent there", so the launcher's card reads
+    one contract for both arms instead of guessing which keys survive on which.
+    """
     from hermes_cli.harness import _cmd_characters_thumb
 
-    measured = _agreed_shape(
-        [
-            _emit(
-                _cmd_characters_thumb,
-                draft=draft_id,
-                row=row_key,
-                attempt=-1,
-                frame=None,
-                scale=1,
-                square=False,
-            )
-            for draft_id, row_key in drafts
-        ]
-    )
+    modes = {
+        "row": _agreed_shape(
+            [
+                _emit(
+                    _cmd_characters_thumb,
+                    draft=draft_id,
+                    row=row_key,
+                    direction="",
+                    attempt=-1,
+                    frame=None,
+                    scale=1,
+                    square=False,
+                )
+                for draft_id, row_key, _direction in drafts
+            ]
+        ),
+        "direction": _agreed_shape(
+            [
+                _emit(
+                    _cmd_characters_thumb,
+                    draft=draft_id,
+                    row="",
+                    direction=direction,
+                    attempt=-1,
+                    frame=None,
+                    scale=1,
+                    square=False,
+                )
+                for draft_id, _row_key, direction in drafts
+            ]
+        ),
+    }
     return _kind(
-        argv="harness characters thumb --draft <id> --row <key> --json",
-        producer="agent/charsheet/draft.py::CharacterDraft.row_thumb",
+        argv="harness characters thumb --draft <id> (--row <key> | --direction <dir>) --json",
+        producer=(
+            "agent/charsheet/draft.py::CharacterDraft.row_thumb / "
+            "CharacterDraft.direction_thumb"
+        ),
         object_path="",
-        modes={"default": measured},
+        modes=modes,
     )
 
 
