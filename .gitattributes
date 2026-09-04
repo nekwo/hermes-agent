@@ -42,3 +42,17 @@ docker/entrypoint.sh text eol=lf
 # so the bytes on disk are the bytes in the object store are the bytes the
 # other repo committed.
 tests/fixtures/office_layout/** -text
+
+# The other two byte-pinned cross-repo families, pinned 2026-09-04 for the
+# reason `office_layout` was: each carries a `MANIFEST.sha256`, each README
+# states the launcher commits byte-identical copies
+# (`test/fixtures/hermes_responses/` and `test/fixtures/harness_stream/`), and
+# the launcher pinned both of those sides on the same date. A sha256 is a claim
+# about bytes; without `-text` the default `* text=auto` above lets a checkout
+# hand a contributor different bytes than the object store holds, and the digest
+# then reds for a file nobody edited. Enumerated — not listed — by
+# `tests/test_byte_pinned_fixture_families.py`, which walks
+# `git ls-files -- '*/MANIFEST.sha256'` so a fourth family cannot arrive
+# unpinned and quiet.
+tests/fixtures/response_envelopes/** -text
+tests/fixtures/stream_frames/** -text
