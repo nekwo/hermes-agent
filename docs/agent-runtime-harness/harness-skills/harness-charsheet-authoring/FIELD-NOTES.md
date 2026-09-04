@@ -1001,9 +1001,19 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   the composed shift budget on real art, 9 px of 16 with a 32 px prop
   saturating the window — and its detection floor was measured by injecting a
   per-row drift: red at 6 px, green at 4 px. Read it as a pin on the composition
-  path's shift budget, not on the upstream centring rule. "If `normalize_cells`
+  path's shift budget, not on the upstream centring rule. ~~"If `normalize_cells`
   ever stops registering" still has no detector, and now we know why one is hard
-  to write.
+  to write.~~ **CLOSED 2026-09-04: there is a detector, and the reason one
+  looked hard is that it was being looked for on the wrong path.** Through the
+  composition path the centring is invisible; against the FUNCTION it is one
+  assertion —
+  `tests/agent/test_charsheet_pipeline.py::test_normalize_cells_still_registers_every_state_on_the_cell_s_centre`
+  hands `atlas.normalize_cells` two states drawn hard against opposite edges of
+  their own canvases and requires both to land centred in the same 192 px cell.
+  Verified by removing the centring (`px = 0`): `idle is not centred in its
+  cell: 0 left, 102 right`. It lives in the CHARSHEET suite deliberately — the
+  pet suite is opt-in (`HERMES_RUN_SLOW_PET_TESTS`) and would not run in the
+  sweep that deleted the line.
 
 - **[READ] THE RULING: the threshold is not the lever, so it did not move. What
   moved is what ONE reading is allowed to DO.** Measured in both directions, the

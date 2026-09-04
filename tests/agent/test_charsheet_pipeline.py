@@ -2456,6 +2456,53 @@ def worst_registered_shift(spec, sheet):
     return worst
 
 
+def test_normalize_cells_still_registers_every_state_on_the_cell_s_centre():
+    """The load-bearing UPSTREAM dependency, pinned where it is depended ON.
+
+    `detect_mirrored_art` reads PLACEMENT as handedness — an 8 px horizontal
+    shift of one correct row moves it from -38.2% to +9.4% and refuses the
+    install — and what holds that at bay is `atlas.normalize_cells` centring
+    each state on its union box. That is pet code this package imports and does
+    not own.
+
+    The composition test below CANNOT see it go, measured rather than assumed:
+    `extract_strip_frames` content-crops each frame per slot BEFORE the centring
+    runs, so replacing `normalize_cells` with a fit that centres nothing leaves
+    every composed shift at 0. What that test does see is per-row DRIFT (red at
+    6 px, green at 4). The centring itself needs a pin against the function, and
+    it belongs in this file because the charsheet is what the removal would
+    break — `tests/agent/test_pet_generate.py` is opt-in (`HERMES_RUN_SLOW_PET_TESTS`)
+    and would not run in the sweep that deleted it.
+
+    Two states drawn hard against opposite edges of their own canvases land
+    centred in the same 192 px cell. Delete the horizontal centring
+    (`px = round((CELL_WIDTH - sw) / 2)` in `normalize_cells`) and they land
+    where their sources put them, tens of pixels apart.
+    """
+    from agent.pet.generate import atlas
+
+    left_hugging = Image.new("RGBA", (160, 180), (0, 0, 0, 0))
+    right_hugging = Image.new("RGBA", (160, 180), (0, 0, 0, 0))
+    ImageDraw.Draw(left_hugging).rectangle((0, 40, 60, 170), fill=(80, 120, 220, 255))
+    ImageDraw.Draw(right_hugging).rectangle((100, 40, 159, 170), fill=(220, 120, 80, 255))
+
+    normalized = atlas.normalize_cells({"idle": [left_hugging], "walk": [right_hugging]})
+
+    centres = {}
+    for state, cells in normalized.items():
+        box = cells[0].getbbox()
+        assert box is not None, state
+        left_margin, right_margin = box[0], atlas.CELL_WIDTH - box[2]
+        assert abs(left_margin - right_margin) <= 1, (
+            f"{state} is not centred in its cell: {left_margin} left, {right_margin} right"
+        )
+        centres[state] = (box[0] + box[2]) / 2
+
+    assert abs(centres["idle"] - centres["walk"]) <= 1, (
+        "two states drawn at opposite edges landed apart: the registration is gone"
+    )
+
+
 def test_composing_real_art_registers_every_row_inside_the_shift_window(tmp_path):
     """The composition path's shift budget, on real art, with its headroom.
 
@@ -2481,6 +2528,8 @@ def test_composing_real_art_registers_every_row_inside_the_shift_window(tmp_path
     the composition lands rows: measured red at 6 px and green at 4 px, i.e. a
     detection floor of ~5 px on top of the 9 px already spent. That is the same
     ~6 px of headroom the window has, stated as a test rather than as a note.
+    The centring itself is pinned directly, one test up
+    (`test_normalize_cells_still_registers_every_state_on_the_cell_s_centre`).
     """
     spec, strips, references = strips_of_real_art(tmp_path, "jump")
     composed = pipeline.compose_sheet(
