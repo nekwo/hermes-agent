@@ -894,7 +894,7 @@ def _candidate_endpoints(store_root) -> list[dict]:
     return [{"host": str(host), "port": port}]
 
 
-def _dial_host(store_root) -> tuple[str, int] | None:
+def _dial_host(endpoints: list[dict]) -> tuple[str, int] | None:
     """The ONE address every payload writer names, or ``None``.
 
     R-D1: *a payload host is a dialable address or the verb refuses.* Before
@@ -913,9 +913,15 @@ def _dial_host(store_root) -> tuple[str, int] | None:
     ``gateway id`` prints it as ``dial_host`` for the launcher's sheet to read
     (R-D4). ``None`` when the list is empty, which the callers distinguish from
     "the lane is off" using the endpoint's own ``source``.
+
+    **It takes the LIST, not the root, and D1b is why.** D1 wrote it as
+    ``_dial_host(store_root)``, which enumerated a second time; enumerating was
+    two socket calls then and is a routing-table process spawn now (~0.4 s on
+    the operator's Windows PC), and both callers — ``_dial_target`` and
+    ``gateway id`` — were already holding the list they asked for again. Same
+    single answer, one enumeration per command instead of two.
     """
 
-    endpoints = _candidate_endpoints(store_root)
     if not endpoints:
         return None
     first = endpoints[0]
@@ -939,7 +945,7 @@ def _dial_target(store_root, endpoint: dict, *, args):
     """
 
     endpoints = _candidate_endpoints(store_root)
-    dial = _dial_host(store_root) if endpoints else None
+    dial = _dial_host(endpoints)
     if dial is None and endpoint.get("source") in {"live", "config"}:
         return (
             None,

@@ -211,7 +211,7 @@ instead: not "which of my addresses reaches the internet" but "who owns
 |---|---|
 | 1 — `_default_route_address` | `_run_route_command` (stdlib `subprocess`, 2 s, never raises) plus four pure readers: `_windows_default_route_address`, `_macos_default_route_interface`, `_first_inet_address`, `_linux_default_route` |
 | 2 — rank 0 | `_address_rank` takes a third argument; the table's answer is rank 0, the probe's rank 1, and the old 1–4 shift to 2–5 |
-| 3 — fixtures + rank tests | 10 tests in `tests/hermes_cli/test_gateway_introduce_verb.py`, beside D1's rank tests |
+| 3 — fixtures + rank tests | 10 new test functions (13 cases — the dispatch one is parametrised over four arms) in `tests/hermes_cli/test_gateway_introduce_verb.py`, beside D1's rank tests |
 | 4 — proof | §8 below |
 
 **The netmask comparison is the entire ruling.** PIA's rows are
@@ -259,6 +259,16 @@ than falling to the tunnel.
 * **Silence costs exactly the pre-D1b order.** Asserted end to end rather than
   by stubbing the helper this stage added: every routing command fails and the
   list comes back byte-for-byte D1's.
+* **DEVIATION: `_dial_host` now takes the candidate LIST, not the store root**
+  (`hermes_cli/harness_parts/gateway_commands.py`, and its two callers —
+  `_dial_target` and `gateway id` in `hermes_cli/harness.py`). D1's plan item 2
+  spells it `_dial_host(store_root)`, which enumerates a second time. That was
+  two socket calls before and is a process spawn now — `route print -4` costs
+  **0.43 s** measured on this PC — and both callers were already holding the
+  list they went back and asked for. Same single answer to "which address do we
+  hand out", one enumeration per command instead of two. Splitting it into a
+  second helper instead would have left `_dial_host(store_root)` with no callers
+  in the repo, which the deadcode census would rightly come for.
 
 ## 8. The read-only proof on this machine, with PIA still connected
 

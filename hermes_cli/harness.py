@@ -2117,7 +2117,9 @@ def _gateway_install_row(identity) -> dict:
             "port": endpoint.get("port"),
             "source": endpoint["source"],
         }
-        dial = _dial_host(root)
+        # The list this row already holds, not a second enumeration of it: since
+        # D1b that walk reads the routing table, which is a process spawn.
+        dial = _dial_host(row["endpoints"])
         row["dial_host"] = {"host": dial[0], "port": dial[1]} if dial else None
         row["capabilities"] = list(GATEWAY_CAPABILITIES)
     except Exception:
