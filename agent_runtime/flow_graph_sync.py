@@ -304,8 +304,8 @@ _REFUSAL_MESSAGES = {
 }
 
 
-def _refusal(key: str, code: str) -> dict[str, str]:
-    return {"key": key, "code": code, "message": _REFUSAL_MESSAGES.get(code, code)}
+def _refusal(key: str, code: str, *, message: str | None = None) -> dict[str, str]:
+    return {"key": key, "code": code, "message": message or _REFUSAL_MESSAGES.get(code, code)}
 
 
 # --- baseline sidecar (never synced, never published) ------------------------
@@ -366,3 +366,268 @@ def update_flow_graph_baseline_after_publish(realm_id: str, projection: FlowGrap
     for graph_id, body_hash in projection.hashes().items():
         baseline[flow_graph_baseline_key(graph_id)] = body_hash
     write_flow_graph_baseline(realm_id, baseline)
+
+
+# --- pull: adopt or hold, at whole-document granularity ----------------------
+
+
+def read_projection_document(data: Any) -> dict[str, dict[str, Any]] | None:
+    """Parse a pulled ``store/flow_graphs.yaml`` document.
+
+    ``None`` means "this subtree carries no canvas projection" — an older
+    publisher, or a realm whose desks never had one drawn. Absence is never a
+    removal, and the launcher's version-skew story keys on the distinction.
+    """
+
+    if not isinstance(data, dict) or data.get("kind") != PROJECTION_KIND:
+        return None
+    raw = data.get("graphs")
+    if not isinstance(raw, dict):
+        return {}
+    return {str(key): value for key, value in raw.items() if isinstance(value, dict)}
+
+
+def read_remote_flow_graphs(subtree) -> tuple[dict[str, dict[str, Any]], str | None]:
+    """Canvas bodies carried by a pulled realm subtree.
+
+    ``(bodies, source)``. ``source`` is ``None`` for an absent projection and
+    ``"unreadable"`` for one that exists and will not decode — a distinction the
+    caller spends: absence touches nothing, and a parse error is a named refusal
+    rather than a delete-shaped decision taken on a read failure.
+    """
+
+    from pathlib import Path
+
+    path = Path(subtree).joinpath(*FLOW_GRAPH_PROJECTION_RELATIVE_PATH.split("/"))
+    if not path.is_file():
+        return {}, None
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return {}, "unreadable"
+    parsed = read_projection_document(data)
+    if parsed is None:
+        return {}, None
+    return parsed, "projection"
+
+
+#: The pulled body is not a canvas ``parse_flow_graph_doc`` will accept.
+REFUSAL_INVALID_REMOTE_DOCUMENT = "invalid_remote_canvas"
+#: The LOCAL stored canvas exists and will not project. Refused rather than
+#: reported absent: absent drives the ADOPT arm, and adopting over a file this
+#: machine could not read would overwrite a drawing nobody has seen.
+REFUSAL_UNREADABLE_LOCAL = "unreadable_local_canvas"
+#: The projection exists in the subtree and will not decode.
+REFUSAL_UNREADABLE_PROJECTION = "unreadable_projection"
+
+
+@dataclass(slots=True)
+class FlowGraphPullSummary:
+    """Typed accounting for the canvas pull — the contract seam the launcher
+    renders, carried on a pull ack as ``result["flow_graph_sync"]``.
+
+    - ``adopted`` — the realm's drawing was written whole, through the store
+      door so ``parse_flow_graph_doc`` validated it on the way in.
+    - ``converged`` — local already equals remote; nothing written.
+    - ``kept_local`` — this machine drew on it and the realm did not.
+    - ``held`` — BOTH sides drew. The local canvas is untouched and the remote
+      body is parked in a conflict sidecar. A drawing has no natural three-way
+      resolution, so this is a loud hold, never a merge.
+    - ``upstream_absent`` — the realm no longer carries a canvas this baseline
+      says it published. **Never a delete.** A canvas is the only record of a
+      map somebody authored by hand, and owner-liveness reaping — which
+      ARCHIVES, never deletes — is the one authority that removes one.
+    - ``refused`` — a remote body ``parse_flow_graph_doc`` rejects, an
+      unreadable local canvas, or an unreadable projection. Per-entity
+      isolation: nothing is written, the refusal is named, the pull continues.
+    - ``unbound_node_agents`` — nodes bound to instances that did not travel.
+      Reported, NEVER dropped: the instance may arrive on the next pull, and
+      editing the operator's drawing to fit what this machine happens to know is
+      the exact silence this lane exists to close.
+
+    ``source`` is ``None`` when the subtree carries no projection at all.
+    """
+
+    adopted: list[str] = field(default_factory=list)
+    converged: list[str] = field(default_factory=list)
+    kept_local: list[str] = field(default_factory=list)
+    held: list[str] = field(default_factory=list)
+    upstream_absent: list[str] = field(default_factory=list)
+    refused: list[dict[str, str]] = field(default_factory=list)
+    unbound_node_agents: list[dict[str, str]] = field(default_factory=list)
+    source: str | None = None
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.adopted)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "adopted": sorted(set(self.adopted)),
+            "converged": sorted(set(self.converged)),
+            "kept_local": sorted(set(self.kept_local)),
+            "held": sorted(set(self.held)),
+            "upstream_absent": sorted(set(self.upstream_absent)),
+            "refused": list(self.refused),
+            "unbound_node_agents": list(self.unbound_node_agents),
+            "source": self.source,
+        }
+
+
+def apply_flow_graph_pull(
+    realm_id: str,
+    subtree,
+    *,
+    live_instance_ids=None,
+) -> FlowGraphPullSummary:
+    """Adopt, keep or HOLD each pulled canvas — whole document, never merged.
+
+    Runs inside ``pull_realm_sync`` AFTER ``apply_persona_instance_pull``, and
+    the order is the argument rather than a preference: owner-liveness reaping
+    archives a canvas whose owner instance is gone, and a canvas that landed
+    before its owner was minted looks exactly like that. The ordering is pinned
+    by a test, not by this docstring.
+
+    **What this deliberately does not do: steering.** The steering relations
+    already travel on ``steered_by`` in the persona-instance family, and running
+    ``reconcile_flow_graph_steering`` here would let a pulled drawing rewrite a
+    peer's instance records. Non-owner edges in a pulled canvas are the local
+    context the operator drew, exactly as they are in a locally authored one:
+    reported, never applied.
+
+    ``live_instance_ids`` is the caller's settled live-row set, injected so this
+    stays testable without a store; ``None`` asks the instance store.
+    """
+
+    from .flow_graph import FlowGraphDocError, FlowGraphStore, parse_flow_graph_doc
+    from .sync_merge import PullAction, classify_three_way_pull
+
+    summary = FlowGraphPullSummary()
+    remote, source = read_remote_flow_graphs(subtree)
+    summary.source = source
+    if source is None:
+        # Not published. Never a removal — no baselined canvas is touched, so an
+        # older peer in the rotation cannot strand this machine's drawings.
+        return summary
+    if source == "unreadable":
+        summary.refused.append(
+            _refusal(FLOW_GRAPH_PROJECTION_RELATIVE_PATH, REFUSAL_UNREADABLE_PROJECTION)
+        )
+        return summary
+
+    store = FlowGraphStore()
+    baseline = read_flow_graph_baseline(realm_id)
+    live = set(live_instance_ids) if live_instance_ids is not None else _live_instance_ids()
+    prefix = flow_graph_baseline_key("")
+    baselined = {key[len(prefix):] for key in baseline if key.startswith(prefix)}
+    for graph_id in sorted(set(remote) | baselined):
+        remote_body = remote.get(graph_id)
+        remote_hash = flow_graph_def_hash(remote_body) if remote_body is not None else None
+        try:
+            local_hash = _local_canvas_hash(store, graph_id)
+        except ValueError:
+            summary.refused.append(_refusal(graph_id, REFUSAL_UNREADABLE_LOCAL))
+            continue
+        if remote_body is None:
+            # ARCHIVE_LOCAL and edit-vs-remove are the same fact for this family:
+            # the realm stopped carrying a drawing this machine still has. Held
+            # and named, baseline KEPT so a repaired publish still converges.
+            summary.upstream_absent.append(graph_id)
+            continue
+        decision = classify_three_way_pull(
+            local_hash, remote_hash, baseline.get(flow_graph_baseline_key(graph_id))
+        )
+        if decision.action is PullAction.NOOP:
+            summary.converged.append(graph_id)
+            continue
+        if decision.action is PullAction.KEEP_LOCAL:
+            summary.kept_local.append(graph_id)
+            continue
+        if decision.action is PullAction.CONFLICT:
+            summary.held.append(graph_id)
+            _write_conflict_sidecar(realm_id, graph_id, remote_body, local_hash, remote_hash)
+            continue
+        try:
+            doc = parse_flow_graph_doc(remote_body)
+        except FlowGraphDocError as exc:
+            summary.refused.append(
+                _refusal(graph_id, REFUSAL_INVALID_REMOTE_DOCUMENT, message=str(exc))
+            )
+            continue
+        store.set_doc(doc, requested_by="realm-sync")
+        baseline[flow_graph_baseline_key(graph_id)] = remote_hash
+        summary.adopted.append(graph_id)
+        for node_id in sorted(doc.node_bindings):
+            agent_id = doc.node_bindings[node_id]
+            if agent_id and agent_id not in live:
+                summary.unbound_node_agents.append(
+                    {"graph_id": graph_id, "node": node_id, "agent": agent_id}
+                )
+    if summary.adopted:
+        write_flow_graph_baseline(realm_id, baseline)
+    return summary
+
+
+def _live_instance_ids() -> set[str]:
+    """The instance ids this machine can resolve, best-effort.
+
+    A store this process cannot read yields an empty set, which makes every
+    binding ``unbound`` — over-reporting, and the safe direction: these rows are
+    accounting, and nothing is dropped on their word.
+    """
+
+    try:
+        from .persona_assignments import PersonaInstanceStore
+
+        return {instance.id for instance in PersonaInstanceStore().scan_all().instances}
+    except Exception:  # noqa: BLE001 — accounting, never a failed pull
+        return set()
+
+
+def _local_canvas_hash(store, graph_id: str) -> str | None:
+    """The LOCAL canvas's semantic hash, or ``None`` when there is none.
+
+    Raises ``ValueError`` for a stored file that EXISTS and will not project —
+    absent is what drives the adopt arm, so folding a broken read into it would
+    overwrite a drawing nobody could read.
+    """
+
+    stored = store.get(graph_id)
+    if stored is None:
+        return None
+    return flow_graph_def_hash(project_flow_graph(stored, dropped=[]))
+
+
+def _write_conflict_sidecar(
+    realm_id: str,
+    graph_id: str,
+    remote_body: dict[str, Any],
+    local_hash: str | None,
+    remote_hash: str | None,
+) -> None:
+    """Park the drawing a HOLD refused to adopt.
+
+    Best-effort: a sidecar this machine cannot write is not a reason to clobber
+    the canvas the hold exists to protect.
+    """
+
+    from utils import atomic_json_write
+
+    from . import paths
+
+    try:
+        atomic_json_write(
+            paths.flow_graph_conflict_path(realm_id, graph_id),
+            {
+                "schema_version": 1,
+                "realm_id": realm_id,
+                "graph_id": graph_id,
+                "local_hash": local_hash,
+                "remote_hash": remote_hash,
+                "remote_body": remote_body,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    except Exception:  # noqa: BLE001 — the HOLD stands with or without its receipt
+        pass

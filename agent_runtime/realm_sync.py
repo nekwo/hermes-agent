@@ -624,6 +624,17 @@ def pull_realm_sync(
     )
     if instance_summary.changed:
         changed = True
+    # The CANVAS, immediately AFTER the mint door and never before it. Owner
+    # liveness is what decides whether a stored canvas is an operator's drawing
+    # or an orphan addressed to an agent that no longer exists, so a canvas that
+    # lands before its owner is minted is indistinguishable from garbage — and
+    # the pull's own ``unbound_node_agents`` accounting would name every binding
+    # this same pass was about to satisfy. The ordering is pinned by a test.
+    from .flow_graph_sync import apply_flow_graph_pull
+
+    flow_graph_summary = apply_flow_graph_pull(realm.id, subtree)
+    if flow_graph_summary.changed:
+        changed = True
     # Workspace deletions: honor the pulled realm's deleted_workspace_ids
     # resurrection-guard ledger so a member's surviving local copy neither
     # lingers nor republishes a workspace another member deleted.
@@ -647,6 +658,11 @@ def pull_realm_sync(
     # older hermes" apart from "this ack came from an older hermes" — and an
     # omitted key cannot say the first one.
     result["persona_instance_sync"] = instance_summary.as_dict()
+    # Emitted UNCONDITIONALLY for the same reason as the row above: an omitted
+    # key cannot tell "this peer publishes no canvas" apart from "this ack came
+    # from a hermes that has no canvas family", and the launcher's skew rule
+    # needs both.
+    result["flow_graph_sync"] = flow_graph_summary.as_dict()
     if tombstone_summary["deleted"] or tombstone_summary["archived"] or tombstone_summary["warnings"]:
         result["workspace_tombstones"] = tombstone_summary
     if any(skill_tombstone_summary.values()):
