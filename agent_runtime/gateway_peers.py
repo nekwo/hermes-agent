@@ -927,7 +927,6 @@ def redeem_peer_code(
             )
             _write_peers(store_root, rows)
             _note_write(store_root)
-            _clear_revoked_you(store_root, peer_install_id, now=stamp)
             _emit_peer_event(
                 PEER_EVENT_RECORDED,
                 {
@@ -945,7 +944,7 @@ def redeem_peer_code(
                 },
                 store_root=store_root,
             )
-            return PeerCredential(
+            credential = PeerCredential(
                 peer_install_id=peer_install_id,
                 secret=secret,
                 display_name=name,
@@ -953,6 +952,16 @@ def redeem_peer_code(
             )
     except OSError as exc:
         return StoreRefusal(_os_reason(exc), str(exc))
+    # Cleared AFTER the lock closed, which is why the credential is captured
+    # above and returned below rather than returned from inside the block.
+    # :func:`_clear_revoked_you` writes through :func:`_touch_cache`, which takes
+    # this root's lock for itself, and ``_store_lock`` is not reentrant: called
+    # from inside the block it spent the whole ten-second budget contending with
+    # the write it was describing, so the re-pair stalled the join handshake for
+    # a flag it might then fail to clear. :func:`record_peer` always cleared out
+    # here; both credential writers now do.
+    _clear_revoked_you(store_root, peer_install_id, now=stamp)
+    return credential
 
 
 def record_peer(

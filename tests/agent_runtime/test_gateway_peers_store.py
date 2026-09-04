@@ -23,6 +23,7 @@ peer against one install and answer for another.
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -1215,6 +1216,47 @@ def test_usable_peers_excludes_revoked_expired_and_revoked_you(tmp_path):
     assert [peer.record.peer_install_id for peer in usable_peers(tmp_path)] == [
         "inst_live"
     ]
+
+
+def test_a_repair_clears_revoked_you_without_contending_with_its_own_lock(tmp_path):
+    """The re-pair exit from ``revoked_you``, taken at REDEEM and taken OUTSIDE
+    the store lock.
+
+    ``_clear_revoked_you`` is the one exit from the flag (R-S2-9) and it writes
+    through ``_touch_cache``, which takes this root's lock for itself. Called
+    from inside :func:`redeem_peer_code`'s own lock it contended with the write
+    it was describing, spent the whole ten-second budget, and had the refusal
+    swallowed by ``_touch_cache``'s best-effort ``except`` — so a re-pair stalled
+    the join handshake AND left an edge every reader still treated as dead.
+    :func:`record_peer` always cleared after its lock closed; this proves the
+    redeeming half now has the same shape.
+
+    The elapsed bound is the assertion that names the mechanism: a redeem that
+    contends spends the lock's entire budget, never a fraction of a second.
+    """
+
+    from agent_runtime.gateway_peers import (
+        apply_peer_announce,
+        read_peer_cache,
+        usable_peers,
+    )
+
+    _pair(tmp_path)
+    apply_peer_announce(tmp_path, PEER_B, {"revoked_you": True})
+    assert read_peer_cache(tmp_path)[PEER_B].revoked_you is True
+    assert usable_peers(tmp_path) == []
+
+    started = time.monotonic()
+    _pair(tmp_path)
+    elapsed = time.monotonic() - started
+
+    cached = read_peer_cache(tmp_path)[PEER_B]
+    assert cached.revoked_you is False
+    assert cached.revoked_you_at is None
+    assert [peer.record.peer_install_id for peer in usable_peers(tmp_path)] == [PEER_B]
+    assert elapsed < 2.0, (
+        f"the redeem took {elapsed:.1f}s, which is a lock it took twice"
+    )
 
 
 def test_ref_is_the_name_when_unique_else_the_id(tmp_path):
