@@ -322,21 +322,24 @@ class TestHarnessCoreToolset:
     resolved from this file alone.
     """
 
-    def test_harness_core_resolves_the_declared_43_with_the_registry(self):
+    def test_harness_core_resolves_the_declared_count_with_the_registry(self):
         from tools.registry import discover_builtin_tools
 
         discover_builtin_tools()  # populates agent_chat / board / browser-cdp
 
         resolved = set(resolve_toolset("harness_core"))
 
-        assert len(resolved) == 43, sorted(resolved)
+        # 43 -> 44 on 2026-09-03: S2b (485f33a7f6) registered ``agent_chat_installs``
+        # into the registry-only ``agent_chat`` toolset; the inventory and its test
+        # moved with it, this pin did not (found red on main 2026-09-04, w12/l3).
+        assert len(resolved) == 44, sorted(resolved)
         # The fork's own two lanes are IN — they are registry-only toolsets, so
         # this is also the proof that an ``includes`` reaches the registry view.
         assert {"agent_chat_send", "agent_chat_threads", "board_card_add"} <= resolved
         # ... and the conversational core the manual routes agents to.
         assert {"clarify", "delegate_task", "terminal", "read_file", "web_search"} <= resolved
         # ``browser-cdp`` is named as its own member so the two resolution
-        # lenses agree at 43 (see the comment in TOOLSETS).
+        # lenses agree (43 at S0a, 44 since S2b; see the comment in TOOLSETS).
         assert {"browser_cdp", "browser_dialog"} <= resolved
 
     def test_harness_core_never_resolves_a_registry_hygiene_name(self):

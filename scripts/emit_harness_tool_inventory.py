@@ -30,7 +30,7 @@ THE THREE ARTIFACTS
 1. The `## In-turn tools` block inside SKILL.md, between the generated markers:
    ONE ROW PER TOOLSET (15 rows), not one per tool. SKILL.md is prompt weight the
    operator pays on every turn (R-S0a-5).
-2. `references/tool-inventory.md` — the full 43-row table WITH descriptions, read
+2. `references/tool-inventory.md` — the full table (one row per tool) WITH descriptions, read
    on demand.
 3. `references/tool-inventory.json` — the machine copy. The launcher's Agent
    Command Atlas artifact regenerates its "full inventory" section from THIS file
