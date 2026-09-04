@@ -683,3 +683,237 @@ it is repaired by the next completed handshake, which is the first `peers
 join` (either direction) after the new build. A chat dial would also do it,
 and always would have; that is why the row was accurate the one time anybody
 looked at it through the chat lane.
+## 12. D6h — the errno that reads like a route and is a permission (R-D20)
+
+Branch `feat/d6-local-policy`, same worktree, from `9c798c6240` (D5h's docs
+commit). Commits `662a61b768` (the classifier, the `peers join` refusal, the
+family row) and `6c9f5d7cde` (the chat dial's word). Nothing here was run
+against `X:/Eternia/.hermes`.
+
+### 12.1 What the Mac measured, and the one thing the errno cannot say
+
+`dialable-addresses-mac-field-notes-2026-09-04.md`, Verdict and Steps 4–5.
+On macOS 15.7.9 with Local Network privacy never granted to the responsible
+app, the kernel refuses at `sendto` time:
+
+```
+nc -vz -w 5 192.168.1.203 8765   -> connectx ... failed: No route to host
+openssl s_client -connect ...    -> connect:errno=65
+ping -c 3 192.168.1.203          -> ping: sendto: No route to host
+ping -c 2 192.168.1.1            -> 2 received, 0.0% loss          (the router answers)
+arp -an | grep .203              -> at 2:bf:a1:23:b8:93 on en0      (RESOLVED)
+```
+
+Every host on the Mac's own `/24` except the router, on every port and on
+ICMP, with the neighbour entry resolved and the route correct (`en0`,
+`192.168.1.39/24`, default via `192.168.1.1`). That is not a route condition;
+it is a per-process policy. The unified log names it at both dial timestamps
+(`nw_path_libinfo_path_check … unsatisfied (Local network prohibited)` from
+the serve's own pid, `LocalNetwork: found bundle id com.microsoft.VSCode`).
+
+`peers join` reported it as `192.168.1.203:8765 (OSError)` inside
+`runtime_unavailable` at 20:19:25 — 177 ms, because nothing was ever sent —
+the launcher's fulfiller mapped that family to `no_route`, and the sheet said
+`Unreachable`. Third time on this plan that a LOCAL condition reached the
+operator as a claim about the network: R-D1 (a bind is not an address), R-D14
+(a DACL on `peers.json`), and now a permission on the dialling machine itself.
+
+**The errno on its own cannot carry the distinction.** `EHOSTUNREACH` against
+an address nobody routes to really is a route failure, and telling that
+operator to open System Settings would be advice for a problem they do not
+have. The separating question is whether the host is ON-LINK — on a segment
+one of this machine's own addresses sits on — which is exactly what the Mac's
+resolved ARP entry was evidence of.
+
+### 12.2 The classifier, and why it lives where it does
+
+`classify_dial_error(exc, host, *, addresses=None) -> "local_policy" |
+"unreachable"` is in `hermes_cli/harness_parts/gateway_commands.py`, beside
+`_machine_addresses` and the `ipaddress` helpers D1/D1b already grew. The
+alternative — `agent_runtime/gateway_peers.py`, the lower layer — would have
+needed a second interface enumeration to answer the on-link question, and a
+second address model in this repo is the thing `_ipv4`'s own docstring is
+already arguing against.
+
+So `dial_peer` reaches UP for it, through a function-local import, which is
+what it already does for `_candidate_endpoints` eleven lines earlier. Nothing
+at module load couples the runtime layer to the CLI one, and there is no
+import cycle to break. `_dial_failure_word` wraps that import in the same
+try/except the neighbouring `_candidate_endpoints` read uses, and falls back
+to `type(exc).__name__` — which is precisely what the line printed before this
+stage. The classification is a BETTER word for a failure, never the only word.
+
+Three decisions inside it:
+
+* **Both `errno` and `winerror` are read.** Windows delivers `WSAEHOSTUNREACH`
+  as `winerror=10065` and translates `errno` to the CRT's own `EHOSTUNREACH`,
+  which is 110 — a third number, equal to neither POSIX one. Reading only
+  `errno` would miss the Windows case; reading only `winerror` would miss
+  every other platform.
+* **65 and 113 are written out beside `errno.EHOSTUNREACH`.** The constant is
+  whatever the interpreter's platform says, and the condition under test is
+  the errno of the *kernel that refused*. Every fixture in this repo runs on
+  one platform, and the measurement being reproduced was taken on another; a
+  test on Windows that could not present the Mac's 65 would be a test of
+  nothing. This is the one place in the change where a literal number beats a
+  symbol.
+* **v6 answers from the address itself wherever it can.** `fe80::/10` is
+  on-link by definition — it is meaningless off the segment that assigned it.
+  `fc00::/7` shares a `/64` with one of ours or it does not. A GLOBAL v6
+  address is never called on-link, because without the prefix length the
+  kernel assigned there is no honest way to say, and R-D20 only ever wants to
+  be sure in one direction. (Note that `_machine_addresses` filters `fe80:`
+  out of what it OFFERS, so our own link-local address is never in the list —
+  which is why the link-local arm cannot depend on it.)
+
+`addresses=None` means "ask `_machine_addresses`", and it is asked **only
+after the errno test**. On macOS that read is two subprocesses with a
+two-second ceiling each; paying it on every `ConnectionRefusedError` would put
+a routing-table walk in the middle of the common failure. There is a test
+pinning that ordering, because it is the kind of thing a later edit tidies
+away without noticing.
+
+### 12.3 Family 2, and the argument against 5 and 7
+
+`local_policy` is `ERROR_EXIT_CODES` **2**, not retryable.
+
+* **Not 7.** The family encodes exactly one thing — whether the identical
+  command succeeds later. Here it does not: thirty denials and zero prompts in
+  twenty-four hours on that Mac, because Sequoia raises the Allow prompt only
+  for the responsible app's OWN socket and the serve is a python child. A
+  client that retries this burns a pairing code per attempt, which is the same
+  argument R-D14 made for `store_unwritable` leaving 7.
+* **Not 5.** `permission_denied` is this stack refusing a caller for a
+  credential it holds. This is the HOST OS refusing this process, and the cure
+  is outside hermes entirely. The plan wrote "family 2-ish" and the dispatch
+  said 2; 5 was considered and rejected on that boundary, and it is written
+  down here because it is the one row in this table where the word
+  "permission" appears on both sides of a split.
+
+The producer gate (`tests/hermes_cli/test_error_exit_code_producers.py`) sees
+the new row as spent, because the refusal is a literal
+`code="local_policy"` at an `emit_harness_error` site — checked, green, ten
+tests.
+
+### 12.4 The refusal, and the one string that deliberately differs from D5h's
+
+`cmd_gateway_peers_join` collects `policy_refused` beside the existing
+`attempts` list. The new refusal fires only when **nothing answered** AND at
+least one on-link candidate was `local_policy`. Both halves matter: a run
+whose second candidate completed the handshake has nothing to say to the
+operator, and a run where every candidate merely timed out is still the
+network's answer. There is a test for each.
+
+The message names the addresses first, then the sentence D6l maps on:
+
+```
+192.168.1.203:8765: this machine's operating system refused to send to a host
+on its own network — on macOS allow this app under System Settings › Privacy &
+Security › Local Network. Nothing was sent: the kernel answered EHOSTUNREACH
+for an address on one of this machine's own subnets, which is a permission and
+not a route. Tried: 192.168.1.203:8765 (local_policy).
+```
+
+`LOCAL_POLICY_SENTENCE` is a module constant because both the message and the
+launcher's contract quote it, and a second spelling would be a second contract.
+
+**One deliberate divergence from D5h.** That stage made the noted string and
+the printed `Tried:` list byte-identical, on the argument that the cache row
+and the operator's sentence must not disagree about what was tried. Here the
+note is `local_policy: <host:port>[, …]` and the printed list keeps its full
+form. The reason is that `error` is the only channel `gateway.peer.reachability`
+has for WHY, a subscriber branches on it to choose a sentence, and a word
+buried behind an address list is a word a prefix match cannot find. The
+`Tried:` list still carries every address, so nothing is lost — it moved from
+one field to the other. Same shape on both doors (`dial_peer` prefixes its
+`detail` the same way) so the edge has one vocabulary.
+
+`peers join` prints `(local_policy)` in place of the exception class for a
+candidate that was classified — `OSError` is what the Mac's receipt said, and
+it is the single least useful thing that can be printed about a kernel that
+knows exactly where that host is and declines to send.
+
+### 12.5 What did NOT need changing
+
+* **The cache ROW has no `error` field.** `note_dial_result` passes `error`
+  into `_touch_cache`, which puts it on the `gateway.peer.reachability` event
+  detail and nowhere else; `PeerCacheRow` carries `reachability` and
+  `unreachable_since` only. The plan's R-D20 sentence *"the reachability cache
+  notes `ok=False` with `error="local_policy"`"* is satisfied by the event, and
+  a new persisted field would be a cache-contract change nothing on the
+  launcher side has asked for. **D6l should read the word off the event or off
+  the refusal envelope, not off the cache row.**
+* **`gateway_announce.py`'s fan-out** calls `note_dial_result` with its own
+  `ok`, and its dial goes through `dial_peer` — so it inherits the word without
+  a line changing.
+* **`_address_rank` / `_machine_addresses`** are untouched. The classifier
+  READS the enumeration; it never reorders or filters it.
+* **No refusal moved.** `runtime_unavailable` still covers every dial failure
+  that is not an on-link `EHOSTUNREACH`, including an on-link
+  `ConnectionRefusedError` — a host on our own subnet that answers with a reset
+  has proved packets leave this machine.
+
+### 12.6 What each test pins
+
+`tests/hermes_cli/test_gateway_peer_verbs.py` (+12 functions, 42 → 54):
+
+| test | what would break without it |
+| --- | --- |
+| `…the_os_refusing_an_on_link_host_is_a_permission_and_not_a_route` | exit 2, `code`/`reason` both `local_policy`, the address and both halves of the sentence in the message — the D6l interface contract, whole |
+| `…the_same_errno_against_an_off_link_host_is_still_the_networks_answer` | the on-link question being dropped, which would send every `EHOSTUNREACH` to System Settings |
+| `…a_refused_connection_on_an_on_link_host_is_not_a_permission` | the errno test widening to "any OSError on our subnet" |
+| `…one_candidate_that_answers_leaves_the_policy_word_unsaid` | the refusal firing on a run that succeeded on a later candidate |
+| `…the_reachability_event_leads_with_the_policy_word…` | §12.4's divergence being tidied back to D5h's identical-strings rule |
+| six classifier arms (`…calls_an_on_link_ehostunreach_a_policy`, `…reads_the_linux_number_too`, `…reads_the_windows_winerror_rather_than_the_errno`, `…needs_the_host_to_be_on_one_of_our_own_subnets`, `…only_ever_looks_at_a_host_unreachable_errno`, `…a_v6_link_local_host_is_on_link_by_definition…`) | each of §12.2's three decisions, in both directions |
+| `…asks_this_machine_when_it_is_given_no_address_list` | the errno-before-enumeration ordering, counted |
+
+`tests/agent_runtime/test_gateway_peers_store.py` (+2 functions, 61 → 63):
+the chat dial's `ConnectionError` leading with `local_policy: 192.168.1.203:8765`
+and the cache flipping to `unreachable`; and a merely-refused dial on the same
+on-link address keeping `ConnectionRefusedError`.
+
+### 12.7 Verification
+
+```
+bash scripts/run_tests.sh tests/hermes_cli/test_gateway_peer_verbs.py
+  -> 54 passed  (42 before this stage)
+bash scripts/run_tests.sh tests/agent_runtime/test_gateway_peers_store.py
+  -> 63 passed  (61 before this stage)
+bash scripts/run_tests.sh \
+  tests/agent_runtime/test_gateway_peers_store.py \
+  tests/hermes_cli/test_gateway_introduce_verb.py \
+  tests/hermes_cli/test_error_exit_code_producers.py \
+  tests/agent_runtime/test_response_contract_fixture.py
+  -> 4 files, 126 passed, 0 failed
+ruff check (gateway_commands.py, gateway_peers.py, harness_support.py, both
+  test files)                                      -> All checks passed
+python scripts/doc_cite_adjacency.py --exclude archive --exclude planned
+  -> passed (baseline capped, nothing new, nothing stale)
+```
+
+The two taxonomy consumers D4h ran are
+`tests/hermes_cli/test_error_exit_code_producers.py` and
+`tests/agent_runtime/test_response_contract_fixture.py` — both named in the
+dispatch under root-level paths that do not exist; the files above are them.
+The cite gate is run in its RULED scope (`AGENTS.md` §"doc-cite adjacency":
+the bare walk is red by ruling, 1247 unwaived across `archive/` and
+`planned/`). No canon cite fell out of its ±3 window: the insertions are in
+`gateway_commands.py` and `gateway_peers.py`, and the cites into those files
+sit above them.
+
+### 12.8 Owed after this
+
+* **D6l** builds the launcher half against the contract this stage pins:
+  `error.code == "local_policy"`, `error.reason == "local_policy"`, the message
+  above, → `MissionPairingReason.localNetworkDenied`. Note §12.5's first
+  bullet: the word is on the refusal envelope and on the
+  `gateway.peer.reachability` event, NOT on the cached peer row.
+* **Nothing here makes the Mac pair.** R-D19 (the launcher's own Dart socket
+  taking the first LAN touch, so macOS attributes it to the app and prompts)
+  and R-D21 (`NSLocalNetworkUsageDescription`) are the halves that turn a
+  correct sentence into a working dial. This stage only stops hermes telling
+  the operator to go and look at their router.
+* The operator's live cache at
+  `X:/Eternia/.hermes/agent-runtime/gateway/peers_cache.json` is unchanged by
+  this stage, as D5h §11.8 said: it is repaired by the next completed
+  handshake, not by a rebuild.
