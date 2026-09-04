@@ -908,7 +908,7 @@ demotes everything (`patch_coverage.py:25-40`).
 
 Promotion is **negotiated per client** by capability tokens, not decided by the
 server alone. The office surface's own fold is `office_surface`
-(`state_patches.py:1062`, `emit_office_surface_patch` at `:1132`), gated on
+(`state_patches.py:1062`, `emit_office_surface_patch` at `:1218`), gated on
 `OFFICE_SURFACE_FOLD_CAPABILITY = "office_surface_fold"`
 (`patch_coverage.py:179`), which is what lets `office.surface.updated` join the
 covered set (`patch_coverage.LIVE_COVERED_DOMAIN_EVENT_TYPES`). It is a
@@ -921,7 +921,7 @@ the `runtime.office.subscribe` request, so the two lanes cannot drift.
 
 Where a surface write is genuinely unfoldable, hermes emits an accounted
 **refresh** instead of pretending: `emit_office_surface_refresh`
-(`state_patches.py:1199`) exists because archiving an orphaned surface removes the
+(`state_patches.py:1285`) exists because archiving an orphaned surface removes the
 office row and every actor under it in one move, and a covered event with no patch
 beside it would ship an EMPTY patch list — advancing the client's watermark having
 folded nothing, keeping the archived surface and its chip forever.
@@ -936,19 +936,48 @@ none: the same asymmetry H1 closed for the pull lane. The adopt arm now emits it
 `upsert` from inside the lock, and `take="local"` still emits nothing, because it
 writes nothing.
 
-`office.actor.conflict_resolved` nevertheless **stays off**
-`LIVE_COVERED_DOMAIN_EVENT_TYPES`, and the reason changed with the fix rather
-than surviving it. The old reason — "there is no row for a covered batch to
-ride" — is now false. The live reason is the container row: every arm calls
+`office.actor.conflict_resolved` nevertheless **stayed off**
+`LIVE_COVERED_DOMAIN_EVENT_TYPES` for another two days, and the reason changed
+with the fix rather than surviving it. The old reason — "there is no row for a
+covered batch to ride" — went false with the adopt arm's `upsert`. The reason
+that replaced it was the container row: every arm calls
 `_archive_conflict_sidecar`, and the office projection reads those sidecars into
 `conflict_actor_keys` (`snapshot.office_summary_row`, off
-`OfficeStore.scan_conflicts`). No `office_actor` patch carries that field, and
-the launcher's `_applyOfficeActorPatch` never writes it — it is one of the
+`OfficeStore.scan_conflicts`). No `office_actor` patch carried that field, and
+the launcher's `_applyOfficeActorPatch` never wrote it — it is one of the
 office-row keys `_officeSurfaceFields` deliberately refuses to let any patch
-move. A covered batch would fold the resolved desk and leave the sync strip's
-conflict pill lit for the rest of the session: a conflict rendered on the row
-whose conflict that very gesture resolved. Covering it needs a producer for the
-CONFLICT LIST, which is a cross-stack change, not a line in a set.
+move. A covered batch would have folded the resolved desk and left the sync
+strip's conflict pill lit for the rest of the session: a conflict rendered on the
+row whose conflict that very gesture resolved.
+
+**The conflict ledger got its producer on 2026-09-04, and the event is now
+covered.** `OFFICE_CONFLICT_ENTITY = "office_conflict"` (`state_patches.py`) is a
+third office entity with exactly ONE op: a `remove` whose id is
+`office_actor_patch_id`'s `"<workspace_id>/<actor_key>"`, saying that one key has
+left `conflict_actor_keys`. `OfficeStore._emit_conflict_resolved_patch` emits it
+from inside `office_lock`, after the sidecar archive and before the domain event,
+on **all three arms** — the `take="local"` arm included, which writes no actor
+row at all and whose ledger move was the second, independent reason the event
+could not be covered. `office_patch_scope` routes the row by sharing the actor
+arm's split, so the office subscribe lane forwards it instead of dropping it.
+
+The event rides `TOKEN_GATED_DOMAIN_EVENT_TYPES` with the **entity name as its
+own token**, the trade WS1 made for `scope`: one entity with one op makes "can
+you fold the paired row" and "may this event free-ride" the same question, so a
+fifth capability string could only ever agree with the entity declaration. That
+gate is what let the hermes half land first — a client that has not declared
+`office_conflict` is sent no such row and may not promote the event, so its wire
+is byte-for-byte what it was. **The launcher half is still owed**: the fold that
+splices the id out of `conflict_actor_keys`, and `office_conflict` added to
+`kMissionFoldDeclaredEntities`. Until it lands, every fielded client keeps taking
+the full core on a resolve, which is exactly today's behaviour.
+
+The alternative the queue row named — widening the office row and giving it a
+capability token on the `office_surface_fold` pattern — was rejected: it would
+put a second writer on the row `OFFICE_SURFACE_PATCH_FIELDS` exists to keep to
+one. There is deliberately no ARRIVAL op either. A conflict sidecar is written by
+realm sync rather than by a chokepointed office write, so the batch that first
+RAISES a conflict has no row to ride and keeps demoting.
 
 ### The fold fence, and why it stopped firing
 
