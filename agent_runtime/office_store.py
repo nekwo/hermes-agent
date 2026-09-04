@@ -97,8 +97,11 @@ class DuplicateDeskRefused(AgentRuntimeError):
     """Raised when an actor write would give one persona a SECOND live desk.
 
     The one-desk-per-persona rule was a LAUNCHER rule only (plan
-    ``agent-placement-verb`` F9): ``MissionOfficeLayout.hasAuthoredDeskForPersona``
-    guards the authoring gesture and ``MissionOfficeRenderResolver`` counts desk
+    ``agent-placement-verb`` F9, deleted 2026-08-27 by the S10 fold-in commit —
+    see ``docs/agent-runtime-harness/06-office-and-board.md`` §Supersedes for
+    the sha and where its decisions live on):
+    ``MissionOfficeLayout.hasAuthoredDeskForPersona`` guards the authoring
+    gesture and ``MissionOfficeRenderResolver`` counts desk
     render nodes afterwards, so the client refuses what the client authors and
     reports what it finds. Neither is a fence: the 2026-08-24 incident authored
     a second ``qa`` desk through ``harness office actor-upsert``, a door no
