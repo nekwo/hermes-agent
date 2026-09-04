@@ -314,19 +314,35 @@ def test_the_ban_leaves_a_non_empty_or_default_alone():
 # ---------------------------------------------------------------------------
 
 
-def _flags_read_as_absent_or_given() -> set[str]:
-    """Every ``dest`` some handler reads through ``list_flag_or_absent``.
+def _flags_read_as_absent_or_given(
+    *, modules: list[Path] | None = None, reader_names: frozenset[str] | None = None
+) -> set[str]:
+    """Every ``dest`` some handler reads through an absence-preserving reader.
 
     Enumerated from the calls themselves rather than listed here: a flag added
-    to that reader tomorrow is inside this gate the moment it is written. A
-    literal-less call (a computed name) is deliberately NOT guessed at — it is
-    reported, because silently skipping it is how a gate reports a subset as if
-    it were the whole.
+    to one of those readers tomorrow is inside this gate the moment it is
+    written. A literal-less call (a computed name) is deliberately NOT guessed
+    at — it is reported, because silently skipping it is how a gate reports a
+    subset as if it were the whole.
+
+    ``reader_names`` derives from :data:`flag_binding.ABSENCE_PRESERVING_READERS`
+    by default rather than a literal repeated here — a SECOND
+    absence-preserving reader declared there tomorrow is inside this gate the
+    moment it is declared, with no matching edit owed in this file. ``modules``
+    defaults to the real package walk; both are parameters (not just read from
+    the module scope) so a test can prove the derivation is live rather than
+    hardcoded, by pointing this at a synthetic module and a synthetic reader
+    name — see :func:`test_a_second_absence_preserving_reader_joins_the_gate_
+    by_declaration_alone`.
     """
+
+    if reader_names is None:
+        reader_names = flag_binding.ABSENCE_PRESERVING_READERS
+    walk_modules = _package_modules() if modules is None else modules
 
     names: set[str] = set()
     unresolved: list[str] = []
-    for path in _package_modules():
+    for path in walk_modules:
         if path == BINDING_MODULE:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -335,7 +351,7 @@ def _flags_read_as_absent_or_given() -> set[str]:
                 continue
             func = node.func
             name = getattr(func, "id", None) or getattr(func, "attr", None)
-            if name != "list_flag_or_absent":
+            if name not in reader_names:
                 continue
             if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
                 names.add(str(node.args[1].value))
@@ -348,6 +364,37 @@ def _flags_read_as_absent_or_given() -> set[str]:
         f"cannot resolve it to a parser action: {unresolved}"
     )
     return names
+
+
+def test_a_second_absence_preserving_reader_joins_the_gate_by_declaration_alone(
+    tmp_path,
+):
+    """Row 129: the walk derives its reader set, it does not hardcode one.
+
+    Before this row the walk matched the literal string
+    ``"list_flag_or_absent"``, so a second absence-preserving reader added to
+    ``flag_binding`` tomorrow would be silently outside the gate until someone
+    remembered to edit this file too. This proves the OTHER shape: a synthetic
+    reader name that is not ``list_flag_or_absent`` at all is still found, as
+    long as it is passed in ``reader_names`` — the same set
+    ``flag_binding.ABSENCE_PRESERVING_READERS`` supplies by default. Without
+    the row's fix (a hardcoded ``!= "list_flag_or_absent"`` comparison) this
+    would fail: the synthetic name would never match and ``"widgets"`` would
+    never be collected.
+    """
+
+    synthetic = tmp_path / "synthetic_handler.py"
+    synthetic.write_text(
+        "def handle(args):\n"
+        "    return a_future_reader(args, 'widgets')\n",
+        encoding="utf-8",
+    )
+
+    names = _flags_read_as_absent_or_given(
+        modules=[synthetic], reader_names=frozenset({"a_future_reader"})
+    )
+
+    assert names == {"widgets"}
 
 
 def _harness_parser() -> argparse.ArgumentParser:

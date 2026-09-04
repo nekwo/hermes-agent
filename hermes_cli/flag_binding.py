@@ -69,6 +69,16 @@ __all__ = [
     "list_flag_or_empty",
 ]
 
+#: The readers that preserve "flag not given" as ``None`` rather than
+#: collapsing it to ``[]``. Declared here, and only here, so a gate that wants
+#: "every call site that reads a flag absence-preservingly" has a canonical
+#: source to derive from instead of a spelling repeated at each call site.
+#: ``tests/hermes_cli/test_flag_binding_boundary.py`` walks the package for
+#: calls to a name IN THIS SET rather than matching the literal
+#: ``"list_flag_or_absent"``, so a second absence-preserving reader added here
+#: tomorrow is inside that gate the moment it is added here too.
+ABSENCE_PRESERVING_READERS = frozenset({"list_flag_or_absent"})
+
 _MISSING = object()
 
 
