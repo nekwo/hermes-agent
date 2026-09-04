@@ -132,6 +132,14 @@ which the W2-H3 block above had already priced at ~10-16 ms. Nothing here
 argues for a per-persona warm beyond the first, and nothing argues for
 retiring the worker.
 
+RULED 2026-09-04 (operator): KEEP the worker. The two measurements never
+conflicted -- A6b priced the SECOND warm (1-2 ms), this re-take priced the
+FIRST (~1.4 s of registry import that the first create would otherwise pay).
+The retirement that was built against A6b's number was dropped at landing and
+is not to be re-proposed on that number. Ruled out alongside it: ANY per-persona
+warm beyond the first. The ``runtime.persona.prewarm`` verb and its launcher
+caller stay exactly as they are.
+
 The worker is a daemon: a serve process shutting down must not wait on a cache
 fill, and there is nothing to flush.
 """

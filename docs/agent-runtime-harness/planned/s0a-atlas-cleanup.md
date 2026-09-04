@@ -222,7 +222,8 @@ provider bill.
   `_cached_tool_names_for_toolsets` lru (`agent_runtime/tool_visibility.py:521`),
   the 15 s readiness memo and the 60 s provider-issue memo. A1 changes the
   memo KEY (the declared set, not the registry set) so the re-measure must be
-  taken after A1 lands — §2 A6b gives the recipe and the decision rule.
+  taken after A1 lands — §2 A6b gives the recipe. (The decision it fed is
+  RULED 2026-09-04: keep the worker, and no per-persona warm beyond the first.)
 - **Persona→skill seed.** `persona_records_from_config` DOES merge config
   `skills:` additions onto catalog defaults (`agent_runtime/config.py:532`,
   the `"skills" in overrides` branch) — the row's "`_persona_from_overrides`
@@ -599,11 +600,14 @@ under `docs/agent-runtime-harness/harness-skills/harness-runtime-model/`;
   + `resolve_tool_visibility` for `neko_supervisor` cold, then call
   `warm_persona_memos(persona)` for `dev` and time the same resolve for `dev`;
   the delta is what a warm is worth for a SECOND persona type. Record cold/warm
-  in the field notes and the ledger. **Decision rule** (the builder records the
-  number, the orchestrator decides): delta ≥ 300 ms → keep the worker, close
-  the row as "earns it, measured"; < 300 ms → the row becomes "retire
-  `persona_prewarm` worker + `runtime.persona.prewarm` verb + launcher
-  trigger" with this measurement as evidence. Do not retire anything in S0a.
+  in the field notes and the ledger. **RULED 2026-09-04 (operator): DONE and
+  CLOSED — KEEP the worker.** The decision rule this item carried keyed on the
+  SECOND warm's delta (measured 1–2 ms) and was the wrong input: w12/m5 priced
+  the FIRST warm on a cold process at ~1.4–1.5 s of registry import, which is
+  what the worker removes from the first create. The retire branch is
+  WITHDRAWN — the `persona_prewarm` worker, the `runtime.persona.prewarm` verb
+  and the launcher trigger all stay. Ruled out with it: any per-persona warm
+  beyond the first, so there is no follow-on ambition here to build.
 - **A6c · persona→skill seed — skills wait, and here is why.** The toolsets
   answer ("the profile declares, no persona field is consulted") does not
   transfer: skills are written by `persona set-skills` (own supersede clock)

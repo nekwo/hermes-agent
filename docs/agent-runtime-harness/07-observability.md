@@ -190,7 +190,7 @@ what the fixture mirror below enforces.
 | `snapshot_agents_readiness walk_ms=… tool_visibility_ms=… pid=…` | const `snapshot.py:432-434`, emitted `:449-454` | joins `snapshot_build_core` on `pid`; pinned by regex at `tests/agent_runtime/test_agents_readiness_attribution.py:51` |
 | `stream_attach op=… purpose=… … pid=…` | `agent_runtime/stream.py:212-218` | boot-investigation join (third `pid=`-bearing family) |
 | `snapshot_core_cache …` / `snapshot_core_cache_write …` / `snapshot_core_shadow …` / `snapshot_core_cache_lane_closed …` | `agent_runtime/core_cache.py` — see the channel table below | `agent_runtime/core_cache_census.py` via `scripts/core_cache_demote_census.py` |
-| `persona_prewarm done persona=… elapsed_ms=…` | const `PREWARM_DONE_RECEIPT` (`persona_prewarm.py:163`), emitted by `_worker` | pacing census; pinned at `tests/agent_runtime/test_persona_prewarm.py:481` |
+| `persona_prewarm done persona=… elapsed_ms=…` | const `PREWARM_DONE_RECEIPT` (`persona_prewarm.py:171`), emitted by `_worker` | pacing census; pinned at `tests/agent_runtime/test_persona_prewarm.py:481` |
 | `persona_chat_actor_prewarm root=… outcome=… elapsed_ms=…` | const `persona_chat_actor_prewarm.py` (`CHAT_ACTOR_PREWARM_DONE_RECEIPT`), emitted in `_drain` | did the chat's actor get built before its first message; format pinned at `tests/agent_runtime/test_persona_chat_actor_prewarm.py` |
 | `persona_chat_actor_prewarm pass candidates=… queued=… skipped=… elapsed_ms=…` | const `persona_chat_actor_prewarm.py` (`CHAT_ACTOR_PREWARM_PASS_RECEIPT`), emitted in `prewarm_chat_actors_on_boot` | one line per boot pass; the `candidates`/`queued` gap is `max_hot_sessions` doing its job |
 | `resident_signature_diff root=… components=…` | const `persona_chat_continuity.py` (`RESIDENT_SIGNATURE_DIFF_RECEIPT`), emitted in `PersonaChatRuntimeRegistry.acquire` | why a resident actor was NOT reused: the signature component NAMES that moved (never digests, never values — the components include prompt- and policy-adjacent material). Twin of the turn record's `resident_rebuild_component_<name>` flags; format pinned at `tests/agent_runtime/test_persona_chat_continuity.py` |
@@ -278,9 +278,9 @@ The `agent_create_phases` LOG line still bills only `instance_ms` and its ten
 sub-spans, so a reader wanting the skills cost reads the ack, not the log.
 
 `persona_prewarm done` is the completion half of an otherwise unfalsifiable
-claim — "a start with no finish measures nothing" (`persona_prewarm.py:130-135`).
+claim — "a start with no finish measures nothing" (`persona_prewarm.py:168-171`).
 The clock starts AFTER the queue `get`, so an idle worker never reports a
-minute-long warm (`:255-258`); a warm that RAISED logs a WARNING carrying the
+minute-long warm (`:298-302`); a warm that RAISED logs a WARNING carrying the
 same elapsed cost, because a census blind to the failures would under-count the
 queue's real service time (`:262-274`).
 
@@ -666,7 +666,7 @@ drift.
    `log_create_subphases` never raises and never measures
    (`agent_create_phases.py:230`).
 5. **Receipts carry timings and ids only.** Never a display name, never a
-   resolved toolset, never operator message text (`persona_prewarm.py:137-138`,
+   resolved toolset, never operator message text (`persona_prewarm.py:169-170`,
    `agent_create_phases.py:64-66`,
    `mission_agent_chat_runtime_controller.dart:1562`).
 6. **Observability rides log receipts, never new keys on the parity envelope.**

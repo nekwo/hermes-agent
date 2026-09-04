@@ -331,7 +331,7 @@ across the pair — then queues and returns
 ids are refused with their own reason: their memo keys are keyed on the instance the create
 mints, so there is nothing to warm beforehand.
 
-The work is `warm_persona_memos` (`persona_prewarm.py:181-232`): run the create's own
+The work is `warm_persona_memos` (`persona_prewarm.py:225-285`): run the create's own
 visibility resolution and DISCARD it. It fills process-lifetime memos and nothing else — no
 store write, no event, no minted id, no lock — which is why it can be fire-and-forget.
 
@@ -343,6 +343,14 @@ second worker could buy at best 16 ms while running a second cold sweep beside i
 concurrency is therefore NOT implemented. But that premise is the bench's, and the live series
 below does not have that shape — every warm after the first costs 109-375 ms, not ~0 — so warm
 #2 on a REAL roster is the number to re-measure before revisiting the decision.
+
+**KEEP, ruled 2026-09-04 (operator).** The stage was re-opened on the reading that the
+`check_fn` sweep leaving this path had taken its value with it. It had not: the FIRST warm
+in a cold process still costs 1,418–1,543 ms of registry import that the first create would
+otherwise pay inline, while the SECOND costs 1–2 ms. So the worker, the verb and the
+launcher trigger all stay, and any per-persona warm beyond the first is ruled OUT. The
+argument and both measurements are in `agent_runtime/persona_prewarm.py`; the refusal is
+listed in doc 08.
 
 Receipt, format-pinned by `tests/agent_runtime/test_persona_prewarm.py` —
 `persona_prewarm done persona=<id> elapsed_ms=<n>`. Live 2026-08-22 15:46:39-40:

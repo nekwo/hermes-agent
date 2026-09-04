@@ -240,6 +240,15 @@ depth counter that does not.
   TTL cache cold and each run the full toolset sweep — N concurrent `docker version`
   subprocesses, N playwright imports. A second worker cannot shorten the 2,172 ms item;
   it can only run the already-free ones alongside, buying at best 16 ms.
+- **Retiring the `persona_prewarm` worker on the second-warm number, and any
+  per-persona warm beyond the first** (RULED 2026-09-04, operator). Two same-day
+  measurements read as a conflict and are not one: S0a A6b priced the SECOND warm of
+  a process at **1–2 ms** (which is what a per-persona warm is worth — nothing), and
+  w12/m5 priced the FIRST on a cold process at **1,418–1,543 ms**, the registry
+  import the first create would otherwise pay inline. The worker earns its keep on
+  warm #1 alone, so it STAYS, together with the `runtime.persona.prewarm` verb and
+  the launcher trigger; a retirement was built against A6b's number and deliberately
+  dropped at landing. Argument written at `agent_runtime/persona_prewarm.py`.
 
 ### Closed on verification, 2026-08-22
 

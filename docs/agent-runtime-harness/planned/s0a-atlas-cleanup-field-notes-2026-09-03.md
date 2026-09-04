@@ -318,6 +318,15 @@ it. **Recorded, not acted on**: the plan says the orchestrator decides whether
 that retires the `persona_prewarm` worker, the `runtime.persona.prewarm` verb
 and the launcher trigger. Nothing was retired here.
 
+**RULED 2026-09-04 (operator): KEEP the worker — this measurement does NOT
+retire it.** The number above prices the SECOND warm; w12/m5 (2026-09-04, hermes
+`5dffe93935`) priced the FIRST on a cold process at ~1.4–1.5 s of registry
+import, which is the cost the worker actually takes off the first create. The
+two reads never conflicted. The retirement that was built against this row's
+1–2 ms was dropped at landing and must not be re-proposed on it. Ruled out with
+it: any per-persona warm beyond the first. The verb and the launcher trigger
+stay.
+
 **A6c — skills wait, and the accounting shipped.** `persona_skill_sources`
 (`agent_runtime/config.py`) plus two `harness agent list --json` keys. Against
 the operator's live config, four of five personas carry config `skills:`
