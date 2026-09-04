@@ -14,8 +14,8 @@ lane and nothing below carries a task frame.
 spawns the Launcher bridge otherwise pays a ~3s import tax on
 (`hermes_cli/harness_parts/serve.py:1-7`). Requests arrive as NDJSON, one frame
 per line, and dispatch into the **existing** harness argparse tree unchanged:
-`dispatch_argv` (`serve.py:1567`) builds a fresh parser per request
-(`_build_harness_parser`, `:1554`) and calls the same `_cmd_*` handler the CLI
+`dispatch_argv` (`serve.py:1638`) builds a fresh parser per request
+(`_build_harness_parser`, `:1625`) and calls the same `_cmd_*` handler the CLI
 would, including the harness error-envelope contract — argv arrives verbatim as
 the bridge already builds it, which keeps the per-call CLI fallback
 byte-identical to the served path. **`ready` is a BOOT frame, not a request
@@ -57,7 +57,20 @@ releasing its pool worker (`is_runtime_stream`, `:835`, used `:2952`).
 **Two transports, one dispatcher.** `serve_loop` is transport-agnostic. One
 serve per root owns a localhost socket, decided by an OS-held exclusive lock
 (`agent_runtime/serve_socket.py`); the loser runs stdio-only and says so on
-`ready`. The handshake is challenge-response and the SERVER speaks first —
+`ready`. **A DEAD owner is not an owner** (R-L2, 2026-09-04). The identity
+sidecar `serve_socket.owner.json` outlives its process — a killed serve never
+gets to unlink it — so `SocketOwnerLock.acquire` proves the pid with
+`serve_registry.pid_alive`, the same probe that classifies a registry row
+`stale_dead_pid`, before believing the file. Proven gone → the lane is taken
+and the block carries `took_over_from` plus the corpse's `owner_started_at`,
+with one `serve_socket_owner_takeover` line on the service log; a probe that
+cannot answer is never read as a takeover; a LIVE owner is refused exactly as
+before. The OS lock is not the stale part — the kernel releases it when the
+holder dies — so the only shape needing a retry is a held lock whose sidecar
+names a corpse, and that retry is bounded at one. Measured cost of the missing
+rule: a launcher respawn that did not await the old child's exit left the
+replacement stdio-only for a whole session, and therefore with no LAN listener.
+The handshake is challenge-response and the SERVER speaks first —
 `server_hello` carries a 64-hex nonce and `hello_contract: 3`, and the client
 answers `HMAC-SHA256(key=<per-root token>, msg="v3|<the port it DIALLED>|<nonce>")`.
 **The token never travels**: it is the HMAC key, never a field, so a captured
@@ -125,8 +138,39 @@ compared field by field on `ready` and on a loopback client's `hello_ok`
 (`tests/agent_runtime/test_serve_gateway_lane.py`).
 
 A `gateway` block rides `ready` / `hello_ok` / `version` on the same "states its
-own outcome" rule as `socket`: `disabled`, or `listening` with `host` / `port` /
-`cert_fingerprint`, or `error:<reason>`. Never absent.
+own outcome" rule as `socket`, and since R-L1 (2026-09-04) it has **four**
+outcomes rather than three, because "there is no listener" had four causes and
+one word:
+
+| outcome | means | carries |
+|---|---|---|
+| `listening` | the door is open | `host`, `port`, `started_at`, `cert_fingerprint` |
+| `disabled` | `remote_gateway.listen` is off. The default, forever | — |
+| `socket_unavailable` | **the config asked for a listener and the socket lane is why there is none** | `reason` (the `socket` block's own outcome, verbatim: `disabled` \| `lock_held_by` \| `error:<token>`), `pid`, `owner_started_at`, plus the `host`/`port` that were asked for |
+| `error:<Type>` | the bind or the certificate failed | `host`, `port` |
+
+Never absent, and the capability list (R-IP16) rides every one of them.
+`gateway_block_when_no_listener` (`hermes_cli/harness_parts/serve.py`) is the
+one place the first three are decided, and config-off wins over
+socket-unavailable: `disabled` is the actionable answer, while
+`socket_unavailable` on a runtime nobody asked to listen would send a launcher
+chasing a lock for a door it was never told to open.
+
+**Why `socket_unavailable` had to exist.** The LAN listener is deliberately
+coupled to the loopback lane — the serve that owns a root's socket is the serve
+that opens that root's doors, or two serves bind one operator-chosen port and
+the second loses that race too — so every way the socket lane fails is a boot
+with no listener. Until R-L1 all of them said `disabled`, the word for "the
+operator never asked", and on 2026-09-04 the launcher had *just* asked: it wrote
+`remote_gateway.listen` correctly, respawned, the replacement lost the
+socket-owner lock to a dead pid, and the greeting told it the feature was off.
+The launcher rendered `unsupported` and the operator got a grey switch.
+`socket_unavailable` also means the launcher's `unsupported` shrinks to its true
+meaning — a runtime that predates this block.
+
+Note that `socket_unavailable` can only ride `ready` and a stdio `version`
+reply: in that state there is no loopback listener to greet on, so no `hello_ok`
+exists to carry it. That is precisely why `ready` has to be complete.
 
 **Operational note — the Windows firewall.** The port is operator-chosen, and on
 Windows the first bind beyond loopback raises the Defender Firewall prompt
@@ -653,7 +697,7 @@ existed the log named none of them:
 
 | Caller | `op` / `purpose` | Site |
 |---|---|---|
-| socket/stdio op lane | `subscribe` / `stream_lane` | `serve.py:2867` |
+| socket/stdio op lane | `subscribe` / `stream_lane` | `serve.py:2971` |
 | RPC office lane | `runtime.office.subscribe` / `office_patch` | `serve_office_subscriptions.py:902` |
 | argv CLI | `harness_stream` / `cli_stream` | `runtime_commands.py:621-622` |
 
@@ -665,7 +709,7 @@ never raises — an instrument must not be why a subscribe fails.
 
 **Who paints the boot's one stale core is a property of the ROOM**, so
 `stream_frames(wants_stale_first=…)` is stated by the caller —
-`serve.py::_room_wants_stale_first` (`:3193`) reads the hub's two subscriber
+`serve.py::_room_wants_stale_first` (`:3297`) reads the hub's two subscriber
 tables at producer-build time, `_cmd_stream` (`runtime_commands.py:611`) states
 `True`, default `False`. It cannot be re-derived inside the producer: the
 subscriber attaching FIRST at boot is the RPC office lane, whose sink discards
@@ -688,7 +732,7 @@ workspace id that failed the private "id under `<workspace_id>/`" restatement
 becomes a resync notification; an UNKNOWN frame type takes the same branch
 deliberately. Drops are typed, never silent: a subscriber outrunning its bounded
 buffer gets `subscription_dropped` naming which of the two bounds tripped —
-frame count or bytes — then is unsubscribed (`serve.py:4182`).
+frame count or bytes — then is unsubscribed (`serve.py:4286`).
 
 ## 7. The PUSH-vs-RPC boundary, and the fork boundary
 

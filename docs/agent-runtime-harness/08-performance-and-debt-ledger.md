@@ -127,7 +127,7 @@ carry the boot-side half).
 ### 3. Per-domain store read caches in the serve — OPEN, re-verified 2026-08-22
 
 Archived doc 14's item 1, and still item 1. The serve's `_PollResponseCache`
-(`serve.py:1181`; renamed from `_ReadModelCache` in the duplicate-implementation
+(`serve.py:1252`; renamed from `_ReadModelCache` in the duplicate-implementation
 retirement, Stage 2 — the old name was the third thing in this repo wearing
 "read model", and Stage 6 has since deleted the first, so the phrase now means
 two things: this repo's live core cache and the directory it lives in) is a
