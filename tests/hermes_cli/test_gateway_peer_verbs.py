@@ -874,6 +874,141 @@ def test_every_peer_write_verb_reports_an_unwritable_store_the_same_way(
     )
 
 
+# ── join: the handshake is a reachability fact (R-D16) ───────────────────────
+#
+# D3 run #2, 2026-09-04 20:19:19. The join dialled 192.168.1.39:8765, redeemed,
+# stored the secret and emitted ``gateway.peer.recorded source=join`` — and the
+# cache row for that peer still read ``reachability: unreachable,
+# unreachable_since 18:03:17``, two hours stale. ``note_dial_result(ok=True)``
+# had exactly one caller, the chat lane's ``dial_peer``. The launcher read the
+# cache, called the edge unusable, and re-requested a pairing code every minute
+# for an edge that was already up.
+
+
+def _seeded_unreachable(peer_install_id: str = "inst_far") -> None:
+    """The operator's live cache: a peer written off by an earlier dial."""
+
+    from agent_runtime.gateway_peers import note_dial_result
+
+    note_dial_result(
+        paths.store_root(), peer_install_id, ok=False, error="18:03 said no"
+    )
+
+
+def _cached(peer_install_id: str = "inst_far"):
+    from agent_runtime.gateway_peers import read_peer_cache
+
+    return read_peer_cache(paths.store_root()).get(peer_install_id)
+
+
+def test_a_completed_join_marks_the_peer_reachable(capsys, fake_dials):
+    """The defect, stated as the fact it denied: this run reached that install,
+    over TLS, with a credential it minted seconds earlier. Anything reading the
+    cache afterwards and seeing ``unreachable`` is being told the opposite of
+    what the process it is reading just measured."""
+
+    from agent_runtime.gateway_peers import REACHABILITY_REACHABLE
+
+    _seeded_unreachable()
+    assert _cached().reachability != REACHABILITY_REACHABLE
+    fake_dials.outcomes = {("10.0.0.9", 8765): None}
+
+    code, output = _join(capsys, _successful_payload(), "--timeout", "2")
+
+    assert code == 0, output
+    row = _cached()
+    assert row.reachability == REACHABILITY_REACHABLE
+    # Cleared, not merely overwritten beside a stale timestamp: "down since
+    # 18:03" printed under a row that says reachable is the same lie in a
+    # smaller font.
+    assert row.unreachable_since is None
+
+
+def _reachability_events(monkeypatch) -> list:
+    """Every ``gateway.peer.reachability`` payload this test's writes emit."""
+
+    from agent_runtime import gateway_peers
+
+    seen: list = []
+    monkeypatch.setattr(
+        gateway_peers,
+        "_emit_peer_event",
+        lambda event_type, payload, **_kw: seen.append((event_type, payload)),
+    )
+    return seen
+
+
+def test_a_join_that_reached_nothing_marks_the_peer_unreachable(
+    capsys, fake_dials, monkeypatch
+):
+    """The other half, through the same door — carrying the addresses the
+    refusal named, so the event and the operator's sentence cannot disagree
+    about what was tried."""
+
+    from agent_runtime.gateway_peers import REACHABILITY_UNREACHABLE
+
+    seen = _reachability_events(monkeypatch)
+    fake_dials.outcomes = {("10.0.0.9", 8765): TimeoutError("no route")}
+
+    code, output = _join(capsys, _successful_payload(), "--timeout", "2")
+
+    assert code != 0, output
+    row = _cached()
+    assert row.reachability == REACHABILITY_UNREACHABLE
+    assert row.unreachable_since
+    (flip,) = [p for event, p in seen if event == "gateway.peer.reachability"]
+    assert "10.0.0.9:8765 (TimeoutError)" in flip["error"]
+    assert "10.0.0.9:8765 (TimeoutError)" in output
+
+
+def test_the_flip_emits_the_same_event_the_chat_dial_emits(
+    capsys, fake_dials, monkeypatch
+):
+    """One door, one event. ``dial_peer`` records through
+    ``note_dial_result``; so does the announce fan-out; so does this verb —
+    which is what makes ``gateway.peer.reachability`` the single thing a
+    subscriber has to watch, on a CHANGE of word rather than per handshake."""
+
+    _seeded_unreachable()
+    seen = _reachability_events(monkeypatch)
+    fake_dials.outcomes = {("10.0.0.9", 8765): None}
+
+    code, output = _join(capsys, _successful_payload(), "--timeout", "2")
+
+    assert code == 0, output
+    flips = [payload for event, payload in seen if event == "gateway.peer.reachability"]
+    assert [row["reachability"] for row in flips] == ["reachable"]
+    assert flips[0]["peer_install_id"] == "inst_far"
+    assert flips[0]["unreachable_since"] is None
+
+
+def test_the_reachability_word_lands_in_the_cache_and_not_the_trust_store(
+    capsys, fake_dials
+):
+    """``test_gateway_peers_store.py`` asserts that no cache writer opens
+    ``peers.json``; this asserts the verb did not find a way around it. The
+    word is in the sidecar, and the trust row this same run wrote does not
+    carry it — the split is a boundary only while the two writer sets are
+    disjoint."""
+
+    from agent_runtime.gateway_peers import (
+        REACHABILITY_REACHABLE,
+        peer_cache_path,
+        peer_store_path,
+    )
+
+    fake_dials.outcomes = {("10.0.0.9", 8765): None}
+    code, output = _join(capsys, _successful_payload(), "--timeout", "2")
+    assert code == 0, output
+
+    root = paths.store_root()
+    trust = json.loads(peer_store_path(root).read_bytes().decode("utf-8"))
+    cached = json.loads(peer_cache_path(root).read_bytes().decode("utf-8"))
+
+    assert "reachability" not in json.dumps(trust)
+    assert cached["peers"]["inst_far"]["reachability"] == REACHABILITY_REACHABLE
+
+
 # ── list ─────────────────────────────────────────────────────────────────────
 
 

@@ -484,6 +484,86 @@ def test_a_join_walks_past_an_unroutable_first_candidate_and_lands_on_the_second
     assert joined["endpoints"] == [{"host": "127.0.0.1", "port": a.gateway_port}]
 
 
+def _cache_row(install: "_Install", peer_install_id: str) -> dict:
+    """One row of an install's ``peers_cache.json``, read off its own disk."""
+
+    path = install.root / "gateway" / "peers_cache.json"
+    assert path.exists(), f"{install.name} wrote no peer cache at all"
+    payload = json.loads(path.read_bytes().decode("utf-8"))
+    row = payload["peers"].get(peer_install_id)
+    assert row is not None, (
+        f"{install.name}'s cache holds {sorted(payload['peers'])} and not "
+        f"{peer_install_id}"
+    )
+    return row
+
+
+@_REAL_CHILD_SPAWN
+@pytest.mark.timeout(E2E_TEST_TIMEOUT_SECONDS)
+def test_a_completed_join_leaves_both_caches_saying_reachable(two_installs):
+    """R-D16 across two real roots: a handshake is a reachability fact on BOTH
+    sides of it.
+
+    D3 run #2 measured the hole from the joining side. At 20:19:19 the join
+    dialled the far listener, redeemed, stored the secret and emitted
+    ``gateway.peer.recorded source=join`` — and the cache row for that peer
+    still read ``unreachable``, from a failure at 18:03. ``note_dial_result``
+    had exactly one caller, the chat lane's ``dial_peer``, so no ceremony had
+    ever written the word. The launcher read the cache, called the edge
+    unusable, and re-requested a pairing code every minute for an edge that was
+    already up.
+
+    The MINTING side had the same hole for the mirror reason: its row is
+    written by ``redeem_peer_code`` inside the serve's hello authenticator,
+    which is not a dial and did not record one either — even though an install
+    that just completed TLS against this listener and spent a code minted here
+    seconds ago is exactly as reached as one this side dialled.
+
+    Two roots is the only place both halves are visible at once: A never runs a
+    CLI join and B never runs a listener redemption, so a single-root test can
+    only ever see one of them.
+    """
+
+    a, b = two_installs
+
+    _c, minted, _o = a.cli("gateway", "peers", "pair")
+    code, _joined, output = b.cli(
+        "gateway", "peers", "join", _payload_of(minted), "--timeout", "60"
+    )
+    assert code == 0, output
+
+    joiner = _cache_row(b, a.ready["install"]["install_id"])
+    listener = _cache_row(a, b.ready["install"]["install_id"])
+
+    assert joiner["reachability"] == "reachable", joiner
+    assert listener["reachability"] == "reachable", listener
+    # Cleared and not merely stamped beside the new word: "down since <t>"
+    # under a row that reads reachable is the same wrong answer in a smaller
+    # font, and the launcher's sheet renders that field.
+    assert joiner["unreachable_since"] is None
+    assert listener["unreachable_since"] is None
+
+    # The word is in the SIDECAR. ``peers.json`` is the trust half and no cache
+    # writer may open it — the property ``test_gateway_peers_store.py`` pins
+    # from the inside, asserted here against what the two ceremonies actually
+    # wrote to disk.
+    for install in (a, b):
+        trust = (install.root / "gateway" / "peers.json").read_bytes().decode("utf-8")
+        assert "reachability" not in trust
+
+    # …and the flip is on the log a stream consumer is watermark-gated on, from
+    # each of the two processes that wrote it: B's CLI join, A's serve.
+    for install in (a, b):
+        code, output = install.python(
+            """
+import json
+from agent_runtime.events import EventLog
+print(json.dumps({"types": [e.type for e in EventLog().tail(50)]}))
+"""
+        )
+        assert code == 0, output
+        assert "gateway.peer.reachability" in _json_line(output)["types"], install.name
+
 
 def _json_line(output: str) -> dict:
     """The last JSON object in a snippet's combined stdout+stderr.

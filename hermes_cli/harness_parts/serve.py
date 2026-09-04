@@ -738,6 +738,7 @@ def _gateway_authenticator(store_root: Any):
     from agent_runtime.gateway_peers import (
         PeerCredential,
         cache_peer_hello,
+        note_dial_result,
         note_peer_seen,
         note_peer_store_read,
         redeem_peer_code,
@@ -794,6 +795,20 @@ def _gateway_authenticator(store_root: Any):
             )
             if not isinstance(outcome, PeerCredential):
                 return _reject()
+            # R-D16, this side of the ceremony. The joining install just
+            # completed a TLS handshake against this listener and proved a code
+            # a human minted here seconds ago — the same evidence the
+            # ``peer_install_id`` arm below turns into ``reachable`` through
+            # ``cache_peer_hello``. Without this the MINTING side's cache stayed
+            # at whatever a past dial left, so an edge both stores had just
+            # written read as unusable on one of them.
+            #
+            # Outside ``redeem_peer_code``'s own lock rather than inside it:
+            # ``_store_lock`` is not reentrant (``locks._file_lock``), so a
+            # cache touch taken within that span would spend its ten-second
+            # budget contending with the write it is describing and then give up
+            # silently.
+            note_dial_result(store_root, outcome.peer_install_id, ok=True)
             return HelloAuthOutcome(
                 ok=True,
                 peer_install_id=outcome.peer_install_id,

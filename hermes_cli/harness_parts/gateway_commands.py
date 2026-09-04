@@ -1599,10 +1599,18 @@ def cmd_gateway_peers_join(args) -> int:
     ``tls_fingerprint_mismatch`` with nothing dialled and nothing written.
     Without the flag the verb keeps its trust-on-first-use pin and the ack says
     ``fingerprint_attested: false`` — a weaker posture that announces itself.
+
+    D5h adds no refusal and one recording: the completed handshake is noted as a
+    reachability fact (R-D16), and a run where no address answered is noted as
+    the failure it was. See the two ``note_dial_result`` calls below.
     """
 
     from agent_runtime import paths
-    from agent_runtime.gateway_peers import peer_store_path, record_peer
+    from agent_runtime.gateway_peers import (
+        note_dial_result,
+        peer_store_path,
+        record_peer,
+    )
     from agent_runtime.serve_gateway_auth import StoreRefusal
     from agent_runtime.serve_socket import ServeSocketClient
 
@@ -1777,6 +1785,12 @@ def cmd_gateway_peers_join(args) -> int:
         # actual answer that day) the address was never dialable in the first
         # place.
         tried = ", ".join(attempts) or "(none — the payload offered no address)"
+        # R-D16's failing half, through the door ``dial_peer`` and the announce
+        # fan-out record through, with the SAME string the refusal prints — so
+        # the cache row and the operator's sentence cannot end up disagreeing
+        # about which addresses were tried. A no-op when the payload named no
+        # install id: there is no row for the word to land on.
+        note_dial_result(root, parsed["install_id"] or "", ok=False, error=tried)
         return emit_harness_error(
             RuntimeError("no_candidate_answered"),
             reason="no_candidate_answered",
@@ -1873,6 +1887,26 @@ def cmd_gateway_peers_join(args) -> int:
         return _store_write_refusal(exc, args=args, store_path=peers)
     if isinstance(outcome, StoreRefusal):
         return _refusal(outcome, args=args, store_path=peers)
+
+    # ── and the handshake IS a reachability fact (R-D16) ─────────────────────
+    #
+    # Until D5h ``note_dial_result(ok=True)`` had exactly one caller — the chat
+    # lane's ``dial_peer`` — so a row this verb wrote kept whatever word the
+    # last chat dial had left on it. On the operator's PC that read
+    # ``unreachable_since 18:03:17`` at 20:19:19, after a join that dialled
+    # 192.168.1.39:8765, redeemed, and stored the secret. The launcher reads the
+    # cache, called the edge unusable, and re-requested a pairing code every
+    # minute for an edge that was already up — minting codes on the far side for
+    # nothing.
+    #
+    # Recorded AFTER the trust row rather than before it: a cache row for an
+    # install this store holds no credential for would describe an edge no dial
+    # could use. And through the same door the chat lane and the announce
+    # fan-out use, so "reachable" means one thing across the runtime rather than
+    # one thing per lane — the event on the flip, the endpoint list untouched,
+    # and the cache written under the directory lock ``_touch_cache`` already
+    # takes.
+    note_dial_result(root, outcome.peer_install_id, ok=True)
 
     row = outcome.payload()
     # Which posture wrote this row, said out loud on the ack. An operator (and
