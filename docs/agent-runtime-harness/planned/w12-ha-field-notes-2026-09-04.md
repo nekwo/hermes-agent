@@ -7,6 +7,8 @@ pushed; nothing outside this worktree touched.
 
 ## Row 13 — retire the persona-prewarm worker
 
+> **NOT LANDED (operator, 2026-09-04).** The retirement commit was dropped from this lane at landing. The same afternoon, lane w12/m5 re-took the prewarm measurement on a cold process and found the FIRST warm absorbs ~1.4-1.5 s of registry import that the first create would otherwise pay (the create-shaped resolve behind it is ~10 ms); only a warm for a SECOND persona type is worth 1-2 ms. Two same-day measurements now argue opposite ways about the worker, so retiring it is an operator ruling, not a small row. The section below records what the lane BUILT and verified; none of it is on main. The launcher still fires `runtime.persona.prewarm` from `mission_persona_prewarm.dart`, which is the other reason the verb cannot go first.
+
 **Re-measured before fixing.** Confirmed at this base:
 `agent_runtime/persona_prewarm.py` and the `runtime.persona.prewarm` RPC verb
 both still existed, exactly as the row said, and S0a's A6b field-note number
