@@ -917,3 +917,130 @@ sit above them.
   `X:/Eternia/.hermes/agent-runtime/gateway/peers_cache.json` is unchanged by
   this stage, as D5h §11.8 said: it is repaired by the next completed
   handshake, not by a rebuild.
+
+## 13. redeem_peer_code lock fix
+
+`agent_runtime/gateway_peers.py::redeem_peer_code` called
+`_clear_revoked_you` from INSIDE its own `with _store_lock(store_root):`.
+That helper writes through `_touch_cache`, which opens the same lock
+(`with _CACHE_WRITE_LOCK, _store_lock(store_root):`), and the lock is not
+reentrant — so a re-pair of an install carrying `revoked_you` spent the whole
+ten-second budget contending with the write it was describing.
+`record_peer`, the other credential writer, always cleared AFTER its lock
+closed. The fix gives the redeeming half that shape: the `PeerCredential` is
+captured inside the block, the clear runs after it, the return is last. Every
+refusal path still returns from inside, unchanged.
+
+### 12.1 The mechanism is not the one the docstring predicts, and it is worse
+
+The refusal story we expected — `HarnessLockUnavailable` raised at the
+deadline, swallowed by `_touch_cache`'s best-effort `except`, flag never
+cleared — belongs to `agent_runtime/locks.py::_file_lock`. But
+`serve_gateway_auth._store_lock` does not call that one. It calls
+`store_file_io.store_lock` (imported as `_file_lock`, which is what makes the
+two easy to confuse), and that lock **falls through WITHOUT the lock rather
+than raising** when it cannot be taken. Measured here on Windows:
+
+* the nested acquire polls `LK_NBLCK` for the full 10 s, then `break`s with
+  `locked = False` and yields anyway;
+* so the clear DOES land, ten seconds late, and lands UNSYNCHRONISED — a
+  read-modify-write of `peers_cache.json` performed while another lock holder
+  was told it had exclusive access.
+
+Which is why the red below fails on the STALL and not on the flag. Read the
+POSIX arm before deciding that is the milder outcome: it is a bare blocking
+`fcntl.flock(fd, LOCK_EX)` with no deadline at all, and a second open file
+description in the same process conflicts with the first. On Mac and Linux
+this call does not stall for ten seconds — it never returns. The two-machine
+lane has a Mac in it.
+
+### 12.2 Red, then green
+
+Red, against the unfixed code:
+
+```
+>       assert elapsed < 2.0, (
+            f"the redeem took {elapsed:.1f}s, which is a lock it took twice"
+        )
+E       AssertionError: the redeem took 10.1s, which is a lock it took twice
+E       assert 10.06199999999808 < 2.0
+tests\agent_runtime\test_gateway_peers_store.py:1159: AssertionError
+====================== 1 failed, 61 deselected in 12.19s ======================
+```
+
+A direct probe of the same shape — `_clear_revoked_you` called under a held
+`_store_lock` — measured 10.03 s to the nested acquire, and confirmed the
+write landing after the fall-through.
+
+Green, after the move: `tests/agent_runtime/test_gateway_peers_store.py
+::test_a_repair_clears_revoked_you_without_contending_with_its_own_lock`
+passes, and the full runs are in 12.4.
+
+### 12.3 What the test pins
+
+Three things, and the third is the one that names the mechanism. That the
+flag is cleared by a re-pair at all (R-S2-9's one exit, exercised through the
+REDEEM half rather than only `record_peer`'s); that `usable_peers` returns
+the edge afterwards, because a flag nobody clears is an edge every reader
+treats as dead; and that the redemption completes in under two seconds. The
+timing bound is not a performance assertion — a redeem that takes the lock
+twice cannot come in under the lock's own budget, so the number is a
+statement about the call graph.
+
+### 12.4 Verification
+
+```
+bash scripts/run_tests.sh tests/agent_runtime/test_gateway_peers_store.py \
+  tests/agent_runtime/test_serve_gateway_peer_lane.py \
+  tests/hermes_cli/test_gateway_peer_verbs.py --file-timeout 900
+=== Summary: 3 files, 132 tests passed, 0 failed (100% complete) in 44.2s ===
+
+bash scripts/run_tests.sh tests/agent_runtime/test_gateway_peer_two_roots_e2e.py \
+  --file-timeout 900
+=== Summary: 1 files, 9 tests passed, 0 failed (100% complete) in 233.8s ===
+
+ruff check agent_runtime/gateway_peers.py tests/agent_runtime/test_gateway_peers_store.py
+All checks passed!
+```
+
+`--file-timeout 900` is load-bearing on a cold cache: without it
+`test_gateway_peer_verbs.py` and `test_serve_gateway_peer_lane.py` were
+killed during `harness.py`'s `_load_command_parts()` import, before a single
+test ran. That is a collection timeout, not a failure — both files are green
+above.
+
+### 12.5 The sweep for the same shape elsewhere
+
+Mechanical, not by eye: an AST pass over `agent_runtime/` and `hermes_cli/`
+for any call to a store-lock-taking function (`_touch_cache`,
+`_clear_revoked_you`, the credential writers, both `redeem`/`mint` doors)
+that sits lexically inside a `with ... _store_lock(...)` span. Validated
+against the pre-fix file first, where it names exactly one call —
+`_clear_revoked_you` inside `redeem_peer_code`, at the line it then sat on —
+and nothing else. A sweep that cannot find the bug it was written for proves
+nothing.
+
+Result on the fixed tree: **zero** in either package. `redeem_peer_code` was
+the only site. The other five `_touch_cache` callers (`note_peer_seen`,
+`cache_peer_hello`, `note_dial_result` twice, `cache_peer_roster`,
+`apply_peer_announce`) all take no lock of their own, which is why they never
+had it.
+
+`scripts/doc_cite_adjacency.py` was re-run against this branch's base with the
+change stashed and again with it applied: the failure set is byte-identical
+apart from this file's own line numbers moving, so the ten lines the fix adds
+staled no cite anywhere. One cite in 11.3 DID go stale — it named the line
+`_clear_revoked_you` sat on, and the fix moved it — and is rewritten above to
+name the call instead. The `gateway_peers.py:1181/1184/1518` lines in 11.1 are
+left alone on purpose: they are a quoted sweep RECEIPT, and a receipt
+re-anchored to today's line numbers is no longer a record of what ran.
+
+### 12.6 Owed
+
+Not fixed here, and both are bigger than this diff. `store_file_io.store_lock`'s
+POSIX arm takes an unbounded `flock` and ignores the `timeout_seconds` it was
+handed — the same defect `locks._file_lock`'s docstring says it was rewritten
+to remove, still standing in the gateway lane's copy. And its Windows arm
+proceeds unlocked on timeout, which the docstring calls a lost update; it is
+also a silent one, since no caller can tell the difference between a write
+that held the lock and a write that gave up waiting for it.
