@@ -1534,6 +1534,56 @@ def test_the_registration_window_is_the_size_it_says_and_bounds_what_it_says():
     assert past["walk-e"] >= pipeline.MIRROR_GAIN_THRESHOLD
 
 
+def test_ONE_displacement_can_fool_BOTH_bases_so_an_error_is_not_proof_either():
+    """The two-basis ERROR tier is not proof of handedness, and here is the case.
+
+    Both passes share one registration — `registration_window(spec.frame_w)` is
+    computed once and handed to the rotation pass and the cross-state pass alike
+    — so a displacement past the window biases them TOGETHER. That was an
+    argument from the code with no fixture behind it, and a 2026-09-02 sweep
+    struck the number it was argued with as never having existed.
+
+    The number was real and only unpinned. Measured at HEAD on the shipped-
+    correct art: sliding `walk-e` by -32 px (one sixth of a 192 px frame, twice
+    the 16 px window, ART UNTOUCHED) produces a `rotation and states` finding on
+    `walk-e` at +18.2%, attribution `both`, severity `error` — the tier that
+    refuses the install. The same sheet unslid flags nothing at all.
+
+    It is a narrow window in the literal sense: -24 px blames a NEIGHBOUR with a
+    single basis, -48 px is exonerated by the second basis (`contradicted`,
+    warning), and -64 and beyond flag nothing. That is not reassurance — an
+    operator does not get to choose how far a prop hangs off one row — it is the
+    shape of a blind spot, and it is why `--accept-handedness` exists as a door
+    on `compose` rather than as a courtesy.
+    """
+    slid = REPAIRED + (("slide", "walk-e", -32),)
+
+    findings = variant_findings(EIGHT_WAY_FIXTURE, slid)
+    flagged = {entry["row"]: entry for entry in findings["flagged"]}
+
+    assert not variant_findings(EIGHT_WAY_FIXTURE, REPAIRED)["flagged"], (
+        "the base art is not clean, so nothing below is about the displacement"
+    )
+    assert "walk-e" in flagged
+    assert flagged["walk-e"]["basis"] == "rotation and states"
+    assert flagged["walk-e"]["attribution"] == "both"
+    assert flagged["walk-e"]["severity"] == "error", (
+        "a pure displacement of correct art reached the tier that refuses"
+    )
+
+    refused = variant_validation(EIGHT_WAY_FIXTURE, slid)
+    assert not refused["ok"]
+    assert [error for error in refused["errors"] if "walk-e" in error]
+
+    # And the only defence: an operator who has LOOKED at the row can say so.
+    # This is the argument for keeping that door, not a reason to trust the tier.
+    accepted = variant_validation(
+        EIGHT_WAY_FIXTURE, slid, (f"walk-e:{TWO_BASIS_TOKEN}",)
+    )
+    assert accepted["ok"], accepted["errors"]
+    assert [entry["row"] for entry in accepted["handedness"]["accepted"]] == ["walk-e"]
+
+
 def test_the_shift_grid_is_symmetric_so_a_global_flip_still_scores_identically():
     """Why the registration is a MINIMUM over a symmetric grid and not a peak.
 

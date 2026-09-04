@@ -1297,7 +1297,14 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
   sense that argument can use, and `validate_sheet`'s own docstring already says an error
   with no way past it is a wall and `compose` has no other door. (2) The refusal can be
   wrong — `max(false) ≈ +18.75%` against `min(true) = +7.64%`, and two bases can be
-  fooled by ONE displacement — so an operator who has LOOKED at the strip is better
+  fooled by ONE displacement (**pinned 2026-09-04, and it had only ever been argued
+  from the code:** both passes share one `registration_window`, and sliding the
+  shipped-correct `walk-e` by −32 px — art untouched, twice the 16 px window — reads
+  `rotation and states`, attribution `both`, severity `error` at +18.2%, while the
+  unslid sheet flags nothing;
+  `tests/agent/test_charsheet_pipeline.py::test_ONE_displacement_can_fool_BOTH_bases_so_an_error_is_not_proof_either`.
+  The band is narrow and that is not reassurance: −24 blames a NEIGHBOUR on one basis,
+  −48 is exonerated by the second, −64 and past it flag nothing) — so an operator who has LOOKED at the strip is better
   evidence than the reading, and telling them only to re-roll spends the correct approved
   art they just judged. (3) The costs run the other way from the prose: a re-roll is
   private, silent, auto-approving and has no undo verb, while an acceptance is a
