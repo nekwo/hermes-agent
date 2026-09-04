@@ -103,9 +103,10 @@ __all__ = [
 #: * ``invalid_tier`` / ``invalid_device_id`` / ``invalid_code`` — the argument
 #:   was wrong (2).
 #: * ``unknown_device`` — nothing to act on (3).
-#: * every I/O condition on the root — retryable in the sense family 7 already
-#:   means (an AV hold releases, a permission is fixed, the identical call then
-#:   succeeds).
+#: * a WRITE this machine could not perform — ``store_unwritable`` (family 1),
+#:   R-D14. See :data:`_STORE_WRITE_REASONS` for why these three left family 7.
+#: * every remaining I/O condition on the root — retryable in the sense family 7
+#:   already means (an AV hold releases, the identical call then succeeds).
 _REFUSAL_CODES = {
     "too_many_pending": "pairing_codes_pending",
     "locked_out": "pairing_locked_out",
@@ -125,8 +126,30 @@ _REFUSAL_CODES = {
     "unknown_peer": "not_found",
 }
 
+#: The ``os_error_reason`` words that mean **this machine could not write its own
+#: store** — R-D14, and the one thing on this lane that is not about the network.
+#:
+#: D3 run #1 (2026-09-04, 18:06:20) is why they have their own code. The
+#: handshake completed, the far install answered, and ``record_peer`` came back
+#: ``permission_denied`` from a ``[WinError 5]`` on ``peers.json``. That fell
+#: through this table to ``runtime_unavailable``, the launcher's fulfiller mapped
+#: ``runtime_unavailable`` to ``no_route``, and the sheet told the operator the
+#: Mac was unreachable — a claim about the network, for a DACL on a local
+#: directory, retried once a minute for four minutes to the identical result.
+#:
+#: ``root_missing`` is deliberately NOT here and keeps family 7. An absent
+#: directory is the one condition the writer creates for itself on its next call
+#: (``write_secure_json`` mkdirs its parents), so "retry" really is the cure —
+#: which is the whole distinction family 1 and family 7 encode.
+_STORE_WRITE_REASONS = frozenset(
+    {"permission_denied", "unwritable", "root_not_a_directory"}
+)
+for _reason in _STORE_WRITE_REASONS:
+    _REFUSAL_CODES[_reason] = "store_unwritable"
+del _reason
 
-def _refusal(refusal: Any, *, args) -> int:
+
+def _refusal(refusal: Any, *, args, store_path: Any = None) -> int:
     """One ``StoreRefusal`` as a harness error, with BOTH words on it.
 
     R-D6. The mapping above is many-to-one on purpose — the family answers "what
@@ -139,16 +162,80 @@ def _refusal(refusal: Any, *, args) -> int:
     So ``reason`` rides beside ``code``: the store's own word, unmapped,
     untranslated, and never a substitute for the family an exit code is derived
     from.
+
+    ``store_path`` is R-D14's other half. A write refusal carries an OS message
+    like ``[WinError 5] Access is denied: '.peers.json.ntk1yca6.tmp' ->
+    'peers.json'`` — two BASENAMES, which name no directory an operator could go
+    and fix. This is the one caller that knows which file the verb was writing,
+    so it is the one place that can put the absolute path in front of them.
     """
 
     code = _REFUSAL_CODES.get(refusal.reason, "runtime_unavailable")
+    detail = refusal.detail or refusal.reason
+    reason = refusal.reason
+    message = detail
+    if code == "store_unwritable":
+        # ONE word on the wire for this condition (R-D14), because the launcher
+        # renders it as a sheet sentence of its own — three spellings would be
+        # three sentences for one fault. The store's own word is not lost: it
+        # rides in the message, beside the OSError text, which is where an
+        # operator reads "which failure was it" anyway.
+        reason = "store_unwritable"
+        where = f" at {store_path}" if store_path is not None else ""
+        message = (
+            f"could not write this install's own gateway store{where}: {detail} "
+            f"({refusal.reason}). Nothing on the other machine is wrong — the "
+            "handshake it answered is lost because this side could not record "
+            "it. Give the user this process runs as write and delete permission "
+            "on that file and the directory holding it, then run the command "
+            "again."
+        )
     return emit_harness_error(
         RuntimeError(refusal.reason),
         args=args,
         code=code,
-        message=refusal.detail or refusal.reason,
-        reason=refusal.reason,
+        message=message,
+        reason=reason,
     )
+
+
+def _store_write_refusal(exc: OSError, *, args, store_path: Any) -> int:
+    """An ``OSError`` that ESCAPED a store call, as the same R-D14 refusal.
+
+    The store functions on this lane catch ``OSError`` around their locked
+    read-modify-write and return a ``StoreRefusal``, which :func:`_refusal`
+    already classifies. This covers what that ``try`` does not span — the event
+    append and the cache touch that ``record_peer`` runs after its lock is
+    released, and any future write that acquires a raise on the way out.
+
+    One helper rather than four, and both doors give the identical code, message
+    shape and exit: an operator hitting a permission problem must not get two
+    different stories depending on which line inside the store it surfaced on.
+    """
+
+    from agent_runtime.store_file_io import os_error_reason
+
+    reason = os_error_reason(exc)
+    if reason not in _STORE_WRITE_REASONS:
+        reason = "unwritable"
+    return _refusal(
+        _StoreWriteRefusal(reason, str(exc)), args=args, store_path=store_path
+    )
+
+
+class _StoreWriteRefusal:
+    """A ``StoreRefusal``-shaped pair, so :func:`_refusal` has one input type.
+
+    Not the real class: importing ``serve_gateway_auth`` here would pull the
+    whole device-store module into every verb that only needs two strings, and
+    the only contract ``_refusal`` reads is ``.reason`` / ``.detail``.
+    """
+
+    __slots__ = ("reason", "detail")
+
+    def __init__(self, reason: str, detail: str) -> None:
+        self.reason = reason
+        self.detail = detail
 
 
 def _endpoint(store_root) -> dict[str, Any]:
@@ -247,7 +334,11 @@ def cmd_gateway_pair(args) -> int:
     from agent_runtime import paths
     from agent_runtime.gateway_identity import ensure_install_identity
     from agent_runtime.gateway_tls import ensure_certificate
-    from agent_runtime.serve_gateway_auth import StoreRefusal, mint_pairing_code
+    from agent_runtime.serve_gateway_auth import (
+        StoreRefusal,
+        mint_pairing_code,
+        pairing_store_path,
+    )
 
     root = paths.store_root()
     tier = str(getattr(args, "tier", None) or "console")
@@ -290,7 +381,9 @@ def cmd_gateway_pair(args) -> int:
 
     code = mint_pairing_code(root, tier=tier, name=name)
     if isinstance(code, StoreRefusal):
-        return _refusal(code, args=args)
+        # R-D14: a pairing.json this machine cannot write is not the network's
+        # fault, and the refusal now says which file to fix.
+        return _refusal(code, args=args, store_path=pairing_store_path(root))
 
     payload = {
         # R-D1: a DIALABLE address, never the bind. ``endpoint`` below still
@@ -370,7 +463,11 @@ def cmd_gateway_devices_revoke(args) -> int:
     """
 
     from agent_runtime import paths
-    from agent_runtime.serve_gateway_auth import StoreRefusal, revoke_device
+    from agent_runtime.serve_gateway_auth import (
+        StoreRefusal,
+        device_store_path,
+        revoke_device,
+    )
 
     device_id = str(getattr(args, "device_id", "") or "").strip()
     if bool(getattr(args, "dry_run", False)):
@@ -395,7 +492,9 @@ def cmd_gateway_devices_revoke(args) -> int:
 
     outcome = revoke_device(paths.store_root(), device_id)
     if isinstance(outcome, StoreRefusal):
-        return _refusal(outcome, args=args)
+        return _refusal(
+            outcome, args=args, store_path=device_store_path(paths.store_root())
+        )
     row = outcome.payload()
     row["takes_effect"] = "next_handshake"
     envelope = attach_root_observability(_object_envelope("gateway_device", row))
@@ -995,7 +1094,7 @@ def cmd_gateway_peers_pair(args) -> int:
 
     from agent_runtime import paths
     from agent_runtime.gateway_peers import mint_peer_code
-    from agent_runtime.serve_gateway_auth import StoreRefusal
+    from agent_runtime.serve_gateway_auth import StoreRefusal, pairing_store_path
 
     root = paths.store_root()
     resolved, code_or_error = _install_and_certificate(args)
@@ -1012,7 +1111,9 @@ def cmd_gateway_peers_pair(args) -> int:
 
     minted = mint_peer_code(root, note=getattr(args, "note", None))
     if isinstance(minted, StoreRefusal):
-        return _refusal(minted, args=args)
+        # Into ``pairing.json``, the same file ``gateway pair`` mints into: one
+        # store, one cap, one lockout across both ceremonies (R-D14).
+        return _refusal(minted, args=args, store_path=pairing_store_path(root))
 
     payload = {
         # R-D1 / R-D3, exactly as ``gateway pair`` writes them: a dialable first
@@ -1108,6 +1209,7 @@ def cmd_gateway_introduce(args) -> int:
         CREDENTIAL_TTL_SECONDS_INTRODUCED,
         StoreRefusal,
         mint_pairing_code,
+        pairing_store_path,
     )
     from agent_runtime.state_patches import (
         CORRELATION_ID_MAX_LEN,
@@ -1259,10 +1361,15 @@ def cmd_gateway_introduce(args) -> int:
             }
 
     if first_refusal is not None:
-        # The first refusal's family, not a generic one: a pending cap and a
-        # lockout are different next moves and the exit code is how a launcher
-        # tells them apart without parsing prose.
-        return _refusal(first_refusal, args=args)
+        # The first refusal's family, not a generic one: a pending cap, a
+        # lockout and a store this machine cannot write are three different next
+        # moves, and the exit code is how a launcher tells them apart without
+        # parsing prose. Both halves mint into ``pairing.json`` — one file, one
+        # cap, one lockout across the two ceremonies — so one path answers for
+        # whichever half refused first.
+        return _refusal(
+            first_refusal, args=args, store_path=pairing_store_path(root)
+        )
 
     # **One writer of the backend's shape.** The launcher POSTs this object
     # verbatim; building it here rather than letting the launcher assemble it
@@ -1495,7 +1602,7 @@ def cmd_gateway_peers_join(args) -> int:
     """
 
     from agent_runtime import paths
-    from agent_runtime.gateway_peers import record_peer
+    from agent_runtime.gateway_peers import peer_store_path, record_peer
     from agent_runtime.serve_gateway_auth import StoreRefusal
     from agent_runtime.serve_socket import ServeSocketClient
 
@@ -1728,25 +1835,44 @@ def cmd_gateway_peers_join(args) -> int:
             ),
         )
 
-    outcome = record_peer(
-        root,
-        peer_install_id=remote_id or parsed["install_id"] or "",
-        secret=str(peered["peer_secret"]),
-        display_name=remote.get("display_name"),
-        # The candidate that ANSWERED, not the payload's first row. The row is
-        # this install's memory of where the far one is, so recording an address
-        # the loop walked past would make every later dial start with a failure
-        # this run already proved.
-        endpoints=[dict(dialled)],
-        cert_fingerprint=parsed["cert_fingerprint"],
-        # Read off the frame, never derived. The far side computed it at
-        # redemption; a second derivation here would make the two ends of one
-        # edge lapse at two different moments. ``None`` on every edge the manual
-        # ceremony mints, and on every far install that predates S2.
-        expires_at=peered.get("expires_at"),
-    )
+    # ── recording it: the half that failed on hardware (R-D14) ───────────────
+    #
+    # Everything above this line worked on the operator's PC on 2026-09-04. The
+    # code was granted, the dial reached 192.168.1.39:8765, the far install
+    # redeemed and returned the secret — and then this write raised
+    # ``[WinError 5]``, four times in five minutes. It reached the sheet as
+    # ``runtime_unavailable`` → ``no_route`` → "Unreachable": a claim about the
+    # network, for a DACL on a local directory.
+    #
+    # So a write refusal here is its OWN reason with its own family, and the
+    # message names the file. Both doors give the same answer — ``record_peer``
+    # catches OSError around its locked write and returns a refusal, but the
+    # cache touch and the event append it runs after releasing the lock are
+    # outside that span, and an operator must not get two different stories
+    # depending on which line inside the store surfaced the same permission.
+    peers = peer_store_path(root)
+    try:
+        outcome = record_peer(
+            root,
+            peer_install_id=remote_id or parsed["install_id"] or "",
+            secret=str(peered["peer_secret"]),
+            display_name=remote.get("display_name"),
+            # The candidate that ANSWERED, not the payload's first row. The row
+            # is this install's memory of where the far one is, so recording an
+            # address the loop walked past would make every later dial start
+            # with a failure this run already proved.
+            endpoints=[dict(dialled)],
+            cert_fingerprint=parsed["cert_fingerprint"],
+            # Read off the frame, never derived. The far side computed it at
+            # redemption; a second derivation here would make the two ends of
+            # one edge lapse at two different moments. ``None`` on every edge
+            # the manual ceremony mints, and on every far install predating S2.
+            expires_at=peered.get("expires_at"),
+        )
+    except OSError as exc:
+        return _store_write_refusal(exc, args=args, store_path=peers)
     if isinstance(outcome, StoreRefusal):
-        return _refusal(outcome, args=args)
+        return _refusal(outcome, args=args, store_path=peers)
 
     row = outcome.payload()
     # Which posture wrote this row, said out loud on the ack. An operator (and
@@ -1874,7 +2000,7 @@ def cmd_gateway_peers_revoke(args) -> int:
     """
 
     from agent_runtime import paths
-    from agent_runtime.gateway_peers import lookup_peer, revoke_peer
+    from agent_runtime.gateway_peers import lookup_peer, peer_store_path, revoke_peer
     from agent_runtime.serve_gateway_auth import StoreRefusal
 
     peer_install_id = str(getattr(args, "peer_install_id", "") or "").strip()
@@ -1921,11 +2047,18 @@ def cmd_gateway_peers_revoke(args) -> int:
         )
         announced = any(receipt.ok for receipt in receipts)
 
-    outcome = revoke_peer(
-        paths.store_root(), peer_install_id, announced=announced
-    )
+    peers = peer_store_path(paths.store_root())
+    try:
+        outcome = revoke_peer(
+            paths.store_root(), peer_install_id, announced=announced
+        )
+    except OSError as exc:
+        # ``revoke_peer`` catches OSError around its own locked write and
+        # returns a refusal; the event append it runs AFTER releasing the lock
+        # is outside that span. Both doors, one answer (R-D14).
+        return _store_write_refusal(exc, args=args, store_path=peers)
     if isinstance(outcome, StoreRefusal):
-        return _refusal(outcome, args=args)
+        return _refusal(outcome, args=args, store_path=peers)
     row = outcome.payload()
     row["takes_effect"] = "next_handshake"
     row["scope"] = "this_install_only"

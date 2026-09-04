@@ -692,6 +692,188 @@ def test_a_failed_join_writes_no_row(capsys):
     assert list_peers(paths.store_root()) == []
 
 
+# ── join: a store this machine cannot write (R-D14) ──────────────────────────
+#
+# D3 run #1, 2026-09-04 18:06:20. The code was granted, the dial reached
+# 192.168.1.39:8765, the far install redeemed and returned the secret — and the
+# local write raised ``[WinError 5]``. hermes called it ``runtime_unavailable``,
+# the launcher's fulfiller maps that to ``no_route``, and the sheet told the
+# operator the Mac was unreachable. It was a DACL on a local directory, and the
+# loop retried it once a minute to the identical result.
+#
+# R-D9 fixed the write. These pin the REPORT, because the next thing that makes
+# a store unwritable (an AV quarantine, a full disk, a synced folder) will not
+# be fixed by R-D9 and must still not be reported as somebody else's network.
+
+
+_WINERROR_5 = "[WinError 5] Access is denied: '.peers.json.ntk1yca6.tmp' -> 'peers.json'"
+
+
+def _successful_payload() -> str:
+    return json.dumps(
+        {
+            "host": "10.0.0.9",
+            "port": 8765,
+            "endpoints": [{"host": "10.0.0.9", "port": 8765}],
+            "install_id": "inst_far",
+            "cert_fingerprint": "ab" * 32,
+            "peer_code": "ABCD2345",
+        }
+    )
+
+
+def test_a_store_this_machine_cannot_write_is_not_the_networks_fault(
+    capsys, fake_dials, monkeypatch
+):
+    """The measured defect's REPORT half, from the door that raises.
+
+    ``record_peer`` catches OSError around its own locked write, but the cache
+    touch and the event append it runs after releasing the lock are outside
+    that span — so a raise really can reach this verb, and it must land on the
+    same word as the refusal below."""
+
+    from agent_runtime import gateway_peers
+    from hermes_cli.harness_support import ERROR_EXIT_CODES
+
+    fake_dials.outcomes = {("10.0.0.9", 8765): None}
+
+    def _denied(*_args, **_kwargs):
+        raise PermissionError(_WINERROR_5)
+
+    monkeypatch.setattr(gateway_peers, "record_peer", _denied)
+
+    code = _dispatch(
+        ["harness", "gateway", "peers", "join", _successful_payload(), "--json"]
+    )
+    envelope = json.loads(capsys.readouterr().out)
+
+    assert envelope["error"]["code"] == "store_unwritable"
+    assert envelope["error"]["reason"] == "store_unwritable"
+    assert code == ERROR_EXIT_CODES["store_unwritable"] == 1, (
+        "family 1, not 7: a directory's permissions do not lapse on their own, "
+        "and D3 run #1 proved it by retrying four times to the same WinError"
+    )
+    assert envelope["error"]["retryable"] is False
+
+
+def test_the_write_refusal_names_the_file_and_the_os_error(
+    capsys, fake_dials, monkeypatch
+):
+    """The OS message is two BASENAMES — ``'.peers.json.ntk1yca6.tmp' ->
+    'peers.json'`` — which name no directory an operator could go and fix. The
+    verb knows which store it was writing, so it is the one place that can put
+    the absolute path in front of them."""
+
+    from agent_runtime import gateway_peers
+    from agent_runtime.gateway_peers import peer_store_path
+
+    fake_dials.outcomes = {("10.0.0.9", 8765): None}
+    monkeypatch.setattr(
+        gateway_peers,
+        "record_peer",
+        lambda *a, **k: (_ for _ in ()).throw(PermissionError(_WINERROR_5)),
+    )
+
+    _dispatch(["harness", "gateway", "peers", "join", _successful_payload(), "--json"])
+    message = json.loads(capsys.readouterr().out)["error"]["message"]
+
+    assert str(peer_store_path(paths.store_root())) in message
+    assert "WinError 5" in message
+    assert "permission_denied" in message, (
+        "the store's own word is not lost when the wire word is collapsed"
+    )
+    assert "Nothing on the other machine is wrong" in message
+
+
+def test_the_stores_own_refusal_door_gives_the_identical_answer(
+    capsys, fake_dials, monkeypatch
+):
+    """Two doors, one story. ``record_peer`` normally RETURNS a refusal rather
+    than raising; an operator must not get "unreachable" from one line of the
+    store and "could not save" from another."""
+
+    from agent_runtime import gateway_peers
+    from agent_runtime.serve_gateway_auth import StoreRefusal
+
+    fake_dials.outcomes = {("10.0.0.9", 8765): None}
+    monkeypatch.setattr(
+        gateway_peers,
+        "record_peer",
+        lambda *a, **k: StoreRefusal("permission_denied", _WINERROR_5),
+    )
+
+    code = _dispatch(
+        ["harness", "gateway", "peers", "join", _successful_payload(), "--json"]
+    )
+    envelope = json.loads(capsys.readouterr().out)
+
+    assert code == 1
+    assert envelope["error"]["code"] == "store_unwritable"
+    assert str(paths.store_root()) in envelope["error"]["message"]
+
+
+def test_a_dial_that_never_landed_is_still_the_networks_answer(capsys):
+    """The other half of the split, so R-D14 does not swallow the case it was
+    carved out of: nothing was written because nothing was AGREED, and family 7
+    is right — the listener may be up five seconds later."""
+
+    from hermes_cli.harness_support import ERROR_EXIT_CODES
+
+    code, output = _join(
+        capsys,
+        json.dumps(
+            {
+                "host": "127.0.0.1",
+                "port": 9,
+                "install_id": "inst_far",
+                "cert_fingerprint": "ab" * 32,
+                "peer_code": "ABCD2345",
+            }
+        ),
+        "--timeout",
+        "2",
+    )
+
+    assert code == ERROR_EXIT_CODES["runtime_unavailable"]
+    assert "store_unwritable" not in output
+
+
+def test_every_peer_write_verb_reports_an_unwritable_store_the_same_way(
+    capsys, monkeypatch
+):
+    """One helper, not four copies. ``peers pair`` mints into ``pairing.json``
+    and ``peers revoke`` writes ``peers.json``; both reach the secure writer,
+    so both had the same defect waiting and both take the same classification.
+    """
+
+    from agent_runtime import gateway_peers
+    from agent_runtime.serve_gateway_auth import StoreRefusal, pairing_store_path
+
+    monkeypatch.setattr(
+        gateway_peers,
+        "mint_peer_code",
+        lambda *a, **k: StoreRefusal("permission_denied", _WINERROR_5),
+    )
+    code, envelope = _run(capsys, "pair")
+
+    assert code == 1
+    assert envelope["error"]["code"] == "store_unwritable"
+    assert str(pairing_store_path(paths.store_root())) in envelope["error"]["message"]
+
+    monkeypatch.setattr(
+        gateway_peers,
+        "revoke_peer",
+        lambda *a, **k: StoreRefusal("unwritable", "the disk said no"),
+    )
+    code, envelope = _run(capsys, "revoke", "inst_far")
+
+    assert code == 1
+    assert envelope["error"]["code"] == "store_unwritable"
+    assert str(gateway_peers.peer_store_path(paths.store_root())) in (
+        envelope["error"]["message"]
+    )
+
+
 # ── list ─────────────────────────────────────────────────────────────────────
 
 

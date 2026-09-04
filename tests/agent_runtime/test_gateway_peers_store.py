@@ -1271,3 +1271,32 @@ def test_a_write_this_process_made_is_never_reported_as_external(tmp_path, monke
     gateway_peers.note_peer_store_read(tmp_path)
 
     assert [event for event, _ in seen] == ["gateway.peer.reachability"]
+
+
+def test_a_write_the_disk_refuses_comes_back_as_a_typed_reason(tmp_path, monkeypatch):
+    """The vocabulary R-D14's CLI classification is built on, pinned at the
+    store rather than inferred from it.
+
+    ``record_peer`` must return ``permission_denied`` — an ``os_error_reason``
+    word — and never let the ``OSError`` out of its locked write. The CLI maps
+    exactly those words to ``store_unwritable``, so a store that started
+    raising, or that renamed its reason, would silently move every write
+    failure back onto ``runtime_unavailable`` and back onto the launcher's
+    "Unreachable".
+    """
+
+    from agent_runtime import gateway_peers
+
+    def _denied(*_args, **_kwargs):
+        raise PermissionError(
+            "[WinError 5] Access is denied: '.peers.json.x.tmp' -> 'peers.json'"
+        )
+
+    monkeypatch.setattr(gateway_peers, "_write_peers", _denied)
+
+    outcome = record_peer(tmp_path, peer_install_id=PEER_B, secret="s" * 32)
+
+    assert isinstance(outcome, StoreRefusal)
+    assert outcome.reason == "permission_denied"
+    assert "WinError 5" in outcome.detail
+    assert list_peers(tmp_path) == [], "a refused write records nothing"

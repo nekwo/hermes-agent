@@ -365,6 +365,42 @@ def test_revoke_refuses_the_device_and_keeps_the_row(capsys):
     assert _run(capsys, "devices", "list")[1]["count"] == 1
 
 
+def test_the_device_half_reports_an_unwritable_store_as_its_own_reason(
+    capsys, monkeypatch
+):
+    """R-D14 through the same helper the peer verbs use.
+
+    ``pair`` and ``devices revoke`` write ``pairing.json`` and ``devices.json``
+    with the writer whose narrowing wedged the peer store, so they carry the
+    same latent fault and must not report it as ``runtime_unavailable`` — the
+    family that means "try again in five seconds", and the one the launcher's
+    fulfiller turns into a claim about the network."""
+
+    from agent_runtime import serve_gateway_auth
+    from agent_runtime.serve_gateway_auth import (
+        StoreRefusal,
+        device_store_path,
+        pairing_store_path,
+    )
+    from hermes_cli.harness_support import ERROR_EXIT_CODES
+
+    denied = StoreRefusal("permission_denied", "[WinError 5] Access is denied")
+    monkeypatch.setattr(serve_gateway_auth, "mint_pairing_code", lambda *a, **k: denied)
+    code, envelope = _run(capsys, "pair")
+
+    assert code == ERROR_EXIT_CODES["store_unwritable"] == 1
+    assert envelope["error"]["code"] == "store_unwritable"
+    assert envelope["error"]["reason"] == "store_unwritable"
+    assert str(pairing_store_path(paths.store_root())) in envelope["error"]["message"]
+
+    monkeypatch.setattr(serve_gateway_auth, "revoke_device", lambda *a, **k: denied)
+    code, envelope = _run(capsys, "devices", "revoke", "dev_x")
+
+    assert code == 1
+    assert envelope["error"]["code"] == "store_unwritable"
+    assert str(device_store_path(paths.store_root())) in envelope["error"]["message"]
+
+
 def test_revoking_an_unknown_device_is_not_found_rather_than_a_traceback(capsys):
     code = _dispatch(["harness", "gateway", "devices", "revoke", "dev_nope", "--json"])
     capsys.readouterr()

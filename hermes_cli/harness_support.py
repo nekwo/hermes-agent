@@ -239,6 +239,24 @@ ERROR_EXIT_CODES = {
     "idempotent_replay_unresolved": 7,
     # Data integrity (1)
     "store_corrupt": 1,
+    # This machine's own store could not be WRITTEN (R-D14). Family 1 beside
+    # ``store_corrupt`` and deliberately NOT 7, which is where every other I/O
+    # condition on a root sits, because the two differ on the only thing an exit
+    # family encodes — whether the identical command succeeds later:
+    #
+    # * a 7 is transient. An AV hold releases, a listener comes up, and the same
+    #   call works unchanged. Retrying is the cure.
+    # * this is a standing verdict about a directory's permissions. D3 run #1
+    #   retried it once a minute for four minutes and got the identical
+    #   [WinError 5] every time, and the launcher — reading ``runtime_unavailable``
+    #   and mapping it to ``no_route`` — told the operator the OTHER MACHINE was
+    #   unreachable. It was a local disk permission, and no amount of network is
+    #   going to fix it.
+    #
+    # So it is terminal until a human changes something here, and the message
+    # names the file so they know which something. ``retryable`` is false for the
+    # same reason: a client that retries this burns a pairing code per attempt.
+    "store_unwritable": 1,
     "event_payload_too_large": 1,
     "internal_error": 1,
     "timeout": 124,
