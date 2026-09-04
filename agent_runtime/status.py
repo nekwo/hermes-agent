@@ -216,6 +216,8 @@ def _agent_status(agent):
         "readiness_summary": readiness["summary"],
         "missing_skills": readiness.get("missing_skills", []),
         "skill_hash_mismatches": readiness.get("skill_hash_mismatches", []),
+        # The other half of the same split (H-H7); see snapshot._agent_summary.
+        "skill_hash_absent": readiness.get("skill_hash_absent", []),
         "required_mcp_servers": readiness.get("required_mcp_servers", []),
         "effective_required_mcp_servers": readiness.get("effective_required_mcp_servers", []),
         "missing_mcp_servers": readiness.get("missing_mcp_servers", []),

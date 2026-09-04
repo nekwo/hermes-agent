@@ -2561,6 +2561,11 @@ def _agent_summary(agent, *, include_tool_details: bool = False, readiness=None)
         "effective_required_mcp_servers": readiness.get("effective_required_mcp_servers", []),
         "missing_mcp_servers": readiness.get("missing_mcp_servers", []),
         "skill_hash_mismatches": readiness.get("skill_hash_mismatches", []),
+        # ABSENT is not MATCHING (H-H7): readiness has published the split since
+        # the hash-states lane landed, but this row copied only the mismatch
+        # half, so no frame the launcher ever received could tell "the two
+        # copies agreed" from "there is no installed copy to compare".
+        "skill_hash_absent": readiness.get("skill_hash_absent", []),
         # The DECLARED lane set (S0a A1 moved the authority into
         # ``effective_toolsets``): the launcher's agent card "Toolsets" tag block
         # became truthful with no launcher change, because this row stopped

@@ -167,3 +167,106 @@ def test_readiness_reports_no_absence_once_the_package_is_installed(
 
     assert row["skill_hash_mismatches"] == []
     assert row["skill_hash_absent"] == []
+
+
+def _wire_persona(persona_id: str):
+    """A persona whose only skill is the canonical harness package the cases
+    above install and uninstall, so the two wire rows read the SAME file state
+    the readiness cases establish. Distinct ids per case because
+    ``snapshot._agent_summary`` resolves readiness through a TTL memo."""
+
+    from agent_runtime.models import AgentPersona
+
+    return AgentPersona(
+        id=persona_id,
+        display_name="H-H7 Wire",
+        role="qa",
+        model=None,
+        provider=None,
+        api_mode="codex_responses",
+        toolsets=["file"],
+        system_prompt_path="personas/qa/system.md",
+        hermes_profile="base",
+        skills=[SKILL],
+        required_mcp_servers=[],
+    )
+
+
+def _bind_ready(monkeypatch, home):
+    """Same stubs as ``_readiness_row``: the walk must REACH the skill-hash
+    split, which it only does for a persona whose profile binding resolves."""
+
+    from agent_runtime import profile_readiness
+
+    monkeypatch.setattr(
+        profile_readiness,
+        "resolve_persona_profile",
+        lambda _persona: SimpleNamespace(
+            profile_home=home, hermes_profile="base", readiness="ready", summary="ready"
+        ),
+    )
+    monkeypatch.setattr(profile_readiness, "persona_profile_scope", _null_scope)
+    monkeypatch.setattr(profile_readiness, "_runtime_dependency_issue", lambda _p: None)
+    monkeypatch.setattr(profile_readiness, "_provider_issue", lambda _p: None)
+
+
+def test_the_snapshot_persona_row_projects_the_absent_half(
+    isolate_agent_runtime_root, monkeypatch, tmp_path
+):
+    """Readiness publishing the split is not the same as the LAUNCHER seeing
+    it: ``_agent_summary`` is the roster row every frame carries, and it used
+    to copy ``skill_hash_mismatches`` out of readiness and stop."""
+
+    from agent_runtime.snapshot import _agent_summary
+
+    assert not harness_skill_destination(SKILL).exists()
+    _bind_ready(monkeypatch, tmp_path / "home")
+
+    summary = _agent_summary(_wire_persona("hh7-snap-absent"))
+
+    assert summary["skill_hash_mismatches"] == []
+    assert summary["skill_hash_absent"] == [SKILL]
+
+
+def test_the_snapshot_persona_row_reports_no_absence_once_installed(
+    isolate_agent_runtime_root, monkeypatch, tmp_path
+):
+    """ANTI-VACUITY: the same row, one real install, and the projected list
+    empties — so the field cannot be a constant."""
+
+    from agent_runtime.snapshot import _agent_summary
+
+    install_harness_skill(SKILL)
+    _bind_ready(monkeypatch, tmp_path / "home")
+
+    assert _agent_summary(_wire_persona("hh7-snap-present"))["skill_hash_absent"] == []
+
+
+def test_the_status_agent_row_projects_the_absent_half(
+    isolate_agent_runtime_root, monkeypatch, tmp_path
+):
+    """The second wire reader. ``status._agent_status`` is the other row built
+    straight off a readiness dict, and it carried the same one-sided copy."""
+
+    from agent_runtime.status import _agent_status
+
+    assert not harness_skill_destination(SKILL).exists()
+    _bind_ready(monkeypatch, tmp_path / "home")
+
+    row = _agent_status(_wire_persona("hh7-status-absent"))
+
+    assert row["skill_hash_mismatches"] == []
+    assert row["skill_hash_absent"] == [SKILL]
+
+
+def test_the_status_agent_row_reports_no_absence_once_installed(
+    isolate_agent_runtime_root, monkeypatch, tmp_path
+):
+    """ANTI-VACUITY for the row above."""
+
+    from agent_runtime.status import _agent_status
+
+    install_harness_skill(SKILL)
+    _bind_ready(monkeypatch, tmp_path / "home")
+
+    assert _agent_status(_wire_persona("hh7-status-present"))["skill_hash_absent"] == []
