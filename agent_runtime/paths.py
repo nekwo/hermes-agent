@@ -290,6 +290,28 @@ def persona_instance_dropped_steering_path(realm_id: str) -> Path:
     )
 
 
+def flow_graph_baseline_path(realm_id: str) -> Path:
+    # realm-sync baseline sidecar for the replicated CANVAS family; NEVER synced,
+    # NEVER published. Under the realm-sync root rather than beside the graphs it
+    # describes, so the publish walk that ships ``flow_graphs/`` cannot pick it
+    # up — the same construction that keeps the persona-instance baseline two
+    # entries up out of its own family's publish.
+    return realm_sync_root() / safe_path_token(realm_id) / "flow_graph_baseline.json"
+
+
+def flow_graph_conflict_path(realm_id: str, graph_id: str) -> Path:
+    # Where a HELD canvas's remote body is parked. Two operators, two drawings,
+    # one graph id has no natural three-way resolution, so the pull holds — and a
+    # hold that leaves no copy of what it refused to adopt makes the operator's
+    # only exit "pull again and hope".
+    return (
+        realm_sync_root()
+        / safe_path_token(realm_id)
+        / "flow_graph_conflicts"
+        / f"{safe_path_token(graph_id)}.json"
+    )
+
+
 def profile_artifact_baseline_path(realm_id: str) -> Path:
     # realm-sync baseline sidecar for the per-profile FILE family (MEMORY.md,
     # core-context files, persona prompts); NEVER synced, NEVER published.

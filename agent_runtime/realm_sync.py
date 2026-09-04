@@ -351,6 +351,8 @@ def publish_realm_sync(
             result["persona_instance_projection"] = _persona_instance_row(
                 resolved.instance_projection, resolved.instance_rows_unreadable
             )
+        if resolved.flow_graph_projection is not None:
+            result["flow_graph_projection"] = _flow_graph_row(resolved.flow_graph_projection)
         return result
 
     subtree = _realm_subtree(repo, realm.id)
@@ -458,6 +460,16 @@ def publish_realm_sync(
             update_persona_instance_baseline_after_publish(realm.id, resolved.instance_projection)
     except Exception:  # noqa: BLE001 — baseline is best-effort; never fail publish
         pass
+    # The CANVAS family: the same baseline discipline, and it matters more here.
+    # A held record is an absence; a held DRAWING is a conflict sidecar over
+    # content nobody disagreed about.
+    from .flow_graph_sync import update_flow_graph_baseline_after_publish
+
+    try:
+        if resolved.flow_graph_projection is not None:
+            update_flow_graph_baseline_after_publish(realm.id, resolved.flow_graph_projection)
+    except Exception:  # noqa: BLE001 — baseline is best-effort; never fail publish
+        pass
     warnings = _notify_publish(realm, repo=repo, artifacts=artifacts, credential=credential) if changed else []
     git_after = _git_state(repo)
     result = _sync_result(realm, "publish", "published", artifacts, repo=repo, git=git_after, changed=changed)
@@ -478,6 +490,8 @@ def publish_realm_sync(
         result["persona_instance_projection"] = _persona_instance_row(
             resolved.instance_projection, resolved.instance_rows_unreadable
         )
+    if resolved.flow_graph_projection is not None:
+        result["flow_graph_projection"] = _flow_graph_row(resolved.flow_graph_projection)
     if warnings:
         result["warnings"] = warnings
     _write_sync_sidecar(realm, repo=repo, git=git_after, skills_drift=_held_skill_packages_for_realm(realm), artifacts=artifacts)
@@ -888,6 +902,11 @@ class _ResolvedPublish:
     #: delete here: a peer that misses an instance from the projection classifies
     #: it ``upstream_absent`` (plan §3.3), which is explicitly held, not archived.
     instance_rows_unreadable: int = 0
+    #: The CANVAS projection resolved by the same pass — the operator's drawing
+    #: for exactly the desks above. A realm that never drew one yields an EMPTY
+    #: projection and the artifact is then not appended at all, so a graph-less
+    #: realm publishes byte-identically to before this family existed.
+    flow_graph_projection: Any = None
 
 
 def resolve_realm_sync_artifacts(realm_id: str) -> list[RealmSyncArtifact]:
@@ -958,6 +977,13 @@ def _resolve_artifacts_with_projection(realm_id: str) -> _ResolvedPublish:
     )
     if instance_projection.instances:
         artifacts.append(_persona_instance_artifact(instance_projection))
+    # The CANVAS projection: the operator's drawing for those same desks, on the
+    # SAME id list for the same reason — a canvas is addressed to an owner
+    # instance, so a desk this publish does not ship has no canvas to ship
+    # either.
+    flow_graph_projection = _flow_graph_projection(office_scan.instance_ids)
+    if flow_graph_projection.graphs:
+        artifacts.append(_flow_graph_artifact(flow_graph_projection))
     return _ResolvedPublish(
         artifacts=_dedupe_artifacts(artifacts),
         projection=projection,
@@ -967,7 +993,35 @@ def _resolve_artifacts_with_projection(realm_id: str) -> _ResolvedPublish:
         board_refused=board_scan.refused,
         instance_projection=instance_projection,
         instance_rows_unreadable=instance_rows_unreadable,
+        flow_graph_projection=flow_graph_projection,
     )
+
+
+def _flow_graph_projection(instance_ids: list[str]):
+    """The canvas projection for the desks this publish already ships.
+
+    One store read per owner (``FlowGraphStore.get``) rather than a walk of the
+    graph directory, and that asymmetry with ``_persona_instance_projection``
+    above is deliberate: the instance store's ``scan_all`` reports its own
+    unreadable count because a missing instance is a fact about a desk that IS
+    being published, whereas the graph directory legitimately holds canvases for
+    owners no realm places (archived desks' drawings are kept, never deleted).
+    Walking it would make every one of those look like a shortfall.
+
+    A store that cannot be constructed at all yields an empty projection: the
+    canvas is additive to a publish, so its absence must never fail one.
+    """
+
+    from .flow_graph import FlowGraphStore
+    from .flow_graph_sync import graph_id_for_owner, project_flow_graphs
+
+    wanted = [str(item) for item in (instance_ids or [])]
+    try:
+        store = FlowGraphStore()
+        docs = {owner: store.get(graph_id_for_owner(owner)) for owner in wanted}
+    except Exception:  # noqa: BLE001 — accounted as "no canvas", never a failed publish
+        docs = {}
+    return project_flow_graphs(wanted, docs=docs)
 
 
 def _persona_instance_projection(instance_ids: list[str]):
@@ -2151,6 +2205,43 @@ def _persona_instance_row(projection, unreadable: int) -> dict[str, Any]:
     return row
 
 
+def _flow_graph_artifact(projection) -> RealmSyncArtifact:
+    """The single synthesized ``flow_graph_config`` artifact.
+
+    Published at ``store/flow_graphs.yaml``, a path no older hermes maps to
+    anything (``_destination_for_sync_path`` → ``None`` → skipped), so an old
+    member degrades to "no canvas replication" rather than writing a canvas
+    document over some unrelated destination.
+
+    ``source``/``destination`` are the local graph directory: this artifact is
+    SYNTHESIZED (``content`` is set), so both are provenance only — the publish
+    lane reads ``content`` through ``read_bytes`` and never touches them.
+    """
+
+    from .flow_graph_sync import FLOW_GRAPH_PROJECTION_RELATIVE_PATH
+
+    root = paths.store_root() / "flow_graphs"
+    return RealmSyncArtifact(
+        kind="flow_graph_config",
+        source=root,
+        relative_path=FLOW_GRAPH_PROJECTION_RELATIVE_PATH,
+        destination=root,
+        content=projection.to_bytes(),
+    )
+
+
+def _flow_graph_row(projection) -> dict[str, Any]:
+    """Typed publish accounting for the canvas family.
+
+    No ``rows_unreadable`` twin here, and the absence is the point: this family
+    reads exactly the owners it was asked for, so there is no "rest of the
+    store" it could have failed to read. A canvas it could not decode is a named
+    row in ``unreadable``, keyed by the desk that wanted it.
+    """
+
+    return projection.as_dict()
+
+
 def _persona_projection_row(projection, bound_profiles: list[str]) -> dict[str, Any]:
     """Typed publish accounting for the projection — including the explicit
     base-seed guard (Office plan §5.1).
@@ -2605,6 +2696,17 @@ def _destination_for_sync_path(rel: str) -> Path | None:
         # no behaviour — it records the OWNERSHIP, the way the personas.yaml
         # branch directly above does.
         return None
+    if parts and parts[0] == "store" and len(parts) == 2 and parts[1] == "flow_graphs.yaml":
+        # The portable CANVAS projection. Owned by ``apply_flow_graph_pull``
+        # (adopt-or-hold at whole-document granularity against the 3-way
+        # baseline), never the generic overwrite loop: a raw write would put a
+        # multi-graph YAML where the store expects one JSON file per graph id,
+        # and would bypass ``parse_flow_graph_doc`` — the validation every
+        # stored canvas has passed through since the family existed.
+        #
+        # Like the branch above, this already resolved to None through the final
+        # fallthrough; the line records the OWNERSHIP.
+        return None
     if len(parts) > 2 and parts[0] == "store" and parts[1] == "profile_files":
         # The per-profile FILE family (MEMORY.md, core context, persona prompts).
         # Owned by ``profile_artifact_sync.apply_profile_artifact_pull``.
@@ -2663,6 +2765,8 @@ def _kind_for_sync_path(rel: str) -> str:
         return "persona_config"
     if rel == "store/persona_instances.yaml":
         return "persona_instance_config"
+    if rel == "store/flow_graphs.yaml":
+        return "flow_graph_config"
     if rel.startswith("store/profile_files/"):
         # Kind is derived from the DESTINATION the published tail names — the
         # same authority the pull applier uses, never a second spelling.

@@ -306,3 +306,63 @@ _REFUSAL_MESSAGES = {
 
 def _refusal(key: str, code: str) -> dict[str, str]:
     return {"key": key, "code": code, "message": _REFUSAL_MESSAGES.get(code, code)}
+
+
+# --- baseline sidecar (never synced, never published) ------------------------
+#
+# The one IO in this module, below the line on purpose: everything above is pure
+# so the allowlist, the projection and the hash stay unit-testable without a
+# store. Same two-halves shape as ``persona_instance_sync``, for the same
+# reason — one module per synced family beats a pure module and a sidecar module
+# that can drift apart.
+
+
+def flow_graph_baseline_key(graph_id: str) -> str:
+    """This family's baseline key. ``flow_graph:<graph id>``, namespaced because
+    the drift/revert lane addresses rows by ``FAMILY:CONTAINER:KEY`` and a bare
+    graph id would be indistinguishable from a container token."""
+
+    return f"flow_graph:{graph_id}"
+
+
+def read_flow_graph_baseline(realm_id: str) -> dict[str, str]:
+    from . import paths
+
+    path = paths.flow_graph_baseline_path(realm_id)
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    entries = raw.get("entries") if isinstance(raw, dict) else None
+    return {str(k): str(v) for k, v in entries.items()} if isinstance(entries, dict) else {}
+
+
+def write_flow_graph_baseline(realm_id: str, entries: dict[str, str]) -> None:
+    from utils import atomic_json_write
+
+    from . import paths
+
+    atomic_json_write(
+        paths.flow_graph_baseline_path(realm_id),
+        {"schema_version": 1, "entries": entries},
+        indent=2,
+        sort_keys=True,
+    )
+
+
+def update_flow_graph_baseline_after_publish(realm_id: str, projection: FlowGraphProjection) -> None:
+    """Record the published canvases' hashes as the new baseline.
+
+    Without it a member who publishes and then pulls reads every canvas they
+    just shipped as locally-edited-and-remotely-changed. For this family that is
+    worse than a hold on a record: the pull's answer to a two-sided divergence
+    is a CONFLICT sidecar, so the publisher would be handed a held drawing over
+    content nobody disagreed about.
+    """
+
+    baseline = read_flow_graph_baseline(realm_id)
+    for graph_id, body_hash in projection.hashes().items():
+        baseline[flow_graph_baseline_key(graph_id)] = body_hash
+    write_flow_graph_baseline(realm_id, baseline)
