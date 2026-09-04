@@ -1650,3 +1650,115 @@ def test_a_declaring_clients_OTHER_batches_are_unchanged_by_the_token(
     assert not batch_is_patch_coverable(
         [e for _, e in EventLog().iter_from_offset(before)], fold_entities=declared
     )
+
+
+# --------------------------------------------------------------------------- #
+# w12/l3 stage 1: the conflict-ledger entity and its emitter
+#
+# The row (`office.actor.conflict_resolved` needs a producer for the CONFLICT
+# LIST) is closed in two halves, and this is the first: the entity, the emitter
+# and the SCOPE ROUTING exist and are correct before anything calls them. The
+# producer is wired into `resolve_conflict` in stage 2, and the coverage entry
+# moves with it — an emitter that lands ahead of its coverage entry changes no
+# client's wire, because a row naming an entity nobody declared is refused by
+# `event_is_patch_coverable`'s entity gate.
+# --------------------------------------------------------------------------- #
+def test_the_conflict_emitter_writes_one_remove_addressed_like_an_actor_row(
+    isolate_agent_runtime_root, set_delta_patches
+):
+    """The whole shape of the row, asserted as one dict.
+
+    A ``remove`` because the fact is a DEPARTURE from a ledger, and no
+    ``changed`` by contract — so it can never reach the oversize ladder, which is
+    said here as the shape rather than as prose. The id is
+    ``office_actor_patch_id``'s, reused deliberately: one builder for one id
+    scheme, the drift operator task #57 already paid for once.
+    """
+
+    set_delta_patches(True)
+    before = _log_end()
+
+    assert sp.emit_office_conflict_resolved_patch(
+        EventLog(), WORKSPACE, "personainst_qa_agent_0001"
+    )
+
+    batch = [e for _, e in EventLog().iter_from_offset(before)]
+    assert [e.type for e in batch] == [STATE_PATCHED_EVENT_TYPE]
+    assert batch[0].payload == {
+        "entity": sp.OFFICE_CONFLICT_ENTITY,
+        "id": office_actor_patch_id(WORKSPACE, "personainst_qa_agent_0001"),
+        "op": "remove",
+    }
+
+
+def test_the_conflict_emitter_is_silent_with_the_flag_off(
+    isolate_agent_runtime_root, set_delta_patches
+):
+    """Every sibling emitter answers ``False`` and writes nothing when
+    ``read_model.delta_patches`` is off; a new one that ignored the flag would
+    put rows on a wire the operator turned off."""
+
+    set_delta_patches(False)
+    before = _log_end()
+
+    assert not sp.emit_office_conflict_resolved_patch(
+        EventLog(), WORKSPACE, "personainst_qa_agent_0001"
+    )
+
+    assert [e for _, e in EventLog().iter_from_offset(before)] == []
+
+
+def test_a_conflict_row_is_placed_in_its_workspace_by_the_scope_authority():
+    """An office patch ``office_patch_scope`` cannot place is one the subscribe
+    lane silently DROPS — the WV-H3 failure that function's own docstring
+    records. An unrouted conflict row would be a resolve that promoted its batch
+    and folded nothing, which is strictly worse than the full core it replaced.
+    """
+
+    row = {
+        "entity": sp.OFFICE_CONFLICT_ENTITY,
+        "id": office_actor_patch_id(WORKSPACE, "personainst_qa_agent_0001"),
+        "op": "remove",
+    }
+    assert sp.office_patch_scope(row) == WORKSPACE
+
+    # The same fences the actor arm carries, because it IS the actor arm: an id
+    # with no separator names no workspace and answers ``None`` rather than
+    # guessing, and ``ws_pilot_2`` never lands in ``ws_pilot``'s scope.
+    assert sp.office_patch_scope({**row, "id": "no_separator"}) is None
+    assert sp.office_patch_scope({**row, "id": "ws_pilot_2/k"}) == "ws_pilot_2"
+
+
+def test_the_conflict_entity_is_not_folded_by_a_client_that_declares_the_actor_one(
+    isolate_agent_runtime_root, set_delta_patches
+):
+    """The gate is the ENTITY NAME, and that is the whole of the negotiation.
+
+    No capability string is minted for this row (the WS1 ``scope`` argument: one
+    entity, one op, so "can you fold the paired row" and "may the paired event
+    free-ride" are the same question). Which makes this the test that the entity
+    really does gate — a client holding every office token it knows today must
+    still be refused a row it has never heard of.
+    """
+
+    set_delta_patches(True)
+    before = _log_end()
+    sp.emit_office_conflict_resolved_patch(
+        EventLog(), WORKSPACE, "personainst_qa_agent_0001"
+    )
+    patch_event = next(
+        e
+        for e in (x for _, x in EventLog().iter_from_offset(before))
+        if e.type == STATE_PATCHED_EVENT_TYPE
+    )
+
+    todays_client = HISTORICAL_FOLD_ENTITIES | {
+        OFFICE_ACTOR_ENTITY,
+        OFFICE_ACTOR_LIFECYCLE_CAPABILITY,
+        OFFICE_SURFACE_ENTITY,
+        OFFICE_SURFACE_FOLD_CAPABILITY,
+    }
+    assert not event_is_patch_coverable(patch_event, fold_entities=todays_client)
+    assert event_is_patch_coverable(
+        patch_event, fold_entities=todays_client | {sp.OFFICE_CONFLICT_ENTITY}
+    )

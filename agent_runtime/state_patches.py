@@ -1061,6 +1061,85 @@ def emit_office_actor_remove(
 
 OFFICE_SURFACE_ENTITY = "office_surface"
 
+#: The office row's CONFLICT LEDGER, as an entity of its own (w12/l3, 2026-09-04).
+#:
+#: The office row carries two key ledgers the actor rows cannot express:
+#: ``archived_actor_keys``, which the §V1 audit showed a client can DERIVE from
+#: the ``office_actor`` ``remove`` it already folds, and ``conflict_actor_keys``,
+#: which it cannot — those keys come from sidecar FILES under
+#: ``office/<ws>/conflicts/`` (``OfficeStore.scan_conflicts`` →
+#: ``snapshot.office_summary_row``), and no actor write creates or archives one.
+#: ``resolve_conflict`` archives a sidecar on EVERY arm, ``take="local"``
+#: included, and that arm writes no actor row at all.
+#:
+#: That is why ``office.actor.conflict_resolved`` sat on ``patch_coverage``'s
+#: must-stay-absent list: a covered batch would fold the resolved desk and leave
+#: the sync strip's conflict pill lit for the rest of the session — a conflict
+#: rendered on the row whose conflict the gesture just resolved.
+#:
+#: **Why a new entity rather than a widened office row.** The alternative the
+#: queue row named was to let some patch move ``conflict_actor_keys`` on the
+#: office row itself, behind a capability token on the
+#: :data:`~agent_runtime.patch_coverage.OFFICE_SURFACE_FOLD_CAPABILITY` pattern.
+#: Rejected: the launcher's ``_officeSurfaceFields`` doc comment names the
+#: office-row keys no patch may move, and widening that set would put a SECOND
+#: writer on the row :data:`OFFICE_SURFACE_PATCH_FIELDS` exists to keep to one —
+#: two producers for one row, which is the shape this lane keeps retiring.
+#:
+#: **Why no capability string of its own.** The WS1 ``scope`` argument, verbatim:
+#: this is a brand-new entity with exactly ONE op, so "can you fold the paired
+#: row" and "may the paired event free-ride" are the SAME question, and the
+#: entity name already answers it. A separate token could only ever agree with
+#: the entity declaration — a second thing to get wrong for no compatibility
+#: gained. So it stands as its own token in
+#: :data:`~agent_runtime.patch_coverage.TOKEN_GATED_DOMAIN_EVENT_TYPES`, beside
+#: ``workspace.activated`` and ``realm.activated``.
+OFFICE_CONFLICT_ENTITY = "office_conflict"
+
+
+def emit_office_conflict_resolved_patch(
+    event_log: EventLog,
+    workspace_id: Any,
+    actor_key: Any,
+    *,
+    correlation_id: str | None = None,
+    config: AgentRuntimeConfig | None = None,
+) -> bool:
+    """Emit an ``office_conflict`` ``remove`` — one key leaving the conflict ledger.
+
+    A ``remove`` and not an ``upsert`` because the fact moved is a DEPARTURE from
+    a list. The fold is the one the launcher already performs for
+    ``office_actor``'s remove — splice this id out, idempotently — and it carries
+    no payload that could go stale between the emit and the fold, so it can never
+    reach the oversize ladder.
+
+    There is deliberately no ARRIVAL op. A conflict sidecar is WRITTEN by realm
+    sync, not by a chokepointed office write, so a create has no row to ride and
+    the batch that first raises a conflict keeps demoting to a full core exactly
+    as it does today. This entity covers the RESOLVE and nothing else, which is
+    the whole of what ``office.actor.conflict_resolved`` needed.
+
+    The id is :func:`office_actor_patch_id`'s, reused rather than re-derived: the
+    two halves are the same two halves (a workspace id and an actor key), the
+    separator argument is the same one, and the launcher splits on the first
+    ``/`` for both. A second builder for one id scheme is the drift operator
+    task #57 already paid for once.
+
+    Best-effort at its call site like every sibling emitter: a patch-lane fault
+    is a missing PROMOTION, never a failed resolve.
+    """
+
+    if not delta_patches_enabled(config):
+        return False
+    return emit_state_patch(
+        event_log,
+        entity=OFFICE_CONFLICT_ENTITY,
+        entity_id=office_actor_patch_id(workspace_id, actor_key),
+        op=PATCH_OP_REMOVE,
+        correlation_id=correlation_id,
+        config=config,
+    )
+
 
 def office_patch_scope(patch: Any) -> str | None:
     """The office workspace one ``state.patched`` row belongs to, or ``None``.
@@ -1083,7 +1162,7 @@ def office_patch_scope(patch: Any) -> str | None:
     So both readers on that lane now call THIS, and a batch the coverage authority
     promotes is by construction either forwarded or resynced.
 
-    The two id shapes, and why one function can hold both:
+    The two id shapes, and why one function can hold all three entities:
 
     * ``office_actor`` — ``"<workspace_id>/<actor_key>"``. Split on the FIRST
       ``/`` exactly as :func:`office_actor_patch_id` joins on it (that separator
@@ -1091,6 +1170,13 @@ def office_patch_scope(patch: Any) -> str | None:
       with no separator names no workspace and answers ``None`` rather than
       guessing; this is also what keeps ``ws_pilot_2`` out of ``ws_pilot``'s
       scope, where a naive ``startswith`` on the bare id would have leaked it.
+    * ``office_conflict`` — the SAME shape, because
+      :func:`emit_office_conflict_resolved_patch` reuses the same id builder, so
+      it shares the actor arm rather than repeating it. Routing it here is not
+      cosmetic: an office patch this function cannot place is one the subscribe
+      lane silently DROPS (the WV-H3 failure this docstring records), so an
+      unrouted conflict row would be a resolve that promoted its batch and folded
+      nothing — strictly worse than the full core it replaced.
     * ``office_surface`` — the bare workspace id
       (:func:`emit_office_surface_patch`), so the id IS the scope.
 
@@ -1107,7 +1193,7 @@ def office_patch_scope(patch: Any) -> str | None:
     entity_id = patch.get("id")
     if not isinstance(entity_id, str) or not entity_id:
         return None
-    if entity == OFFICE_ACTOR_ENTITY:
+    if entity in (OFFICE_ACTOR_ENTITY, OFFICE_CONFLICT_ENTITY):
         workspace_id, separator, _actor_key = entity_id.partition("/")
         if not separator or not workspace_id:
             return None
