@@ -16,6 +16,7 @@ import base64
 import json
 import math
 import re
+import shutil
 import threading
 import warnings
 from pathlib import Path
@@ -2258,6 +2259,28 @@ def test_list_drafts_skips_directories_that_hold_no_draft(draft):
     (drafts_dir() / "not-a-draft").mkdir()
 
     assert [item.id for item in CharacterDraft.list_drafts()] == [draft.id]
+
+
+def test_a_backup_directory_is_a_row_that_names_the_draft_it_shadows(draft):
+    """The live defect: `list --json` answered one draft id TWICE.
+
+    A backup directory is a byte copy of a draft directory, so its `draft.json`
+    carries the ORIGINAL's `id` and `CharacterDraft.id` answers it. Both rows
+    were therefore indistinguishable on the wire. Ruled 2026-09-04: the backup
+    stays a row (deleting it would hide a directory that exists on disk) and
+    carries `shadows`, the id of the draft it copies, so a consumer can drop it
+    and keep the un-shadowed one.
+    """
+    backup = drafts_dir() / f"{draft.id}.backup-2026-08-25-nefix"
+    shutil.copytree(draft.directory, backup)
+
+    rows = {item.directory.name: item for item in CharacterDraft.list_drafts()}
+
+    assert set(rows) == {draft.id, backup.name}
+    # The duplicate id is preserved, not papered over — that is what is on disk.
+    assert rows[backup.name].id == draft.id
+    assert rows[draft.id].shadows is None
+    assert rows[backup.name].shadows == draft.id
 
 
 def test_loading_an_unknown_draft_names_the_path_it_looked_at(fake):

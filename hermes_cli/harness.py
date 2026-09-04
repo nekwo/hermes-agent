@@ -4323,6 +4323,13 @@ def _characters_draft_summary(draft) -> dict:
     (``draft.path_or_none``). ``list`` and ``status`` name the same field, and a
     consumer that has to remember which of the two flattens absence is a
     consumer that will get it wrong.
+
+    ``shadows`` is what makes a duplicate ``id`` readable rather than a defect.
+    A backup directory is a copy of a draft directory, so it answers the
+    ORIGINAL's id and two rows carried one id with nothing to tell them apart.
+    The copy stays a row — it is on disk — and names the id it copies, so a
+    consumer drops every row carrying ``shadows`` and keeps the un-shadowed one.
+    ``str`` or JSON ``null``, the same spelling of absence as its neighbours.
     """
     from agent.charsheet.draft import path_or_none
 
@@ -4333,6 +4340,7 @@ def _characters_draft_summary(draft) -> dict:
         "displayName": draft.display_name,
         "concept": draft.concept,
         "style": draft.style,
+        "shadows": draft.shadows,
         "authoredBy": draft.authored_by,
         # Beside `authoredBy` in all three payloads that carry provenance —
         # this row, `status --json`, and the `start --json` summary (which is

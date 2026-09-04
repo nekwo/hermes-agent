@@ -626,6 +626,33 @@ class CharacterDraft:
         return str(self._data.get("id", self.directory.name))
 
     @property
+    def shadows(self) -> str | None:
+        """The draft id this directory is a COPY of, or ``None`` for a real draft.
+
+        A backup is made by copying a draft directory beside itself
+        (``<id>.backup-<date>-<reason>``), so its ``draft.json`` still carries
+        the ORIGINAL's ``id`` and :attr:`id` answers it. Two rows of
+        ``harness characters list --json`` therefore answered ONE id, and no
+        consumer could tell which was the live draft.
+
+        Ruled 2026-09-04: the copy stays a row — it is a directory that exists
+        on disk, and a list that hides it lies about the library — but it names
+        what it shadows, so a consumer dedupes by dropping every row carrying
+        this field and keeping the un-shadowed one.
+
+        DERIVED, never stored. Nothing in this module writes a backup, so there
+        is no writer to teach and no backfill to run: the fact is already on
+        disk in the disagreement between the directory name and the recorded
+        id, and reading it there cannot go stale. :meth:`create` puts a draft at
+        ``drafts_dir() / <id>``, so agreement is the invariant a real draft
+        holds by construction and a copy necessarily breaks.
+        """
+        recorded = str(self._data.get("id", "") or "").strip()
+        if not recorded or _safe_segment(recorded) == self.directory.name:
+            return None
+        return recorded
+
+    @property
     def slug(self) -> str:
         return str(self._data.get("slug", ""))
 

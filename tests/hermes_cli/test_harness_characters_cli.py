@@ -1052,6 +1052,27 @@ def test_start_records_the_authoring_persona_as_provenance(fake, capsys):
     assert listed["drafts"][0]["authoredBy"] == "alice"
 
 
+def test_list_json_names_which_row_a_backup_directory_shadows(fake, capsys):
+    """One draft id used to answer TWICE, with nothing to tell the rows apart.
+
+    A backup is a copy of the draft directory, so its `draft.json` carries the
+    original's `id`. Ruled 2026-09-04: the copy stays a row and carries
+    `shadows`; the consumer drops the rows that carry it and keeps the
+    un-shadowed one.
+    """
+    draft_id = start_draft(capsys)
+    shutil.copytree(drafts_dir() / draft_id, drafts_dir() / f"{draft_id}.backup-2026-08-25-nefix")
+
+    _, listed = run(["harness", "characters", "list", "--json"], capsys)
+
+    rows = listed["drafts"]
+    assert [row["id"] for row in rows] == [draft_id, draft_id]
+    assert [row["shadows"] for row in rows] == [None, draft_id]
+    # The dedupe the launcher runs, spelled out here so the payload is provably
+    # enough on its own to do it.
+    assert [row["id"] for row in rows if row["shadows"] is None] == [draft_id]
+
+
 def test_an_unattributed_draft_reports_a_null_author_in_every_payload(fake, capsys):
     """Absence has to reach the consumer, in both payload spellings.
 
