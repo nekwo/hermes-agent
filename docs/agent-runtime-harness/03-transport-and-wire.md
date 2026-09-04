@@ -545,7 +545,7 @@ answers on its own thread.
 
 ## 3. The mission-control stream
 
-`agent_runtime/stream.py::stream_frames` (`:1102`) is the single producer body.
+`agent_runtime/stream.py::stream_frames` (`:1149`) is the single producer body.
 It yields exactly one `hydrate`, then tails the event log from that frame's
 `watermark.event_offset` (`_resume_offset`, `:305`) emitting `patch`, full-core
 `delta`, and `heartbeat` frames. **An unknown resume position is not byte 0**:
@@ -655,7 +655,7 @@ Rules, all in `agent_runtime/patch_coverage.py`:
   narrow and was silently widened back would get patches it cannot fold.
 - A batch naming any undeclared entity is demoted IN FULL to a core-bearing
   frame; there is no partial patch frame (`_batch_frames_with_liveness`,
-  `stream.py:1016`). The demotion bills `snapshot_build reason=demote`
+  `stream.py:1063`). The demotion bills `snapshot_build reason=demote`
   (`BATCH_REASON_DEMOTE`, `:64`), which makes a foldable update that paid for a
   whole snapshot greppable.
 
@@ -709,12 +709,12 @@ never raises — an instrument must not be why a subscribe fails.
 
 **Who paints the boot's one stale core is a property of the ROOM**, so
 `stream_frames(wants_stale_first=…)` is stated by the caller —
-`serve.py::_room_wants_stale_first` (`:3312`) reads the hub's two subscriber
+`serve.py::_room_wants_stale_first` (`:3375`) reads the hub's two subscriber
 tables at producer-build time, `_cmd_stream` (`runtime_commands.py:611`) states
 `True`, default `False`. It cannot be re-derived inside the producer: the
 subscriber attaching FIRST at boot is the RPC office lane, whose sink discards
 every non-`office_actor` row, and measured 2026-08-18 two boots in three handed
-the stale paint to that sink (`stream.py:897-913`).
+the stale paint to that sink (`stream.py:944-960`).
 
 ## 6. The office push lane is a re-envelope, not a second derivation
 
@@ -732,7 +732,7 @@ workspace id that failed the private "id under `<workspace_id>/`" restatement
 becomes a resync notification; an UNKNOWN frame type takes the same branch
 deliberately. Drops are typed, never silent: a subscriber outrunning its bounded
 buffer gets `subscription_dropped` naming which of the two bounds tripped —
-frame count or bytes — then is unsubscribed (`serve.py:4301`).
+frame count or bytes — then is unsubscribed (`serve.py:4344`).
 
 ## 7. The PUSH-vs-RPC boundary, and the fork boundary
 
@@ -911,7 +911,7 @@ authority, so in-process tool relay, CLI and serve transport get the same depth
   lease code. Source: `…/mission-control-stream.md:361-383`.
 - **The measured patch-lane saving** — 486 bytes against an 822,671-byte core,
   the ~99.96% reduction the S6/S7 acceptance names. Cited at
-  `patch_coverage.py:347` and `stream.py:459-462` as 2026-07/08 measurements;
+  `patch_coverage.py:347` and `stream.py:506-509` as 2026-07/08 measurements;
   not re-measured here, so a historical figure, not a benchmark.
 
 ## Supersedes

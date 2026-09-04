@@ -23,7 +23,7 @@ runtime. Everything else launcher-side belongs to the Launcher's docs.
 
 ## Stage 1 — interpreter and import tax (`interpreter_ms` and its segments)
 
-`_cmd_serve` starts a `BootTimeline` as its first instruction (`serve.py:5075-5077`).
+`_cmd_serve` starts a `BootTimeline` as its first instruction (`serve.py:5114-5116`).
 Everything before that instant is `interpreter_ms`: process creation → the command's own first
 statement, resolved through psutil and **simply absent when the platform will not give a
 creation time** (`agent_runtime/boot_timeline.py:108-118`). That one number used to be the
@@ -289,9 +289,9 @@ cannot touch: two shipped incidents came from writers that mutate durable state 
 event at all, and an offset key cannot see them at any price.
 
 A mismatch does not mean a blank canvas: `take_stale_first_core` serves the last persisted core
-**labeled stale** while the build runs (`core_cache.py:3817`, `stream.py:1274`). The one-shot
+**labeled stale** while the build runs (`core_cache.py:3817`, `stream.py:1321`). The one-shot
 belongs to the SUBSCRIBER, not the process — derived at producer-build time by
-`serve.py::_room_wants_stale_first` (`:3312`) — because a boot starts two `stream_frames`
+`serve.py::_room_wants_stale_first` (`:3375`) — because a boot starts two `stream_frames`
 generators and the module-global version handed the allowance to whichever raced first. A
 forced-refresh one-shot is refused the stale core outright.
 
@@ -430,8 +430,8 @@ residue above, exactly as predicted. That re-take stays owed
 
 ## Stage 10 — demote builds and same-offset core reuse
 
-`agent_runtime/demote_core_reuse.py`, consumed only by `agent_runtime/stream.py` (`:919`,
-`:945`, `:1003`). The waste: three `snapshot_build reason=demote role=led` lines at the SAME
+`agent_runtime/demote_core_reuse.py`, consumed only by `agent_runtime/stream.py` (`:966`,
+`:992`, `:1050`). The waste: three `snapshot_build reason=demote role=led` lines at the SAME
 offset 89961793 on 2026-08-22 10:50, `build_ms` 3017 / 3210 / 2388, identical fingerprint.
 `build_snapshot`'s coalescer cannot merge them — it is deliberately strict, and a caller
 arriving mid-build waits for the NEXT build rather than riding the in-flight one. That rule is

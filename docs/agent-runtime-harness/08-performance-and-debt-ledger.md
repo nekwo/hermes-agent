@@ -420,7 +420,7 @@ plan at the canon fold; lane shipped as `45abf82803` + `32f41be19f` +
 
 - Two of its six defect classes were re-checked and are **LANDED, so they are dropped
   rather than carried**: RD-H3's empty-patch-frame promotion now has a non-empty guard
-  (`agent_runtime/stream.py:493`, with the mechanism written out at `:813`), and RD-H1's
+  (`agent_runtime/stream.py:540`, with the mechanism written out at `:860`), and RD-H1's
   office push scope predicate is now a documented union over the patch-coverage
   vocabulary rather than a private `office_actor`-only restatement
   (`agent_runtime/serve_office_subscriptions.py:140-163,285`).

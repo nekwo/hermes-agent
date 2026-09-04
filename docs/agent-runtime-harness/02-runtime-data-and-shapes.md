@@ -175,8 +175,8 @@ callers coalesce. The coalescer is deliberately strict — a caller arriving whi
 a build runs waits for the *next* build, never the in-flight one, because an
 in-flight build began earlier and may miss writes the caller already observed.
 `accept_inflight=True` opts out, and both non-test callers are the same
-boot-hydrate lane — `hydrate_frame` (`stream.py:352`) and the `stream_frames`
-boot job that drives it (`:1102`) — because the hydrate's payload carries its own
+boot-hydrate lane — `hydrate_frame` (`stream.py:399`) and the `stream_frames`
+boot job that drives it (`:1149`) — because the hydrate's payload carries its own
 watermark and the stream tails from exactly that offset
 (`snapshot.py:522-536`). Roles:
 `BUILD_ROLE_LED` / `RODE` / `SHARED_NEXT` / `CACHE` / `REUSED`
