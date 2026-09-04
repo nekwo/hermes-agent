@@ -76,39 +76,31 @@ jobs:
         with:
           command: uv sync --locked --python 3.11 --extra dev
 
-      # `--max-candidates` is a RUNTIME bound, not a quality bound: each
-      # candidate costs one baseline plus one mutant focused-test run. The
-      # script's default is 12 and its own refusal offers two cures, "split the
-      # diff, or pass the cap visibly" — this is the visible raise, and it is
-      # here rather than in the script so the number a run actually enforces is
-      # readable beside the command that enforces it. Since 2026-09-01 that
-      # refusal names its own numbers (`<N> selected > --max-candidates <M>`)
-      # and extends the doctrine to the other lane that outgrows the default: a
-      # multi-stage LANDING run passes its own cap the way this job does.
+      # The bound is WALL CLOCK (ruled 2026-09-04, replacing `--max-candidates`).
+      # It is passed here rather than left to the script's default for the same
+      # reason the cap was: the number a run actually enforces should be readable
+      # beside the command that enforces it.
       #
-      # 16 because a slice that adds a whole PHASE legitimately carries more
-      # claims than a bug fix does: the placement verb's skills phase (S4) came
-      # to 14 in one landing, every one of them a distinct guarantee with its own
-      # killing mutation. Capping at 12 would not have made that change smaller;
-      # it would have made four of its guarantees unregistered, which is the
-      # failure this gate exists to prevent. Raise it again the same way — with
-      # the reason written down — rather than dropping claims to fit.
+      # 600 because this job's own `timeout-minutes: 15` is the real ceiling and
+      # a checkout plus `uv sync` eats into it — a budget that expires INSIDE the
+      # gate stops with a report naming what ran and what remains, where the job
+      # timeout kills the step and says nothing. Raise it the same way, with the
+      # reason written here, rather than dropping claims to fit.
       #
-      # 20 since 2026-08-30, and for exactly that reason again. The realm-actor
-      # lifecycle wave's store batch is FOUR stages that cannot be split by
-      # pathspec — they rewrite one function apiece inside `office_store.py`
-      # (H-H6's lock loop, H-H10's in-lock placement, H-H3's typed outcomes,
-      # H-H9's folder fill) plus AX5/AX6's single actor-directory reader — and
-      # they select 17 together. Splitting the diff, the cap's other cure, is
-      # not available to a batch whose whole argument is that the four touch the
-      # same lines; dropping four claims to fit would leave the in-lock
-      # placement race and the pull's delete fence unregistered.
+      # What the cap kept getting wrong, and why the count stopped being the
+      # bound: it was always a proxy for runtime (one baseline plus one mutant
+      # test run per candidate), and the proxy drifted. Symbol-overlap selection
+      # raises the count BY DESIGN — measured on W1-H3's own diffs at 6 -> 27,
+      # 32 -> 64 and 98 -> 104 against a cap of 20 — and a push-shaped base
+      # collapses it, because on a push the base is `HEAD~1` and a two-commit
+      # branch selects 2 and 2. Neither moves how long this step takes. The
+      # count is still printed on every run; it is simply never asserted.
       - name: Require every selected mutant to turn its claimed test red
         if: steps.select.outputs.run == 'true'
         run: >-
           uv run python scripts/changed_line_mutation_check.py
           --base "${{ steps.select.outputs.base }}"
-          --max-candidates 20
+          --wall-budget-seconds 600
 
   generate:
     name: "Generate slices"

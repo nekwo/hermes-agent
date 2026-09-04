@@ -23,11 +23,23 @@ carries a ``changed production sources:`` census naming the changed ``.py``
 files no claim anchors in. It is REPORTED, never enforced: whether a given file
 must carry a claim is a policy question this script has no honest default for.
 
-Cap doctrine. ``--max-candidates`` defaults to 12, which is sized for a
-PER-STAGE base. A multi-stage LANDING run selects more — the H1-H4 landing
-selected 30 — and passes its own cap explicitly on the command line, the way
-CI does in ``.github/workflows/tests.yml``, so the enforced number is readable
-beside the command that enforces it. See ``tool/test_quality/README.md``.
+Budget doctrine (ruled 2026-09-04; replaces the candidate cap). The bound is
+WALL CLOCK — ``--wall-budget-seconds`` — and the candidate count is REPORTED,
+never asserted. The cap it replaces was always a proxy for runtime ("one
+baseline plus one mutant test run per candidate"), and the proxy kept
+mis-reading the thing it stood for: symbol-overlap selection RAISES candidate
+pressure by design, measured on W1-H3's own diffs at 6 -> 27, 32 -> 64 and
+98 -> 104 against a cap of 20, while a PR-shaped base and a push-shaped base
+over the same work select wildly different counts (on a push the base is
+``HEAD~1``, and a two-commit branch selects 2 and 2). None of that changes how
+long the run takes, which is the only thing the bound was ever protecting.
+
+The budget is checked before the mutating phase begins and again before each
+claim, so a run that outgrows it STOPS with what it has done and what remains
+— it does not discover the overrun by being killed. The enforced number stays
+readable beside the command that enforces it: CI passes its own in
+``.github/workflows/tests.yml``, and a multi-stage LANDING run passes its own
+the same way. See ``tool/test_quality/README.md``.
 """
 
 from __future__ import annotations
@@ -42,6 +54,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 from typing import Any
 
 
@@ -54,6 +67,19 @@ DEFAULT_EXEMPTIONS = REPO_ROOT / "tool" / "test_quality" / "mutation_exemptions.
 #: clone have two trees.
 LOCK_PATH = REPO_ROOT / ".mutation_gate.lock"
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+
+#: The default WALL-CLOCK bound on a run, in seconds. 900 = fifteen minutes,
+#: which is the ceiling the CI job already enforces with its own
+#: ``timeout-minutes: 15`` — so the default is the number the slowest lane was
+#: living under anyway, said out loud where a local run can read it.
+#:
+#: Ruled 2026-09-04, the same ruling the launcher's discovered-extras count
+#: took (``kRepoLaneWallBudgetSeconds``): a bound on a COUNT is a bound on a
+#: proxy, and this one kept drifting from the thing it stood for. Symbol-overlap
+#: selection raises the count by design and a push-shaped base collapses it, and
+#: neither moves the runtime. The count is still printed on every run — it is
+#: the most useful number in the report — it is simply never asserted.
+DEFAULT_WALL_BUDGET_SECONDS = 900.0
 
 #: ``symbol`` spellings that mean "the whole module" rather than a definition
 #: inside it. Module-scope claims are legitimate (an import, a constant, a
@@ -831,10 +857,54 @@ def _refuse_because_locked() -> int:
     return 2
 
 
-def run(base: str, claims_path: Path, exemptions_path: Path, max_candidates: int, list_only: bool) -> int:
+def _over_budget(started: float, wall_budget_seconds: float) -> bool:
+    """Has this run spent its wall-clock budget."""
+
+    return (time.monotonic() - started) >= wall_budget_seconds
+
+
+def _refuse_over_budget(
+    started: float, wall_budget_seconds: float, done: int, total: int
+) -> int:
+    """Exit 2, naming the numbers and the cure — the cap refusal's whole lesson.
+
+    An exit 2 that means "your change is big" used to read as "your claims are
+    bad", the wrong signal on the wrong lane, measured on the H1-H4 landing. So
+    this says what was spent, what the bound was, how far the run got, and both
+    cures — and the ORDER matters: raising the budget is named first, because
+    splitting the diff is not available to a landing whose whole argument is
+    that its stages land together.
+    """
+
+    print(
+        f"wall budget exhausted: {time.monotonic() - started:.0f}s of "
+        f"--wall-budget-seconds {wall_budget_seconds:.0f}, after {done} of "
+        f"{total} claim(s); raise the budget visibly (a multi-stage LANDING run "
+        "passes its own, e.g. --wall-budget-seconds 1800), or split the diff",
+        file=sys.stderr,
+    )
+    return 2
+
+
+def run(
+    base: str,
+    claims_path: Path,
+    exemptions_path: Path,
+    wall_budget_seconds: float,
+    list_only: bool,
+) -> int:
+    started = time.monotonic()
     _validate_exemptions(exemptions_path)
     claims, unselected = _partition_claims(base, claims_path)
-    print(f"mutation candidates: {len(claims)} (cap {max_candidates})")
+    # REPORTED, never asserted (ruled 2026-09-04). The trailing parenthetical is
+    # load-bearing in a way the number is not: CI's selector greps
+    # `^mutation candidates: 0 ` — with the trailing space — to decide whether to
+    # install the test environment at all, so this line keeps a token after the
+    # count whatever the bound is called.
+    print(
+        f"mutation candidates: {len(claims)} "
+        f"(reported, not capped; wall budget {wall_budget_seconds:.0f}s)"
+    )
     for claim in claims:
         via = " (selected by symbol)" if claim.get(SELECTION_KEY) == "symbol" else ""
         print(
@@ -921,23 +991,16 @@ def run(base: str, claims_path: Path, exemptions_path: Path, max_candidates: int
             )
         else:
             runnable.append(claim)
-    # The cap counts SELECTED claims, not runnable ones, so the number a diff
-    # has to answer for is the same on every host. A Windows run that squeaked
-    # under the cap only because half its claims were platform-skipped would
-    # hand CI a refusal nobody local could reproduce.
-    if len(claims) > max_candidates:
-        # Name the numbers and the cure. The old copy said neither, so an exit 2
-        # that means "your change is big" read as "your claims are bad" — the
-        # wrong signal on the wrong lane, measured on the H1-H4 landing.
-        print(
-            f"candidate cap exceeded: {len(claims)} selected > --max-candidates "
-            f"{max_candidates}; split the diff, or pass the cap visibly (a "
-            "multi-stage LANDING run passes its own cap, e.g. --max-candidates 40)",
-            file=sys.stderr,
-        )
-        return 2
     if list_only or not runnable:
         return 0
+    # The budget is checked HERE, before the lock, for the reason the cap was:
+    # a refused run must hold nothing, or a run that stops for being too big
+    # leaves a lock behind for the split-up runs that follow it. It is checked
+    # after the ``--list`` return because the inventory lane runs no tests and
+    # so has nothing to bound — under the cap, a big diff could not even ask
+    # what it had selected, which is the one thing it needed to know.
+    if _over_budget(started, wall_budget_seconds):
+        return _refuse_over_budget(started, wall_budget_seconds, 0, len(runnable))
 
     # Everything past here READS OR WRITES the tree, so everything past here is
     # inside the lock — the baseline runs included. They do not mutate, but they
@@ -957,7 +1020,16 @@ def run(base: str, claims_path: Path, exemptions_path: Path, max_candidates: int
                 return 2
 
         survivors: list[str] = []
-        for claim in runnable:
+        for done, claim in enumerate(runnable):
+            # Checked between claims and never inside one: a run that stopped
+            # mid-mutation would be a run that left a spliced file on disk,
+            # which is the one thing this gate may never do. So the bound is
+            # honoured at the only safe boundary, and the overrun a single very
+            # slow claim can cause is bounded by that claim, not by the budget.
+            if _over_budget(started, wall_budget_seconds):
+                return _refuse_over_budget(
+                    started, wall_budget_seconds, done, len(runnable)
+                )
             target = REPO_ROOT / str(claim["path"])
             original, text = _read_source(target)
             anchor = claim[ANCHOR_KEY]
@@ -1007,12 +1079,16 @@ def main(argv: list[str] | None = None) -> int:
             "cannot be seen from here."
         ),
         epilog=(
-            "cap doctrine:\n"
-            "  --max-candidates defaults to 12, sized for a PER-STAGE base. A\n"
-            "  multi-stage LANDING run selects more (the H1-H4 landing selected\n"
-            "  30) and passes its own cap explicitly, the way CI does, so the\n"
-            "  enforced number is readable beside the command that enforces it:\n"
-            "    python scripts/changed_line_mutation_check.py --base <sha> --max-candidates 40\n"
+            "budget doctrine (replaced the candidate cap, 2026-09-04):\n"
+            "  the bound is WALL CLOCK. --wall-budget-seconds defaults to 900\n"
+            "  (fifteen minutes, the ceiling CI's own job timeout already\n"
+            "  enforced). The candidate COUNT is reported on every run and\n"
+            "  never asserted: symbol-overlap selection raises it by design and\n"
+            "  a push-shaped base collapses it, and neither moves the runtime\n"
+            "  the bound exists to protect. A long multi-stage LANDING run\n"
+            "  passes its own budget explicitly, the way CI does, so the\n"
+            "  enforced number is readable beside the command enforcing it:\n"
+            "    python scripts/changed_line_mutation_check.py --base <sha> --wall-budget-seconds 1800\n"
             "  See tool/test_quality/README.md."
         ),
     )
@@ -1023,13 +1099,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--claims", type=Path, default=DEFAULT_CLAIMS)
     parser.add_argument("--exemptions", type=Path, default=DEFAULT_EXEMPTIONS)
     parser.add_argument(
-        "--max-candidates",
-        type=int,
-        default=12,
+        "--wall-budget-seconds",
+        type=float,
+        default=DEFAULT_WALL_BUDGET_SECONDS,
         help=(
-            "refuse the run when more than N claims are selected (default: 12, "
-            "sized for a per-stage base; a multi-stage landing run passes its "
-            "own cap -- 40 is the current house number)"
+            "stop the run when it has spent N seconds of wall clock (default: "
+            "%(default)s). Checked before the mutating phase and between "
+            "claims, so an overrun stops with a report rather than being "
+            "killed. The candidate count is reported, never asserted."
         ),
     )
     parser.add_argument("--list", action="store_true", dest="list_only")
@@ -1052,7 +1129,7 @@ def main(argv: list[str] | None = None) -> int:
             args.base,
             args.claims.resolve(),
             args.exemptions.resolve(),
-            args.max_candidates,
+            args.wall_budget_seconds,
             args.list_only,
         )
     except RuntimeError as error:

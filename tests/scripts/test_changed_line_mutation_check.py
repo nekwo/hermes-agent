@@ -110,12 +110,12 @@ def test_a_resolving_claim_the_diff_never_touched_is_listed_as_unselected(
     touched({claim_files["first"]: {2}, claim_files["second"]: set()})
 
     code = gate.run(
-        "BASE", claims, _exemptions_file(tmp_path), max_candidates=12, list_only=True
+        "BASE", claims, _exemptions_file(tmp_path), wall_budget_seconds=900, list_only=True
     )
     out = capsys.readouterr().out
 
     assert code == 0
-    assert "mutation candidates: 1 (cap 12)" in out
+    assert "mutation candidates: 1 " in out
     assert "  touched-claim:" in out
     assert "UNSELECTED (0 changed lines): untouched-claim" in out
     # The selected claim is reported ONCE, as a candidate — never in both lists.
@@ -141,12 +141,12 @@ def test_every_claim_unselected_still_reports_zero_candidates_first(
     touched({})
 
     code = gate.run(
-        "BASE", claims, _exemptions_file(tmp_path), max_candidates=12, list_only=True
+        "BASE", claims, _exemptions_file(tmp_path), wall_budget_seconds=900, list_only=True
     )
     lines = capsys.readouterr().out.splitlines()
 
     assert code == 0
-    assert lines[0] == "mutation candidates: 0 (cap 12)"
+    assert lines[0].startswith("mutation candidates: 0 ")
     assert lines[1:] == [
         "changed production sources: 0 (0 carry no registered claim)",
         "UNSELECTED (0 changed lines): a",
@@ -173,7 +173,7 @@ def test_a_real_run_does_not_print_the_unselected_rows(
     touched({})
 
     code = gate.run(
-        "BASE", claims, _exemptions_file(tmp_path), max_candidates=12, list_only=False
+        "BASE", claims, _exemptions_file(tmp_path), wall_budget_seconds=900, list_only=False
     )
     out = capsys.readouterr().out
 
@@ -183,11 +183,16 @@ def test_a_real_run_does_not_print_the_unselected_rows(
     assert "UNSELECTED" not in out
 
 
-def test_the_cap_still_refuses_even_while_the_inventory_prints(
+def test_a_big_inventory_still_prints_both_halves_and_refuses_nothing(
     tmp_path, claim_files, touched, capsys
 ):
-    """Exit semantics are unchanged by the new rows: an over-cap `--list` is
-    still a configuration refusal (2), not a report."""
+    """This case used to pin "an over-cap `--list` is a refusal (2)".
+
+    The cap is gone (ruled 2026-09-04) and with it the refusal it produced, so
+    what survives is the part that was always the point: the inventory prints
+    the selected candidates AND the unselected rows, and says nothing about
+    whether the number is allowed.
+    """
 
     claims = _claims_file(
         tmp_path,
@@ -200,12 +205,12 @@ def test_the_cap_still_refuses_even_while_the_inventory_prints(
     touched({claim_files["first"]: {1, 3}, claim_files["second"]: set()})
 
     code = gate.run(
-        "BASE", claims, _exemptions_file(tmp_path), max_candidates=1, list_only=True
+        "BASE", claims, _exemptions_file(tmp_path), wall_budget_seconds=900, list_only=True
     )
     out = capsys.readouterr().out
 
-    assert code == 2
-    assert "mutation candidates: 2 (cap 1)" in out
+    assert code == 0
+    assert "mutation candidates: 2 " in out
     assert "UNSELECTED (0 changed lines): c" in out
 
 
@@ -228,7 +233,7 @@ def test_a_claim_whose_find_no_longer_resolves_is_still_a_configuration_error(
             "BASE",
             claims,
             _exemptions_file(tmp_path),
-            max_candidates=12,
+            wall_budget_seconds=900,
             list_only=True,
         )
 
@@ -254,17 +259,17 @@ def test_a_zero_with_changed_sources_reads_differently_from_a_zero_with_none(
     touched({})
 
     monkeypatch.setattr(gate, "_changed_sources", lambda base: [])
-    gate.run("BASE", claims, _exemptions_file(tmp_path), max_candidates=12, list_only=True)
+    gate.run("BASE", claims, _exemptions_file(tmp_path), wall_budget_seconds=900, list_only=True)
     quiet = capsys.readouterr().out
 
     monkeypatch.setattr(
         gate, "_changed_sources", lambda base: ["agent_runtime/office_store.py", "hermes_cli/x.py"]
     )
-    gate.run("BASE", claims, _exemptions_file(tmp_path), max_candidates=12, list_only=True)
+    gate.run("BASE", claims, _exemptions_file(tmp_path), wall_budget_seconds=900, list_only=True)
     loud = capsys.readouterr().out
 
-    assert quiet.splitlines()[0] == "mutation candidates: 0 (cap 12)"
-    assert loud.splitlines()[0] == "mutation candidates: 0 (cap 12)"
+    assert quiet.splitlines()[0].startswith("mutation candidates: 0 ")
+    assert loud.splitlines()[0].startswith("mutation candidates: 0 ")
     assert "changed production sources: 0 (0 carry no registered claim)" in quiet
     assert "NO CLAIM ANCHORS HERE" not in quiet
     assert "changed production sources: 2 (2 carry no registered claim)" in loud
@@ -290,7 +295,7 @@ def test_a_changed_source_a_claim_anchors_in_is_not_reported_unregistered(
     anchored = str(claim_files["first"]).replace("\\", "/")
 
     monkeypatch.setattr(gate, "_changed_sources", lambda base: [anchored, "agent/other.py"])
-    gate.run("BASE", claims, _exemptions_file(tmp_path), max_candidates=12, list_only=True)
+    gate.run("BASE", claims, _exemptions_file(tmp_path), wall_budget_seconds=900, list_only=True)
     out = capsys.readouterr().out
 
     assert "changed production sources: 2 (1 carry no registered claim)" in out
@@ -353,7 +358,7 @@ def test_a_claim_may_carry_the_commit_its_needle_was_derived_at(
     touched({claim_files["first"]: {2}})
 
     code = gate.run(
-        "BASE", claims, _exemptions_file(tmp_path), max_candidates=12, list_only=True
+        "BASE", claims, _exemptions_file(tmp_path), wall_budget_seconds=900, list_only=True
     )
     out = capsys.readouterr().out
 
@@ -386,7 +391,7 @@ def test_a_moved_file_warns_about_the_derivation_and_never_fails_the_run(
     touched({claim_files["first"]: {2}})
 
     code = gate.run(
-        "BASE", claims, _exemptions_file(tmp_path), max_candidates=12, list_only=True
+        "BASE", claims, _exemptions_file(tmp_path), wall_budget_seconds=900, list_only=True
     )
     out = capsys.readouterr().out
 
@@ -417,7 +422,7 @@ def test_a_claim_with_no_derivation_recorded_says_nothing(
     touched({claim_files["first"]: {2}})
 
     code = gate.run(
-        "BASE", claims, _exemptions_file(tmp_path), max_candidates=12, list_only=True
+        "BASE", claims, _exemptions_file(tmp_path), wall_budget_seconds=900, list_only=True
     )
     out = capsys.readouterr().out
 
@@ -445,3 +450,117 @@ def test_the_derivation_read_counts_real_commits_against_this_repo():
     # A sha git cannot resolve is "nothing to say", not a crash and not a zero:
     # a shallow clone is a normal state and is not a fact about the claim.
     assert gate._commits_since_derivation(_claim_at("f" * 40)) is None
+
+
+# ────────────────────── the wall-clock budget (ruled 2026-09-04) ─────────────
+
+
+def test_the_candidate_count_is_reported_and_never_refused(
+    tmp_path, claim_files, touched, capsys
+):
+    """The ruling's first half: the COUNT stops being a bound.
+
+    The cap it replaces was a proxy for runtime, and the proxy kept mis-reading
+    the thing it stood for — symbol-overlap selection raises the count by
+    design (6 -> 27, 32 -> 64, 98 -> 104 on W1-H3's own diffs against a cap of
+    20) and a push-shaped base collapses it, and neither moves how long the run
+    takes.
+
+    ANTI-VACUITY: three claims are selected here against a budget that could
+    not have refused them either, so the assertion is on the exit code AND on
+    the count still being printed — an implementation that silently stopped
+    counting would pass a bare `code == 0`.
+    """
+
+    claims = _claims_file(
+        tmp_path,
+        [
+            _claim("a", claim_files["first"], "alpha = 1", "alpha = 99"),
+            _claim("b", claim_files["first"], "gamma = 3", "gamma = 99"),
+            _claim("c", claim_files["second"], "epsilon = 5", "epsilon = 99"),
+        ],
+    )
+    touched({claim_files["first"]: {1, 3}, claim_files["second"]: {2}})
+
+    code = gate.run(
+        "BASE", claims, _exemptions_file(tmp_path), wall_budget_seconds=900, list_only=True
+    )
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "mutation candidates: 3 " in out
+    assert "cap" not in out.lower().replace("not capped", "")
+
+
+def test_a_spent_budget_refuses_before_the_lock_and_names_both_cures(
+    tmp_path, claim_files, touched, capsys
+):
+    """The ruling's second half, and the property the cap refusal had to keep.
+
+    A refused run must hold nothing — a run that stops for being too big must
+    not leave `.mutation_gate.lock` behind for the split-up runs that follow
+    it. And the message has to say what was spent, what the bound was, how far
+    it got, and both cures, because an exit 2 meaning "your change is big" read
+    as "your claims are bad" on the H1-H4 landing.
+
+    ANTI-VACUITY: no test command runs, asserted directly — a budget checked
+    only AFTER the work would produce the same exit code and the same text.
+    """
+
+    ran: list[list[str]] = []
+    monkeypatched = pytest.MonkeyPatch()
+    monkeypatched.setattr(gate, "_run_command", lambda command: ran.append(list(command)) or 0)
+    try:
+        claims = _claims_file(
+            tmp_path, [_claim("a", claim_files["first"], "alpha = 1", "alpha = 99")]
+        )
+        touched({claim_files["first"]: {1}})
+
+        code = gate.run(
+            "BASE",
+            claims,
+            _exemptions_file(tmp_path),
+            wall_budget_seconds=0,
+            list_only=False,
+        )
+    finally:
+        monkeypatched.undo()
+    err = capsys.readouterr().err
+
+    assert code == 2
+    assert ran == [], "a refused run still executed a command"
+    assert not gate.LOCK_PATH.exists(), "a refused run left the gate lock behind"
+    assert "wall budget exhausted" in err
+    assert "--wall-budget-seconds 0" in err
+    assert "after 0 of 1 claim(s)" in err
+    # Both cures, and the budget raise FIRST: splitting is not available to a
+    # landing whose whole argument is that its stages land together.
+    assert err.index("raise the budget") < err.index("split the diff")
+
+
+def test_the_inventory_lane_never_spends_the_budget(
+    tmp_path, claim_files, touched, capsys
+):
+    """`--list` runs no test, so it has nothing to bound — and this is a
+    behaviour CHANGE the ruling makes on purpose.
+
+    Under the cap, a diff too big to run was also refused the inventory, so the
+    one thing it needed to know — what it had selected — was the one thing it
+    could not ask.
+
+    ANTI-VACUITY: the identical budget refuses the sibling case above at
+    `list_only=False`, so the exit 0 here is the flag doing the work.
+    """
+
+    claims = _claims_file(
+        tmp_path, [_claim("a", claim_files["first"], "alpha = 1", "alpha = 99")]
+    )
+    touched({claim_files["first"]: {1}})
+
+    code = gate.run(
+        "BASE", claims, _exemptions_file(tmp_path), wall_budget_seconds=0, list_only=True
+    )
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "  a:" in out

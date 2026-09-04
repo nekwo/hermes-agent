@@ -1,6 +1,6 @@
-"""The mutation gate's CI cap is one number, and the README may not re-type it.
+"""The mutation gate's CI budget is one number, and the README may not re-type it.
 
-`tool/test_quality/README.md` tells a reader which cap each lane enforces, and
+`tool/test_quality/README.md` tells a reader what each lane enforces, and
 its own opening paragraph records why that is worth a gate: *"this paragraph
 said 12 while the gate ran 16, then said 16 while CI ran 20."* Twice wrong, both
 times silently — a prose number beside a machine number is a fact with no
@@ -14,11 +14,15 @@ sync, which is the failure it exists to close. The workflow is parsed as YAML
 names the older caps 12 and 16 — cannot be mistaken for the live one), and the
 README is read for the bullet that claims what CI passes.
 
+The flag this pins changed on 2026-09-04 from `--max-candidates` to
+`--wall-budget-seconds` — the bound became wall clock and the candidate count
+became a report. What is pinned did not change: one number, two places.
+
 The pair this pins is deliberately narrow: **the CI lane only.** The README's
-other two numbers (the per-stage default and the landing cap) are not a
+other numbers (the script default and the landing budget) are not a
 workflow's to state — the default lives in the script's argparse and the
-landing cap is a house convention — and inventing a source of truth for them
-here would be inventing a claim.
+landing budget is a house convention — and inventing a source of truth for
+them here would be inventing a claim.
 """
 
 from __future__ import annotations
@@ -35,11 +39,11 @@ README = REPO_ROOT / "tool" / "test_quality" / "README.md"
 
 JOB_ID = "mutation-claims"
 GATE_SCRIPT = "changed_line_mutation_check.py"
-CAP = re.compile(r"--max-candidates[=\s]+(\d+)")
+CAP = re.compile(r"--wall-budget-seconds[=\s]+(\d+)")
 
 
 def workflow_cap() -> int:
-    """The `--max-candidates` CI actually passes, read from the job that runs."""
+    """The `--wall-budget-seconds` CI actually passes, read from the job that runs."""
 
     yaml = pytest.importorskip("yaml")
     document = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
@@ -53,19 +57,19 @@ def workflow_cap() -> int:
         for match in [CAP.search(str(step.get("run") or ""))]
         if match is not None and GATE_SCRIPT in str(step.get("run") or "")
     ]
-    assert len(found) == 1, f"expected exactly one capped {GATE_SCRIPT} run: {found}"
+    assert len(found) == 1, f"expected exactly one budgeted {GATE_SCRIPT} run: {found}"
     return found[0]
 
 
 def readme_cap() -> int:
-    """The cap the README tells a reader CI passes."""
+    """The budget the README tells a reader CI passes."""
 
     lines = README.read_text(encoding="utf-8").splitlines()
     claims = [
         line for line in lines if "**CI**" in line and JOB_ID in line and CAP.search(line)
     ]
     assert len(claims) == 1, (
-        f"expected exactly one README line claiming the {JOB_ID} cap; found "
+        f"expected exactly one README line claiming the {JOB_ID} budget; found "
         f"{len(claims)}. If the paragraph was rewritten, keep one line that "
         f"names **CI**, the job id and the flag — that shape is what this test "
         f"reads."
@@ -73,7 +77,7 @@ def readme_cap() -> int:
     return int(CAP.search(claims[0]).group(1))
 
 
-def test_the_readme_quotes_the_cap_the_workflow_actually_passes():
+def test_the_readme_quotes_the_budget_the_workflow_actually_passes():
     """The row, and the only assertion that matters: one number, two places."""
 
     assert readme_cap() == workflow_cap()

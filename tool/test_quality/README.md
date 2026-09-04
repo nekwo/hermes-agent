@@ -2,35 +2,50 @@
 
 `python scripts/changed_line_mutation_check.py --base <merge-base>` selects
 only explicit claims whose exact production source overlaps the diff, baselines
-their focused commands once, applies at most `--max-candidates` mutations, and
-requires each focused test to fail. The number a run enforces is the one on the
-command line, so read it there — this paragraph said 12 while the gate ran 16,
-then said 16 while CI ran 20. The original bytes are restored in `finally`
+their focused commands once, applies each mutation within a wall-clock budget,
+and requires each focused test to fail. The number a run enforces is the one on
+the command line, so read it there — this paragraph said 12 while the gate ran
+16, then said 16 while CI ran 20. The original bytes are restored in `finally`
 after every candidate.
 
-## Which cap, on which lane
+## The bound is wall clock, and the count is only reported
 
-- **A per-stage run** uses the default, `12`. Per-stage bases stay under it,
-  and that is what the default is sized for.
-- **A multi-stage LANDING run passes its own cap explicitly** — `40` is the
-  current house number. This is the run that matters and the one the default
-  cannot carry: the H1–H4 landing selected **30** against its base and only ran
-  because a 40 was hand-passed. Splitting the diff, the cap's other cure, is
-  not available to a landing whose whole point is that the stages land together.
-- **CI** passes `--max-candidates 20` in the `mutation-claims` job, with the
-  reason for each raise written in the comment beside the call site. That one
-  line is now PINNED: `tests/scripts/test_mutation_cap_matches_workflow.py`
-  parses the number out of the workflow's own step and out of this bullet and
-  fails when they disagree. It hand-types neither, so raising CI's cap reds
-  the pin until this line is updated — which is the mechanism the paragraph
-  above was asking for after being wrong twice. Keep the bullet's shape
-  (**CI**, the job id, and the flag on one line); that is what the test reads.
+Ruled 2026-09-04, replacing `--max-candidates`. The cap was always a proxy for
+runtime — one baseline plus one mutant test run per candidate — and the proxy
+kept mis-reading the thing it stood for:
 
-The doctrine behind all three is one rule: the enforced number is readable
-beside the command that enforces it, with the reason in the command line rather
-than buried in a default. `--max-candidates` is a RUNTIME bound (one baseline
-plus one mutant test run per candidate), never a quality bound — dropping
-claims to fit a cap is the failure this gate exists to prevent.
+- **Symbol-overlap selection raises the count by design.** Measured on W1-H3's
+  own diffs: 6 → 27, 32 → 64, 98 → 104 candidates against a cap of 20.
+- **The same work selects wildly different counts depending on the base.** The
+  27/64/104 figures come from a merge-base over a whole branch; on a push the
+  base is `HEAD~1` and a two-commit branch selects 2 and 2.
+
+Neither of those moves how long a run takes, which is the only thing the bound
+was protecting. So:
+
+- **`--wall-budget-seconds` is the bound.** Default `900` — fifteen minutes,
+  the ceiling CI's own job timeout already enforced. It is checked before the
+  mutating phase and again between claims, never inside one (a run stopped
+  mid-mutation would leave a spliced file on disk), so an overrun STOPS with a
+  report naming what ran and what remains instead of being killed by a timeout.
+- **The candidate count is printed on every run and never asserted.** It is the
+  most useful number in the report; it is not a verdict.
+- **CI** passes `--wall-budget-seconds 600` in the `mutation-claims` job, with
+  the reason written in the comment beside the call site. That one line is
+  PINNED: `tests/scripts/test_mutation_cap_matches_workflow.py` parses the
+  number out of the workflow's own step and out of this bullet and fails when
+  they disagree. It hand-types neither, so changing CI's budget reds the pin
+  until this line is updated — the mechanism the paragraph above was asking for
+  after being wrong twice. Keep the bullet's shape (**CI**, the job id, and the
+  flag on one line); that is what the test reads.
+- **A long multi-stage LANDING run passes its own budget**, the same way and
+  for the same reason: splitting the diff is not available to a landing whose
+  whole point is that its stages land together.
+
+The doctrine is unchanged and only its unit moved: the enforced number is
+readable beside the command that enforces it, with the reason in the command
+line rather than buried in a default. It is a RUNTIME bound, never a quality
+bound — dropping claims to fit is the failure this gate exists to prevent.
 
 ## Never share the worktree with a test run
 

@@ -126,11 +126,11 @@ def test_the_hh2_case_end_to_end_reports_it_was_selected_by_symbol(
     exemptions.write_text(json.dumps({"exemptions": []}), encoding="utf-8")
     monkeypatch.setattr(gate, "_changed_lines", lambda base, path: set(changed))
 
-    code = gate.run("BASE", claims, exemptions, max_candidates=12, list_only=True)
+    code = gate.run("BASE", claims, exemptions, wall_budget_seconds=900, list_only=True)
     out = capsys.readouterr().out
 
     assert code == 0
-    assert "mutation candidates: 1 (cap 12)" in out
+    assert "mutation candidates: 1 " in out
     assert f"  {HH2_CLAIM}:" in out
     assert "(selected by symbol)" in out
     assert "UNSELECTED" not in out
@@ -154,7 +154,7 @@ def test_a_line_selected_claim_is_not_labelled_as_selected_by_symbol(
     exemptions.write_text(json.dumps({"exemptions": []}), encoding="utf-8")
     monkeypatch.setattr(gate, "_changed_lines", lambda base, path: {1170})
 
-    gate.run("BASE", claims, exemptions, max_candidates=12, list_only=True)
+    gate.run("BASE", claims, exemptions, wall_budget_seconds=900, list_only=True)
     out = capsys.readouterr().out
 
     assert f"  {HH2_CLAIM}:" in out
@@ -200,11 +200,11 @@ def test_a_module_scope_claim_is_not_widened_to_the_whole_file(
     # Line 7 is inside `unrelated`, nowhere near the anchored import.
     monkeypatch.setattr(gate, "_changed_lines", lambda base, path: {7})
 
-    code = gate.run("BASE", claims, exemptions, max_candidates=12, list_only=True)
+    code = gate.run("BASE", claims, exemptions, wall_budget_seconds=900, list_only=True)
     out = capsys.readouterr().out
 
     assert code == 0
-    assert "mutation candidates: 0 (cap 12)" in out
+    assert "mutation candidates: 0 " in out
     assert "UNSELECTED (0 changed lines): module-claim" in out
 
 
@@ -233,9 +233,9 @@ def test_a_symbol_scoped_claim_in_the_same_shape_is_selected(
     exemptions.write_text(json.dumps({"exemptions": []}), encoding="utf-8")
     monkeypatch.setattr(gate, "_changed_lines", lambda base, path: {6})
 
-    gate.run("BASE", claims, exemptions, max_candidates=12, list_only=True)
+    gate.run("BASE", claims, exemptions, wall_budget_seconds=900, list_only=True)
 
-    assert "mutation candidates: 1 (cap 12)" in capsys.readouterr().out
+    assert "mutation candidates: 1 " in capsys.readouterr().out
 
 
 def _diff_returning(stdout: str, monkeypatch):

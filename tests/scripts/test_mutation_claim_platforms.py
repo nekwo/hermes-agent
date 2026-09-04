@@ -91,11 +91,11 @@ def test_a_posix_claim_on_a_windows_host_skips_by_name_and_the_run_is_green(
     host("windows")
     touched({1})
 
-    code = gate.run("BASE", claims, exemptions, max_candidates=12, list_only=False)
+    code = gate.run("BASE", claims, exemptions, wall_budget_seconds=900, list_only=False)
     captured = capsys.readouterr()
 
     assert code == 0
-    assert "mutation candidates: 1 (cap 12)" in captured.out
+    assert "mutation candidates: 1 " in captured.out
     assert (
         "SKIPPED (platform): posix-only (declared posix; this host is windows)"
         in captured.out
@@ -118,7 +118,7 @@ def test_the_same_claim_on_a_posix_host_runs_and_survives(
     host("posix")
     touched({1})
 
-    code = gate.run("BASE", claims, exemptions, max_candidates=12, list_only=False)
+    code = gate.run("BASE", claims, exemptions, wall_budget_seconds=900, list_only=False)
     captured = capsys.readouterr()
 
     assert code == 1
@@ -137,17 +137,17 @@ def test_a_claim_with_no_platforms_field_runs_everywhere(tmp_path, host, touched
     host("windows")
     touched({1})
 
-    code = gate.run("BASE", claims, exemptions, max_candidates=12, list_only=False)
+    code = gate.run("BASE", claims, exemptions, wall_budget_seconds=900, list_only=False)
 
     assert code == 1
     assert "SURVIVED: everywhere" in capsys.readouterr().err
 
 
-def test_a_skipped_claim_still_counts_toward_the_cap(tmp_path, host, touched, capsys):
-    """The cap counts SELECTED claims, so the number a diff must answer for is
-    the same on every host. A Windows run that squeaked under the cap only
-    because half its claims were platform-skipped would hand CI a refusal
-    nobody local could reproduce."""
+def test_a_skipped_claim_still_counts_in_the_report(tmp_path, host, touched, capsys):
+    """The count reports SELECTED claims, so the number reads the same on every
+    host. It stopped being a bound on 2026-09-04 — the wall-clock budget is the
+    bound now — but a report whose number moved with the host would still be
+    lying about what this diff put on the hook."""
 
     target = tmp_path / "target.py"
     claims, exemptions = _files(
@@ -160,11 +160,11 @@ def test_a_skipped_claim_still_counts_toward_the_cap(tmp_path, host, touched, ca
     host("windows")
     touched({1})
 
-    code = gate.run("BASE", claims, exemptions, max_candidates=1, list_only=True)
+    code = gate.run("BASE", claims, exemptions, wall_budget_seconds=900, list_only=True)
     out = capsys.readouterr().out
 
-    assert code == 2
-    assert "mutation candidates: 2 (cap 1)" in out
+    assert code == 0
+    assert "mutation candidates: 2 " in out
 
 
 def test_the_list_lane_reports_the_skip_too(tmp_path, host, touched, capsys):
@@ -176,7 +176,7 @@ def test_the_list_lane_reports_the_skip_too(tmp_path, host, touched, capsys):
     host("windows")
     touched({1})
 
-    gate.run("BASE", claims, exemptions, max_candidates=12, list_only=True)
+    gate.run("BASE", claims, exemptions, wall_budget_seconds=900, list_only=True)
 
     assert "SKIPPED (platform): posix-only" in capsys.readouterr().out
 
@@ -202,7 +202,7 @@ def test_a_malformed_platforms_field_is_a_configuration_error(
     touched({1})
 
     with pytest.raises(RuntimeError, match=message):
-        gate.run("BASE", claims, exemptions, max_candidates=12, list_only=True)
+        gate.run("BASE", claims, exemptions, wall_budget_seconds=900, list_only=True)
 
 
 def test_an_unknown_claim_field_is_refused_rather_than_ignored(tmp_path, touched):
@@ -216,7 +216,7 @@ def test_an_unknown_claim_field_is_refused_rather_than_ignored(tmp_path, touched
     touched({1})
 
     with pytest.raises(RuntimeError, match=r"unknown claim fields: \['platform'\]"):
-        gate.run("BASE", claims, exemptions, max_candidates=12, list_only=True)
+        gate.run("BASE", claims, exemptions, wall_budget_seconds=900, list_only=True)
 
 
 def test_the_registered_posix_claim_is_the_one_that_declares_it(tmp_path):

@@ -394,7 +394,7 @@ def test_the_mutation_is_spliced_at_the_anchor_not_at_the_first_occurrence(
     touched({target: {7}})
 
     code = gate.run(
-        "BASE", claims, _exemptions_file(tmp_path), max_candidates=12, list_only=False
+        "BASE", claims, _exemptions_file(tmp_path), wall_budget_seconds=900, list_only=False
     )
     out = capsys.readouterr().out
 
@@ -442,7 +442,7 @@ def test_a_crlf_committed_target_anchors_and_splices_and_keeps_its_bytes(
     touched({target: {7}})
 
     code = gate.run(
-        "BASE", claims, _exemptions_file(tmp_path), max_candidates=12, list_only=False
+        "BASE", claims, _exemptions_file(tmp_path), wall_budget_seconds=900, list_only=False
     )
     out = capsys.readouterr().out
 
@@ -474,10 +474,10 @@ def test_a_re_anchored_claim_says_so_after_the_candidate_line(tmp_path, touched,
     touched({})
 
     code = gate.run(
-        "BASE", claims, _exemptions_file(tmp_path), max_candidates=12, list_only=True
+        "BASE", claims, _exemptions_file(tmp_path), wall_budget_seconds=900, list_only=True
     )
     lines = capsys.readouterr().out.splitlines()
 
     assert code == 0
-    assert lines[0] == "mutation candidates: 0 (cap 12)"
+    assert lines[0].startswith("mutation candidates: 0 ")
     assert any(row.startswith("RE-ANCHORED: dedented") and "-8 columns" in row for row in lines)

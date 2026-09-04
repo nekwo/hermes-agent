@@ -106,7 +106,7 @@ def _run(gate, **kwargs) -> int:
         kwargs.get("base", "BASE"),
         Path("claims.json"),
         Path("exemptions.yaml"),
-        kwargs.get("max_candidates", 40),
+        kwargs.get("wall_budget_seconds", 900),
         kwargs.get("list_only", False),
     )
 
@@ -207,26 +207,30 @@ def test_the_lock_records_who_holds_it(gate):
         gate.LOCK_PATH.unlink(missing_ok=True)
 
 
-# ── the cap refusal names its numbers ────────────────────────────────────────
+# ── the budget refusal names its numbers ─────────────────────────────────────
 
 
-def test_the_cap_refusal_names_the_count_the_cap_and_the_landing_cure(gate, capsys):
-    """An exit 2 that means "your change is big" used to read as "your claims
-    are bad" — the wrong signal on the wrong lane, measured on the H1-H4
-    landing, which selected 30 against a default of 12."""
+def test_the_budget_refusal_names_what_it_spent_and_the_landing_cure(gate, capsys):
+    """An exit 2 that means "this run is too long" must not read as "your
+    claims are bad" — the wrong signal on the wrong lane, measured on the H1-H4
+    landing when the bound was still a candidate cap.
 
-    assert _run(gate, max_candidates=0) == 2
+    The bound became WALL CLOCK on 2026-09-04; the lesson about the refusal's
+    wording did not change hands with it."""
+
+    assert _run(gate, wall_budget_seconds=0) == 2
 
     stderr = capsys.readouterr().err
-    assert "1 selected > --max-candidates 0" in stderr
-    assert "--max-candidates 40" in stderr
+    assert "wall budget exhausted" in stderr
+    assert "--wall-budget-seconds 0" in stderr
+    assert "--wall-budget-seconds 1800" in stderr
     assert gate._stub_runs == []
 
 
-def test_the_cap_refusal_precedes_the_lock(gate):
-    """A refused run holds nothing: the cap is checked before the lock is taken,
-    so a capped-out run cannot leave a lock behind for the split-up runs that
-    follow it."""
+def test_the_budget_refusal_precedes_the_lock(gate):
+    """A refused run holds nothing: the budget is checked before the lock is
+    taken, so a run that stops for being too long cannot leave a lock behind for
+    the split-up runs that follow it."""
 
-    assert _run(gate, max_candidates=0) == 2
+    assert _run(gate, wall_budget_seconds=0) == 2
     assert not gate.LOCK_PATH.exists()
