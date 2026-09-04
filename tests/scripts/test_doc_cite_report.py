@@ -17,9 +17,31 @@ judgements underneath them:
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from scripts import doc_cite_report as report
+
+
+class _SpawnCounter:
+    """Counts real ``git`` processes without faking any of them.
+
+    What the assertions below are about is the process COUNT, so the calls have
+    to stay real: a stub would pin the shape of a mock instead of the cost of
+    the report.
+    """
+
+    def __init__(self, monkeypatch):
+        self.count = 0
+        real = subprocess.run
+
+        def counted(*args, **kwargs):
+            self.count += 1
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(report.subprocess, "run", counted)
+
 
 #: The live-canon test's cost is its CORPUS and its GIT calls, and the repo-wide
 #: per-test cap does not know that. Measured 2026-09-02 on the Windows dev box:
@@ -39,6 +61,13 @@ from scripts import doc_cite_report as report
 #: ``tests/test_coverage_claims_resolve.py`` carries. It stays far under
 #: ``run_tests_parallel``'s 300 s per-FILE wall, which remains the real bound on
 #: a hang: this buys headroom for a slow corpus walk, not for a loop.
+#:
+#: 2026-09-04: the 32.1 s half is GONE — ``_classify_shas`` batches every sha
+#: into two ``git`` processes, so the same gated canon costs 3 spawns and 2.5 s
+#: against 454 and 46.2 s, with byte-identical report output. The cap stays at
+#: 180 rather than dropping to the new measurement: what it bounds is a corpus
+#: that grows, and the reason it exists — that the repo-wide 30 s knows nothing
+#: about a walk over the whole canon — did not change with the spawn count.
 _LIVE_CANON_TIMEOUT_SECONDS = 180
 
 
@@ -125,3 +154,44 @@ def test_the_report_exits_zero_over_the_live_canon(capsys):
     assert code == 0
     assert "ADVISORY — this is not a gate" in out
     assert "PATH DOES NOT RESOLVE:" in out
+
+
+def test_every_sha_verdict_costs_two_git_processes_however_many_shas(monkeypatch):
+    """The row's whole finding: process creation was the report.
+
+    Per sha this used to be `cat-file -e` then `merge-base --is-ancestor` — two
+    spawns each, ~90 ms apiece on Windows, 32.1 s across 356 of them. The three
+    verdicts are unchanged and are asserted here beside the count, because a
+    batch that is cheap and wrong is the only way this change could hurt.
+
+    ANTI-VACUITY: all three verdicts come out of ONE call, so `unknown` is the
+    classification and not a probe that never resolves anything.
+    """
+
+    head, ancestor, base = (
+        subprocess.run(
+            ["git", "rev-parse", rev],
+            cwd=report.REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()[:10]
+        for rev in ("HEAD", "HEAD~3", "HEAD~2")
+    )
+    # AFTER the revs are resolved: `report.subprocess` IS the `subprocess`
+    # module, so the patch is global and would count this fixture's own spawns.
+    counter = _SpawnCounter(monkeypatch)
+
+    verdicts = report._classify_shas([ancestor, head, "deadbee", ancestor], base)
+
+    assert verdicts == {ancestor: "ok", head: "offline", "deadbee": "unknown"}
+    assert counter.count == 2
+
+
+def test_no_shas_at_all_spawns_nothing(monkeypatch):
+    """The empty batch is a return, not a `git` invocation with no input."""
+
+    counter = _SpawnCounter(monkeypatch)
+
+    assert report._classify_shas([], "HEAD") == {}
+    assert counter.count == 0

@@ -72,10 +72,71 @@ CITE = re.compile(
 SHA = re.compile(r"`([0-9a-f]{7,40})`")
 
 
-def _git(*args: str) -> subprocess.CompletedProcess:
+def _git(*args: str, stdin: str | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["git", *args], cwd=REPO_ROOT, check=False, capture_output=True, text=True
+        ["git", *args],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        input=stdin,
     )
+
+
+def _classify_shas(shas: list[str], base: str) -> dict[str, str]:
+    """``{sha: "ok" | "offline" | "unknown"}`` for every distinct cite, in TWO spawns.
+
+    The per-sha shape this replaces was ``cat-file -e`` followed by
+    ``merge-base --is-ancestor``, two processes per distinct sha. Measured
+    2026-09-02 on the Windows dev box: 32.1 s across 356 spawns of a 26.6 /
+    40.0 / 46.0 s run, ~90 ms of process creation apiece, against 0.9 s for all
+    634 ``_line_count`` reads. Process creation WAS the report; the work it
+    wrapped was rounding error.
+
+    Both halves batch without moving a single verdict:
+
+    * existence — ``cat-file --batch-check`` peels every cite through
+      ``^{commit}`` on stdin and answers ``<full-oid> commit <size>`` or
+      ``<input> missing``. A short sha that is ambiguous, or that names a tree
+      or a blob, does not peel and lands under ``missing`` — the same
+      ``unknown`` a non-zero ``cat-file -e`` produced;
+    * ancestry — the FULL oids ``batch-check`` just handed back go to one
+      ``rev-list --stdin`` alongside ``^<base>``, which prints exactly the
+      commits reachable from a cite but not from the base. Present in that
+      output is ``offline``; absent is ``ok``.
+
+    The full oid is what makes the second call possible at all: a 7-hex cite
+    cannot be compared against ``rev-list`` output, and abbreviating the output
+    back down would be a second guess. Exclusions ride on stdin as ``^<base>``
+    rather than as a command-line ``--not``, so hundreds of oids never approach
+    the Windows command-line limit.
+    """
+
+    if not shas:
+        return {}
+    probe = _git("cat-file", "--batch-check", stdin="".join(f"{sha}^{{commit}}\n" for sha in shas))
+    if probe.returncode != 0:
+        raise RuntimeError(f"git cat-file --batch-check failed: {probe.stderr.strip()}")
+    verdicts: dict[str, str] = {}
+    oids: dict[str, str] = {}
+    for sha, row in zip(shas, probe.stdout.splitlines()):
+        if " commit " not in row:
+            verdicts[sha] = "unknown"
+        else:
+            oids[sha] = row.split(" ", 1)[0]
+    if not oids:
+        return verdicts
+    reach = _git(
+        "rev-list", "--stdin", stdin="".join(f"{oid}\n" for oid in oids.values()) + f"^{base}\n"
+    )
+    # A base this clone cannot resolve used to make EVERY `--is-ancestor` probe
+    # exit non-zero, which the caller read as "offline". Preserved deliberately:
+    # batching is a COST change, and inventing a new failure mode for a bad
+    # `--base` belongs to whoever decides this report may exit non-zero.
+    not_ancestors = set(reach.stdout.split()) if reach.returncode == 0 else set(oids.values())
+    for sha, oid in oids.items():
+        verdicts[sha] = "offline" if oid in not_ancestors else "ok"
+    return verdicts
 
 
 def _tracked() -> tuple[set[str], dict[str, list[str]]]:
@@ -129,8 +190,11 @@ def run(root: str, base: str, exclude: list[str]) -> int:
     ambiguous = 0
     cross_repo = 0
     checked_cites = 0
-    checked_shas = 0
-    sha_cache: dict[str, str] = {}
+    # Sha cites are COLLECTED on the walk and classified after it, in one
+    # batch. Order is the walk's, so the rows below come out doc-by-doc and
+    # line-by-line exactly as the per-sha probe emitted them.
+    sha_hits: list[tuple[str, str]] = []
+    distinct_shas: list[str] = []
 
     for doc in docs:
         text = (REPO_ROOT / doc).read_bytes().decode("utf-8", "replace")
@@ -162,22 +226,21 @@ def run(root: str, base: str, exclude: list[str]) -> int:
                     )
             for match in SHA.finditer(line):
                 sha = match.group(1)
-                if sha not in sha_cache:
-                    if _git("cat-file", "-e", f"{sha}^{{commit}}").returncode != 0:
-                        sha_cache[sha] = "unknown"
-                    elif _git("merge-base", "--is-ancestor", sha, base).returncode != 0:
-                        sha_cache[sha] = "offline"
-                    else:
-                        sha_cache[sha] = "ok"
-                checked_shas += 1
-                if sha_cache[sha] == "unknown":
-                    unknown_sha.append(f"{doc}:{number}  {sha}")
-                elif sha_cache[sha] == "offline":
-                    offline_sha.append(f"{doc}:{number}  {sha}")
+                if sha not in distinct_shas:
+                    distinct_shas.append(sha)
+                sha_hits.append((f"{doc}:{number}", sha))
+
+    verdicts = _classify_shas(distinct_shas, base)
+    checked_shas = len(sha_hits)
+    for where, sha in sha_hits:
+        if verdicts[sha] == "unknown":
+            unknown_sha.append(f"{where}  {sha}")
+        elif verdicts[sha] == "offline":
+            offline_sha.append(f"{where}  {sha}")
 
     print(f"doc-cite report (ADVISORY — this is not a gate) over {len(docs)} docs under {root}/")
     print(f"  line cites resolved      : {checked_cites}")
-    print(f"  sha cites checked        : {checked_shas} ({len(sha_cache)} distinct)")
+    print(f"  sha cites checked        : {checked_shas} ({len(distinct_shas)} distinct)")
     print(f"  bare names left ambiguous: {ambiguous}")
     print(f"  cross-repo/elided, skipped: {cross_repo}")
     print("")
