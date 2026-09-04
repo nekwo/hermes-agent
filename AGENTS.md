@@ -1459,6 +1459,29 @@ hermetic env) and the fact that `tests/acp` cannot collect from a git
 worktree (`No module named 'acp'`; the editable install resolves to the
 primary checkout — run it from the primary, or name your lanes explicitly).
 
+**A wait bound above 30 seconds MUST declare its own `pytest.mark.timeout`.**
+`pyproject.toml`'s `addopts` carry a repo-wide per-test `--timeout=30`
+(`--timeout-method=thread`). A test whose own bound exceeds it can never
+report: pytest-timeout kills it first and prints a thread dump where the
+test's message would have been, so the run says "hung" about a test that was
+about to say exactly what went wrong. That is the trap under the obvious
+repair for a wall-clock flake — RAISING the bound trades one bad failure mode
+for a worse one unless the test also carries `@pytest.mark.timeout(N)` with
+`N` comfortably above the new bound (module-wide:
+`pytestmark = pytest.mark.timeout(N)`). Worked examples in the tree:
+`tests/hermes_cli/test_active_sessions.py` and
+`tests/hermes_cli/test_relay_shared_metrics.py`, both repaired this way in
+`99c8fa5725`, and `tests/scripts/test_doc_cite_report.py`, which carries the
+marker with the measurement that sized it written beside the constant.
+
+There is deliberately NO gate for this, and the reason is worth knowing before
+someone writes one: a scan for numeric wait bounds over `tests/` flags 51
+modules (measured 2026-09-04), and nearly all of them are SAFETY VALVES — a
+`subprocess.run(..., timeout=60)` wrapped around a call that normally returns
+in two seconds is not a wait the test expects to reach. Telling a valve from a
+bound is semantic, so the honest form of this rule is the paragraph above and
+not a literal scan carrying an allowlist.
+
 **Validated scope vs. what the runner discovers by default.**
 `scripts/run_tests_parallel.py` default-discovers the WHOLE `tests` tree
 (`_DEFAULT_ROOTS = ['tests']`, minus the integration/e2e/docker skips above),
