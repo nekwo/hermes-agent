@@ -232,7 +232,22 @@ ERROR_EXIT_CODES = {
 }
 
 
-def emit_harness_error(exc: BaseException, *, args=None, code: str | None = None, message: str | None = None) -> int:
+def emit_harness_error(exc: BaseException, *, args=None, code: str | None = None, message: str | None = None, reason: str | None = None) -> int:
+    """Render one refusal. ``reason`` is the RAW word the layer below used.
+
+    R-D6, and it exists because ``code`` is a FAMILY. Nine store refusals map
+    onto ``runtime_unavailable`` and three onto ``invalid_payload``, so a caller
+    that only has the code knows what to do next and cannot say what happened —
+    which is exactly what S4's 12:00:40 receipt hit: the launcher wrote
+    ``no_route``, hermes had said something specific, and the specific thing was
+    unrecoverable from the other machine.
+
+    Omitted rather than ``null`` when a caller passes nothing, so every envelope
+    this harness has ever emitted keeps its exact byte shape (the response
+    fixtures and their Launcher mirrors pin those bytes) and only the verbs that
+    have a reason to give grow the key.
+    """
+
     error_code = code or _error_code_for_exception(exc)
     safe_details = {"error_class": type(exc).__name__}
     if isinstance(exc, RealmSyncError):
@@ -254,6 +269,9 @@ def emit_harness_error(exc: BaseException, *, args=None, code: str | None = None
         retryable=getattr(exc, "retryable", False) or error_code in {"runtime_unavailable", "daemon_offline", "timeout", "archive_unreadable", "actors_unreadable", "idempotent_replay_unresolved"},
         safe_details=safe_details,
     )
+    cleaned = str(reason or "").strip()
+    if cleaned:
+        envelope["error"]["reason"] = cleaned
     _print_stage42(envelope, args=args, default_output="json")
     return ERROR_EXIT_CODES.get(error_code, 1)
 

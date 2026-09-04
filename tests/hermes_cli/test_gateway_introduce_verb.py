@@ -508,6 +508,63 @@ def test_gateway_id_prints_candidate_endpoints_without_loopback_and_the_capabili
     assert "PRIVATE KEY" not in json.dumps(payload)
 
 
+def test_gateway_id_names_the_dial_host_and_keeps_the_listener_block_on_the_bind(
+    capsys, monkeypatch, named_install
+):
+    """R-D4's source. The launcher paints ``Windows PC (192.168.1.203)`` and
+    ``Listening on 192.168.1.203:8765 · all interfaces`` from this one key.
+
+    It is a key and not a slice of ``endpoints`` because two surfaces computing
+    "the first one" independently is how a sheet ends up naming an address no
+    payload contains — and it is separate from ``listener`` because that block
+    still reports the BIND. "What is this listener on" and "what should another
+    machine dial" are different questions, and ``0.0.0.0`` is the honest answer
+    to the first and never to the second.
+    """
+
+    from hermes_cli.harness_parts import gateway_commands, serve as serve_module
+
+    monkeypatch.setattr(
+        serve_module, "gateway_listen_config", lambda: ("0.0.0.0", 8765)
+    )
+    monkeypatch.setattr(
+        gateway_commands,
+        "_machine_addresses",
+        lambda: ["192.168.1.203", "10.97.7.100"],
+    )
+
+    _code, payload = _run(capsys, "id")
+
+    assert payload["dial_host"] == {"host": "192.168.1.203", "port": 8765}
+    assert payload["dial_host"] == payload["endpoints"][0]
+    assert payload["listener"]["host"] == "0.0.0.0"
+
+
+def test_gateway_id_says_null_rather_than_a_bind_when_there_is_nothing_to_dial(
+    capsys, monkeypatch, named_install
+):
+    """``null`` is a state the sheet renders (`no address published`), and it is
+    the only honest answer for a wildcard that enumerates nothing. A verb that
+    filled the hole with the bind would put ``0.0.0.0`` on a launcher label,
+    which is the sentence the operator asked never to see again."""
+
+    from hermes_cli.harness_parts import gateway_commands, serve as serve_module
+
+    monkeypatch.setattr(
+        serve_module, "gateway_listen_config", lambda: ("0.0.0.0", 8765)
+    )
+    monkeypatch.setattr(gateway_commands, "_machine_addresses", lambda: [])
+
+    code, payload = _run(capsys, "id")
+
+    # Still exit 0: ``gateway id`` is read-only by contract and Stage 4's picker
+    # runs it against roots it does not own, so "nowhere to dial" is reported,
+    # not refused. The PAYLOAD WRITERS are the ones that refuse.
+    assert code == 0
+    assert payload["dial_host"] is None
+    assert payload["endpoints"] == []
+
+
 def test_a_wildcard_bind_enumerates_interfaces_and_a_concrete_host_is_one_row(
     capsys, monkeypatch, named_install
 ):

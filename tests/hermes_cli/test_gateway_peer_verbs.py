@@ -619,6 +619,58 @@ def test_a_wildcard_row_in_an_advertised_list_is_dropped_rather_than_dialled(
     assert fake_dials.dialled == [("10.0.0.9", 8765)]
 
 
+def test_a_refusal_carries_the_stores_own_reason_beside_the_family_code(capsys):
+    """R-D6. ``code`` is a FAMILY — nine store refusals share
+    ``runtime_unavailable`` and three share ``invalid_payload`` — so a caller
+    holding only the code knows what to do next and cannot say what happened.
+
+    The launcher's fulfiller maps ``runtime_unavailable`` to ``no_route``, which
+    is why S4's 12:00:40 receipt recorded "no route" for a refusal whose real
+    reason existed one process earlier and was thrown away. ``reason`` is that
+    word, unmapped, beside the family and never instead of it.
+    """
+
+    from hermes_cli.harness_support import ERROR_EXIT_CODES
+
+    # Three outstanding codes, then a fourth: the store says ``too_many_pending``
+    # and the taxonomy calls it ``pairing_codes_pending``.
+    for _ in range(3):
+        assert _run(capsys, "pair")[0] == 0
+
+    code = _dispatch(["harness", "gateway", "peers", "pair", "--json"])
+    envelope = json.loads(capsys.readouterr().out)
+
+    assert code == ERROR_EXIT_CODES["pairing_codes_pending"]
+    assert envelope["error"]["code"] == "pairing_codes_pending"
+    assert envelope["error"]["reason"] == "too_many_pending"
+
+
+def test_a_parse_refusal_names_its_reason_and_a_caller_with_none_omits_the_key(
+    capsys,
+):
+    """The two halves of R-D6's shape.
+
+    A verb on this lane names its reason even when the refusal never reached a
+    store — a payload that will not decode is ``payload_not_json``, which the
+    family ``invalid_payload`` cannot say. And a caller that passes no reason
+    emits the envelope it always did, byte for byte: the response fixtures and
+    their Launcher mirrors pin those bytes, so an unconditional ``reason: null``
+    would be a cross-repo regeneration for a key nobody on that lane reads.
+    """
+
+    _code = _dispatch(["harness", "gateway", "peers", "join", "{not json", "--json"])
+    envelope = json.loads(capsys.readouterr().out)
+
+    assert envelope["error"]["code"] == "invalid_payload"
+    assert envelope["error"]["reason"] == "payload_not_json"
+
+    from hermes_cli.harness_support import emit_harness_error
+
+    emit_harness_error(RuntimeError("boom"), args=None, code="internal_error")
+    plain = json.loads(capsys.readouterr().out)
+    assert "reason" not in plain["error"]
+
+
 def test_a_failed_join_writes_no_row(capsys):
     from agent_runtime.gateway_peers import list_peers
 

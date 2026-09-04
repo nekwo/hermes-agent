@@ -2089,11 +2089,22 @@ def _gateway_install_row(identity) -> dict:
     # Best-effort as a whole: this verb is read-only by contract and Stage 4's
     # install picker runs it against roots it does not own, so a store it cannot
     # read degrades to the identity row rather than to an error.
+    # * ``dial_host`` — the ONE address every payload writer hands out (R-D1),
+    #   which is ``endpoints[0]`` and ``null`` when there is none. Printed as its
+    #   own key rather than left for a reader to slice off the list, because the
+    #   launcher renders it as a sentence and as a row label (R-D4: `Windows PC
+    #   (192.168.1.203)`, `Listening on 192.168.1.203:8765 · all interfaces`) and
+    #   two surfaces computing "the first one" independently is how a sheet ends
+    #   up naming an address no payload contains. It is deliberately NOT the
+    #   ``listener`` block: that one still reports the BIND, because "what is
+    #   this listener on" and "what should another machine dial" are different
+    #   questions and a wildcard is the honest answer to the first.
     try:
         from agent_runtime import paths
         from agent_runtime.gateway_capabilities import GATEWAY_CAPABILITIES
         from hermes_cli.harness_parts.gateway_commands import (
             _candidate_endpoints,
+            _dial_host,
             _endpoint,
         )
 
@@ -2106,11 +2117,14 @@ def _gateway_install_row(identity) -> dict:
             "port": endpoint.get("port"),
             "source": endpoint["source"],
         }
+        dial = _dial_host(root)
+        row["dial_host"] = {"host": dial[0], "port": dial[1]} if dial else None
         row["capabilities"] = list(GATEWAY_CAPABILITIES)
     except Exception:
         row.setdefault("endpoints", [])
         row.setdefault("endpoints_source", "unknown")
         row.setdefault("listener", {"host": None, "port": None, "source": "unknown"})
+        row.setdefault("dial_host", None)
         from agent_runtime.gateway_capabilities import GATEWAY_CAPABILITIES
 
         row.setdefault("capabilities", list(GATEWAY_CAPABILITIES))

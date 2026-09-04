@@ -127,12 +127,27 @@ _REFUSAL_CODES = {
 
 
 def _refusal(refusal: Any, *, args) -> int:
+    """One ``StoreRefusal`` as a harness error, with BOTH words on it.
+
+    R-D6. The mapping above is many-to-one on purpose — the family answers "what
+    do I do next", and nine I/O conditions genuinely share one next move — but a
+    reader who only has the family cannot say what happened. The launcher's
+    fulfiller maps ``runtime_unavailable`` to ``no_route``, so S4's 12:00:40
+    receipt recorded "no route" for a refusal whose actual reason existed and
+    was thrown away one process earlier.
+
+    So ``reason`` rides beside ``code``: the store's own word, unmapped,
+    untranslated, and never a substitute for the family an exit code is derived
+    from.
+    """
+
     code = _REFUSAL_CODES.get(refusal.reason, "runtime_unavailable")
     return emit_harness_error(
         RuntimeError(refusal.reason),
         args=args,
         code=code,
         message=refusal.detail or refusal.reason,
+        reason=refusal.reason,
     )
 
 
@@ -254,6 +269,7 @@ def cmd_gateway_pair(args) -> int:
         # than printed with a null.
         return emit_harness_error(
             RuntimeError(certificate.state),
+            reason=certificate.state,
             args=args,
             code="runtime_unavailable",
             message=(
@@ -364,6 +380,7 @@ def cmd_gateway_devices_revoke(args) -> int:
         if record is None:
             return emit_harness_error(
                 RuntimeError("unknown_device"),
+                reason="unknown_device",
                 args=args,
                 code="not_found",
                 message=f"no device {device_id!r} is paired with this root",
@@ -411,6 +428,7 @@ def _install_and_certificate(args):
     if not identity.ok or not identity.install_id:
         return None, emit_harness_error(
             RuntimeError(identity.state),
+            reason=identity.state,
             args=args,
             code="runtime_unavailable",
             message=(
@@ -424,6 +442,7 @@ def _install_and_certificate(args):
     if not certificate.ok:
         return None, emit_harness_error(
             RuntimeError(certificate.state),
+            reason=certificate.state,
             args=args,
             code="runtime_unavailable",
             message=(
@@ -705,6 +724,7 @@ def _dial_target(store_root, endpoint: dict, *, args):
             [],
             emit_harness_error(
                 RuntimeError("no_dial_host"),
+                reason="no_dial_host",
                 args=args,
                 code="runtime_unavailable",
                 message=(
@@ -876,6 +896,7 @@ def cmd_gateway_introduce(args) -> int:
         # parent plan's "both that apply" is exactly this.
         return emit_harness_error(
             RuntimeError("no_requester"),
+            reason="no_requester",
             args=args,
             code="invalid_payload",
             message=(
@@ -901,6 +922,7 @@ def cmd_gateway_introduce(args) -> int:
         if correlation is None:
             return emit_harness_error(
                 RuntimeError("correlation_id_invalid"),
+                reason="correlation_id_invalid",
                 args=args,
                 code="invalid_payload",
                 message=(
@@ -919,6 +941,7 @@ def cmd_gateway_introduce(args) -> int:
     if endpoint["source"] == "unknown":
         return emit_harness_error(
             RuntimeError("gateway_listener_off"),
+            reason="gateway_listener_off",
             args=args,
             code="runtime_unavailable",
             message=LISTENER_OFF_SENTENCE,
@@ -1032,6 +1055,7 @@ def cmd_gateway_introduce(args) -> int:
         # 400 from a service this process cannot see.
         return emit_harness_error(
             RuntimeError("grant_payload_too_large"),
+            reason="grant_payload_too_large",
             args=args,
             code="invalid_payload",
             message=(
@@ -1091,12 +1115,14 @@ def _parse_join_payload(raw: Any, args) -> dict[str, Any] | None:
                 exc,
                 args=args,
                 code="invalid_payload",
+                reason="payload_not_json",
                 message=f"the join payload is not JSON: {exc}",
             )
             return None
         if not isinstance(decoded, dict):
             emit_harness_error(
                 RuntimeError("payload_not_an_object"),
+                reason="payload_not_an_object",
                 args=args,
                 code="invalid_payload",
                 message="the join payload must be a JSON object",
@@ -1153,6 +1179,7 @@ def _parse_join_payload(raw: Any, args) -> dict[str, Any] | None:
     if missing:
         emit_harness_error(
             RuntimeError("incomplete_payload"),
+            reason="incomplete_payload",
             args=args,
             code="invalid_payload",
             message=(
@@ -1270,6 +1297,7 @@ def cmd_gateway_peers_join(args) -> int:
         if len(expected) != 64 or any(ch not in "0123456789abcdef" for ch in expected):
             return emit_harness_error(
                 RuntimeError("tls_fingerprint_invalid"),
+                reason="tls_fingerprint_invalid",
                 args=args,
                 code="invalid_payload",
                 message=(
@@ -1287,6 +1315,7 @@ def cmd_gateway_peers_join(args) -> int:
         if offered != expected:
             return emit_harness_error(
                 RuntimeError("tls_fingerprint_mismatch"),
+                reason="tls_fingerprint_mismatch",
                 args=args,
                 code="invalid_payload",
                 message=(
@@ -1315,6 +1344,7 @@ def cmd_gateway_peers_join(args) -> int:
         if correlation is None:
             return emit_harness_error(
                 RuntimeError("correlation_id_invalid"),
+                reason="correlation_id_invalid",
                 args=args,
                 code="invalid_payload",
                 message=(
@@ -1381,6 +1411,7 @@ def cmd_gateway_peers_join(args) -> int:
                 exc,
                 args=args,
                 code="invalid_payload",
+                reason="tls_fingerprint_mismatch",
                 message=(
                     # R-IP17's reason word first, as the pre-dial check spells
                     # it, so one enumerated vocabulary covers both the payload
@@ -1413,6 +1444,7 @@ def cmd_gateway_peers_join(args) -> int:
         tried = ", ".join(attempts) or "(none — the payload offered no address)"
         return emit_harness_error(
             RuntimeError("no_candidate_answered"),
+            reason="no_candidate_answered",
             args=args,
             code="runtime_unavailable",
             message=(
@@ -1445,6 +1477,7 @@ def cmd_gateway_peers_join(args) -> int:
     if not isinstance(peered, dict) or not peered.get("peer_secret"):
         return emit_harness_error(
             RuntimeError("no_peer_secret"),
+            reason="no_peer_secret",
             args=args,
             code="invalid_payload",
             message=(
@@ -1457,6 +1490,7 @@ def cmd_gateway_peers_join(args) -> int:
     if parsed["install_id"] and remote_id and parsed["install_id"] != remote_id:
         return emit_harness_error(
             RuntimeError("install_id_mismatch"),
+            reason="install_id_mismatch",
             args=args,
             code="invalid_payload",
             message=(
@@ -1621,6 +1655,7 @@ def cmd_gateway_peers_revoke(args) -> int:
         if record is None:
             return emit_harness_error(
                 RuntimeError("unknown_peer"),
+                reason="unknown_peer",
                 args=args,
                 code="not_found",
                 message=f"no install {peer_install_id!r} is paired with this root",
