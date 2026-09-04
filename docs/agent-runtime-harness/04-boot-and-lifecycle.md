@@ -12,9 +12,10 @@ defects. Read
 env set of FOUR keys — `ETERNIA_HERMES_ROOT`, `HERMES_HOME`, `HERMES_HEAD_HOME`,
 `HERMES_AGENT_RUNTIME_ROOT`, with `HERMES_HOME` and `HERMES_HEAD_HOME` both at the **base
 profile home**, not the state root
-(`EterniaLauncher .../data/mission_control_hermes_installer.dart:861-866`, `runtimeEnvironment`).
+(`EterniaLauncher .../data/mission_control_hermes_installer.dart`, `runtimeEnvironment`).
 The spawn RECEIPT records three of them, dropping `ETERNIA_HERMES_ROOT`
-(`.../data/mission_control_serve_session_io.dart:1615-1621`).
+(`.../data/mission_control_serve_session_io.dart`, the
+`MissionTransportReceiptKind.serveSpawn` receipt).
 So **the live serve reads `profiles/base`** — measuring under another home measures a different
 runtime. Everything else launcher-side belongs to the Launcher's docs.
 

@@ -336,8 +336,8 @@ point `core_cache.consult()` (`:3112`); write-back `core_cache.write_back()`
 
 A stale-labeled core sets `parity.freshness.state = "stale"`, which the launcher
 already maps to `MissionSnapshotHealth.stale`
-(`mission_control_snapshot.dart:499-503`; the `declaredStale` predicate that
-mapping reads is `:455`). **A cached or stale core never deletes,
+(`mission_control_snapshot.dart`, `MissionSnapshotHealth`; the `declaredStale`
+predicate that mapping reads is in the same file). **A cached or stale core never deletes,
 never refuses a write, and never wins a conflict** — the 2026-08-15 mass archive
 was a projection that had acquired store powers.
 

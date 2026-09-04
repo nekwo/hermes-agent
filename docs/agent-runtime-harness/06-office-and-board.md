@@ -326,8 +326,8 @@ Launcher side, all four are RPC-first through one writer
 `updateSurface:257`, `resolveConflict:352`), each gated per-method on the serve
 manifest. The argv capability lane survives on exactly one arm — `Unavailable` —
 and a **refusal is terminal and never falls back**
-(`mission_office_layout_controller.dart:351`). The per-flush receipt is
-`kMissionOfficeWriteLaneReceiptLabel = 'write lane:'` (`:434`), and the live log
+(`mission_office_layout_controller.dart`). The per-flush receipt is
+`kMissionOfficeWriteLaneReceiptLabel = 'write lane:'`, and the live log
 reads `[MissionOfficeWrite] ws_codex-test-workspace_28d285 write lane: 1 rpc, 0 cli`
 on every 2026-08-22 flush — in the ISO-stamped log era the argv arms are fielded
 and unexercised (the undated era carries 4 `0 rpc, 5 cli (fallback: laneAbsent)`
@@ -371,7 +371,7 @@ omit-none setting.
 **The placement id must be classifiable by both repos, and the server's own mint
 never was (R1, 2026-08-27).** The launcher tells a deliberate placement from an
 operator channel by one regex — `_agent_(\d+|[0-9a-f]{8})$`
-(`mission_agent_identity.dart:121`) — and `mint_placement_id` claimed parity with
+(`mission_agent_identity.dart`) — and `mint_placement_id` claimed parity with
 the launcher's mint while producing `{token}_{hex8}` with no `_agent_` marker. So
 every server-minted placement derived an instance id the launcher classified as a
 CONVERSATIONAL channel, fed into the operator-channel dedupe, and — newer wins —
@@ -916,7 +916,7 @@ covered set (`patch_coverage.LIVE_COVERED_DOMAIN_EVENT_TYPES`). It is a
 `{folders, revision, updated_at}`, not a row replace, because the office row also
 carries actor lists, counts and ledger keys this write does not move. The launcher
 declares both strings in one authority list — `kMissionFoldDeclaredEntities`
-(`data/mission_read_model.dart:161`) — used verbatim by the argv stream child and
+(`data/mission_read_model.dart`) — used verbatim by the argv stream child and
 the `runtime.office.subscribe` request, so the two lanes cannot drift.
 
 Where a surface write is genuinely unfoldable, hermes emits an accounted
@@ -989,19 +989,19 @@ one window both passed against the same base: a check-then-act race whose outcom
 were a fenced resubscribe, or the same batch committed twice.
 
 Both halves are fixed and both fixes are live. `_foldChain`
-(`data/mission_control_bridge.dart:2420`, `_enqueueFold` `:2429`) serializes every
+(`data/mission_control_bridge.dart`, serialized with `_enqueueFold`) orders every
 fold from both lanes, so the loser stale-drops at prepare having paid no
-projection; `MissionReadModel` records `coreRevisionWriter` (`:430`) at each of
+projection; `MissionReadModel` records `coreRevisionWriter` at each of
 its bump sites so a surviving fence NAMES the writer that moved the base
-(`mission_control_bridge.dart:2459`, `:2650`) instead of leaving it to adjacency
+(`mission_control_bridge.dart`) instead of leaving it to adjacency
 inference. Live evidence, 2026-08-22 diag log: **zero** `fold:fenced`, **zero**
 `REFUSED fenced`, **zero** `push:full_core` resubscribes in the ISO-timestamped
 era; the only residual causes are `fold:no_base` (6) and `fold:gap` (2).
 
 `fold:no_base` is itself a fix, not a defect. A full-core apply that supplies no
-raw core now NULLS the retained fold base (`mission_read_model.dart:563-577`), so
+raw core now NULLS the retained fold base (`mission_read_model.dart`), so
 the next patch takes the typed `patch_without_base` refusal → `no_base` resync
-(`:1309`) → a forced hydrate on the one lane that provably supplies a core. The
+→ a forced hydrate on the one lane that provably supplies a core. The
 alternative — folding onto a stale base and publishing it as truth — was
 silently discarding whatever the poll's core carried, invisibly to the fence.
 The rejected repair is recorded too: threading a raw core through the CLI poll
@@ -1026,10 +1026,10 @@ That class is now unrepresentable. The office runs an **intent ledger**
 (`office/mission_office_intent.dart`), keyed by surface id, and the paint path
 reads the layout provider UNCONDITIONALLY and exactly once, then applies
 `withPendingIntents(surfaceId:, server:)` on top
-(`mission_control_page.dart:2881-2894`). `_officeLayoutOverride`,
+(`mission_control_page.dart`). `_officeLayoutOverride`,
 `_hasPendingOfficeSave`, the override branch and the paint-path `isSettled` caller
 are deleted, each with a row in `mission_control_tombstone_registry_test.dart`
-(`:2980`, `:2995`) so they cannot come back. The ledger is keyed by SURFACE rather
+so they cannot come back. The ledger is keyed by SURFACE rather
 than workspace deliberately: not every surface is harness-backed, and a ledger
 hanging off `_WorkspaceSync` would have left SharedPreferences-backed surfaces
 flickering on every gesture.
@@ -1043,25 +1043,25 @@ the staler of two answers to one question.
 **A drag is now one write, not hundreds.** `_handlePanUpdate` no longer calls
 `onMoveSceneItem`; it records the commit position and asks the game to echo the
 node at the cursor with no write at all
-(`office/mission_office_mount.dart:362-373`, `office/mission_office_game.dart:284-305`).
+(`office/mission_office_mount.dart`, `office/mission_office_game.dart`).
 `_handlePanEnd` emits the move and the commit **together or not at all** — firing
 the commit alone would ask the write lane to flush somebody else's staged edit
-early, which a camera pan or an unmoved node press would otherwise do (`:374-391`).
+early, which a camera pan or an unmoved node press would otherwise do.
 The `'Moved '` display-string gate that used to route the debounce — control flow
-on operator-facing text — is deleted (`mission_control_page.dart:3713`).
+on operator-facing text — is deleted (`mission_control_page.dart`).
 
 **Snapshot truth is joined separately, and the type is the guard.** The
 `roster_confirmed` mark reads `MissionControlSnapshot.offices[].actors[].actorKey`
 — the producer's own folded state — never the page's overlaid layout
-(`mission_control_page.dart:2310-2340`). Joining on the overlaid layout would find
+(`mission_control_page.dart`). Joining on the overlaid layout would find
 the actor in the very turn that placed it and report near-zero on every drop
 forever. The parameter TYPE is a `MissionControlSnapshot`, so rewiring it to the
 overlay does not type-check.
 
 **The drop pipeline** is instrumented end to end by `MissionDropTimeline`
 (`data/mission_drop_timeline.dart`, 954 lines) with five phases —
-`drop_started` (`:76`), `layout_mutated` (`:83`), `rpc_settled` (`:87`),
-`roster_confirmed` (`:118`), `first_paint` (`:126`) — emitted as one
+`drop_started`, `layout_mutated`, `rpc_settled`, `roster_confirmed` and
+`first_paint` — emitted as one
 `[MissionDropTiming]` line at settle. Four honesty rules are enforced by the file:
 an unresolved phase is ABSENT, never a fake `0`; marks come off a monotonic
 `Stopwatch`; first mark wins within a drop; and the line ships in RELEASE, unlike
@@ -1162,8 +1162,8 @@ third was an observability artifact over a real 24 s window.
   resolves in the persona-instance archive now drops as `instance_retired` with
   `by_design=True` (`persona_chat_history.py:420`), so the count means *lost*
   data. The chip also gained the disclosure the other two had —
-  `anomalousDropSummaries` (`data/mission_control_snapshot.dart:345`, parsed
-  `:263`, passed to the alert `:1070`).
+  `anomalousDropSummaries` (`data/mission_control_snapshot.dart`, parsed and
+  passed to the alert from that same file).
 - **`parity warnings N`** was a live-store pollution alarm with a smoking gun: a
   test called `monkeypatch.undo()` mid-body, which unwound the package's autouse
   root pin and let the next line write the operator's real store. Both halves
@@ -1194,12 +1194,12 @@ with its verbatim 401 under "Not connected". What was genuinely silent was the
 search gesture, the all-lanes-down collapse, and home provenance.
 
 All four surfacings shipped: `searchMissionAgentUnavailableModels`
-(`mission_agent_model_switcher_view_model.dart:726`, rendered
-`agent_model_menu.dart:467`) so typing a model name on a dead lane no longer
+(`mission_agent_model_switcher_view_model.dart`, rendered by
+`agent_model_menu.dart`) so typing a model name on a dead lane no longer
 renders copy identical to a typo; the `catalogUnavailable` collapse carries the
-lane reasons (`agent_chat/mission_agent_model_switcher_view_model.dart:497-505`);
+lane reasons (`agent_chat/mission_agent_model_switcher_view_model.dart`);
 `probedHomeCaption` puts the probed home on screen
-(`agent_model_menu.dart:235`); and the swallowed 401 became a stated status —
+(`agent_model_menu.dart`); and the swallowed 401 became a stated status —
 `usage {phase} failed (HTTP {status} — re-auth may be required)`
 (`hermes_cli/harness.py:3840-3843`), with class-name-only discipline preserved for
 everything that is not an HTTP status, because a bare status code leaks nothing.
@@ -1209,12 +1209,12 @@ everything that is not an HTTP status, because a bare status code leaks nothing.
 The board is the office's sibling surface and it has NOT made the same journey.
 All six board writes go out as argv capabilities — `board.card.add`, `.move`,
 `.edit`, `.archive`, `.restore`, `board.resolve_conflict`
-(`board/mission_board_write.dart:133-219`) — with no `runtime.board.*` RPC method
+(`board/mission_board_write.dart`) — with no `runtime.board.*` RPC method
 registered in `serve_rpc.py`. Board writes are named in the uncovered list
 (`patch_coverage.py:33`), so a board batch demotes to a full core by design.
 One asymmetry worth knowing: the board DOES send `expect_revision`
-(`mission_board_write.dart:166,192`, sourced from `card.revision` at
-`mission_board_card_panel.dart:233`), while the office's argv arms deliberately
+(`mission_board_write.dart`, sourced from `card.revision` at
+`mission_board_card_panel.dart`), while the office's argv arms deliberately
 omit it — the office's revision guard lives on the RPC lane only.
 
 ### The pull's adopt arms, and the day they started emitting
@@ -1356,7 +1356,7 @@ Two decisions ride with it:
 ## Unverified carry-forward
 
 - **The `~4.3 s laneAbsent` window on page open.** The degrade path is live in
-  code (`office/mission_office_rpc.dart:153,640,720`) and the plans of 2026-08-16
+  code (`office/mission_office_rpc.dart`) and the plans of 2026-08-16
   size the window at ~4.3 s, but the current diag log's ISO-timestamped era
   contains **zero** `laneAbsent` lines, so the number is neither confirmed nor
   refuted today. Source: `OFFICE_WRITE_VERBS_RPC_PLAN_2026-08-16.md` §4.
@@ -1510,4 +1510,4 @@ Two decisions ride with it:
 - [UNIFIED_GESTURE_PREDICTION_PLAN_2026-08-16.md](archive/2026-08-22-pre-consolidation/UNIFIED_GESTURE_PREDICTION_PLAN_2026-08-16.md) — UP-0/1/2 shipped and UP-4 struck at source; UP-3/5 in `planned/office-gesture-prediction-remainder.md`.
 - [HUD_CHIPS_INVESTIGATION_PLAN_2026-08-17.md](archive/2026-08-22-pre-consolidation/HUD_CHIPS_INVESTIGATION_PLAN_2026-08-17.md) — all five stages shipped.
 - [AGENT_CONSOLE_DEAD_LANE_AND_LIMITS_PLAN_2026-08-16.md](archive/2026-08-22-pre-consolidation/AGENT_CONSOLE_DEAD_LANE_AND_LIMITS_PLAN_2026-08-16.md) — S1–S4 shipped; the two-homes split is the standing finding.
-- [SCOUT_LAUNCHER_LANE_MAP_2026-08-17.md](archive/2026-08-22-pre-consolidation/SCOUT_LAUNCHER_LANE_MAP_2026-08-17.md) — its Hazard A and Hazard B are both CLOSED (see the fold section and `onReconnected`'s production caller at `mission_office_subscribe_lane.dart:787`); do not re-quote them as open.
+- [SCOUT_LAUNCHER_LANE_MAP_2026-08-17.md](archive/2026-08-22-pre-consolidation/SCOUT_LAUNCHER_LANE_MAP_2026-08-17.md) — its Hazard A and Hazard B are both CLOSED (see the fold section and `onReconnected`'s production caller in `mission_office_subscribe_lane.dart`); do not re-quote them as open.

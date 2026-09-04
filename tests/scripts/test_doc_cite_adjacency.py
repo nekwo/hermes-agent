@@ -511,3 +511,159 @@ def test_the_ceiling_can_never_turn_a_red_cite_green():
 
     assert loose == probe.ADJACENT
     assert tight in (probe.NO_SUBJECT, probe.FAILED)
+
+
+# ─────────────────── ARM 1 — the cite that points OUT of this repo ───────────
+
+TRACKED = {"agent_runtime/office_store.py", "hermes_cli/harness.py"}
+
+
+def foreign(doc_text: str, tracked: set[str] = TRACKED):
+    """ARM 1 over fabricated prose against a fabricated tracked set.
+
+    The arm landed EMPTY over the live canon, which is the point of it and also
+    means the canon carries no case to falsify it with. These do.
+    """
+
+    by_name: dict[str, list[str]] = {}
+    for path in tracked:
+        by_name.setdefault(path.rsplit("/", 1)[-1], []).append(path)
+    return probe.foreign_cites_in_doc(
+        "docs/fake.md",
+        doc_text.splitlines(),
+        lambda token: not probe.resolve_candidates(token, set(tracked), by_name),
+    )
+
+
+def test_a_line_cite_into_a_file_this_repo_does_not_track_is_refused():
+    """The rule, and the whole reason the arm exists: nothing on this side can
+    ever tell a reader that a launcher line number went stale."""
+
+    found = foreign(
+        "The refusal is terminal (`lib/features/nowhere.dart:1`).\n"
+    )
+
+    assert [item.key for item in found] == [
+        "docs/fake.md|lib/features/nowhere.dart:1"
+    ]
+    assert found[0].cite == "lib/features/nowhere.dart:1"
+
+
+def test_the_same_foreign_cite_naming_only_a_symbol_is_allowed():
+    """The cite is not banned — the LINE is. A doc may say which foreign file
+    and which symbol; that is what the re-anchoring of all 53 did."""
+
+    assert foreign(
+        "The refusal is terminal (`lib/features/nowhere.dart`, `_refuse`).\n"
+    ) == []
+
+
+def test_a_line_cite_into_a_file_this_repo_does_track_is_not_foreign():
+    """Arm 1 is a NEGATIVE rule about tracking, not about line numbers: a cite
+    into this repo is arm 2's question and must not be answered twice."""
+
+    assert foreign("`agent_runtime/office_store.py:96` refuses.\n") == []
+
+
+def test_an_ambiguous_path_is_not_foreign():
+    """A basename several tracked files share resolves to no ONE file, but it
+    resolves to some — refusing it because the probe cannot tell which is
+    inventing a finding, which is the one thing both arms are built not to do.
+    """
+
+    paths = {"a/models.py", "b/models.py"}
+    by_name = {"models.py": ["a/models.py", "b/models.py"]}
+
+    assert probe.resolve_path("models.py", paths, by_name) is None
+    assert probe.resolve_candidates("models.py", paths, by_name) == [
+        "a/models.py",
+        "b/models.py",
+    ]
+    assert foreign("`models.py:12` is the record.\n", tracked=paths) == []
+
+
+def test_a_bare_continuation_after_a_foreign_path_is_refused_too():
+    """Half the line numbers in this canon are bare `:N` continuations. An arm
+    that reads only path cites leaves them ungated, which is the hole the
+    adjacency arm had to be widened to close once already."""
+
+    found = foreign(
+        "`mission_read_model.dart` NULLS the base, then `:1309` resyncs.\n"
+    )
+
+    assert [item.key for item in found] == [
+        "docs/fake.md|mission_read_model.dart:1309"
+    ]
+
+
+def test_a_continuation_after_a_TRACKED_path_is_not_refused():
+    """The continuation inherits the path, so it inherits the verdict too."""
+
+    assert foreign(
+        "`hermes_cli/harness.py` parses the flag, and `:404` spends it.\n"
+    ) == []
+
+
+def test_the_live_canon_carries_no_foreign_line_cite(capsys):
+    """The state the port landed in, asserted rather than described: all 53
+    measured at `3d3a33be3e` were re-anchored to the symbol their own sentence
+    already named, exactly as the launcher's nine were."""
+
+    code = probe.main(
+        ["--root", LIVE_ROOT, *sum(([f"--exclude={f}"] for f in LIVE_EXCLUDE), [])]
+    )
+    out = capsys.readouterr().out
+
+    assert code == 0, out
+    assert "  foreign line cites found  : 0" in out
+    assert "  UNBUDGETED: 0" in out
+
+
+def test_the_foreign_budget_is_empty_and_keeps_its_header():
+    """A budget that exists at zero is the only kind that cannot quietly grow —
+    and it may not be filled in without a written reason per key."""
+
+    payload = json.loads(
+        (probe.REPO_ROOT / probe.DEFAULT_FOREIGN_BUDGET).read_text(encoding="utf-8")
+    )
+
+    assert payload["waived"] == {}
+    assert len(payload["_comment"]) > 200
+
+
+def test_a_stale_foreign_budget_key_turns_the_gate_red(tmp_path, capsys):
+    """The ratchet, in the direction a plain allowlist never has: a waiver may
+    not outlive the rot it waived."""
+
+    stale = tmp_path / "foreign.json"
+    stale.write_text(
+        json.dumps({"waived": {"docs/nowhere.md|gone.dart:1": "long gone"}}),
+        encoding="utf-8",
+    )
+
+    code = probe.run(
+        LIVE_ROOT,
+        LIVE_EXCLUDE,
+        3,
+        probe.REPO_ROOT / probe.DEFAULT_BASELINE,
+        write_baseline=False,
+        foreign_budget_path=stale,
+    )
+    out = capsys.readouterr().out
+
+    assert code == 1
+    assert "docs/nowhere.md|gone.dart:1" in out
+    assert "STALE BUDGET KEYS (delete the entry): 1" in out
+
+
+def test_arm_1_did_not_widen_what_arm_2_judges():
+    """The port's one hard constraint, stated as the invariant rather than as a
+    frozen count: arm 1's wider extension set is a SEPARATE pattern, so no
+    `.dart` / `.json` / `.yaml` token can reach `verdict` — which parses an AST
+    and would move the adjacency baseline the moment it saw one."""
+
+    for token in ("nowhere.dart:1", "a/b.json:2", "c.yaml:3", "d.yml:4"):
+        assert probe.CITE.search(f"`{token}`") is None, token
+        assert probe.PATH_MENTION.search(f"`{token}`") is None, token
+        assert probe.FOREIGN_CITE.search(f"`{token}`") is not None, token
+    assert probe.CITE.search("`store.py:5`") is not None

@@ -61,8 +61,29 @@ reports the duplicate count so it cannot happen silently.
 **Fails loud on a zero-cite walk.** A probe that walks nothing prints a clean
 report, and an unrun gate is indistinguishable from a passing one.
 
+**ARM 1 — the cite that points OUT of this repo.** Everything above is arm 2,
+and it can only judge a cite whose file this repo tracks. The canon's other
+line-number corpus points at the launcher: 37 `.dart:N` path cites and 16 bare
+`:N` continuations trailing a `.dart` path, measured over the gated canon at
+hermes `3d3a33be3e`. Nothing on this side can ever tell a reader that one of
+those numbers went stale — the launcher's mirror of this gate was built after
+its own `hermes-agent/agent_runtime/office_store.py:<n>` cite rotted FOUR
+times. So arm 1 is a NEGATIVE rule: a `path.ext:N` cite whose path names no
+file `git ls-files` reports is REFUSED. It may name a SYMBOL; it may not name a
+line. A path that resolves AMBIGUOUSLY is not foreign and stays unchecked in
+both arms — refusing a cite because the probe cannot tell which of three
+`models.py` it means is inventing a finding.
+
+Arm 1 has its own budget (``--foreign-budget``, default
+``docs/agent-runtime-harness/foreign-line-cites.json``), asserted in both
+directions exactly as the adjacency baseline is, and it landed EMPTY: every one
+of the 53 was re-anchored to the symbol its own sentence already named. The file
+stays with its header, because a budget that exists at zero is the only kind
+that cannot quietly grow.
+
     python scripts/doc_cite_adjacency.py [--root docs/agent-runtime-harness]
         [--exclude archive/] [--window 3] [--baseline PATH] [--write-baseline]
+        [--foreign-budget PATH] [--write-foreign-budget]
 """
 
 from __future__ import annotations
@@ -81,6 +102,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 DEFAULT_ROOT = "docs/agent-runtime-harness"
 DEFAULT_BASELINE = "docs/agent-runtime-harness/cite-adjacency-baseline.json"
+DEFAULT_FOREIGN_BUDGET = "docs/agent-runtime-harness/foreign-line-cites.json"
 
 #: The same cite shape the resolution report reads, narrowed to Python: this
 #: probe needs an AST and a symbol vocabulary, and `.md`/`.json` cites have
@@ -112,6 +134,26 @@ CONTINUATION = re.compile(r"`:(\d+)(?:\s*-\s*(\d+))?\+?`")
 #: The nearest preceding FILE the prose names is what a reader inherits, which
 #: is what this matches.
 PATH_MENTION = re.compile(r"(?<![\w/.\-])((?:[\w.\-]+/)*[\w.\-]+\.py)(?![\w])")
+
+#: ARM 1's extension set. Wider than ``CITE``'s because arm 1 needs no AST and
+#: no symbol vocabulary — it only asks whether the path is a file this repo
+#: tracks — and the corpus it exists for is entirely ``.dart``. The two data
+#: shapes are carried because the canon cites them by line the same way.
+FOREIGN_EXT = r"(?:dart|py|json|ya?ml)"
+
+#: ARM 1's cite shape and the path a bare ``:N`` inherits under arm 1. Separate
+#: objects from ``CITE``/``PATH_MENTION`` on purpose: widening those would put
+#: ``.dart`` and ``.json`` tokens through the adjacency verdict, which parses an
+#: AST and would change arm 2's counts and baseline. The two arms walk the same
+#: docs and share nothing but the sentence rules.
+FOREIGN_CITE = re.compile(
+    r"(?<![\w/.\-])"
+    r"((?:[\w.\-]+/)*[\w.\-]+\." + FOREIGN_EXT + r")"
+    r":(\d+)(?:\s*-\s*(\d+))?"
+)
+FOREIGN_PATH_MENTION = re.compile(
+    r"(?<![\w/.\-])((?:[\w.\-]+/)*[\w.\-]+\." + FOREIGN_EXT + r")(?![\w])"
+)
 
 #: Identifiers the prose offers as the subject. Read from backticked spans only
 #: — bare prose words are English, and "store" in a sentence is not a claim
@@ -218,6 +260,27 @@ def _tracked() -> tuple[set[str], dict[str, list[str]]]:
     return paths, by_name
 
 
+def resolve_candidates(
+    token: str, paths: set[str], by_name: dict[str, list[str]]
+) -> list[str]:
+    """Every tracked path a cite's token could name.
+
+    Split out of :func:`resolve_path` because the two arms need different
+    halves of the same answer, and folding them into one ``None`` is what made
+    arm 1 impossible to state. ``[]`` means the token names NO tracked file —
+    a foreign path, which arm 1 refuses when it carries a line number. Two or
+    more means AMBIGUOUS, which both arms leave unchecked: refusing a cite
+    because the probe cannot tell which of three `models.py` it means is
+    inventing a finding.
+    """
+
+    if token in paths:
+        return [token]
+    if "/" in token:
+        return sorted(path for path in paths if path.endswith("/" + token))
+    return sorted(by_name.get(token, []))
+
+
 def resolve_path(token: str, paths: set[str], by_name: dict[str, list[str]]) -> str | None:
     """The tracked path a cite names, or ``None`` when it cannot be settled.
 
@@ -225,12 +288,7 @@ def resolve_path(token: str, paths: set[str], by_name: dict[str, list[str]]) -> 
     guessed. Picking one of three `models.py` is how a probe invents findings.
     """
 
-    if token in paths:
-        return token
-    if "/" in token:
-        tail = [path for path in paths if path.endswith("/" + token)]
-        return tail[0] if len(tail) == 1 else None
-    candidates = by_name.get(token, [])
+    candidates = resolve_candidates(token, paths, by_name)
     return candidates[0] if len(candidates) == 1 else None
 
 
@@ -511,7 +569,10 @@ class ContinuedCite:
 
 
 def continued_path(
-    doc_lines: list[str], index: int, match: "re.Match[str]"
+    doc_lines: list[str],
+    index: int,
+    match: "re.Match[str]",
+    mention: "re.Pattern[str]" = PATH_MENTION,
 ) -> str | None:
     """The path token a bare ``:N`` inherits, or ``None`` when it has none.
 
@@ -528,13 +589,18 @@ def continued_path(
 
     A continuation with no path mention before it in its sentence is counted,
     never guessed.
+
+    ``mention`` is the vocabulary of paths a continuation may inherit. Arm 2
+    passes the default (Python only, because that is all its verdict can
+    judge); arm 1 passes ``FOREIGN_PATH_MENTION`` so a bare ``:N`` trailing a
+    `.dart` path is refused by the same rule as the path cite it continues.
     """
 
     start, end = paragraph_bounds(doc_lines, index)
     paragraph = "\n".join(doc_lines[start : end + 1])
     offset = sum(len(doc_lines[i]) + 1 for i in range(start, index)) + match.start()
     low, _ = sentence_bounds(paragraph, offset, len(match.group(0)))
-    preceding = list(PATH_MENTION.finditer(paragraph, low, offset))
+    preceding = list(mention.finditer(paragraph, low, offset))
     return preceding[-1].group(1) if preceding else None
 
 
@@ -622,6 +688,95 @@ def _judge_one(
     result.failures.append(Finding(key, doc, index + 1, cite, present, resolved))
 
 
+def canon_docs(paths: set[str], root: str, exclude: list[str]) -> list[str]:
+    """The gated canon both arms walk: tracked ``.md`` under ``root``."""
+
+    return sorted(
+        path
+        for path in paths
+        if path.startswith(root + "/")
+        and path.endswith(".md")
+        and not any(fragment in path for fragment in exclude)
+    )
+
+
+class ForeignCite:
+    """One cite carrying a LINE NUMBER into a file this repo does not track."""
+
+    def __init__(self, key: str, doc: str, doc_line: int, cite: str) -> None:
+        self.key = key
+        self.doc = doc
+        self.doc_line = doc_line
+        self.cite = cite
+
+    def __str__(self) -> str:
+        return f"{self.doc}:{self.doc_line}  {self.cite}"
+
+
+def foreign_walk(root: str, exclude: list[str]) -> list[ForeignCite]:
+    """ARM 1 — every foreign line cite in the gated canon.
+
+    The rule, and it is a NEGATIVE one: a ``path.ext:N`` cite whose ``path``
+    names no file ``git ls-files`` reports is a FAILURE. Such a cite may name a
+    SYMBOL and may not name a LINE, because nothing on this side can ever tell
+    a reader that the number went stale — the launcher's own
+    `office_store.py:<n>` cite rotted four times before that was accepted, and
+    a fifth re-numbering is not a fix.
+
+    A path that resolves AMBIGUOUSLY is NOT foreign and is not refused: see
+    :func:`resolve_candidates`. This walk shares the sentence rules with arm 2
+    and nothing else — it parses no AST and reads no subjects, because "is this
+    file tracked" needs neither.
+    """
+
+    paths, by_name = _tracked()
+
+    def is_foreign(token: str) -> bool:
+        return not resolve_candidates(token, paths, by_name)
+
+    found: list[ForeignCite] = []
+    for doc in canon_docs(paths, root, exclude):
+        lines = (REPO_ROOT / doc).read_bytes().decode("utf-8", "replace").splitlines()
+        found.extend(foreign_cites_in_doc(doc, lines, is_foreign))
+    return sorted(found, key=lambda item: item.key)
+
+
+def foreign_cites_in_doc(
+    doc: str, lines: list[str], is_foreign
+) -> list[ForeignCite]:
+    """ARM 1's rule for ONE doc, with no git and no filesystem in it.
+
+    ``is_foreign`` answers "does this path token name no tracked file". Split
+    out so the rule can be falsified on fabricated prose rather than only on
+    the live canon, which — the arm having landed EMPTY — carries no case.
+    """
+
+    found: dict[str, ForeignCite] = {}
+
+    def record(index: int, token: str, first: str, spelling: str) -> None:
+        if not is_foreign(token):
+            return
+        # Same key shape as the adjacency baseline — `<doc>|<token>:<line>`,
+        # without the doc's own line number, so inserting a paragraph does not
+        # invalidate a waiver.
+        key = f"{doc}|{token}:{first}"
+        found.setdefault(key, ForeignCite(key, doc, index + 1, spelling))
+
+    for index, line in enumerate(lines):
+        for match in FOREIGN_CITE.finditer(line):
+            record(index, match.group(1), match.group(2), match.group(0))
+        for match in CONTINUATION.finditer(line):
+            token = continued_path(lines, index, match, mention=FOREIGN_PATH_MENTION)
+            if token is None:
+                continue
+            record(
+                index, token, match.group(1),
+                f"{token}{match.group(0).strip('`')}",
+            )
+
+    return sorted(found.values(), key=lambda item: item.key)
+
+
 def walk(
     root: str,
     exclude: list[str],
@@ -629,13 +784,7 @@ def walk(
     ceiling: int = MAX_SUBJECT_OCCURRENCES,
 ) -> Walk:
     paths, by_name = _tracked()
-    docs = sorted(
-        path
-        for path in paths
-        if path.startswith(root + "/")
-        and path.endswith(".md")
-        and not any(fragment in path for fragment in exclude)
-    )
+    docs = canon_docs(paths, root, exclude)
     result = Walk()
     result.docs = len(docs)
     targets: dict[str, Target] = {}
@@ -677,7 +826,11 @@ def run(
     baseline_path: Path,
     write_baseline: bool,
     ceiling: int = MAX_SUBJECT_OCCURRENCES,
+    foreign_budget_path: Path | None = None,
+    write_foreign_budget: bool = False,
 ) -> int:
+    if foreign_budget_path is None:
+        foreign_budget_path = REPO_ROOT / DEFAULT_FOREIGN_BUDGET
     result = walk(root, exclude, radius, ceiling)
 
     print(f"cite-adjacency probe (+/-{radius} lines) over {result.docs} docs under {root}/")
@@ -730,6 +883,41 @@ def run(
         print(f"wrote {len(result.failures)} key(s) to {baseline_path}")
         return 0
 
+    foreign = foreign_walk(root, exclude)
+    if write_foreign_budget:
+        payload = {
+            "_comment": (
+                "ARM 1 budget for scripts/doc_cite_adjacency.py. Every key is a "
+                "cite carrying a LINE NUMBER into a file this repo does not "
+                "track, kept with a written reason because it could not be "
+                "re-anchored to a symbol. The gate is red on any foreign line "
+                "cite NOT here AND on any key here that has stopped being one - "
+                "a waiver may not outlive its rot. Burn this down; do not grow it."
+            ),
+            "waived": {item.key: "TODO: reason" for item in foreign},
+        }
+        foreign_budget_path.write_text(
+            json.dumps(payload, indent=2) + "\n", encoding="utf-8"
+        )
+        print(f"wrote {len(foreign)} key(s) to {foreign_budget_path}")
+        return 0
+
+    foreign_budget = load_baseline(foreign_budget_path)
+    foreign_keys = {item.key for item in foreign}
+    foreign_unlisted = [item for item in foreign if item.key not in foreign_budget]
+    foreign_stale = sorted(key for key in foreign_budget if key not in foreign_keys)
+
+    print(f"arm 1 (foreign line cites), budget {foreign_budget_path}")
+    print(f"  foreign line cites found  : {len(foreign)}")
+    print(f"  budgeted                  : {len(foreign_budget)}")
+    print(f"  UNBUDGETED: {len(foreign_unlisted)}")
+    for item in foreign_unlisted:
+        print(f"    {item}")
+    print(f"  STALE BUDGET KEYS (delete the entry): {len(foreign_stale)}")
+    for key in foreign_stale:
+        print(f"    {key}")
+    print("")
+
     baseline = load_baseline(baseline_path)
     failing_keys = {finding.key for finding in result.failures}
     unwaived = [finding for finding in result.failures if finding.key not in baseline]
@@ -745,6 +933,14 @@ def run(
         print(f"  {key}")
     print("")
 
+    if foreign_unlisted or foreign_stale:
+        print(
+            "foreign-line-cite arm FAILED. A cite carrying a line number into a "
+            "file this repo does not track can never be told it went stale from "
+            "here: name the SYMBOL instead of the line. A budget key that has "
+            "stopped failing must be deleted.",
+            file=sys.stderr,
+        )
     if unwaived or stale:
         print(
             "cite-adjacency probe FAILED. A cite whose line is nowhere near the "
@@ -752,6 +948,7 @@ def run(
             "re-anchor it, or name the symbol instead of the line.",
             file=sys.stderr,
         )
+    if unwaived or stale or foreign_unlisted or foreign_stale:
         return 1
     print("cite-adjacency probe passed (baseline capped, nothing new, nothing stale).")
     return 0
@@ -776,6 +973,14 @@ def main(argv: list[str] | None = None) -> int:
         help="rewrite the baseline from the current failures, each with a TODO "
         "reason to be filled in by hand. Never run this to make a red gate green.",
     )
+    parser.add_argument("--foreign-budget", default=DEFAULT_FOREIGN_BUDGET)
+    parser.add_argument(
+        "--write-foreign-budget",
+        action="store_true",
+        help="rewrite the ARM 1 budget from the current foreign line cites, "
+        "each with a TODO reason to be filled in by hand. Never run this to "
+        "make a red gate green.",
+    )
     parser.add_argument("--exclude", action="append", default=[], metavar="FRAGMENT")
     args = parser.parse_args(argv)
     try:
@@ -786,6 +991,8 @@ def main(argv: list[str] | None = None) -> int:
             REPO_ROOT / args.baseline,
             args.write_baseline,
             args.occurrence_ceiling,
+            REPO_ROOT / args.foreign_budget,
+            args.write_foreign_budget,
         )
     except RuntimeError as error:
         print(f"cite-adjacency probe could not run: {error}", file=sys.stderr)

@@ -1,0 +1,4 @@
+{
+  "_comment": "ARM 1 budget for scripts/doc_cite_adjacency.py. Every key is a cite carrying a LINE NUMBER into a file this repo does not track, kept with a written reason because it could not be re-anchored to a symbol. The gate is red on any foreign line cite NOT here AND on any key here that has stopped being one - a waiver may not outlive its rot. It landed EMPTY on 2026-09-04 and should stay that way: name the symbol, never the line. Burn this down; do not grow it.",
+  "waived": {}
+}

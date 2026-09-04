@@ -91,7 +91,7 @@ the create receipt (`agent_create_phases.py:23-24`) then inherited verbatim.
    join key, argued in `stream.py`'s boot-receipt docstring), and
    `correlation_id` for the gesture chain (`OfficeStore._emit`, which normalizes
    the token and threads it onto the event and the `state.patched` row). See
-   `mission_chat_latency_audit.dart:23-40` in the launcher. (Symbols, not lines:
+   `mission_chat_latency_audit.dart` in the launcher. (Symbols, not lines:
    the `office_store.py` LINE RANGE this row once carried had drifted onto the
    position-policy alias and the `ActorScan` docstring — a range about actor
    completeness, with no `correlation_id` in it. It is spelled without its
@@ -342,16 +342,16 @@ run unconditionally, but since MCF-83 §2 (launcher `1a012e13d`, 2026-08-20) the
 disk tee installs only in debug or opt-in support builds
 (`kDebugMode || ETERNIA_VOICE_DIAGNOSTICS`); a release binary emits to a logger
 nothing tees. Lines are stamped `[<UTC ISO-8601>] <level> <logger> — <message>`
-(`lib/core/telemetry/diag_log_file.dart:278-283`). Bullet paths below are
+(`lib/core/telemetry/diag_log_file.dart`). Bullet paths below are
 relative to `lib/features/mission_control/`.
 
 * `[MissionChatTiming] turn_id=<id> send_to_admit_ms=… admit_to_first_delta_ms=…
   first_delta_to_end_ms=… end_to_settle_ms=…` —
-  `data/mission_chat_turn_timeline.dart:266-273`, marker const `:296`. One line
+  `data/mission_chat_turn_timeline.dart`, with its marker const. One line
   per turn, at settle. Absent fields omitted entirely; no `unresolved=` clause,
   because the field set is CLOSED unlike the open-ended boot receipt (`:255-265`).
 * `[MissionChatOutcome] turn_id=… status=… [error_kind=…] message="…"` —
-  `agent_chat/mission_agent_chat_runtime_controller.dart:1566-1571`. Landed
+  `agent_chat/mission_agent_chat_runtime_controller.dart`. Landed
   because the 2026-08-22 02:00:47Z new-chat rejection settled leaving NO
   envelope anywhere on disk: the timing line printed bare (correct — no phases
   happened) and the refusal lived only in widget state. Harness error prose only,
@@ -359,7 +359,7 @@ relative to `lib/features/mission_control/`.
 * `[MissionDropTiming] correlation=… persona=… slug=… layout_mutate_ms=…
   rpc_ms=… rpc_instance_ms=… roster_confirmed_ms=… sprite_ms=…
   sprite_source=cold|warm|absent sprite_lane=serve|cli first_paint_ms=…` —
-  `data/mission_drop_timeline.dart:351-368`, marker const `:376`. Closed and
+  `data/mission_drop_timeline.dart`, with its marker const. Closed and
   ordered; `roster_confirmed_ms` went in additively, disturbing no `key=value`
   reader.
 * `[MissionAgentCreate] …` — the placement verb's launcher lane, all arms
@@ -415,7 +415,7 @@ loaded — `skill_view` entries only, redaction-safe.
 
 A timeline with no consumer is a file, not observability: the boot receipts were
 honest and release-visible for days while nothing read them, which is how the
-2026-08-21 convergence defect survived (`mission_boot_receipt_audit.dart:1-16`).
+2026-08-21 convergence defect survived (`mission_boot_receipt_audit.dart`).
 
 * **`tool/mission_chat_latency_audit.dart`** (launcher repo; reads only, safe
   while the launcher is open). Joins `[MissionChatTiming]` to the turn record's
@@ -615,9 +615,9 @@ it never read. Every consumer above encodes the lesson: the chat audit splits it
 in TWO on purpose — `3` "the launcher wrote nothing" versus `4` "the launcher
 wrote and hermes did not" — because folding them would make "the other repo has
 not landed yet" look identical to "the join is broken"
-(`mission_chat_latency_audit.dart:64-80`); the boot audit guards the marker AND
+(`mission_chat_latency_audit.dart`); the boot audit guards the marker AND
 the audited key separately, both watched failing before the tool is trusted
-(`mission_boot_receipt_audit.dart:44-62`); the demote census exits `1` on an
+(`mission_boot_receipt_audit.dart`); the demote census exits `1` on an
 empty scan, because `absent` is deliberately unlogged and a `0` there would be
 indistinguishable from a healthy runtime — "exactly how a self-invalidating
 cache went unnoticed for months" (`scripts/core_cache_demote_census.py:13-19`).
@@ -668,7 +668,7 @@ drift.
 5. **Receipts carry timings and ids only.** Never a display name, never a
    resolved toolset, never operator message text (`persona_prewarm.py:169-170`,
    `agent_create_phases.py:64-66`,
-   `mission_agent_chat_runtime_controller.dart:1562`).
+   `mission_agent_chat_runtime_controller.dart`).
 6. **Observability rides log receipts, never new keys on the parity envelope.**
    See the wire-safety section.
 7. **A scanner that matches nothing must exit nonzero.**

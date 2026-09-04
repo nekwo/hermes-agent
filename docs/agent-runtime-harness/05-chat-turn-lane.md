@@ -12,12 +12,12 @@ sits under `## Open rows`, `## Unverified carry-forward`, or is gone. The handle
 ## 1. Send admission — the turn's identity and its thread
 
 **One id, minted launcher-side, echoed byte-equal.** The launcher mints `agent-chat-send-<uuid4>` as
-the intent's `idempotencyKey` (`mission_agent_chat_panel.dart:1870`), sends it as the RPC's
-`client_message_id` (`mission_agent_chat_adapter.dart:1485`), and hermes echoes it as `turn_id`
+the intent's `idempotencyKey` (`mission_agent_chat_panel.dart`), sends it as the RPC's
+`client_message_id` (`mission_agent_chat_adapter.dart`), and hermes echoes it as `turn_id`
 (`persona_commands.py:3111`, `:3145`) after reading it at `:2189-2195`. Absent, hermes mints
 `agent-chat-send-<hex12>` and writes it back onto `args` so the serve lane and the turn store agree.
 The launcher's timeline names this the join key in its own docstring
-(`mission_chat_turn_timeline.dart:157-161`): one key, minted once, so the cross-process join is
+(`mission_chat_turn_timeline.dart`): one key, minted once, so the cross-process join is
 never a time-proximity guess.
 
 **Explicit `session_id`** (new-chat and per-chat sends) runs two SessionDB guards, both
@@ -574,7 +574,7 @@ stream whose first-delta callback never fired — and the token vanishes rather 
 **Outcome recording is launcher-side, one line, at the settle chokepoint.** A turn that settles
 WITHOUT acceptance emits `[MissionChatOutcome] turn_id=… status=… error_kind=… message="…"` through
 `Logger`, so the release-build diag tee carries it
-(`mission_agent_chat_runtime_controller.dart:1555-1571`) — harness error prose only, never the
+(`mission_agent_chat_runtime_controller.dart`) — harness error prose only, never the
 operator's text.
 
 ## Invariants
