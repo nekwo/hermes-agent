@@ -157,6 +157,7 @@ from .gateway_pairing_codes import (
     mint_into,
     note_failed_redeem,
     pending_codes,
+    supersede_pending,
 )
 from .store_file_io import iso_stamp as _iso
 from .store_file_io import os_error_reason as _os_reason
@@ -654,10 +655,23 @@ def mint_pairing_code(
             f"tier must be one of {', '.join(TIERS)}; got {tier!r}",
         )
     stamp = now if now is not None else time.time()
+    requester = _clean_name(for_device_id) or None
     try:
         with _store_lock(store_root):
             state = _read_pairing(store_root)
             expire_pending(state, now=stamp)
+            # R-D5, the device half. Same ruling and same ordering as
+            # ``gateway_peers.mint_peer_code``: before the cap is counted, so a
+            # launcher's retry for one device finds the cap where it started
+            # instead of being refused by its own previous attempt. Scoped to a
+            # named ``--for-device`` only — an unscoped ``harness gateway pair``
+            # supersedes nothing, because there is no requester to attribute the
+            # earlier code to and dropping a stranger's invitation on a mint
+            # nobody asked for would be the cap working backwards.
+            if requester:
+                supersede_pending(
+                    state, kind=KIND_DEVICE, field="for_device_id", value=requester
+                )
             locked = lockout_remaining(state, now=stamp)
             if locked:
                 return StoreRefusal(
@@ -690,7 +704,7 @@ def mint_pairing_code(
                         if credential_ttl_seconds
                         else None
                     ),
-                    "for_device_id": _clean_name(for_device_id) or None,
+                    "for_device_id": requester,
                     "correlation": _clean_name(correlation) or None,
                 },
                 now=stamp,

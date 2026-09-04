@@ -702,6 +702,80 @@ def test_an_unscoped_code_is_still_spendable_by_anybody_which_is_the_manual_cere
     assert credential.expires_at is None
 
 
+def test_a_requester_supersedes_its_own_earlier_peer_code_so_a_retry_is_free(
+    tmp_path,
+):
+    """R-D5, on the store side.
+
+    ``harness gateway introduce`` mints TWO codes per run and the launcher
+    retries a stalled edge at 2 s, 8 s and 30 s — so with a cap of three the
+    SECOND attempt for the same install was already refused
+    ``too_many_pending``. That is S4's 12:00:16 and 12:00:24 receipts: the retry
+    loop burning the far side's cap and then resting refused, with nothing wrong
+    on either machine.
+
+    The superseded codes are ones only that requester could ever have redeemed
+    (``for_install_id`` is checked at redemption), so what stays bounded is the
+    number of DIFFERENT parties holding an outstanding invitation — which is
+    what the cap was always counting.
+    """
+
+    from agent_runtime.gateway_pairing_codes import pending_codes
+    from agent_runtime.serve_gateway_auth import _read_pairing
+
+    first = mint_peer_code(tmp_path, for_install_id=PEER_B)
+    second = mint_peer_code(tmp_path, for_install_id=PEER_B)
+    third = mint_peer_code(tmp_path, for_install_id=PEER_B)
+    for minted in (first, second, third):
+        assert isinstance(minted, PeerPairingCode), minted
+
+    pending = pending_codes(_read_pairing(tmp_path))
+    assert len(pending) == 1
+    assert {entry["for_install_id"] for entry in pending.values()} == {PEER_B}
+
+    # Only the newest redeems — the earlier two are gone, not merely shadowed,
+    # so a code an operator copied out of a stale envelope buys nothing.
+    assert isinstance(
+        redeem_peer_code(tmp_path, first.code, peer_install_id=PEER_B), StoreRefusal
+    )
+    assert isinstance(
+        redeem_peer_code(tmp_path, third.code, peer_install_id=PEER_B), PeerCredential
+    )
+
+
+def test_superseding_is_scoped_to_the_requester_and_never_touches_a_strangers_code(
+    tmp_path,
+):
+    """The half that keeps the cap a cap. An install re-asking for its own
+    invitation drops its own; it does not get to clear the map, and a code
+    minted with no requester at all (the manual ceremony) is nobody's to
+    supersede."""
+
+    from agent_runtime.gateway_pairing_codes import pending_codes
+    from agent_runtime.serve_gateway_auth import _read_pairing
+
+    unscoped = mint_peer_code(tmp_path)
+    other = mint_peer_code(tmp_path, for_install_id=PEER_A)
+    assert isinstance(mint_peer_code(tmp_path, for_install_id=PEER_B), PeerPairingCode)
+    # Third mint for B: supersedes B's own row and nothing else, so the map
+    # still holds the unscoped one, A's, and B's newest.
+    assert isinstance(mint_peer_code(tmp_path, for_install_id=PEER_B), PeerPairingCode)
+
+    pending = pending_codes(_read_pairing(tmp_path))
+    assert len(pending) == 3
+    assert sorted(
+        str(entry.get("for_install_id") or "") for entry in pending.values()
+    ) == ["", PEER_A, PEER_B]
+    # …and a FOURTH party still trips the cap, which is the sentence that makes
+    # this a supersede rather than a hole.
+    fourth = mint_peer_code(tmp_path, for_install_id="inst_stranger")
+    assert isinstance(fourth, StoreRefusal)
+    assert fourth.reason == "too_many_pending"
+    assert isinstance(unscoped, PeerPairingCode) and isinstance(
+        other, PeerPairingCode
+    )
+
+
 def test_a_peer_code_minted_with_a_ttl_redeems_into_a_row_that_expires(tmp_path):
     """The stamp is computed at REDEEM and not at mint, so a code that sits for
     nine of its ten minutes does not spend nine minutes of the credential's

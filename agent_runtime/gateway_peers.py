@@ -176,6 +176,7 @@ from .gateway_pairing_codes import (
     mint_into,
     note_failed_redeem,
     pending_codes,
+    supersede_pending,
 )
 from .serve_gateway_auth import (
     CREDENTIAL_TTL_SECONDS_INTRODUCED,
@@ -758,10 +759,19 @@ def mint_peer_code(
     """
 
     stamp = now if now is not None else time.time()
+    requester = str(for_install_id or "").strip()[:128] or None
     try:
         with _store_lock(store_root):
             state = _read_pairing(store_root)
             expire_pending(state, now=stamp)
+            # R-D5, and it runs BEFORE the cap is counted rather than after —
+            # that ordering IS the ruling. A launcher retrying one stalled edge
+            # has to find the cap where it started, or its second attempt is
+            # refused by the codes its first attempt minted.
+            if requester:
+                supersede_pending(
+                    state, kind=KIND_PEER, field="for_install_id", value=requester
+                )
             locked = lockout_remaining(state, now=stamp)
             if locked:
                 return StoreRefusal(
@@ -794,7 +804,7 @@ def mint_peer_code(
                     "credential_ttl_seconds": (
                         int(credential_ttl_seconds) if credential_ttl_seconds else None
                     ),
-                    "for_install_id": str(for_install_id or "").strip()[:128] or None,
+                    "for_install_id": requester,
                     "correlation": str(correlation or "").strip()[:64] or None,
                 },
                 now=stamp,

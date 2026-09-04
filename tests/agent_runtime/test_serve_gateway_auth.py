@@ -117,6 +117,70 @@ def test_only_three_codes_may_be_outstanding_at_once(tmp_path: Path):
     )
 
 
+def test_a_named_device_supersedes_its_own_pending_code_and_a_stranger_still_caps(
+    tmp_path: Path,
+):
+    """R-D5's device half, and the two clauses have to be tested together.
+
+    ``harness gateway introduce --for-device`` is the launcher retrying one
+    device's pairing on a backoff, and with a cap of three (shared with the peer
+    ceremony, and `introduce` mints into both) the second attempt was refused
+    ``too_many_pending`` for codes the first attempt had made. So a named
+    requester now drops its own earlier row before minting.
+
+    That is a supersede and not a hole only because the cap still counts
+    PARTIES: a different device id finds the map exactly as full as it was.
+    """
+
+    from agent_runtime.gateway_pairing_codes import pending_codes
+    from agent_runtime.serve_gateway_auth import _read_pairing
+
+    for _ in range(3):
+        assert isinstance(
+            mint_pairing_code(tmp_path, for_device_id="dev-acct-1", now=1000.0),
+            PairingCode,
+        )
+
+    pending = pending_codes(_read_pairing(tmp_path))
+    assert len(pending) == 1
+    assert [entry["for_device_id"] for entry in pending.values()] == ["dev-acct-1"]
+
+    # A second device fills the map back up…
+    for _ in range(2):
+        assert isinstance(
+            mint_pairing_code(tmp_path, for_device_id="dev-acct-2", now=1000.0),
+            PairingCode,
+        )
+    # …wait: the second device supersedes ITSELF on its second mint, so two
+    # parties is two rows. A THIRD and a FOURTH party are what reach the cap.
+    assert isinstance(
+        mint_pairing_code(tmp_path, for_device_id="dev-acct-3", now=1000.0),
+        PairingCode,
+    )
+    refused = mint_pairing_code(tmp_path, for_device_id="dev-acct-4", now=1000.0)
+    assert isinstance(refused, StoreRefusal)
+    assert refused.reason == "too_many_pending"
+
+
+def test_an_unscoped_pair_supersedes_nothing_because_no_requester_asked_for_it(
+    tmp_path: Path,
+):
+    """``harness gateway pair`` names no device — a phone has no id until it
+    redeems — so there is nobody to attribute an earlier code to. Dropping one
+    anyway would be the cap working backwards: an operator minting a second code
+    would silently invalidate the first one they are still holding."""
+
+    from agent_runtime.gateway_pairing_codes import pending_codes
+    from agent_runtime.serve_gateway_auth import _read_pairing
+
+    first = mint_pairing_code(tmp_path, now=1000.0)
+    second = mint_pairing_code(tmp_path, now=1000.0)
+    assert isinstance(first, PairingCode) and isinstance(second, PairingCode)
+
+    assert len(pending_codes(_read_pairing(tmp_path))) == 2
+    assert isinstance(redeem_pairing_code(tmp_path, first.code, now=1000.0), DeviceCredential)
+
+
 # ── the lockout, and the two bugs ``pairing.py`` had to fix ─────────────────
 
 

@@ -93,6 +93,7 @@ __all__ = [
     "mint_into",
     "note_failed_redeem",
     "pending_codes",
+    "supersede_pending",
 ]
 
 
@@ -150,6 +151,53 @@ def expire_pending(state: dict[str, Any], *, now: float) -> None:
     if float(state.get("locked_until") or 0.0) <= now and state.get("locked_until"):
         state["locked_until"] = 0.0
         state["failed_redeems"] = 0
+
+
+def supersede_pending(
+    state: dict[str, Any], *, kind: str, field: str, value: str
+) -> int:
+    """Drop this requester's own earlier pending codes of one kind. Returns how many.
+
+    R-D5, and the sentence that justifies it is: **a requester supersedes its
+    own invitation.** :data:`MAX_PENDING_CODES` exists to cap the operator's
+    ATTENTION — three unredeemed codes at once is a mistake, not a workflow —
+    and to make a stranger's grinding visible. Neither of those is what it was
+    doing on the pairing lane: ``harness gateway introduce`` mints TWO codes per
+    run, and the launcher retries a stalled edge at 2 s, 8 s and 30 s, so the
+    SECOND attempt for the same device already stood at four pending and was
+    refused ``too_many_pending``. That is S4's 12:00:16 and 12:00:24 receipts:
+    the retry loop burning the far side's cap and then resting refused, with
+    nothing wrong on either machine.
+
+    So an ``introduce`` for a requester now expires that requester's earlier
+    codes of the same half before minting. This is not a hole in the cap. The
+    codes being dropped are ones only that requester could ever have redeemed
+    (``for_install_id`` is CHECKED at redemption; ``for_device_id`` is a label,
+    but the pair being superseded is the one the same launcher just failed to
+    use), so the count that remains bounded is "how many DIFFERENT parties have
+    an outstanding invitation from me" — which is the number the cap was always
+    about. A fourth requester still trips it.
+
+    Kind and field travel together as arguments rather than being derived from
+    each other, because the two ceremonies scope on different keys and this
+    module deliberately holds no opinion about which credential a kind redeems
+    into.
+    """
+
+    wanted = str(value or "").strip()
+    if not wanted:
+        return 0
+    pending = pending_codes(state)
+    stale = [
+        request_id
+        for request_id, entry in pending.items()
+        if isinstance(entry, dict)
+        and str(entry.get("kind") or KIND_DEVICE) == str(kind)
+        and str(entry.get(field) or "").strip() == wanted
+    ]
+    for request_id in stale:
+        del pending[request_id]
+    return len(stale)
 
 
 def lockout_remaining(state: dict[str, Any], *, now: float) -> int:

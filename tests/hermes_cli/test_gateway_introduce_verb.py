@@ -359,6 +359,71 @@ def test_introduce_when_the_second_mint_hits_the_pending_cap_reports_the_half_th
     assert "outstanding" in (out.out + out.err)
 
 
+def test_three_introduces_for_one_requester_leave_one_pending_row_per_half(capsys):
+    """R-D5 through the verb that actually trips the cap.
+
+    The launcher retries a stalled pair edge at 2 s, 8 s and 30 s
+    (``kMissionPairRetryBackoff``) and each ``introduce`` mints TWO codes, so
+    against ``MAX_PENDING_CODES = 3`` the SECOND attempt for one device was
+    already refused ``too_many_pending`` — which the launcher rendered as
+    ``refused``, which is why S4's receipts show the loop giving up at 12:00:24
+    with both machines healthy. Retrying is now free.
+    """
+
+    from agent_runtime.gateway_pairing_codes import KIND_DEVICE, KIND_PEER
+    from agent_runtime.serve_gateway_auth import _read_pairing
+
+    for _ in range(3):
+        code, payload = _introduce(
+            capsys, "--for-install", "install-a", "--for-device", "dev-acct-1"
+        )
+        assert code == 0, payload
+
+    pending = _read_pairing(paths.store_root())["pending"]
+    kinds = sorted(entry["kind"] for entry in pending.values())
+    assert kinds == [KIND_DEVICE, KIND_PEER]
+    assert {entry.get("for_install_id") for entry in pending.values()} == {
+        None,
+        "install-a",
+    }
+
+
+def test_a_fourth_requester_still_trips_the_cap_because_supersede_is_not_a_hole(
+    capsys,
+):
+    """The clause that keeps the cap meaningful. What R-D5 bounds is how many
+    DIFFERENT parties hold an outstanding invitation from this install — a
+    stranger cannot mint past it by asking twice, and a second requester finds
+    the map exactly as full as the first left it."""
+
+    from hermes_cli.harness_support import ERROR_EXIT_CODES
+
+    for _ in range(3):
+        code, payload = _introduce(
+            capsys, "--for-install", "install-a", "--for-device", "dev-acct-1"
+        )
+        assert code == 0, payload
+
+    # Two rows stand (one per half). The second requester's peer half fits as
+    # the third; its device half is the fourth and is refused.
+    code = _dispatch(
+        [
+            "harness",
+            "gateway",
+            "introduce",
+            "--for-install",
+            "install-b",
+            "--for-device",
+            "dev-acct-2",
+            "--json",
+        ]
+    )
+    out = capsys.readouterr()
+
+    assert code == ERROR_EXIT_CODES["pairing_codes_pending"]
+    assert "outstanding" in (out.out + out.err)
+
+
 def test_the_codes_appear_in_the_envelope_and_nowhere_else(capsys):
     """The codes discipline, unchanged and re-asserted for the new verb: the
     plaintext exists on stdout, once, for the caller who asked. ``pairing.json``
