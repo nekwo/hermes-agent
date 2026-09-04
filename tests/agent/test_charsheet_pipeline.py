@@ -619,6 +619,96 @@ def test_a_cell_of_the_wrong_size_is_refitted_only_at_the_upstream_geometry():
         pipeline.compose_sheet(odd, {"cheer": [small]})
 
 
+# ──────────────────────────── which way it faces ────────────────────────────
+#
+# A number, not a verdict. `face_offset` measures where the HEAD sits against
+# the body's own centre, which is the same quantity the 2026-08-25 field notes
+# quoted by hand (`s se e ne n` = `+0.0 +5.2 +10.9 -6.5 -0.3`) when they found
+# an approved `e` REFERENCE facing west while all three `e` rows drawn from it
+# faced east. Approving a turnaround certified nothing about that; now the
+# approval receipt carries the measurement.
+
+
+def figure(*, head_dx: int, size: int = 200, on_chroma: bool = True):
+    """A standing figure: a wide body, and a head offset *head_dx* from centre.
+
+    Deliberately crude — the measure is a centroid comparison, so a body and a
+    head are all it can read. `on_chroma` puts it on the full-bleed magenta
+    field every generated reference actually arrives on, which is the input the
+    verb has to survive: a measure that read the field as body would answer
+    about the canvas.
+    """
+    ground = MAGENTA if on_chroma else (0, 0, 0, 0)
+    image = Image.new("RGBA", (size, size), ground)
+    draw = ImageDraw.Draw(image)
+    mid = size // 2
+    draw.rectangle([mid - 30, mid - 20, mid + 30, size - 20], fill=(40, 60, 200, 255))
+    draw.ellipse(
+        [mid + head_dx - 18, 20, mid + head_dx + 18, 56], fill=(230, 180, 140, 255)
+    )
+    return image
+
+
+def test_a_figure_whose_head_sits_over_its_body_measures_near_zero():
+    assert abs(pipeline.face_offset(figure(head_dx=0))) < 1.0
+
+
+def test_the_face_offset_is_signed_and_the_sign_is_which_way_it_faces():
+    """Positive is a head to the RIGHT of the body's centre, and that is the
+    whole reading: the field notes' `+10.9` east and `-44.8` west are the two
+    signs of one number.
+    """
+    right = pipeline.face_offset(figure(head_dx=30))
+    left = pipeline.face_offset(figure(head_dx=-30))
+
+    assert right > 5 and left < -5
+    # A mirror is the only exact symmetry available, and it is the property that
+    # makes the sign meaningful rather than an artefact of the drawing.
+    assert right == pytest.approx(-left, abs=0.6)
+
+
+def test_a_mirrored_reference_measures_the_negated_offset(tmp_path):
+    """The measure travels through a FILE, because that is how it is called.
+
+    `approve_direction` is handed a path out of the revision store, never an
+    open image.
+    """
+    from PIL import ImageOps
+
+    drawn = figure(head_dx=26)
+    path = tmp_path / "reference.png"
+    drawn.save(path, format="PNG")
+    mirrored_path = tmp_path / "mirrored.png"
+    ImageOps.mirror(drawn).save(mirrored_path, format="PNG")
+
+    assert pipeline.face_offset(path) == pytest.approx(
+        -pipeline.face_offset(mirrored_path), abs=0.6
+    )
+
+
+def test_the_chroma_field_is_not_read_as_body(tmp_path):
+    """The same figure on magenta and on transparency is the same measurement.
+
+    Every generated reference is full-bleed magenta at alpha 255, so a measure
+    that skipped the keying step would compute the centroid of the CANVAS —
+    which is 0.0 for every picture ever drawn, and would have reported the
+    anime-girl reference as facing nowhere.
+    """
+    on_field = pipeline.face_offset(figure(head_dx=30, on_chroma=True))
+    keyed = pipeline.face_offset(figure(head_dx=30, on_chroma=False))
+
+    assert on_field == pytest.approx(keyed, abs=0.6)
+    assert abs(on_field) > 5, "the offset collapsed to nothing: the field was read as body"
+
+
+def test_an_empty_picture_has_no_facing_to_report():
+    """`None`, never 0.0: "there is nothing here" and "it faces straight at you"
+    are different answers, and a receipt that spelled them the same way would
+    invite an operator to read a blank generation as a square-on pose.
+    """
+    assert pipeline.face_offset(Image.new("RGBA", (64, 64), (0, 0, 0, 0))) is None
+
+
 # ────────────────────────── frame-cell geometry ──────────────────────────
 #
 # The defect this section pins SHIPPED, and an operator found it by opening a

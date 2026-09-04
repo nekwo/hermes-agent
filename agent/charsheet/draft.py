@@ -922,12 +922,45 @@ class CharacterDraft:
             }
 
     def approve_direction(self, direction: str, attempt: int = -1) -> dict:
-        """Approve a direction reference; advances the stage once all are approved."""
+        """Approve a direction reference; advances the stage once all are approved.
+
+        The receipt carries ``faceOffset``: the approved reference's own measured
+        facing (:func:`pipeline.face_offset`), signed, positive to the right of
+        frame. It is here because approving a turnaround certified NOTHING about
+        the direction it approved — measured on the live ``anime-girl`` draft,
+        the approved ``e`` reference is a west-facing profile (``-44.8``) while
+        all three ``e`` rows drawn from it face east (``+10.9 / +9.9 / +10.5``).
+        The reference carries identity, the row prompt carries facing, and
+        nothing said so at the moment an operator was asked to say yes.
+
+        A number, not a gate: nothing is refused on it, because what a correct
+        offset is for a given sector of an unknown character is not something
+        this code knows — the front and back views measure near zero legitimately.
+        ``null`` when the approved attempt has no image on disk to measure.
+        """
         self._require_stage("approve_direction", "turnaround")
         self._require_authored_direction(direction)
         index = self.store.approve(turnaround_item(direction), attempt)
         advanced = self._advance_if_directions_approved()
-        return {"direction": direction, "approved": index, "stage": self.stage, "advanced": advanced}
+        return {
+            "direction": direction,
+            "approved": index,
+            "faceOffset": self._face_offset(direction),
+            "stage": self.stage,
+            "advanced": advanced,
+        }
+
+    def _face_offset(self, direction: str) -> float | None:
+        """The APPROVED reference's measured facing.
+
+        Called only just after ``store.approve``, which refuses an attempt whose
+        file is missing — so there is always an image here to open, and the only
+        ``None`` this answers is :func:`pipeline.face_offset`'s own "nothing is
+        drawn on it", which is what a generation that came back as a bare chroma
+        field looks like. A second existence check here would be a branch no
+        input can reach.
+        """
+        return pipeline.face_offset(self.store.current(turnaround_item(direction)))
 
     def approve_all_directions(self) -> dict:
         """Approve the latest attempt of every authored direction, then advance."""
@@ -943,7 +976,18 @@ class CharacterDraft:
                 )
             approved[direction] = store.approve(key)
         advanced = self._advance_if_directions_approved()
-        return {"approved": approved, "stage": self.stage, "advanced": advanced}
+        return {
+            "approved": approved,
+            # Per direction, on THIS arm too: `--all` is the path `auto` takes
+            # and the path the anime-girl draft was approved through, so a
+            # measurement that only rode on the single-direction arm would be
+            # absent from every run that actually goes wrong unattended.
+            "faceOffsets": {
+                direction: self._face_offset(direction) for direction in approved
+            },
+            "stage": self.stage,
+            "advanced": advanced,
+        }
 
     def _advance_if_directions_approved(self) -> bool:
         store = self.store

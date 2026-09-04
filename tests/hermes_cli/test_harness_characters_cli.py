@@ -497,6 +497,40 @@ def test_approve_direction_hands_the_rows_command_only_once_it_advances(
     }
 
 
+def test_the_approval_receipt_states_the_reference_s_measured_facing(
+    fake, base_image, capsys
+):
+    """Approving a turnaround certified nothing about the direction — until this.
+
+    The live evidence (2026-08-25, `anime-girl`): an approved `e` reference is a
+    west-facing profile while all three `e` rows drawn from it face east. The
+    number was always measurable and no surface ever showed it, so the receipt
+    shows it — signed, on both arms, in the payload and in the human line.
+    """
+    draft_id = start_draft(capsys, "--base-image", str(base_image))
+    run(["harness", "characters", "turnaround", "--draft", draft_id, "--json"], capsys)
+
+    code, one = run(
+        ["harness", "characters", "approve-direction", "--draft", draft_id,
+         "--direction", "e", "--json"],
+        capsys,
+    )
+    assert code == 0
+    assert "faceOffset" in one, "the approval says nothing about the direction again"
+    assert one["faceOffset"] is None or isinstance(one["faceOffset"], float)
+
+    args = parser().parse_args(
+        ["harness", "characters", "approve-direction", "--draft", draft_id, "--all"]
+    )
+    assert args.func(args) == 0
+    line = capsys.readouterr().out.strip()
+    assert "face offsets" in line, line
+    # Every authored direction is named on the line, because the disagreement
+    # this exists to surface is one sector reading against its neighbours.
+    for direction in SPEC.scheme.authored:
+        assert f"{direction} " in line, direction
+
+
 def test_a_failed_rows_hands_back_the_reroll_and_the_resume(
     fake_unsliceable_walk_e, base_image, capsys
 ):

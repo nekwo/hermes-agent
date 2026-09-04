@@ -1570,6 +1570,100 @@ def test_a_square_crop_over_the_console_ceiling_is_refused_at_the_default_scale(
     )
 
 
+# ──────────────── what an approval says about the direction ────────────────
+
+
+def facing_reference(tmp_path, name, *, head_dx):
+    """A hand-drawn reference whose FACING is known, proposed straight to the store.
+
+    The fake draftsman draws a direction glyph, not a figure, so a facing this
+    test can state has to be drawn here.
+    """
+    size = 200
+    image = Image.new("RGBA", (size, size), MAGENTA)
+    art = ImageDraw.Draw(image)
+    mid = size // 2
+    art.rectangle([mid - 30, mid - 20, mid + 30, size - 20], fill=(40, 60, 200, 255))
+    art.ellipse([mid + head_dx - 18, 20, mid + head_dx + 18, 56], fill=(230, 180, 140, 255))
+    path = tmp_path / f"{name}.png"
+    image.save(path, format="PNG")
+    return path
+
+
+def test_approving_a_direction_reports_the_reference_s_own_measured_facing(
+    draft, tmp_path
+):
+    """The row's actual complaint: a clean approve said nothing about the direction.
+
+    Measured on the live `anime-girl` draft on 2026-08-25 — the approved `e`
+    reference is a west-facing profile (-44.8) and all three `e` rows drawn from
+    it face east (+10.9 / +9.9 / +10.5). One attempt, approved index 0, nothing
+    rerolled: the disagreement was there to be seen at approve time and no
+    surface said it. It says it now, as a signed number.
+    """
+    draft.store.propose(turnaround_item("e"), facing_reference(tmp_path, "e", head_dx=30))
+
+    result = draft.approve_direction("e")
+
+    assert result["approved"] == 0
+    assert result["faceOffset"] > 5, "a right-facing reference reads positive"
+
+
+def test_two_references_that_disagree_about_facing_disagree_in_the_receipt(
+    draft, tmp_path
+):
+    """The visibility claim, stated as a difference rather than a threshold.
+
+    Nothing here is a gate: what closes the row is that a reference facing the
+    other way from its neighbours is READABLE at the moment of approval, which
+    is a sign that does not match. A verdict would need to know the correct
+    offset for each sector of an unknown character, and nothing does.
+    """
+    draft.store.propose(turnaround_item("e"), facing_reference(tmp_path, "e", head_dx=30))
+    draft.store.propose(
+        turnaround_item("n"), facing_reference(tmp_path, "n", head_dx=-30)
+    )
+
+    east = draft.approve_direction("e")["faceOffset"]
+    north = draft.approve_direction("n")["faceOffset"]
+
+    assert east > 0 > north
+    assert east == pytest.approx(-north, abs=0.6)
+
+
+def test_approving_them_all_measures_every_reference_it_approved(fake, base, tmp_path):
+    """`--all` is the arm `auto` takes, so the measurement rides on it too.
+
+    The draft the row was written about was approved this way. A number that
+    only appeared on the single-direction arm would be absent from every
+    unattended run, which is exactly the population that cannot be watched.
+    """
+    draft = CharacterDraft.create(concept=CONCEPT, slug=SLUG, spec=SPEC, base_image=base)
+    draft.run_turnaround()
+
+    result = draft.approve_all_directions()
+
+    assert sorted(result["faceOffsets"]) == sorted(SPEC.scheme.authored)
+    assert all(
+        value is None or isinstance(value, float) for value in result["faceOffsets"].values()
+    )
+
+
+def test_a_reference_with_nothing_drawn_on_it_reports_no_facing(draft, tmp_path):
+    """`null`, never 0.0 — "nothing to read" is not "it faces straight at you".
+
+    A bare chroma field is what a generation that produced nothing looks like,
+    and it is the only shape that reaches this arm: the store refuses to approve
+    an attempt whose file is missing, so there is always a picture, and the
+    question is only whether anything is on it.
+    """
+    blank = tmp_path / "blank.png"
+    Image.new("RGBA", (120, 120), MAGENTA).save(blank, format="PNG")
+    draft.store.propose(turnaround_item("e"), blank)
+
+    assert draft.approve_direction("e")["faceOffset"] is None
+
+
 # ─────────────────────── looking at a DIRECTION reference ───────────────────
 
 

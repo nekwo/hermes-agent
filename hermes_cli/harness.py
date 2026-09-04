@@ -4697,10 +4697,44 @@ def _characters_step_turnaround(draft):
     return result, f"Draft {draft.id}: proposed turnaround references for {directions} (awaiting approval)"
 
 
+def _characters_face_offset_label(offset) -> str:
+    """One approved reference's measured facing, spelled for a person.
+
+    The sign is the reading — positive is a head to the RIGHT of frame — so it
+    is always printed, and the word beside it is there because a bare `+10.9` in
+    a receipt is a number an operator has to go and look up. Approving a
+    turnaround said nothing about the direction until this line existed.
+    """
+    if offset is None:
+        return "facing unmeasured (no image to read)"
+    if offset > 0:
+        return f"face offset +{offset:.1f} px (head right of body centre)"
+    if offset < 0:
+        return f"face offset {offset:.1f} px (head LEFT of body centre)"
+    return "face offset 0.0 px (head over body centre)"
+
+
+def _characters_face_offsets(offsets: dict) -> str:
+    """The same measurement for a whole turnaround, in one clause.
+
+    Compact on purpose: `--all` approves five references at once and the line
+    has to stay one line, so it is the signed numbers in the order they were
+    approved. The disagreement this exists to surface is legible as a sign
+    that does not match its neighbours.
+    """
+    if not offsets:
+        return "no facings measured"
+    return "face offsets " + ", ".join(
+        f"{direction} {'unmeasured' if value is None else format(value, '+.1f')}"
+        for direction, value in offsets.items()
+    )
+
+
 def _characters_step_approve_all(draft):
     result = draft.approve_all_directions()
     human = (
-        f"Draft {draft.id}: approved {len(result['approved'])} direction(s); "
+        f"Draft {draft.id}: approved {len(result['approved'])} direction(s) "
+        f"({_characters_face_offsets(result['faceOffsets'])}); "
         f"stage is now '{draft.stage}'"
     )
     # Only when the approval ADVANCED the stage. `rows` refuses at stage
@@ -4819,7 +4853,9 @@ def _cmd_characters_approve_direction(args) -> int:
         result = draft.approve_direction(direction, attempt=attempt)
         human = (
             f"Draft {draft.id}: approved {result['direction']} "
-            f"{_attempt_label(result['approved'])}; stage is now '{draft.stage}'"
+            f"{_attempt_label(result['approved'])}, "
+            f"{_characters_face_offset_label(result['faceOffset'])}; "
+            f"stage is now '{draft.stage}'"
         )
         # Only when the approval ADVANCED the stage — same rule the `--all` arm
         # states at its own site.

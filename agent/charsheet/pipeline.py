@@ -496,6 +496,77 @@ def frame_cell(image_or_path, *, frame: int, frames: int):
     return strip.crop((left, 0, right, strip.height))
 
 
+#: The share of the subject's own bounding box, from the top, that is read as
+#: the HEAD. A quarter, because a standing figure's head is about that, and
+#: because the measure is a comparison against the same figure's body centre —
+#: a band that is somewhat too tall or too short moves both centroids toward
+#: each other and shrinks the number, it does not change its SIGN, which is the
+#: half anything reads.
+FACE_BAND = 0.25
+
+
+def _column_centroid(rgba) -> float | None:
+    """The alpha-weighted horizontal centroid of *rgba*, or ``None`` if empty.
+
+    Through a one-row resize rather than a pixel loop: the same column-profile
+    trick :func:`agent.pet.generate.atlas.normalize_cells` registers with, which
+    makes this O(width) in Python instead of O(pixels) — a 1024-square reference
+    is a million pixels and this is called once per approved direction.
+    """
+    from PIL import Image
+
+    profile = list(rgba.getchannel("A").resize((rgba.width, 1), Image.BILINEAR).getdata())
+    total = sum(profile)
+    if not total:
+        return None
+    return sum(x * weight for x, weight in enumerate(profile)) / total
+
+
+def face_offset(image_or_path) -> float | None:
+    """How far the HEAD sits from the body's own centre, in pixels; ``None`` if empty.
+
+    Positive is a head to the RIGHT of frame, negative to the left, and that
+    sign is the whole reading — it is the quantity the 2026-08-25 field notes
+    measured by hand when they found an approved ``e`` reference facing west
+    (``-44.8``) while all three ``e`` rows drawn from it faced east (``+10.9``,
+    ``+9.9``, ``+10.5``). The reference carried IDENTITY and the row prompt
+    carried FACING, so a clean ``approve-direction`` certified nothing about the
+    direction it was approving. This is what the approval now reports.
+
+    **It is a measurement, not a verdict.** There is no threshold here and no
+    boolean: a number and its sign, published for a person and for a later
+    comparison against the rows. A gate would need to know what a correct offset
+    is for each of eight sectors on an unknown character, which nothing does —
+    the front and back views legitimately measure near zero, and the diagonals
+    are small on purpose.
+
+    Both centroids are alpha-weighted, and the chroma field is keyed out first:
+    every generated reference is full-bleed magenta at alpha 255, and a measure
+    that skipped the keying step would return the centroid of the CANVAS — 0.0
+    for every picture ever drawn.
+
+    ``None`` for an empty picture, never ``0.0``: "there is nothing here" and
+    "it faces straight at you" are different answers.
+    """
+    rgba = remove_background(_open_rgba(image_or_path), chroma_key=MAGENTA)
+    box = rgba.getbbox()
+    if box is None:
+        return None
+    left, top, right, bottom = box
+    subject = rgba.crop(box)
+    body = _column_centroid(subject)
+    if body is None:
+        return None
+    band = max(1, round((bottom - top) * FACE_BAND))
+    head = _column_centroid(subject.crop((0, 0, right - left, band)))
+    if head is None:
+        return None
+    # One decimal, because that is the precision the field notes are written in
+    # and the precision a receipt can be read at; the underlying centroids carry
+    # no more meaning than that.
+    return round(head - body, 1)
+
+
 def reference_cell(image_or_path):
     """The whole of a single-pose image, as the QA cell to crop.
 
