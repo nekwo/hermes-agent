@@ -378,6 +378,247 @@ def test_an_unreachable_install_is_retryable_rather_than_a_bad_argument(capsys):
     assert "gateway listener must be running" in output
 
 
+class _FakeClient:
+    """A ``ServeSocketClient`` stand-in that records every address dialled.
+
+    The dial loop's two failure KINDS are the subject here, and neither can be
+    reached against a real socket without standing up two TLS listeners with
+    deliberately wrong certificates — which is what the two-roots e2e is for.
+    What this stub can prove, and the e2e cannot without a firewall, is that a
+    dial failure MOVES ON and a certificate mismatch DOES NOT.
+    """
+
+    dialled: list[tuple[str, int]] = []
+    #: ``{(host, port): exception-or-None}``; a ``None`` completes the handshake.
+    outcomes: dict = {}
+
+    def __init__(self, host, port, **kwargs):
+        self._where = (host, int(port))
+
+    def connect(self):
+        type(self).dialled.append(self._where)
+        outcome = type(self).outcomes.get(self._where, ConnectionRefusedError("no"))
+        if outcome is not None:
+            raise outcome
+
+    def peer_join_hello(self, **kwargs):
+        return {
+            "event": "hello_ok",
+            "install": {"install_id": "inst_far", "display_name": "far"},
+            "peered": {"peer_secret": "s" * 32, "expires_at": None},
+        }
+
+    def close(self):
+        pass
+
+
+@pytest.fixture
+def fake_dials(monkeypatch):
+    """Install :class:`_FakeClient` where ``peers join`` imports its client."""
+
+    from agent_runtime import serve_socket
+
+    _FakeClient.dialled = []
+    _FakeClient.outcomes = {}
+    monkeypatch.setattr(serve_socket, "ServeSocketClient", _FakeClient)
+    return _FakeClient
+
+
+def test_the_join_dials_the_payloads_candidates_in_order_until_one_answers(
+    capsys, fake_dials
+):
+    """R-D3's whole point: the first advertised address being unreachable is a
+    fact about that address, and the far install offered the others precisely
+    because it could not know which of them a given peer can reach.
+
+    The row records the candidate that ANSWERED and not the payload's first
+    row — a stored address the loop already walked past would make every later
+    dial start with a failure this run had proved."""
+
+    from agent_runtime.gateway_peers import list_peers
+
+    fake_dials.outcomes = {("192.0.2.1", 8765): TimeoutError("no route"),
+                           ("10.0.0.9", 8765): None}
+    payload = json.dumps(
+        {
+            "host": "192.0.2.1",
+            "port": 8765,
+            "endpoints": [
+                {"host": "192.0.2.1", "port": 8765},
+                {"host": "10.0.0.9", "port": 8765},
+            ],
+            "install_id": "inst_far",
+            "cert_fingerprint": "ab" * 32,
+            "peer_code": "ABCD2345",
+        }
+    )
+
+    code, output = _join(capsys, payload, "--timeout", "2")
+
+    assert code == 0, output
+    assert fake_dials.dialled == [("192.0.2.1", 8765), ("10.0.0.9", 8765)]
+    (row,) = list_peers(paths.store_root())
+    assert list(row.endpoints) == [{"host": "10.0.0.9", "port": 8765}]
+
+
+def test_a_certificate_mismatch_stops_the_loop_instead_of_trying_the_next_address(
+    capsys, fake_dials
+):
+    """A refused connection says *this address*; a certificate that does not
+    match the pin says *this identity*, and no other address in the list can
+    make that come out differently. Retrying it would offer the same wrong
+    certificate three more chances and burn three timeouts to reach the same
+    refusal — so the loop stops on the first one, with R-IP17's reason word
+    leading the sentence exactly as the pre-dial check spells it."""
+
+    from agent_runtime.gateway_peers import list_peers
+    from agent_runtime.serve_socket import ServeCertificatePinMismatch
+    from hermes_cli.harness_support import ERROR_EXIT_CODES
+
+    fake_dials.outcomes = {
+        ("192.0.2.1", 8765): ServeCertificatePinMismatch("wrong certificate"),
+        ("10.0.0.9", 8765): None,
+    }
+    payload = json.dumps(
+        {
+            "host": "192.0.2.1",
+            "port": 8765,
+            "endpoints": [
+                {"host": "192.0.2.1", "port": 8765},
+                {"host": "10.0.0.9", "port": 8765},
+            ],
+            "install_id": "inst_far",
+            "cert_fingerprint": "ab" * 32,
+            "peer_code": "ABCD2345",
+        }
+    )
+
+    code, output = _join(capsys, payload, "--timeout", "2")
+
+    assert code == ERROR_EXIT_CODES["invalid_payload"]
+    assert "tls_fingerprint_mismatch" in output
+    assert fake_dials.dialled == [("192.0.2.1", 8765)]
+    assert list_peers(paths.store_root()) == []
+
+
+def test_the_refusal_names_every_address_it_tried_with_the_failure_beside_it(
+    capsys, fake_dials
+):
+    """The receipt S4's hardware attempt did not have. ``runtime_unavailable``
+    on its own reads identically whether the listener is down, a firewall
+    dropped the SYN, or the address was never dialable — which is why the
+    12:00:13 receipt could not be attributed from either machine."""
+
+    from hermes_cli.harness_support import ERROR_EXIT_CODES
+
+    fake_dials.outcomes = {
+        ("192.0.2.1", 8765): TimeoutError("no route"),
+        ("10.0.0.9", 8765): ConnectionRefusedError("shut"),
+    }
+    payload = json.dumps(
+        {
+            "host": "192.0.2.1",
+            "port": 8765,
+            "endpoints": [
+                {"host": "192.0.2.1", "port": 8765},
+                {"host": "10.0.0.9", "port": 8765},
+            ],
+            "install_id": "inst_far",
+            "cert_fingerprint": "ab" * 32,
+            "peer_code": "ABCD2345",
+        }
+    )
+
+    code, output = _join(capsys, payload, "--timeout", "2")
+
+    assert code == ERROR_EXIT_CODES["runtime_unavailable"]
+    assert "192.0.2.1:8765 (TimeoutError)" in output
+    assert "10.0.0.9:8765 (ConnectionRefusedError)" in output
+
+
+def test_host_and_port_flags_collapse_the_list_to_the_one_candidate_they_name(
+    capsys, fake_dials
+):
+    """The override the launcher's redeemer uses: it owns the ORDER (it knows
+    the account's list, its cache and its own subnets) and passes one candidate
+    per run. A flag that merely reordered the payload's list would make the
+    launcher's ranking advisory, which is not what R-D3 says."""
+
+    fake_dials.outcomes = {("127.0.0.1", 9): None}
+    payload = json.dumps(
+        {
+            "host": "192.0.2.1",
+            "port": 8765,
+            "endpoints": [
+                {"host": "192.0.2.1", "port": 8765},
+                {"host": "10.0.0.9", "port": 8765},
+            ],
+            "install_id": "inst_far",
+            "cert_fingerprint": "ab" * 32,
+            "peer_code": "ABCD2345",
+        }
+    )
+
+    code, output = _join(capsys, payload, "--host", "127.0.0.1", "--port", "9")
+
+    assert code == 0, output
+    assert fake_dials.dialled == [("127.0.0.1", 9)]
+
+
+def test_a_payload_without_the_endpoints_key_is_read_as_a_one_row_list(
+    capsys, fake_dials
+):
+    """An install that predates R-D3 sends ``host``/``port`` and nothing else,
+    and a bare code typed with ``--host``/``--port`` arrives the same way. Not a
+    shim to delete later — it is the typed half of R3."""
+
+    fake_dials.outcomes = {("10.0.0.9", 8765): None}
+    payload = json.dumps(
+        {
+            "host": "10.0.0.9",
+            "port": 8765,
+            "install_id": "inst_far",
+            "cert_fingerprint": "ab" * 32,
+            "peer_code": "ABCD2345",
+        }
+    )
+
+    code, output = _join(capsys, payload)
+
+    assert code == 0, output
+    assert fake_dials.dialled == [("10.0.0.9", 8765)]
+
+
+def test_a_wildcard_row_in_an_advertised_list_is_dropped_rather_than_dialled(
+    capsys, fake_dials
+):
+    """Defence in depth against the far side, not against ourselves: R-D1 stops
+    this install writing a bind into a payload, and this stops an install that
+    has not landed R-D1 yet from making us dial one. Dropped rather than
+    refusing the whole payload — the list is advertisement, and one unusable row
+    is not a reason to refuse an edge the other rows would have made."""
+
+    fake_dials.outcomes = {("10.0.0.9", 8765): None}
+    payload = json.dumps(
+        {
+            "host": "0.0.0.0",
+            "port": 8765,
+            "endpoints": [
+                {"host": "0.0.0.0", "port": 8765},
+                {"host": "10.0.0.9", "port": 8765},
+            ],
+            "install_id": "inst_far",
+            "cert_fingerprint": "ab" * 32,
+            "peer_code": "ABCD2345",
+        }
+    )
+
+    code, output = _join(capsys, payload)
+
+    assert code == 0, output
+    assert fake_dials.dialled == [("10.0.0.9", 8765)]
+
+
 def test_a_failed_join_writes_no_row(capsys):
     from agent_runtime.gateway_peers import list_peers
 

@@ -437,6 +437,53 @@ def test_a_second_install_cannot_spend_the_code_a_first_one_redeemed(two_install
     assert len(a_rows["items"]) == 1
 
 
+@_REAL_CHILD_SPAWN
+@pytest.mark.timeout(E2E_TEST_TIMEOUT_SECONDS)
+def test_a_join_walks_past_an_unroutable_first_candidate_and_lands_on_the_second(
+    two_installs,
+):
+    """R-D3 against two real serves: the edge lands even though the address the
+    payload offers FIRST cannot be reached.
+
+    A machine with several adapters cannot know which of its addresses the far
+    side can reach — that is the whole reason it advertises a list rather than a
+    choice — so the joining side has to walk it. Before this, ``peers join``
+    dialled exactly one address and reported ``runtime_unavailable``, which is
+    what S4's hardware attempt got at 12:00:13 with a perfectly healthy listener
+    at the other end.
+
+    ``192.0.2.1`` is TEST-NET-1 (RFC 5737): reserved for documentation, routed
+    nowhere, and therefore a dial that fails the way a wrong LAN address fails
+    rather than the way a closed port does. A's real payload is doctored rather
+    than synthesised so everything else about it — the code, the fingerprint,
+    the install id — is the one A actually minted.
+    """
+
+    a, b = two_installs
+
+    _c, minted, _o = a.cli("gateway", "peers", "pair")
+    payload = json.loads(_payload_of(minted))
+    assert payload["endpoints"] == [{"host": "127.0.0.1", "port": a.gateway_port}]
+
+    payload["endpoints"] = [
+        {"host": "192.0.2.1", "port": a.gateway_port}
+    ] + payload["endpoints"]
+    # ``host``/``port`` stay equal to ``endpoints[0]`` — the contract the far
+    # side reads — so the legacy keys point at the unroutable row too. A join
+    # that only consulted them is exactly the join that fails here.
+    payload["host"] = "192.0.2.1"
+
+    code, joined, output = b.cli(
+        "gateway", "peers", "join", json.dumps(payload), "--timeout", "5"
+    )
+
+    assert code == 0, output
+    assert joined["peer_install_id"] == a.ready["install"]["install_id"]
+    # The row holds the candidate that ANSWERED. Storing the payload's first row
+    # would make every later dial from B start with a failure this run proved.
+    assert joined["endpoints"] == [{"host": "127.0.0.1", "port": a.gateway_port}]
+
+
 
 def _json_line(output: str) -> dict:
     """The last JSON object in a snippet's combined stdout+stderr.

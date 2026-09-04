@@ -1110,6 +1110,7 @@ def _parse_join_payload(raw: Any, args) -> dict[str, Any] | None:
     # who typed --host did so because the payload's address is wrong for their
     # network (a second interface, a NAT, a machine that moved), and a merge that
     # preferred the payload would silently ignore the correction.
+    overridden = bool(getattr(args, "host", None)) or bool(getattr(args, "port", None))
     for flag, key in (
         ("host", "host"),
         ("port", "port"),
@@ -1120,11 +1121,30 @@ def _parse_join_payload(raw: Any, args) -> dict[str, Any] | None:
             fields[key] = value
 
     code = str(fields.get("peer_code") or "").strip().upper()
+    # R-D3's list, read here so the dial loop below never has to know which
+    # spelling of a payload it was given. Three sources, in this order:
+    #
+    # * ``--host/--port`` — a SINGLE candidate. An operator (or the launcher's
+    #   redeemer, which passes one candidate per run) who names an address means
+    #   that address and not a list to fall back through.
+    # * the payload's ``endpoints``, which is what every writer on this lane has
+    #   emitted since R-D3.
+    # * the payload's legacy ``host``/``port`` as a one-row list, which is what
+    #   an install that predates this key sends. Not a compatibility shim to
+    #   delete later: a bare code typed with --host/--port arrives the same way.
+    candidates = _clean_candidates(fields.get("endpoints"))
     host = str(fields.get("host") or "").strip()
     try:
         port = int(fields.get("port") or 0)
     except (TypeError, ValueError):
         port = 0
+    if candidates and not (host and port):
+        # A payload carrying only the list still names a first candidate, and
+        # ``host``/``port`` are that row by contract — so filling them in here is
+        # reading the contract, not guessing.
+        host, port = candidates[0]["host"], candidates[0]["port"]
+    if overridden or not candidates:
+        candidates = [{"host": host, "port": port}] if host and port else []
     missing = [
         name
         for name, value in (("peer_code", code), ("host", host), ("port", port))
@@ -1148,9 +1168,41 @@ def _parse_join_payload(raw: Any, args) -> dict[str, Any] | None:
         "peer_code": code,
         "host": host,
         "port": port,
+        "endpoints": candidates,
         "install_id": str(fields.get("install_id") or "").strip() or None,
         "cert_fingerprint": str(fields.get("cert_fingerprint") or "").strip() or None,
     }
+
+
+def _clean_candidates(raw: Any) -> list[dict]:
+    """A payload's ``endpoints`` as rows this verb can dial, order preserved.
+
+    Deliberately forgiving about the CONTENTS and strict about the SHAPE: a row
+    without a usable host or port is dropped rather than refusing the whole
+    payload, because the list is advertisement — the far install offered every
+    address it could think of — and one unusable row is not a reason to refuse
+    an edge that three good rows would have made. A payload with nothing usable
+    in it falls through to the legacy ``host``/``port`` above and is refused
+    there, by name, if those are absent too.
+    """
+
+    if not isinstance(raw, list):
+        return []
+    rows: list[dict] = []
+    for item in raw[:MAX_CANDIDATE_ENDPOINTS]:
+        if not isinstance(item, dict):
+            continue
+        host = str(item.get("host") or "").strip()
+        try:
+            port = int(item.get("port") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not host or host.lower() in _WILDCARD_HOSTS or not port:
+            continue
+        row = {"host": host, "port": port}
+        if row not in rows:
+            rows.append(row)
+    return rows
 
 
 def cmd_gateway_peers_join(args) -> int:
@@ -1168,9 +1220,16 @@ def cmd_gateway_peers_join(args) -> int:
       recording the row anyway would pin a credential to the wrong machine;
     * a ``hello_ok`` with no ``peered`` block — the code did not redeem, and a
       row written on hope is a row whose every dial fails;
-    * any dial failure at all, as ``runtime_unavailable`` (family 7, retryable),
-      because a listener that is not up yet is exactly the condition where the
-      identical command succeeds five seconds later.
+    * a dial that fails against EVERY advertised address, as
+      ``runtime_unavailable`` (family 7, retryable), because a listener that is
+      not up yet is exactly the condition where the identical command succeeds
+      five seconds later. Since R-D3 the payload carries the far install's whole
+      candidate list and this verb walks it in order, stopping at the first
+      handshake; ``--host``/``--port`` still collapse that to one candidate, and
+      the refusal names every address it tried with the exception class beside
+      it, because "runtime_unavailable" alone is the same sentence for a
+      listener that is down, a firewall that dropped the SYN, and an address
+      that was never dialable.
 
     S2 adds a fourth, and it fires BEFORE any socket is opened: with
     ``--expect-fingerprint`` (R-S2-6), a payload whose ``cert_fingerprint``
@@ -1271,36 +1330,98 @@ def cmd_gateway_peers_join(args) -> int:
     identity, certificate = resolved
 
     endpoints = _self_endpoints(root)
-    connection = ServeSocketClient(
-        parsed["host"],
-        parsed["port"],
-        timeout_seconds=float(getattr(args, "timeout", None) or 20.0),
-        tls=True,
-        cert_fingerprint=parsed["cert_fingerprint"],
-    )
-    try:
-        connection.connect()
-        reply = connection.peer_join_hello(
-            peer_code=parsed["peer_code"],
-            peer_install_id=identity.install_id,
-            display_name=identity.display_name,
-            endpoints=endpoints,
-            cert_fingerprint=certificate.fingerprint,
+
+    # ── the dial, over the candidate LIST (R-D3) ─────────────────────────────
+    #
+    # One address used to be the whole of it, and that address was whatever the
+    # payload's ``host`` said — which, before R-D1, could be a bind. Now the
+    # payload carries every address the far install can offer, in the order IT
+    # ranked them, and this loop takes the first handshake that completes.
+    #
+    # Two failure kinds, and telling them apart is the point of the loop rather
+    # than a refinement of it:
+    #
+    # * a DIAL failure (refused, timed out, no route) is about THIS ADDRESS, and
+    #   the next candidate may be on a segment that works. Recorded and moved
+    #   past.
+    # * a certificate that does not match the pin is about the far INSTALL'S
+    #   IDENTITY, and no address can change the answer. Terminal, immediately,
+    #   because retrying it means offering the same wrong certificate three more
+    #   chances and burning three timeouts to reach the same refusal.
+    #
+    # ``--timeout`` is PER CANDIDATE, not a budget for the whole loop: an
+    # operator who allows twenty seconds for a handshake means twenty seconds
+    # for a handshake, and dividing it by a list length they did not write would
+    # make the flag mean something different on every payload.
+    from agent_runtime.serve_socket import ServeCertificatePinMismatch
+
+    attempts: list[str] = []
+    reply = None
+    dialled: dict | None = None
+    for candidate in parsed["endpoints"]:
+        connection = ServeSocketClient(
+            candidate["host"],
+            candidate["port"],
+            timeout_seconds=float(getattr(args, "timeout", None) or 20.0),
+            tls=True,
+            cert_fingerprint=parsed["cert_fingerprint"],
         )
-    except Exception as exc:
+        try:
+            connection.connect()
+            reply = connection.peer_join_hello(
+                peer_code=parsed["peer_code"],
+                peer_install_id=identity.install_id,
+                display_name=identity.display_name,
+                endpoints=endpoints,
+                cert_fingerprint=certificate.fingerprint,
+            )
+            dialled = candidate
+        except ServeCertificatePinMismatch as exc:
+            return emit_harness_error(
+                exc,
+                args=args,
+                code="invalid_payload",
+                message=(
+                    # R-IP17's reason word first, as the pre-dial check spells
+                    # it, so one enumerated vocabulary covers both the payload
+                    # that disagreed with the account and the certificate that
+                    # disagreed with the payload.
+                    "tls_fingerprint_mismatch: "
+                    f"{candidate['host']}:{candidate['port']} presented a "
+                    "certificate that is not the one this payload pins. No "
+                    "other address was tried and no row was written: a "
+                    "mismatched certificate is a statement about the install, "
+                    "not about the address it answered on."
+                ),
+            )
+        except Exception as exc:
+            attempts.append(
+                f"{candidate['host']}:{candidate['port']} ({type(exc).__name__})"
+            )
+        finally:
+            connection.close()
+        if reply is not None:
+            break
+
+    if reply is None or dialled is None:
+        # Every address tried, named, with the exception class beside it — the
+        # receipt S4's hardware attempt did not have. "runtime_unavailable" on
+        # its own is unattributable from the far machine: it reads identically
+        # whether the listener is down, the firewall dropped the SYN, or (the
+        # actual answer that day) the address was never dialable in the first
+        # place.
+        tried = ", ".join(attempts) or "(none — the payload offered no address)"
         return emit_harness_error(
-            exc,
+            RuntimeError("no_candidate_answered"),
             args=args,
             code="runtime_unavailable",
             message=(
-                f"{parsed['host']}:{parsed['port']}: could not complete the peer "
-                f"handshake ({type(exc).__name__}: {exc}). The other install's "
-                "gateway listener must be running, reachable, and presenting the "
-                "certificate whose fingerprint is in the payload."
+                "could not complete the peer handshake with any advertised "
+                f"address. Tried: {tried}. The other install's gateway listener "
+                "must be running, reachable, and presenting the certificate "
+                "whose fingerprint is in the payload."
             ),
         )
-    finally:
-        connection.close()
 
     if not isinstance(reply, dict) or reply.get("event") != "hello_ok":
         reason = (reply or {}).get("reason") or "no hello_ok"
@@ -1340,7 +1461,7 @@ def cmd_gateway_peers_join(args) -> int:
             code="invalid_payload",
             message=(
                 f"the payload names install {parsed['install_id']!r} but "
-                f"{parsed['host']}:{parsed['port']} answered as {remote_id!r}. "
+                f"{dialled['host']}:{dialled['port']} answered as {remote_id!r}. "
                 "Something else is on that address; the row was NOT written."
             ),
         )
@@ -1350,7 +1471,11 @@ def cmd_gateway_peers_join(args) -> int:
         peer_install_id=remote_id or parsed["install_id"] or "",
         secret=str(peered["peer_secret"]),
         display_name=remote.get("display_name"),
-        endpoints=[{"host": parsed["host"], "port": parsed["port"]}],
+        # The candidate that ANSWERED, not the payload's first row. The row is
+        # this install's memory of where the far one is, so recording an address
+        # the loop walked past would make every later dial start with a failure
+        # this run already proved.
+        endpoints=[dict(dialled)],
         cert_fingerprint=parsed["cert_fingerprint"],
         # Read off the frame, never derived. The far side computed it at
         # redemption; a second derivation here would make the two ends of one

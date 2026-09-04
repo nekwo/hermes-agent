@@ -234,6 +234,7 @@ __all__ = [
     "SOCKET_LOCK_FILENAME",
     "SOCKET_OWNER_FILENAME",
     "HelloRateLimiter",
+    "ServeCertificatePinMismatch",
     "ServeHelloProtocolError",
     "ServeSocketClient",
     "ServeSocketServer",
@@ -830,6 +831,24 @@ class ServeHelloProtocolError(Exception):
             return None
         value = self.frame.get("reason")
         return value if isinstance(value, str) else None
+
+
+class ServeCertificatePinMismatch(ServeHelloProtocolError):
+    """The TLS peer presented a certificate the client did not pin.
+
+    A SUBCLASS rather than a flag on the parent, and it exists for one caller:
+    ``peers join``, which since R-D3 dials a LIST of candidate addresses and has
+    to know which failures are worth moving past. A refused connection or a
+    timeout says *this address*; a certificate that does not match the pinned
+    fingerprint says *this identity*, and no other address in the list can make
+    that come out differently — so the loop stops rather than offering the same
+    wrong certificate three more chances to be accepted.
+
+    Subclassing keeps every existing ``except ServeHelloProtocolError`` arm and
+    every ``pytest.raises(ServeHelloProtocolError, match=...)`` true, and the
+    message is unchanged: this names a condition that was already raised, it
+    does not add one.
+    """
 
 
 def hello_proof(token: str, nonce: str, *, port: int) -> str:
@@ -2058,7 +2077,7 @@ class ServeSocketClient:
                     wrapped.close()
                 except OSError:
                     pass
-                raise ServeHelloProtocolError(
+                raise ServeCertificatePinMismatch(
                     "the peer's certificate does not match the pinned fingerprint"
                 )
         wrapped.settimeout(self._timeout)
