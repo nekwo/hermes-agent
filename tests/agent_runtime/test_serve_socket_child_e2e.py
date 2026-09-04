@@ -145,6 +145,101 @@ def _connect(env: dict[str, str], *args: str) -> tuple[int, dict | None, str]:
 _REAL_CHILD_SPAWN = pytest.mark.live_system_guard_bypass
 
 
+def _spawn_serve(env: dict[str, str]) -> "_Child":
+    return _Child(
+        subprocess.Popen(
+            [sys.executable, "-m", "hermes_cli.main", "harness", "serve", "--ndjson"],
+            cwd=str(REPO_ROOT),
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+        ),
+        env,
+    )
+
+
+@_REAL_CHILD_SPAWN
+@pytest.mark.timeout(E2E_TEST_TIMEOUT_SECONDS)
+def test_a_killed_serves_successor_takes_the_lane_and_opens_the_listener(tmp_path):
+    """L1's whole point, against two REAL processes and a real ``taskkill``.
+
+    This is the operator's 2026-09-04 session reproduced end to end, and it is
+    the one claim the in-process tests cannot make: the first serve is a real
+    child holding a real OS lock, and it is KILLED — not shut down — so the
+    sidecar it leaves behind is a genuine leftover rather than a file a test
+    wrote. Its successor must then (a) take the socket lane over and say whose
+    it was, and (b) actually open the LAN listener the config asked for, which
+    is the door that never opened on the operator's machine.
+
+    ``remote_gateway.listen`` is written into the sandbox home's ``config.yaml``
+    rather than monkeypatched, because the config read is half of what failed:
+    the launcher's write path was correct and the greeting still said the
+    feature was off.
+    """
+
+    env = _sandbox_env(tmp_path)
+    # Loopback and an ephemeral port. The LAN bind is this same config with a
+    # different host string — what CI cannot exercise is a second machine and a
+    # firewall prompt, and those are named in the field notes, not faked here.
+    (Path(env["HERMES_HOME"]) / "config.yaml").write_text(
+        "remote_gateway:\n  listen: 127.0.0.1\n  port: 0\n", encoding="utf-8"
+    )
+
+    first = _spawn_serve(env)
+    try:
+        first_ready = first.wait_for("ready")
+        assert first_ready["socket"]["outcome"] == "listening"
+        assert "took_over_from" not in first_ready["socket"]
+        assert first_ready["gateway"]["outcome"] == "listening"
+        first_pid = first_ready["pid"]
+
+        # KILLED, not drained and not shut down: no atexit, no `release()`, no
+        # unlink. The owner sidecar survives naming a pid that is about to stop
+        # existing — which is exactly the state the launcher's un-awaited
+        # respawn left behind.
+        first.process.kill()
+        first.process.wait(timeout=30)
+        owner = json.loads(
+            (Path(env["HERMES_AGENT_RUNTIME_ROOT"]) / "serve_socket.owner.json")
+            .read_text(encoding="utf-8")
+        )
+        assert owner["pid"] == first_pid
+    finally:
+        if first.process.poll() is None:
+            first.process.kill()
+            first.process.wait(timeout=30)
+
+    second = _spawn_serve(env)
+    try:
+        ready = second.wait_for("ready")
+        # (a) The lane was taken over, and the receipt names the corpse.
+        assert ready["socket"]["outcome"] == "listening"
+        assert ready["socket"]["took_over_from"] == first_pid
+        assert ready["socket"]["owner_started_at"] == first_ready["socket"]["started_at"]
+        assert ready["pid"] != first_pid
+        # (b) …and therefore the second door opened. Before L1 this boot read
+        # `socket: lock_held_by` and `gateway: disabled`, and an operator who
+        # had just enabled the listener was told the feature did not exist.
+        assert ready["gateway"]["outcome"] == "listening"
+        assert ready["gateway"]["host"] == "127.0.0.1"
+        assert isinstance(ready["gateway"]["port"], int)
+        assert ready["gateway"]["cert_fingerprint"]
+        # The sidecar now names the living owner, so a THIRD boot inherits a
+        # truthful file rather than the corpse's.
+        owner = json.loads(
+            (Path(env["HERMES_AGENT_RUNTIME_ROOT"]) / "serve_socket.owner.json")
+            .read_text(encoding="utf-8")
+        )
+        assert owner["pid"] == ready["pid"]
+    finally:
+        if second.process.poll() is None:
+            second.process.kill()
+            second.process.wait(timeout=30)
+
+
 @_REAL_CHILD_SPAWN
 @pytest.mark.timeout(E2E_TEST_TIMEOUT_SECONDS)
 def test_probe_then_drain_over_the_socket_against_a_real_serve_child(tmp_path):
