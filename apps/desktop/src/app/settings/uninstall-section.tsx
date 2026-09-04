@@ -136,6 +136,12 @@ export function UninstallSection() {
             <p className="mt-1 text-xs text-muted-foreground">
               This removes {pendingOption.consequence}. This can&apos;t be undone.
             </p>
+            {pendingOption.needsAgent && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                This deletes the agent&apos;s code checkout, including its git history — not backed up by this
+                tool.
+              </p>
+            )}
             {summary?.running_app_path && (
               <p className="mt-1 font-mono text-[0.68rem] text-muted-foreground/60">App: {summary.running_app_path}</p>
             )}

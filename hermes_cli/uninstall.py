@@ -644,6 +644,12 @@ def run_uninstall(args):
     print(f"  Secrets: {hermes_home / '.env'}")
     print(f"  Data:    {hermes_home / 'cron/'}, {hermes_home / 'sessions/'}, {hermes_home / 'logs/'}")
     print()
+    print(color(
+        "Note: the code checkout above (including its git history) is deleted "
+        "and NOT backed up by this tool.",
+        Colors.YELLOW,
+    ))
+    print()
 
     if named_profiles:
         print(color("Other profiles detected:", Colors.CYAN, Colors.BOLD))
@@ -747,6 +753,7 @@ def _print_uninstall_dry_run(*, project_root: Path, hermes_home: Path, full_unin
     print("  • Hermes wrapper scripts and Hermes-managed node/npm/npx symlinks")
     print("  • Desktop Chat GUI artifacts")
     print(f"  • Code checkout: {project_root}")
+    print("    (includes its git history — not backed up by this tool)")
     if full_uninstall:
         print(f"  • Hermes config/data: {hermes_home}")
         if _is_default_hermes_home(hermes_home):
