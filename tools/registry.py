@@ -23,7 +23,7 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Set
+from typing import Callable, Dict, List, NamedTuple, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +63,150 @@ def _module_registers_tools(module_path: Path) -> bool:
         return False
 
     return any(_is_registry_register_call(stmt) for stmt in tree.body)
+
+
+#: A registrar module's tools, read WITHOUT importing it.
+#:
+#: ``tools``  — ``{tool_name: toolset}``, every top-level registration whose two
+#:              identifying arguments resolve to string literals.
+#: ``modules`` — ``{module_stem: [tool_name, …]}``, in source order, so a reader
+#:              can say WHICH file owns a name without a second scan.
+#: ``unresolved`` — ``"<module_stem>: <what could not be read>"`` for every
+#:              top-level registration the reader could not resolve.
+#:
+#: The third field is the one that keeps this honest. A scan that silently
+#: dropped what it could not parse would be indistinguishable from a scan that
+#: found nothing there, and the artifact built from it would be quietly short —
+#: the MCF-53 census disease, one layer down. Callers that need completeness
+#: assert this list is EMPTY; the generator refuses to write an artifact while it
+#: is not.
+class ToolScan(NamedTuple):
+    tools: Dict[str, str]
+    modules: Dict[str, List[str]]
+    unresolved: List[str]
+
+
+def _module_level_string_constants(tree: ast.Module) -> Dict[str, str]:
+    """``{NAME: "value"}`` for every module-level assignment of a string literal.
+
+    Needed because 11 of the 90 registrations in this tree name a module-level
+    ``_TOOLSET`` constant instead of repeating the literal
+    (``flux3_video_tool.py``, ``yuanbao_tools.py``). Folding those is the
+    difference between a manifest that covers 79/90 and one that covers all of
+    them, and a manifest with holes is one nobody may rely on.
+
+    Deliberately NOT a general constant folder: one assignment, one Name target,
+    one string Constant. Anything else — a join, an f-string, a conditional, a
+    re-assignment later in the file — is left unresolved and surfaces in
+    :attr:`ToolScan.unresolved` rather than being guessed at.
+    """
+
+    constants: Dict[str, str] = {}
+    reassigned: Set[str] = set()
+    for stmt in tree.body:
+        targets: List[ast.expr] = []
+        value: Optional[ast.expr] = None
+        if isinstance(stmt, ast.Assign):
+            targets = list(stmt.targets)
+            value = stmt.value
+        elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+            targets = [stmt.target]
+            value = stmt.value
+        for target in targets:
+            if not isinstance(target, ast.Name):
+                continue
+            if target.id in constants or target.id in reassigned:
+                # A name written twice is a name whose value depends on WHERE
+                # the register call sits. Refuse it rather than pick a side.
+                constants.pop(target.id, None)
+                reassigned.add(target.id)
+                continue
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                constants[target.id] = value.value
+    return constants
+
+
+def _literal_str(node: Optional[ast.expr], constants: Dict[str, str]) -> Optional[str]:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name):
+        return constants.get(node.id)
+    return None
+
+
+def scan_registered_tools(tools_dir: Optional[Path] = None) -> ToolScan:
+    """Which tools each builtin module registers, and into which toolset —
+    read STATICALLY, importing nothing.
+
+    The question "what are this install's toolset names" does not need the 38
+    registrar modules; it needs the two identifying arguments of their top-level
+    ``registry.register()`` calls, both of which are string literals in the
+    source. Importing them to find out costs 3.16 s measured on this checkout
+    (2026-09-04, warm verdict cache) and is paid on every cold
+    ``perform_agent_create`` and every single-test run, because the memo it would
+    otherwise ride lives under ``get_hermes_home()`` — which the test runner
+    points at a fresh temp directory per file, so it is cold by construction.
+
+    Same AST walk :func:`_module_registers_tools` already performs, same text
+    prefilter, same top-level-only rule (a ``registry.register`` inside a
+    function body is a helper, not a registrar, and stays invisible here exactly
+    as it does there). What is added is reading the call's arguments.
+
+    **This answers NAMES, never HANDLERS.** A handler is a live callable and
+    there is no static substitute for importing the module that defines it.
+    Anything that must CALL a tool still goes through
+    :func:`discover_builtin_tools`.
+
+    It also answers only BUILTINS. Plugin tools register into the same singleton
+    through ``hermes_cli.plugins``, and MCP tools through ``discover_mcp_tools``;
+    neither is in this tree and neither is in this scan. A caller that needs the
+    complete live set must union this with the registry it has actually
+    populated — see the note on the generated manifest.
+    """
+
+    tools_path = Path(tools_dir) if tools_dir is not None else Path(__file__).resolve().parent
+    tools: Dict[str, str] = {}
+    modules: Dict[str, List[str]] = {}
+    unresolved: List[str] = []
+
+    for path in sorted(tools_path.glob("*.py")):
+        if path.name in {"__init__.py", "registry.py", "mcp_tool.py"}:
+            continue
+        try:
+            source = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            unresolved.append(f"{path.stem}: unreadable ({type(exc).__name__})")
+            continue
+        if "registry" not in source or "register" not in source:
+            continue
+        try:
+            tree = ast.parse(source, filename=str(path))
+        except SyntaxError:
+            unresolved.append(f"{path.stem}: does not parse")
+            continue
+
+        constants = _module_level_string_constants(tree)
+        for stmt in tree.body:
+            if not _is_registry_register_call(stmt):
+                continue
+            call = stmt.value
+            keywords = {kw.arg: kw.value for kw in call.keywords if kw.arg}
+            name_node = keywords.get("name") or (call.args[0] if call.args else None)
+            toolset_node = keywords.get("toolset") or (
+                call.args[1] if len(call.args) > 1 else None
+            )
+            name = _literal_str(name_node, constants)
+            toolset = _literal_str(toolset_node, constants)
+            if name is None or toolset is None:
+                unresolved.append(
+                    f"{path.stem}: register() at line {stmt.lineno} has a "
+                    f"{'name' if name is None else 'toolset'} this reader cannot resolve"
+                )
+                continue
+            tools[name] = toolset
+            modules.setdefault(path.stem, []).append(name)
+
+    return ToolScan(tools=tools, modules=modules, unresolved=unresolved)
 
 
 def discover_builtin_tools(tools_dir: Optional[Path] = None) -> List[str]:
