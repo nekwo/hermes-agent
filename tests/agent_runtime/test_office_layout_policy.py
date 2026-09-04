@@ -59,25 +59,50 @@ def test_manifest_pins_fixture_bytes():
         )
 
 
+def _declared_lattice_constants() -> dict[str, float]:
+    """Every numeric constant the policy MODULE declares, keyed as the fixture
+    keys them.
+
+    Derived from the imported module object, never from its source text — the
+    banned antipattern, and unnecessary here: Python hands over the same
+    enumeration at runtime that the launcher's mirror has to scan `static
+    const` declarations to get. `NO_LANE` (a tuple) and the two folder names
+    (strings) are not lattice numbers and are not pinned by the fixture; `bool`
+    is excluded explicitly because it is an `int` subclass and a future
+    feature flag would otherwise be demanded of the case file.
+    """
+
+    return {
+        name.lower(): value
+        for name, value in vars(policy).items()
+        if name.isupper()
+        and not name.startswith("_")
+        and type(value) in (int, float)
+    }
+
+
 def test_the_fixture_pins_every_constant_this_module_spends():
     """A case file whose constants had drifted from the code would still pass
     every case — it would simply be describing a different lattice. This is the
     join: the numbers the launcher mirrors are the numbers this module uses.
 
-    KILLING MUTATION: change ``ORIGIN_Y`` by 0.1 here (or in the Dart) and this
-    reds naming the constant, before any case has to be read.
+    DERIVED, not restated. The seven names used to be typed out here, which
+    made this test answer "do these seven agree" and never "are these seven all
+    of them" — an eighth constant could join the policy, be spent by the scan,
+    and leave the cross-repo file describing a lattice the launcher would then
+    mirror incompletely. The launcher's half of this pin was rebuilt the same
+    way on 2026-09-04 (`mission_office_placement_policy_test.dart`); this is the
+    hermes mirror, one enumeration per side.
+
+    KILLING MUTATIONS, both directions: change ``ORIGIN_Y`` by 0.1 (here or in
+    the Dart) and this reds naming the constant; add ``SHELF_SPACING = 2.0`` to
+    the policy and it reds naming that, before any case has to be read.
     """
 
-    constants = _fixture()["constants"]
-    assert constants == {
-        "origin_x": policy.ORIGIN_X,
-        "origin_y": policy.ORIGIN_Y,
-        "column_spacing": policy.COLUMN_SPACING,
-        "row_spacing": policy.ROW_SPACING,
-        "rows_per_column": policy.ROWS_PER_COLUMN,
-        "occupancy_radius": policy.OCCUPANCY_RADIUS,
-        "desk_lane_offset": policy.DESK_LANE_OFFSET,
-    }
+    declared = _declared_lattice_constants()
+
+    assert len(declared) >= 7, declared
+    assert _fixture()["constants"] == declared
 
 
 def test_the_case_list_is_not_empty_and_names_the_shapes_S1_requires():
@@ -144,6 +169,95 @@ def test_every_fixture_slot_is_genuinely_free(case):
     x, y = case["expected"]
     for ox, oy in occupied:
         assert math.hypot(x - ox, y - oy) >= policy.OCCUPANCY_RADIUS, case["name"]
+
+
+def _resolve_case(case: dict) -> tuple[float, float]:
+    """One case through the live policy: ``next_free_slot_for_kind``'s body with
+    the actor flattening skipped, because a case gives already-flat items.
+
+    The folder and the lane come from the POLICY, not from the case's own
+    ``folder`` / ``lane_offset`` fields. Those two fields are the launcher's
+    prediction of what the policy resolves, asserted against it by
+    ``test_every_fixture_case_resolves_to_its_slot``; feeding them back in here
+    would route the scan around ``DESK_LANE_OFFSET`` and leave the perturbation
+    sweep below unable to see it move — measured, on the first run of that
+    sweep.
+    """
+
+    occupied = policy.occupied_item_positions(
+        case["items"], folder=policy.folder_for_kind(case["kind"])
+    )
+    return policy.next_free_slot(
+        occupied, lane_offset=policy.lane_offset_for_kind(case["kind"])
+    )
+
+
+@pytest.mark.parametrize("constant", sorted(_declared_lattice_constants()))
+def test_moving_a_constant_moves_at_least_one_case(constant, monkeypatch):
+    """The other half of the join, and the one nothing forced before.
+
+    ``test_the_fixture_pins_every_constant_this_module_spends`` proves every
+    constant is IN the file. It cannot prove the file EXERCISES one: a constant
+    the case list never bends around is pinned by name and unpinned in effect,
+    so the two repos could disagree about it and every case would still pass on
+    both sides. This requires the cases to notice.
+
+    Perturb ONE constant, re-run every case, and demand some case move. The
+    unperturbed run is asserted to reproduce every ``expected`` first, so a
+    sweep that moved nothing because the harness itself was broken reds as a
+    broken harness rather than as a satisfied gate.
+
+    ``ROWS_PER_COLUMN`` is perturbed by a whole row and the rest by a distance
+    well above the fixture's ``1e-4`` tolerance: a perturbation smaller than the
+    tolerance would be invisible by construction and would make this test
+    vacuous for the constant it is least able to check.
+
+    KILLING MUTATION: delete ``boundary_item_at_exact_radius`` from the case
+    file and the ``occupancy_radius`` parametrization reds — measured, that case
+    is the ONLY one of the thirteen whose slot moves when the radius does. The
+    margins vary widely and were measured rather than assumed: origin_x /
+    origin_y move 13 cases, row_spacing 9, desk_lane_offset 3, column_spacing
+    and rows_per_column 2 each, occupancy_radius 1.
+    """
+
+    cases = _fixture()["cases"]
+    tolerance = _fixture()["tolerance"]
+    baseline = {case["name"]: _resolve_case(case) for case in cases}
+
+    for case in cases:
+        expected = case["expected"]
+        slot = baseline[case["name"]]
+        assert math.isclose(slot[0], expected[0], abs_tol=tolerance), case["name"]
+        assert math.isclose(slot[1], expected[1], abs_tol=tolerance), case["name"]
+
+    name = constant.upper()
+    current = getattr(policy, name)
+    # A whole row for the integer, a visible distance for the spacings. Both
+    # are far outside the fixture's tolerance, which is what makes "nothing
+    # moved" a statement about the CASES rather than about the nudge.
+    monkeypatch.setattr(
+        policy, name, current + 1 if isinstance(current, int) else current + 0.5
+    )
+
+    moved = [
+        case["name"]
+        for case in cases
+        if not (
+            math.isclose(
+                _resolve_case(case)[0], baseline[case["name"]][0], abs_tol=tolerance
+            )
+            and math.isclose(
+                _resolve_case(case)[1], baseline[case["name"]][1], abs_tol=tolerance
+            )
+        )
+    ]
+
+    assert moved, (
+        f"moving {name} changed no case's resolved slot, so the cross-repo file "
+        "pins this constant by NAME and by nothing else — the two repos could "
+        "disagree about it and every case would pass on both sides. Add a case "
+        "that bends around it."
+    )
 
 
 # ── the policy's own properties ──────────────────────────────────────────────
