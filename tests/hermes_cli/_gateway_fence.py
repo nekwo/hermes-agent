@@ -88,18 +88,6 @@ _LAUNCHER_BASENAMES = ("gateway.vbs", "gateway.cmd")
 #: install-detection branch, and reading a task cannot start one.
 _SCHTASKS_MUTATING_VERBS = ("/create", "/delete", "/change", "/run", "/end")
 
-#: The one read-only capability probe the real-store arm below lets through,
-#: and the exact argv shape it is allowed in. See
-#: :func:`_is_agent_browser_version_probe`.
-_AGENT_BROWSER_BASENAMES = (
-    "agent-browser",
-    "agent-browser.cmd",
-    "agent-browser.exe",
-    "agent-browser.bat",
-    "agent-browser.ps1",
-)
-
-
 class GatewayFenceViolation(RuntimeError):
     """A test (or something it left running) tried to touch the live gateway."""
 
@@ -212,21 +200,6 @@ def _backend_subcommand(tokens: list[str]) -> str | None:
     return None
 
 
-def _is_agent_browser_version_probe(tokens: list[str]) -> bool:
-    """Exactly ``<...>/agent-browser[.cmd|.exe|.bat|.ps1] --version``, nothing else.
-
-    ``hermes_constants.agent_browser_runnable`` validates a candidate binary by
-    running it with ``--version``. It starts nothing, writes nothing and exits;
-    the whole point of the call is that a dangling npm symlink answers 127
-    instead of being trusted (#48521).
-    """
-    return (
-        len(tokens) == 2
-        and _basename(tokens[0]) in _AGENT_BROWSER_BASENAMES
-        and str(tokens[1]).lower() == "--version"
-    )
-
-
 def _names_real_root(text: str, env) -> bool:
     if _REAL_ROOT is None:
         return False
@@ -276,53 +249,31 @@ def classify(cmd, env=None) -> str | None:
                     "Task Scheduler"
                 )
 
-    # The real-store arm refuses any argv that names the operator's store, with
-    # ONE exemption: the read-only ``agent-browser --version`` capability probe.
-    # A blanket refusal was measured over-wide -- it caught
-    # ``X:\...\.hermes\profiles\alice\node\agent-browser.CMD --version``, 44
-    # reds across 8 files in the 2026-08-31 measurement run, not one of them the
-    # hazard this fence is for. What this arm must catch is a hermes process
-    # coming up on the operator's store: the second half of the measured escape.
+    # The real-store arm refuses any argv that names the operator's store. What
+    # it must catch is a hermes process coming up ON that store: the second half
+    # of the measured escape.
     #
-    # The exemption used to be spelled "argv without a hermes entry point",
-    # which let EVERY non-hermes command through -- an ``npm --prefix
-    # <real root>``, a ``node <real root>/...`` -- for the sake of one probe.
-    # It is now spelled as the probe.
+    # It carried ONE exemption from 2026-08-31 to 2026-09-04 -- the read-only
+    # ``agent-browser --version`` capability probe that
+    # ``hermes_constants.agent_browser_runnable`` spawns to tell a working
+    # binary from a dangling npm symlink (#48521). The probe is harmless in
+    # itself; what made it reach the fence at all was that it resolves through
+    # ``shutil.which("agent-browser")`` -- the operator's PATH, which
+    # ``run_tests.sh`` forwards verbatim and no profile redirection can touch.
+    # The exemption was therefore a hole in the real-store rule kept open for
+    # production call sites that had no test seam.
     #
-    # 2026-09-02, measured on this host: the previously-recorded MECHANISM was
-    # wrong, and the correction is why the exemption survives a lane that set
-    # out to delete it. The probed path does NOT come from ``doctor``'s
-    # import-time ``HERMES_HOME`` -- that binding is now resolved at call time
-    # and ``<home>/node`` does not exist under either the real root or the
-    # session's hermetic home. It comes from ``shutil.which("agent-browser")``,
-    # i.e. the operator's PATH, which ``run_tests.sh`` forwards verbatim and no
-    # profile redirection can touch. Deleting this exemption therefore still
-    # reds 19 tests in ``test_doctor.py`` alone (measured with the doctor fix in
-    # place). The remaining half is a test-side seam over the real resolver, not
-    # a production binding; it is rowed, not done here.
-    #
-    # 2026-09-03: the seam landed (``run_doctor``'s ``agent_browser_runnable_
-    # override`` in ``hermes_cli/doctor.py``, injected by every plain-report
-    # test in ``test_doctor.py`` via a ``_run_doctor`` wrapper) and the 19
-    # ``test_doctor.py`` reds ARE gone -- measured by deleting this exemption's
-    # ``and not _is_agent_browser_version_probe(tokens)`` clause and running
-    # ``test_doctor.py`` (49 passed) plus ``test_gateway_spawn_fence.py`` and
-    # ``test_doctor_command_install.py`` (only ``test_the_agent_browser_
-    # capability_probe_is_not_refused`` reds, which exists to pin this
-    # exemption and is expected to red when it is gone). But `doctor.py` is
-    # not the only production caller: ``hermes_cli/dep_ensure.py``'s
-    # ``_DEP_CHECKS`` (reached from ``cmd_postinstall``, unmocked in
-    # ``test_postinstall_noninteractive.py::
-    # test_postinstall_json_emits_summary_as_final_line``) and
-    # ``hermes_cli/nous_subscription.py`` (unmocked in
-    # ``test_nous_subscription.py::
-    # test_apply_nous_managed_defaults_writes_video_gen_config``) both call
-    # ``agent_browser_runnable`` straight off ``shutil.which("agent-browser")``
-    # with no seam of their own, so deleting the exemption still reds those
-    # two tests. The exemption stays until those two also get a test-side
-    # seam (or their tests get one each) -- not done here; see
-    # `docs/agent-runtime-harness/planned/w10-hermes-field-notes-2026-09-03.md`.
-    if _names_real_root(text, env) and not _is_agent_browser_version_probe(tokens):
+    # All three now have one, each the same shape (``None`` on every production
+    # call site, so behavior is unchanged):
+    #   * ``doctor.run_doctor(agent_browser_runnable_override=...)``  (2026-09-03)
+    #   * ``dep_ensure._browser_available`` / ``dependency_status`` /
+    #     ``ensure_dependency``, threaded from
+    #     ``main.cmd_postinstall(agent_browser_runnable_override=...)``  (2026-09-04)
+    #   * ``nous_subscription._has_agent_browser`` /
+    #     ``_local_browser_runnable`` / ``get_nous_subscription_features`` /
+    #     ``apply_nous_managed_defaults``  (2026-09-04)
+    # so the exemption is deleted and the real-store arm is unconditional again.
+    if _names_real_root(text, env):
         return (
             f"it would run hermes against the operator's REAL store ({_REAL_ROOT}). "
             "Tests run against the hermetic home that tests/conftest.py's "

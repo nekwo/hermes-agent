@@ -124,26 +124,32 @@ def test_the_real_store_root_comes_from_the_runners_env_var_first(monkeypatch):
     assert _gateway_fence.REAL_ROOT_ENV == "HERMES_TEST_REAL_ROOT"
 
 
-def test_the_agent_browser_capability_probe_is_not_refused():
-    """The over-refusal this arm was narrowed away from, pinned so it stays gone.
+def test_the_agent_browser_capability_probe_is_refused_like_anything_else():
+    """The exemption is GONE (2026-09-04), and the real-store arm is whole again.
 
-    ``hermes doctor`` probes an agent-browser shim that lives inside the
-    operator's live profile. That IS a finding -- the suite reads a tool out of
-    a real profile home -- but it is a ``--version`` call that starts nothing,
-    and refusing it turned 44 tests across 8 files red for a hazard this fence
-    is not about.
+    From 2026-08-31 the arm let one argv shape through: an
+    ``agent-browser[.cmd|.exe|...] --version`` capability probe naming the
+    operator's live store. It was not a safe-by-nature carve-out -- it was a
+    hole held open for three production call sites that had no test seam, so
+    the suite exec'd whatever ``shutil.which("agent-browser")`` found on the
+    operator's PATH (which ``run_tests.sh`` forwards verbatim, and no profile
+    redirection can touch).
 
-    The path is resolved by ``shutil.which("agent-browser")`` off the
-    operator's PATH, which ``run_tests.sh`` forwards verbatim. It was recorded
-    as doctor's import-time ``HERMES_HOME`` binding; that was wrong, and was
-    re-measured 2026-09-02 when the binding moved to call time and this spawn
-    did not move with it.
+    All three now take an ``agent_browser_runnable_override`` -- ``run_doctor``
+    (2026-09-03), ``cmd_postinstall`` -> ``dep_ensure``, and
+    ``nous_subscription``'s ``_has_agent_browser`` chain (both 2026-09-04) --
+    so a test that does not care what is installed injects a stub, and an argv
+    naming the real root is refused whatever it was going to do there.
     """
     real_root = _gateway_fence.real_root()
     if real_root is None:
         pytest.skip("no default hermes root resolvable on this host")
     probe = str(real_root / "profiles" / "alice" / "node" / "agent-browser.CMD")
-    assert _gateway_fence.classify([probe, "--version"]) is None
+
+    reason = _gateway_fence.classify([probe, "--version"])
+
+    assert reason is not None
+    assert "REAL store" in reason
 
 
 @pytest.mark.parametrize(
@@ -156,13 +162,15 @@ def test_the_agent_browser_capability_probe_is_not_refused():
     ],
     ids=["npm-prefix", "node-script", "agent-browser-install", "probe-plus-a-flag"],
 )
-def test_only_the_version_probe_itself_is_exempt(argv):
-    """The exemption is the PROBE, not "any argv without a hermes entry point".
+def test_no_argv_naming_the_real_store_gets_through(argv):
+    """ANTI-VACUITY for the row above, and the older regression it replaced.
 
-    Spelled the old way, every one of these reached the operator's store
-    unremarked -- an ``npm install`` into a real profile is exactly the class
-    of write this fence exists to stop, and it was allowed for the sake of one
-    read-only ``--version``.
+    Before 2026-08-31 the arm's escape was spelled "argv without a hermes entry
+    point", and every one of these reached the operator's store unremarked -- an
+    ``npm install`` into a real profile is exactly the class of write this fence
+    exists to stop, and it was allowed for the sake of one read-only
+    ``--version``. Both spellings of the escape are gone now; these stay red-on-
+    regression for either of them coming back.
     """
     real_root = _gateway_fence.real_root()
     if real_root is None:

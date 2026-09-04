@@ -71,6 +71,62 @@ def _gateway_fence_is_armed_for_this_test():
         _gateway_fence.disarm()
 
 
+#: Every module that binds :func:`hermes_constants.agent_browser_runnable` by
+#: value at IMPORT time. Patching ``hermes_constants`` alone reaches the ones
+#: that import it inside a function (``nous_subscription._has_agent_browser``)
+#: and every module imported AFTER the fixture runs, but not a module already
+#: in ``sys.modules`` holding its own reference.
+_AGENT_BROWSER_PROBE_BINDINGS = (
+    "hermes_constants",
+    "hermes_cli.dep_ensure",
+    "hermes_cli.doctor",
+    "tools.browser_tool",
+)
+
+
+@pytest.fixture(autouse=True)
+def _agent_browser_probe_never_spawns(monkeypatch, request):
+    """The agent-browser ``--version`` probe does not run a real binary here.
+
+    ``hermes_constants.agent_browser_runnable`` tells a working agent-browser
+    from a dangling npm symlink (#48521) by EXECUTING the candidate. The
+    candidate comes from ``shutil.which("agent-browser")`` — the operator's
+    PATH, which ``run_tests.sh`` forwards verbatim and no ``HERMES_HOME``
+    redirection can touch — so on a developer box the suite was exec'ing a
+    binary out of a live profile home, and the gateway fence carried a
+    standing exemption for that argv shape from 2026-08-31 to 2026-09-04.
+
+    The exemption was a hole in the fence's real-store rule kept open because
+    the probe had no single seam. Individual seams were tried and did not close
+    the class: the reachers are a FAMILY (``doctor``, ``dep_ensure`` via
+    ``cmd_postinstall``, ``nous_subscription`` via ``tools_config``'s
+    ``tools_command`` / ``_visible_providers`` / picker surfaces), several of
+    them in tests that do not even take ``monkeypatch``. One fixture over the
+    probe itself is the owner the class wanted.
+
+    Default answer is ``False`` — "no runnable agent-browser" — which is the
+    deterministic one. Whether the developer's machine happens to have the CLI
+    installed is not a thing any test in this directory means to assert; a test
+    that genuinely probes the real binary marks itself
+    ``@pytest.mark.real_agent_browser_probe``.
+    """
+
+    if "real_agent_browser_probe" in request.keywords:
+        return
+
+    def _no_agent_browser(_candidate) -> bool:
+        return False
+
+    for module_name in _AGENT_BROWSER_PROBE_BINDINGS:
+        module = sys.modules.get(module_name)
+        if module is not None and hasattr(module, "agent_browser_runnable"):
+            monkeypatch.setattr(module, "agent_browser_runnable", _no_agent_browser)
+    # ``hermes_constants`` is imported by this conftest's own imports, so the
+    # loop above always reaches it; assert rather than hope, because a miss here
+    # is silent and the fence only notices on a box that HAS agent-browser.
+    assert sys.modules.get("hermes_constants") is not None
+
+
 #: Pristine ``web_server.app`` state — ``app.state`` and the router's merged
 #: lifespan — as they stood the first time a test in this directory saw the
 #: module. Every later test is reset to this.
