@@ -1290,6 +1290,26 @@ file will silently overwrite recent fixes on main when squashed. Verify
 with `git diff HEAD~1..HEAD` after merging — unexpected deletions are a
 red flag.
 
+### Cut your worktree from a NEUTRAL cwd — a read-shaped setup step can move a ref
+`git worktree add` and the `git fetch` in front of it are commands about the
+CLONE, not about the directory you happen to stand in. Run them from anywhere
+OUTSIDE the primary checkout (a scratch directory, or a worktree root that
+already exists) and pass every path explicitly. Measured 2026-08-31 at the
+W1-H1 landing: a correct `--ff-only` merge was followed by another agent running
+`fetch` + `worktree add` from the primary checkout, and `main` was yanked back
+to its pre-merge tip with the merge left staged. **Both of the usual tells
+lied** — the reflog still held the merge and `push` answered "up-to-date" — so
+the rollback is invisible to the checks anyone would run; it was repaired by
+`reset --hard` plus a re-merge (`2638504f9b`). This is a third, DIFFERENT
+instance of the one-index-per-clone hazard behind the commit-by-pathspec habit,
+and it is new in kind because nothing was being COMMITTED — a read-shaped setup
+step moved a ref. Corollary for whoever is landing: primary-checkout git writes
+are not safe to interleave with a landing, so do the merge and the push in one
+breath and do not start a setup step in that window. The launcher carries the
+same rule in its `CLAUDE.md` git-discipline section; there is no hook enforcing
+it in either repo (see "There is no push gate" under Testing), so it is a rule
+agents follow, not a gate.
+
 ### Don't wire in dead code without E2E validation
 Unused code that was never shipped was dead for a reason. Before wiring an
 unused module into a live code path, E2E test the real resolution chain
