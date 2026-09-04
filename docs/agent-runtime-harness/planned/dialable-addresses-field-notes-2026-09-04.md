@@ -194,3 +194,108 @@ Counts are in the final report. The two-roots e2e gained
 which is the only place R-D3 is proved against two real serves: A's real
 payload, doctored to advertise `192.0.2.1` (TEST-NET-1) first with `host`/`port`
 pointing at it too, and the edge still lands on `127.0.0.1:<A's port>`.
+
+## 7. D1b — the routing table, and the proof that D1's §2 pointed at (R-D8)
+
+Same worktree, branch `feat/d1b-default-route`, from main `9ea840bb90`. One
+commit: `987a9bbb54`.
+
+§2 above measured the thing and stopped short of fixing it: with PIA up, every
+probe destination answers `10.97.7.100`, so D1 landed with `dial_host` naming a
+full-tunnel address and `192.168.1.203` — the only address a machine on this
+LAN can reach — second. R-D8 asks the routing table the *different* question
+instead: not "which of my addresses reaches the internet" but "who owns
+`0.0.0.0/0`".
+
+| Plan item | What landed |
+|---|---|
+| 1 — `_default_route_address` | `_run_route_command` (stdlib `subprocess`, 2 s, never raises) plus four pure readers: `_windows_default_route_address`, `_macos_default_route_interface`, `_first_inet_address`, `_linux_default_route` |
+| 2 — rank 0 | `_address_rank` takes a third argument; the table's answer is rank 0, the probe's rank 1, and the old 1–4 shift to 2–5 |
+| 3 — fixtures + rank tests | 10 tests in `tests/hermes_cli/test_gateway_introduce_verb.py`, beside D1's rank tests |
+| 4 — proof | §8 below |
+
+**The netmask comparison is the entire ruling.** PIA's rows are
+`0.0.0.0 128.0.0.0` and `128.0.0.0 128.0.0.0`; the true default is
+`0.0.0.0 0.0.0.0`. Matching on the destination alone would answer
+`10.97.7.100` on this machine — the exact wrong answer, arrived at by a
+different route — so the fixture keeps both PIA rows and there is a test that
+deletes only the true default row and asserts the reader answers `None` rather
+than falling to the tunnel.
+
+### Decisions worth naming
+
+* **The table's answer is KEPT, not merely used as a sort key.** It goes through
+  `_keep` like the probe's and the hostname's, so it is deduped and filtered by
+  the same exclusions and — on a machine whose hostname resolves to nothing and
+  whose probe names a tunnel — it is *found* rather than reordered. The plan's
+  item 2 says "ranks first"; making it a third source costs one line and closes
+  the case where ranking alone would have had nothing to rank.
+* **The row SHAPE is the anchor, not the `Active Routes:` header.** That header
+  is localised on a non-English Windows and the section is not otherwise
+  delimited. Five whitespace fields, the first two exactly `0.0.0.0`, the fourth
+  a v4 address, the fifth an integer — which the Persistent Routes table cannot
+  satisfy (four fields, and the word `Default` where a metric goes). There is a
+  test for that row too.
+* **The /24 arithmetic follows the table when the table answered.** Otherwise
+  ranks 2 and 3 would be computed against the tunnel while rank 0 is the LAN,
+  and the ordering would contradict itself one row down.
+* **`stdin=subprocess.DEVNULL` on the spawn.** This CLI is spoken to over stdio
+  by the launcher (`CALLER_STDIO_OWNER`, the module docstring's own subject); a
+  child inheriting that stdin could eat a frame addressed to us.
+  `CREATE_NO_WINDOW` on Windows for the same class of reason: `route.exe` is a
+  console program and the sheet calls `gateway id` on a timer.
+* **D1's four probe tests now pin `_default_route_address` to `None`.** They
+  shell out to nothing and assert the probe's own contract on the same fixtures
+  they always did; without the pin they would read *this* machine's routing
+  table and stop being tests of the thing they name.
+* **The macOS and Linux fixtures are NOT from this machine** — there is no Mac
+  and no Linux box in this worktree. They are the documented output shapes of
+  `route -n get default`, `ifconfig en0`, `ip -4 route show default` (with and
+  without `src`) and `ip -4 -o addr show dev eth0`, and they are labelled as
+  such in the file. The Windows fixture IS this machine's capture, PIA rows
+  included. What the three arms share is the dispatch test, which asserts the
+  argv of every command and that the second one does not run when the first
+  already answered.
+* **Silence costs exactly the pre-D1b order.** Asserted end to end rather than
+  by stubbing the helper this stage added: every routing command fails and the
+  list comes back byte-for-byte D1's.
+
+## 8. The read-only proof on this machine, with PIA still connected
+
+```
+cd X:/wt/d1-dialable
+HERMES_HOME=X:/Eternia/.hermes/profiles/base \
+HERMES_AGENT_RUNTIME_ROOT=X:/Eternia/.hermes/agent-runtime \
+PYTHONPATH=X:/wt/d1-dialable \
+  /c/Users/beast/.venvs/hermes-test/Scripts/python.exe -m hermes_cli.main harness gateway id --json
+```
+
+```json
+"dial_host":        {"host": "192.168.1.203", "port": 8765},
+"endpoints":        [192.168.1.203, 10.97.7.100, 25.3.92.221, 2620:9b::1903:5cdd]  (all :8765),
+"endpoints_source": "live",
+"listener":         {"host": "0.0.0.0", "port": 8765, "source": "live"},
+"install_id":       "bbdb8120-575d-4890-85e7-ecdbd650cde0"
+```
+
+Which is §4's run with the first two rows swapped, and it is the line D3 needs:
+`dial_host 192.168.1.203`, the router-granted address, while the tunnel is up.
+The tunnel keeps its row — it is a real address, and on a run where PIA is the
+only network it is the only one there is. Nothing was written; `install.json`
+is still at its 2026-08-27 stamp.
+
+## 9. Verification
+
+```
+bash scripts/run_tests.sh \
+  tests/hermes_cli/test_gateway_peer_verbs.py \
+  tests/hermes_cli/test_gateway_introduce_verb.py \
+  tests/hermes_cli/test_gateway.py
+```
+
+plus the four D1 files this ordering could reach
+(`test_gateway_pairing_verbs.py`, `test_gateway_peers_store.py`,
+`test_serve_gateway_auth.py`, `test_gateway_peer_two_roots_e2e.py`). Counts are
+in the final report. `ruff check` clean on both touched files; `ruff format` is
+not a gate in this repo (it would reformat pre-existing code in the same two
+files).
