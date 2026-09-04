@@ -110,6 +110,28 @@ success recorded, a cold process has no grace to serve from and honours its
 failures immediately. It moves the steady state, where a flapping probe used to
 re-run at full cost on every call.)
 
+Re-taken 2026-09-04, after the check_fn sweep left this path
+--------------------------------------------------------------
+The queue row that asked for this ("Stage 3a lost one of its four memos --
+re-measure whether the stage still earns its worker") was filed on the reading
+that nobody had measured a warm since the sweep went away. Two reads say
+otherwise, and they agree. S0a A6b (2026-09-03) measured the SECOND persona
+type at 1-2 ms. This re-take, three runs on a fresh interpreter and a hermetic
+root, measured the FIRST -- the number the decision actually turns on:
+
+    warm_persona_memos(dev) on a cold process : 1458 / 1543 / 1418 ms
+    the create-shaped resolve that follows    :   13 /    9 /   12 ms
+
+and, warming a second type afterwards, a delta of 0.8 / 4.1 / 2.0 ms.
+
+So the stage's remaining value is entirely warm #1, and it is intact: the
+registry populate is what costs, it is process-wide, and paying it on this
+worker keeps ~1.4-1.5 s off the first create's critical path in a serve
+process. What the lost check_fn sweep took with it was the per-persona half,
+which the W2-H3 block above had already priced at ~10-16 ms. Nothing here
+argues for a per-persona warm beyond the first, and nothing argues for
+retiring the worker.
+
 The worker is a daemon: a serve process shutting down must not wait on a cache
 fill, and there is nothing to flush.
 """
