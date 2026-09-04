@@ -301,3 +301,106 @@ def test_every_kept_row_is_still_in_the_table(code: str):
     assert code in _table(), (
         f"{code} is in _KEPT_UNSPENDABLE but no longer in ERROR_EXIT_CODES"
     )
+
+
+def test_every_archive_unreadable_subclass_inherits_the_exit_family_it_claims():
+    """A declared ``code`` that is not a table row silently exits 1.
+
+    ``_error_code_for_exception``'s ``ArchiveUnreadable`` arm returns
+    ``exc.code`` rather than a constant, and the comment beside it states the
+    invariant this pins: ``ActorsUnreadable`` "subclasses ``ArchiveUnreadable``
+    so it inherits the exit family and the cure SHAPE ... while naming a
+    DIFFERENT file".
+
+    Inheriting the family is not automatic. ``ERROR_EXIT_CODES.get(code, 1)``
+    falls back to 1 -- ``internal_error``'s own number -- for any code the
+    table does not carry, and ``_emit_harness_error``'s retryable set is a
+    literal of code strings. So a new subclass gets its own honest ``code`` in
+    the envelope and then reports the exact wrong story in the exit status and
+    in ``retryable``: a damaged server file read as a harness crash, which is
+    the half of EG-1.5 the whole ``exc.code``-not-a-constant shape exists to
+    fix.
+
+    Measured 2026-09-04, before this test: ``cards_unreadable`` and
+    ``persona_instances_unreadable`` were both absent from the table and both
+    absent from the retryable set, so ``harness`` verbs reaching them through
+    the catch-all exited 1 while their sibling ``actors_unreadable`` exited 7.
+    """
+
+    import inspect
+
+    from agent_runtime import errors as errors_mod
+    from hermes_cli.harness_support import ERROR_EXIT_CODES
+
+    subclasses = []
+
+    def _walk(cls):
+        for sub in cls.__subclasses__():
+            subclasses.append(sub)
+            _walk(sub)
+
+    _walk(errors_mod.ArchiveUnreadable)
+    declared = {
+        cls.__name__: cls.code
+        for cls in [errors_mod.ArchiveUnreadable, *subclasses]
+        if isinstance(inspect.getattr_static(cls, "code", None), str)
+    }
+    assert len(declared) >= 4, declared
+
+    missing = sorted(
+        f"{name} -> {code}" for name, code in declared.items() if code not in ERROR_EXIT_CODES
+    )
+    assert missing == [], (
+        "these ArchiveUnreadable classes declare a `code` that ERROR_EXIT_CODES "
+        "does not carry, so `ERROR_EXIT_CODES.get(code, 1)` hands them exit 1 -- "
+        "the internal_error number -- instead of the family their parent has:"
+        f"\n  {missing}"
+    )
+
+    wrong_family = sorted(
+        f"{name} -> {code} = {ERROR_EXIT_CODES[code]}"
+        for name, code in declared.items()
+        if ERROR_EXIT_CODES[code] != 7
+    )
+    assert wrong_family == [], (
+        "an unreadable-file condition is family 7 (repair the file, run the "
+        "identical call again). These are not:"
+        f"\n  {wrong_family}"
+    )
+
+
+def test_every_archive_unreadable_code_is_in_the_retryable_set():
+    """The envelope's two halves must not disagree about the same fault.
+
+    ``emit_harness_error`` computes ``retryable`` from a literal set of code
+    strings. A family-7 code missing from it emits ``retryable: false`` beside
+    exit 7 -- the disagreement the comment above that set forbids in so many
+    words.
+    """
+
+    import inspect
+
+    from agent_runtime import errors as errors_mod
+    from hermes_cli import harness_support
+
+    source = inspect.getsource(harness_support.emit_harness_error)
+
+    subclasses = []
+
+    def _walk(cls):
+        for sub in cls.__subclasses__():
+            subclasses.append(sub)
+            _walk(sub)
+
+    _walk(errors_mod.ArchiveUnreadable)
+    codes = {
+        cls.code
+        for cls in [errors_mod.ArchiveUnreadable, *subclasses]
+        if isinstance(inspect.getattr_static(cls, "code", None), str)
+    }
+    absent = sorted(code for code in codes if f'"{code}"' not in source)
+    assert absent == [], (
+        "these ArchiveUnreadable codes are not in `emit_harness_error`'s "
+        "retryable set, so the envelope says `retryable: false` beside a "
+        f"family-7 exit: {absent}"
+    )

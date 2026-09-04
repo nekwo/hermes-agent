@@ -217,6 +217,19 @@ ERROR_EXIT_CODES = {
     # the file is readable), the code is WHICH file to repair.
     "archive_unreadable": 7,
     "actors_unreadable": 7,
+    # The other two ``ArchiveUnreadable`` subclasses, added 2026-09-04. They
+    # were raised (``board_store.py`` card reads, ``persona_assignments.py``
+    # instance reads) and mapped -- ``_error_code_for_exception`` returns
+    # ``exc.code`` for the whole family -- but they had no ROW here, so
+    # ``ERROR_EXIT_CODES.get(code, 1)`` handed them 1: the number the two rows
+    # above are spending an entire comment to avoid, and the one that shares
+    # its family with ``internal_error``. The comment beside that mapping arm
+    # says a subclass "inherits the exit family"; it did not. Same family, same
+    # cure, one code per file, pinned now by
+    # ``tests/hermes_cli/test_error_exit_code_producers.py``
+    # ``::test_every_archive_unreadable_subclass_inherits_the_exit_family_it_claims``.
+    "cards_unreadable": 7,
+    "persona_instances_unreadable": 7,
     # A recorded idempotency receipt that cannot be resolved to the row it
     # names. Family 7 beside the two rows above because the operator cure is
     # theirs exactly — repair or remove one unreadable file and run the same
@@ -266,7 +279,7 @@ def emit_harness_error(exc: BaseException, *, args=None, code: str | None = None
         # AV hold releases or an operator repairs it, and the identical call then
         # succeeds. Saying ``retryable: false`` beside a 7 would have the two
         # halves of one envelope disagree about the same fault.
-        retryable=getattr(exc, "retryable", False) or error_code in {"runtime_unavailable", "daemon_offline", "timeout", "archive_unreadable", "actors_unreadable", "idempotent_replay_unresolved"},
+        retryable=getattr(exc, "retryable", False) or error_code in {"runtime_unavailable", "daemon_offline", "timeout", "archive_unreadable", "actors_unreadable", "cards_unreadable", "persona_instances_unreadable", "idempotent_replay_unresolved"},
         safe_details=safe_details,
     )
     cleaned = str(reason or "").strip()
@@ -353,6 +366,29 @@ def _error_code_for_exception(exc: BaseException) -> str:
         if text in ERROR_EXIT_CODES:
             return text
         return "invalid_request"
+    # THE CATCH-ALL, AND WHAT IT COSTS (surveyed 2026-09-04).
+    #
+    # Four typed conditions above are hand-placed AHEAD of this row, each with
+    # its own comment saying the same sentence: without the row, a REFUSAL or a
+    # damaged server file exits 1 as ``internal_error``, which names the wrong
+    # party. Four of one shape is a pattern, not four bugs -- the default here
+    # is "the harness crashed", and it is applied to every typed subclass
+    # nobody remembered to escape.
+    #
+    # Measured over every ``AgentRuntimeError`` subclass on this date, six
+    # still land here: ``ActorArchived`` (which DECLARES ``code =
+    # "actor_archived"`` and never gets to spend it through this lane -- only
+    # the two arms that catch it by hand, ``harness_parts/office.py`` and
+    # ``serve_rpc.py``, name it), ``SkillTombstoneRefused``,
+    # ``WorkspaceDeleteBlocked``, ``ProbeIsolationViolation``,
+    # ``PersonaInstanceRetireError`` and ``StaleModelOverrideWrite``. The first
+    # four are refusals.
+    #
+    # Whether the default should instead be DECLARED per error class -- read
+    # ``exc.code`` when the class carries one, and let this row cover only the
+    # classes that genuinely have no name for themselves -- is an open operator
+    # ruling, not a drive-by: it moves the exit status of live conditions, and
+    # ``actor_archived`` has no ``ERROR_EXIT_CODES`` row to move to yet.
     if isinstance(exc, AgentRuntimeError):
         return "internal_error"
     return "internal_error"
