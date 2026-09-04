@@ -619,6 +619,13 @@ def test_restore_stays_uncovered_and_remove_no_longer_does(
     ``office.surface.created``, which stays uncovered because a create authors a
     surface the client has never held. The token gate on the surviving
     surface event is pinned in its own tests below.
+
+    THIRD SPLIT (w12/l3, 2026-09-04). ``.conflict_resolved`` leaves this
+    assertion too, and for the same shape of reason as the second: the fact it
+    moves — the office row's ``conflict_actor_keys`` — finally has a producer,
+    ``office_conflict``. What survives here is the pair that still has none. Its
+    token gate gets its own tests at the end of this file, exactly as the
+    surface event's did.
     """
 
     declared = (
@@ -640,7 +647,6 @@ def test_restore_stays_uncovered_and_remove_no_longer_does(
 
     assert "office.actor.removed" in LIVE_COVERED_DOMAIN_EVENT_TYPES
     assert "office.actor.restored" not in LIVE_COVERED_DOMAIN_EVENT_TYPES
-    assert "office.actor.conflict_resolved" not in LIVE_COVERED_DOMAIN_EVENT_TYPES
     assert "office.surface.created" not in LIVE_COVERED_DOMAIN_EVENT_TYPES
 
 
@@ -692,10 +698,17 @@ def test_a_conflict_resolution_archive_still_emits_the_remove_even_with_emit_fal
     (``emit=False``) but the row really did leave the office.
 
     A client told nothing would render a desk the store no longer has, for the
-    rest of its session. That batch demotes anyway on its own uncovered
-    ``office.actor.conflict_resolved``, so the patch costs nothing here and is
-    honest everywhere — which is why the emit sits in ``_archive_actor_locked``
+    rest of its session. That batch used to demote anyway on its own uncovered
+    ``office.actor.conflict_resolved``, so the patch cost nothing here and was
+    merely honest — which is why the emit sits in ``_archive_actor_locked``
     rather than beside the domain event above it.
+
+    Since w12/l3 (2026-09-04) the event is coverable, so this remove is the only
+    thing that tells a folding client the desk went. The batch now carries TWO
+    removes and the test asserts both: the ACTOR row leaving the office, and the
+    ledger key leaving ``conflict_actor_keys``. They are separate entities on
+    purpose — one desk can leave without a conflict, and one conflict can resolve
+    (``take="local"``) without a desk moving at all.
     """
 
     import json as _json
@@ -720,7 +733,12 @@ def test_a_conflict_resolution_archive_still_emits_the_remove_even_with_emit_fal
         if e.type == STATE_PATCHED_EVENT_TYPE and e.payload.get("op") == "remove"
     ]
     assert removes == [
-        {"entity": OFFICE_ACTOR_ENTITY, "id": f"{WORKSPACE}/{actor_key}", "op": "remove"}
+        {"entity": OFFICE_ACTOR_ENTITY, "id": f"{WORKSPACE}/{actor_key}", "op": "remove"},
+        {
+            "entity": sp.OFFICE_CONFLICT_ENTITY,
+            "id": f"{WORKSPACE}/{actor_key}",
+            "op": "remove",
+        },
     ], batch
     # The domain event really was suppressed — otherwise this passes for the
     # wrong reason (it would just be re-testing the plain archive path).
@@ -1762,3 +1780,176 @@ def test_the_conflict_entity_is_not_folded_by_a_client_that_declares_the_actor_o
     assert event_is_patch_coverable(
         patch_event, fold_entities=todays_client | {sp.OFFICE_CONFLICT_ENTITY}
     )
+
+
+# --------------------------------------------------------------------------- #
+# w12/l3 stage 2: the producer in `resolve_conflict`, and the coverage entry
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def seeded_conflict(seeded_office):
+    """A conflict sidecar for ``qa``, with a REMOTE copy in it.
+
+    The adopt arm rather than the tombstone arm, because the tombstone arm is
+    already covered by the archive test above; what has never been exercised is
+    a resolve that GIVES you a desk and the ledger row that must ride with it.
+    """
+
+    from agent_runtime import paths
+
+    def _write(actor_key: str, *, remote: bool) -> None:
+        path = paths.office_conflict_path(WORKSPACE, actor_key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload: dict = {"actor_key": actor_key}
+        if remote:
+            row = to_jsonable(seeded_office.get_actor(WORKSPACE, actor_key))
+            row["items"] = row.get("items") or []
+            payload["remote_actor"] = row
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    return _write
+
+
+@pytest.mark.parametrize("take,remote", [("local", True), ("remote", True), ("remote", False)])
+def test_every_resolve_arm_emits_the_conflict_ledger_row(
+    seeded_office, seeded_conflict, set_delta_patches, take, remote
+):
+    """ALL THREE arms, and that is the whole point of the row.
+
+    The three are ``take="local"`` (keeps the local actor, writes NO actor row),
+    ``take="remote"`` with a remote copy (adopts it — an actor ``upsert``), and
+    ``take="remote"`` on a removal tombstone (archives the local actor — an actor
+    ``remove``). They move three different things about the ACTOR and exactly one
+    same thing about the OFFICE ROW: the key leaves ``conflict_actor_keys``. A
+    producer that fired on only the arms that touch an actor would leave the
+    ``take="local"`` pill lit forever, which is the failure the must-stay-absent
+    note called out by name.
+    """
+
+    set_delta_patches(True)
+    actor_key = "personainst_qa_agent_0001"
+    seeded_conflict(actor_key, remote=remote)
+
+    before = _log_end()
+    seeded_office.resolve_conflict(WORKSPACE, actor_key, take=take)
+
+    batch = [e for _, e in EventLog().iter_from_offset(before)]
+    conflict_rows = [
+        e.payload
+        for e in batch
+        if e.type == STATE_PATCHED_EVENT_TYPE
+        and e.payload.get("entity") == sp.OFFICE_CONFLICT_ENTITY
+    ]
+    assert conflict_rows == [
+        {
+            "entity": sp.OFFICE_CONFLICT_ENTITY,
+            "id": office_actor_patch_id(WORKSPACE, actor_key),
+            "op": "remove",
+        }
+    ], batch
+
+    # ORDER: the patch precedes its domain event, the ordering every emitter in
+    # the store uses and the one the ride-along rule assumes.
+    types = [e.type for e in batch]
+    assert types.index(STATE_PATCHED_EVENT_TYPE) < types.index(
+        "office.actor.conflict_resolved"
+    )
+    # The OTHER actor's conflict is untouched — a hoisted key would name it here.
+    assert not sp.office_patch_scope({"entity": "x", "id": "y"})
+
+
+def test_a_dry_run_resolve_emits_no_ledger_row(
+    seeded_office, seeded_conflict, set_delta_patches
+):
+    """``dry_run`` returns before the sidecar is archived, so there is nothing to
+    say. A row emitted here would tell every folding client a conflict cleared
+    that is still on disk."""
+
+    set_delta_patches(True)
+    actor_key = "personainst_qa_agent_0001"
+    seeded_conflict(actor_key, remote=True)
+
+    before = _log_end()
+    seeded_office.resolve_conflict(WORKSPACE, actor_key, take="remote", dry_run=True)
+
+    assert [e for _, e in EventLog().iter_from_offset(before)] == []
+
+
+def test_the_flag_off_emits_no_ledger_row(
+    seeded_office, seeded_conflict, set_delta_patches
+):
+    set_delta_patches(False)
+    actor_key = "personainst_qa_agent_0001"
+    seeded_conflict(actor_key, remote=True)
+
+    before = _log_end()
+    seeded_office.resolve_conflict(WORKSPACE, actor_key, take="remote")
+
+    batch = [e for _, e in EventLog().iter_from_offset(before)]
+    assert [e.type for e in batch] == ["office.actor.conflict_resolved"], batch
+
+
+def test_a_resolve_batch_promotes_only_for_a_client_that_declares_the_conflict_entity(
+    seeded_office, seeded_conflict, set_delta_patches
+):
+    """The token gate, from both sides — the assertion that lets the hermes half
+    land ahead of the launcher fold.
+
+    A fielded client declares ``office_actor`` (+ its lifecycle token) and knows
+    nothing of ``office_conflict``. Its wire must be byte-for-byte what it was:
+    the resolve keeps demoting to a full core. The same batch promotes for a
+    client that has declared the new entity, and nothing in between changed.
+    """
+
+    set_delta_patches(True)
+    actor_key = "personainst_qa_agent_0001"
+    seeded_conflict(actor_key, remote=True)
+
+    before = _log_end()
+    seeded_office.resolve_conflict(WORKSPACE, actor_key, take="remote")
+    batch = [e for _, e in EventLog().iter_from_offset(before)]
+
+    todays_client = HISTORICAL_FOLD_ENTITIES | {
+        OFFICE_ACTOR_ENTITY,
+        OFFICE_ACTOR_LIFECYCLE_CAPABILITY,
+        OFFICE_SURFACE_ENTITY,
+        OFFICE_SURFACE_FOLD_CAPABILITY,
+    }
+    assert not batch_is_patch_coverable(batch, fold_entities=todays_client)
+    assert batch_is_patch_coverable(
+        batch, fold_entities=todays_client | {sp.OFFICE_CONFLICT_ENTITY}
+    )
+
+    # And the DOMAIN EVENT is the half that needed the token: it carries no fold
+    # state, so without an explicit entry it would free-ride at a client that
+    # cannot fold the row beside it.
+    domain_event = next(
+        e for e in batch if e.type == "office.actor.conflict_resolved"
+    )
+    assert not event_is_patch_coverable(domain_event, fold_entities=todays_client)
+    assert event_is_patch_coverable(
+        domain_event, fold_entities=todays_client | {sp.OFFICE_CONFLICT_ENTITY}
+    )
+
+
+def test_declaring_the_conflict_entity_widens_nothing_else(
+    seeded_office, set_delta_patches
+):
+    """The nearest neighbour is ``office.actor.restored``, which still has no
+    producer for the row it moves. A sloppy family check would sweep it in."""
+
+    set_delta_patches(True)
+    seeded_office.remove_actor(WORKSPACE, "personainst_qa_agent_0001")
+    before = _log_end()
+    seeded_office.restore_actor(WORKSPACE, "personainst_qa_agent_0001")
+
+    declared = HISTORICAL_FOLD_ENTITIES | {
+        OFFICE_ACTOR_ENTITY,
+        OFFICE_ACTOR_LIFECYCLE_CAPABILITY,
+        OFFICE_SURFACE_ENTITY,
+        OFFICE_SURFACE_FOLD_CAPABILITY,
+        sp.OFFICE_CONFLICT_ENTITY,
+    }
+    assert not batch_is_patch_coverable(
+        [e for _, e in EventLog().iter_from_offset(before)], fold_entities=declared
+    )
+    assert "office.actor.restored" not in LIVE_COVERED_DOMAIN_EVENT_TYPES

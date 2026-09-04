@@ -1029,6 +1029,50 @@ class OfficeStore:
                 exc_info=True,
             )
 
+    def _emit_conflict_resolved_patch(
+        self, workspace_id: str, actor_key: str, *, correlation_id: str | None = None
+    ) -> None:
+        """Emit the ``office_conflict`` ``remove`` for one resolved sidecar.
+
+        The row ``office.actor.conflict_resolved`` never had, and the reason it
+        sat on ``patch_coverage``'s must-stay-absent list through three
+        successive arguments. The event's fold state is not on the ACTOR row at
+        all: it is the office row's ``conflict_actor_keys``, read off the sidecar
+        files by :meth:`scan_conflicts`, and EVERY arm of
+        :meth:`resolve_conflict` archives a sidecar — ``take="local"`` included,
+        which writes no actor row of any kind. Without this row a covered batch
+        would fold the resolved desk and leave the sync strip's conflict pill lit
+        for the rest of the session.
+
+        Called from inside ``office_lock`` and before the domain event, exactly
+        like its two siblings above — see ``_emit_actor_patch`` for why the
+        placement rather than the argument is the monotonicity guarantee.
+
+        Best-effort, like every emitter in this class: a patch-lane fault is a
+        missing PROMOTION, never a failed resolve.
+        """
+
+        try:
+            from .state_patches import emit_office_conflict_resolved_patch
+
+            emit_office_conflict_resolved_patch(
+                self.event_log,
+                workspace_id,
+                actor_key,
+                correlation_id=correlation_id,
+            )
+        except Exception as exc:
+            import logging
+
+            # See ``_emit_actor_patch``: the exception class rides the message so
+            # the demote this suppression now forces is attributable.
+            logging.getLogger(__name__).warning(
+                "office conflict resolved patch emit failed: %s error=%s",
+                actor_key,
+                type(exc).__name__,
+                exc_info=True,
+            )
+
     # --- surface reads ----------------------------------------------------
 
     def get_surface(self, workspace_id: str) -> OfficeSurface:
@@ -1888,13 +1932,20 @@ class OfficeStore:
         BOTH ``take="remote"`` arms also emit their ``office_actor`` patch — the
         adopt arm an ``upsert``, the edit-vs-remove arm the ``remove``
         ``_archive_actor_locked`` has always emitted. ``take="local"`` writes no
-        row and emits none. That does NOT make the domain event coverable: the
-        resolution also ARCHIVES the conflict sidecar, which takes the key out
-        of the office row's ``conflict_actor_keys``, and no ``office_actor``
-        patch carries that field (the launcher's ``_applyOfficeActorPatch``
-        never writes it). A covered batch would clear the desk and leave the
-        sync strip's conflict pill lit for the rest of the session. See
-        ``patch_coverage`` for that ruling in full.
+        row and emits none.
+
+        Those actor rows were never the missing half. The resolution also
+        ARCHIVES the conflict sidecar, which takes the key out of the office
+        row's ``conflict_actor_keys``, and no ``office_actor`` patch carries that
+        field (the launcher's ``_applyOfficeActorPatch`` never writes it) — so a
+        covered batch would clear the desk and leave the sync strip's conflict
+        pill lit for the rest of the session. **That is what
+        :meth:`_emit_conflict_resolved_patch` now carries**, on all three arms,
+        which is why the archive is the thing it pairs with rather than the
+        write: ``take="local"`` moves the ledger and nothing else. The domain
+        event is coverable from 2026-09-04 (w12/l3), gated on the client
+        declaring ``office_conflict``. See ``patch_coverage`` for the ruling in
+        full.
 
         ``allow_class_key`` is the operator's on-the-record override for the
         class-key fence below (``harness office resolve-conflict
@@ -1983,6 +2034,12 @@ class OfficeStore:
                 # nothing (matches the real return, incl. None for edit-vs-remove).
                 return result_actor
             _archive_conflict_sidecar(wsid, actor_key)
+            # The row the archive above moves, on ALL THREE arms — the fact that
+            # kept this method's domain event uncoverable. Before the domain
+            # event and inside the lock, like every emitter in this class.
+            self._emit_conflict_resolved_patch(
+                wsid, actor_key, correlation_id=correlation_id
+            )
             self._emit(
                 "office.actor.conflict_resolved",
                 correlation_id,
@@ -2347,9 +2404,13 @@ class OfficeStore:
         # It fires for ``emit=False`` too, and that is correct rather than an
         # oversight: ``resolve_conflict``'s edit-vs-remove branch suppresses the
         # DOMAIN event, but the row really did leave the office and a client that
-        # never heard so would render a desk the store no longer has. That batch
-        # demotes anyway on its own uncovered ``office.actor.conflict_resolved``,
-        # so the patch costs nothing there and is honest everywhere.
+        # never heard so would render a desk the store no longer has. Until
+        # 2026-09-04 that batch demoted anyway on its own uncovered
+        # ``office.actor.conflict_resolved``, so the patch cost nothing there and
+        # was merely honest; since w12/l3 gave the conflict ledger a row and the
+        # event became coverable, this remove is the ONLY thing telling a folding
+        # client the desk went — which is what the paragraph above was insuring
+        # against, arriving.
         self._emit_actor_remove_patch(actor, correlation_id=correlation_id)
         if emit:
             self._emit(

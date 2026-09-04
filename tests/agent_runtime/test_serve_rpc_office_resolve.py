@@ -1162,6 +1162,8 @@ def test_the_adopt_arm_emits_the_actor_patch_its_archive_sibling_always_did(monk
     from agent_runtime.events import EventLog
     from agent_runtime.state_patches import (
         OFFICE_ACTOR_ENTITY,
+        OFFICE_CONFLICT_ENTITY,
+        PATCH_OP_REMOVE,
         PATCH_OP_UPSERT,
         office_actor_patch_id,
     )
@@ -1178,8 +1180,13 @@ def test_the_adopt_arm_emits_the_actor_patch_its_archive_sibling_always_did(monk
     assert "error" not in reply, reply
 
     rows = _patch_rows(before)
+    # Since w12/l3 (2026-09-04) the ledger row rides beside the actor row: the
+    # resolve archives the conflict sidecar on every arm, and that departure is
+    # what ``office_conflict`` carries. Order is the store's emit order — the
+    # actor write first, the sidecar archive after it.
     assert [(r["entity"], r["op"]) for r in rows] == [
-        (OFFICE_ACTOR_ENTITY, PATCH_OP_UPSERT)
+        (OFFICE_ACTOR_ENTITY, PATCH_OP_UPSERT),
+        (OFFICE_CONFLICT_ENTITY, PATCH_OP_REMOVE),
     ], rows
     row = rows[0]
     assert row["id"] == office_actor_patch_id(WORKSPACE, QA_INSTANCE)
@@ -1194,13 +1201,28 @@ def test_the_adopt_arm_emits_the_actor_patch_its_archive_sibling_always_did(monk
     assert "created" not in row, row
 
 
-def test_take_local_writes_no_actor_and_therefore_emits_no_patch(monkeypatch):
-    """The other half of the pair, and the second independent reason the domain
-    event must stay uncovered: ``take="local"`` keeps the row it already had, so
-    there is no write and no patch — only the domain event a covered batch would
-    promote into a frame carrying nothing."""
+def test_take_local_writes_no_actor_but_still_moves_the_conflict_ledger(monkeypatch):
+    """The other half of the pair, and the arm that decided the SHAPE of the fix.
+
+    ``take="local"`` keeps the row it already had, so there is no actor write and
+    no ``office_actor`` patch. Until 2026-09-04 that was the second independent
+    reason the domain event had to stay uncovered — covering it would have
+    promoted a batch carrying nothing a client could fold.
+
+    It is also why the producer w12/l3 added pairs with the SIDECAR ARCHIVE
+    rather than with the actor write. This arm moves exactly one thing: the key
+    leaves ``conflict_actor_keys``. A producer hung off the write would have
+    fired on two arms out of three and left this one's conflict pill lit forever
+    — the failure ``patch_coverage``'s note named, arriving through the fix
+    meant to close it.
+    """
 
     from agent_runtime.events import EventLog
+    from agent_runtime.state_patches import (
+        OFFICE_CONFLICT_ENTITY,
+        PATCH_OP_REMOVE,
+        office_actor_patch_id,
+    )
 
     _with_delta_patches(monkeypatch)
     _seed()
@@ -1213,40 +1235,46 @@ def test_take_local_writes_no_actor_and_therefore_emits_no_patch(monkeypatch):
     )
     assert "error" not in reply, reply
 
-    assert _patch_rows(before) == []
+    rows = _patch_rows(before)
+    assert [(r["entity"], r["op"]) for r in rows] == [
+        (OFFICE_CONFLICT_ENTITY, PATCH_OP_REMOVE)
+    ], rows
+    assert rows[0]["id"] == office_actor_patch_id(WORKSPACE, QA_INSTANCE)
     types = [e.type for _, e in EventLog().iter_from_offset(before)]
     assert "office.actor.conflict_resolved" in types, types
 
 
-# ── coverage, deliberately unmoved ──────────────────────────────────────────
+# ── coverage: what a today's client sees, and what a declaring one does ─────
 
 
-def test_the_batch_a_resolve_lands_in_still_demotes_for_every_client(monkeypatch):
-    """The stage's "no coverage change" claim, pinned rather than asserted in
-    prose.
+def test_a_resolve_batch_demotes_for_todays_client_and_promotes_for_a_declaring_one(
+    monkeypatch,
+):
+    """The coverage claim, pinned rather than asserted in prose — and INVERTED
+    on 2026-09-04 (w12/l3), which is why the history is kept.
 
-    ``office.actor.conflict_resolved`` is deliberately absent from
-    ``LIVE_COVERED_DOMAIN_EVENT_TYPES`` and must stay absent — but NOT for the
-    reason this docstring gave until 2026-09-02. It said the adoption wrote the
-    peer's row past the patch chokepoint so no patch carried it; that was true,
-    and the fix one test up retired it. The LIVE reason is the container row:
-    every arm archives the conflict SIDECAR, which takes the key out of the
-    office row's ``conflict_actor_keys``, and no ``office_actor`` patch carries
-    that field (the launcher's ``_applyOfficeActorPatch`` never writes it). A
-    covered batch would fold the resolved desk and leave the sync strip's
+    This test asserted that a resolve batch demotes for EVERY client, and it was
+    right for three successive reasons. The first two are retired on the tests
+    above it. The third and best was the container row: every arm archives the
+    conflict SIDECAR, which takes the key out of the office row's
+    ``conflict_actor_keys``, and no ``office_actor`` patch carried that field, so
+    a covered batch would fold the resolved desk and leave the sync strip's
     conflict pill lit for the rest of the session.
 
-    Asserted from both ends: the batch really carries the domain event, it now
-    DOES carry the adopted actor's patch, and it is still uncoverable even for a
-    client declaring every fold token this runtime knows — which is the only
-    assertion here that was ever the point.
+    What changed is not the honesty rule but the WIRE: ``office_conflict`` is a
+    producer for that ledger, so the fact is now on a row and the event is
+    coverable. The assertion therefore splits rather than being deleted — a
+    client that declares every token this runtime knew YESTERDAY still demotes,
+    byte-for-byte, and only one that declares the new entity promotes. That
+    split IS the compatibility claim that let the hermes half land before the
+    launcher fold; a single "it promotes" assertion would have hidden it.
 
     The tombstone arm is the POSITIVE CONTROL, and it is why this test covers two
     scenarios instead of one. ``_archive_actor_locked`` emits its paired remove
-    patch even with the domain event suppressed, so that batch carries a
+    patch even with the domain event suppressed, so that batch carries an actor
     ``remove`` where the adopt arm carries an ``upsert`` — two different rows,
-    both demoted by the same uncovered event, exactly as the coverage module's
-    comment block says they should be.
+    both riding the same ledger row, and both answering the declaration the same
+    way.
     """
 
     from agent_runtime import state_patches as sp
@@ -1260,6 +1288,7 @@ def test_the_batch_a_resolve_lands_in_still_demotes_for_every_client(monkeypatch
     )
     from agent_runtime.state_patches import (
         OFFICE_ACTOR_ENTITY,
+        OFFICE_CONFLICT_ENTITY,
         STATE_PATCHED_EVENT_TYPE,
     )
 
@@ -1287,14 +1316,20 @@ def test_the_batch_a_resolve_lands_in_still_demotes_for_every_client(monkeypatch
         (e.payload["entity"], e.payload["op"])
         for e in batch
         if e.type == STATE_PATCHED_EVENT_TYPE
-    ] == [(OFFICE_ACTOR_ENTITY, "upsert")], types
+    ] == [(OFFICE_ACTOR_ENTITY, "upsert"), (OFFICE_CONFLICT_ENTITY, "remove")], types
 
+    # Every token this runtime knew before w12/l3. A fielded launcher declares a
+    # SUBSET of this, so if the widest yesterday-client still demotes, so does
+    # every real one.
     widened = HISTORICAL_FOLD_ENTITIES | {
         OFFICE_ACTOR_ENTITY,
         OFFICE_ACTOR_LIFECYCLE_CAPABILITY,
         OFFICE_SURFACE_FOLD_CAPABILITY,
     }
     assert not batch_is_patch_coverable(batch, fold_entities=widened), types
+    assert batch_is_patch_coverable(
+        batch, fold_entities=widened | {OFFICE_CONFLICT_ENTITY}
+    ), types
 
     # The positive control: the tombstone arm DOES emit a patch, so the producer
     # is live in this run — and that batch demotes too.
@@ -1317,6 +1352,10 @@ def test_the_batch_a_resolve_lands_in_still_demotes_for_every_client(monkeypatch
     types = [e.type for e in batch]
     rows = [e.payload for e in batch if e.type == STATE_PATCHED_EVENT_TYPE]
     assert [(r["entity"], r["op"]) for r in rows] == [
-        (OFFICE_ACTOR_ENTITY, "remove")
+        (OFFICE_ACTOR_ENTITY, "remove"),
+        (OFFICE_CONFLICT_ENTITY, "remove"),
     ], rows
     assert not batch_is_patch_coverable(batch, fold_entities=widened), types
+    assert batch_is_patch_coverable(
+        batch, fold_entities=widened | {OFFICE_CONFLICT_ENTITY}
+    ), types

@@ -92,6 +92,7 @@ from typing import Any, Iterable
 from .state_patches import (
     FOLDABLE_PATCH_OPS,
     OFFICE_ACTOR_ENTITY,
+    OFFICE_CONFLICT_ENTITY,
     OFFICE_SURFACE_ENTITY,
     PATCH_OP_REMOVE,
     PATCH_OP_UPSERT,
@@ -273,17 +274,17 @@ LIVE_COVERED_DOMAIN_EVENT_TYPES: frozenset[str] = frozenset(
         # uncoverable event was demoting the whole boot batch.
         #
         # The REMAINING siblings are deliberately absent and must stay absent.
-        # ``office.actor.restored`` / ``.conflict_resolved`` and
-        # ``office.surface.created`` move surface state a fold genuinely cannot
-        # reproduce: a create authors a surface the client has never held (and
-        # is emitted by lazy ``ensure_surface`` from inside other writes, so
-        # covering it would need a pairing audit of every one of them) and a
-        # restore un-archives from a copy the client never held. Leaving them
-        # uncovered routes their batches down the full-core lane with no new
-        # code and no new failure mode.
+        # ``office.actor.restored`` and ``office.surface.created`` move surface
+        # state a fold genuinely cannot reproduce: a create authors a surface the
+        # client has never held (and is emitted by lazy ``ensure_surface`` from
+        # inside other writes, so covering it would need a pairing audit of every
+        # one of them) and a restore un-archives from a copy the client never
+        # held. Leaving them uncovered routes their batches down the full-core
+        # lane with no new code and no new failure mode.
         #
-        # ``.conflict_resolved`` is in that list too, and its reason has now
-        # been wrong TWICE, so the dead ones are kept beside the live one.
+        # ``office.actor.conflict_resolved`` WAS in that list, and its reason was
+        # wrong three times running, so the dead ones are kept beside the record
+        # of what finally discharged it.
         #
         # It first said the resolution "adopts a peer's row through a path that
         # bypasses the upsert chokepoint" — an argument H1 (``f810bd2ac``)
@@ -299,28 +300,39 @@ LIVE_COVERED_DOMAIN_EVENT_TYPES: frozenset[str] = frozenset(
         # not for this list's, because a resolve that GAVE you a desk reached no
         # live consumer while its edit-vs-remove sibling's ``remove`` did.
         #
-        # The LIVE reason is this module's derivability audit, and it is about
-        # the CONTAINER row rather than the actor row. EVERY arm — including
-        # ``take="local"``, which writes no actor at all — calls
+        # Its third and best reason was this module's derivability audit, and it
+        # was about the CONTAINER row rather than the actor row. EVERY arm —
+        # including ``take="local"``, which writes no actor at all — calls
         # ``_archive_conflict_sidecar``, and the office projection reads those
-        # sidecars into ``conflict_actor_keys`` (``snapshot.office_summary_row``, off
-        # ``OfficeStore.scan_conflicts``). No ``office_actor`` patch carries
-        # that field, and the launcher's ``_applyOfficeActorPatch`` never writes
-        # it — it is one of the office-row keys ``_officeSurfaceFields``
+        # sidecars into ``conflict_actor_keys`` (``snapshot.office_summary_row``,
+        # off ``OfficeStore.scan_conflicts``). No ``office_actor`` patch carried
+        # that field, the launcher's ``_applyOfficeActorPatch`` never wrote it,
+        # and it is one of the office-row keys ``_officeSurfaceFields``
         # deliberately refuses to let ANY patch move. A covered batch would
-        # therefore fold the resolved desk and leave the sync strip's conflict
-        # pill lit for the rest of the session: a conflict rendered on the row
-        # whose conflict this very gesture resolved.
+        # therefore have folded the resolved desk and left the sync strip's
+        # conflict pill lit for the rest of the session: a conflict rendered on
+        # the row whose conflict that very gesture resolved.
         #
-        # ``take="local"`` adds a second, independent refusal: it emits the
-        # domain event and no patch, so covering it would promote a batch whose
-        # only member the launcher ignores by contract — a patch frame carrying
-        # nothing, for a gesture that moved the conflict list.
+        # **That reason named its own retirement, and w12/l3 built it**
+        # (2026-09-04). The note ended "covering this event needs a producer for
+        # the CONFLICT LIST, not one for the actor row — a new patch entity, or a
+        # widened office row and its capability token". It is the first of the
+        # two: ``state_patches.OFFICE_CONFLICT_ENTITY``, one entity with one op,
+        # emitted by ``OfficeStore._emit_conflict_resolved_patch`` from inside
+        # ``office_lock`` on all three arms — which is why the ``take="local"``
+        # objection goes with it. That arm was the second, independent refusal
+        # ("it emits the domain event and no patch, so covering it would promote
+        # a batch whose only member the launcher ignores by contract"); it now
+        # carries the one row the gesture actually moved.
         #
-        # Covering this event needs a producer for the CONFLICT LIST, not one
-        # for the actor row. That is a cross-stack change (a new patch entity,
-        # or a widened office row and its capability token), not a line in this
-        # set.
+        # The event is therefore LIVE-covered and TOKEN-GATED on
+        # ``office_conflict`` — see :data:`TOKEN_GATED_DOMAIN_EVENT_TYPES`, whose
+        # WS1 entries make the same trade: a brand-new entity with exactly one op
+        # is its own token, because "can you fold the paired row" and "may this
+        # event free-ride" are one question. A client that has not declared it is
+        # sent no such row and may not promote the event, so its wire is
+        # byte-for-byte what it was — which is what let the hermes half land
+        # ahead of the launcher fold.
         #
         # ``persona_instance.chat_binding_cleared`` is the PERSONA-side member
         # of that must-stay-absent list, and it is the one whose absence reads
@@ -397,6 +409,24 @@ LIVE_COVERED_DOMAIN_EVENT_TYPES: frozenset[str] = frozenset(
         # ``planned/iws-ws12-field-notes-2026-09-01.md``.
         "workspace.activated",
         "realm.activated",
+        # The CONFLICT-LEDGER half (w12/l3, 2026-09-04). Pairs with the
+        # ``office_conflict`` ``remove`` ``OfficeStore.resolve_conflict`` now
+        # emits on all three arms, and rides that entity as its token below. The
+        # three reasons it was absent for, and what discharged each, are in the
+        # must-stay-absent note above — kept there rather than moved here,
+        # because a retired argument is worth more beside its siblings than in
+        # the history of a line.
+        #
+        # THE DERIVABILITY AUDIT. The resolve moves exactly two things a client
+        # holds: the ACTOR row (``take="remote"`` — carried verbatim by the
+        # ``office_actor`` upsert or remove that arm already emits) and the
+        # office row's ``conflict_actor_keys`` (all three arms — carried by the
+        # new row, which names the departing key). It moves no count, no folder,
+        # no surface revision: ``_archive_conflict_sidecar`` renames one file and
+        # ``scan_conflicts`` skips ``*.resolved.json``, so the ledger is the
+        # whole of the container-row effect. Nothing is left that only the
+        # demoted full core could say.
+        "office.actor.conflict_resolved",
     }
 )
 
@@ -430,6 +460,10 @@ TOKEN_GATED_DOMAIN_EVENT_TYPES: dict[str, str] = {
     "office.surface.updated": OFFICE_SURFACE_FOLD_CAPABILITY,
     "workspace.activated": SCOPE_ENTITY,
     "realm.activated": SCOPE_ENTITY,
+    # w12/l3 takes WS1's trade for the same reason: ``office_conflict`` is a
+    # brand-new entity with exactly one op, so the entity name IS the token and a
+    # fifth capability string could only ever agree with it.
+    "office.actor.conflict_resolved": OFFICE_CONFLICT_ENTITY,
 }
 
 COVERED_DOMAIN_EVENT_TYPES: frozenset[str] = (
@@ -644,7 +678,7 @@ def event_is_patch_coverable(
     same token as its pair, or an undeclared client would be promoted a batch it
     answers with a re-hydrate. Anything else (task/assignment domain events, run
     traces, ``state.reconciled`` watchdog, board/flow writes, the office
-    surface-CREATE/restore/conflict writes, planning.py chokepoint-less
+    surface-CREATE and actor-RESTORE writes, planning.py chokepoint-less
     mutations) is uncovered → the whole batch falls back to a full core."""
 
     event_type = getattr(event, "type", None)

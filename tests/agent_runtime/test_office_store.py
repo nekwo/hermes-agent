@@ -934,7 +934,11 @@ def test_resolve_conflict_dry_run_leaves_sidecar_and_is_eventless():
     resolved = store.resolve_conflict(ws, "dev", take="local")
     assert resolved is not None
     assert not sidecar.exists()
-    assert _office_event_count() == before_events + 1
+    # TWO since w12/l3 (2026-09-04): the domain event, and the ``office_conflict``
+    # ``state.patched`` that carries the key leaving ``conflict_actor_keys``.
+    # ``take="local"`` writes no actor, so the ledger row is the whole of what
+    # this arm puts on the wire — which is exactly why it exists.
+    assert _office_event_count() == before_events + 2
 
 
 # --------------------------------------------------------------------------- #
