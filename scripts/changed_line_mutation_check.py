@@ -108,6 +108,25 @@ PLATFORMS = frozenset({"posix", "windows"})
 #: answer.
 MAX_REINDENT_COLUMNS = 16
 
+#: The optional claim field holding the commit a claim's needle was DERIVED at.
+#:
+#: What it is for. ``find`` is a source SPELLING inside the anchored symbol. The
+#: loud failure — a spelling that stopped occurring — is a configuration error
+#: and impossible to miss (S8b and the S5 landing both paid it). The quiet one
+#: is the reason this field exists: a needle that STILL resolves after a
+#: semantic edit runs a mutation nobody re-derived, and the run goes green on a
+#: guarantee that may no longer be the guarantee.
+#:
+#: Ruled 2026-09-04: ONE optional field carrying the commit, NO backfill, and a
+#: stale marker is a WARNING in the report and never a failure. All three halves
+#: are load-bearing. No backfill, so ABSENCE means "written before this schema"
+#: and says nothing about the claim's health — the 289 rows here at the ruling
+#: are not silently asserted to be fresh. And a warning rather than a refusal,
+#: because staleness is a suspicion, not a defect: a claim whose file moved
+#: underneath it is usually still correct, and a gate that refuses on suspicion
+#: is a gate that gets its budget raised until it says nothing.
+DERIVED_AT_KEY = "derived_at"
+
 #: Where ``_partition_claims`` parks the resolved :class:`ClaimAnchor` on the
 #: claim row. Not a claim FIELD — the schema check above rejects unknown-shaped
 #: rows on the way in, and this is added after that check, by us, on our copy.
@@ -616,7 +635,7 @@ def _partition_claims(
         # `platforms: ["posix"]` is the typo this schema invites, and an
         # ignored field would mean the claim runs on every host while its
         # author believes it is scoped — a silent SURVIVED waiting to happen.
-        unknown = sorted(set(claim) - required - {"platforms"})
+        unknown = sorted(set(claim) - required - {"platforms", DERIVED_AT_KEY})
         if unknown:
             raise RuntimeError(f"{claims_path}: {claim['id']}: unknown claim fields: {unknown}")
         _declared_platforms(claim)
@@ -635,6 +654,40 @@ def _partition_claims(
         else:
             unselected.append(claim)
     return selected, unselected
+
+
+def _commits_since_derivation(claim: dict[str, Any]) -> int | None:
+    """How many commits have touched this claim's file since it was derived.
+
+    ``None`` when there is nothing to say: no :data:`DERIVED_AT_KEY` on the row
+    (the pre-schema majority), or a commit git cannot resolve in this checkout —
+    a shallow clone and a worktree that has not fetched the sha are both normal,
+    and neither is a fact about the claim. A count of ``0`` is a real answer and
+    a different one: derived here, nothing has moved.
+
+    Deliberately counts COMMITS TO THE FILE and not to the symbol. A per-symbol
+    read would need the anchor resolved at the old commit — a checkout per claim
+    — to say something this report is not entitled to say anyway: the output is
+    a prompt to a human re-derivation, and "this file has moved 14 times since
+    anyone looked at this needle" is enough to prompt one.
+    """
+
+    derived_at = str(claim.get(DERIVED_AT_KEY, "") or "").strip()
+    if not derived_at:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "log", "--oneline", f"{derived_at}..HEAD", "--", str(claim["path"])],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    return len([line for line in result.stdout.splitlines() if line.strip()])
 
 
 def _symbol_head(claim: dict[str, Any]) -> str:
@@ -821,6 +874,24 @@ def run(base: str, claims_path: Path, exemptions_path: Path, max_candidates: int
             print(
                 f"RE-ANCHORED: {claim['id']} ({claim['path']}::{claim['symbol']} "
                 f"re-indented {anchor.shift:+d} columns)"
+            )
+    # The QUIET failure, made visible. A needle that stopped occurring is a
+    # configuration error nobody can miss; a needle that still resolves after a
+    # semantic edit runs a mutation nobody re-derived, and until this line the
+    # run said nothing at all about that. Only for the SELECTED claims: this is
+    # a prompt about work this run is actually doing.
+    #
+    # A WARNING and never a failure (ruled 2026-09-04), and printed on stdout
+    # beside the rest of the report rather than on stderr, because it is not an
+    # error channel — it is a line a reader of a GREEN run is meant to read.
+    for claim in claims:
+        moved = _commits_since_derivation(claim)
+        if moved:
+            print(
+                f"WARNING: stale derivation: {claim['id']} was derived at "
+                f"{str(claim[DERIVED_AT_KEY])[:12]} and {claim['path']} has moved "
+                f"in {moved} commit(s) since; re-derive the needle or re-stamp "
+                f"{DERIVED_AT_KEY}"
             )
     if list_only:
         # Only under ``--list``, which is the inventory lane. A real run prints

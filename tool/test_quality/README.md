@@ -82,6 +82,35 @@ structure changed does not. A re-anchored run says so — `RE-ANCHORED: <id> …
 re-indented -8 columns` — after the `mutation candidates:` line, for selected
 and unselected claims alike.
 
+## `derived_at`: the needle is a spelling, and the quiet failure is silence
+
+`find` is a source SPELLING inside the anchored symbol, so a semantic edit that
+leaves the spelling standing runs a mutation nobody re-derived — and the run
+goes green on a guarantee that may no longer be the guarantee. The loud version
+of this is impossible to miss (`mutation source must occur exactly once; found
+0`, paid by S8b and by the S5 landing); the quiet one had no surface at all.
+
+Ruled 2026-09-04, and all three halves are deliberate:
+
+- **One optional field.** A claim may carry `derived_at`, the commit its needle
+  was last derived at. Nothing else records provenance, and the schema had to be
+  taught the key: unknown claim fields are refused by design, so this is not a
+  convention an author could have adopted on their own.
+- **No backfill.** ABSENCE means "written before this schema" and says nothing
+  about a claim's health. The rows that predate the field are not silently
+  asserted to be fresh.
+- **A stale marker is a WARNING, never a failure.** A selected claim whose file
+  has moved since its `derived_at` prints
+  `WARNING: stale derivation: <id> was derived at <sha> and <path> has moved in
+  <n> commit(s) since` on stdout, beside the rest of the report, and the run's
+  exit code is untouched. Staleness is a suspicion, not a defect — a claim whose
+  file moved underneath it is usually still correct, and a gate that refuses on
+  suspicion is one that gets turned off.
+
+The count is of commits to the FILE, not to the symbol: a per-symbol read would
+need the anchor resolved at the old commit to say something the report is not
+entitled to say anyway. The line is a prompt to a human re-derivation.
+
 Honest exceptions live in `mutation_exemptions.yaml` (JSON syntax is valid YAML
 and keeps the pre-install CI selector dependency-free). Every exception must
 name its path, symbol, operator, reason, owner, issue/evidence, and expiry.

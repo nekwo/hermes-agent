@@ -326,3 +326,122 @@ def test_the_census_reads_the_diff_and_leaves_tests_and_deletions_out(monkeypatc
     assert recorded == [
         ["git", "diff", "--name-only", "--diff-filter=d", "BASE", "--", "*.py"]
     ]
+
+
+# ─────────────────────── derivation provenance (ruled 2026-09-04) ────────────
+
+
+def test_a_claim_may_carry_the_commit_its_needle_was_derived_at(
+    tmp_path, claim_files, touched, capsys
+):
+    """The schema accepts `derived_at`, and accepting it is the whole first half.
+
+    `mutation_claims.json` refuses unknown fields BY DESIGN — a `platform:` for
+    `platforms:` would otherwise mean a claim runs everywhere while its author
+    believes it is scoped. So recording provenance is not a convention anyone
+    can adopt in a claim file; it needs the schema to let the key through.
+
+    ANTI-VACUITY: the same claim without the field is exercised by every other
+    case in this module, and the run below is asserted to reach the candidate
+    line rather than merely to avoid raising — a schema that dropped the key
+    silently would also pass a bare `code == 0`.
+    """
+
+    claim = _claim("dated", claim_files["first"], "beta = 2", "beta = 99")
+    claim[gate.DERIVED_AT_KEY] = "0123456789abcdef0123456789abcdef01234567"
+    claims = _claims_file(tmp_path, [claim])
+    touched({claim_files["first"]: {2}})
+
+    code = gate.run(
+        "BASE", claims, _exemptions_file(tmp_path), max_candidates=12, list_only=True
+    )
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "  dated:" in out
+
+
+def test_a_moved_file_warns_about_the_derivation_and_never_fails_the_run(
+    tmp_path, claim_files, touched, capsys, monkeypatch
+):
+    """The ruled behaviour: a stale marker is a WARNING, never a refusal.
+
+    The failure this addresses is the QUIET one. A needle that stopped
+    occurring is a configuration error nobody can miss; a needle that still
+    resolves after a semantic edit runs a mutation nobody re-derived, and the
+    run goes green on a guarantee that may no longer be the guarantee.
+
+    ANTI-VACUITY: the exit code is asserted to be 0 IN THE SAME CASE as the
+    warning text, so an implementation that reported staleness by refusing —
+    the obvious wrong answer, and the one the ruling names — fails here even
+    though it "detected" the same thing. `_commits_since_derivation` is stubbed
+    for the wiring; the real git read is exercised against this repo's own
+    history in the case below.
+    """
+
+    monkeypatch.setattr(gate, "_commits_since_derivation", lambda claim: 4)
+    claim = _claim("dated", claim_files["first"], "beta = 2", "beta = 99")
+    claim[gate.DERIVED_AT_KEY] = "0123456789abcdef0123456789abcdef01234567"
+    claims = _claims_file(tmp_path, [claim])
+    touched({claim_files["first"]: {2}})
+
+    code = gate.run(
+        "BASE", claims, _exemptions_file(tmp_path), max_candidates=12, list_only=True
+    )
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "WARNING: stale derivation: dated was derived at 0123456789ab" in out
+    assert "has moved in 4 commit(s) since" in out
+
+
+def test_a_claim_with_no_derivation_recorded_says_nothing(
+    tmp_path, claim_files, touched, capsys, monkeypatch
+):
+    """No backfill was ruled, so ABSENCE means "written before this schema".
+
+    It must not be reported as fresh and must not be reported as stale: the 289
+    rows that predate the field carry no claim about their own health, and a
+    report that invented one either way would be the gate asserting something
+    nobody measured.
+
+    ANTI-VACUITY: the stub says "this file has moved" for every claim it is
+    asked about, so silence here is the ABSENCE of the field doing the work and
+    not a quiet stub.
+    """
+
+    monkeypatch.setattr(gate, "_commits_since_derivation", gate._commits_since_derivation)
+    claims = _claims_file(
+        tmp_path, [_claim("undated", claim_files["first"], "beta = 2", "beta = 99")]
+    )
+    touched({claim_files["first"]: {2}})
+
+    code = gate.run(
+        "BASE", claims, _exemptions_file(tmp_path), max_candidates=12, list_only=True
+    )
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "stale derivation" not in out
+
+
+def test_the_derivation_read_counts_real_commits_against_this_repo():
+    """The git half, against this checkout's own history — no stub anywhere.
+
+    ANTI-VACUITY: three claims over the SAME path, differing only in the
+    recorded commit — HEAD (nothing has moved since), HEAD's first parent (this
+    file's own history is what decides), and a sha that does not resolve. A
+    helper that answered a constant cannot produce those three answers.
+    """
+
+    def _claim_at(commit):
+        row = {"path": "scripts/changed_line_mutation_check.py"}
+        if commit is not None:
+            row[gate.DERIVED_AT_KEY] = commit
+        return row
+
+    assert gate._commits_since_derivation(_claim_at("HEAD")) == 0
+    assert gate._commits_since_derivation(_claim_at(None)) is None
+    # A sha git cannot resolve is "nothing to say", not a crash and not a zero:
+    # a shallow clone is a normal state and is not a fact about the claim.
+    assert gate._commits_since_derivation(_claim_at("f" * 40)) is None

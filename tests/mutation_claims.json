@@ -151,19 +151,20 @@
       ]
     },
     {
-      "id": "bwh3-registry-read-before-the-deferred-import-populates-it",
+      "id": "r135-4-plugin-discovery-barrier-dropped-from-the-name-union",
       "path": "agent_runtime/tool_visibility.py",
       "symbol": "_cached_tool_names_for_toolsets/ordering",
-      "operator": "drop-the-population-barrier",
-      "find": "    toolset_for = _ensure_tool_registry_populated()\n    blocked = set(blocked_tool_names)",
-      "replace": "    toolset_for = get_toolset_for_tool\n    blocked = set(blocked_tool_names)",
+      "operator": "drop-the-plugin-discovery-barrier",
+      "find": "    _ensure_plugin_tools_registered()\n    toolset_for = registry.get_toolset_for_tool",
+      "replace": "    toolset_for = registry.get_toolset_for_tool",
       "test": [
         "{python}",
         "-m",
         "pytest",
         "-q",
         "tests/agent_runtime/test_tool_visibility_import_deferral.py"
-      ]
+      ],
+      "derived_at": "9ef1324634ebc803d2753af4ab58b8b6682eb865"
     },
     {
       "id": "s4-skills-id-gate-lets-a-respelling-through",
