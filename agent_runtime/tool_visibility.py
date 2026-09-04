@@ -32,6 +32,12 @@ from .personas import (
 from .profile_readiness import declared_mcp_server_names, profile_readiness_for_persona
 from .tool_turn_history import load_tool_turn_history
 
+# The committed toolset manifest. Importing it imports NO registrar module and no
+# ``model_tools`` — it is a JSON reader (``tools/toolset_manifest.py``), and that
+# is the whole reason it may sit at module scope where the thing it replaced
+# could not.
+from tools.toolset_manifest import builtin_tool_names_for_toolsets, builtin_toolset_for_tool
+
 TOOL_VISIBILITY_SCHEMA_VERSION = 2
 
 
@@ -80,6 +86,15 @@ def _ensure_tool_registry_populated():
     consumer in the tree already calls it defensively (``tools_config.py``,
     ``plugins_cmd.py``, ``cli.py``, the gateway). This moves an import; it does
     not invent a lifecycle.
+
+    **What it is FOR since R135.4 (ruled 2026-09-04).** It is the CAPABILITY
+    door and only that: "can this tool actually run in this process" has no
+    static substitute, because a handler is a live callable and 11 of the 38
+    registrar modules fail to import under some environments and are logged and
+    skipped. The NAME questions — which toolset is this tool in, what tools does
+    this toolset hold — left this accessor for the committed manifest, which is
+    where the 3.1 s is saved. Nothing that decides runnability may read that
+    manifest, and nothing that only needs a name should come back here.
     """
 
     from model_tools import get_toolset_for_tool as _lookup
@@ -87,16 +102,60 @@ def _ensure_tool_registry_populated():
     return _lookup
 
 
-def get_toolset_for_tool(name: str) -> str | None:
-    """The toolset a tool belongs to.
+def _ensure_plugin_tools_registered() -> None:
+    """Run plugin discovery EXPLICITLY, because nothing on this path will now.
 
-    Kept as a module attribute with the name it had when it was a re-exported
-    import, so the three call sites below and anything that patched
-    ``tool_visibility.get_toolset_for_tool`` are unaffected — the only change is
-    WHEN ``model_tools`` gets imported.
+    Plugin tools register into the SAME ``tools.registry`` singleton as the
+    builtins, and until R135.4 they were present in ``get_all_tool_names()``
+    only as a SIDE EFFECT: ``model_tools``' module scope runs
+    ``discover_builtin_tools()`` and then ``discover_plugins()``, so any reader
+    that imported ``model_tools`` got both populations whether it meant to or
+    not. The manifest is builtin-only, so a reader that stops importing
+    ``model_tools`` and does nothing else would silently drop every plugin tool
+    from a persona's visible set — the same class of wrong-and-quiet answer that
+    :func:`_ensure_tool_registry_populated` exists to prevent.
+
+    Ruled 2026-09-04: plugin discovery becomes a thing this reader DOES rather
+    than a thing it inherits. That is a lifecycle statement, not a refactor, and
+    it is written here so the union in
+    :func:`_cached_tool_names_for_toolsets` reads as one deliberate act.
+
+    Cheap and idempotent by contract — ``discover_plugins()`` without ``force``
+    re-uses the loaded manager — and it imports ``hermes_cli.plugins`` only,
+    never ``model_tools``, so no registrar module under ``tools/`` is imported
+    by coming through here.
     """
 
-    return _ensure_tool_registry_populated()(name)
+    from hermes_cli.plugins import discover_plugins
+
+    discover_plugins()
+
+
+def get_toolset_for_tool(name: str) -> str | None:
+    """The toolset a tool belongs to — a NAME question, answered off the manifest.
+
+    Kept as a module attribute with the name it had when it was a re-exported
+    import, so the call sites below and anything that patched
+    ``tool_visibility.get_toolset_for_tool`` are unaffected.
+
+    Since R135.4 the answer is ``manifest ∪ (registry after an explicit
+    ``discover_plugins()``)``: the committed artifact answers every BUILTIN
+    without importing a single registrar module, and only a name the manifest
+    does not carry — a plugin or MCP tool — reaches the live registry. A builtin
+    therefore costs one dict lookup where it used to cost the 3.1 s walk on the
+    first call of a process.
+
+    It does NOT decide runnability. A manifest hit means "this name is a builtin
+    registered into that toolset in this tree", which stays true of a module
+    whose import fails; asking whether the handler can be looked up is
+    :func:`_ensure_tool_registry_populated`'s question and must go there.
+    """
+
+    toolset = builtin_toolset_for_tool(name)
+    if toolset is not None:
+        return toolset
+    _ensure_plugin_tools_registered()
+    return registry.get_toolset_for_tool(name)
 
 
 @lru_cache(maxsize=1)
@@ -539,20 +598,43 @@ def _cached_profile_readiness_for_visibility(
 
 @lru_cache(maxsize=128)
 def _cached_tool_names_for_toolsets(toolsets: tuple[str, ...], blocked_tool_names: tuple[str, ...]) -> tuple[str, ...]:
-    # FIRST, before touching the registry: importing ``model_tools`` is what
-    # registers the builtin tools INTO the singleton imported at module scope, and
-    # since BW-H3 that import is deferred. Reading ``get_all_tool_names()`` ahead
-    # of it would return an empty list and this function would answer "no tools"
-    # — memoised, for the process's lifetime, with no error anywhere. See
-    # :func:`_ensure_tool_registry_populated`.
-    toolset_for = _ensure_tool_registry_populated()
+    """The tools of these toolsets, minus the blocked ones — a NAME question.
+
+    ``manifest ∪ (registry after an explicit ``discover_plugins()``)``, ruled
+    2026-09-04 (R135.4). The manifest half answers every BUILTIN for one JSON
+    parse where this used to import ``model_tools``, whose module scope imports
+    all 38 registrar modules under ``tools/`` — 3.1 s, paid on the first
+    visibility resolve of every process, which on a create is inline on the
+    critical path. The registry half is what keeps the answer COMPLETE: plugin
+    and MCP tools register into the same singleton and are not in this tree, and
+    a manifest-only answer would quietly lose them.
+
+    The union is taken over NAMES and cannot double-count: a builtin present in
+    both halves resolves to the same toolset in both, because the manifest is
+    gated against the live registry in ``tests/tools/test_toolset_manifest.py``.
+
+    Not a runnability answer. A registrar module whose import fails is named
+    here and absent from the registry, which is the ruled behaviour — this is
+    the preview's "what tools does this persona have", and "can this tool run
+    on this box" is a different question with a different door
+    (:func:`_ensure_tool_registry_populated`).
+    """
+
+    wanted = set(toolsets)
     blocked = set(blocked_tool_names)
-    names = [
+    names = set(builtin_tool_names_for_toolsets(toolsets))
+    # The plugin half. Explicit and idempotent since R135.4 — it used to ride in
+    # on the ``model_tools`` import this function no longer performs, and a
+    # reader that skipped it would answer with the builtins alone, memoised for
+    # the process's lifetime, with no error anywhere.
+    _ensure_plugin_tools_registered()
+    toolset_for = registry.get_toolset_for_tool
+    names.update(
         name
         for name in registry.get_all_tool_names()
-        if name not in blocked and str(toolset_for(name) or "") in set(toolsets)
-    ]
-    return tuple(sorted(names))
+        if str(toolset_for(name) or "") in wanted
+    )
+    return tuple(sorted(name for name in names if name not in blocked))
 
 
 def _blocked_tool_entries(

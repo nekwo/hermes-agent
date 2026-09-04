@@ -33,16 +33,22 @@ importing the module that defines it, and nothing here pretends otherwise.
 
 So :func:`builtin_tool_names` is a SUBSET of what a fully-warmed process holds,
 and a caller that needs the whole answer must union it with the registry it has
-actually populated. That union is the reason this module ships UNWIRED: pointing
-``agent_runtime.tool_visibility`` at it changes two answers (plugin tools in a
-process that never imported ``model_tools``, and the tools of a registrar module
-whose import FAILS — 11 of the 38 do under some environments, on missing optional
-dependencies, and their tools are absent from the live registry while the manifest
-names them). Both are honest questions with no house precedent, and both are
-recorded for an operator ruling in
-``docs/agent-runtime-harness/planned/w12-l3-remote-carriage-conflict-list-and-toolset-manifest.md``
-§R135.4. Until that is ruled, use this where "the builtin names" is the whole
-question, and say so at the call site.
+actually populated. That union is now WIRED, and how it is spelled was ruled
+2026-09-04 (R135.4): ``agent_runtime.tool_visibility`` answers its NAME questions
+as ``manifest`` union ``registry after an explicit, idempotent
+``discover_plugins()```, which restores the plugin population without importing a
+single registrar module. Plugin discovery is therefore a thing that reader DOES,
+not a side effect it inherits from importing ``model_tools``.
+
+The second answer the switch changes is the deliberate one: 11 of the 38 registrar
+modules fail to import under some environments (missing optional dependencies) and
+their tools are absent from the live registry while this artifact names them. That
+is RIGHT for a name question and wrong for a capability question, so the line is
+drawn there — **nothing that decides whether a tool can RUN may read this module**.
+"Can this handler be looked up on this box" goes to the live registry via
+``tool_visibility._ensure_tool_registry_populated``, which exists for exactly that
+and is documented as the capability door. A caller here is asking for names; say so
+at the call site.
 
 FRESHNESS
 ---------

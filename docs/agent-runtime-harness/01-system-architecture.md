@@ -19,8 +19,8 @@ There is one runtime execution surface. `GPTPersonaRuntime`
 `mission_chat_reply` (`:72`) — there is no `run_persona`, no tick, no worker
 loop. The entry point is `_cmd_mission_chat_message` — defined at
 `hermes_cli/harness_parts/persona_commands.py:2637`, exec-loaded into
-`harness.py` globals (`hermes_cli/harness.py:6347`) and wired to argparse at
-`harness.py:1417`.
+`harness.py` globals (`hermes_cli/harness.py:6369`) and wired to argparse at
+`harness.py:1419`.
 
 Turn ingress has one path. Asynchronous agent-to-agent delivery
 (`agent_chat_send(wait=false)`) does not inject a message: a serve-hosted drain

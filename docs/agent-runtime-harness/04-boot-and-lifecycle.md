@@ -49,7 +49,7 @@ processes booting against one checkout is a REAL concurrency, so the sweep is cl
 `_break_stale_bytecode_sweep_lock` `:5056`;
 `tests/hermes_cli/test_bytecode_sweep_lock.py`). **`harness_parser_ms`** — the
 `hermes_cli.harness` import used to drag a full plugin-discovery walk in through
-`tool_visibility` → `model_tools`; it is now function-local (`tool_visibility.py:85`), guarded
+`tool_visibility` → `model_tools`; it is now function-local (`tool_visibility.py:100`), guarded
 by `tests/agent_runtime/test_tool_visibility_import_deferral.py`, which drives the real chain
 through subprocesses after recording that the originally specified assertion was vacuous.
 
@@ -231,7 +231,7 @@ earlier serve cost `build_ms=1948` and `3439`. The delta is per-process cache fi
 are named: `agent_runtime/parse_cache.py` (YAML/frontmatter/sha, `(path, mtime_ns, size)`-keyed,
 bounded 4096 — profiled as the dominant snapshot cost);
 `tool_visibility._cached_tool_names_for_toolsets` (`lru_cache(128)`, process lifetime,
-`tool_visibility.py:520`); `_cached_profile_readiness_for_visibility` (15 s TTL, `:466-471`);
+`tool_visibility.py:599-600`); `_cached_profile_readiness_for_visibility` (15 s TTL, `:550`);
 `tools/registry.py::_check_fn_cached` (30 s TTL per `check_fn`, `registry.py:225`).
 
 The readiness section publishes its own split. Same cold boot:

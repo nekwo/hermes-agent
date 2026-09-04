@@ -221,12 +221,16 @@ answerable; nothing needs to be guessed.
   unwired.
 - **Check**: `scripts/run_tests.sh tests/tools/test_toolset_manifest.py`.
 
-### Stage R135.4 — repointing `tool_visibility`. **GATED ON AN OPERATOR RULING; NOT BUILT HERE.**
+### Stage R135.4 — repointing `tool_visibility`. **RULED 2026-09-04; BUILT (w13/h1).**
 
 Switching `tool_visibility._cached_tool_names_for_toolsets` / `get_toolset_for_tool` from
 `_ensure_tool_registry_populated()` to the manifest is where the 3.1 s is actually saved, and it
-changes two answers. Both are honest questions with no house precedent, so this lane stops here and
-states them rather than choosing:
+changes two answers. Both were honest questions with no house precedent, so l3 stopped here and
+stated them rather than choosing. **The ruling (2026-09-04, operator): the manifest answers NAME
+questions; plugin discovery becomes an explicit idempotent call, not an import side effect; the
+live registry keeps answering CAPABILITY questions (can this tool run here).** Both call sites now
+read `manifest ∪ (registry after `discover_plugins()`)`, and nothing that decides runnability
+reads the manifest. The two questions, and what the ruling did with each:
 
 1. **Plugin tools.** `hermes_cli/plugins.py` registers plugin tools into the SAME `tools.registry`
    singleton, and today they are present in `get_all_tool_names()` only because `model_tools`'
@@ -243,9 +247,21 @@ states them rather than choosing:
    regression for a capability question, and which one it is decides whether the reader must
    intersect against an import-health probe.
 
-Until that is ruled, stages 1–3 stand on their own: the artifact and its gate are exactly what the
-row asked for ("needs a generated in-tree artifact plus a gate"), the names ARE answerable without
-the imports, and the `--timeout=180` question the row names as downstream is unblocked either way.
+**What shipped (w13/h1).** `tool_visibility` imports the reader at module scope — it is a JSON
+reader and imports no registrar module, which is exactly why it may sit where the thing it
+replaced could not — and gained `_ensure_plugin_tools_registered()`, a one-line explicit
+`discover_plugins()` door carrying the lifecycle statement in its docstring.
+`_ensure_tool_registry_populated` STAYS, re-documented as the capability door and nothing else.
+
+Red-first, in `tests/agent_runtime/test_tool_visibility_import_deferral.py`:
+`test_the_name_answer_never_imports_a_registrar_module` (a resolve that returns tools while
+`model_tools` stays out of a fresh interpreter's `sys.modules`) and
+`test_a_plugin_tool_is_still_in_the_union_the_manifest_cannot_see` (a tool that only a stubbed
+`discover_plugins` registers still reaches the answer). One existing case in that file changed
+hands rather than being deleted: it used to pin the BW-H3 repair as "`model_tools` IS imported on
+first use", which the ruling inverts — it now pins the property that was always the point (a real,
+non-empty answer) plus the absence of the import, and is renamed
+`test_the_first_visibility_resolve_answers_real_tools_without_the_import`.
 
 ---
 

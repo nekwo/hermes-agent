@@ -155,28 +155,32 @@ def test_tool_visibility_has_no_module_scope_model_tools_import():
 # ---------------------------------------------------------------------------
 
 
-def test_the_first_visibility_resolve_populates_the_registry_and_returns_tools(
+def test_the_first_visibility_resolve_answers_real_tools_without_the_import(
     tmp_path,
 ):
     """Deferral must not silently answer "this persona has no tools".
 
     This is the bug the first draft of BW-H3 had, and it is worth the subprocess.
-    Importing ``model_tools`` is also what REGISTERS the builtin tools into the
-    ``tools.registry`` singleton ``tool_visibility`` holds. A reader that touched
-    ``registry.get_all_tool_names()`` before that import would read an EMPTY
-    registry, memoise the empty answer for the process's lifetime, and raise
+    Importing ``model_tools`` is what REGISTERS the builtin tools into the
+    ``tools.registry`` singleton ``tool_visibility`` holds, so a reader that
+    touched ``registry.get_all_tool_names()`` before that import read an EMPTY
+    registry, memoised the empty answer for the process's lifetime, and raised
     nothing — a wrong answer, not a failure.
 
-    Anti-vacuity. *Mutation:* drop the ``_ensure_tool_registry_populated()`` call
-    at the top of ``_cached_tool_names_for_toolsets`` and go back to calling the
-    lazy lookup inside the comprehension. *Probed field:* the LENGTH of the
-    returned tool tuple in a fresh interpreter where ``model_tools`` was never
-    imported. Under the mutation ``get_all_tool_names()`` returns ``[]``, the
-    comprehension never runs, the lookup is never called, and the result is empty
-    — so the mutant is killed by the tools it fails to return, not by any flag or
-    counter it could also set. Second, independent witness in the same case:
-    ``model_tools`` IS in ``sys.modules`` afterwards, which pins that the deferral
-    resolves on first use rather than never.
+    **The witness changed hands on 2026-09-04 and the danger did not.** Until
+    R135.4 this case pinned the repair as "``model_tools`` IS in ``sys.modules``
+    afterwards". The ruling took the NAME question off that import entirely —
+    the builtins now come from the committed manifest — so the import is exactly
+    what must NOT happen, while "answers a real, non-empty set" is the property
+    that was always the point.
+
+    Anti-vacuity. *Mutation:* have ``_cached_tool_names_for_toolsets`` read
+    ``registry.get_all_tool_names()`` alone, dropping the manifest half.
+    *Probed field:* the LENGTH of the returned tool tuple in a fresh interpreter
+    where ``model_tools`` was never imported. Under the mutation the registry
+    holds only whatever plugin discovery registered, the ``file`` toolset's
+    builtins are absent, and the count collapses — the mutant is killed by the
+    tools it fails to return, not by any flag it could also set.
     """
 
     result = _run_probe(
@@ -194,11 +198,98 @@ def test_the_first_visibility_resolve_populates_the_registry_and_returns_tools(
     )
 
     assert result["before"] == [], "importing tool_visibility already loaded model_tools"
-    assert result["after"] == ["model_tools"], "first use never imported model_tools"
     assert result["count"] > 0, (
-        "the deferred registry read returned no tools for the 'file' toolset — "
+        "the visibility read returned no tools for the 'file' toolset — "
         f"sample={result['sample']}"
     )
+    assert result["after"] == [], (
+        "the first visibility resolve imported model_tools — the 3.1 s registrar "
+        "walk is back on the name path (R135.4)"
+    )
+
+
+def test_the_name_answer_never_imports_a_registrar_module(tmp_path):
+    """R135.4: the NAME question is answered from the manifest, not the imports.
+
+    Deferring the ``model_tools`` import (BW-H3) moved the 3.1 s off the boot
+    path; it did not remove it, because the first visibility resolve still paid
+    it in full. Ruled 2026-09-04: ``_cached_tool_names_for_toolsets`` and
+    ``get_toolset_for_tool`` read ``manifest`` UNION ``registry after an
+    explicit ``discover_plugins()```, and nothing that decides RUNNABILITY
+    reads the manifest.
+
+    Anti-vacuity. *Mutation:* restore ``_ensure_tool_registry_populated()`` at
+    the top of ``_cached_tool_names_for_toolsets``. *Probed field:*
+    ``model_tools`` absent from a fresh interpreter's ``sys.modules`` AFTER a
+    resolve that returned tools. Both halves are load-bearing: an
+    implementation that answers nothing would also leave ``model_tools``
+    unimported, so the count is asserted in the same case, and an
+    implementation that imports it fails the absence check even though its
+    count is right.
+    """
+
+    result = _run_probe(
+        "from agent_runtime import tool_visibility\n"
+        "names = tool_visibility._cached_tool_names_for_toolsets(('file',), ())\n"
+        "probe_name = sorted(names)[0]\n"
+        "toolset = tool_visibility.get_toolset_for_tool(probe_name)\n"
+        "print(json.dumps({'probe': 'manifest_names',\n"
+        "  'loaded': [m for m in ('model_tools',) if m in sys.modules],\n"
+        "  'count': len(names),\n"
+        "  'toolset': toolset}))\n",
+        tmp_path,
+    )
+
+    assert result["count"] > 0, "the manifest-backed resolve returned no tools"
+    assert result["toolset"] == "file"
+    assert result["loaded"] == [], (
+        "resolving the 'file' toolset's NAMES imported model_tools - the 3.1 s "
+        "registrar walk is back on the visibility path"
+    )
+
+
+def test_a_plugin_tool_is_still_in_the_union_the_manifest_cannot_see(tmp_path):
+    """The manifest is builtin-only, so the union half has to be real.
+
+    Plugin tools register into the SAME ``tools.registry`` singleton and were
+    reachable before this stage only as a side effect of importing
+    ``model_tools``. The ruling made that discovery an explicit, idempotent call
+    this reader makes. The probe stands in a fresh interpreter where
+    ``model_tools`` is never imported and a stubbed ``discover_plugins`` is the
+    only thing that registers the probe tool.
+
+    Anti-vacuity. *Mutation:* drop the ``_ensure_plugin_tools_registered()``
+    call from ``_cached_tool_names_for_toolsets``. *Probed field:* the presence
+    of a non-builtin name in the returned tuple. Under the mutation nothing runs
+    the registration, the registry has no such entry, and the name is absent -
+    while the builtin half still answers, so the mutant cannot hide behind an
+    empty result.
+    """
+
+    result = _run_probe(
+        "import hermes_cli.plugins as plugins\n"
+        "from tools.registry import registry\n"
+        "def _fake_discover(force=False):\n"
+        "    if 'zz_probe_plugin_tool' not in registry.get_all_tool_names():\n"
+        "        registry.register(name='zz_probe_plugin_tool', toolset='file',\n"
+        "                          schema={}, handler=lambda **kw: '',\n"
+        "                          check_fn=None)\n"
+        "plugins.discover_plugins = _fake_discover\n"
+        "from agent_runtime import tool_visibility\n"
+        "names = tool_visibility._cached_tool_names_for_toolsets(('file',), ())\n"
+        "print(json.dumps({'probe': 'plugin_union',\n"
+        "  'loaded': [m for m in ('model_tools',) if m in sys.modules],\n"
+        "  'has_plugin': 'zz_probe_plugin_tool' in names,\n"
+        "  'count': len(names)}))\n",
+        tmp_path,
+    )
+
+    assert result["has_plugin"], (
+        "a tool registered only by discover_plugins() is missing from the "
+        "visibility answer - the union lost the plugin half"
+    )
+    assert result["count"] > 1, "the builtin half of the union went missing"
+    assert result["loaded"] == []
 
 
 def test_the_toolset_lookup_shim_keeps_its_module_attribute_name(tmp_path):
