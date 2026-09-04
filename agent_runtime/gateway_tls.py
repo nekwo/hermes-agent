@@ -97,6 +97,7 @@ from typing import Any
 from .gateway_identity import gateway_dir
 from .store_file_io import narrow_windows_acl as _narrow_windows_acl
 from .store_file_io import os_error_reason as _os_reason
+from .store_file_io import prepare_windows_replace as _prepare_windows_replace
 
 __all__ = [
     "CERTIFICATE_FILENAME",
@@ -330,7 +331,13 @@ def _der_from_pem(pem: bytes) -> bytes | None:
 
 
 def _write_private(path: Path, payload: bytes) -> None:
-    """0600 where meaningful, narrowed where it is not, atomic either way."""
+    """0600 where meaningful, narrowed where it is not, atomic either way.
+
+    Carries R-D9 through the shared helper rather than a second copy of the
+    reasoning: this writer narrows-then-replaces exactly as
+    ``store_file_io.write_secure_json`` does, so it wedged a renewed key on the
+    same volumes for the same reason and is repaired by the same call.
+    """
 
     handle = tempfile.NamedTemporaryFile(
         "wb", dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp", delete=False
@@ -345,6 +352,7 @@ def _write_private(path: Path, payload: bytes) -> None:
                 os.chmod(handle.name, 0o600)
             except OSError:
                 pass
+        _prepare_windows_replace(Path(handle.name), path)
         os.replace(handle.name, path)
     except BaseException:
         try:

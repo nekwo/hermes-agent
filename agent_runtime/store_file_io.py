@@ -25,7 +25,8 @@ The rules the bodies carry are load-bearing, so they live here once:
   permission and declined to fix it, on the grounds that the real control
   belongs with the transport slice that introduces the exposure; the gateway
   lane IS that slice, so the narrowing is attempted — ``icacls`` with
-  inheritance removed and a single grant to the current user — and never
+  inheritance removed and a single grant to the current user, read/write/DELETE
+  since R-D9 because an atomic replace is a delete (see below) — and never
   fatal: a store that could not be narrowed is still a store, and refusing to
   write one would take the lane down over a hardening.
 
@@ -90,8 +91,33 @@ def os_error_reason(exc: OSError) -> str:
     return "unwritable"
 
 
+#: The grant ``narrow_windows_acl`` writes. ``D`` is R-D9 and it is not a
+#: loosening: the owner of a file can re-grant itself DELETE at any time, so
+#: withholding it bought no security and cost the store every write after the
+#: first (see :func:`narrow_windows_acl`).
+WINDOWS_STORE_GRANT = "(R,W,D)"
+
+
 def narrow_windows_acl(path: Path) -> str:
-    """Best-effort DACL narrowing on Windows; the outcome, never a raise."""
+    """Best-effort DACL narrowing on Windows; the outcome, never a raise.
+
+    **The grant includes DELETE (R-D9), because replacing a file is deleting
+    one.** Until 2026-09-04 it was ``(R,W)``, and that wedged every store this
+    lane owns on any volume outside the user profile. ``os.replace`` renames the
+    temp over the target, which needs DELETE on the target — or FILE_DELETE_CHILD
+    on the directory, which only Full control carries. A profile directory grants
+    the user Full control, so every test and every developer machine passed; a
+    directory on another volume inherits ``Authenticated Users:(M)``, which has
+    neither. Measured 2026-09-04 at ``X:/wt/acl_repro_d4h``: write 0 succeeded,
+    the narrowing removed the file's DELETE, write 1 raised ``PermissionError
+    [WinError 5]`` — which is why every peer handshake on the operator's PC
+    completed and then failed to record its row for a week.
+
+    Granting DELETE gives away nothing. The DACL names the file's OWNER, and an
+    owner always holds WRITE_DAC — it could grant itself DELETE in one icacls
+    call. The narrowing exists to keep OTHER principals out, and it still does:
+    inheritance is removed and this user is the only ACE.
+    """
 
     user = os.environ.get("USERNAME") or ""
     if not user:
@@ -103,7 +129,7 @@ def narrow_windows_acl(path: Path) -> str:
                 str(path),
                 "/inheritance:r",
                 "/grant:r",
-                f"{user}:(R,W)",
+                f"{user}:{WINDOWS_STORE_GRANT}",
             ],
             capture_output=True,
             timeout=10,
@@ -112,6 +138,40 @@ def narrow_windows_acl(path: Path) -> str:
     except (OSError, subprocess.SubprocessError) as exc:
         return f"error:{type(exc).__name__}"
     return "narrowed" if completed.returncode == 0 else f"error:rc{completed.returncode}"
+
+
+def prepare_windows_replace(temp_path: Path, target: Path) -> tuple[str, str]:
+    """Give both halves of an ``os.replace`` the DELETE the rename needs.
+
+    A no-op off Windows, and the second half of R-D9. Two files need DELETE for
+    one atomic replace and they need it for different reasons:
+
+    * the TARGET, because the rename removes it — and a target an OLDER build
+      narrowed to ``(R,W)`` is still on disk with no DELETE on it. Repairing it
+      here is what un-wedges a store already in that state, rather than leaving
+      it broken forever behind a writer that can no longer touch it;
+    * the TEMP, because a rename deletes the source name from its directory.
+      Its ACL is whatever the directory handed down, and a directory that grants
+      this user only ``(RX,W)`` hands down no DELETE — so the very FIRST write
+      fails there, before any narrowing has happened. Measured in the same
+      repro's case B.
+
+    Returns the two outcome strings (``narrowed`` / ``skipped:*`` / ``error:*``)
+    for a caller that wants to record them; raises nothing, on
+    :func:`narrow_windows_acl`'s rule — a store that could not be prepared is
+    still worth attempting to write, and the ``os.replace`` that follows reports
+    the real verdict.
+    """
+
+    if os.name != "nt":
+        return ("skipped:not_windows", "skipped:not_windows")
+    target_outcome = "skipped:absent"
+    try:
+        if target.exists():
+            target_outcome = narrow_windows_acl(target)
+    except OSError:
+        target_outcome = "skipped:absent"
+    return (narrow_windows_acl(temp_path), target_outcome)
 
 
 def iso_stamp(now: float | None) -> str:
@@ -215,6 +275,10 @@ def write_secure_json(path: Path, payload: dict[str, Any]) -> None:
                 os.chmod(handle.name, 0o600)
             except OSError:
                 pass
+        # R-D9. On Windows the rename needs DELETE on BOTH names, and neither
+        # is guaranteed to have it: see :func:`prepare_windows_replace`. Off
+        # Windows this is a no-op and the call costs one `os.name` compare.
+        prepare_windows_replace(Path(handle.name), path)
         os.replace(handle.name, path)
     except BaseException:
         try:
