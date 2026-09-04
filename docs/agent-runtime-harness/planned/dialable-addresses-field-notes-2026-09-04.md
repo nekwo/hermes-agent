@@ -322,3 +322,181 @@ and the same file passed 8/8 with the timeout raised, both before the
 `_dial_host` change (394 s) and after it (1648 s, with another session's suite
 on the same 16 cores — the spread is contention, not this lane). Worth knowing
 before somebody debugs an import that is not broken.
+
+## 10. D4h — the store write that could not happen, and the refusal that lied about it
+
+Stage D4h of `dialable-addresses.md` §5, branch `feat/d4-store-write-windows`
+from main `6c9928c5dd`. Two rulings: R-D9 (the secure writer grants DELETE) and
+R-D14 (a store write failure is its own reason). Nothing here touched
+`X:/Eternia/.hermes` or `X:/Eternia/hermes-agent`.
+
+| Ruling | Commit | What landed |
+|---|---|---|
+| R-D9 | `2766db1802` | `WINDOWS_STORE_GRANT = "(R,W,D)"`; new `prepare_windows_replace(temp, target)` called before every `os.replace` in `store_file_io.write_secure_json` and in `gateway_tls._write_private`; new `tests/agent_runtime/test_store_file_io_secure_write.py` |
+| R-D14 | `db5d4715ad` | `store_unwritable` in `ERROR_EXIT_CODES` (family 1, not retryable); three `os_error_reason` words moved onto it in `_REFUSAL_CODES`; `_refusal(…, store_path=…)` and `_store_write_refusal`; six call sites; tests in the peer-verb, pairing-verb and peers-store files |
+
+### 10.1 The repro, before touching anything
+
+`X:/wt/acl_repro_d4h`, three directories, the real `write_secure_json` from this
+worktree. Case A is the operator's actual condition — a directory on a
+non-profile volume, inheriting `NT AUTHORITY\Authenticated Users:(I)(M)`:
+
+```
+--- A. plain X: dir (inherits Authenticated Users:(M)) — the operator's PC ---
+  write 0: ok
+  write 1: FAILED PermissionError [WinError 5] Access is denied:
+           'X:\wt\acl_repro_d4h\plain\.peers.json.qtip3iur.tmp'
+        -> 'X:\wt\acl_repro_d4h\plain\peers.json'
+--- B. inheritance stripped, user granted (RX,W) only on the dir ---
+  write 0: FAILED PermissionError [WinError 5] ...
+```
+
+Which is D3 run #1's 18:06:20 receipt exactly, one process removed:
+`peers join refused — runtime_unavailable ([WinError 5] Access is denied:
+'.peers.json.ntk1yca6.tmp' -> 'peers.json')`.
+
+After both commits, the same script:
+
+```
+--- A ---  write 0: ok   write 1: ok   write 2: ok
+           file acl: ...\peers.json DESKTOP-QJ7DDV2\beast:(R,W,D)
+--- B ---  write 0: ok   write 1: ok   write 2: ok
+--- C. target already narrowed to (R,W) by an older build ---
+  seeded  : ...\peers.json DESKTOP-QJ7DDV2\beast:(R,W)    (what an older build left)
+           write 0: ok   write 1: ok   write 2: ok
+           file acl: ...\peers.json DESKTOP-QJ7DDV2\beast:(R,W,D)
+```
+
+### 10.2 Case B is not a hypothetical, and it is why the TEMP file is narrowed too
+
+R-D9 as written asks for the grant plus a repair of an EXISTING target before
+the replace. That is not sufficient on its own, and case B is the proof: with
+inheritance stripped and the directory granting only `(RX,W)`, the very FIRST
+write fails, before any narrowing has run. The reason is the other half of the
+rename — `os.replace` deletes the SOURCE name from its directory, so the temp
+file needs DELETE as well, and the temp's ACL is whatever the directory handed
+down. So `prepare_windows_replace` narrows both names, and the plan's Windows
+integration case (three writes in a `(RX,W)` directory, all succeeding) is only
+reachable because of it.
+
+Granting DELETE gives nothing away. The DACL names the file's OWNER, and an
+owner always holds WRITE_DAC — it could grant itself DELETE in one `icacls`
+call. Withholding `D` bought no security and cost the store every write after
+the first.
+
+### 10.3 `gateway_tls._write_private` had the identical bug (scope +1 file)
+
+Not named in D4h. It narrows-then-replaces exactly as `write_secure_json` does,
+over `gateway/tls/key.pem`, so a RENEWED certificate on any non-profile volume
+would have hit the same `[WinError 5]` — silently, since certificate renewal is
+not a verb anybody watches. It takes the shared helper rather than a second copy
+of the reasoning, which is that module's own "ONE authority" rule. One extra
+file in the diff, no behaviour change anywhere else.
+
+### 10.4 Two reasons this defect had no test, and both are in the test file
+
+1. **`tmp_path` lands in `%TEMP%`**, i.e. inside the user profile, whose
+   Full-control ACE supplies the FILE_DELETE_CHILD the narrowed file lacks. Any
+   test written the ordinary way is green against the bug. So the Windows cases
+   build their directory under the REPO (`mkdtemp(prefix=".acl-probe-",
+   dir=REPO_ROOT)`, gitignored, torn down through a Full-control re-grant —
+   because a directory that cannot delete its children cannot delete itself).
+2. **`scripts/run_tests.sh` runs every file under `env -i` and does not forward
+   `USERNAME`.** `narrow_windows_acl` reads `USERNAME` and returns
+   `skipped:no_username` without it — so under the canonical runner the
+   narrowing never happens at all, and a test of it would pass because the code
+   under test did nothing. Measured: the first version of this file reported
+   `6 passed` under bare pytest and `3 passed` under `run_tests.sh`, the
+   difference being three silent skips. The fixture recovers the principal from
+   `USERPROFILE` (which IS forwarded) and puts `USERNAME` back, so the
+   production writer narrows exactly as it does for an operator.
+
+### 10.5 R-D14 — what each decision was, and the one deviation
+
+* **Where the classification lives.** `record_peer` does not RAISE on a
+  permission error; it catches `OSError` around its locked write and returns
+  `StoreRefusal(os_error_reason(exc), str(exc))`. So the fault reached the
+  operator through `_refusal`'s table, not through an uncaught exception, and
+  the fix is a table row rather than a `try`. D4h's text says "catch `OSError`
+  from `record_peer`"; both doors are now covered, and the RETURN door is the
+  one that fired on hardware.
+* **The raise door is still real**, for two verbs and no more: `record_peer`
+  and `revoke_peer` run a cache touch and an event append AFTER releasing their
+  lock, outside their own `except OSError`. `mint_pairing_code`,
+  `mint_peer_code` and `revoke_device` return from inside the `try`, so nothing
+  can escape them and they get no `try` they do not need.
+* **`root_missing` stays on family 7.** The other three `os_error_reason` words
+  move to `store_unwritable`. An absent directory is the one condition the
+  writer creates for itself on its next call (`write_secure_json` mkdirs its
+  parents), so "retry" really is the cure — which is the whole distinction
+  family 1 and family 7 encode.
+* **Family 1, not 7.** A 7 means the identical command succeeds later. D3 run #1
+  retried this once a minute for four minutes and got the identical
+  `[WinError 5]` every time. `retryable` is false for the same reason: a client
+  that retries this burns a pairing code per attempt.
+* **DEVIATION — `reason` is `store_unwritable`, not the store's raw word.**
+  R-D6 says `reason` carries the layer-below's own word; D4h's brief asks for
+  `reason=store_unwritable`, and the brief wins because the launcher renders
+  this condition as one sheet sentence and three spellings (`permission_denied`
+  / `unwritable` / `root_not_a_directory`) would be three sentences for one
+  fault. The raw word is not lost: it is in the message, in parentheses after
+  the OSError text. Flagged here because it is the one place on this lane where
+  `reason` is a family word rather than a raw one.
+* **The path is added by the CLI, not by the store.** The OSError says
+  `'.peers.json.ntk1yca6.tmp' -> 'peers.json'` — two basenames, naming no
+  directory anybody could go and fix. The verb knows which store it was writing;
+  it is the only layer that can print the absolute path, and it does, along with
+  the sentence that the other machine is fine.
+
+### 10.6 What each test pins
+
+| Test | What breaks without it |
+|---|---|
+| `test_the_narrowing_grants_read_write_and_delete` | the argv, on every platform — the Windows cases cannot run where a silent revert would be noticed |
+| `test_a_narrowing_that_fails_is_an_outcome_string_and_never_a_raise` | the file's standing rule: a store that could not be narrowed is still a store |
+| `test_the_replace_is_prepared_before_it_happens` | ORDER, without a DACL: the helper must run while the OLD target is still on disk (asserted by reading the target's bytes at call time) |
+| `test_three_writes_land_in_a_directory_that_grants_no_delete` | the measured defect. Three writes, not two: a writer that re-widened and then re-narrowed wrongly would still fail on the third |
+| `test_a_store_an_older_build_wedged_is_repaired_by_its_next_write` | the repair half — installs that already ran the `(R,W)` build stay wedged forever without it |
+| `test_the_narrowing_still_names_exactly_one_principal` | the hardening the grant exists for, in case "we widened it" quietly acquires a second ACE |
+| `test_a_write_the_disk_refuses_comes_back_as_a_typed_reason` (peers store) | the VOCABULARY the CLI maps on — a store that started raising, or renamed its reason, would move every write failure silently back onto `runtime_unavailable` |
+| `test_a_store_this_machine_cannot_write_is_not_the_networks_fault` | code, reason, exit 1, `retryable: false`, from the raise door |
+| `test_the_write_refusal_names_the_file_and_the_os_error` | the absolute path, the WinError text, the raw store word, and the "nothing on the other machine is wrong" sentence |
+| `test_the_stores_own_refusal_door_gives_the_identical_answer` | two doors, one story |
+| `test_a_dial_that_never_landed_is_still_the_networks_answer` | the carve-out staying carved: a failed HANDSHAKE is still family 7 |
+| `test_every_peer_write_verb_reports_an_unwritable_store_the_same_way` | one helper, not four copies (`peers pair`, `peers revoke`) |
+| `test_the_device_half_reports_an_unwritable_store_as_its_own_reason` (pairing verbs) | the same, for `pair` and `devices revoke` |
+
+### 10.7 Verification
+
+```
+bash scripts/run_tests.sh \
+  tests/agent_runtime/test_store_file_io_secure_write.py \
+  tests/agent_runtime/test_gateway_peers_store.py \
+  tests/hermes_cli/test_gateway_peer_verbs.py \
+  tests/hermes_cli/test_gateway_pairing_verbs.py \
+  tests/hermes_cli/test_gateway_introduce_verb.py \
+  tests/agent_runtime/test_serve_gateway_auth.py
+```
+
+— 6 files, **195 passed, 0 failed**. Plus the taxonomy's own consumers
+(`test_error_exit_code_producers.py`, `test_response_contract_fixture.py`,
+`test_tombstone_registry.py`, `test_gateway_peers_join_attested.py`) — 4 files,
+**1183 passed, 0 failed** — and `test_gateway_tls.py` +
+`test_gateway_peer_two_roots_e2e.py` with `--file-timeout 900` (§9's note still
+applies), 2 files, **18 passed, 0 failed**.
+
+`ruff check` clean on all seven touched files.
+`scripts/check-windows-footguns.py` clean, after one fix it caught in the new
+test file: `subprocess.run(text=True)` without `encoding=` decodes `icacls`
+with the console codepage.
+
+### 10.8 Owed to D3's re-run
+
+The operator's live store at `X:/Eternia/.hermes/agent-runtime/gateway` still
+holds a `peers.json` (and `pairing.json`, `devices.json`) narrowed to `(R,W)`
+by the old build. Nothing here touched it — by rule. It repairs ITSELF on the
+first write the new build makes, which is exactly why `prepare_windows_replace`
+narrows the existing target rather than only new files: the first `peers join`
+after the rebuild is the repair. If a store somehow resists, `icacls
+X:\Eternia\.hermes\agent-runtime\gateway\peers.json /grant beast:(R,W,D)` is the
+manual equivalent.
