@@ -136,6 +136,37 @@ class SkillTombstone:
 
 
 @dataclass(slots=True)
+class WorkspaceLift:
+    """One "this workspace id was taken back OFF the delete ledger" record.
+
+    ``deleted_workspace_ids`` stays a bare-id ledger — the ids are freshly
+    minted and never re-creatable, so an id that sits there forever blocks
+    nothing (see :class:`SkillTombstone` for the asymmetry). What a bare id
+    cannot express is a LIFT. ``default_scope`` removes the reserved local
+    default workspace's id from that ledger when it turns up there, and under
+    the RD-11 set-union merge a removal is an ABSENCE — indistinguishable from
+    "that peer never heard about this delete" — so the next pull from any member
+    still carrying the id put it straight back, and the lift stayed local until
+    the cap aged it out (MEASURED 2026-08-31 by W2-H5; RULED 2026-09-04: a
+    restore that never reaches peers reads as a failed restore).
+
+    A lift is therefore a POSITIVE marker with a clock, exactly like
+    ``SkillTombstone.restored_at``, and it travels in the realm JSON so it can
+    win a merge on its own timestamp. ``deleted_at`` is what a LATER re-delete
+    of the same id stamps here, so this is a per-workspace state register rather
+    than a one-way flag: a fresh re-delete outranks a stale lift by the same
+    comparison that makes a fresh lift outrank a stale delete, and an equal
+    transition time resolves to the DELETE (a lift that loses a tie is one
+    explicit verb away from being re-run; a delete that loses one is a
+    resurrected workspace).
+    """
+
+    workspace_id: str
+    restored_at: datetime
+    deleted_at: datetime | None = None
+
+
+@dataclass(slots=True)
 class Realm:
     id: str
     slug: str
@@ -155,6 +186,14 @@ class Realm:
     # pull (the Board.archived_card_ids / OfficeSurface.archived_actor_keys
     # idiom, lifted to workspace granularity).
     deleted_workspace_ids: list[str] = field(default_factory=list)
+    # The PROPAGATING lift markers for the ledger above (see WorkspaceLift).
+    # ADDITIVE at schema_version 1, for the same reason skill_tombstones is: a
+    # bump would refuse every older member's realm load, so the compat cost is
+    # instead an old member's save stripping the field — which degrades a lift
+    # to exactly the local-until-age-out behaviour it replaces, never worse.
+    # Written only at store.lift_deleted_workspace / WorkspaceStore.delete;
+    # merged only by realm_sync.merge_workspace_lift_ledgers.
+    workspace_lifts: list[WorkspaceLift] = field(default_factory=list)
     # The same resurrection guard for shared SKILLS, at record granularity (see
     # SkillTombstone). Travels in the realm JSON like the ledger above so a
     # member holding a live canonical copy of a deleted skill neither

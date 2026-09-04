@@ -37,6 +37,7 @@ from .store import (
     active_skill_tombstones,
     prune_settled_ledger,
     skill_tombstoned,
+    workspace_lift_is_active,
 )
 
 logger = logging.getLogger(__name__)
@@ -2294,9 +2295,13 @@ _REALM_AUTHORITY_FIELDS = (
 
 #: The realm-JSON lists that are RESURRECTION-GUARD LEDGERS rather than realm
 #: truth, and so are UNIONED on pull instead of last-writer-wins-adopted
-#: (RD-11). Each names its merge; both are keyed and bounded by their own rule.
+#: (RD-11). Each names its merge, and each is keyed and bounded by its own rule.
 #: Every other realm field keeps the LWW posture ``skill_selection`` documents.
-_UNIONED_REALM_LEDGERS = ("skill_tombstones", "deleted_workspace_ids")
+#:
+#: ORDER IS LOAD-BEARING: ``workspace_lifts`` is merged before
+#: ``deleted_workspace_ids`` because the deleted-id union SUBTRACTS the ids the
+#: merged lift register says are live (w13/h2).
+_UNIONED_REALM_LEDGERS = ("skill_tombstones", "workspace_lifts", "deleted_workspace_ids")
 
 
 def _ledger_time(value: Any) -> "datetime | None":
@@ -2414,32 +2419,90 @@ def merge_skill_tombstone_ledgers(
     )
 
 
-def merge_deleted_workspace_ledgers(local: Any, incoming: Any) -> list[str]:
-    """Set-union of two ``deleted_workspace_ids`` ledgers, local order first.
+def merge_workspace_lift_ledgers(local: Any, incoming: Any) -> list[dict[str, Any]]:
+    """Per-workspace newest-transition-wins UNION of two lift registers.
 
-    A plain union with no state register, unlike the skill ledger above: these
-    are freshly-minted ids, never re-creatable names, so an id that stays on the
-    ledger forever can never block a legitimate re-creation (``models``
-    :class:`SkillTombstone` spells the asymmetry out).
+    The propagating half of a workspace-delete lift (RULED 2026-09-04; see
+    :class:`models.WorkspaceLift` for why a bare removal could not travel). The
+    comparison is the SKILL ledger's, reused rather than restated — both are
+    per-key state registers over the same ``restored_at``/``deleted_at`` pair,
+    and the tie rule (equal stamps resolve to the DELETE) has to be the same in
+    both or the two ledgers disagree about the same instant.
 
-    MEASURED BOUNDARY (2026-08-31, W2-H5): the plan called this safe because the
-    ledger has "no restore verb", and that is not literally true —
-    ``default_scope.ensure_default_scope`` and the fixed-id reconcile path both
-    LIFT an id when the reserved local-default workspace turns up on the ledger.
-    Those two sites act on the local default scope (which refuses a server
-    binding), so they are not the shared-realm lane; what the union changes for
-    them is only PROPAGATION — under LWW a lift travelled to other members on
-    the next publish, under a union it stays local until the id ages out of the
-    cap. Recorded here rather than in a commit message because a future reader
-    of this function is the person who needs it.
+    Rows that are not dicts, or carry no ``workspace_id``, are dropped: nothing
+    downstream can key on them, and carrying one forward only risks breaking the
+    next realm load.
+
+    Output is oldest-transition-first and bounded SUPERSEDED-FIRST — a marker a
+    re-delete has already superseded is settled history whose id is back on
+    ``deleted_workspace_ids`` anyway, while evicting a LIVE lift would re-delete
+    a live workspace.
     """
 
+    merged: dict[str, dict[str, Any]] = {}
+    for rows in (local, incoming):
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            workspace_id = str(row.get("workspace_id") or "").strip()
+            if not workspace_id:
+                continue
+            held = merged.get(workspace_id)
+            merged[workspace_id] = (
+                dict(row) if held is None else _newer_tombstone_row(held, dict(row))
+            )
+    ordered = sorted(
+        merged.values(),
+        key=lambda row: (
+            _tombstone_transition_at(row) or datetime.min.replace(tzinfo=timezone.utc),
+            str(row.get("workspace_id") or ""),
+        ),
+    )
+    return prune_settled_ledger(
+        ordered,
+        cap=DELETED_WORKSPACE_LEDGER_CAP,
+        settled=lambda row: not workspace_lift_is_active(row),
+    )
+
+
+def merge_deleted_workspace_ledgers(
+    local: Any, incoming: Any, *, lifts: Any = None
+) -> list[str]:
+    """Set-union of two ``deleted_workspace_ids`` ledgers, MINUS the live lifts.
+
+    The union half is unchanged and stays a plain set union with no state
+    register of its own: these are freshly-minted ids, never re-creatable names,
+    so an id that stays on the ledger forever can never block a legitimate
+    re-creation (``models`` :class:`SkillTombstone` spells the asymmetry out).
+
+    MEASURED BOUNDARY (2026-08-31, W2-H5), and what closed it. The plan called
+    the union safe because the ledger has "no restore verb", and that is not
+    literally true — ``default_scope.ensure_default_scope`` and the fixed-id
+    reconcile path both LIFT an id when the reserved local-default workspace
+    turns up on the ledger. Under LWW a lift travelled on the next publish;
+    under a union a removal is an ABSENCE, which the merge cannot tell apart
+    from "that peer never heard about this delete", so the lift stayed local
+    until the id aged out of the cap.
+
+    ``lifts`` is the merged lift register (:func:`merge_workspace_lift_ledgers`)
+    and it is what makes the lift travel: an id whose marker is still live is
+    subtracted from the union, so a peer that has not yet seen the restore
+    cannot re-add it. Absent or empty ``lifts`` reproduces the pre-2026-09-04
+    behaviour EXACTLY, which is what an old member's realm JSON gets.
+    """
+
+    live_lifts = {
+        str(row.get("workspace_id") or "").strip()
+        for row in (lifts if isinstance(lifts, list) else [])
+        if isinstance(row, dict) and workspace_lift_is_active(row)
+    }
+    live_lifts.discard("")
     merged: list[str] = []
     seen: set[str] = set()
     for rows in (local, incoming):
         for raw in rows if isinstance(rows, list) else []:
             value = str(raw or "").strip()
-            if not value or value in seen:
+            if not value or value in seen or value in live_lifts:
                 continue
             seen.add(value)
             merged.append(value)
@@ -2482,7 +2545,18 @@ def _pulled_artifact_bytes(artifact: RealmSyncArtifact, *, realm: Realm) -> byte
                 merged[field] = current[field]
     mergers = {
         "skill_tombstones": merge_skill_tombstone_ledgers,
-        "deleted_workspace_ids": merge_deleted_workspace_ledgers,
+        "workspace_lifts": merge_workspace_lift_ledgers,
+        # Reads the lift register merged one iteration earlier — the tuple's
+        # order is what guarantees it is there. Falls back to the incoming and
+        # local rows so the subtraction is still right if either side is the
+        # only one carrying a lift.
+        "deleted_workspace_ids": lambda local_rows, incoming_rows: (
+            merge_deleted_workspace_ledgers(
+                local_rows,
+                incoming_rows,
+                lifts=merged.get("workspace_lifts"),
+            )
+        ),
     }
     for field in _UNIONED_REALM_LEDGERS:
         if not (current.get(field) or incoming.get(field)):

@@ -44,7 +44,7 @@ removal doc).
 
 Four things, in one chain, each with a distinct lifetime.
 
-**1 — Persona template.** `AgentPersona` (`agent_runtime/models.py:364`) — the
+**1 — Persona template.** `AgentPersona` (`agent_runtime/models.py:403`) — the
 definition: display name, role, model/provider/api_mode, toolsets, skills,
 `hermes_profile`, budgets, readiness. Personas are **data**, from the config
 block (`config.persona_records_from_config`, `agent_runtime/config.py:552`)

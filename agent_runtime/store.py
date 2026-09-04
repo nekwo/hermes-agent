@@ -6,6 +6,7 @@ import re
 import shutil
 import uuid
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -15,7 +16,16 @@ from utils import atomic_json_write
 from . import paths
 from .errors import AlreadyExists, NotFound, SkillTombstoneRefused, WorkspaceDeleteBlocked
 from .events import EventLog
-from .models import AgentPersona, AgentRun, Event, Incident, Realm, SkillTombstone, Workspace
+from .models import (
+    AgentPersona,
+    AgentRun,
+    Event,
+    Incident,
+    Realm,
+    SkillTombstone,
+    Workspace,
+    WorkspaceLift,
+)
 from .serde import from_jsonable, safe_id, to_jsonable
 from .states import RunState
 
@@ -456,6 +466,25 @@ class WorkspaceStore:
             ledger = [wid for wid in (realm.deleted_workspace_ids or []) if wid != item.id]
             ledger.append(item.id)
             realm.deleted_workspace_ids = ledger[-DELETED_WORKSPACE_LEDGER_CAP:]
+            # SUPERSEDE any lift marker for this id rather than dropping it.
+            # Dropping it would be an absence again, and a peer's surviving lift
+            # would then out-rank this fresh delete on the next pull. Stamping
+            # ``deleted_at`` makes "a fresh re-delete beats a stale lift" the
+            # same comparison as "a fresh lift beats a stale delete".
+            realm.workspace_lifts = _prune_workspace_lifts(
+                [
+                    (
+                        WorkspaceLift(
+                            workspace_id=lift.workspace_id,
+                            restored_at=lift.restored_at,
+                            deleted_at=now(),
+                        )
+                        if lift.workspace_id == item.id
+                        else lift
+                    )
+                    for lift in (getattr(realm, "workspace_lifts", None) or [])
+                ]
+            )
             if realm.default_workspace_id == item.id:
                 # Only reachable for local realms — the server-bound case is
                 # guarded above.
@@ -609,6 +638,96 @@ def _prune_skill_tombstones(entries: list[SkillTombstone]) -> list[SkillTombston
         cap=SKILL_TOMBSTONE_LEDGER_CAP,
         settled=lambda entry: getattr(entry, "restored_at", None) is not None,
     )
+
+
+def workspace_lift_is_active(lift: Any) -> bool:
+    """Is this lift marker the LATEST word about its workspace id?
+
+    Shape-tolerant on purpose (record here, raw JSON row in the pull-time merge
+    over a peer's bytes — the same "one rule, two shapes" split
+    :func:`prune_settled_ledger` carries). A marker whose ``deleted_at`` is at
+    least as new as its ``restored_at`` has been superseded by a re-delete; the
+    tie resolves to the DELETE, matching the skill ledger's rule.
+    """
+
+    restored_at = lift.get("restored_at") if isinstance(lift, dict) else getattr(lift, "restored_at", None)
+    deleted_at = lift.get("deleted_at") if isinstance(lift, dict) else getattr(lift, "deleted_at", None)
+    restored_at = _stamp(restored_at)
+    if restored_at is None:
+        return False
+    deleted_at = _stamp(deleted_at)
+    return deleted_at is None or restored_at > deleted_at
+
+
+def _stamp(value: Any) -> "datetime | None":
+    """A ledger stamp as an aware datetime, or ``None`` when it will not parse.
+
+    Deliberately tolerant: at pull time this runs over a PEER's bytes, where an
+    unparseable stamp must cost that one entry its rank and nothing more.
+    """
+
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def active_workspace_lifts(realm: Realm) -> list[WorkspaceLift]:
+    """The lift markers that currently say "this id is NOT deleted"."""
+
+    return [lift for lift in (getattr(realm, "workspace_lifts", None) or []) if workspace_lift_is_active(lift)]
+
+
+def _prune_workspace_lifts(entries: list[WorkspaceLift]) -> list[WorkspaceLift]:
+    """The record-shaped bound. SUPERSEDED markers are the settled history here:
+    a re-deleted id is back on ``deleted_workspace_ids``, so dropping its marker
+    loses nothing, while dropping a LIVE lift would re-delete a live workspace."""
+
+    return prune_settled_ledger(
+        entries,
+        cap=DELETED_WORKSPACE_LEDGER_CAP,
+        settled=lambda entry: not workspace_lift_is_active(entry),
+    )
+
+
+def lift_deleted_workspace(realm: Realm, workspace_id: str) -> bool:
+    """Take ``workspace_id`` off the delete ledger AND say so to the peers.
+
+    The single write chokepoint for a lift, and it exists because the local half
+    alone is not a restore: removing the id is an absence, and RD-11's set-union
+    merge reads an absence as "that member never heard about the delete", so the
+    next pull from any peer still carrying the id undid the lift. The marker is
+    the propagating half — a positive fact with a clock that can win the merge.
+
+    Mutates ``realm`` IN MEMORY and reports whether anything changed, because
+    both call sites (``default_scope``) batch several realm edits behind one
+    ``realm_changed`` flag and a single save. Idempotent: an id that is neither
+    on the ledger nor already lifted writes nothing.
+    """
+
+    clean = str(workspace_id or "").strip()
+    if not clean:
+        return False
+    ledger = list(realm.deleted_workspace_ids or [])
+    lifts = list(getattr(realm, "workspace_lifts", None) or [])
+    already = any(lift.workspace_id == clean and workspace_lift_is_active(lift) for lift in lifts)
+    if clean not in ledger and already:
+        return False
+    realm.deleted_workspace_ids = [item for item in ledger if item != clean]
+    # One marker per id: a re-lift RE-STAMPS rather than appending, so the
+    # register cannot hold two contradictory rows for one workspace.
+    lifts = [lift for lift in lifts if lift.workspace_id != clean]
+    lifts.append(WorkspaceLift(workspace_id=clean, restored_at=now()))
+    realm.workspace_lifts = _prune_workspace_lifts(lifts)
+    return True
 
 
 def skill_tombstoned(realm: Realm, slug: str) -> SkillTombstone | None:

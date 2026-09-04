@@ -13,7 +13,7 @@ from . import paths
 from .errors import DefaultScopeReconciliationRequired, NotFound, StoreCorrupt
 from .locks import archive_lock
 from .models import Realm, Workspace
-from .store import RealmStore, WorkspaceStore
+from .store import RealmStore, WorkspaceStore, lift_deleted_workspace
 
 
 DEFAULT_REALM_ID = "realm_default"
@@ -130,12 +130,12 @@ def ensure_default_scope(*, agent_ids: list[str] | None = None) -> DefaultScope:
     if workspace.id not in realm.workspace_ids:
         realm.workspace_ids.append(workspace.id)
         realm_changed = True
-    if workspace.id in realm.deleted_workspace_ids:
-        realm.deleted_workspace_ids = [
-            workspace_id
-            for workspace_id in realm.deleted_workspace_ids
-            if workspace_id != workspace.id
-        ]
+    # A LIFT, not a bare local removal: the MARKER is what reaches the other
+    # members (see ``store.lift_deleted_workspace``). Under RD-11's set-union
+    # merge a removal is an absence, indistinguishable from "that peer never
+    # heard about this delete", so the next pull from any member still carrying
+    # the id put it straight back and the restore never left this machine.
+    if lift_deleted_workspace(realm, workspace.id):
         realm_changed = True
     if realm_changed:
         realm = realm_store.save(realm)
@@ -525,12 +525,10 @@ def reconcile_default_scope_to_legacy(
             if winner_workspace.id not in winner_realm.workspace_ids:
                 winner_realm.workspace_ids.append(winner_workspace.id)
                 changed = True
-            if winner_workspace.id in winner_realm.deleted_workspace_ids:
-                winner_realm.deleted_workspace_ids = [
-                    item
-                    for item in winner_realm.deleted_workspace_ids
-                    if item != winner_workspace.id
-                ]
+            # The same propagating lift as ``ensure_default_scope`` — one
+            # chokepoint, so the reconcile path cannot drift into the old
+            # local-only removal.
+            if lift_deleted_workspace(winner_realm, winner_workspace.id):
                 changed = True
             if changed:
                 winner_realm = realm_store.save(winner_realm)

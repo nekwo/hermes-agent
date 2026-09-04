@@ -34,10 +34,17 @@ from agent_runtime import store as store_module
 from agent_runtime.realm_sync import (
     merge_deleted_workspace_ledgers,
     merge_skill_tombstone_ledgers,
+    merge_workspace_lift_ledgers,
     pull_realm_sync,
     realm_sync_status,
 )
-from agent_runtime.store import RealmStore, active_skill_tombstones, skill_tombstoned
+from agent_runtime.store import (
+    RealmStore,
+    active_skill_tombstones,
+    active_workspace_lifts,
+    lift_deleted_workspace,
+    skill_tombstoned,
+)
 from hermes_constants import get_shared_skills_dir
 
 T0 = datetime(2026, 8, 31, 12, 0, 0, tzinfo=timezone.utc)
@@ -195,6 +202,95 @@ def test_deleted_workspace_ids_union_drops_blanks_and_tolerates_absence():
     assert merge_deleted_workspace_ledgers(["x"], None) == ["x"]
 
 
+# ── the propagating LIFT marker (w13/h2, RULED 2026-09-04) ───────────────────
+# The union above cannot express a lift: `default_scope` removed the reserved
+# local-default workspace's id from the ledger, and a removal is an ABSENCE,
+# which the union reads as "that peer never heard about this delete". The lift
+# therefore stayed local until the cap aged the id out (MEASURED by W2-H5). A
+# lift is now a positive marker with a clock that travels in the realm JSON.
+
+
+def _lift(workspace_id: str, *, restored: int, deleted: int | None = None) -> dict:
+    row = {"workspace_id": workspace_id, "restored_at": _stamp(restored)}
+    if deleted is not None:
+        row["deleted_at"] = _stamp(deleted)
+    return row
+
+
+def test_a_live_lift_subtracts_its_id_from_the_deleted_union():
+    """THE regression this marker exists for.
+
+    A peer that still carries the id must not be able to re-delete a workspace
+    this member has restored — under a bare union it always could.
+    """
+
+    merged = merge_deleted_workspace_ledgers(
+        [], ["ws_default", "ws_other"], lifts=[_lift("ws_default", restored=10)]
+    )
+
+    assert merged == ["ws_other"]
+
+
+def test_a_lift_a_later_delete_superseded_no_longer_subtracts():
+    """The other direction, and it is the reason the marker carries two stamps.
+
+    A re-delete stamps ``deleted_at`` on the marker instead of dropping it —
+    dropping it would be an absence again, and a peer's surviving lift would
+    out-rank the fresh delete.
+    """
+
+    merged = merge_deleted_workspace_ledgers(
+        [], ["ws_default"], lifts=[_lift("ws_default", restored=10, deleted=20)]
+    )
+
+    assert merged == ["ws_default"]
+
+
+def test_an_equal_stamp_tie_on_a_lift_resolves_to_the_delete():
+    """Same tie rule as the skill ledger, and for the same reason: a lift that
+    loses a tie is one explicit verb away from being re-run; a delete that loses
+    one is a resurrected workspace."""
+
+    merged = merge_deleted_workspace_ledgers(
+        [], ["ws_default"], lifts=[_lift("ws_default", restored=10, deleted=10)]
+    )
+
+    assert merged == ["ws_default"]
+
+
+def test_an_absent_lift_register_reproduces_the_old_union_exactly():
+    """Back-compat floor: an old member's realm JSON carries no lift register,
+    and must merge exactly as it did before this field existed."""
+
+    assert merge_deleted_workspace_ledgers(["a"], ["b"]) == ["a", "b"]
+    assert merge_deleted_workspace_ledgers(["a"], ["b"], lifts=None) == ["a", "b"]
+    assert merge_deleted_workspace_ledgers(["a"], ["b"], lifts=[]) == ["a", "b"]
+
+
+def test_the_lift_register_keeps_the_newest_transition_per_workspace():
+    merged = merge_workspace_lift_ledgers(
+        [_lift("ws_a", restored=10), _lift("ws_b", restored=5)],
+        [_lift("ws_a", restored=10, deleted=30)],
+    )
+
+    assert [row["workspace_id"] for row in merged] == ["ws_b", "ws_a"]
+    # ws_a's newer fact is the re-delete, so it stops subtracting.
+    assert merge_deleted_workspace_ledgers([], ["ws_a", "ws_b"], lifts=merged) == ["ws_a"]
+
+
+def test_the_lift_register_drops_rows_nothing_can_key_on():
+    """A peer's bytes, not ours: a row with no workspace_id keys nothing
+    downstream, and carrying it forward only risks breaking the next realm load.
+    """
+
+    merged = merge_workspace_lift_ledgers(
+        ["not-a-dict", {"restored_at": _stamp(1)}, {"workspace_id": "  "}],
+        [_lift("ws_ok", restored=1)],
+    )
+
+    assert [row["workspace_id"] for row in merged] == ["ws_ok"]
+
+
 # ── end to end through the pull verb ─────────────────────────────────────────
 
 
@@ -339,6 +435,60 @@ def test_a_pull_unions_the_deleted_workspace_ledger(tmp_path):
     pull_realm_sync(realm.id)
 
     assert RealmStore().get(realm.id).deleted_workspace_ids == ["ws_mine", "ws_theirs"]
+
+
+def test_a_pull_cannot_undo_a_lift_the_publisher_never_heard_about(tmp_path):
+    """END TO END, through the verb an operator runs.
+
+    Before the lift marker this asserted the opposite by construction: the local
+    removal was an absence, the peer's copy still carried the id, and the union
+    put it straight back. The workspace stayed deleted on this machine until the
+    id aged out of the 500-entry cap.
+    """
+
+    realm, repo = _local_realm(tmp_path)
+    item = RealmStore().get(realm.id)
+    item.deleted_workspace_ids = ["ws_default", "ws_theirs"]
+    RealmStore().save(item)
+    _publish_record(repo, realm)
+
+    item = RealmStore().get(realm.id)
+    assert lift_deleted_workspace(item, "ws_default") is True
+    RealmStore().save(item)
+
+    pull_realm_sync(realm.id)
+
+    pulled = RealmStore().get(realm.id)
+    assert pulled.deleted_workspace_ids == ["ws_theirs"]
+    # And the marker itself survives the pull, so the NEXT peer to publish
+    # learns about the restore too.
+    assert [lift.workspace_id for lift in active_workspace_lifts(pulled)] == ["ws_default"]
+
+
+def test_a_delete_after_a_lift_supersedes_the_marker_end_to_end(tmp_path):
+    """The lift must not become a permanent immunity to deletion."""
+
+    realm, repo = _local_realm(tmp_path)
+    item = RealmStore().get(realm.id)
+    item.deleted_workspace_ids = ["ws_default"]
+    RealmStore().save(item)
+    _publish_record(repo, realm)
+
+    item = RealmStore().get(realm.id)
+    lift_deleted_workspace(item, "ws_default")
+    RealmStore().save(item)
+
+    # The re-delete's supersede stamp, written the way WorkspaceStore.delete
+    # writes it (the workspace row itself is long gone in this fixture).
+    item = RealmStore().get(realm.id)
+    item.workspace_lifts[0].deleted_at = datetime.now(timezone.utc)
+    RealmStore().save(item)
+
+    pull_realm_sync(realm.id)
+
+    pulled = RealmStore().get(realm.id)
+    assert pulled.deleted_workspace_ids == ["ws_default"]
+    assert active_workspace_lifts(pulled) == []
 
 
 def test_a_pull_that_reconciles_nothing_leaves_the_record_byte_identical(tmp_path):
