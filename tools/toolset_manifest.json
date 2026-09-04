@@ -1,0 +1,263 @@
+{
+  "schema_version": 1,
+  "tools": {
+    "agent_chat_dispatches": "agent_chat",
+    "agent_chat_installs": "agent_chat",
+    "agent_chat_log_path": "agent_chat",
+    "agent_chat_open": "agent_chat",
+    "agent_chat_send": "agent_chat",
+    "agent_chat_threads": "agent_chat",
+    "bfl_flux3_get_result": "bfl",
+    "bfl_flux3_image_to_video": "bfl",
+    "bfl_flux3_keyframes_to_video": "bfl",
+    "bfl_flux3_prompting_guide": "bfl",
+    "bfl_flux3_text_to_video": "bfl",
+    "bfl_flux3_video_continuation": "bfl",
+    "board_card_add": "board",
+    "board_cards": "board",
+    "browser_back": "browser",
+    "browser_cdp": "browser-cdp",
+    "browser_click": "browser",
+    "browser_console": "browser",
+    "browser_dialog": "browser-cdp",
+    "browser_get_images": "browser",
+    "browser_navigate": "browser",
+    "browser_press": "browser",
+    "browser_scroll": "browser",
+    "browser_snapshot": "browser",
+    "browser_type": "browser",
+    "browser_vision": "browser",
+    "clarify": "clarify",
+    "close_terminal": "terminal",
+    "computer_use": "computer_use",
+    "cronjob": "cronjob",
+    "delegate_task": "delegation",
+    "discord": "discord",
+    "discord_admin": "discord_admin",
+    "execute_code": "code_execution",
+    "feishu_doc_read": "feishu_doc",
+    "feishu_drive_add_comment": "feishu_drive",
+    "feishu_drive_list_comment_replies": "feishu_drive",
+    "feishu_drive_list_comments": "feishu_drive",
+    "feishu_drive_reply_comment": "feishu_drive",
+    "focus_pane": "terminal",
+    "ha_call_service": "homeassistant",
+    "ha_get_state": "homeassistant",
+    "ha_list_entities": "homeassistant",
+    "ha_list_services": "homeassistant",
+    "image_generate": "image_gen",
+    "kanban_attach": "kanban",
+    "kanban_attach_url": "kanban",
+    "kanban_attachments": "kanban",
+    "kanban_block": "kanban",
+    "kanban_comment": "kanban",
+    "kanban_complete": "kanban",
+    "kanban_create": "kanban",
+    "kanban_heartbeat": "kanban",
+    "kanban_link": "kanban",
+    "kanban_list": "kanban",
+    "kanban_show": "kanban",
+    "kanban_unblock": "kanban",
+    "memory": "memory",
+    "open_preview": "terminal",
+    "patch": "file",
+    "process": "terminal",
+    "project_create": "project",
+    "project_list": "project",
+    "project_switch": "project",
+    "react_to_message": "terminal",
+    "read_file": "file",
+    "read_terminal": "terminal",
+    "search_files": "file",
+    "session_search": "session_search",
+    "skill_manage": "skills",
+    "skill_search": "skills",
+    "skill_view": "skills",
+    "skills_list": "skills",
+    "terminal": "terminal",
+    "text_to_speech": "tts",
+    "todo": "todo",
+    "video_analyze": "video",
+    "video_generate": "video_gen",
+    "vision_analyze": "vision",
+    "web_extract": "web",
+    "web_search": "web",
+    "write_file": "file",
+    "x_search": "x_search",
+    "xai_video_edit": "video_gen",
+    "xai_video_extend": "video_gen",
+    "yb_query_group_info": "hermes-yuanbao",
+    "yb_query_group_members": "hermes-yuanbao",
+    "yb_search_sticker": "hermes-yuanbao",
+    "yb_send_dm": "hermes-yuanbao",
+    "yb_send_sticker": "hermes-yuanbao"
+  },
+  "modules": {
+    "agent_chat_tool": [
+      "agent_chat_dispatches",
+      "agent_chat_installs",
+      "agent_chat_log_path",
+      "agent_chat_open",
+      "agent_chat_send",
+      "agent_chat_threads"
+    ],
+    "board_tool": [
+      "board_card_add",
+      "board_cards"
+    ],
+    "browser_cdp_tool": [
+      "browser_cdp"
+    ],
+    "browser_dialog_tool": [
+      "browser_dialog"
+    ],
+    "browser_tool": [
+      "browser_back",
+      "browser_click",
+      "browser_console",
+      "browser_get_images",
+      "browser_navigate",
+      "browser_press",
+      "browser_scroll",
+      "browser_snapshot",
+      "browser_type",
+      "browser_vision"
+    ],
+    "clarify_tool": [
+      "clarify"
+    ],
+    "close_terminal_tool": [
+      "close_terminal"
+    ],
+    "code_execution_tool": [
+      "execute_code"
+    ],
+    "computer_use_tool": [
+      "computer_use"
+    ],
+    "cronjob_tools": [
+      "cronjob"
+    ],
+    "delegate_tool": [
+      "delegate_task"
+    ],
+    "discord_tool": [
+      "discord",
+      "discord_admin"
+    ],
+    "feishu_doc_tool": [
+      "feishu_doc_read"
+    ],
+    "feishu_drive_tool": [
+      "feishu_drive_add_comment",
+      "feishu_drive_list_comment_replies",
+      "feishu_drive_list_comments",
+      "feishu_drive_reply_comment"
+    ],
+    "file_tools": [
+      "patch",
+      "read_file",
+      "search_files",
+      "write_file"
+    ],
+    "flux3_video_tool": [
+      "bfl_flux3_get_result",
+      "bfl_flux3_image_to_video",
+      "bfl_flux3_keyframes_to_video",
+      "bfl_flux3_prompting_guide",
+      "bfl_flux3_text_to_video",
+      "bfl_flux3_video_continuation"
+    ],
+    "focus_pane_tool": [
+      "focus_pane"
+    ],
+    "homeassistant_tool": [
+      "ha_call_service",
+      "ha_get_state",
+      "ha_list_entities",
+      "ha_list_services"
+    ],
+    "image_generation_tool": [
+      "image_generate"
+    ],
+    "kanban_tools": [
+      "kanban_attach",
+      "kanban_attach_url",
+      "kanban_attachments",
+      "kanban_block",
+      "kanban_comment",
+      "kanban_complete",
+      "kanban_create",
+      "kanban_heartbeat",
+      "kanban_link",
+      "kanban_list",
+      "kanban_show",
+      "kanban_unblock"
+    ],
+    "memory_tool": [
+      "memory"
+    ],
+    "open_preview_tool": [
+      "open_preview"
+    ],
+    "process_registry": [
+      "process"
+    ],
+    "project_tools": [
+      "project_create",
+      "project_list",
+      "project_switch"
+    ],
+    "react_to_message_tool": [
+      "react_to_message"
+    ],
+    "read_terminal_tool": [
+      "read_terminal"
+    ],
+    "session_search_tool": [
+      "session_search"
+    ],
+    "skill_manager_tool": [
+      "skill_manage"
+    ],
+    "skills_tool": [
+      "skill_search",
+      "skill_view",
+      "skills_list"
+    ],
+    "terminal_tool": [
+      "terminal"
+    ],
+    "todo_tool": [
+      "todo"
+    ],
+    "tts_tool": [
+      "text_to_speech"
+    ],
+    "video_generation_tool": [
+      "video_generate"
+    ],
+    "vision_tools": [
+      "video_analyze",
+      "vision_analyze"
+    ],
+    "web_tools": [
+      "web_extract",
+      "web_search"
+    ],
+    "x_search_tool": [
+      "x_search"
+    ],
+    "xai_video_tools": [
+      "xai_video_edit",
+      "xai_video_extend"
+    ],
+    "yuanbao_tools": [
+      "yb_query_group_info",
+      "yb_query_group_members",
+      "yb_search_sticker",
+      "yb_send_dm",
+      "yb_send_sticker"
+    ]
+  }
+}
