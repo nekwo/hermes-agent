@@ -108,6 +108,31 @@ def test_harness_pets_sprite_json_shape(tmp_path, monkeypatch, capsys):
     assert base64.standard_b64decode(pet["spritesheetBase64"]).startswith(b"\x89PNG")
 
 
+def test_harness_pets_sprite_no_sheet_is_metadata_only(tmp_path, monkeypatch, capsys):
+    """Mirrors `characters sprite --no-sheet` (row 33): metadata only, no bytes.
+
+    The row this closes: pets had no metadata-only mode while characters did,
+    a deliberate divergence the Mission Control queue flagged (row 33). Same
+    relief, same shape — drop `spritesheetBase64`, carry `sheet` (the absolute
+    path) in its place, leave every other key untouched.
+    """
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    pet_dir = _write_pet(tmp_path, slug="milo", display_name="Milo")
+
+    args = parser().parse_args(["harness", "pets", "sprite", "milo", "--no-sheet", "--json"])
+
+    assert args.func(args) == 0
+    data = json.loads(capsys.readouterr().out)
+    pet = data["pet"]
+    assert data["ok"] is True
+    assert "spritesheetBase64" not in pet
+    assert pet["sheet"] == str(pet_dir / "spritesheet.png")
+    assert pet["spritesheetRevision"]
+    assert pet["frameW"] == 192
+    assert pet["frameH"] == 208
+    assert pet["framesByRow"]["idle"] == 3
+
+
 # ── the sprite byte-baseline (the standing sha check, now enforced by a test) ──
 #
 # `harness characters` lives in the same argparse tree and the same emitter as

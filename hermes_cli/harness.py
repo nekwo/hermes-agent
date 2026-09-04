@@ -1838,6 +1838,7 @@ def build_parser(parent_subparsers) -> None:
     pets_install.set_defaults(func=_cmd_pets_install)
     pets_sprite = pets_subs.add_parser("sprite", help="Return an installed pet spritesheet payload")
     pets_sprite.add_argument("slug")
+    pets_sprite.add_argument("--no-sheet", dest="no_sheet", action="store_true", help="Metadata only: drop `spritesheetBase64` and carry `sheet`, the absolute path, in its place. `spritesheetRevision` and every geometry/taxonomy key are unchanged. Mirrors `characters sprite --no-sheet`. The default is byte-identical to what it always was")
     pets_sprite.add_argument("--json", action="store_true")
     pets_sprite.set_defaults(func=_cmd_pets_sprite)
     pets_thumb = pets_subs.add_parser("thumb", help="Return a Petdex pet thumbnail")
@@ -3973,7 +3974,12 @@ def _cmd_pets_sprite(args) -> int:
         data = {"ok": False, "slug": slug, "error": f"pet '{slug}' is not installed"}
         print(emit_json(data) if getattr(args, "json", False) else data["error"])
         return 2
-    data = {"ok": True, "pet": _pet_sprite_payload_for_launcher(pet)}
+    data = {
+        "ok": True,
+        "pet": _pet_sprite_payload_for_launcher(
+            pet, include_sheet=not bool(getattr(args, "no_sheet", False))
+        ),
+    }
     print(emit_json(data) if getattr(args, "json", False) else json.dumps(data, indent=2))
     return 0
 
@@ -4084,20 +4090,39 @@ def _pet_state_rows(spritesheet: Path) -> list[str]:
         return list(constants.STATE_ROWS)
 
 
-def _pet_sprite_payload_for_launcher(pet) -> dict:
+def _pet_sprite_payload_for_launcher(pet, *, include_sheet: bool = True) -> dict:
+    """The launcher payload for an installed pet.
+
+    ``include_sheet=False`` is the METADATA-ONLY shape (``pets sprite
+    --no-sheet``, row 33), mirroring ``characters sprite --no-sheet``: it
+    drops ``spritesheetBase64`` and puts ``sheet`` — the absolute path — in
+    the same slot, so a consumer that wants ``framesByRow``/``stateRows`` and
+    reads the file itself is not also handed the whole sheet re-encoded as
+    base64. Unlike the character-sheet mode, the geometry keys below
+    (``framesByRow``, ``framesByState``, ``stateRows``) still open the pet's
+    sheet — a pet carries no per-row frame count in its manifest, so the
+    padding-trimmed counts can only come from the image itself; only the
+    WHOLE-SHEET base64 encode is skipped. The default is byte-identical to
+    what it always was.
+    """
+
     import base64
 
     from agent.pet import constants, render
 
-    raw = pet.spritesheet.read_bytes()
     suffix = pet.spritesheet.suffix.lower()
     mime = "image/png" if suffix == ".png" else "image/webp"
+    sheet_slot = (
+        {"spritesheetBase64": base64.standard_b64encode(pet.spritesheet.read_bytes()).decode("ascii")}
+        if include_sheet
+        else {"sheet": str(pet.spritesheet)}
+    )
     return {
         "slug": pet.slug,
         "displayName": pet.display_name,
         "description": pet.description,
         "mime": mime,
-        "spritesheetBase64": base64.standard_b64encode(raw).decode("ascii"),
+        **sheet_slot,
         "spritesheetRevision": _pet_sheet_revision(pet.spritesheet),
         "frameW": constants.FRAME_W,
         "frameH": constants.FRAME_H,
