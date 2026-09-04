@@ -43,11 +43,8 @@ from agent_runtime.cli_format import emit_json
 from agent_runtime.errors import (
     AgentRuntimeError,
     AlreadyExists,
-    ArchiveUnreadable,
     DefaultScopeReconciliationRequired,
     EventPayloadTooLarge,
-    IdempotencyKeyVerbMismatch,
-    IdempotentReplayUnresolved,
     NotFound,
     StaleRevision,
     StoreCorrupt,
@@ -136,8 +133,29 @@ ERROR_EXIT_CODES = {
     # wire's ``data.reason`` and the launcher's render-time detector or one
     # refusal ends up with three names.
     "duplicate_desk": 4,
+    # An upsert of an actor key this server DELETED (``ActorArchived``). It
+    # declared ``code = "actor_archived"`` from the day it was written and could
+    # never spend it: the catch-all answered ``internal_error`` for it until the
+    # 2026-09-04 ruling made the declaration the rule, and with no row here it
+    # would have gone straight on to exit 1 anyway. Family 4 because the RPC arm
+    # already answers ``ERR_CONFLICT`` for the identical condition
+    # (``serve_rpc.py``) — one refusal, one family across the two lanes — and
+    # because the operator's next MOVE is a family-4 move: the key is gone on
+    # the authority, so drop the local row and place a NEW agent. NON-RETRYABLE
+    # (errors.py states it): it is not in the retryable set below, and must not
+    # join it.
+    "actor_archived": 4,
     "already_exists": 4,
     "stale_revision": 4,
+    # A workspace hard-delete refused because the workspace is a server-bound
+    # realm's DEFAULT pointer (``WorkspaceDeleteBlocked``, ``store.py``'s first
+    # delete guard). Family 4 on the same reading as the rows above: nothing
+    # about the request is wrong, the WORLD conflicts with it, and the cure is
+    # to promote another default first and then re-run the identical command.
+    # Before this row it exited 1 — ``internal_error``'s number — while the
+    # envelope correctly carried the typed reason, so the code and the exit told
+    # an operator two different stories about the same refusal.
+    "realm_default_workspace": 4,
     # ``agent_already_assigned`` left this table with AX2 (2026-08-31). It was
     # the snapshot ``warnings`` lane's only code, that lane's only input was the
     # writerless assignment store, and the launcher had already tombstoned the
@@ -320,49 +338,6 @@ def _error_code_for_exception(exc: BaseException) -> str:
         return "not_found"
     if isinstance(exc, json.JSONDecodeError):
         return "invalid_payload"
-    # A file the write DEPENDS ON will not decode. Its own ``code``, not a
-    # constant and not a row in the tuple below: ``ActorsUnreadable`` subclasses
-    # ``ArchiveUnreadable`` so it inherits the exit family and the cure SHAPE
-    # (repair one file, retry the same call) while naming a DIFFERENT file —
-    # a fixed string here would tell an operator holding an undecodable ACTOR
-    # file to go and fix the archive copy. This is the same
-    # ``exc.code``-not-the-class-constant rule the three RPC write arms record
-    # (``serve_rpc.py`` — upsert, archive, resolve), so one condition keeps one
-    # name per lane instead of one name per verb.
-    #
-    # Placed ahead of the ``AgentRuntimeError`` catch-all it exists to escape:
-    # without this row ``harness office actor-remove`` / ``actor-upsert`` over an
-    # undecodable archived copy exited 1 as ``internal_error`` — a corrupt file
-    # on the server reported as a harness crash, which is precisely the
-    # names-the-wrong-party failure EG-1.5 fixed on the wire and left standing
-    # here. Verbs that catch the condition themselves (``harness_parts/office.py``
-    # actor-upsert, EG-6.6) pass ``code=`` explicitly and never reach this; this
-    # row is what covers every OTHER office write verb.
-    if isinstance(exc, ArchiveUnreadable):
-        return exc.code
-    # An office write naming a workspace no record resolves. Its own ``exc.code``
-    # under the same rule as the row above, and placed AHEAD of the
-    # ``AgentRuntimeError`` catch-all for the same reason that row was: without
-    # it, an operator refusal exits 1 as ``internal_error``, and a refusal is not
-    # a harness crash. Exit family 3 (``ERROR_EXIT_CODES``) so it lands beside
-    # ``workspace_not_found`` — the RPC office arms' spelling for the neighbouring
-    # condition — and no existing client branch has to learn a new exit.
-    if isinstance(exc, WorkspaceUnresolved):
-        return exc.code
-    # A recorded idempotency receipt naming a row that will not resolve.
-    # Ahead of the catch-all for the third time and the same reason: the
-    # write REFUSED rather than crashed, and re-running it is the one thing
-    # that must not happen (``add_card`` mints a new id per call, so the key
-    # that exists to prevent a duplicate would create one).
-    if isinstance(exc, IdempotentReplayUnresolved):
-        return exc.code
-    # One board idempotency key presented to two different card verbs. Ahead of
-    # the catch-all for the fourth time and the same reason — a refusal is not a
-    # crash — and its own row rather than a share of the one above because the
-    # two disagree about ``retryable``: repairing nothing will ever make this
-    # call succeed, so it must not join the retryable set that row is in.
-    if isinstance(exc, IdempotencyKeyVerbMismatch):
-        return exc.code
     # Typed AgentRuntimeError subclasses map to their precondition/integrity
     # codes. Four rows left this tuple on 2026-08-19 — InvalidTransition,
     # StaleRun, ProofMissing and RuntimeRootMismatch — because an AST Raise
@@ -384,30 +359,46 @@ def _error_code_for_exception(exc: BaseException) -> str:
         if text in ERROR_EXIT_CODES:
             return text
         return "invalid_request"
-    # THE CATCH-ALL, AND WHAT IT COSTS (surveyed 2026-09-04).
+    # THE CATCH-ALL. RULED 2026-09-04: the code is DECLARED by the class.
     #
-    # Four typed conditions above are hand-placed AHEAD of this row, each with
-    # its own comment saying the same sentence: without the row, a REFUSAL or a
-    # damaged server file exits 1 as ``internal_error``, which names the wrong
-    # party. Four of one shape is a pattern, not four bugs -- the default here
-    # is "the harness crashed", and it is applied to every typed subclass
-    # nobody remembered to escape.
+    # This used to return ``internal_error`` for every ``AgentRuntimeError``,
+    # with four typed conditions hand-placed AHEAD of it -- ``ArchiveUnreadable``,
+    # ``WorkspaceUnresolved``, ``IdempotentReplayUnresolved`` and
+    # ``IdempotencyKeyVerbMismatch``. Every one of those four did nothing but
+    # ``return exc.code``, and every one carried the same comment: without the
+    # row, a REFUSAL or a damaged server file exits 1 as ``internal_error``,
+    # which names the wrong party. Four escapes of one shape is a pattern, not
+    # four bugs -- they were re-implementing a declaration the class already
+    # carries -- so the escapes are gone and the declaration is the rule.
     #
-    # Measured over every ``AgentRuntimeError`` subclass on this date, six
-    # still land here: ``ActorArchived`` (which DECLARES ``code =
-    # "actor_archived"`` and never gets to spend it through this lane -- only
-    # the two arms that catch it by hand, ``harness_parts/office.py`` and
-    # ``serve_rpc.py``, name it), ``SkillTombstoneRefused``,
-    # ``WorkspaceDeleteBlocked``, ``ProbeIsolationViolation``,
-    # ``PersonaInstanceRetireError`` and ``StaleModelOverrideWrite``. The first
-    # four are refusals.
+    # The latent fifth was measurable on the day of the ruling: ``ActorArchived``
+    # declares ``code = "actor_archived"`` and could never spend it through this
+    # lane; only the two arms that catch it by hand (``harness_parts/office.py``
+    # and ``serve_rpc.py``, which answers ``ERR_CONFLICT``) ever named it. It
+    # gained a family-4 ``ERROR_EXIT_CODES`` row with this change, as did
+    # ``realm_default_workspace``.
     #
-    # Whether the default should instead be DECLARED per error class -- read
-    # ``exc.code`` when the class carries one, and let this row cover only the
-    # classes that genuinely have no name for themselves -- is an open operator
-    # ruling, not a drive-by: it moves the exit status of live conditions, and
-    # ``actor_archived`` has no ``ERROR_EXIT_CODES`` row to move to yet.
+    # A class with NO ``code`` still lands on ``internal_error``, which is the
+    # honest answer for it: ``ProbeIsolationViolation``,
+    # ``PersonaInstanceRetireError``, ``RetiredPersonaInstanceError``,
+    # ``StaleModelOverrideWrite`` and ``PersonaProfileRebindError`` have no name
+    # for themselves, and inventing one here would be this function guessing.
+    #
+    # ``getattr`` and not ``inspect.getattr_static``: three classes
+    # (``WorkspaceDeleteBlocked``, ``SkillTombstoneRefused``,
+    # ``WorkspaceUnresolved``) set ``self.code`` in ``__init__`` -- the machine
+    # reason IS per-raise for those, which is the whole reason they take it as a
+    # constructor argument.
+    #
+    # Pinned by ``tests/hermes_cli/test_error_exit_code_producers.py``
+    # ``::test_a_class_that_declares_its_code_is_the_code_the_mapping_spends``
+    # and ``::test_every_declared_code_has_a_row_in_the_exit_table``, which
+    # enumerate the subclass tree rather than listing names -- a list would be
+    # green the day a sixth typed refusal lands.
     if isinstance(exc, AgentRuntimeError):
+        declared = getattr(exc, "code", None)
+        if isinstance(declared, str) and declared:
+            return declared
         return "internal_error"
     return "internal_error"
 
@@ -470,6 +461,15 @@ def _error_hint(code: str) -> str:
         # ``emit_harness_error`` merges details for three named types and this is
         # not one of them), so the default would point at an empty object.
         "duplicate_desk": "Move the desk this persona already holds — named in the message — or remove it with `harness office actor-remove`, then retry.",
+        # Its own hint for the reason the default is wrong here: "retry after
+        # correcting the request" invites exactly the re-add this refusal
+        # exists to stop. The cure is a NEW create, and the same wording is on
+        # the RPC arm's message so an operator meeting it on either lane reads
+        # one instruction.
+        "actor_archived": "This actor key was deleted on this server. Drop the local row; re-placing the agent is a new create with a new id, never a re-add of this key. `harness office actor-restore` (or --resurrect) is the deliberate exception.",
+        # Names the promotion, because the default's "correct the request" is
+        # unreachable advice: the id the operator typed is the right one.
+        "realm_default_workspace": "This workspace is the realm's default. Promote another workspace as the realm default first, then re-run the same delete.",
         # Both name the operator's actual next move rather than the default's
         # "inspect safe_details": the details carry only the slug, which is the
         # one thing the operator already typed.

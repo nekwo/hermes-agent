@@ -404,3 +404,130 @@ def test_every_archive_unreadable_code_is_in_the_retryable_set():
         "retryable set, so the envelope says `retryable: false` beside a "
         f"family-7 exit: {absent}"
     )
+
+
+def _declared_code_classes() -> dict[str, str]:
+    """Every ``AgentRuntimeError`` subclass carrying a CLASS-level ``code``.
+
+    ``inspect.getattr_static`` rather than ``getattr`` so an instance attribute
+    set in ``__init__`` (``WorkspaceDeleteBlocked``, ``SkillTombstoneRefused``,
+    ``WorkspaceUnresolved``) cannot be mistaken for a declaration — those three
+    carry a code but only once raised, and a static walk cannot see it.
+    """
+
+    import importlib
+    import inspect
+    import pkgutil
+
+    import agent_runtime
+    from agent_runtime import errors as errors_mod
+
+    # ``__subclasses__`` only sees classes whose module has been IMPORTED, so an
+    # enumeration that skips this silently drops every subclass defined outside
+    # ``errors.py`` — ``DuplicateDeskRefused`` (office_store),
+    # ``ClassKeyedPlacementRefused`` (office_class_key_guard), the two
+    # persona_assignments errors. Measured: 8 classes without this sweep, 10
+    # with it, and the two it was missing are both live refusals.
+    for module in pkgutil.iter_modules(agent_runtime.__path__):
+        try:
+            importlib.import_module(f"agent_runtime.{module.name}")
+        except Exception:  # noqa: BLE001 — an optional dep must not silently shrink the walk
+            pass
+
+    seen: dict[str, type] = {}
+
+    def _walk(cls):
+        for sub in cls.__subclasses__():
+            if sub.__name__ not in seen:
+                seen[sub.__name__] = sub
+                _walk(sub)
+
+    _walk(errors_mod.AgentRuntimeError)
+    return {
+        name: inspect.getattr_static(cls, "code")
+        for name, cls in seen.items()
+        if isinstance(inspect.getattr_static(cls, "code", None), str)
+    }
+
+
+def test_a_class_that_declares_its_code_is_the_code_the_mapping_spends():
+    """RULED 2026-09-04: the catch-all reads ``exc.code`` when one is declared.
+
+    The four hand-placed escapes ahead of the ``AgentRuntimeError`` catch-all
+    each did nothing but ``return exc.code``, and each carried the same comment
+    — without the row, a refusal exits 1 as ``internal_error`` and names the
+    wrong party. Four of one shape is a pattern, and the fifth was measurable:
+    ``ActorArchived`` DECLARES ``actor_archived`` and could never spend it
+    through this lane. The declaration is now the rule, so a new typed refusal
+    cannot arrive silently mapped to "the harness crashed".
+
+    Enumerated, not listed: a test that names the classes would be green the
+    day a sixth one lands.
+    """
+
+    from agent_runtime import errors as errors_mod
+    from hermes_cli.harness_support import _error_code_for_exception
+
+    declared = _declared_code_classes()
+    assert len(declared) >= 10, declared
+
+    subclasses = {name: None for name in declared}
+
+    def _find(cls):
+        for sub in cls.__subclasses__():
+            if sub.__name__ in subclasses:
+                subclasses[sub.__name__] = sub
+            _find(sub)
+
+    _find(errors_mod.AgentRuntimeError)
+
+    # `__new__` without `__init__`: the mapping is a chain of isinstance checks
+    # and one getattr, so it needs a typed object and nothing else. Building
+    # real instances would need each class's own constructor and would test the
+    # constructors instead of the mapping.
+    wrong = sorted(
+        f"{name}: declares {code!r}, mapping returns "
+        f"{_error_code_for_exception(subclasses[name].__new__(subclasses[name]))!r}"
+        for name, code in declared.items()
+        if _error_code_for_exception(subclasses[name].__new__(subclasses[name])) != code
+    )
+    assert wrong == [], (
+        "these classes declare a `code` the CLI mapping does not spend, so the "
+        "envelope reports a typed refusal as an internal error:\n  "
+        + "\n  ".join(wrong)
+    )
+
+
+def test_every_declared_code_has_a_row_in_the_exit_table():
+    """A declared code with no table row exits 1 — ``internal_error``'s own
+    number — which undoes the whole point of declaring it. This is the same
+    trap ``cards_unreadable`` fell into on 2026-09-04, generalised past the
+    ``ArchiveUnreadable`` family that found it."""
+
+    from hermes_cli.harness_support import ERROR_EXIT_CODES
+
+    missing = sorted(
+        f"{name} -> {code}"
+        for name, code in _declared_code_classes().items()
+        if code not in ERROR_EXIT_CODES
+    )
+    assert missing == [], (
+        "these declared codes are not in ERROR_EXIT_CODES, so "
+        "`ERROR_EXIT_CODES.get(code, 1)` hands each one exit 1:\n  "
+        + "\n  ".join(missing)
+    )
+
+
+def test_an_undeclared_subclass_still_falls_to_internal_error():
+    """The other direction, and the reason the catch-all stays: a class with no
+    name for itself must not invent one. ``ProbeIsolationViolation`` and the
+    two persona-assignment errors have no ``code`` and are still exit 1."""
+
+    from agent_runtime import errors as errors_mod
+    from hermes_cli.harness_support import _error_code_for_exception
+
+    exc = errors_mod.ProbeIsolationViolation.__new__(
+        errors_mod.ProbeIsolationViolation
+    )
+
+    assert _error_code_for_exception(exc) == "internal_error"
