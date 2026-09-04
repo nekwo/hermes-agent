@@ -1210,3 +1210,205 @@ absent from it is a family nobody looks for.
 * R-D22 (the launcher writing the closure reason to a receipt) is the other
   half. Until it lands, the reason is on the Mac's disk and the teardown is on
   the Windows PC's, and joining them is still a wall-clock exercise.
+
+## 15. store_lock deadline (R-D27)
+
+§12.6 owed two fixes and they were one fix. `store_file_io.store_lock` was a
+second copy of `locks._file_lock` carrying the exact defect that module's
+docstring records having been rewritten to remove — "the same call had two
+contracts, bounded on one host and unbounded on the other" — and the copy was
+worse in both arms:
+
+* **Windows** polled `LK_NBLCK` to the deadline and then `break`ed with
+  `locked = False` and **yielded anyway**. So a caller that lost the race did
+  its read-modify-write of `peers.json` / `peers_cache.json` ten seconds late
+  and unsynchronised, while another holder had been told it had exclusive
+  access. Silent in every direction: the store, the return value and the wire
+  all read identically for a write that held the lock and a write that gave up
+  waiting for it.
+* **POSIX** was a bare blocking `fcntl.flock(fd, LOCK_EX)` that ignored
+  `timeout_seconds` outright. `flock` conflicts per OPEN FILE DESCRIPTION, so a
+  second acquisition inside one process did not stall for the budget — it never
+  returned. The two-machine lane has a Mac in it.
+
+The fix is one line of body. `store_lock` now **delegates** to
+`locks._file_lock(path, timeout_seconds=…)` and keeps only its docstring and
+its name.
+
+### 14.1 Delegate, not a third implementation
+
+The choice §12.6 left open. Delegation, for three reasons and one non-reason:
+
+* `locks._file_lock` already **takes a path**. The module docstring's argument
+  for restating the primitive ("`locks.py` resolves its directory through
+  `paths.lock_dir()` — i.e. it re-derives a root — which is what every module in
+  the gateway lane is forbidden to do") is true of that module's OTHER doors,
+  every one of which builds `paths.lock_dir() / …`. It was never true of
+  `_file_lock` itself, whose whole signature is a caller-supplied path. The
+  forbidden thing is re-deriving the ROOT, and delegating re-derives nothing.
+* This repo has a `test_duplicate_helper_bodies` gate, and this module exists
+  *because* of it. Writing a second correct deadline loop here would be the
+  fourth copy of one primitive in `agent_runtime/` and would have to be kept in
+  step with `locks.py` by hand — which is precisely how the copy under repair
+  drifted into being the pre-rewrite version.
+* The behaviour R-D27 asks for IS `_file_lock`'s documented behaviour, down to
+  the not-reentrant note the redeem fix in §13 was written against.
+
+The non-reason: `_file_lock` is underscore-private. It is private in NAME only —
+nothing in it is root-derived — and `store_lock` is now the public door for this
+package, which is why the import carries a comment saying so rather than a
+rename churning eleven call sites in `locks.py`.
+
+Import cost checked, not assumed: `locks` pulls `paths` → `resolution` →
+`parse_cache` + `errors`, and none of those import `store_file_io`, so the new
+edge introduces no cycle (`python -c "from agent_runtime import store_file_io,
+gateway_peers, serve_gateway_auth"` is the check that ran).
+
+What did NOT change: the lock file path (still the caller's), the
+`mkdir(parents=True)` + `open(path, "a+b")` creation, the byte-0 seed on
+Windows, and the release-then-close order. What did: a lock file that cannot be
+opened at all now raises the `OSError` instead of yielding, which is the same
+`OSError` the write two lines later would have raised anyway.
+
+### 14.2 Every caller, before and after
+
+Nine call sites, all in two modules; `grep -rn "store_lock\|_store_lock"
+agent_runtime hermes_cli` names no others. (`hermes_cli/auth.py`'s
+`_auth_store_lock` and `mission_chat_turns._file_lock` are different locks over
+different files — the name collision is the same one §12.1 warns about, and
+neither is a caller of this one.)
+
+Seven of the nine already turned a store they could not write into a typed
+`StoreRefusal`; those gain `HarnessLockUnavailable` beside the `OSError` they
+already caught. The two best-effort writers catch `Exception` and were covered
+as they stood. **Nothing crashes where it previously fell through** — that was
+the audit's question, and the answer is that the seven would have, which is why
+the catch is widened in the same commit as the raise.
+
+| Caller | Catch | Before (at the deadline) | After |
+|---|---|---|---|
+| `serve_gateway_auth.note_device_seen` | `except Exception: return` | stamped `last_seen` unsynchronised | write skipped, silently — bookkeeping that is never in a handshake's way |
+| `serve_gateway_auth.revoke_device` | `except (OSError, HarnessLockUnavailable)` | wrote the revocation unlocked | `StoreRefusal("unwritable", …)` → CLI `store_unwritable` |
+| `serve_gateway_auth.mint_pairing_code` | same | minted into `pairing.json` unlocked | same refusal |
+| `serve_gateway_auth.redeem_pairing_code` | same | spent a code, wrote a device row unlocked | same refusal |
+| `gateway_peers.revoke_peer` | same | wrote the revocation unlocked | same refusal |
+| `gateway_peers.mint_peer_code` | same | minted into `pairing.json` unlocked | same refusal |
+| `gateway_peers.redeem_peer_code` | same | spent a code, wrote a peer row unlocked | same refusal |
+| `gateway_peers.record_peer` | same | **the D3 run #1 door**: wrote `peers.json` unlocked | same refusal |
+| `gateway_peers._touch_cache` | `except Exception: return` (inside `_CACHE_WRITE_LOCK`) | merged a cache row unsynchronised | write skipped; the in-process lock means only another PROCESS can now reach the refusal |
+
+The vocabulary is not invented either. `os_error_reason` answers `unwritable`
+for a `HarnessLockUnavailable` — which is what it already answered by accident,
+since the class is a `RuntimeError` and fell through every `isinstance` to the
+default — and the isinstance branch is now explicit, in the signature and the
+docstring, so the word is a decision rather than a fall-through. `unwritable` is
+in `_STORE_WRITE_REASONS`, so `_refusal` renders it as `store_unwritable`
+(family 1) with the store path in front of the operator.
+
+**Family 1 and not 7, deliberately.** A lock this machine could not take inside
+ten seconds is retryable in the literal sense, so family 7 is arguable. It is
+the wrong word for the same reason D4h moved `permission_denied` out of 7: the
+family answers *what does the operator do next*, and "this install could not
+write its own gateway store" is one sentence in the launcher's sheet whether
+the obstacle was a DACL or another process holding the file. What a lock adds
+is not a different family, it is the lock's own sentence — `lock unavailable
+after 0.5s: <path>` — riding in the message the same way the `OSError` text
+does.
+
+### 14.3 The in-process cache lock is now MORE necessary
+
+`_CACHE_WRITE_LOCK`'s comment cited the fall-through as its justification, so it
+had to be rewritten rather than left. The conclusion did not change, the
+argument did: with the fall-through gone, two threads of one serve process
+contending on the cache no longer lose an update — they spend the whole budget
+and one of them REFUSES. Serialising them in memory means they queue and reach
+the file lock one at a time, so the second writer waits microseconds instead of
+racing a ten-second refusal.
+
+### 14.4 What each test pins
+
+`tests/agent_runtime/test_store_file_io_secure_write.py`, a lock section under
+D4h's write section (same module, same file). Every case asserts on the ERROR
+and on the block never running, never on elapsed time alone — a test that only
+measured the wait would have passed against the Windows defect, which spent the
+identical ten seconds and then wrote anyway.
+
+* `test_a_lock_another_holder_owns_refuses_at_the_deadline` — the contract in
+  one call: `HarnessLockUnavailable` inside `timeout + 0.5`, the block's
+  `ran = True` never reached, and the message naming the lock file.
+* `test_the_lock_is_free_again_the_moment_its_holder_leaves` — a refusal is not
+  a wedge; the release is in a `finally` and the next caller gets in.
+* `test_a_nested_acquire_refuses_instead_of_deadlocking_forever` — **POSIX
+  only**, skip reason stated in the mark: it pins `flock`'s own defect, where a
+  second acquisition inside ONE process never returned. Windows reaches the
+  same refusal through `msvcrt`'s byte-range lock and has its own case.
+* `test_the_windows_arm_refuses_rather_than_writing_unlocked` — Windows only and
+  real, not a stub: the elapsed FLOOR proves the poll ran to the deadline (a
+  contended lock must be polled, because the holder usually leaves before it
+  expires) and the refusal proves what follows the poll is not the block.
+* `test_record_peer_refuses_the_unwritable_family_rather_than_writing_unlocked`
+  — the caller's half, through the door D3 run #1 watched fail. Asserts three
+  things: the return is a `StoreRefusal` and not a `PeerRecord`, `peers.json` is
+  still ABSENT, and `_REFUSAL_CODES[reason] == "store_unwritable"`. The lock,
+  the contention and the raise are all real; only the ten-second budget is
+  shortened, through the module's own `_store_lock` binding.
+
+The holder in these cases is another THREAD, not another process: `flock`
+conflicts per open file description and `msvcrt` per byte-range request, so a
+second acquisition from this same process is exactly the contention a second
+process raises — the property `locks._file_lock`'s docstring calls out as
+deliberate — and it fits inside a half-second budget, which an interpreter
+start does not.
+
+### 14.5 Red, then green
+
+The red run is against the OLD semantics restored surgically (the delegation
+wrapped in `except (HarnessLockUnavailable, OSError): yield`, i.e. exactly the
+Windows fall-through), so the import surface stays intact and the four
+Windows-runnable cases fail on the defect rather than on a collection error:
+
+```
+FAILED test_a_lock_another_holder_owns_refuses_at_the_deadline
+FAILED test_the_lock_is_free_again_the_moment_its_holder_leaves
+FAILED test_the_windows_arm_refuses_rather_than_writing_unlocked
+FAILED test_record_peer_refuses_the_unwritable_family_rather_than_writing_unlocked
+E       AssertionError: the write went through while another holder had the lock
+E        +  where True = isinstance(PeerRecord(peer_install_id='inst_a1b2c3d4', …))
+================= 4 failed, 1 skipped, 7 deselected in 3.03s ==================
+```
+
+That last line is the defect in one frame: `record_peer` returned a written row
+while another holder owned the lock. The POSIX case cannot be red-run from this
+machine and is marked, not claimed.
+
+### 14.6 Verification
+
+```
+bash scripts/run_tests.sh tests/agent_runtime/test_store_file_io_secure_write.py \
+  tests/agent_runtime/test_gateway_peers_store.py \
+  tests/agent_runtime/test_serve_gateway_auth.py \
+  tests/hermes_cli/test_gateway_peer_verbs.py \
+  tests/agent_runtime/test_gateway_peer_two_roots_e2e.py --file-timeout 900
+=== Summary: 5 files, 172 tests passed, 0 failed (100% complete) in 215.4s ===
+
+bash scripts/run_tests.sh tests/agent_runtime/test_serve_gateway_peer_lane.py --file-timeout 900
+=== Summary: 1 files, 28 tests passed, 0 failed (100% complete) in 10.7s ===
+
+ruff check agent_runtime/store_file_io.py agent_runtime/gateway_peers.py \
+  agent_runtime/serve_gateway_auth.py tests/agent_runtime/test_store_file_io_secure_write.py
+All checks passed!
+
+python scripts/check-windows-footguns.py <the same four files>
+✓ No Windows footguns found (4 file(s) scanned).
+```
+
+`--file-timeout 900` stays load-bearing for the same reason §12.4 gives.
+
+### 14.7 Owed
+
+Nothing on this diff. Two neighbours were seen and left alone, both outside
+R-D27's scope: `mission_chat_turns.py` carries a THIRD `_file_lock` (it yields
+an `acquired` boolean rather than refusing, which is a different contract its
+callers read), and `hermes_cli/auth.py` a fourth over `auth.json` with its own
+reentrancy tracker. Neither is on the gateway lane and neither shares this
+module's callers; folding them in would be its own measurement.
