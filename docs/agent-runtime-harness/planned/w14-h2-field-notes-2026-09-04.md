@@ -196,7 +196,7 @@ covers `docs/agent-runtime-harness/`, not `AGENTS.md`). No absolute paths added.
 
 ---
 
-## A main red that is not mine
+## Main reds that are not mine
 
 `tests/agent_runtime/test_stream_contract_fixture.py` — two failures,
 `test_committed_goldens_are_the_generators_bytes` and
@@ -204,3 +204,12 @@ covers `docs/agent-runtime-harness/`, not `AGENTS.md`). No absolute paths added.
 `delta_agent_create_narrow_profile.json` over `core.agents[].skill_hash_absent`.
 Proven to predate this branch: restored `agent_runtime/snapshot.py` to
 `3d3a33be3e` and the same two failed. Left alone.
+
+`tests/test_coverage_claims_resolve.py::test_every_coverage_claim_names_a_test_that_exists`
+— one failure, and it is a FALSE POSITIVE of the gate rather than a rotted
+citation. `planned/w13-h1-field-notes-2026-09-04.md:246` quotes a flaky pytest
+log line verbatim (`FAILED …::test_a_cleared_binding_is_not_stale_because…`) and
+the extractor reads the quoted line as a coverage claim. The file is unchanged
+from the base sha (landed by `8f9f0b8ac3`), so the red predates this branch.
+Left alone: the fix is either the quoted line's spelling in that lane's notes or
+the extractor's handling of quoted log output, and neither is this row.
