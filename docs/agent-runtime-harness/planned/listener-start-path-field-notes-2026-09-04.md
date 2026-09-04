@@ -233,8 +233,10 @@ Commit `f774da1701`.
 
 ## Step (e) — the suites, and what was classified
 
-`bash scripts/run_tests.sh tests/hermes_cli tests/agent_runtime` — see the
-verify block at the end of this file.
+Both suites green, **0 failed**, run separately (the runner's per-file
+parallelism makes one combined invocation no cheaper): `tests/agent_runtime`
+418 files / 7689 tests / 755.7s, `tests/hermes_cli` 598 files / 4555 tests /
+1227.0s. See the verify block at the end of this file.
 
 **One flake observed and classified, not carried.** On the first combined run of
 `test_serve_gateway_lane.py` + `test_serve_socket_lane.py`,
@@ -243,7 +245,14 @@ verify block at the end of this file.
 own retry passed it, and two later runs of the same pair passed it. It is a
 subscriber-teardown timing race in a test this stage does not touch — no lock,
 no owner sidecar, no gateway block anywhere in its path — and the same file's
-other 67 tests were green in the same process.
+other 67 tests were green in the same process, and the whole-suite run above hit
+it zero times.
+
+**One retry inside the hermes_cli run, and it is the runner's own rule, not a
+red.** `test_harness_cli.py` tripped the per-file timeout at 8-worker contention
+and the runner re-ran it at 1-worker isolation: `RETRY PASS … (59.0s at 1
+worker)`. It is a cold-interpreter cost under load in a file this stage does not
+touch.
 
 ---
 
@@ -303,6 +312,15 @@ $ bash scripts/run_tests.sh tests/agent_runtime/test_serve_gateway_lane.py tests
 
 $ bash scripts/run_tests.sh tests/agent_runtime/test_serve_socket_child_e2e.py
 === Summary: 1 files, 3 tests passed, 0 failed (100% complete) in 32.8s (8 workers) ===
+
+$ bash scripts/run_tests.sh tests/agent_runtime
+=== Summary: 418 files, 7689 tests passed, 0 failed (100% complete) in 755.7s (8 workers) ===
+
+$ bash scripts/run_tests.sh tests/hermes_cli
+Retrying 1 timeout-affected file at 1-worker isolation (single bounded retry):
+  RETRY tests\hermes_cli\test_harness_cli.py
+  RETRY PASS tests\hermes_cli\test_harness_cli.py (59.0s at 1 worker)
+=== Summary: 598 files, 4555 tests passed, 0 failed (100% complete) in 1227.0s (8 workers) ===
 
 $ python scripts/dump_cli_contract.py --check
 CLI contract fresh: 191 command paths, sha256 86837537988fdfcf
