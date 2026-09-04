@@ -418,14 +418,16 @@ def _key_present(raw: dict[str, Any], path: tuple[str, ...]) -> list[tuple[str, 
     return [(head,) + tail for tail in _key_present(raw[head], rest)]
 
 
-def find_misplaced_root_only_keys() -> list[dict[str, Any]]:
+def scan_misplaced_root_only_keys() -> dict[str, Any]:
     """Root-only keys that an operator has set in a PROFILE config, where they
     are inert.
 
-    Each row names the profile, the full dotted key, and the reader that will
-    never see it — enough to fix without re-deriving the analysis. An empty
-    list means "examined and none found"; the caller distinguishes "could not
-    examine" by catching the exception this may raise.
+    Returns ``{"rows": [...], "scope": {...}}``. Each row names the profile, the
+    full dotted key, and the reader that will never see it — enough to fix
+    without re-deriving the analysis. An empty ``rows`` means "examined and none
+    found"; the caller distinguishes "could not examine" by catching the
+    exception this may raise. ``scope`` is the denominator those rows have to be
+    read against — see the comment on the return statement.
 
     ``set_in_root`` separates the two cases, which are NOT the same defect and
     must not be reported at one severity:
@@ -447,10 +449,12 @@ def find_misplaced_root_only_keys() -> list[dict[str, Any]]:
     )
 
     rows: list[dict[str, Any]] = []
+    profiles_examined = 0
     for config_path in _profile_config_paths():
         loaded = cached_yaml_file(config_path, default=None)
         raw = (loaded or {}).get("agent_runtime") or {} if isinstance(loaded, dict) else {}
         if not isinstance(raw, dict):
+            profiles_examined += 1
             continue
         for key_path, reader in ROOT_ONLY_CONFIG_KEYS:
             for concrete in _key_present(raw, key_path):
@@ -467,7 +471,23 @@ def find_misplaced_root_only_keys() -> list[dict[str, Any]]:
                         "set_in_root": bool(_key_present(root_raw, concrete)),
                     }
                 )
-    return rows
+        profiles_examined += 1
+    return {
+        "rows": rows,
+        # The DENOMINATOR, from this same walk (w12/m5). A row is
+        # (profile x concrete key) and two of the four patterns are per-persona,
+        # so the count scales with how many profiles and personas a machine HAS.
+        # The census that raised this read 9 on one store against 2 on another
+        # and called it a 4.5x asymmetry; without the scope beside it, a raw
+        # count comparison across two machines compares their inventories. Read
+        # from the same iteration as the rows on purpose: a scope derived from a
+        # second walk is a second authority that can disagree with the numerator
+        # it exists to explain.
+        "scope": {
+            "profiles_examined": profiles_examined,
+            "root_only_key_patterns": len(ROOT_ONLY_CONFIG_KEYS),
+        },
+    }
 
 
 def chat_lane_restore_toolsets(persona_id: str, cfg: AgentRuntimeConfig | None = None) -> list[str]:

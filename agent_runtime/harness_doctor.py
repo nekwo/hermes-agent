@@ -247,7 +247,13 @@ def run_harness_doctor(
         # 7; they are two independent schema-visible additions, so the merge
         # numbered them in landing order rather than folding two contracts into
         # one version an operator could not tell apart.)
-        "schema_version": 8,
+        # 9: ``findings.root_config_misplacement`` gains ``remediation`` (the
+        # class's one cure, present even when the section is ``ok``) and
+        # ``scope`` (``profiles_examined`` / ``root_only_key_patterns`` — the
+        # denominator a misplacement COUNT has to be read against before two
+        # machines' numbers are compared). Additive only: no health change, no
+        # new section, no new count.
+        "schema_version": 9,
         "generated_at": ref,
         "ok": not defective and not unexamined,
         "mode": {"fix": bool(fix), "dry_run": bool(dry_run)},
@@ -382,12 +388,29 @@ def _root_config_misplacement_report(_context: _DoctorProbeContext | None = None
     * ``notice`` — set in both. The live value is correct; the profile copy is a
       redundant leftover worth deleting but not worth failing a health check
       over.
+
+    Two keys added 2026-09-04 (w12/m5), because a two-store census read
+    ``misplaced_root_only_keys`` 9 against 2 and had neither a cure nor a
+    denominator to read that with:
+
+    * ``remediation`` — the CLASS's one cure, stated whether or not anything is
+      currently broken, the way ``_persona_binding_report`` has always stated
+      its own. Inert values move to the root; redundant copies are deleted; and
+      it says plainly that no automated repair exists, because rewriting an
+      operator's ``config.yaml`` is not a write this doctor takes on its own.
+    * ``scope`` — ``profiles_examined`` and ``root_only_key_patterns`` from the
+      same walk the rows come from. A row is (profile x concrete key) and two of
+      the four patterns are per-persona, so a raw count compares inventories
+      across two machines, not health.
     """
 
-    from .config import find_misplaced_root_only_keys
+    from .config import harness_root_config_path, scan_misplaced_root_only_keys
 
     try:
-        rows = find_misplaced_root_only_keys()
+        scan = scan_misplaced_root_only_keys()
+        rows = scan["rows"]
+        scope = scan["scope"]
+        root_config_path = str(harness_root_config_path())
     except Exception as exc:
         return {"available": False, "health": HEALTH_UNKNOWN, "error": _error_text(exc)}
 
@@ -405,6 +428,14 @@ def _root_config_misplacement_report(_context: _DoctorProbeContext | None = None
         "misplaced": rows,
         "inert": inert,
         "redundant": redundant,
+        "scope": scope,
+        "remediation": (
+            f"The root config {root_config_path} is the only reader of these keys. "
+            "Move an inert value there (it is being ignored where it sits); "
+            "delete a redundant profile copy (the root value is already live). "
+            "There is no automated repair: rewriting an operator's config.yaml is "
+            "a write the doctor does not take on its own."
+        ),
         "notices": [
             f"{row['key']} set in profile '{row['profile']}' is ignored — "
             f"{row['read_only_by']} reads {row['root_config_path']}"

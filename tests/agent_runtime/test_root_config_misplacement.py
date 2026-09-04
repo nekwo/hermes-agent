@@ -156,3 +156,92 @@ def test_every_declared_key_names_a_real_reader():
         module_name, _, attr = reader.rpartition(".")
         module = importlib.import_module(module_name)
         assert hasattr(module, attr), f"{reader} does not exist"
+def _arrange_many(tmp_path, monkeypatch, root_text: str, profile_texts: dict[str, str]):
+    """Same as :func:`_arrange`, with N profiles rather than one."""
+
+    root_config = tmp_path / "config.yaml"
+    root_config.write_text(root_text, encoding="utf-8")
+    profile_configs = []
+    for name, body in profile_texts.items():
+        path = tmp_path / "profiles" / name / "config.yaml"
+        path.parent.mkdir(parents=True)
+        path.write_text(body, encoding="utf-8")
+        profile_configs.append(path)
+
+    monkeypatch.setattr(cfgmod, "harness_root_config_path", lambda: root_config)
+    monkeypatch.setattr(cfgmod, "_profile_config_paths", lambda: profile_configs)
+    return _root_config_misplacement_report()
+
+
+def test_the_report_names_the_one_cure_for_the_class(tmp_path, monkeypatch):
+    """The class gets an OWNER, not two hand-fixes.
+
+    Queue row (w12/m5): ``misplaced_root_only_keys`` read 9 on the Windows store
+    against 2 on the Mac, and "the class wants one owner". Its sibling finding
+    ``persona_binding`` has carried a ``remediation`` string since it shipped;
+    this one carried per-row ``notices`` describing the symptom and nothing
+    saying what to do, so every row was an independent hand-fix on whichever
+    machine happened to report it. The cure is single and it is the same on
+    every machine: the ROOT config is the one reader, so an inert value MOVES
+    there and a redundant copy is DELETED.
+    """
+
+    report = _arrange(tmp_path, monkeypatch, ROOT_WITHOUT_KEY, PROFILE_WITH_KEY)
+    remediation = report["remediation"]
+
+    assert str(tmp_path / "config.yaml") in remediation
+    assert "move" in remediation.lower() and "delete" in remediation.lower()
+
+
+def test_the_remediation_is_present_even_when_the_store_is_clean(tmp_path, monkeypatch):
+    """ANTI-VACUITY. A remediation that only appears once a defect is found is a
+    per-incident note, which is exactly the shape the row rejected. It is the
+    CLASS's cure and it states the rule whether or not anything is broken."""
+
+    report = _arrange(tmp_path, monkeypatch, ROOT_WITHOUT_KEY, PROFILE_CLEAN)
+
+    assert report["health"] == HEALTH_OK
+    assert report["misplaced"] == []
+    assert report["remediation"]
+
+
+def test_the_count_carries_the_denominator_two_machines_are_compared_on(tmp_path, monkeypatch):
+    """Why "9 on Windows vs 2 on the Mac" is not a 4.5x defect ratio.
+
+    A row is (profile x concrete key), and two of the four root-only patterns are
+    per-persona (``personas.*.workdir``,
+    ``personas.*.chat_lane_restore_toolsets``), so the count scales with how many
+    profiles and personas a machine HAS. Comparing two machines' raw counts
+    compares their inventories. The scope block is what makes the two numbers
+    comparable, so it ships beside them rather than being re-derived by whoever
+    reads the census next.
+    """
+
+    report = _arrange_many(
+        tmp_path,
+        monkeypatch,
+        ROOT_WITHOUT_KEY,
+        {
+            "p1": "agent_runtime:\n  personas:\n    qa:\n      workdir: /p/qa\n",
+            "p2": "agent_runtime:\n  personas:\n    qa:\n      workdir: /p/qa\n"
+            "    dev:\n      workdir: /p/dev\n",
+            "p3": PROFILE_CLEAN,
+        },
+    )
+
+    assert len(report["misplaced"]) == 3
+    assert report["scope"]["profiles_examined"] == 3
+    assert report["scope"]["root_only_key_patterns"] == len(cfgmod.ROOT_ONLY_CONFIG_KEYS)
+
+
+def test_the_scope_is_reported_from_the_same_walk_the_rows_come_from(tmp_path, monkeypatch):
+    """The denominator has to be THIS report's denominator. A scope read from a
+    different source than the rows would be a second authority that can disagree
+    with the numerator it explains."""
+
+    report = _arrange(tmp_path, monkeypatch, ROOT_WITHOUT_KEY, PROFILE_WITH_KEY)
+
+    assert report["scope"]["profiles_examined"] == 1
+    profiles_with_rows = {row["profile"] for row in report["misplaced"]}
+    assert profiles_with_rows <= {"p1"}
+    assert len(profiles_with_rows) <= report["scope"]["profiles_examined"]

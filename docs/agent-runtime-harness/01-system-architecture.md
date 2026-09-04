@@ -47,8 +47,8 @@ Four things, in one chain, each with a distinct lifetime.
 **1 — Persona template.** `AgentPersona` (`agent_runtime/models.py:364`) — the
 definition: display name, role, model/provider/api_mode, toolsets, skills,
 `hermes_profile`, budgets, readiness. Personas are **data**, from the config
-block (`config.persona_records_from_config`, `agent_runtime/config.py:532`)
-merged with persisted store rows (`ensure_persisted_personas`, `:578`, over
+block (`config.persona_records_from_config`, `agent_runtime/config.py:552`)
+merged with persisted store rows (`ensure_persisted_personas`, `:651`, over
 `store.AgentStore` at `store.py:152`). Nothing in code declares them — S11 left
 `DEFAULT_PERSONA_IDS`, `BASE_PERSONA_ID`, `DEFAULT_SUPERVISOR_PERSONA_ID`,
 `ALLOWED_TOOLSETS_BY_ROLE` and `PER_ROLE_TOOL_DENIES` as scoped tombstone rows

@@ -1480,11 +1480,14 @@ def test_the_doctor_report_declares_its_schema_version(isolate_agent_runtime_roo
     independent payload additions, so the merge numbered them in landing order
     — one 7 would have meant two different contracts answering to one number,
     which is the exact failure this pin exists to catch.
+
+    9 (2026-09-04, w12/m5): ``findings.root_config_misplacement`` gained
+    ``remediation`` and ``scope``. Additive; the deliberate edit is here.
     """
 
     report = run_harness_doctor(include_worktrees=False, snapshot_builder=lambda: {})
 
-    assert report["schema_version"] == 8
+    assert report["schema_version"] == 9
 
 
 # ── H-H4: which orphan, keyed on facts the store holds ───────────────────────
