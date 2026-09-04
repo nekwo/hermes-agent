@@ -2,7 +2,7 @@
 """Diff the canonical shared test venv's pins against the live install's.
 
 Row 17 (mission-control-queue.md, 2026-09-03): the canonical test env at
-``X:/Eternia/.venvs/hermes-test`` was built BY HAND from a one-time freeze of
+``~/.venvs/hermes-test`` (``$HERMES_TEST_VENV``) was built BY HAND from a one-time freeze of
 the live install's venv (see ``docs/agent-runtime-harness/planned/
 canonical-test-env-field-notes-2026-09-03.md`` §1 for the recipe). Nothing
 compares the two after that; when the live install's pins move, the test
