@@ -188,6 +188,19 @@ LISTENER_OFF_SENTENCE = (
     "until an interface is configured and the runtime restarts."
 )
 
+#: The OTHER "nowhere to dial", and it is a different condition from the one
+#: above rather than a rewording of it: the lane is ON, a listener is up or
+#: configured, and the bind names every interface — but interface enumeration
+#: came back empty, so this machine cannot say which address the far side should
+#: use. R-D1's refusal, and the reason it exists is that the alternative is
+#: writing the BIND into the payload, which is what S4's first hardware attempt
+#: did: Windows dialled ``0.0.0.0:8765`` and reported ``runtime_unavailable``,
+#: which reads exactly like the far install being down.
+NO_DIAL_HOST_SENTENCE = (
+    "the listener is bound to every interface but this machine offers no "
+    "address to dial"
+)
+
 #: What :func:`cmd_gateway_introduce` prints, compactly, for a launcher to POST
 #: as the backend grant's ``payload``. Declared as a tuple rather than left
 #: implicit in a dict literal so the backend contract (S1 packet §4.1) has one
@@ -251,14 +264,29 @@ def cmd_gateway_pair(args) -> int:
             ),
         )
 
+    # The dial host is decided BEFORE the mint, so a root that cannot say where
+    # a phone should dial refuses without having burned one of the three pending
+    # codes the operator is allowed.
+    endpoint = _endpoint(root)
+    dial, endpoints, failure = _dial_target(root, endpoint, args=args)
+    if failure:
+        return failure
+
     code = mint_pairing_code(root, tier=tier, name=name)
     if isinstance(code, StoreRefusal):
         return _refusal(code, args=args)
 
-    endpoint = _endpoint(root)
     payload = {
-        "host": endpoint["host"],
-        "port": endpoint["port"],
+        # R-D1: a DIALABLE address, never the bind. ``endpoint`` below still
+        # reports the bind, because that is the honest answer to "what is this
+        # listener on" — what changed is that the bind stopped being what a
+        # phone is told to dial.
+        "host": dial[0] if dial else None,
+        "port": dial[1] if dial else None,
+        # R-D3's list, on the payload a phone scans. ``host``/``port`` remain and
+        # equal ``endpoints[0]``, so a scanner that predates this key reads the
+        # same first candidate it always did.
+        "endpoints": endpoints,
         "install_id": identity.install_id,
         "cert_fingerprint": certificate.fingerprint,
         "code": code.code,
@@ -625,6 +653,72 @@ def _candidate_endpoints(store_root) -> list[dict]:
     return [{"host": str(host), "port": port}]
 
 
+def _dial_host(store_root) -> tuple[str, int] | None:
+    """The ONE address every payload writer names, or ``None``.
+
+    R-D1: *a payload host is a dialable address or the verb refuses.* Before
+    this existed, four writers each took ``_endpoint(root)["host"]`` — the
+    LISTENER'S BIND — and a wildcard bind therefore put the literal ``0.0.0.0``
+    into a join payload, a QR payload and a grant. That is not an address: on
+    Windows dialling it fails with ``WSAEADDRNOTAVAIL`` and on macOS it resolves
+    to the dialler's own loopback, so both machines in S4's hardware attempt
+    reported the far install as unreachable when nothing was wrong with either
+    listener.
+
+    The answer is simply the first of :func:`_candidate_endpoints`, which after
+    R-D2 is the default-route address. Defined as its own function rather than
+    inlined four times because "which address do we hand out" must have exactly
+    one answer — the same reason :func:`_self_endpoints` exists — and because
+    ``gateway id`` prints it as ``dial_host`` for the launcher's sheet to read
+    (R-D4). ``None`` when the list is empty, which the callers distinguish from
+    "the lane is off" using the endpoint's own ``source``.
+    """
+
+    endpoints = _candidate_endpoints(store_root)
+    if not endpoints:
+        return None
+    first = endpoints[0]
+    return str(first["host"]), int(first["port"])
+
+
+def _dial_target(store_root, endpoint: dict, *, args):
+    """What a payload writer needs: the dial host, the full list, or a refusal.
+
+    Returns ``(dial, endpoints, 0)`` or ``(None, [], exit_code)`` — the error
+    branch is already rendered when it returns, so callers propagate the int.
+
+    The refusal fires on exactly one condition: the listener is ``live`` or
+    ``config`` — so this root IS reachable in principle — and enumeration
+    produced nothing. ``unknown`` is deliberately NOT refused here, because each
+    verb already answers that its own way and they disagree on purpose:
+    ``introduce`` refuses it (its consumer is a machine that will dial), while
+    ``pair`` and ``peers pair`` print :data:`LISTENER_OFF_SENTENCE` as a note and
+    still mint (their consumer is a human who can go turn the listener on, and
+    a code minted before the first boot is a legitimate thing to have).
+    """
+
+    endpoints = _candidate_endpoints(store_root)
+    dial = _dial_host(store_root) if endpoints else None
+    if dial is None and endpoint.get("source") in {"live", "config"}:
+        return (
+            None,
+            [],
+            emit_harness_error(
+                RuntimeError("no_dial_host"),
+                args=args,
+                code="runtime_unavailable",
+                message=(
+                    f"{NO_DIAL_HOST_SENTENCE}. Writing the bind "
+                    f"({endpoint.get('host')!r}) into the payload would tell the "
+                    "other machine to dial an address that is not one. Name a "
+                    "reachable interface in remote_gateway.listen, or fix why "
+                    "this host enumerates none."
+                ),
+            ),
+        )
+    return dial, endpoints, 0
+
+
 def _self_endpoints(store_root) -> list[dict]:
     """Backwards-compatible spelling of :func:`_candidate_endpoints`.
 
@@ -661,14 +755,23 @@ def cmd_gateway_peers_pair(args) -> int:
         return code_or_error
     identity, certificate = resolved
 
+    # Before the mint, for ``gateway pair``'s reason: a refusal that had already
+    # written a pending entry burns one of the operator's three.
+    endpoint = _endpoint(root)
+    dial, endpoints, failure = _dial_target(root, endpoint, args=args)
+    if failure:
+        return failure
+
     minted = mint_peer_code(root, note=getattr(args, "note", None))
     if isinstance(minted, StoreRefusal):
         return _refusal(minted, args=args)
 
-    endpoint = _endpoint(root)
     payload = {
-        "host": endpoint["host"],
-        "port": endpoint["port"],
+        # R-D1 / R-D3, exactly as ``gateway pair`` writes them: a dialable first
+        # candidate, the whole ordered list beside it, and never the bind.
+        "host": dial[0] if dial else None,
+        "port": dial[1] if dial else None,
+        "endpoints": endpoints,
         "install_id": identity.install_id,
         "cert_fingerprint": certificate.fingerprint,
         "peer_code": minted.code,
@@ -821,7 +924,9 @@ def cmd_gateway_introduce(args) -> int:
             message=LISTENER_OFF_SENTENCE,
         )
 
-    endpoints = _candidate_endpoints(root)
+    dial, endpoints, failure = _dial_target(root, endpoint, args=args)
+    if failure:
+        return failure
     note = getattr(args, "note", None)
 
     peer_block = None
@@ -846,8 +951,13 @@ def cmd_gateway_introduce(args) -> int:
                 "expires_in_seconds": minted.expires_in_seconds(),
                 "join_payload": json.dumps(
                     {
-                        "host": endpoint["host"],
-                        "port": endpoint["port"],
+                        # R-D1: the DIAL host, not ``endpoint["host"]``. This is
+                        # the line S4's hardware attempt died on — a wildcard
+                        # bind put ``0.0.0.0`` here, the far install dialled it,
+                        # and the receipt said ``runtime_unavailable``.
+                        "host": dial[0] if dial else None,
+                        "port": dial[1] if dial else None,
+                        "endpoints": endpoints,
                         "install_id": identity.install_id,
                         "cert_fingerprint": certificate.fingerprint,
                         "peer_code": minted.code,
@@ -881,8 +991,13 @@ def cmd_gateway_introduce(args) -> int:
                 "expires_in_seconds": minted_device.expires_in_seconds(),
                 "qr_payload": json.dumps(
                     {
-                        "host": endpoint["host"],
-                        "port": endpoint["port"],
+                        # The device half's copy of the same correction, and it
+                        # has to be the same object: one introduction is one
+                        # machine, and two halves that named different addresses
+                        # would be an introduction to two different places.
+                        "host": dial[0] if dial else None,
+                        "port": dial[1] if dial else None,
+                        "endpoints": endpoints,
                         "install_id": identity.install_id,
                         "cert_fingerprint": certificate.fingerprint,
                         "code": minted_device.code,

@@ -94,10 +94,90 @@ def test_pair_prints_a_typed_code_and_a_join_payload_that_agree(capsys):
     assert scanned == {
         "host": "10.0.0.4",
         "port": 8765,
+        # R-D3: the whole candidate list rides the payload so the far side's
+        # ``peers join`` can dial in order. One row here, because this fixture's
+        # bind names one interface — the list is not an enumeration, it is
+        # whatever ``_candidate_endpoints`` answers, which for a concrete bind is
+        # exactly that bind.
+        "endpoints": [{"host": "10.0.0.4", "port": 8765}],
         "install_id": payload["install_id"],
         "cert_fingerprint": payload["cert_fingerprint"],
         "peer_code": payload["peer_code"],
     }
+    assert (scanned["host"], scanned["port"]) == (
+        scanned["endpoints"][0]["host"],
+        scanned["endpoints"][0]["port"],
+    )
+
+
+def test_a_wildcard_bind_in_the_live_sidecar_still_yields_a_dialable_payload(
+    capsys, monkeypatch
+):
+    """R-D1 through the LIVE source, which is the one that actually shipped.
+
+    A serve started with ``remote_gateway.listen: "0.0.0.0"`` publishes that
+    bind in its ownership sidecar, and the sidecar wins over the config because
+    it is the only source that can name an ephemeral port. So the wildcard
+    reaches the payload writer through ``source: live`` — the exact path S4's
+    hardware attempt took — and the payload must still name an address.
+    """
+
+    from agent_runtime.serde import write_json_atomic
+    from agent_runtime.serve_socket import socket_owner_path
+    from hermes_cli.harness_parts import gateway_commands
+
+    write_json_atomic(
+        socket_owner_path(paths.store_root()),
+        {
+            "pid": 1,
+            "port": 111,
+            "gateway": {"host": "0.0.0.0", "port": 8765, "cert_fingerprint": "x"},
+        },
+    )
+    monkeypatch.setattr(
+        gateway_commands,
+        "_machine_addresses",
+        lambda: ["192.168.1.203", "10.97.7.100"],
+    )
+
+    _code, payload = _run(capsys, "pair")
+    scanned = json.loads(payload["join_payload"])
+
+    assert scanned["host"] == "192.168.1.203"
+    assert scanned["endpoints"] == [
+        {"host": "192.168.1.203", "port": 8765},
+        {"host": "10.97.7.100", "port": 8765},
+    ]
+    assert "0.0.0.0" not in payload["join_payload"]
+    # The endpoint block still reports the bind, because that IS what the
+    # listener is on — the operator who chose a wildcard should keep seeing it.
+    assert payload["endpoint"]["host"] == "0.0.0.0"
+    assert payload["endpoint"]["source"] == "live"
+
+
+def test_peers_pair_refuses_when_a_wildcard_bind_enumerates_no_address(
+    capsys, monkeypatch
+):
+    """R-D1's refusal on the peer half, with the sentence the plan names, and
+    nothing minted — a code burned on a refusal is one of the three the operator
+    is allowed."""
+
+    from agent_runtime.gateway_peers import list_peers
+    from agent_runtime.serve_gateway_auth import pairing_store_path
+    from hermes_cli.harness_parts import gateway_commands, serve as serve_module
+    from hermes_cli.harness_parts.gateway_commands import NO_DIAL_HOST_SENTENCE
+    from hermes_cli.harness_support import ERROR_EXIT_CODES
+
+    monkeypatch.setattr(serve_module, "gateway_listen_config", lambda: ("::", 8765))
+    monkeypatch.setattr(gateway_commands, "_machine_addresses", lambda: [])
+
+    code = _dispatch(["harness", "gateway", "peers", "pair", "--json"])
+    out = capsys.readouterr()
+
+    assert code == ERROR_EXIT_CODES["runtime_unavailable"]
+    assert NO_DIAL_HOST_SENTENCE in (out.out + out.err)
+    assert not pairing_store_path(paths.store_root()).exists()
+    assert list_peers(paths.store_root()) == []
 
 
 def test_the_payload_names_peer_code_so_the_two_ceremonies_cannot_be_confused(capsys):

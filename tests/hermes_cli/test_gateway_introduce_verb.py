@@ -134,6 +134,83 @@ def test_introduce_mints_both_halves_and_prints_one_envelope_whose_grant_payload
     assert len(compact.encode("utf-8")) <= GRANT_PAYLOAD_MAX_BYTES
 
 
+def test_both_nested_payloads_carry_the_candidate_list_and_a_dialable_first_row(
+    capsys, monkeypatch
+):
+    """R-D1 + R-D3 on the two payloads that are actually POSTed to the backend.
+
+    Before this, both were built from ``_endpoint(root)["host"]`` — the
+    listener's BIND — while the grant's own top-level ``endpoints`` list was
+    already correct. So one envelope carried a good list and two payloads
+    carrying ``0.0.0.0``, and the two things that get dialled were the wrong
+    ones. They are now the same answer three times, which is what makes the
+    contract checkable in one assertion.
+    """
+
+    from hermes_cli.harness_parts import gateway_commands, serve as serve_module
+
+    monkeypatch.setattr(
+        serve_module, "gateway_listen_config", lambda: ("0.0.0.0", 8765)
+    )
+    monkeypatch.setattr(
+        gateway_commands,
+        "_machine_addresses",
+        lambda: ["192.168.1.203", "10.97.7.100"],
+    )
+
+    code, payload = _introduce(
+        capsys, "--for-install", "install-a", "--for-device", "dev-acct-1"
+    )
+    assert code == 0
+
+    expected = [
+        {"host": "192.168.1.203", "port": 8765},
+        {"host": "10.97.7.100", "port": 8765},
+    ]
+    join = json.loads(payload["grant_payload"]["peer_join_payload"])
+    pair = json.loads(payload["grant_payload"]["device_pair_payload"])
+
+    for nested in (join, pair):
+        assert nested["endpoints"] == expected
+        assert (nested["host"], nested["port"]) == ("192.168.1.203", 8765)
+    # The grant's own list, the two nested lists, and the envelope's: one answer.
+    assert payload["endpoints"] == payload["grant_payload"]["endpoints"] == expected
+    assert "0.0.0.0" not in json.dumps(payload)
+
+
+def test_introduce_refuses_a_wildcard_bind_that_enumerates_no_address(
+    capsys, monkeypatch
+):
+    """R-D1's refusal, and it is a DIFFERENT condition from the listener being
+    off: the lane is on and a bind exists, but this machine cannot say which
+    address the requester should use. A launcher that got the listener-off
+    sentence here would send an operator to a config key that is already set."""
+
+    from agent_runtime.serve_gateway_auth import pairing_store_path
+    from hermes_cli.harness_parts import gateway_commands, serve as serve_module
+    from hermes_cli.harness_parts.gateway_commands import (
+        LISTENER_OFF_SENTENCE,
+        NO_DIAL_HOST_SENTENCE,
+    )
+    from hermes_cli.harness_support import ERROR_EXIT_CODES
+
+    monkeypatch.setattr(
+        serve_module, "gateway_listen_config", lambda: ("0.0.0.0", 8765)
+    )
+    monkeypatch.setattr(gateway_commands, "_machine_addresses", lambda: [])
+
+    code = _dispatch(
+        ["harness", "gateway", "introduce", "--for-install", "install-a", "--json"]
+    )
+    out = capsys.readouterr()
+    text = out.out + out.err
+
+    assert code == ERROR_EXIT_CODES["runtime_unavailable"]
+    assert NO_DIAL_HOST_SENTENCE in text
+    assert LISTENER_OFF_SENTENCE not in text
+    assert not pairing_store_path(paths.store_root()).exists()
+
+
 def test_introduce_stamps_the_correlation_on_the_envelope_and_refuses_an_unfit_token(
     capsys,
 ):

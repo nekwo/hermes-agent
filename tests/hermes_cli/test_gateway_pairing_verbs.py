@@ -53,6 +53,27 @@ def gateway_configured(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def enumerated_addresses(monkeypatch):
+    """This box's interfaces, stubbed, because the bind above is a WILDCARD.
+
+    The fixture bind is ``0.0.0.0``, and since R-D1 that means every payload
+    host comes from :func:`_machine_addresses` rather than from the bind — so
+    without this stub these assertions would be about whatever adapters the
+    machine running the suite happens to have, which is a test that fails on a
+    laptop that changed networks. The two values are the operator's own
+    measured pair, in R-D2's order.
+    """
+
+    from hermes_cli.harness_parts import gateway_commands
+
+    monkeypatch.setattr(
+        gateway_commands,
+        "_machine_addresses",
+        lambda: ["192.168.1.203", "10.97.7.100"],
+    )
+
+
 def _dispatch(argv: list[str]) -> int:
     from hermes_cli import harness
 
@@ -87,14 +108,74 @@ def test_pair_prints_a_typed_code_and_a_qr_payload_that_agree(capsys):
 
     scanned = json.loads(payload["qr_payload"])
     assert scanned == {
-        "host": "0.0.0.0",
+        # R-D1, and this used to read ``0.0.0.0``: the bind was written into the
+        # payload verbatim, so a phone was handed an address it cannot dial (on
+        # Windows ``WSAEADDRNOTAVAIL``; on macOS its own loopback). The host is
+        # now the first candidate and the list is beside it.
+        "host": "192.168.1.203",
         "port": 8765,
+        "endpoints": [
+            {"host": "192.168.1.203", "port": 8765},
+            {"host": "10.97.7.100", "port": 8765},
+        ],
         "install_id": payload["install_id"],
         "cert_fingerprint": payload["cert_fingerprint"],
         "code": payload["code"],
     }
-    # The typed fallback needs the endpoint beside the code, on one screen.
+    # …and ``host`` is exactly ``endpoints[0]``, which is the contract the
+    # launcher's scanner reads: a client that predates the list keeps working.
+    assert (scanned["host"], scanned["port"]) == (
+        scanned["endpoints"][0]["host"],
+        scanned["endpoints"][0]["port"],
+    )
+    # The typed fallback needs the endpoint beside the code, on one screen — and
+    # this block still reports the BIND, because "what is this listener on" is a
+    # different question from "what should a phone dial" and answering the first
+    # with the second would hide a wildcard from the operator who chose it.
     assert payload["endpoint"] == {"host": "0.0.0.0", "port": 8765, "source": "config"}
+
+
+def test_no_payload_a_pair_writes_can_carry_a_bind_address(capsys, monkeypatch):
+    """R-D1 as a rule rather than as one asserted value.
+
+    Every wildcard spelling, one at a time, and the QR payload is scanned for
+    the literal in each. This is the test that would have caught S4's hardware
+    attempt before it reached two machines.
+    """
+
+    from hermes_cli.harness_parts import serve as serve_module
+
+    for bind in ("0.0.0.0", "::", "*"):
+        monkeypatch.setattr(
+            serve_module, "gateway_listen_config", lambda bind=bind: (bind, 8765)
+        )
+        _code, payload = _run(capsys, "pair")
+        scanned = json.loads(payload["qr_payload"])
+        assert scanned["host"] == "192.168.1.203", bind
+        assert bind not in payload["qr_payload"], bind
+
+
+def test_a_wildcard_bind_with_nothing_to_enumerate_refuses_rather_than_minting(
+    capsys, monkeypatch
+):
+    """The other half of R-D1: when there is no dialable address, there is no
+    payload. Family 7 (retryable — plugging in a cable makes the identical
+    command succeed), and NOTHING is minted, because a code burned on a refusal
+    is one of the three the operator is allowed."""
+
+    from agent_runtime.serve_gateway_auth import pairing_store_path
+    from hermes_cli.harness_parts import gateway_commands
+    from hermes_cli.harness_parts.gateway_commands import NO_DIAL_HOST_SENTENCE
+    from hermes_cli.harness_support import ERROR_EXIT_CODES
+
+    monkeypatch.setattr(gateway_commands, "_machine_addresses", lambda: [])
+
+    code = _dispatch(["harness", "gateway", "pair", "--json"])
+    out = capsys.readouterr()
+
+    assert code == ERROR_EXIT_CODES["runtime_unavailable"]
+    assert NO_DIAL_HOST_SENTENCE in (out.out + out.err)
+    assert not pairing_store_path(paths.store_root()).exists()
 
 
 def test_the_qr_payload_is_a_string_so_two_renderers_cannot_disagree(capsys):
