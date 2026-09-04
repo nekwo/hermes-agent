@@ -50,6 +50,7 @@ from agent_runtime.serve_socket import (
     HELLO_CONTRACT_VERSION,
     ServeHelloProtocolError,
     ServeSocketClient,
+    SocketOwnerLock,
 )
 from hermes_cli.harness_parts import serve as serve_module
 from hermes_cli.harness_parts.serve import serve_loop
@@ -250,6 +251,188 @@ def test_with_no_config_the_second_listener_does_not_exist_and_the_frame_says_di
         # Nothing was minted on the way past: no certificate, no key.
         assert read_certificate(_store_root()).state == "error:absent"
         assert not certificate_path(_store_root()).exists()
+
+
+# ── R-L1: "no listener" is four different sentences, and it says which ──────
+#
+# Measured 2026-09-04 on the operator's machine. The launcher wrote
+# `remote_gateway.listen: 0.0.0.0` and `.port: 8765` (correctly — reproduced in a
+# scratch home), respawned the serve, and the replacement lost the socket-owner
+# lock to a dead pid. With no socket lane there is no LAN listener, and the
+# greeting called that `disabled` — the same word as "the operator never asked
+# for one". The launcher, having just asked for one, could only read that as
+# "this build does not support the feature". Every outcome below exists so that
+# sentence cannot be said again.
+
+
+def _stdio_only_ready() -> dict:
+    """Boot a serve with NO socket lane and return its ``ready`` frame.
+
+    ``running_serve`` above pins ``socket_lane=True``, which is right for every
+    other test in this file and is exactly the condition under test here.
+    """
+
+    pipe, sink = _StdioPipe(), _Sink()
+    pipe.send({"op": "shutdown"})
+    serve_loop(pipe, sink, dispatch=lambda argv: 0)
+    return next(f for f in sink.frames() if f.get("event") == "ready")
+
+
+def test_a_listener_the_config_asked_for_and_a_socket_lane_that_is_off_says_so(
+    gateway_on,
+):
+    """The heart of R-L1: config ON + no socket lane must not read `disabled`.
+
+    The key set is pinned exactly, as the `listening` block's is. `reason` is the
+    `socket` block's own outcome verbatim, so the two blocks on one frame cannot
+    tell different stories about one boot.
+    """
+
+    ready = _stdio_only_ready()
+
+    assert ready["socket"] == {"outcome": "disabled"}
+    block = ready["gateway"]
+    assert block["outcome"] == "socket_unavailable"
+    assert block["reason"] == "disabled"
+    assert block["pid"] is None
+    assert block["owner_started_at"] is None
+    # The door the operator ASKED for, carried the way the `error:*` outcomes
+    # already carry it — never to be read as a door that opened.
+    assert block["host"] == "127.0.0.1"
+    assert block["port"] == 0
+    assert set(block) == {
+        "outcome",
+        "reason",
+        "pid",
+        "owner_started_at",
+        "host",
+        "port",
+        # R-IP16, unchanged: the capability list rides EVERY outcome, because
+        # "does this build know the verb" is a different question from "is the
+        # LAN door open" — and a launcher deciding whether to render a pairing
+        # row asks the first one on exactly this kind of boot.
+        "capabilities",
+    }
+    assert block["capabilities"] == list(GATEWAY_CAPABILITIES)
+
+
+def test_a_socket_lock_lost_to_a_live_owner_names_the_holder_on_the_gateway_block(
+    gateway_on, live_foreign_pid
+):
+    """The operator's shape, minus the dead pid R-L2 now takes over from.
+
+    A launcher that reads this knows three things it could not read before: the
+    runtime is present, the listener it asked for is not up, and the reason is a
+    process it can name — which is what turns a grey switch into "waiting for
+    pid N to release the runtime".
+    """
+
+    root = _store_root()
+    incumbent = SocketOwnerLock(root)
+    assert incumbent.acquire().acquired is True
+    try:
+        incumbent.publish_owner(
+            {
+                "pid": live_foreign_pid,
+                "port": 61010,
+                "boot_id": "incumbent",
+                "started_at": "2026-09-04T10:28:16.817Z",
+            }
+        )
+        with running_serve() as handle:
+            assert handle.ready["socket"]["outcome"] == "lock_held_by"
+            block = handle.ready["gateway"]
+            assert block["outcome"] == "socket_unavailable"
+            assert block["reason"] == "lock_held_by"
+            assert block["pid"] == live_foreign_pid
+            assert block["owner_started_at"] == "2026-09-04T10:28:16.817Z"
+
+            # Re-askable, like every other block on this frame: a client that
+            # reconnects after the incumbent goes away must be able to learn
+            # that without a restart it cannot cause. There is no `hello_ok` to
+            # carry it in this state — no socket lane means no loopback
+            # listener to greet on — which is exactly why `ready` and `version`
+            # have to be complete.
+            handle.pipe.send({"op": "version"})
+            version = handle.sink.wait_for("version")
+            assert version["gateway"] == block
+    finally:
+        incumbent.release()
+
+
+def test_config_off_wins_over_a_socket_lane_that_is_also_down():
+    """Precedence, and it is deliberate. `disabled` is the ACTIONABLE answer —
+    turn it on — while `socket_unavailable` on a runtime nobody asked to listen
+    would send a launcher chasing a lock for a door it was never told to open."""
+
+    ready = _stdio_only_ready()
+    assert ready["socket"] == {"outcome": "disabled"}
+    assert ready["gateway"] == {
+        "outcome": "disabled",
+        "capabilities": list(GATEWAY_CAPABILITIES),
+    }
+
+
+def test_the_greeting_a_socket_client_reads_carries_the_same_gateway_block():
+    """R-L1 covers `hello_ok` as well as `ready`, and the launcher's LAN
+    connector and the peer dial both read it there rather than on `ready`."""
+
+    with running_serve() as handle:
+        with ServeSocketClient("127.0.0.1", handle.port, timeout_seconds=WAIT) as client:
+            from agent_runtime.serve_auth import read_token
+
+            hello = client.hello(token=read_token(_store_root()) or "", client="t")
+        assert hello["gateway"] == handle.ready["gateway"]
+        assert hello["gateway"]["outcome"] == "disabled"
+
+
+def test_the_no_listener_block_is_pure_and_answers_without_a_runtime(monkeypatch):
+    """`gateway_block_when_no_listener` is module-level and side-effect-free for
+    the same reason `start_gateway_listener` is: the four outcomes are worth
+    reading in one screen, and a table-driven test of them should not have to
+    boot four runtimes."""
+
+    monkeypatch.setattr(
+        serve_module, "gateway_listen_config", lambda: ("0.0.0.0", 8765)
+    )
+    build = serve_module.gateway_block_when_no_listener
+
+    # No root at all: the same word `auth` and `install` use for it, so one
+    # frame tells one story.
+    assert build({"outcome": "listening"}, root_resolved=False) == {
+        "outcome": "error:root_unresolved"
+    }
+
+    # The operator's own boot, reconstructed from the sidecar he still had.
+    assert build(
+        {
+            "outcome": "lock_held_by",
+            "pid": 25672,
+            "owner_started_at": "2026-09-04T10:28:16.817Z",
+        },
+        root_resolved=True,
+    ) == {
+        "outcome": "socket_unavailable",
+        "reason": "lock_held_by",
+        "pid": 25672,
+        "owner_started_at": "2026-09-04T10:28:16.817Z",
+        "host": "0.0.0.0",
+        "port": 8765,
+    }
+
+    # A socket lane that ERRORED carries its typed token through as the reason
+    # rather than being flattened into one word for every failure.
+    assert build({"outcome": "error:EACCES"}, root_resolved=True)["reason"] == (
+        "error:EACCES"
+    )
+    # And a `socket` block that says nothing recognisable still produces a
+    # complete answer — an explanation with a hole in it is not an explanation.
+    assert build({}, root_resolved=True)["reason"] == "unknown"
+
+    monkeypatch.setattr(serve_module, "gateway_listen_config", lambda: (None, 0))
+    assert build({"outcome": "lock_held_by"}, root_resolved=True) == {
+        "outcome": "disabled"
+    }
 
 
 def test_the_loopback_lane_is_byte_identical_with_the_gateway_lane_up(

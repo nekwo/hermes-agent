@@ -1,3 +1,5 @@
+import subprocess
+import sys
 import threading
 import time
 
@@ -25,6 +27,35 @@ _PRODUCTION_LEGACY_WORKTREE_BASE_DIR = (
 # write guard, the live-system guard, the audio guard) are the root conftest's
 # and were always tree-wide. Keeping a second copy here would produce two
 # teardown errors for one defect, not two facts.
+
+
+@pytest.fixture
+def live_foreign_pid():
+    """A pid that is RUNNING and is not this test process.
+
+    The socket-owner lock (R-L2) classifies the pid in
+    ``serve_socket.owner.json`` three ways — ours, alive, provably gone — and
+    only the middle one is refused as a genuine incumbent. Proving that arm
+    needs a real live process: ``os.getpid()`` classifies as ``self`` (the
+    re-acquire path) and a parent pid is not guaranteed to outlive the
+    assertion. Spawned here rather than in each test file so the two suites that
+    need it (``test_serve_socket_lane`` for the lock, ``test_serve_gateway_lane``
+    for the block that reports it) cannot drift on how a live process is made or
+    reaped.
+
+    The child does nothing but sleep and is killed on teardown.
+    """
+
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        yield child.pid
+    finally:
+        child.kill()
+        child.wait(timeout=30)
 
 
 @pytest.fixture

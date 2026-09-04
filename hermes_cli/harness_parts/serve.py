@@ -168,9 +168,13 @@ because the socket lane is injected and OFF unless ``_cmd_serve`` turns it on.
 - ownership: one serve per root owns the socket, decided by an OS-held
   exclusive lock (``agent_runtime/serve_socket.py``). The loser runs
   stdio-only and says so on ``ready`` under ``"socket"``:
-  ``{"outcome":"lock_held_by","pid":…}``. The winner's ``ready`` carries
-  ``{"outcome":"listening","host":"127.0.0.1","port":…}`` and its registry
-  entry records ``transport:"stdio+socket"`` plus the port.
+  ``{"outcome":"lock_held_by","pid":…,"owner_started_at":…}``. The winner's
+  ``ready`` carries ``{"outcome":"listening","host":"127.0.0.1","port":…}`` —
+  plus ``took_over_from`` when it inherited a proven-dead owner's lane (R-L2) —
+  and its registry entry records ``transport:"stdio+socket"`` plus the port.
+  A serve that loses this race opens no LAN listener either, and since R-L1
+  the ``gateway`` block says so in its own words (``socket_unavailable``)
+  rather than in the word for "the operator never asked" (``disabled``).
 - hello:     CHALLENGE-RESPONSE, and the SERVER speaks first
              (``hello_contract`` 3). On accept the service writes
              ``{"event":"server_hello","nonce":<64 hex>,"boot_id":…,
@@ -511,6 +515,73 @@ def gateway_listen_config() -> tuple[str | None, int]:
     except (TypeError, ValueError):
         port = 0
     return host, max(0, min(65535, port))
+
+
+#: R-L1's fourth outcome word. The LAN listener is deliberately coupled to the
+#: loopback lane — the serve that owns the socket for a root is the serve that
+#: opens that root's doors, or two serves bind one operator-chosen port and the
+#: second one loses — so every way the socket lane fails is also a way this
+#: listener never starts. Until this stage all of them arrived as ``disabled``,
+#: which is the word for "the operator did not ask for a listener": the launcher
+#: could not tell a config it had just written from a lock it had just lost, and
+#: on 2026-09-04 it did not.
+GATEWAY_OUTCOME_SOCKET_UNAVAILABLE = "socket_unavailable"
+
+
+def gateway_block_when_no_listener(
+    socket_block: dict[str, Any] | None, *, root_resolved: bool
+) -> dict[str, Any]:
+    """The ``gateway`` block for a boot that never reached the listener (R-L1).
+
+    Three ways to not be listening, and they are three different sentences a
+    launcher has to be able to say:
+
+    * ``error:root_unresolved`` — there is no runtime root, so there is nothing
+      to open a door onto. Same word the ``auth`` and ``install`` blocks use for
+      the same failure, so an operator reading ``ready`` sees one story.
+    * ``disabled`` — ``remote_gateway.listen`` is off. Nobody asked for a
+      listener and there is nothing wrong. This is the default, forever.
+    * ``socket_unavailable`` — **the config asked for a listener and the socket
+      lane is why there is none.** ``reason`` is the ``socket`` block's own
+      outcome, verbatim (``disabled`` | ``lock_held_by`` | ``error:<token>``), so
+      the two blocks cannot tell different stories about one boot, and ``pid`` /
+      ``owner_started_at`` name the process that is holding the lane. ``host``
+      and ``port`` are the config's, carried the way the ``error:*`` outcomes
+      already carry them — the door the operator ASKED for, not one that opened.
+
+    Config-off wins over socket-unavailable when both are true, and that
+    ordering is deliberate: ``disabled`` is the actionable answer (turn it on),
+    while ``socket_unavailable`` on a runtime nobody asked to listen would send a
+    launcher chasing a lock for a door it was never told to open.
+
+    Note that ``socket_unavailable`` can only ever ride ``ready`` and a stdio
+    ``version`` reply. There is no loopback listener in this state, so no
+    ``hello_ok`` exists to carry it — which is precisely why the block on
+    ``ready`` has to be complete.
+
+    Module-level and pure so it is testable without standing up a runtime, the
+    same reason ``start_gateway_listener`` below is.
+    """
+
+    if not root_resolved:
+        return {"outcome": "error:root_unresolved"}
+    host, port = gateway_listen_config()
+    if host is None:
+        return {"outcome": "disabled"}
+    block = socket_block if isinstance(socket_block, dict) else {}
+    pid = block.get("pid")
+    started_at = block.get("owner_started_at")
+    return {
+        "outcome": GATEWAY_OUTCOME_SOCKET_UNAVAILABLE,
+        # Always present, null when unknown, rather than absent-when-unknown:
+        # this block IS the explanation, and a reader of an explanation should
+        # not have to tell "the field is missing" from "the field is empty".
+        "reason": str(block.get("outcome") or "unknown"),
+        "pid": pid if isinstance(pid, int) else None,
+        "owner_started_at": started_at if isinstance(started_at, str) else None,
+        "host": host,
+        "port": port,
+    }
 
 
 def start_gateway_listener(
@@ -2592,9 +2663,19 @@ def serve_loop(
         # second answered ``no``. Stamped in exactly two places — here, and on
         # the listener's own block below — so ``ready`` / ``hello_ok`` /
         # ``version`` are untouched and cannot disagree.
+        #
+        # R-L1: THE BLOCK IS NEVER SILENT AND NEVER GUESSES. The listener can
+        # only be opened by the serve that owns the loopback lane (one process
+        # per root binds the operator's port, or the second one loses that race
+        # too), so every failure of the lane above is also a boot with no
+        # listener — and until 2026-09-04 all of them said ``disabled``, the same
+        # word as "the operator never asked". That is the sentence the launcher
+        # could not read: it had just WRITTEN ``remote_gateway.listen`` and
+        # respawned, and the greeting told it the feature was off.
+        # ``gateway_block_when_no_listener`` splits those apart.
         from agent_runtime.gateway_capabilities import with_capabilities
 
-        gateway_block: dict[str, Any] = with_capabilities({"outcome": "disabled"})
+        gateway_block: dict[str, Any]
         if socket_server is not None and store_root_path is not None:
             gateway_server, gateway_block = start_gateway_listener(
                 store_root_path,
@@ -2641,6 +2722,12 @@ def serve_loop(
                         },
                     }
                 )
+        else:
+            gateway_block = with_capabilities(
+                gateway_block_when_no_listener(
+                    socket_block, root_resolved=store_root_path is not None
+                )
+            )
         # S2c. ONE announce per boot, on a background thread, telling every
         # usable peer where this install is now reachable and what certificate
         # it presents. It is the push that makes a machine which changed
@@ -2833,10 +2920,13 @@ def serve_loop(
             # operator who sets ``remote_gateway.listen`` and restarts has one
             # question — can my phone reach this install — and every way the
             # answer is no is quiet: the port was taken, the certificate could
-            # not be minted, the config key was never read. ``disabled`` when
-            # nobody asked, ``listening`` with host/port and the
-            # ``cert_fingerprint`` a client pins, ``error:<reason>`` otherwise.
-            # Never absent, never inferred.
+            # not be minted, the socket lane never came up, the config key was
+            # never read. ``disabled`` when nobody asked, ``listening`` with
+            # host/port and the ``cert_fingerprint`` a client pins,
+            # ``socket_unavailable`` (R-L1) with the ``reason`` / ``pid`` /
+            # ``owner_started_at`` of the lane that is holding this one shut, or
+            # ``error:<reason>``. Never absent, never inferred, and — since
+            # R-L1 — never ``disabled`` for a listener the config asked for.
             "gateway": gateway_block,
             # The METHOD lane's capability manifest — ``{"contract":N,
             # "methods":[…]}``. This is stdio's greeting, so this is where a

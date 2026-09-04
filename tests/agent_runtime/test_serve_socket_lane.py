@@ -18,8 +18,6 @@ import json
 import os
 import queue
 import socket
-import subprocess
-import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -386,27 +384,6 @@ def test_the_second_serve_for_a_root_degrades_to_stdio_and_names_the_owner():
 # written its config correctly produced a door that never opened.
 
 
-@contextmanager
-def _a_live_foreign_process():
-    """A pid that is running and is NOT this test process.
-
-    Spawned rather than borrowed: ``os.getpid()`` classifies as ``self`` (the
-    lock's own re-acquire path) and a parent pid is not guaranteed to outlive
-    the assertion. The child does nothing but sleep, and is killed on exit.
-    """
-
-    child = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(120)"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    try:
-        yield child.pid
-    finally:
-        child.kill()
-        child.wait(timeout=WAIT)
-
-
 def test_a_dead_owners_lane_is_taken_over_and_the_takeover_is_a_receipt():
     """R-L2's first half, and the one the operator's session needed.
 
@@ -453,7 +430,9 @@ def test_a_dead_owners_lane_is_taken_over_and_the_takeover_is_a_receipt():
     assert takeovers[0]["pid"] == os.getpid()
 
 
-def test_a_live_owner_is_refused_exactly_as_before_and_nothing_is_taken_over():
+def test_a_live_owner_is_refused_exactly_as_before_and_nothing_is_taken_over(
+    live_foreign_pid,
+):
     """R-L2's second half, which is the half that must NOT change.
 
     The lock exists so that "connect to the service for root X" has one answer.
@@ -465,23 +444,26 @@ def test_a_live_owner_is_refused_exactly_as_before_and_nothing_is_taken_over():
     incumbent = SocketOwnerLock(root)
     assert incumbent.acquire().acquired is True
     try:
-        with _a_live_foreign_process() as live:
-            incumbent.publish_owner(
-                {"pid": live, "port": 61001, "started_at": "2026-09-04T11:00:00.000Z"}
-            )
-            loser = SocketOwnerLock(root, log=lines.append)
-            result = loser.acquire()
+        incumbent.publish_owner(
+            {
+                "pid": live_foreign_pid,
+                "port": 61001,
+                "started_at": "2026-09-04T11:00:00.000Z",
+            }
+        )
+        loser = SocketOwnerLock(root, log=lines.append)
+        result = loser.acquire()
 
-            assert result.outcome == "lock_held_by"
-            assert result.acquired is False
-            assert result.pid == live
-            assert result.took_over_from is None
-            assert result.owner_state == "pid_running"
-            # R-L1 wants the incumbent's boot time on the wire: it is how a
-            # launcher tells "the same holder I saw last time" from "a fresh
-            # one that took the lane while I was away".
-            assert result.payload()["owner_started_at"] == "2026-09-04T11:00:00.000Z"
-            assert "took_over_from" not in result.payload()
+        assert result.outcome == "lock_held_by"
+        assert result.acquired is False
+        assert result.pid == live_foreign_pid
+        assert result.took_over_from is None
+        assert result.owner_state == "pid_running"
+        # R-L1 wants the incumbent's boot time on the wire: it is how a
+        # launcher tells "the same holder I saw last time" from "a fresh one
+        # that took the lane while I was away".
+        assert result.payload()["owner_started_at"] == "2026-09-04T11:00:00.000Z"
+        assert "took_over_from" not in result.payload()
     finally:
         incumbent.release()
     assert [row["event"] for row in lines] == ["serve_socket_owner_stale"]
