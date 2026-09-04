@@ -1,6 +1,20 @@
 # Decision brief — does the flow graph replicate with its agent?
 
-**Status: RULING OWED. Nothing here is built.** This document exists because the
+**Status: RULED and BUILT (2026-09-04).** The ruling is option **B** —
+*replicate the canvas with the agent; nodes, layout and non-owner edges travel
+in the same sync the steering already rides*. It was built stage by stage from
+[`w13-h2-flow-graph-canvas-replication.md`](w13-h2-flow-graph-canvas-replication.md),
+which is the implementation authority; the shipped shape is recorded in
+[`01-system-architecture.md`](../01-system-architecture.md), under "And the
+CANVAS travels with the agent". This brief is kept for the re-measurement and
+the costs it priced, not as a live question. One correction the build made to
+it: §3's reap cost assumed owner-liveness reaping runs inside the pull, and it
+does not — it is phase 5 of `reconcile_persona_instances`, reached only from
+`harness runtime reconcile`.
+
+Everything below is the brief as it stood while the question was open.
+
+**Status when written: RULING OWED. Nothing here is built.** This document exists because the
 queue row that asks for the ruling described the mechanism in terms that do not
 resolve against the code, so the question the operator was being asked was the
 wrong one. Below: what was re-measured (2026-09-04), the three corrections, and

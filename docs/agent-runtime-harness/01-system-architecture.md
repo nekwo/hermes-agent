@@ -466,6 +466,67 @@ delivers a working agent, demonstrated live across two machines — the receipt
 ledger is `docs/mission_control/planned/instance-replication.md` in the
 EterniaLauncher repo.
 
+**And the CANVAS travels with the agent** (2026-09-04, stages S1–S5). The
+operator's flow-graph drawing was not excluded from sync, it was outside every
+door: `grep flow_graph` matched nothing in `realm_sync.py`,
+`persona_config_sync.py` or `persona_instance_sync.py`, so a replica arrived
+with a working agent and a blank chart. The operator ruled REPLICATE — *nodes,
+layout and non-owner edges travel in the same sync the steering already rides;
+authored work silently missing on a replica is worse than the sync cost* — and
+`agent_runtime/flow_graph_sync.py` is the fourth projection, built on the
+instance family's pattern rather than beside it:
+
+- **What travels** is `nodes[]` (`id`, `x`, `y`, `agent` — the `x`/`y` ARE the
+  ruling's layout) and `edges[]` (`from`, `to`) **in the order they were
+  drawn**, because edge order is fan-in priority. Non-owner edges travel by the
+  ruling: they are the local context the operator drew, and ingest reports them
+  without applying them exactly as it does for a locally authored canvas.
+  `viewport` does NOT travel — the launcher's own contract calls it a view
+  preference, never a steering fact — nor do the store envelope's `updated_at` /
+  `requested_by`, nor any unknown key at document, node or edge level. Every one
+  of those is dropped WITH ACCOUNTING on the publish row; an unaccounted drop is
+  the same silence the lane exists to close
+  (`tests/agent_runtime/test_flow_graph_sync.py`).
+- **Publish** resolves canvases for exactly `office_scan.instance_ids` — the
+  same list the instance projection is pruned to, never a second enumeration —
+  and appends `store/flow_graphs.yaml` (`kind: realm_flow_graphs`) only when
+  the projection is non-empty, so a realm that never drew one publishes exactly
+  what it published before (`tests/agent_runtime/test_flow_graph_publish.py`).
+- **Pull is adopt-or-hold at WHOLE-DOCUMENT granularity.** Three-way merge on
+  node positions has no natural resolution, so `classify_three_way_pull` decides
+  and `CONFLICT` is a loud hold with the remote drawing parked in a sidecar
+  (`paths.flow_graph_conflict_path`) — never a merge, never last-write-wins.
+  Adoption goes through `FlowGraphStore.set_doc`, so a pulled canvas passes
+  `parse_flow_graph_doc` like every authored one. A canvas the realm stopped
+  carrying is `upstream_absent`, never deleted: owner-liveness reaping, which
+  ARCHIVES, is the one authority that removes a drawing. A node bound to an
+  instance that did not travel is written WHOLE and reported as
+  `unbound_node_agents` — the instance may arrive on the next pull, and dropping
+  the node would silently edit the operator's drawing
+  (`tests/agent_runtime/test_flow_graph_sync_pull.py`).
+- **The boundary, and the first thing to check in a review:** the canvas pull
+  does NOT run `reconcile_flow_graph_steering`. Steering already travels on
+  `steered_by` in the instance family, and running ingest here would let a
+  pulled drawing rewrite a peer's instance records.
+- **Ordering.** The canvas lane runs immediately AFTER the mint door, pinned by
+  a test rather than by a comment
+  (`tests/agent_runtime/test_flow_graph_pull_order.py`). The stage plan expected
+  the reap to run in the same pass; re-measured, it does not —
+  `_prune_owner_less_flow_graphs` is phase 5 of `reconcile_persona_instances`,
+  reached only from `harness runtime reconcile` — so what the ordering protects
+  is the pull's own accounting, which would otherwise name every binding the
+  same pull was about to satisfy.
+- **Accounting.** `result["flow_graph_sync"]` on a pull ack (emitted
+  unconditionally, `source: "projection" | "unreadable" | null`, same skew
+  argument as the instance row) and a top-level `flow_graphs` key on
+  `realm_sync_status` — `{publishable, unpublished, held, unreadable}`. It is
+  deliberately NOT a fourth `store_drift` family: those rows are exactly the set
+  `realm_revert` addresses, dispatched through `_PROCESS_ORDER[row.family]`, so
+  a family with no revert arm would hand `revert --all` a `KeyError` and offer
+  an exit that does not exist (`tests/agent_runtime/test_flow_graph_status.py`).
+  The canvas revert arm, and the launcher's rendering of the held/conflict rows,
+  are separate rows.
+
 ## The board
 
 Workspace-scoped kanban, and **planning state only**: "Cards are planning
