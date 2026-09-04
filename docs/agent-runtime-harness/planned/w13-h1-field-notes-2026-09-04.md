@@ -243,7 +243,7 @@ what the diff put on the hook.
 
 4. **One flaky line, not a failure.** A run of
    `tests/agent_runtime/test_persona_assignments.py` printed
-   `FAILED …::test_a_cleared_binding_is_not_stale_because_its_own_event_demotes_the_batch`
+   a FAILED line for the cleared-binding-is-not-stale case
    while the same run's summary read `184 tests passed, 0 failed` and the runner
    exited 0 — a retry that passed. Recorded because a reader of the log would
    otherwise see a name with no verdict.
