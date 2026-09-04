@@ -580,17 +580,17 @@ is named beside the change that moves it.
 
 | parity row | test (file) | asserts |
 |---|---|---|
-| send, fresh thread, `title` | `test_gateway_peer_cross_install_chat_e2e.py::test_a_cross_install_send_with_a_title_opens_a_fresh_far_thread` | B's thread title == the title; a new `session_id` |
+| send, fresh thread, `title` | sender side only: `test_agent_chat_tool.py::test_title_names_the_thread_this_dispatch_opens`. UNCOVERED SEAM — no cross-install e2e asserts B's thread title; the planned `test_a_cross_install_send_with_a_title_opens_a_fresh_far_thread` was never written | the title is forwarded; "B's thread title == the title" is unpinned |
 | `wait=true` refused | `test_agent_chat_tool.py::test_wait_true_to_an_install_qualified_target_stays_refused_remote_requires_detached` | unchanged word |
 | `wait=false` reply delivered | existing e2e `test_a_chat_turn_crosses…` + `test_dispatch_delivery.py` delivery line carries `Their thread:` | unchanged |
 | `session_id` continuation | e2e `test_a_cross_install_session_id_continuation_lands_in_the_same_far_thread` | two dispatches, second with the first's `target_session_id`; B's store shows ONE session with two turns |
 | `new_session` | e2e `test_new_session_true_opens_a_second_far_thread` | distinct far ids |
-| `clarify_token` | `test_agent_chat_tool.py::test_a_far_clarify_token_is_refused_as_not_portable_and_names_the_session_id_route`; e2e `test_a_far_clarify_answered_by_session_id_lands_in_the_questions_thread` | R-IP10 |
-| `notify_operator` | `test_agent_chat_dispatch.py::test_notify_operator_rides_a_remote_dispatch_row` | sender side |
+| `clarify_token` | `test_agent_chat_tool.py::test_a_far_clarify_token_is_refused_as_not_portable_and_names_the_session_route`; e2e `test_a_far_clarify_answered_by_session_id_lands_in_the_questions_thread` | R-IP10 |
+| `notify_operator` | `test_agent_chat_dispatch.py::test_notify_operator_rides_the_row` | sender side |
 | `agent_chat_open`/`threads` on the far thread | e2e `test_agent_chat_open_reads_the_far_thread_the_delivery_named` (through `peer.thread.read`, on the REAL serve — proves §0.10 fact 1); `test_agent_chat_threads_lists_the_far_installs_roster_rows` | shape per R-S2-12 |
 | media handles | existing media e2e unchanged | — |
 | roster / discovery | e2e `test_agent_chat_installs_lists_paired_installs_and_fetches_one_roster`; `test_runtime_hud.py::test_the_hud_carries_install_lines_and_a_cached_roster_and_dials_nothing` | HUD from store only |
-| A→B→A cycle | `test_agent_chat_dispatch.py::test_a_cross_install_dispatch_is_a_fresh_chain_root_on_b_recorded_as_a_known_gap` (asserts the fact, cites the row) | still ✗ by design |
+| A→B→A cycle | UNCOVERED SEAM — the planned `test_a_cross_install_dispatch_is_a_fresh_chain_root_on_b_recorded_as_a_known_gap` was never written, and no test anywhere asserts the fresh-chain-root fact; the nearest neighbours pin the LOCAL chain (`test_agent_chat_dispatch.py::test_a_detached_dispatch_still_forwards_the_chain`, `::test_a_detached_dispatch_gets_the_background_budget_not_the_chain_remainder`) | still ✗ by design, and now unpinned |
 | sender identity | `test_peer_chat_execute.py` existing `--requested-by peer:<id>` | unchanged |
 
 Plus: `tests/agent_runtime/test_peer_directory.py` (new) —

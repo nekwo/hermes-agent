@@ -104,8 +104,10 @@ bash scripts/run_tests.sh tests/agent_runtime/test_gateway_targets.py tests/agen
 
 * Test-file names cited for the CLI verb harness were corrected to the real
   files (`tests/hermes_cli/test_gateway_pairing_verbs.py`,
-  `test_gateway_peer_verbs.py`); there is no `test_decision_contract_registry.py`
-  — the S32 parity test is the registry's gate.
+  `test_gateway_peer_verbs.py`). The decision-contract registry file the plan
+  guessed at does not exist anywhere under `tests/`; the registry's gate is the
+  S32 parity test,
+  `tests/agent_runtime/test_s32_decision_contract_parity_retirement.py`.
 
 ### Sub-rulings recorded for the orchestrator (all have recommendations in §1)
 
