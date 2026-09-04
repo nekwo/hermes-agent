@@ -1252,7 +1252,24 @@ def compose_atlas(frames_by_state: dict[str, list]):
 
 
 def atlas_to_webp_bytes(atlas) -> bytes:
-    """Encode an atlas image to lossless WebP bytes (the on-disk pet format)."""
+    """Encode an atlas image to lossless WebP bytes (the on-disk pet format).
+
+    This is the STORAGE seam of the ratified asset-format policy
+    (`EterniaLauncher/docs/studio/ASSET_FORMAT_FOUNDATIONS.md`): storage is
+    lossless for the asset class, and every flag here is load-bearing.
+    ``lossless=True, quality=100, method=6`` make the decoded pixels identical
+    to a PNG's; ``exact=True`` preserves RGB inside fully-transparent pixels,
+    without which an engine bilinear-sampling across an alpha edge picks up
+    dark fringing.
+
+    The policy's other two seams are decided elsewhere and are not this
+    function's to change: CAPTURE depth is the provider's ceiling (8-bit PNG
+    from the image model) and is a ONE-WAY door — an asset class born deeper
+    than 8-bit must declare a deep capture format and never pass through this
+    encoder at all — and EXPORT meets each consumer in its native format, which
+    no lane ships today. A second asset type fills in the policy's
+    capture/storage/export declaration stub before it picks an encoder.
+    """
     buf = io.BytesIO()
     atlas.save(buf, format="WEBP", lossless=True, quality=100, method=6, exact=True)
     return buf.getvalue()
