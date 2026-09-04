@@ -1315,58 +1315,64 @@ def profile_env(tmp_path, monkeypatch):
 
 ## Testing
 
-### The push gate — install it once per clone
+### There is no push gate — install the one hook there is
 
 ```bash
 git config core.hooksPath .githooks
 ```
 
-That one command installs BOTH repo hooks: `post-merge` (re-installs the
-canonical shared skill packages after a pull) and **`pre-push`, the always-on
-lane**. git config is per-clone and shared by every worktree of it, so one
-command covers the primary checkout and every `git worktree add` under it.
+`.githooks/` holds exactly one hook: `post-merge`, which re-installs the
+canonical shared skill packages after a pull. git config is per-clone and
+shared by every worktree of it, so one command covers the primary checkout and
+every `git worktree add` under it.
 
-**Why there is a push gate at all.** hermes `main` sat red and unreported from
+**There is no `pre-push` hook in this repo.** One existed from 2026-08-30 and
+was DELETED on 2026-09-03 (`504953f6ad`) by operator ruling, in both this repo
+and the launcher: a landing blocker that costs a suite run is not how these
+checks get value, and pushes are instant now. Everything below is a check
+someone runs — by hand, or from the unattended report in the next section —
+never something that stops a push.
+
+**Why the checks exist anyway.** hermes `main` sat red and unreported from
 `6979bad59` — `test_every_json_verb_states_its_root_or_is_classified`, a whole-
-program gate — because CI on this fork is largely inert and there was no local
-lane. An unrun gate is indistinguishable from a passing one. The verb is fixed;
-the missing lane was the actual defect.
+program gate — because CI on this fork is largely inert and nothing local ran
+it. An unrun gate is indistinguishable from a passing one. That is still true,
+and it is still true with the hook gone: the coverage-claim gate went red on
+`main` again on 2026-09-04 by five citations the S2 wave landed, and nothing
+reported it. Which of these gets an automatic runner, and where, is an open
+row in the Mission Control queue.
 
-The hook has two lanes:
+The two checks the deleted hook ran, and what they cost:
 
-| lane | when | what | cost |
-|---|---|---|---|
-| **A — always** | every push, every ref, primary or worktree | `scripts/doc_cite_adjacency.py --exclude archive --exclude planned` (its RULED scope — the bare walk is red by 829 by ruling) + `scripts/dump_cli_contract.py --check` | ~11 s warm |
-| **B — the validated suite lane** | a push landing on `refs/heads/main` | `scripts/run_tests.sh tests/agent_runtime tests/hermes_cli tests/cli tests/state` | ~18 min |
+| check | command | cost |
+|---|---|---|
+| doc-cite adjacency + CLI contract | `scripts/doc_cite_adjacency.py --exclude archive --exclude planned` (its RULED scope — the bare walk is red by 829 by ruling) and `scripts/dump_cli_contract.py --check` | ~11 s warm |
+| the validated suite scope | `scripts/run_tests.sh tests/agent_runtime tests/hermes_cli tests/cli tests/state` | **≥25 min** — see below |
 
-Lane B's scope is **the 4 directories R3 was proven on**, deliberately not the
-runner's whole-tree default: a whole-tree run on a green `main` reads ~142
-failed, every one triaged environmental or pre-existing (see
+**The suite number.** This section claimed "~18 min" for all four directories.
+Measured 2026-09-04 and recorded in `dcba382f0a`: `tests/agent_runtime` and
+`tests/hermes_cli` ALONE ran `1014 files, 12186 tests passed, 1 failed in
+1508.2s` at 8 workers — 25.1 minutes for two of the four. Treat ≥25 min as the
+floor for the full four-directory scope, not a budget for it, and expect the
+number to move with the box's core count.
+
+That four-directory scope is **the 4 directories R3 was proven on**,
+deliberately not the runner's whole-tree default: a whole-tree run on a green
+`main` reads ~142 failed, every one triaged environmental or pre-existing (see
 [`planned/hermes-suite-perf.md`](docs/agent-runtime-harness/planned/hermes-suite-perf.md)
-§Follow-ups). Widening it is a scope decision with an open row, not a hook edit.
+§Follow-ups). Two things sit OUTSIDE it and are therefore run by nobody unless
+named explicitly: `tests/test_coverage_claims_resolve.py` and all of
+`tests/scripts/`.
 
-`main` is the classifier because hermes has no `release` branch — `main` IS the
-shipping branch. A push that does not land on `main` runs Lane A and is told, in
-full, which gates did not run and the command that runs them. A ref line the
-hook cannot classify is forced to the Lane-B side, never the fast path.
-
-Controls, all loud and none silent:
-
-- `HERMES_PUSH_SUITE_LANE=skip` — skip Lane B, printing a banner naming exactly
-  what did not run. For a landing you have already reasoned about; not a default.
-- `HERMES_PUSH_SUITE_DIRS="tests/state"` — narrow Lane B's roots. Prints the
-  narrowing and the validated scope beside it. Bootstrap/debug knob.
-- `HERMES_PYTHON=/path/to/python` — the interpreter both lanes use. **Required on
-  a box with no `.venv`**: this repo has had none since 2026-08-30 and "what IS
-  the canonical test env" is an open row, so the hook names the interpreter it
-  needs and refuses the push rather than skipping.
-
-The hook calls `scripts/run_tests.sh` and never `pytest` directly. That is not
-style: the updater tests inside Lane B's scope do `git branch -f main
-origin/main`, and a plain `pytest tests/hermes_cli` in the primary checkout
-detached 11 unpushed commits on 2026-08-01. Per-file hermetic subprocesses are
-the mitigation; re-verified 2026-09-02 from a linked worktree with refs, reflog
-and worktree registrations byte-identical before and after.
+Run these through `scripts/run_tests.sh`, never `pytest` directly. That is not
+style: the updater tests inside that scope do `git branch -f main origin/main`,
+and a plain `pytest tests/hermes_cli` in the primary checkout detached 11
+unpushed commits on 2026-08-01. Per-file hermetic subprocesses are the
+mitigation; re-verified 2026-09-02 from a linked worktree with refs, reflog and
+worktree registrations byte-identical before and after. The runner finds the
+canonical shared test venv on its own (`$HERMES_TEST_VENV`, else
+`~/.venvs/hermes-test`) — a worktree with no `.venv` of its own needs nothing
+set.
 
 ### Unattended reporting
 
@@ -1409,7 +1415,7 @@ Scheduler's GUI. The XML's own header comment carries the full run-book.
 `tests/fixtures/hermes_cli_contract.json` on it.
 
 ```bash
-python scripts/dump_cli_contract.py --check   # the gate Lane A runs
+python scripts/dump_cli_contract.py --check   # the gate; run it after any argparse change
 python scripts/dump_cli_contract.py --write   # regenerate after a parser change
 ```
 
@@ -1492,8 +1498,9 @@ ruled on — was run against **exactly four directories**:
 tests/agent_runtime tests/hermes_cli tests/cli tests/state
 ```
 
-That four-directory set is Lane B of the push gate (`.githooks/pre-push`) and
-is what "the validated suite" means everywhere else in this doc. A bare
+That four-directory set is what "the validated suite" means everywhere else
+in this doc. It used to be a push-gate lane; the hook is gone (`504953f6ad`)
+and the scope outlived it. A bare
 whole-tree invocation on a green `main` is not a wider proof of the same
 thing — it is a **different, unvalidated scope**, and on this workstation
 (`de710d0b89`, 2026-09-01) it read 31,063 passed / 142 failed. Every one of
