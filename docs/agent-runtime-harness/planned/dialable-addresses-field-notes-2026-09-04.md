@@ -197,8 +197,9 @@ pointing at it too, and the edge still lands on `127.0.0.1:<A's port>`.
 
 ## 7. D1b — the routing table, and the proof that D1's §2 pointed at (R-D8)
 
-Same worktree, branch `feat/d1b-default-route`, from main `9ea840bb90`. One
-commit: `987a9bbb54`.
+Same worktree, branch `feat/d1b-default-route`, from main `9ea840bb90`. Three
+commits: `987a9bbb54` (the ruling and its tests), `4140b1681c` (these notes),
+`0882949735` (the `_dial_host` signature, §7's last bullet).
 
 §2 above measured the thing and stopped short of fixing it: with PIA up, every
 probe destination answers `10.97.7.100`, so D1 landed with `dial_host` naming a
@@ -303,9 +304,21 @@ bash scripts/run_tests.sh \
   tests/hermes_cli/test_gateway.py
 ```
 
-plus the four D1 files this ordering could reach
-(`test_gateway_pairing_verbs.py`, `test_gateway_peers_store.py`,
-`test_serve_gateway_auth.py`, `test_gateway_peer_two_roots_e2e.py`). Counts are
-in the final report. `ruff check` clean on both touched files; `ruff format` is
-not a gate in this repo (it would reformat pre-existing code in the same two
-files).
+— 3 files, **84 passed, 0 failed** — plus the D1 files this ordering and the
+`_dial_host` signature could reach: `test_gateway_pairing_verbs.py`,
+`test_gateway_peers_store.py`, `test_serve_gateway_auth.py` and
+`test_response_contract_fixture.py`, 4 files, **125 passed, 0 failed**, and the
+two-roots e2e, **8 passed, 0 failed**. `ruff check` clean on the three touched
+files; `ruff format` is not a gate in this repo (it would reformat pre-existing
+code in the same files, untouched by this stage).
+
+**`test_gateway_peer_two_roots_e2e.py` needs `--file-timeout 900` on this
+machine.** It is 8 tests of real serves at roughly 45 s each, so the runner's
+300 s default per-file timeout kills it mid-file and reports
+`NO TESTS RAN — 0 collected`, which reads like a collection error and is not
+one. Nothing about D1b makes it slower — the file binds `127.0.0.1`, a concrete
+host, so `_machine_addresses` and the routing table are never reached from it —
+and the same file passed 8/8 with the timeout raised, both before the
+`_dial_host` change (394 s) and after it (1648 s, with another session's suite
+on the same 16 cores — the spread is contention, not this lane). Worth knowing
+before somebody debugs an import that is not broken.
