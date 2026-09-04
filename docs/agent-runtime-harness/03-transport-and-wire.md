@@ -15,7 +15,7 @@ spawns the Launcher bridge otherwise pays a ~3s import tax on
 (`hermes_cli/harness_parts/serve.py:1-7`). Requests arrive as NDJSON, one frame
 per line, and dispatch into the **existing** harness argparse tree unchanged:
 `dispatch_argv` (`serve.py:1638`) builds a fresh parser per request
-(`_build_harness_parser`, `:1625`) and calls the same `_cmd_*` handler the CLI
+(`_build_harness_parser`, `:1640`) and calls the same `_cmd_*` handler the CLI
 would, including the harness error-envelope contract — argv arrives verbatim as
 the bridge already builds it, which keeps the per-call CLI fallback
 byte-identical to the served path. **`ready` is a BOOT frame, not a request
@@ -697,7 +697,7 @@ existed the log named none of them:
 
 | Caller | `op` / `purpose` | Site |
 |---|---|---|
-| socket/stdio op lane | `subscribe` / `stream_lane` | `serve.py:2971` |
+| socket/stdio op lane | `subscribe` / `stream_lane` | `serve.py:2986` |
 | RPC office lane | `runtime.office.subscribe` / `office_patch` | `serve_office_subscriptions.py:902` |
 | argv CLI | `harness_stream` / `cli_stream` | `runtime_commands.py:621-622` |
 
@@ -709,7 +709,7 @@ never raises — an instrument must not be why a subscribe fails.
 
 **Who paints the boot's one stale core is a property of the ROOM**, so
 `stream_frames(wants_stale_first=…)` is stated by the caller —
-`serve.py::_room_wants_stale_first` (`:3297`) reads the hub's two subscriber
+`serve.py::_room_wants_stale_first` (`:3312`) reads the hub's two subscriber
 tables at producer-build time, `_cmd_stream` (`runtime_commands.py:611`) states
 `True`, default `False`. It cannot be re-derived inside the producer: the
 subscriber attaching FIRST at boot is the RPC office lane, whose sink discards
@@ -732,7 +732,7 @@ workspace id that failed the private "id under `<workspace_id>/`" restatement
 becomes a resync notification; an UNKNOWN frame type takes the same branch
 deliberately. Drops are typed, never silent: a subscriber outrunning its bounded
 buffer gets `subscription_dropped` naming which of the two bounds tripped —
-frame count or bytes — then is unsubscribed (`serve.py:4286`).
+frame count or bytes — then is unsubscribed (`serve.py:4301`).
 
 ## 7. The PUSH-vs-RPC boundary, and the fork boundary
 
