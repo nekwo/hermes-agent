@@ -15,6 +15,7 @@ has to be tested, not asserted in a commit message.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import queue
 import socket
@@ -2047,6 +2048,98 @@ def test_a_malformed_fold_declaration_is_refused_instead_of_read_as_absent():
 
 
 # ── observability ───────────────────────────────────────────────────────────
+
+
+def _denied_lines(caplog) -> list[dict[str, str]]:
+    """Every ``stream_denied`` line captured, parsed into its pairs.
+
+    Anchored on the prefix rather than matched loosely, for the reason the
+    snapshot-logging suite anchors its own: ``stream_attach`` and
+    ``stream_denied`` share a stem so one grep finds both, and a test that
+    matched on the stem would count an attachment as a refusal — the exact
+    conflation this line exists to end.
+    """
+
+    rows = []
+    for record in caplog.records:
+        message = record.getMessage()
+        if not message.startswith("stream_denied "):
+            continue
+        rows.append(
+            dict(
+                pair.split("=", 1)
+                for pair in message[len("stream_denied ") :].split(" ")
+            )
+        )
+    return rows
+
+
+def test_a_refused_subscribe_says_so_in_the_serve_s_own_log(caplog):
+    """R-D26: a refusal is the one outcome the operator cannot reconstruct.
+
+    A successful attach has logged ``stream_attach`` since EG-2.1; a refusal
+    logged nothing anywhere. The cost is measured: on 2026-09-04 a cockpit's
+    stream to a second machine died 7 ms after its subscribe and NEITHER machine
+    held a record of which of the five denials it was — the reason existed only
+    in the launcher's memory and went out with the connection.
+
+    Two refusals a client can provoke over a real socket are driven here, and
+    both halves of each are asserted, because either half alone is worthless: a
+    reason with no connection key cannot be attributed on a serve with several
+    clients attached (which is every serve in the field), and a connection key
+    with no reason is the silence this ruling closes. They run on ONE connection
+    so the key is a fact under test rather than a formatting detail — the same
+    key must appear on both lines and on the ack between them.
+
+    The frames are asserted unchanged in the same breath. The launcher's
+    connector switches on ``event``/``reason``, so an instrument that moved a
+    key would close the very lane it was added to explain.
+    """
+
+    caplog.set_level(logging.INFO, logger="agent_runtime.stream")
+    with running_serve() as handle:
+        with client(handle, name="cockpit") as (connection, _reply):
+            connection.send({"op": "subscribe"})
+            key = _read_until(connection, "subscribed")["connection"]
+
+            # The lane check runs before the hub check, so an already-attached
+            # connection asking for a lane this serve does not have is still
+            # refused by LANE. The frame and the line have to agree about which
+            # of the two refusals actually happened.
+            connection.send({"op": "subscribe", "lane": "telemetry"})
+            assert _read_until(connection, "subscribe_denied") == {
+                "event": "subscribe_denied",
+                "lane": "telemetry",
+                "reason": "unsupported_lane",
+            }
+
+            connection.send({"op": "subscribe"})
+            assert _read_until(connection, "subscribe_denied") == {
+                "event": "subscribe_denied",
+                "lane": "stream",
+                "reason": "already_subscribed",
+            }
+
+    lines = _denied_lines(caplog)
+    assert [row["reason"] for row in lines] == [
+        "unsupported_lane",
+        "already_subscribed",
+    ], lines
+    assert [row["lane"] for row in lines] == ["telemetry", "stream"], lines
+    assert [row["connection"] for row in lines] == [key, key], lines
+    # Who, and through which door — the pair that makes a line in a shared log
+    # attributable to one client. ``tier`` is empty on the loopback lane and is
+    # rendered rather than omitted, so the line's shape does not change between
+    # a paired device and the operator's own cockpit.
+    assert [row["client"] for row in lines] == ["cockpit", "cockpit"], lines
+    assert [row["transport"] for row in lines] == ["socket", "socket"], lines
+    assert [row["tier"] for row in lines] == ["-", "-"], lines
+    assert all(row["pid"] == str(os.getpid()) for row in lines), lines
+    assert {
+        record.levelno
+        for record in caplog.records
+        if record.getMessage().startswith("stream_denied ")
+    } == {logging.INFO}
 
 
 def test_the_version_reply_carries_the_connections_block_on_both_transports():

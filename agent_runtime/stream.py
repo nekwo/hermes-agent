@@ -349,6 +349,53 @@ def log_stream_attach(*, op: str, purpose: str, **fields: Any) -> None:
         pass
 
 
+def log_stream_denied(
+    *, reason: str, lane: Any, connection: str, **fields: Any
+) -> None:
+    """ONE line per REFUSED attachment — the other half of ``stream_attach``.
+
+    An attachment that succeeded said so here since EG-2.1; an attachment that
+    was turned away said nothing anywhere, and the cost of that asymmetry is
+    measured: on 2026-09-04 the Windows cockpit's stream to the Mac died 7 ms
+    after its subscribe, and neither machine held a record of which of the five
+    denials it was. The reason existed only in the launcher's memory and went
+    out with the connection (dialable-addresses §8, R-D26). A refusal is the one
+    outcome an operator has to reconstruct, so it is the one the log must carry.
+
+    ``lane`` leads because it is what the client ASKED for and the only field
+    that can name a lane this serve does not have; ``reason`` and ``connection``
+    follow so a grep for one denial reads the same left-to-right as the attach
+    line beside it. ``pid`` rides LAST for the same reason it does there — the
+    denial and the builds around it join on one key rather than on wall clocks.
+
+    ``lane`` is the only value on this line taken straight off the wire, so it
+    is the only one rendered through a fence: whitespace would split one
+    ``key=value`` pair into two and let a client write fields into the operator's
+    log. No device id is ever emitted — the connection key already identifies
+    the connection to anyone reading this serve's own log, and it does not
+    identify the device to anyone who is not.
+
+    Never raises, for the reason its sibling gives: an instrument must not be
+    the reason a lane fails, and a refusal path is the worst place to learn it.
+    """
+
+    try:
+        safe_lane = "-".join(str(lane).split())[:64] or "-"
+        extras = " ".join(
+            f"{key}={'-' if value is None else value}" for key, value in fields.items()
+        )
+        logger.info(
+            "stream_denied lane=%s reason=%s connection=%s%s pid=%d",
+            safe_lane,
+            reason,
+            connection,
+            f" {extras}" if extras else "",
+            os.getpid(),
+        )
+    except Exception:  # pragma: no cover - observability must never fail a lane
+        pass
+
+
 def hydrate_frame(
     snapshot: dict[str, Any] | None = None,
     *,

@@ -3210,6 +3210,69 @@ def serve_loop(
         def _owner_of(connection: Any) -> str:
             return "stdio" if connection is None else str(connection.key)
 
+        def _deny_subscribe(
+            sink: Any,
+            connection: Any,
+            lane: Any,
+            reason: str,
+            **extra: Any,
+        ) -> None:
+            """Refuse a subscribe: the LINE the operator reads and the FRAME the
+            client reads, in that order, from one place.
+
+            Six branches refuse a subscribe and every one of them used to emit
+            the frame inline and log nothing. On 2026-09-04 the Windows cockpit's
+            stream to the Mac died 7 ms after its subscribe and neither machine
+            could say which refusal it was: the reason lived only in the
+            launcher's memory and went out with the connection
+            (dialable-addresses §8, R-D26). Single-homing both halves is what
+            stops a seventh branch from growing the frame and forgetting the
+            line — the failure this helper exists to make impossible rather than
+            merely unlikely.
+
+            The log goes FIRST, deliberately. The refusals worth reconstructing
+            are the ones on a connection that is already going away, and a client
+            that never reads its frame is exactly the case the operator has only
+            this serve's own log for.
+
+            The frame is unchanged, key for key and in order: the launcher's
+            connector switches on ``event``/``reason``, and the stream-lane
+            parity and socket-lane tests pin the shape.
+            """
+
+            from agent_runtime.stream import log_stream_denied
+
+            log_stream_denied(
+                reason=reason,
+                lane=lane,
+                connection=_owner_of(connection),
+                # The attach line's own additive field, and for its reason: a
+                # census of who attached is a census of names, not keys.
+                client=getattr(connection, "client", None),
+                # WHICH DOOR the refusal came through — the question the field
+                # gap was actually about, because a denial on the gateway lane is
+                # another machine's cockpit and a denial on the loopback lane is
+                # this one's. The tier rides beside it because a paired device
+                # has one and nothing else does. Neither names the device: the
+                # connection key identifies the connection to a reader of THIS
+                # process's log and to nobody else, which is the whole of what
+                # this line needs.
+                transport=(
+                    "stdio"
+                    if connection is None
+                    else getattr(connection, "transport", None)
+                ),
+                tier=getattr(connection, "device_tier", None),
+                **extra,
+            )
+            sink.emit(
+                {
+                    "event": "subscribe_denied",
+                    "lane": lane,
+                    "reason": reason,
+                }
+            )
+
         def _accepted_fold_entities() -> Any:
             """What the SHARED producer may promote: the intersection of every
             attached subscriber's declaration.
@@ -4153,22 +4216,10 @@ def serve_loop(
             if op == "subscribe":
                 lane = message.get("lane", "stream")
                 if lane != "stream":
-                    sink.emit(
-                        {
-                            "event": "subscribe_denied",
-                            "lane": lane,
-                            "reason": "unsupported_lane",
-                        }
-                    )
+                    _deny_subscribe(sink, connection, lane, "unsupported_lane")
                     return None
                 if drain_state is not None:
-                    sink.emit(
-                        {
-                            "event": "subscribe_denied",
-                            "lane": "stream",
-                            "reason": "draining",
-                        }
-                    )
+                    _deny_subscribe(sink, connection, "stream", "draining")
                     return None
                 # Optional patch-fold capability declaration. ABSENT means the
                 # client said nothing — the historical {persona_instance,
@@ -4188,13 +4239,7 @@ def serve_loop(
                         name.strip() for name in declared_raw
                     )
                 else:
-                    sink.emit(
-                        {
-                            "event": "subscribe_denied",
-                            "lane": "stream",
-                            "reason": "invalid_fold_entities",
-                        }
-                    )
+                    _deny_subscribe(sink, connection, "stream", "invalid_fold_entities")
                     return None
                 # Optional watermark RESUME. Same discipline as the declaration
                 # above: absent means the client asked for nothing (and gets the
@@ -4211,23 +4256,21 @@ def serve_loop(
                     if isinstance(resume_raw, dict):
                         resume_offset = resume_raw.get("event_offset")
                     else:
-                        sink.emit(
-                            {
-                                "event": "subscribe_denied",
-                                "lane": "stream",
-                                "reason": "invalid_resume",
-                            }
-                        )
+                        _deny_subscribe(sink, connection, "stream", "invalid_resume")
                         return None
                 key = _owner_of(connection)
                 hub = _ensure_stream_hub()
                 if hub.has(key):
-                    sink.emit(
-                        {
-                            "event": "subscribe_denied",
-                            "lane": "stream",
-                            "reason": "already_subscribed",
-                        }
+                    # ``at`` separates the two branches that share this reason,
+                    # and they are different diagnoses: HERE the key was already
+                    # attached before this frame arrived (a resubscribe, or a
+                    # subscription the last generation never released), while the
+                    # ``hub_join`` one below lost a race to a concurrent
+                    # subscribe. The frame cannot tell them apart — the launcher
+                    # switches on ``reason`` and that contract is fixed — so the
+                    # log is the only place the difference can live.
+                    _deny_subscribe(
+                        sink, connection, "stream", "already_subscribed", at="precheck"
                     )
                     return None
                 # Recorded BEFORE ``hub.subscribe``: that call starts the new
@@ -4416,12 +4459,8 @@ def serve_loop(
                     # for the wider set, which is the failure direction. A stale
                     # entry can only ever narrow, and ``_release_subscription``
                     # (or the lane close) clears it.
-                    sink.emit(
-                        {
-                            "event": "subscribe_denied",
-                            "lane": "stream",
-                            "reason": "already_subscribed",
-                        }
+                    _deny_subscribe(
+                        sink, connection, "stream", "already_subscribed", at="hub_join"
                     )
                 return None
             if op == "unsubscribe":
