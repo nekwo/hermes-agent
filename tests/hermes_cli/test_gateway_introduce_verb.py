@@ -641,10 +641,13 @@ def test_the_enumerator_drops_loopback_link_local_and_wildcards(monkeypatch):
 
     monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
     # The default-route probe would answer with this box's real address, which
-    # is exactly the non-determinism this test exists without.
+    # is exactly the non-determinism this test exists without. R-D8's routing
+    # table read is silenced for the same reason: it shells out to this
+    # machine's own ``route``/``ip``, and the filter is what is under test.
     monkeypatch.setattr(
         socket, "socket", lambda *a, **k: (_ for _ in ()).throw(OSError("no socket"))
     )
+    monkeypatch.setattr(gateway_commands, "_default_route_address", lambda: None)
 
     assert gateway_commands._machine_addresses() == ["10.0.0.4", "2001:db8::5"]
 
@@ -699,6 +702,9 @@ def test_the_default_route_probe_asks_the_internet_and_its_answer_is_offered_fir
 
     monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
     monkeypatch.setattr(socket, "socket", lambda *a, **k: _Probe())
+    # D1b: with the routing table silent this is still exactly D1's answer, so
+    # the probe's own contract keeps being asserted on its own terms.
+    monkeypatch.setattr(gateway_commands, "_default_route_address", lambda: None)
 
     assert gateway_commands._machine_addresses() == [
         "192.168.1.203",
@@ -746,6 +752,7 @@ def test_a_second_address_on_the_default_routes_own_subnet_outranks_other_privat
 
     monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
     monkeypatch.setattr(socket, "socket", lambda *a, **k: _Probe())
+    monkeypatch.setattr(gateway_commands, "_default_route_address", lambda: None)
 
     assert gateway_commands._machine_addresses() == [
         "192.168.1.203",
@@ -790,10 +797,362 @@ def test_the_cap_is_applied_after_the_order_so_the_lan_address_survives_it(
 
     monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
     monkeypatch.setattr(socket, "socket", lambda *a, **k: _Probe())
+    monkeypatch.setattr(gateway_commands, "_default_route_address", lambda: None)
 
     offered = gateway_commands._machine_addresses()
     assert len(offered) == gateway_commands.MAX_CANDIDATE_ENDPOINTS
     assert offered[0] == "192.168.1.203"
+
+
+# ── R-D8: the routing table names the first candidate ───────────────────────
+
+#: The operator's own Windows PC, ``route print -4``, captured 2026-09-04 with
+#: Private Internet Access connected — the machine and the moment that motivated
+#: R-D8. Both halves of PIA's split default are here (``0.0.0.0/1`` as the
+#: ``0.0.0.0 128.0.0.0`` row and ``128.0.0.0/1`` as the last row), and so is the one
+#: true ``0.0.0.0 0.0.0.0`` row, on Wi-Fi. Kept verbatim rather than trimmed to
+#: the rows under test: what the reader has to get right is telling these
+#: particular rows APART, and a fixture with only the answer in it would prove
+#: nothing about the netmask comparison.
+_WINDOWS_ROUTE_PRINT = """\
+===========================================================================
+Active Routes:
+Network Destination        Netmask          Gateway       Interface  Metric
+          0.0.0.0          0.0.0.0      192.168.1.1    192.168.1.203     35
+          0.0.0.0        128.0.0.0        10.97.0.1      10.97.7.100      3
+       10.0.0.243  255.255.255.255        10.97.0.1      10.97.7.100      3
+        10.97.0.0      255.255.0.0         On-link       10.97.7.100    259
+        127.0.0.0        255.0.0.0         On-link         127.0.0.1    331
+        128.0.0.0        128.0.0.0        10.97.0.1      10.97.7.100      3
+===========================================================================
+"""
+
+#: ``route -n get default`` on macOS. NOT captured on this machine — there is no
+#: Mac in this worktree — but the documented shape of the command, which is a
+#: key/value block and is why the macOS arm needs a second command to turn the
+#: interface NAME into an address.
+_MACOS_ROUTE_GET_DEFAULT = """\
+   route to: default
+destination: default
+       mask: default
+    gateway: 192.168.1.1
+  interface: en0
+      flags: <UP,GATEWAY,DONE,STATIC,PREFIXES>
+ recvpipe  sendpipe  ssthresh  rtt,msec    rttvar  hopcount      mtu     expire
+       0         0         0         0         0         0      1500         0
+"""
+
+#: ``ifconfig en0`` on macOS, documented shape, not from this machine. The ``inet6``
+#: line sits ABOVE the ``inet`` one, which is the reason the reader matches the
+#: token exactly instead of looking for a substring.
+_MACOS_IFCONFIG_EN0 = """\
+en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+\toptions=400<CHANNEL_IO>
+\tether f0:18:98:1a:2b:3c
+\tinet6 fe80::14b3:2f1c:8a4d:9e02%en0 prefixlen 64 secured scopeid 0xc
+\tinet 192.168.1.87 netmask 0xffffff00 broadcast 192.168.1.255
+\tnd6 options=201<PERFORMNUD,DAD>
+\tmedia: autoselect
+\tstatus: active
+"""
+
+#: ``ip -4 route show default`` on Linux, documented shape, not from this machine.
+#: The DHCP form carries ``src``, which is the address the kernel will stamp on
+#: packets leaving by this route — the answer outright.
+_LINUX_IP_ROUTE_WITH_SRC = (
+    "default via 192.168.1.1 dev wlan0 proto dhcp src 192.168.1.42 metric 600\n"
+)
+
+#: The same command on a statically configured route, which carries no ``src`` and
+#: therefore costs a second command.
+_LINUX_IP_ROUTE_WITHOUT_SRC = "default via 10.0.0.1 dev eth0 proto static metric 100\n"
+
+#: ``ip -4 -o addr show dev eth0``, documented shape, not from this machine. The
+#: ``-o`` flag folds the continuation onto one line with a literal backslash,
+#: which is why this is a raw string.
+_LINUX_IP_ADDR_ETH0 = (
+    r"2: eth0    inet 10.0.0.57/24 brd 10.0.0.255 scope global dynamic eth0\       "
+    "valid_lft 84455sec preferred_lft 84455sec" + "\n"
+)
+
+
+def test_the_windows_table_names_the_lan_and_never_the_vpns_split_default():
+    """R-D8 on the capture that produced it.
+
+    With PIA up, EVERY datagram probe on this machine answers ``10.97.7.100``,
+    because ``0.0.0.0/1`` + ``128.0.0.0/1`` cover the whole address space and beat
+    ``0.0.0.0/0`` on specificity — that is D1's field-note correction, and it is
+    why no probe destination could have fixed the ordering. The table still
+    knows: exactly one row has netmask ``0.0.0.0``, and it is on Wi-Fi.
+    """
+
+    from hermes_cli.harness_parts.gateway_commands import (
+        _windows_default_route_address,
+    )
+
+    assert _windows_default_route_address(_WINDOWS_ROUTE_PRINT) == "192.168.1.203"
+
+
+def test_dropping_the_true_default_row_leaves_the_vpn_rows_unable_to_answer():
+    """The negative half of the assertion above, and the one that would catch a
+    reader rewritten to match on destination alone: the same capture WITHOUT its
+    ``0.0.0.0 0.0.0.0`` row must answer ``None`` — never ``10.97.7.100`` — so that a
+    VPN-only machine falls back to R-D2 rather than being told a tunnel address
+    is its router-granted one."""
+
+    from hermes_cli.harness_parts.gateway_commands import (
+        _windows_default_route_address,
+    )
+
+    without_default = "\n".join(
+        line
+        for line in _WINDOWS_ROUTE_PRINT.splitlines()
+        if line.split()[:2] != ["0.0.0.0", "0.0.0.0"]
+    )
+
+    assert "128.0.0.0" in without_default
+    assert _windows_default_route_address(without_default) is None
+
+
+def test_two_default_rows_are_decided_by_the_lowest_metric():
+    """A machine with two NICs on one LAN has two ``0.0.0.0/0`` rows and the
+    kernel picks by Metric. Picking the first printed instead would hand out the
+    address of whichever adapter Windows happened to enumerate first."""
+
+    from hermes_cli.harness_parts.gateway_commands import (
+        _windows_default_route_address,
+    )
+
+    printed = (
+        "Active Routes:\n"
+        "Network Destination        Netmask          Gateway       Interface  Metric\n"
+        "          0.0.0.0          0.0.0.0      192.168.1.1    192.168.1.9     45\n"
+        "          0.0.0.0          0.0.0.0      192.168.1.1    192.168.1.203     35\n"
+    )
+
+    assert _windows_default_route_address(printed) == "192.168.1.203"
+
+
+def test_a_persistent_route_row_is_not_an_active_one():
+    """``route print`` prints a second table below the first, and a persistent
+    default there names a GATEWAY where the active table names an interface
+    address. Its row has four fields and the word ``Default`` where a metric goes,
+    so the shape test rejects it — which is also what makes the reader safe on a
+    Windows whose section headers are localised."""
+
+    from hermes_cli.harness_parts.gateway_commands import (
+        _windows_default_route_address,
+    )
+
+    printed = (
+        "Persistent Routes:\n"
+        "  Network Address          Netmask  Gateway Address  Metric\n"
+        "          0.0.0.0          0.0.0.0     192.168.1.1  Default\n"
+    )
+
+    assert _windows_default_route_address(printed) is None
+
+
+def test_the_macos_arm_reads_an_interface_name_and_then_its_first_inet():
+    """Two commands, because ``route -n get default`` on macOS names ``en0`` and a
+    peer cannot dial an interface name."""
+
+    from hermes_cli.harness_parts.gateway_commands import (
+        _first_inet_address,
+        _macos_default_route_interface,
+    )
+
+    assert _macos_default_route_interface(_MACOS_ROUTE_GET_DEFAULT) == "en0"
+    assert _first_inet_address(_MACOS_IFCONFIG_EN0) == "192.168.1.87"
+
+
+def test_the_linux_arm_prefers_src_and_falls_back_to_the_devices_address():
+    """``src`` is the kernel's own answer to "which of my addresses leaves by this
+    route", so it is taken whole; ``dev`` is the fallback that costs a second
+    command."""
+
+    from hermes_cli.harness_parts.gateway_commands import (
+        _first_inet_address,
+        _linux_default_route,
+    )
+
+    assert _linux_default_route(_LINUX_IP_ROUTE_WITH_SRC) == (
+        "192.168.1.42",
+        "wlan0",
+    )
+    assert _linux_default_route(_LINUX_IP_ROUTE_WITHOUT_SRC) == (None, "eth0")
+    assert _first_inet_address(_LINUX_IP_ADDR_ETH0) == "10.0.0.57"
+
+
+@pytest.mark.parametrize(
+    "platform, replies, expected, expected_argv",
+    [
+        (
+            "win32",
+            [_WINDOWS_ROUTE_PRINT],
+            "192.168.1.203",
+            [["route", "print", "-4"]],
+        ),
+        (
+            "darwin",
+            [_MACOS_ROUTE_GET_DEFAULT, _MACOS_IFCONFIG_EN0],
+            "192.168.1.87",
+            [["route", "-n", "get", "default"], ["ifconfig", "en0"]],
+        ),
+        (
+            "linux",
+            [_LINUX_IP_ROUTE_WITH_SRC],
+            "192.168.1.42",
+            [["ip", "-4", "route", "show", "default"]],
+        ),
+        (
+            "linux",
+            [_LINUX_IP_ROUTE_WITHOUT_SRC, _LINUX_IP_ADDR_ETH0],
+            "10.0.0.57",
+            [
+                ["ip", "-4", "route", "show", "default"],
+                ["ip", "-4", "-o", "addr", "show", "dev", "eth0"],
+            ],
+        ),
+    ],
+    ids=["windows", "macos", "linux-src", "linux-dev"],
+)
+def test_each_platform_asks_its_own_command_and_stops_as_soon_as_it_can(
+    monkeypatch, platform, replies, expected, expected_argv
+):
+    """The dispatch, argv included. The argv is asserted because these are the
+    strings that decide whether the answer is a routing table at all — a reader
+    pointed at ``route print`` without ``-4`` gets a v6 table stapled below the v4
+    one — and because the second command must not run when the first already
+    answered."""
+
+    import sys
+
+    from hermes_cli.harness_parts import gateway_commands
+
+    asked: list[list[str]] = []
+    remaining = list(replies)
+
+    def _fake_run(argv):
+        asked.append(list(argv))
+        return remaining.pop(0)
+
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(gateway_commands, "_run_route_command", _fake_run)
+
+    assert gateway_commands._default_route_address() == expected
+    assert asked == expected_argv
+
+
+def test_a_command_this_machine_does_not_have_answers_none_rather_than_raising(
+    monkeypatch,
+):
+    """Never raising is the contract ``_machine_addresses`` leans on: this runs
+    inside ``gateway id``, and an exception here would turn a ranking preference
+    into a CLI that cannot print its own identity. Proved against a real spawn
+    of a binary that does not exist, because the failure being defended against
+    is ``FileNotFoundError`` out of the OS and not a mocked one."""
+
+    from hermes_cli.harness_parts import gateway_commands
+
+    argv = ["hermes-no-such-routing-tool", "--version"]
+    assert gateway_commands._run_route_command(argv) is None
+
+    monkeypatch.setattr(gateway_commands, "_run_route_command", lambda argv: None)
+    assert gateway_commands._default_route_address() is None
+
+
+def _pia_getaddrinfo(family_module):
+    """The operator's four addresses, in the order this PC enumerates them."""
+
+    def _fake(host, port, family=0, *args, **kwargs):
+        rows = {
+            family_module.AF_INET: [
+                (family_module.AF_INET, 0, 0, "", ("10.97.7.100", 0)),
+                (family_module.AF_INET, 0, 0, "", ("25.3.92.221", 0)),
+                (family_module.AF_INET, 0, 0, "", ("192.168.1.203", 0)),
+            ],
+            family_module.AF_INET6: [
+                (family_module.AF_INET6, 0, 0, "", ("2620:9b::1903:5cdd", 0, 0, 0)),
+            ],
+        }
+        return rows.get(family, [])
+
+    return _fake
+
+
+class _PiaProbe:
+    """The datagram probe as it actually answers on this PC with PIA up: the
+    tunnel, whatever public address it is pointed at."""
+
+    def connect(self, address):
+        pass
+
+    def getsockname(self):
+        return ("10.97.7.100", 0)
+
+    def close(self):
+        pass
+
+
+def test_the_table_outranks_the_probe_so_the_lan_address_is_offered_first(
+    monkeypatch,
+):
+    """D1b's whole point, on D1's own fixture set.
+
+    D1 landed with ``dial_host 10.97.7.100`` on this machine — the probe's honest
+    answer with a full tunnel up, and an address no machine on this LAN can
+    reach. The table says Wi-Fi, so the LAN address moves to rank 0 and the
+    tunnel keeps rank 1 rather than being dropped: it is still a real address,
+    and on a run where PIA is the only network it is the only one there is.
+    """
+
+    import socket
+    import sys
+
+    from hermes_cli.harness_parts import gateway_commands
+
+    monkeypatch.setattr(socket, "getaddrinfo", _pia_getaddrinfo(socket))
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: _PiaProbe())
+    # Pinned to Windows so the suite reads the Windows capture on any machine
+    # that runs it — the ranking is the subject here, the dispatch is proved
+    # above.
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(
+        gateway_commands, "_run_route_command", lambda argv: _WINDOWS_ROUTE_PRINT
+    )
+
+    assert gateway_commands._machine_addresses() == [
+        "192.168.1.203",
+        "10.97.7.100",
+        "25.3.92.221",
+        "2620:9b::1903:5cdd",
+    ]
+
+
+def test_a_table_that_declines_to_answer_leaves_d1s_order_exactly_as_it_was(
+    monkeypatch,
+):
+    """The fallback, asserted end to end rather than by stubbing the helper this
+    stage added: every routing command fails, and the list is byte-for-byte the
+    one D1 shipped — the probe's address first, the LAN second. R-D8 only ever
+    promotes an address ahead of the probe's, so its silence must cost the
+    pre-D1b ordering and nothing else."""
+
+    import socket
+
+    from hermes_cli.harness_parts import gateway_commands
+
+    monkeypatch.setattr(socket, "getaddrinfo", _pia_getaddrinfo(socket))
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: _PiaProbe())
+    monkeypatch.setattr(gateway_commands, "_run_route_command", lambda argv: None)
+
+    assert gateway_commands._machine_addresses() == [
+        "10.97.7.100",
+        "192.168.1.203",
+        "25.3.92.221",
+        "2620:9b::1903:5cdd",
+    ]
 
 
 def test_the_endpoints_gateway_id_prints_are_the_endpoints_a_join_payload_advertises(

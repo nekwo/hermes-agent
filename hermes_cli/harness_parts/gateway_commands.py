@@ -492,6 +492,13 @@ _DEFAULT_ROUTE_PROBE = ("1.1.1.1", 53)
 #: growing a second one out of octet slicing.
 _RFC1918_CIDRS = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
 
+#: How long ONE routing-table command (R-D8) may take before it is abandoned.
+#: The read runs inside ``gateway id``, which the launcher's sheet calls on a
+#: timer, so the failure worth defending against is not a wrong answer — the
+#: R-D2 probe still ranks behind it — but a wedged ``route.exe`` holding the
+#: sheet. Two seconds is far above the ~30 ms these commands actually cost.
+_ROUTE_COMMAND_TIMEOUT_SECONDS = 2.0
+
 
 def _ipv4(host: str):
     """The host as an ``IPv4Address``, or ``None`` if it is not one.
@@ -528,41 +535,246 @@ def _shares_24(host: str, other: str) -> bool:
     return int(left) >> 8 == int(right) >> 8
 
 
-def _address_rank(host: str, default_route: str | None) -> int:
-    """R-D2's order, as a sort key. Lower dials first.
+def _run_route_command(argv: list[str]) -> str | None:
+    """One routing-table command's stdout, or ``None``. Never raises.
 
-    0. **The default route itself.** The address traffic actually leaves from,
-       and therefore the one a machine on the same LAN can reach.
-    1. **RFC1918 addresses on the default route's own /24.** A second address on
+    Every way this can fail — the binary missing, a non-zero exit, a hang, a
+    localised console codepage, a sandbox that forbids spawning at all — means
+    the same thing to the caller: *the table did not answer, fall back to the
+    R-D2 probe.* So they collapse to one ``None`` rather than a taxonomy nobody
+    would branch on. ``check=False`` and the bare ``except`` are the point of
+    this function, not a shortcut taken inside it.
+    """
+
+    import subprocess
+    import sys
+
+    extra: dict[str, Any] = {}
+    if sys.platform == "win32":
+        # ``route.exe`` is a console program and this CLI is routinely spawned
+        # by a windowless launcher process; without this the operator would see
+        # a console blink every time the sheet refreshes.
+        flag = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        if flag:
+            extra["creationflags"] = flag
+    try:
+        completed = subprocess.run(
+            argv,
+            # This CLI is spoken to over stdio by a launcher (see
+            # ``CALLER_STDIO_OWNER``), so a child that inherited stdin could eat
+            # a frame addressed to us. ``route``/``ip``/``ifconfig`` read none.
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=_ROUTE_COMMAND_TIMEOUT_SECONDS,
+            check=False,
+            **extra,
+        )
+    except Exception:
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout or ""
+
+
+def _windows_default_route_address(text: str) -> str | None:
+    """The ``Interface`` column of ``route print -4``'s true default row.
+
+    The row shape is the anchor, not the ``Active Routes:`` header, which is
+    localised on a non-English Windows. Five whitespace-separated fields, the
+    first two exactly ``0.0.0.0``, the fourth a v4 address, the fifth an
+    integer — which is precisely the Active Routes shape and precisely not the
+    Persistent Routes one (four fields, metric ``Default``).
+
+    **The netmask test is the whole of R-D8.** A full-tunnel VPN client like
+    PIA installs ``0.0.0.0/1`` + ``128.0.0.0/1``, which cover every address and
+    beat ``0.0.0.0/0`` on specificity, so the datagram probe answers with the
+    tunnel on a machine whose LAN address is the one a peer can reach. Those
+    rows carry netmask ``128.0.0.0`` and are rejected here by string equality;
+    only an owner of ``0.0.0.0/0`` is the router-granted address.
+
+    Several default rows (two NICs on one LAN) are decided by the lowest Metric,
+    which is the kernel's own tie-break. Any doubt at all — a row that will not
+    parse — drops that row rather than guessing at it.
+    """
+
+    best: tuple[int, str] | None = None
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) != 5:
+            continue
+        destination, netmask, _gateway, interface, metric = fields
+        if destination != "0.0.0.0" or netmask != "0.0.0.0":
+            continue
+        if _ipv4(interface) is None or interface in _WILDCARD_HOSTS:
+            continue
+        try:
+            cost = int(metric)
+        except ValueError:
+            continue
+        if best is None or cost < best[0]:
+            best = (cost, interface)
+    return None if best is None else best[1]
+
+
+def _macos_default_route_interface(text: str) -> str | None:
+    """The ``interface:`` line of ``route -n get default`` — a NAME, not an
+    address, which is why macOS needs the second command below."""
+
+    for line in text.splitlines():
+        key, separator, value = line.partition(":")
+        if separator and key.strip().lower() == "interface":
+            return value.strip() or None
+    return None
+
+
+def _first_inet_address(text: str) -> str | None:
+    """The first ``inet <address>`` of an ``ifconfig``/``ip addr`` block.
+
+    One reader for both platforms: macOS writes ``inet 192.168.1.5 netmask
+    0xffffff00`` and Linux writes ``inet 192.168.1.42/24 brd …``, and the only
+    difference that matters is the prefix length, stripped here. ``inet6`` does
+    not match the token. A first row that will not parse as v4 answers ``None``
+    rather than skipping to a later one — R-D8's rule is "any parse doubt →
+    ``None``", and a second address on that interface is a different address
+    than the one the table named.
+    """
+
+    for line in text.splitlines():
+        fields = line.split()
+        for index, field in enumerate(fields[:-1]):
+            if field != "inet":
+                continue
+            candidate = fields[index + 1].split("/", 1)[0]
+            return candidate if _ipv4(candidate) else None
+    return None
+
+
+def _linux_default_route(text: str) -> tuple[str | None, str | None]:
+    """``(src, dev)`` from the first ``default`` line of ``ip -4 route show
+    default``.
+
+    ``src`` is the address the kernel will put on packets leaving by that route
+    and is therefore the answer outright when present; ``dev`` is the fallback
+    the caller turns into an address with a second command. ``ip`` prints
+    default routes in metric order, so the first line is the lowest-cost one —
+    the same tie-break the Windows reader does arithmetic for.
+    """
+
+    for line in text.splitlines():
+        fields = line.split()
+        if not fields or fields[0] != "default":
+            continue
+        source: str | None = None
+        device: str | None = None
+        for index, field in enumerate(fields[:-1]):
+            if field == "src" and source is None:
+                source = fields[index + 1]
+            elif field == "dev" and device is None:
+                device = fields[index + 1]
+        if source is not None and _ipv4(source) is None:
+            source = None
+        return source, device
+    return None, None
+
+
+def _default_route_address() -> str | None:
+    """R-D8: the address that owns ``0.0.0.0/0``, read from the routing table.
+
+    The operator's sentence — *"the exact router-granted address"* — made
+    mechanical, and the correction D1's field notes earned: the datagram probe
+    of R-D2 asks "which of my addresses reaches the internet", and with a
+    full-tunnel VPN up the honest answer is the tunnel's. The routing TABLE can
+    still be asked the different question "who owns the default route", and on
+    the machine that motivated this it answers Wi-Fi while every probe
+    destination answers PIA.
+
+    Stdlib subprocess, one command per platform (two on macOS and on a Linux
+    route without ``src``), each bounded by
+    :data:`_ROUTE_COMMAND_TIMEOUT_SECONDS`. ``None`` on any doubt whatsoever,
+    which the caller reads as "rank by R-D2 alone" — this ruling only ever
+    promotes an address ahead of the probe's, it never removes one, so a
+    silent failure here costs the pre-D1b ordering and nothing more.
+    """
+
+    import sys
+
+    if sys.platform == "win32":
+        printed = _run_route_command(["route", "print", "-4"])
+        return _windows_default_route_address(printed) if printed else None
+
+    if sys.platform == "darwin":
+        printed = _run_route_command(["route", "-n", "get", "default"])
+        interface = _macos_default_route_interface(printed) if printed else None
+        if not interface:
+            return None
+        printed = _run_route_command(["ifconfig", interface])
+        return _first_inet_address(printed) if printed else None
+
+    printed = _run_route_command(["ip", "-4", "route", "show", "default"])
+    if not printed:
+        return None
+    source, device = _linux_default_route(printed)
+    if source:
+        return source
+    if not device:
+        return None
+    printed = _run_route_command(["ip", "-4", "-o", "addr", "show", "dev", device])
+    return _first_inet_address(printed) if printed else None
+
+
+def _address_rank(
+    host: str, default_route: str | None, table_route: str | None = None
+) -> int:
+    """R-D2's order with R-D8 in front of it, as a sort key. Lower dials first.
+
+    0. **The routing table's owner of ``0.0.0.0/0``** (R-D8). The one source
+       that can tell a LAN apart from a full-tunnel VPN, because the VPN's
+       ``/1`` pair is what the probe below follows.
+    1. **The probe's answer** — the address traffic actually leaves from. First
+       until D1b, and still first whenever the table declines to answer.
+    2. **RFC1918 addresses on the default route's own /24.** A second address on
        the same segment is the next best guess when the first is filtered by a
        firewall rule that does not cover the whole subnet.
-    2. **Other RFC1918.** A private address somewhere, which is what a LAN peer
+    3. **Other RFC1918.** A private address somewhere, which is what a LAN peer
        is most likely to be able to reach.
-    3. **Everything else v4** — a public address, and the Hamachi/Tailscale-class
+    4. **Everything else v4** — a public address, and the Hamachi/Tailscale-class
        overlays that hand out addresses outside 1918. Sorted here BY RULE and
        not filtered by adapter name (R-D2): a machine whose only address is one
        of those still gets offered, because refusing to offer it would make an
        overlay-only machine unpairable in the name of tidiness.
-    4. **Global v6**, last: a v6 address that works is excellent and a v6
+    5. **Global v6**, last: a v6 address that works is excellent and a v6
        address that does not is a dial that hangs before the v4 one is tried.
+
+    The /24 arithmetic follows whichever of the two sources came first, so on a
+    VPN'd machine "the default route's own subnet" means the LAN's subnet and
+    not the tunnel's — the ranks below 2 would otherwise contradict rank 0.
     """
 
-    if default_route and host == default_route:
+    if table_route and host == table_route:
         return 0
+    if default_route and host == default_route:
+        return 1
     if ":" in host:
-        return 4
+        return 5
+    primary = table_route or default_route
     if _is_rfc1918(host):
-        return 1 if default_route and _shares_24(host, default_route) else 2
-    return 3
+        return 2 if primary and _shares_24(host, primary) else 3
+    return 4
 
 
 def _machine_addresses() -> list[str]:
     """This machine's dialable addresses, best-effort, stdlib only, IN DIAL ORDER.
 
     Called ONLY when the listener bound a wildcard — the case where the config
-    says "every interface" and therefore names none. Two sources, deduped:
+    says "every interface" and therefore names none. Three sources, deduped:
 
-    1. **The default-route address**, found with the UDP-connect trick: a
+    0. **The routing table's owner of ``0.0.0.0/0``**
+       (:func:`_default_route_address`, R-D8), which is the only source that
+       tells a LAN apart from a full-tunnel VPN. Silent when the table declines,
+       and then the two below are exactly what D1 shipped.
+    1. **The default-route probe**, using the UDP-connect trick: a
        ``SOCK_DGRAM`` socket is *connected* to :data:`_DEFAULT_ROUTE_PROBE` and
        asked what local address the kernel would use. **No packet is sent** —
        connect on a datagram socket only fixes the peer — so this costs no
@@ -601,6 +813,14 @@ def _machine_addresses() -> list[str]:
             found.append(host)
         return host
 
+    # R-D8 first, because it is the authority the probe only approximates: it
+    # is kept like any other discovered address (deduped, and dropped if it is
+    # loopback or link-local), and it takes rank 0 from :func:`_address_rank`.
+    # A machine whose hostname resolves to nothing and whose probe names the
+    # tunnel therefore still offers its LAN address, because this source found
+    # it rather than merely reordering what the other two found.
+    table_route = _keep(_default_route_address())
+
     default_route: str | None = None
     probe = None
     try:
@@ -627,7 +847,9 @@ def _machine_addresses() -> list[str]:
     # discovered in — the sort decides between KINDS of address and never
     # reorders within one, which is what makes a two-adapter machine's answer
     # reproducible run to run.
-    ordered = sorted(found, key=lambda host: _address_rank(host, default_route))
+    ordered = sorted(
+        found, key=lambda host: _address_rank(host, default_route, table_route)
+    )
     return ordered[:MAX_CANDIDATE_ENDPOINTS]
 
 
