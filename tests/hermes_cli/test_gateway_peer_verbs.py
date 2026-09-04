@@ -1009,6 +1009,349 @@ def test_the_reachability_word_lands_in_the_cache_and_not_the_trust_store(
     assert cached["peers"]["inst_far"]["reachability"] == REACHABILITY_REACHABLE
 
 
+# ── join: EHOSTUNREACH on-link is a permission, not a route (R-D20) ──────────
+#
+# D3 run #2, 2026-09-04 20:19:25, measured on the Mac. macOS 15 Local Network
+# privacy had never been granted to the app responsible for the launcher's
+# process tree, so the kernel returned ``EHOSTUNREACH`` (errno 65) for every
+# host on the Mac's own /24 except the router — on every port and on ICMP, with
+# the ARP entry for 192.168.1.203 RESOLVED, in 177 ms because nothing was ever
+# sent. ``peers join`` reported ``192.168.1.203:8765 (OSError)`` under
+# ``runtime_unavailable``, the launcher painted "Unreachable", and the operator
+# was sent to the router for a permission on their own machine.
+#
+# The errno alone cannot carry the distinction: the identical number against an
+# address nobody routes to really is a route failure. What separates them is
+# whether the host is ON-LINK — on a segment one of this machine's own
+# addresses sits on — which is why these tests pin both arms.
+
+#: The Mac's kernel, verbatim. Written with the literal 65 rather than
+#: ``errno.EHOSTUNREACH`` because these tests run on Windows too, where that
+#: constant is the CRT's 110 — and the condition under test is the errno of the
+#: kernel that refused, not the errno of the interpreter reading it.
+_EHOSTUNREACH_DARWIN = 65
+
+
+def _on_link_payload(host: str = "192.168.1.203") -> str:
+    return json.dumps(
+        {
+            "host": host,
+            "port": 8765,
+            "endpoints": [{"host": host, "port": 8765}],
+            "install_id": "inst_far",
+            "cert_fingerprint": "ab" * 32,
+            "peer_code": "ABCD2345",
+        }
+    )
+
+
+def _this_machine_is_on(monkeypatch, *addresses: str) -> None:
+    """Pin what ``_machine_addresses`` answers, which is the on-link test's
+    only input. The Mac's own address was 192.168.1.39/24 on ``en0``."""
+
+    from hermes_cli.harness_parts import gateway_commands
+
+    monkeypatch.setattr(
+        gateway_commands, "_machine_addresses", lambda: list(addresses)
+    )
+
+
+def test_the_os_refusing_an_on_link_host_is_a_permission_and_not_a_route(
+    capsys, fake_dials, monkeypatch
+):
+    """R-D20's whole subject. The operator's next MOVE is a permission granted
+    on THIS machine, so the refusal must say so — and must not be family 7,
+    which promises the identical command succeeds later. It does not: thirty
+    denials and zero prompts in twenty-four hours on that Mac."""
+
+    from hermes_cli.harness_support import ERROR_EXIT_CODES
+
+    _this_machine_is_on(monkeypatch, "192.168.1.39")
+    fake_dials.outcomes = {
+        ("192.168.1.203", 8765): OSError(_EHOSTUNREACH_DARWIN, "No route to host")
+    }
+
+    code = _dispatch(
+        ["harness", "gateway", "peers", "join", _on_link_payload(), "--json"]
+    )
+    envelope = json.loads(capsys.readouterr().out)
+
+    assert code == ERROR_EXIT_CODES["local_policy"] == 2
+    assert envelope["error"]["code"] == "local_policy"
+    assert envelope["error"]["reason"] == "local_policy"
+    message = envelope["error"]["message"]
+    assert "192.168.1.203:8765" in message
+    assert (
+        "this machine's operating system refused to send to a host on its own "
+        "network" in message
+    )
+    assert (
+        "System Settings › Privacy & Security › Local Network" in message
+    )
+
+
+def test_the_same_errno_against_an_off_link_host_is_still_the_networks_answer(
+    capsys, fake_dials, monkeypatch
+):
+    """The other arm, and the reason the classifier asks a second question at
+    all. ``EHOSTUNREACH`` from a host nobody routes to IS a route failure, and
+    calling it a permission would send an operator to System Settings to fix a
+    LAN they are not on."""
+
+    from hermes_cli.harness_support import ERROR_EXIT_CODES
+
+    _this_machine_is_on(monkeypatch, "192.168.1.39")
+    fake_dials.outcomes = {
+        ("203.0.113.7", 8765): OSError(_EHOSTUNREACH_DARWIN, "No route to host")
+    }
+
+    code = _dispatch(
+        [
+            "harness",
+            "gateway",
+            "peers",
+            "join",
+            _on_link_payload("203.0.113.7"),
+            "--json",
+        ]
+    )
+    envelope = json.loads(capsys.readouterr().out)
+
+    assert code == ERROR_EXIT_CODES["runtime_unavailable"]
+    assert envelope["error"]["code"] == "runtime_unavailable"
+    assert "203.0.113.7:8765 (OSError)" in envelope["error"]["message"]
+    assert "local_policy" not in envelope["error"]["message"]
+
+
+def test_a_refused_connection_on_an_on_link_host_is_not_a_permission(
+    capsys, fake_dials, monkeypatch
+):
+    """The third arm, and the one that keeps the new word rare. A host on our
+    own subnet that ANSWERS with a reset has proved the packets leave this
+    machine — nothing about Local Network privacy is involved, and the listener
+    being down is the retryable condition family 7 exists for."""
+
+    from hermes_cli.harness_support import ERROR_EXIT_CODES
+
+    _this_machine_is_on(monkeypatch, "192.168.1.39")
+    fake_dials.outcomes = {("192.168.1.203", 8765): ConnectionRefusedError("shut")}
+
+    code = _dispatch(
+        ["harness", "gateway", "peers", "join", _on_link_payload(), "--json"]
+    )
+    envelope = json.loads(capsys.readouterr().out)
+
+    assert code == ERROR_EXIT_CODES["runtime_unavailable"]
+    assert "192.168.1.203:8765 (ConnectionRefusedError)" in envelope["error"]["message"]
+    assert "local_policy" not in envelope["error"]["message"]
+
+
+def test_one_candidate_that_answers_leaves_the_policy_word_unsaid(
+    capsys, fake_dials, monkeypatch
+):
+    """The refusal is about a run in which NOTHING answered. A first address the
+    OS would not send to, followed by a second that completed the handshake, is
+    a successful join — and telling that operator to grant a permission would
+    be advice for a problem they do not have."""
+
+    from agent_runtime.gateway_peers import REACHABILITY_REACHABLE, list_peers
+
+    _this_machine_is_on(monkeypatch, "192.168.1.39")
+    fake_dials.outcomes = {
+        ("192.168.1.203", 8765): OSError(_EHOSTUNREACH_DARWIN, "No route to host"),
+        ("10.0.0.9", 8765): None,
+    }
+    payload = json.dumps(
+        {
+            "host": "192.168.1.203",
+            "port": 8765,
+            "endpoints": [
+                {"host": "192.168.1.203", "port": 8765},
+                {"host": "10.0.0.9", "port": 8765},
+            ],
+            "install_id": "inst_far",
+            "cert_fingerprint": "ab" * 32,
+            "peer_code": "ABCD2345",
+        }
+    )
+
+    code, output = _join(capsys, payload, "--timeout", "2")
+
+    assert code == 0, output
+    assert len(list_peers(paths.store_root())) == 1
+    assert _cached().reachability == REACHABILITY_REACHABLE
+
+
+def test_the_reachability_event_leads_with_the_policy_word_so_a_reader_can_see_it(
+    capsys, fake_dials, monkeypatch
+):
+    """D5h made the noted string and the printed ``Tried:`` list identical. This
+    is the one place they differ on purpose: ``error`` is the only channel the
+    reachability event has for WHY, a subscriber branches on it to choose a
+    sentence, and a word buried behind an address list is a word a prefix match
+    cannot find."""
+
+    from agent_runtime.gateway_peers import REACHABILITY_UNREACHABLE
+
+    _this_machine_is_on(monkeypatch, "192.168.1.39")
+    seen = _reachability_events(monkeypatch)
+    fake_dials.outcomes = {
+        ("192.168.1.203", 8765): OSError(_EHOSTUNREACH_DARWIN, "No route to host")
+    }
+
+    code, _output = _join(capsys, _on_link_payload(), "--timeout", "2")
+
+    assert code != 0
+    assert _cached().reachability == REACHABILITY_UNREACHABLE
+    (flip,) = [p for event, p in seen if event == "gateway.peer.reachability"]
+    assert flip["error"] == "local_policy: 192.168.1.203:8765"
+
+
+# ── the classifier itself (R-D20) ────────────────────────────────────────────
+
+
+def test_the_classifier_calls_an_on_link_ehostunreach_a_policy():
+    from hermes_cli.harness_parts.gateway_commands import classify_dial_error
+
+    assert (
+        classify_dial_error(
+            OSError(_EHOSTUNREACH_DARWIN, "No route to host"),
+            "192.168.1.203",
+            addresses=["192.168.1.39"],
+        )
+        == "local_policy"
+    )
+
+
+def test_the_classifier_reads_the_linux_number_too():
+    """113 on Linux, 65 on Darwin/BSD, and the exception can arrive from either
+    — a fixture, a proxied dial, a log replayed on the other platform."""
+
+    from hermes_cli.harness_parts.gateway_commands import classify_dial_error
+
+    assert (
+        classify_dial_error(
+            OSError(113, "No route to host"),
+            "10.0.0.9",
+            addresses=["10.0.0.4"],
+        )
+        == "local_policy"
+    )
+
+
+def test_the_classifier_reads_the_windows_winerror_rather_than_the_errno():
+    """``WSAEHOSTUNREACH`` arrives in ``winerror``; Windows translates ``errno``
+    to the CRT's own ``EHOSTUNREACH``, which is a different number from either
+    POSIX one. Reading only ``errno`` would miss the Windows case entirely."""
+
+    from hermes_cli.harness_parts.gateway_commands import classify_dial_error
+
+    exc = OSError(110, "No route to host")
+    exc.winerror = 10065
+
+    assert (
+        classify_dial_error(exc, "192.168.1.203", addresses=["192.168.1.39"])
+        == "local_policy"
+    )
+
+
+def test_the_classifier_needs_the_host_to_be_on_one_of_our_own_subnets():
+    from hermes_cli.harness_parts.gateway_commands import classify_dial_error
+
+    unreachable = OSError(_EHOSTUNREACH_DARWIN, "No route to host")
+
+    assert (
+        classify_dial_error(unreachable, "203.0.113.7", addresses=["192.168.1.39"])
+        == "unreachable"
+    )
+    # A machine that could enumerate nothing is on no segment, so nothing is
+    # on-link and the honest answer is the word we already had.
+    assert classify_dial_error(unreachable, "192.168.1.203", addresses=[]) == (
+        "unreachable"
+    )
+
+
+def test_the_classifier_only_ever_looks_at_a_host_unreachable_errno():
+    """Every other dial failure keeps the word it had. The new one is narrow on
+    purpose: it claims something about the operating system's policy, and a
+    claim like that spent on a listener that is merely down is worse than no
+    claim at all."""
+
+    from hermes_cli.harness_parts.gateway_commands import classify_dial_error
+
+    mine = ["192.168.1.39"]
+    for exc in (
+        ConnectionRefusedError("shut"),
+        TimeoutError("slow"),
+        OSError("no errno at all"),
+        RuntimeError("not even an OSError"),
+    ):
+        assert classify_dial_error(exc, "192.168.1.203", addresses=mine) == (
+            "unreachable"
+        ), exc
+
+
+def test_a_v6_link_local_host_is_on_link_by_definition_and_a_global_one_is_not():
+    """v6 answers from the address itself wherever it can. ``fe80::/10`` is
+    meaningless off the segment that assigned it, so an ``EHOSTUNREACH`` to one
+    is this machine refusing itself; a GLOBAL v6 address carries no prefix
+    length here, so it is never called on-link."""
+
+    from hermes_cli.harness_parts.gateway_commands import classify_dial_error
+
+    unreachable = OSError(_EHOSTUNREACH_DARWIN, "No route to host")
+
+    assert classify_dial_error(unreachable, "fe80::1", addresses=[]) == "local_policy"
+    assert (
+        classify_dial_error(unreachable, "2001:db8::5", addresses=["2001:db8::9"])
+        == "unreachable"
+    )
+    # Unique-local is v6's RFC1918: on-link when it shares a /64 with one of
+    # ours, and not otherwise.
+    assert (
+        classify_dial_error(unreachable, "fd00:1::5", addresses=["fd00:1::9"])
+        == "local_policy"
+    )
+    assert (
+        classify_dial_error(unreachable, "fd00:1::5", addresses=["fd00:2::9"])
+        == "unreachable"
+    )
+
+
+def test_the_classifier_asks_this_machine_when_it_is_given_no_address_list(
+    monkeypatch,
+):
+    """The production call site passes nothing, so the default has to be the
+    live enumeration — and it must be asked only AFTER the errno test, or every
+    refused connection would pay for a routing-table read (two subprocesses on
+    macOS, one on Windows, each with a two-second ceiling)."""
+
+    from hermes_cli.harness_parts import gateway_commands
+
+    asked: list[int] = []
+
+    def _addresses() -> list[str]:
+        asked.append(1)
+        return ["192.168.1.39"]
+
+    monkeypatch.setattr(gateway_commands, "_machine_addresses", _addresses)
+
+    assert (
+        gateway_commands.classify_dial_error(
+            ConnectionRefusedError("shut"), "192.168.1.203"
+        )
+        == "unreachable"
+    )
+    assert asked == []
+    assert (
+        gateway_commands.classify_dial_error(
+            OSError(_EHOSTUNREACH_DARWIN, "No route to host"), "192.168.1.203"
+        )
+        == "local_policy"
+    )
+    assert asked == [1]
+
+
 # ── list ─────────────────────────────────────────────────────────────────────
 
 

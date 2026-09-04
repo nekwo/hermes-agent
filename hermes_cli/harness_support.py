@@ -125,6 +125,24 @@ ERROR_EXIT_CODES = {
     # damaged file an operator repairs before the identical call succeeds, and
     # this one is a request that will be refused identically forever.
     "idempotency_key_verb_mismatch": 2,
+    # THIS machine's operating system refused to put a packet on its own local
+    # network (R-D20). Measured on the operator's Mac 2026-09-04: macOS 15 Local
+    # Network privacy had never been granted to the responsible app, so the
+    # kernel answered ``EHOSTUNREACH`` for every host on the Mac's own /24 except
+    # the router — ARP resolved, 177 ms, nothing sent. hermes reported
+    # ``OSError`` → ``runtime_unavailable``, the launcher painted "Unreachable",
+    # and the operator was sent to the router for a permission on their own
+    # machine.
+    #
+    # Family 2 and emphatically NOT 7, on the one thing an exit family encodes —
+    # whether the identical command succeeds later. It will not: thirty denials
+    # and zero prompts in twenty-four hours on that Mac. The next MOVE is a
+    # permission (one tap on the system prompt, or System Settings › Privacy &
+    # Security › Local Network), and until a human grants it every retry is a
+    # burned pairing code. Not 5 (``permission_denied``), which is this stack
+    # refusing a caller for a credential it holds; this is the HOST OS refusing
+    # this process, and the cure is outside hermes entirely.
+    "local_policy": 2,
     "duplicate_conflict": 4,
     # The office desk fence (D6): this persona already holds a live desk on this
     # level. Family 4 beside ``duplicate_conflict`` because the operator's next

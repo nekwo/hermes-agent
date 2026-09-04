@@ -70,6 +70,7 @@ an auditor would read first.
 
 from __future__ import annotations
 
+import errno
 import json
 from typing import Any
 
@@ -91,6 +92,9 @@ __all__ = [
     "cmd_gateway_peers_join",
     "cmd_gateway_peers_list",
     "cmd_gateway_peers_revoke",
+    "classify_dial_error",
+    "DIAL_LOCAL_POLICY",
+    "DIAL_UNREACHABLE",
 ]
 
 
@@ -952,6 +956,135 @@ def _machine_addresses() -> list[str]:
     return ordered[:MAX_CANDIDATE_ENDPOINTS]
 
 
+#: R-D20's two words. ``local_policy`` is *this* machine's OS refusing to put a
+#: packet on its own network; ``unreachable`` is everything else a dial can be —
+#: a listener that is down, a firewall that dropped the SYN, an address nobody
+#: routes to. They are separate because the operator's next MOVE differs: one is
+#: a permission granted here, the other is a retry or a trip to the far machine.
+DIAL_LOCAL_POLICY = "local_policy"
+DIAL_UNREACHABLE = "unreachable"
+
+#: ``WSAEHOSTUNREACH``. Windows delivers it in ``OSError.winerror`` and
+#: translates ``errno`` to the CRT's own ``EHOSTUNREACH`` (110), so both fields
+#: have to be read; the POSIX numbers are written out beside
+#: :data:`errno.EHOSTUNREACH` for the same reason a test on Windows must be able
+#: to present the Mac's 65 — the errno of the kernel that refused is not always
+#: the errno of the interpreter reading it (an exception can arrive from a
+#: proxied dial, and every fixture in this repo runs on one platform).
+_WSAEHOSTUNREACH = 10065
+_HOST_UNREACHABLE_ERRNOS = frozenset(
+    {errno.EHOSTUNREACH, 65, 113, _WSAEHOSTUNREACH}
+)
+
+#: IPv6 prefixes that are on-link BY DEFINITION or by convention: link-local
+#: (``fe80::/10``, meaningful only on the segment that assigned it) and the
+#: unique-local range (``fc00::/7``), which is v6's RFC1918. A GLOBAL v6 address
+#: is deliberately absent: without the prefix LENGTH the kernel assigned there
+#: is no honest way to say whether it shares a segment with us, and R-D20 only
+#: ever wants to be sure in one direction.
+_V6_LINK_LOCAL = "fe80::/10"
+_V6_UNIQUE_LOCAL = "fc00::/7"
+
+
+def _in_network(host: str, cidr: str) -> bool:
+    import ipaddress
+
+    try:
+        return ipaddress.ip_address(str(host)) in ipaddress.ip_network(cidr)
+    except ValueError:
+        return False
+
+
+def _shares_64(host: str, other: str) -> bool:
+    """The v6 twin of :func:`_shares_24`, for the unique-local case."""
+
+    import ipaddress
+
+    try:
+        left = ipaddress.ip_address(str(host))
+        right = ipaddress.ip_address(str(other))
+    except ValueError:
+        return False
+    if left.version != 6 or right.version != 6:
+        return False
+    return int(left) >> 64 == int(right) >> 64
+
+
+def _is_on_link(host: str, addresses: list[str] | None = None) -> bool:
+    """Is ``host`` on a segment one of THIS machine's own addresses sits on?
+
+    The question R-D20 turns on, because it is what separates "the kernel has no
+    idea where that is" from "the kernel knows exactly where that is and will not
+    send". The Mac's ARP table had ``192.168.1.203`` resolved while every packet
+    to it came back ``EHOSTUNREACH`` — the address was on-link and the refusal
+    was a policy.
+
+    v4 asks :func:`_shares_24` against :func:`_machine_addresses`, the same
+    prefix test D1's ranking already uses. v6 answers from the address itself
+    wherever it can: link-local is on-link by definition, unique-local shares a
+    /64 with one of ours or it does not, and a global v6 address is never called
+    on-link — see :data:`_V6_LINK_LOCAL`.
+    """
+
+    host = str(host or "").strip().lower().split("%", 1)[0]
+    if not host:
+        return False
+    if ":" in host:
+        if _in_network(host, _V6_LINK_LOCAL):
+            return True
+        if not _in_network(host, _V6_UNIQUE_LOCAL):
+            return False
+        mine = _machine_addresses() if addresses is None else list(addresses)
+        return any(_shares_64(host, address) for address in mine)
+    if _ipv4(host) is None:
+        return False
+    mine = _machine_addresses() if addresses is None else list(addresses)
+    return any(_shares_24(host, address) for address in mine)
+
+
+def classify_dial_error(exc, host: str, *, addresses: list[str] | None = None) -> str:
+    """R-D20: which of :data:`DIAL_LOCAL_POLICY` / :data:`DIAL_UNREACHABLE` this is.
+
+    ``EHOSTUNREACH`` reads as a statement about the NETWORK and on macOS 15 it is
+    a statement about this process's PERMISSIONS. Measured on the operator's Mac
+    2026-09-04: Local Network privacy had never been granted to the responsible
+    app, so the kernel answered errno 65 for every host on the Mac's own /24
+    except the router — on every port and on ICMP, with the ARP entry resolved,
+    in 177 ms because nothing was ever sent. hermes called that ``OSError`` →
+    ``runtime_unavailable``, the launcher painted ``Unreachable``, and the
+    operator was sent to the router for a permission on their own machine.
+
+    So the same errno against an ON-LINK address is a different word from the
+    same errno against an address somewhere out on the internet, and only the
+    on-link one is ``local_policy``. A non-on-link ``EHOSTUNREACH`` is a plain
+    dial failure and keeps every word it had.
+
+    ``addresses`` exists for the caller that already knows this machine's
+    addresses and for tests; when it is ``None`` this asks
+    :func:`_machine_addresses` — but only AFTER the errno test, so the common
+    refusals (``ConnectionRefusedError``, a timeout) never pay for a
+    routing-table read.
+    """
+
+    if not isinstance(exc, OSError):
+        return DIAL_UNREACHABLE
+    number = getattr(exc, "errno", None)
+    winerror = getattr(exc, "winerror", None)
+    if number not in _HOST_UNREACHABLE_ERRNOS and winerror != _WSAEHOSTUNREACH:
+        return DIAL_UNREACHABLE
+    return DIAL_LOCAL_POLICY if _is_on_link(host, addresses) else DIAL_UNREACHABLE
+
+
+#: The sentence R-D20 owes the operator, and the interface D6l maps onto
+#: ``MissionPairingReason.localNetworkDenied``. Written once because both dial
+#: doors print it and a second spelling is a second contract.
+LOCAL_POLICY_SENTENCE = (
+    "this machine's operating system refused to send to a host on its own "
+    "network — on macOS allow this app under System Settings › Privacy & "
+    "Security › Local Network"
+)
+
+
 def _candidate_endpoints(store_root) -> list[dict]:
     """Where the OTHER install should dial this one, as a peer row's list.
 
@@ -1603,6 +1736,15 @@ def cmd_gateway_peers_join(args) -> int:
     D5h adds no refusal and one recording: the completed handshake is noted as a
     reachability fact (R-D16), and a run where no address answered is noted as
     the failure it was. See the two ``note_dial_result`` calls below.
+
+    D6h splits the third refusal in two (R-D20). When every candidate failed and
+    at least one ON-LINK address was refused by this machine's own operating
+    system — ``EHOSTUNREACH`` against a host on one of our own subnets, which is
+    macOS 15's Local Network privacy and not a route — the code is
+    ``local_policy`` (family 2, not retryable: the next move is a permission
+    granted HERE, and a client that retries burns a pairing code per attempt).
+    Everything else keeps ``runtime_unavailable``. See
+    :func:`classify_dial_error`.
     """
 
     from agent_runtime import paths
@@ -1729,6 +1871,11 @@ def cmd_gateway_peers_join(args) -> int:
     from agent_runtime.serve_socket import ServeCertificatePinMismatch
 
     attempts: list[str] = []
+    # R-D20: the addresses this run could not reach because THIS machine's OS
+    # refused to put a packet on its own network. Collected rather than counted,
+    # because the refusal has to name them — an operator granting a Local
+    # Network permission wants to see the address the permission is for.
+    policy_refused: list[str] = []
     reply = None
     dialled: dict | None = None
     for candidate in parsed["endpoints"]:
@@ -1769,9 +1916,16 @@ def cmd_gateway_peers_join(args) -> int:
                 ),
             )
         except Exception as exc:
-            attempts.append(
-                f"{candidate['host']}:{candidate['port']} ({type(exc).__name__})"
-            )
+            where = f"{candidate['host']}:{candidate['port']}"
+            word = classify_dial_error(exc, str(candidate["host"]))
+            if word == DIAL_LOCAL_POLICY:
+                policy_refused.append(where)
+            # The word replaces the exception CLASS rather than riding beside
+            # it: ``OSError`` is what the Mac's receipt said at 20:19:25, and it
+            # is the single least useful thing that could be printed about a
+            # kernel that knows exactly where that host is and declines to send.
+            said = word if word == DIAL_LOCAL_POLICY else type(exc).__name__
+            attempts.append(f"{where} ({said})")
         finally:
             connection.close()
         if reply is not None:
@@ -1785,6 +1939,37 @@ def cmd_gateway_peers_join(args) -> int:
         # actual answer that day) the address was never dialable in the first
         # place.
         tried = ", ".join(attempts) or "(none — the payload offered no address)"
+        # R-D20, and it fires only when NOTHING answered and at least one
+        # on-link address was refused by this machine's own OS. Both halves
+        # matter: a run where a second candidate completed the handshake has
+        # nothing to say to the operator, and a run where every candidate merely
+        # timed out is still the network's answer.
+        #
+        # The note leads with the word rather than with the list — the one place
+        # in this stage where the cache string and the printed ``Tried:`` list
+        # deliberately differ (D5h made them identical). The cache row is what
+        # the launcher's sheet reads to choose a sentence, and a word buried
+        # behind an address list is a word a prefix match cannot find.
+        if policy_refused:
+            named = ", ".join(policy_refused)
+            note_dial_result(
+                root,
+                parsed["install_id"] or "",
+                ok=False,
+                error=f"{DIAL_LOCAL_POLICY}: {named}",
+            )
+            return emit_harness_error(
+                RuntimeError(DIAL_LOCAL_POLICY),
+                reason=DIAL_LOCAL_POLICY,
+                args=args,
+                code=DIAL_LOCAL_POLICY,
+                message=(
+                    f"{named}: {LOCAL_POLICY_SENTENCE}. Nothing was sent: the "
+                    "kernel answered EHOSTUNREACH for an address on one of this "
+                    "machine's own subnets, which is a permission and not a "
+                    f"route. Tried: {tried}."
+                ),
+            )
         # R-D16's failing half, through the door ``dial_peer`` and the announce
         # fan-out record through, with the SAME string the refusal prints — so
         # the cache row and the operator's sentence cannot end up disagreeing
