@@ -14,6 +14,15 @@ same tree is refused outright (:func:`_acquire_gate_lock`); a concurrent pytest
 is not something this script can see, which is why it is written down here as
 well as enforced.
 
+Registration is not coverage, and the report says so. This gate can only run
+guarantees somebody wrote down, so a run with zero candidates has two readings —
+the diff touched no production source, or it touched several and nobody
+registered a claim for any of them. Those printed identically until 2026-09-04
+(S5 landed in the second state and read like the first), so every run now
+carries a ``changed production sources:`` census naming the changed ``.py``
+files no claim anchors in. It is REPORTED, never enforced: whether a given file
+must carry a claim is a policy question this script has no honest default for.
+
 Cap doctrine. ``--max-candidates`` defaults to 12, which is sized for a
 PER-STAGE base. A multi-stage LANDING run selects more — the H1-H4 landing
 selected 30 — and passes its own cap explicitly on the command line, the way
@@ -121,6 +130,38 @@ def _load_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise RuntimeError(f"{path} must contain an object")
     return value
+
+
+#: Path prefixes whose ``.py`` files are not a surface a claim can anchor in.
+#: Short on purpose: every OTHER root carrying Python is code a guarantee can
+#: be registered against, and nine of the registered claims already anchor in
+#: ``scripts/``. Widening this list makes the census below quieter by declaring
+#: code un-mutatable, which is the move it exists to detect.
+NON_PRODUCTION_PREFIXES = ("tests/", "tests-js/")
+
+
+def _changed_sources(base: str) -> list[str]:
+    """The production ``.py`` files this diff touched, sorted.
+
+    Deletions are excluded (``--diff-filter=d``): a file that is gone cannot
+    carry an anchor, so listing it as unregistered would ask for a claim nobody
+    can write.
+    """
+
+    completed = subprocess.run(
+        ["git", "diff", "--name-only", "--diff-filter=d", base, "--", "*.py"],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(f"git diff --name-only failed: {completed.stderr.strip()}")
+    return sorted(
+        path
+        for path in (row.strip().replace("\\", "/") for row in completed.stdout.splitlines())
+        if path and not path.startswith(NON_PRODUCTION_PREFIXES)
+    )
 
 
 def _changed_lines(base: str, relative_path: str) -> set[int]:
@@ -747,6 +788,29 @@ def run(base: str, claims_path: Path, exemptions_path: Path, max_candidates: int
             f"  {claim['id']}: {claim['path']}::{claim['symbol']} "
             f"[{claim['operator']}]{via}"
         )
+    # The census that makes a ZERO attributable. A registration-gated gate is
+    # silent in two completely different situations — "this diff touched no
+    # production source" and "this diff touched seven and nobody registered a
+    # claim for any of them" — and until this line they printed the same
+    # `mutation candidates: 0` and CI skipped identically. Measured on S5, which
+    # landed with zero executable claims (`--base 748687daa3^ --list` -> 0) and
+    # looked exactly like a slice that needed nothing.
+    #
+    # Reported, never enforced: whether a changed source MUST carry a claim is a
+    # policy question with a real answer for some files and no answer for
+    # others, and a gate that guesses it would be turned off inside a week. This
+    # only refuses to let the two zeros look alike.
+    changed_sources = _changed_sources(base)
+    registered_paths = {
+        str(claim["path"]).replace("\\", "/") for claim in (*claims, *unselected)
+    }
+    unregistered = [path for path in changed_sources if path not in registered_paths]
+    print(
+        f"changed production sources: {len(changed_sources)} "
+        f"({len(unregistered)} carry no registered claim)"
+    )
+    for path in unregistered:
+        print(f"  NO CLAIM ANCHORS HERE: {path}")
     # AFTER the candidate line for the same reason the UNSELECTED rows are, and
     # for BOTH halves: a claim re-anchored onto a re-indented block is a fact
     # about this run whether or not the diff selected it, and a silent

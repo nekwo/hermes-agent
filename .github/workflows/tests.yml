@@ -41,6 +41,21 @@ jobs:
           echo "base=$BASE" >> "$GITHUB_OUTPUT"
           if printf '%s\n' "$OUTPUT" | grep -q '^mutation candidates: 0 '; then
             echo "run=false" >> "$GITHUB_OUTPUT"
+            # A zero has two completely different meanings and this job skipped
+            # identically for both: "the diff touched no production source" and
+            # "it touched seven and nobody registered a claim for any of them".
+            # S5 landed in the second state and read exactly like the first.
+            # The selector now names the changed sources no claim anchors in;
+            # this annotation puts that on the run page instead of leaving it
+            # inside a step log nobody opens on a green skip.
+            #
+            # A WARNING, never a failure. Whether a particular changed file MUST
+            # carry a claim is unruled and has no honest default, so this only
+            # refuses to let the two zeros look alike.
+            UNREGISTERED=$(printf '%s\n' "$OUTPUT" | grep -c '^  NO CLAIM ANCHORS HERE: ' || true)
+            if [ "${UNREGISTERED:-0}" -gt 0 ]; then
+              echo "::warning title=Mutation gate had nothing to run::this diff changed ${UNREGISTERED} production source file(s) that carry no registered mutation claim — the skip is 'nobody registered', not 'nothing needed'"
+            fi
           else
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi

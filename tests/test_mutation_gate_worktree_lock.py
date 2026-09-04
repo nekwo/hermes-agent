@@ -73,6 +73,11 @@ def gate(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "LOCK_PATH", tmp_path / ".mutation_gate.lock")
     monkeypatch.setattr(module, "_validate_exemptions", lambda path: None)
     monkeypatch.setattr(module, "_partition_claims", lambda base, path: ([claim], []))
+    # The unregistered-source census is a real `git diff` against the base, and
+    # this file's base is the string "BASE" over a temp tree with no repository
+    # in it. Stubbed for the same reason `_partition_claims` is: what these
+    # tests are about is the LOCK, not what the diff contained.
+    monkeypatch.setattr(module, "_changed_sources", lambda base: [])
     monkeypatch.setattr(module, "_command", lambda claim: ["stub-test"])
     monkeypatch.setattr(module, "_run_command", _stub_run)
 

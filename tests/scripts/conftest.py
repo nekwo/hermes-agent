@@ -25,3 +25,18 @@ from scripts import changed_line_mutation_check as _gate
 @pytest.fixture(autouse=True)
 def mutation_gate_lock_in_tmp(tmp_path, monkeypatch):
     monkeypatch.setattr(_gate, "LOCK_PATH", tmp_path / ".mutation_gate.lock")
+
+
+@pytest.fixture(autouse=True)
+def no_changed_sources_by_default(monkeypatch):
+    """The unregistered-source census asks the REAL repo what a diff touched.
+
+    Every test in this directory injects its own changed-line set against a
+    base spelled ``"BASE"``, so a real ``git diff`` there would either fail on
+    an unknown rev or answer about whatever the working tree happens to hold
+    that day — neither of which is the thing under test. Default it to "no
+    production source changed"; the tests that ARE about the census override
+    this with their own list.
+    """
+
+    monkeypatch.setattr(_gate, "_changed_sources", lambda base: [])
