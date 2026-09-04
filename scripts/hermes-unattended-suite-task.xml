@@ -7,8 +7,10 @@
   gone (hermes 504953f6ad) and pushes are instant by ruling; the checks that
   used to run on every push to `release` now run only when someone runs them
   by hand, and hermes' own CI is largely inert. This task is what runs
-  scripts/unattended_suite_run.ps1 on a schedule, so the validated suite and
-  the mutation-claim inventory get a report on a cadence instead of never.
+  scripts/unattended_suite_run.ps1 on a schedule, so the validated suite, the
+  mutation-claim inventory and (since 2026-09-04) the two scopes that sit
+  outside the validated four directories -- tests/test_coverage_claims_resolve.py
+  and tests/scripts/ -- get a report on a cadence instead of never.
 
   THIS DEFINITION IS NOT REGISTERED BY ANYTHING IN THIS REPO. Per the wave's
   own instruction, the operator enables it by hand:

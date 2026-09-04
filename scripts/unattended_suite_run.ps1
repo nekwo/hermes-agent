@@ -32,6 +32,14 @@
          docstring), so a refactor that silently moved a claimed line off
          its claimed source spelling shows up in the next scheduled report
          even though nothing landing a normal push would ever run it.
+      3. `scripts/run_tests.sh tests/test_coverage_claims_resolve.py
+         tests/scripts` — the two scopes that sit OUTSIDE the four
+         directories above and are therefore run by nobody. Added
+         2026-09-04 on the row's own evidence: the coverage-claim gate had
+         gone red on `main` by five citations the S2 directory-push wave
+         landed, and nothing reported it — the unrun-gate failure this
+         whole script exists to stop, happening inside it because the gate
+         was not in any of its scopes.
 
     Both commands' stdout/stderr and exit codes are captured into one dated
     Markdown report under `qa-artifacts/` (git-ignored; see .gitignore).
@@ -76,9 +84,11 @@ $stamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd_HHmmss")
 $reportPath = Join-Path $artifactsDir "unattended-suite-$stamp.md"
 
 # ── interpreter: mirror the retired pre-push hook's resolution order ───────
-# (HERMES_PYTHON, then `python`, then `python3` on PATH) — this repo has had
-# no .venv since 2026-08-30 and "what IS the canonical test env" is an open
-# row (see the memory index), so a hardcoded fallback is not safe here.
+# (HERMES_PYTHON, then `python`, then `python3` on PATH). This is a FALLBACK,
+# not the answer: `scripts/run_tests.sh` probes the canonical shared test venv
+# itself ($HERMES_TEST_VENV, else ~/.venvs/hermes-test) and prefers it over
+# whatever is handed in here. Section 2 has no such probe, so it still needs a
+# resolved interpreter of its own.
 function Resolve-Python {
     if ($env:HERMES_PYTHON -and (Test-Path $env:HERMES_PYTHON)) {
         return $env:HERMES_PYTHON
@@ -185,6 +195,44 @@ if (-not $python) {
     if ($content) {
         $sections.Add('```')
         $sections.Add(($content -join "`n"))
+        $sections.Add('```')
+        $sections.Add("")
+    }
+}
+
+# ── The scopes nobody runs ─────────────────────────────────────────────────
+# `tests/test_coverage_claims_resolve.py` and `tests/scripts/` are both
+# OUTSIDE the four directories section 1 runs, so before this section they
+# were run only when someone typed them. That is not a hypothetical: on
+# 2026-09-04 the coverage-claim gate was red on `main` by five citations the
+# S2 directory-push wave had landed, and no lane had reported it. Its own
+# section rather than four-plus-two roots in section 1, because section 1's
+# scope is a RULED one (R3's parity/integrity proof was run on exactly those
+# four directories) and quietly widening it would make every future report's
+# "the validated suite" mean something the ruling does not cover.
+$sections.Add("## 3. The scopes outside the validated four (`tests/test_coverage_claims_resolve.py`, `tests/scripts/`)`n")
+$sections.Add("Neither is inside section 1's ruled four-directory scope, so before 2026-09-04 nothing ran them unattended. The coverage-claim gate went red on ``main`` by five S2-wave citations and no lane reported it; this section is why the next one would.`n")
+
+if (-not $bash) {
+    $sections.Add("**SKIPPED** — no Git Bash found (see section 1).`n")
+    $overallExit = 1
+} elseif (-not $python) {
+    $sections.Add("**SKIPPED** — no python interpreter resolved (see section 1).`n")
+    $overallExit = 1
+} else {
+    $repoRootUnix = ConvertTo-UnixPath $RepoRoot
+    $pythonUnix = ConvertTo-UnixPath $python
+    $outsideCmd = "cd '$repoRootUnix' && HERMES_PYTHON='$pythonUnix' scripts/run_tests.sh tests/test_coverage_claims_resolve.py tests/scripts"
+    $outsideOutFile = Join-Path $artifactsDir "unattended-suite-$stamp.outside-scope.log"
+    & $bash -lc $outsideCmd 2>&1 | Tee-Object -FilePath $outsideOutFile | Out-Null
+    $outsideExit = $LASTEXITCODE
+    if ($outsideExit -ne 0) { $overallExit = 1 }
+    $sections.Add("Exit code: **$outsideExit**  ")
+    $sections.Add("Full output: ``$([System.IO.Path]::GetFileName($outsideOutFile))``  (kept beside this report)`n")
+    $tail = Get-Content $outsideOutFile -Tail 40 -ErrorAction SilentlyContinue
+    if ($tail) {
+        $sections.Add('```')
+        $sections.Add(($tail -join "`n"))
         $sections.Add('```')
         $sections.Add("")
     }

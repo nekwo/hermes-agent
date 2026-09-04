@@ -1360,9 +1360,10 @@ That four-directory scope is **the 4 directories R3 was proven on**,
 deliberately not the runner's whole-tree default: a whole-tree run on a green
 `main` reads ~142 failed, every one triaged environmental or pre-existing (see
 [`planned/hermes-suite-perf.md`](docs/agent-runtime-harness/planned/hermes-suite-perf.md)
-§Follow-ups). Two things sit OUTSIDE it and are therefore run by nobody unless
-named explicitly: `tests/test_coverage_claims_resolve.py` and all of
-`tests/scripts/`.
+§Follow-ups). Two things sit OUTSIDE it and are named nowhere in it:
+`tests/test_coverage_claims_resolve.py` and all of `tests/scripts/`. They are
+section 3 of the unattended report below — the only lane that runs them
+without someone typing them.
 
 Run these through `scripts/run_tests.sh`, never `pytest` directly. That is not
 style: the updater tests inside that scope do `git branch -f main origin/main`,
@@ -1388,7 +1389,7 @@ Control queue).
 
 `scripts/unattended_suite_run.ps1` is a REPORT, not a gate — nothing consumes
 its exit code besides Task Scheduler's own run history and whoever reads the
-file it writes. It runs two things and writes one dated Markdown report to
+file it writes. It runs three things and writes one dated Markdown report to
 `qa-artifacts/unattended-suite-<UTC timestamp>.md` (git-ignored; the
 directory itself is kept via `qa-artifacts/.gitkeep`), plus the raw stdout of
 each command beside it:
@@ -1400,6 +1401,13 @@ each command beside it:
    mutating section of that script runs), so this is safe to run unattended
    and on any schedule without the `.mutation_gate.lock` concerns a real
    mutating run has.
+3. `scripts/run_tests.sh tests/test_coverage_claims_resolve.py tests/scripts`
+   — the two scopes that sit OUTSIDE the four directories in 1 and are
+   therefore run by nobody. Added 2026-09-04 after the coverage-claim gate
+   went red on `main` by five S2-wave citations with no lane reporting it.
+   Its own section and not extra roots on 1: 1's scope is the RULED one, and
+   widening it quietly would make "the validated suite" mean something the
+   ruling does not cover.
 
 `scripts/hermes-unattended-suite-task.xml` is a Windows Scheduled Task
 definition that calls it on a cadence. **Nothing in this repo registers it.**
