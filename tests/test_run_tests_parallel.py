@@ -82,6 +82,7 @@ def test_grandchild_leak_is_killed_by_runner(tmp_path: Path) -> None:
     # never picks it up — only our explicit invocation does.
     probe_dir = tmp_path / "probe"
     probe_dir.mkdir()
+    _root_the_probe(probe_dir)
     probe = probe_dir / "test_probe_leaker.py"
     nonce = f"{os.getpid()}-{int(time.time() * 1000)}"
     handoff = _handoff_path_for(nonce)
@@ -204,6 +205,34 @@ def test_grandchild_leak_is_killed_by_runner(tmp_path: Path) -> None:
 # positional-path discovery.
 
 
+def _root_the_probe(directory: Path) -> Path:
+    """Give a probe tree its own ``pytest.ini``, and return the directory.
+
+    Without one, the inner pytest finds no ini file at or above the probe —
+    ``tmp_path`` is under the system temp, which has none — and its rootdir
+    falls back ABOVE the probe. The collection tree is then rooted over the
+    shared temp directory, which on this box means walking every other test
+    process's hermetic home while those are being created and deleted.
+
+    Measured 2026-09-04 on the Windows dev box, the same probe both ways:
+    ``python -m pytest --collect-only <probe>`` cost 58.5 s and died with
+    ``FileNotFoundError`` on a sibling temp dir that vanished underneath the
+    walk, against 1.0 s with this file present. That is why this test FILE
+    could not finish inside its own budget — one inner invocation cost more
+    than the repo-wide per-test cap, so the file timed out at 8 workers and
+    passed only on the runner's 1-worker retry (185.8 s total, 111.8 s of it
+    the retry).
+
+    An empty ``[pytest]`` section is the entire content: what is wanted is a
+    rootdir anchor, not configuration. The probe deliberately does not inherit
+    this repo's ``addopts`` — it is a couple of trivial asserts, and the bound
+    that matters to it is the runner's own ``--file-timeout``.
+    """
+
+    (directory / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    return directory
+
+
 def _make_probe_dir(tmp_path: Path) -> Path:
     """Two trivial passing tests, one named test_alpha, one test_beta."""
     probe_dir = tmp_path / "probe"
@@ -212,7 +241,7 @@ def _make_probe_dir(tmp_path: Path) -> Path:
         "def test_alpha():\n    assert True\n\n"
         "def test_beta():\n    assert True\n"
     )
-    return probe_dir
+    return _root_the_probe(probe_dir)
 
 
 def _run_runner(probe_dir: Path, *extra: str) -> subprocess.CompletedProcess:
@@ -282,7 +311,9 @@ def test_file_retry_self_heals_and_prints_both_attempts(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parent.parent
     runner = repo_root / "scripts" / "run_tests_parallel.py"
     marker = tmp_path / "ran-once"
-    probe = tmp_path / "test_flaky_probe.py"
+    # This probe is a bare file rather than a directory, so `tmp_path` itself is
+    # what the inner pytest has to root on.
+    probe = _root_the_probe(tmp_path) / "test_flaky_probe.py"
     probe.write_text(
         textwrap.dedent(
             f"""
@@ -335,6 +366,43 @@ def test_file_retry_self_heals_and_prints_both_attempts(tmp_path: Path) -> None:
 # "0 tests passed, 0 failed (100% complete)" (reads green), and a pytest node id
 # (`file.py::Class::test`) was silently discarded by path discovery so the run
 # ended with "No test files to run" while looking like an accepted selector.
+
+
+def test_a_probe_dir_roots_the_inner_pytest_on_itself(tmp_path: Path) -> None:
+    """The reason this file could run at all inside its own budget.
+
+    Every subprocess test here hands the inner pytest a probe under the system
+    temp. With no ini file at or above it, pytest's rootdir lands ABOVE the
+    probe and the collection tree is rooted over the whole shared temp
+    directory — measured 2026-09-04 at 58.5 s and a `FileNotFoundError` on
+    another test process's hermetic home, deleted underneath the walk, against
+    1.0 s once the probe carries its own `pytest.ini`.
+
+    ANTI-VACUITY: the rootdir is read out of pytest's own header rather than
+    inferred from the file existing, so a `pytest.ini` that pytest declined to
+    honour would fail this.
+    """
+
+    probe_dir = _make_probe_dir(tmp_path)
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", str(probe_dir)],
+        cwd=Path(__file__).resolve().parent.parent,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+
+    rootdir = [
+        line.split(":", 1)[1].strip()
+        for line in proc.stdout.splitlines()
+        if line.startswith("rootdir:")
+    ]
+    assert proc.returncode == 0, proc.stdout
+    assert rootdir == [str(probe_dir)], proc.stdout
+    assert "2 tests collected" in proc.stdout, proc.stdout
 
 
 def test_zero_collected_across_run_fails_and_says_so(tmp_path: Path) -> None:
