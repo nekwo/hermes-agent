@@ -371,6 +371,10 @@ Test seam closed with it: the handler-level fake now emits its marker through th
 `tests/agent_runtime/test_progress.py`. Restoring the old sink filter reds five rows.
 *Recovers 0 ms; makes every later claim checkable.* Risk: none (additive keys).
 
+*Billing gate: NO REMEDY SITE (§6.1) — this stage BUILDS the instrument
+(`request_assembled`, `agent_init_cold`, `profile_timing`) and proposes no cure, so
+there is no site for a receipt to convict.*
+
 **Stage 1 — one visibility resolve per turn, memoized on identity. CODE LANDED
 2026-08-23, commit `7f2c82f090`**; the live re-take is owed.
 
@@ -432,6 +436,12 @@ Risk: **medium**, as stated — staleness surface moves from "30 s" to "explicit
 invalidation". Residue after the epoch: a backend that dies with nobody calling
 `invalidate_check_fn_cache`, and a profile MCP declaration edited on disk before
 registration. Both are named in the module's doctrine.
+
+*Billing gate: BILLED before the stage (§6.1) — §2.1.4 and §3 H2 bill the resolver
+family (`_enabled_toolsets_for_chat`, `chat_lane_capability_drops`,
+`mission_chat_admission_line`, `chat_runtime_tool_contract`,
+`permission_state_for_chat`) at ≥4× per turn on live records, with
+`runtime_resolve_ms` 878 / 0 / 1589 beside it (§7.5).*
 
 **Stage 2 — pre-construct the resident actor at chat-open (or first prewarm after
 placement). CODE LANDED 2026-08-23, commit `bfde53b4ae`**; the live re-take is
@@ -535,6 +545,11 @@ work performed earlier: (1) `resolve_runtime_provider` reads credentials — a l
 `auth.json` read on `openai-codex`, but a Vertex persona mints an OAuth2 token and a Nous
 pool may refresh an expired agent key, and its result is cached for the turn behind it;
 (2) MCP admission spawns this persona's declared servers and tears them down on the way out.
+
+*Billing gate: BILLED before the stage (§6.1) — §2.3 bills `write_ahead → agent_ready`
+bimodal on live records: 0.1–0.6 s on a reused actor against 3.0–3.6 s cold. The site
+was billed; what the §6 gate then falsified within two turns was the stage's assumption
+about the REMEDY (§1 update), which is a different failure from Stages 3 and 4.*
 
 **Stage 2a — a refused reuse NAMES the input that moved. CODE LANDED 2026-08-23**
 (`14271f261f` = the instrument + convictions 4–6; `b0c1a668b9` = conviction 7, the ambient
@@ -765,6 +780,9 @@ mover. A first turn of a workspace-bound chat is EXPECTED to show
 `resident_rebuild_component_workspace_agents` — that is the prewarm's documented blind
 spot finally self-reporting rather than being indistinguishable from a defect.
 
+*Billing gate: NO REMEDY SITE (§6.1) — a naming/receipt stage over Stage 2's refused
+reuse plus the two identity fixes it convicted; it proposes no cure of its own.*
+
 **Stage 3 — prologue diet, gated on the Stage-0 split data.** Cache tool-schema
 serialization per toolset tuple and verify the system-prompt restore path actually hits
 on turn 2+ (both live inside the `provider_request_started→request_assembled` span).
@@ -785,6 +803,11 @@ system-prompt restore/build POSITIVE pair, and the tool-defs memo hit/miss pair.
 plan's expected −0.5–1.0 s never existed at this site. Re-target any future prologue
 diet at whatever `turn_context_ms` convicts — re-take read 1 of field notes §9.
 
+*Billing gate: NOT BILLED (§6.1) — the remedy site was named ahead of its receipt and
+the live record contradicted it: `request_build` bills 1 ms warm, and the cache this
+stage specified already existed one level down. Caught by the dispatch brief's
+re-measurement requirement, not by this plan (field notes §2, §6.1–2).*
+
 **Stage 4 — SessionDB open-side: measure, then pool.** Add a timing around
 `_default_persona_session_db()` (Stage 0 can carry it); if it bills >100 ms warm, hold
 one writer handle per serve process (the close-side checkpoint discipline from IC-2
@@ -801,6 +824,11 @@ result frame keeps the runner's dict byte-for-byte); the pooling was NOT built. 
 decision rule stands if the field disagrees with the bench: live
 `session_db_open_ms` median >100 ms warm reopens pooling, IC-2 close discipline
 unchanged. Re-take read 4 of field notes §9.
+
+*Billing gate: NOT BILLED (§6.1) — the pooling half was named ahead of its receipt.
+When the timing this stage itself added finally billed the site it read ~6 ms warm
+against the stage's own 100 ms threshold, and the remedy was refused by its own rule
+(field notes §4, §6.3).*
 
 **Stage 5 — stop paying the snapshot builder during live turns.** `builds_overlapped`
 is already recorded; if Stage-0 data shows turn spans correlate with overlap (the
@@ -820,6 +848,11 @@ key); demote lane ONLY (boot/hydrate and `full_core` never wait); unknown counte
 not defer; `builds_overlapped` still counts an overlap that outlasted the bound.
 Receipt: one `snapshot_build_deferred` line per deferral. Re-take read 5 of field
 notes §9.
+
+*Billing gate: BILLED before the stage (§6.1) — §2.5 bills `builds_overlapped` at 1–3
+on most sampled turns, with led builds of `build_ms=3979` (up to 9131 in the boot
+window) burning CPU in the same process. The one of the three 2026-09-01 stages whose
+named site survived re-measurement.*
 
 Deliberately NOT staged: re-tuning the 15/30 s TTL constants upward. That trades the
 measured storm for a staleness window on every consumer (snapshot drawers included)
@@ -864,6 +897,50 @@ Secondary gates, inherited:
   instances carry the gpt-5.6-luna/openai-codex instance override
   (`model_override_issued_at: 2026-08-22T14:49:24Z`; see
   `planned/mission-chat-admission-latency.md` §5).
+
+### 6.1 The per-stage billing gate (added 2026-09-04)
+
+The gate above is written against the PLAN, once: *do not start Stage 1+ until one
+turn record shows the instrument*. It is therefore discharged by whoever goes
+through it first, and nothing re-asks the question of the stage actually being
+built. Two of the three stages built on 2026-09-01 named a remedy site the live
+record then contradicted:
+
+| stage | its named site | what the record billed | verdict |
+|---|---|---|---|
+| 3 | `request_build` tool-schema serialization, "−0.5–1.0 s per turn" | **1 ms warm**; the cache asked for already existed in `model_tools` | remedy FALSIFIED, not built |
+| 4 | `_default_persona_session_db()` open, "measure, then pool" | **~6 ms warm** (flat across a 280× store-size range) vs the stage's own 100 ms threshold | pooling REFUSED by the stage's own rule |
+| 5 | demote-cadence snapshot builds during live turns | `builds_overlapped` 1–3, led `build_ms=3979` (§2.5) | site survived; built as planned |
+
+Neither Stage 3 nor Stage 4 was saved by this document. Both were saved because
+the dispatch brief independently required a re-measurement before the fix; had it
+not, both would have been built on a dead premise (field notes
+[`chat-turn-prep-stages-3-5-field-notes-2026-09-01.md`](chat-turn-prep-stages-3-5-field-notes-2026-09-01.md)
+§2, §4, §6). The missing mechanism is not more diligence — it is that the
+requirement was never asked per stage.
+
+**The rule.** A stage may not name a remedy site until an instrument bills that
+site. Every stage in §5 therefore carries one `*Billing gate: …*` line taking
+exactly one of three verdicts:
+
+- **`BILLED`** — a receipt convicted this site BEFORE the stage was written, and
+  the line names it (a § reference, a `*_ms` key, or a counter). This is the only
+  verdict that licenses naming a remedy.
+- **`NO REMEDY SITE`** — the stage builds instrumentation or accounting and
+  proposes no cure. Nothing to bill.
+- **`NOT BILLED`** — the site was named ahead of its receipt. The stage may still
+  MEASURE, but its remedy is a hypothesis until the instrument lands, and the
+  verdict the record eventually returned is recorded on the same line.
+
+A stage arriving with no such line, or laundering a `NOT BILLED` into `BILLED`
+without a receipt, reds `tests/agent_runtime/test_prep_cost_stage_gate.py`. The
+two `NOT BILLED` rows stay on the page on purpose: they are this gate's evidence,
+and the next stage author reads them in place rather than in an archived note.
+
+This is the plan-local instance of the standing house rule (*re-measure before
+fixing; a filed row is often right that something is wrong and wrong about why*).
+Widening it to every staged perf plan in `planned/` is a separate row — it needs
+a stage-heading convention those documents do not share yet.
 
 ## 7. Uncertain / unverified, stated plainly
 
