@@ -260,6 +260,21 @@ pre-push gate compares, so a file here is a file the gate reinstalls.)
 
 ## Payload
 
+- **[READ] A new payload FLAG is now admitted by a check, not by memory.** The class
+  behind the two entries below — a boolean whose guarantee lives only in prose — had its
+  instances repaired one at a time and nothing looking at the next one. It has a gate as of
+  2026-09-04: `tests/hermes_cli/test_charsheet_payload_flag_admission.py` measures every
+  boolean the four read payloads actually PRINT (through
+  `charsheet_payload_contract.build_flag_inventory`, which runs the verbs) and requires each
+  to be admitted in its table as either a **Guarantee** — naming the pure predicate that
+  computes it and a test where it DISAGREES with its neighbour — or **Data**, saying why
+  there is no guarantee to drift. An unadmitted flag reds; so does a stale entry for a flag
+  nobody publishes any more (proved by planting one: `thumb.plantedFlagBySuite`).
+  *Consequence:* when you add a boolean to a `characters` payload, expect that test to stop
+  you, and answer it — the answer is the design review the class kept skipping. It is an
+  EXISTENCE check on the citation, not proof the named test asserts a disagreement; that
+  half is still a reviewer's job.
+
 - **[READ] Attempts are 0-based in payloads and flags, 1-based in human lines.**
   One helper (`_attempt_label`) renders "attempt N of M". Store filenames are
   `attempt-<n+1>.png`.

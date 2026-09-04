@@ -341,26 +341,24 @@ def _kind(
     }
 
 
-def _sprite_kind(probes: list[dict]) -> dict:
+def _sprite_kind(probes: list[dict], drafts: list[tuple[str, str, str]]) -> tuple[dict, dict]:
     from hermes_cli.harness import _cmd_characters_sprite
 
-    modes: dict[str, tuple[set[str], set[str]]] = {}
-    for mode, no_sheet in (("sheet", False), ("no-sheet", True)):
-        modes[mode] = _agreed_shape(
-            [
-                _emit(_cmd_characters_sprite, slug=probe["slug"], no_sheet=no_sheet)
-                for probe in probes
-            ]
-        )
-    return _kind(
-        argv="harness characters sprite <slug> --json [--no-sheet]",
-        producer="agent/charsheet/draft.py::sprite_payload",
-        object_path="character",
-        modes=modes,
-    )
+    documents = {
+        mode: [
+            _emit(_cmd_characters_sprite, slug=probe["slug"], no_sheet=no_sheet)
+            for probe in probes
+        ]
+        for mode, no_sheet in (("sheet", False), ("no-sheet", True))
+    }
+    return {
+        "argv": "harness characters sprite <slug> --json [--no-sheet]",
+        "producer": "agent/charsheet/draft.py::sprite_payload",
+        "object_path": "character",
+    }, documents
 
 
-def _thumb_kind(drafts: list[tuple[str, str, str]]) -> dict:
+def _thumb_kind(probes: list[dict], drafts: list[tuple[str, str, str]]) -> tuple[dict, dict]:
     """The crop verb's TWO item kinds, as two modes of one payload.
 
     A row crop and a direction-reference crop share the envelope, the two budget
@@ -371,50 +369,45 @@ def _thumb_kind(drafts: list[tuple[str, str, str]]) -> dict:
     """
     from hermes_cli.harness import _cmd_characters_thumb
 
-    modes = {
-        "row": _agreed_shape(
-            [
-                _emit(
-                    _cmd_characters_thumb,
-                    draft=draft_id,
-                    row=row_key,
-                    direction="",
-                    attempt=-1,
-                    frame=None,
-                    scale=1,
-                    square=False,
-                )
-                for draft_id, row_key, _direction in drafts
-            ]
-        ),
-        "direction": _agreed_shape(
-            [
-                _emit(
-                    _cmd_characters_thumb,
-                    draft=draft_id,
-                    row="",
-                    direction=direction,
-                    attempt=-1,
-                    frame=None,
-                    scale=1,
-                    square=False,
-                )
-                for draft_id, _row_key, direction in drafts
-            ]
-        ),
+    documents = {
+        "row": [
+            _emit(
+                _cmd_characters_thumb,
+                draft=draft_id,
+                row=row_key,
+                direction="",
+                attempt=-1,
+                frame=None,
+                scale=1,
+                square=False,
+            )
+            for draft_id, row_key, _direction in drafts
+        ],
+        "direction": [
+            _emit(
+                _cmd_characters_thumb,
+                draft=draft_id,
+                row="",
+                direction=direction,
+                attempt=-1,
+                frame=None,
+                scale=1,
+                square=False,
+            )
+            for draft_id, _row_key, direction in drafts
+        ],
     }
-    return _kind(
-        argv="harness characters thumb --draft <id> (--row <key> | --direction <dir>) --json",
-        producer=(
+    return {
+        "argv": "harness characters thumb --draft <id> (--row <key> | --direction <dir>) --json",
+        "producer": (
             "agent/charsheet/draft.py::CharacterDraft.row_thumb / "
             "CharacterDraft.direction_thumb"
         ),
-        object_path="",
-        modes=modes,
-    )
+        "object_path": "",
+    }, documents
 
 
-def _status_kind(drafts: list[tuple[str, str, str]]) -> dict:
+def _status_kind(probes: list[dict], drafts: list[tuple[str, str, str]]) -> tuple[dict, dict]:
     """The whole draft state, item records included.
 
     ``status`` was outside the contract because its QA items hang off maps keyed
@@ -426,18 +419,20 @@ def _status_kind(drafts: list[tuple[str, str, str]]) -> dict:
     """
     from hermes_cli.harness import _cmd_characters_status
 
-    measured = _agreed_shape(
-        [_emit(_cmd_characters_status, draft=draft_id) for draft_id, _row, _dir in drafts]
-    )
-    return _kind(
-        argv="harness characters status --draft <id> --json",
-        producer="agent/charsheet/draft.py::CharacterDraft.status_payload",
-        object_path="status",
-        modes={"default": measured},
-    )
+    documents = {
+        "default": [
+            _emit(_cmd_characters_status, draft=draft_id)
+            for draft_id, _row, _dir in drafts
+        ]
+    }
+    return {
+        "argv": "harness characters status --draft <id> --json",
+        "producer": "agent/charsheet/draft.py::CharacterDraft.status_payload",
+        "object_path": "status",
+    }, documents
 
 
-def _list_kind(drafts: list[tuple[str, str, str]]) -> dict:
+def _list_kind(probes: list[dict], drafts: list[tuple[str, str, str]]) -> tuple[dict, dict]:
     """Every draft and installed character on this install.
 
     One document, not two: ``list`` is library-wide, so both probes are already
@@ -452,23 +447,39 @@ def _list_kind(drafts: list[tuple[str, str, str]]) -> dict:
     """
     from hermes_cli.harness import _cmd_characters_list
 
-    measured = _agreed_shape([_emit(_cmd_characters_list), _emit(_cmd_characters_list)])
-    return _kind(
-        argv="harness characters list --json",
-        producer=(
+    documents = {"default": [_emit(_cmd_characters_list), _emit(_cmd_characters_list)]}
+    return {
+        "argv": "harness characters list --json",
+        "producer": (
             "hermes_cli/harness.py::_characters_draft_summary / "
             "_characters_installed_rows"
         ),
-        object_path="",
-        modes={"default": measured},
-    )
+        "object_path": "",
+    }, documents
 
 
-# ── the dump ───────────────────────────────────────────────────────────────
+#: Every READ payload kind, in the order the launcher meets them. One entry is
+#: one probe function returning ``(metadata, {mode: [documents]})`` -- the raw
+#: answers, so that a second reader of the same probe run (the flag inventory
+#: below) measures the payloads that were actually printed rather than a
+#: second, drifting set.
+_KINDS = (
+    ("sprite", _sprite_kind),
+    ("thumb", _thumb_kind),
+    ("status", _status_kind),
+    ("list", _list_kind),
+)
 
 
-def build_payload_contract() -> dict:
-    """Measure every payload kind and return the contract document."""
+def _probe(collect: Callable[[dict, dict], Any]) -> dict:
+    """Run every kind's probes once against a throwaway library; *collect* reads them.
+
+    ONE place builds the temp library, redirects
+    ``HERMES_SHARED_CHARACTERS`` at it and restores the environment, because the
+    thing that must never drift is which library the probes touch: a second copy
+    of this dance is a second chance to run a probe against the operator's real
+    characters.
+    """
     probes = _probe_specs()
     with tempfile.TemporaryDirectory(prefix="hermes-payload-contract-") as tmp:
         workspace = Path(tmp)
@@ -480,15 +491,75 @@ def build_payload_contract() -> dict:
             for probe in probes:
                 _install_probe_character(probe)
             drafts = [_start_probe_draft(probe, workspace) for probe in probes]
-            payloads = {
-                "sprite": _sprite_kind(probes),
-                "thumb": _thumb_kind(drafts),
-                "status": _status_kind(drafts),
-                "list": _list_kind(drafts),
-            }
+            measured = {}
+            for name, build in _KINDS:
+                metadata, documents = build(probes, drafts)
+                measured[name] = collect(metadata, documents)
         finally:
             if previous is None:
                 os.environ.pop(_LIBRARY_ENV, None)
             else:
                 os.environ[_LIBRARY_ENV] = previous
-    return {"schema": SCHEMA, "payloads": payloads}
+    return measured
+
+
+# ── the dump ───────────────────────────────────────────────────────────────
+
+
+def build_payload_contract() -> dict:
+    """Measure every payload kind and return the contract document."""
+
+    def shape(metadata: dict, documents: dict) -> dict:
+        return _kind(
+            argv=metadata["argv"],
+            producer=metadata["producer"],
+            object_path=metadata["object_path"],
+            modes={mode: _agreed_shape(docs) for mode, docs in documents.items()},
+        )
+
+    return {"schema": SCHEMA, "payloads": _probe(shape)}
+
+
+# ── the flag inventory ─────────────────────────────────────────────────────
+
+
+def _boolean_paths(value: Any, path: str, collapse: frozenset[str], found: set[str]) -> None:
+    """Collect the contract path of every BOOLEAN leaf, dynamic keys collapsed."""
+    if isinstance(value, dict):
+        dynamic = path in collapse
+        for key, child in value.items():
+            segment = DYNAMIC_KEY if dynamic else str(key)
+            _boolean_paths(child, f"{path}.{segment}" if path else segment, collapse, found)
+    elif isinstance(value, list):
+        for item in value:
+            _boolean_paths(item, f"{path}[]", collapse, found)
+    elif isinstance(value, bool):
+        found.add(path)
+
+
+def build_flag_inventory() -> dict[str, list[str]]:
+    """``{kind: [boolean key path, ...]}`` -- every FLAG the read payloads carry.
+
+    The other reader of the same probe run, and the one an admission check needs:
+    the contract records key paths without types, so nothing in the dump says
+    which of them is a boolean carrying a GUARANTEE. That distinction is the
+    recurring defect this whole family is about -- ``MAX_CARD_PIXELS``'s "can
+    never drift" comment and ``cardSafe`` both passed a green suite because every
+    test asserted the predicate's ARITHMETIC and none asserted a case where the
+    documented guarantee and the implemented one disagree.
+
+    Measured, never declared, for the same reason the key set is: a hand-written
+    list of flags is exactly as blind as the memory it replaces. The paths are
+    spelled the way the contract spells them, placeholder included, so a flag
+    under a data-keyed map is one entry rather than one per character.
+    """
+
+    def flags(_metadata: dict, documents: dict) -> list[str]:
+        found: set[str] = set()
+        for docs in documents.values():
+            dynamic = _agreed_shape(docs)[1]
+            for document in docs:
+                _boolean_paths(document, "", frozenset(dynamic), found)
+        return sorted(found)
+
+    return _probe(flags)
