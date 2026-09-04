@@ -138,6 +138,7 @@ __all__ = [
     "ServeInstanceRegistration",
     "default_process_probe",
     "list_serve_instances",
+    "pid_alive",
     "prune_stale_serve_instances",
     "register_serve_instance",
     "serve_instance_path",
@@ -463,11 +464,11 @@ def prune_stale_serve_instances(
 
 def default_process_probe() -> ProcessProbe:
     return ProcessProbe(
-        alive=_pid_alive, start_time=_process_start_time, cmdline=_process_cmdline
+        alive=pid_alive, start_time=_process_start_time, cmdline=_process_cmdline
     )
 
 
-def _pid_alive(pid: int) -> bool | None:
+def pid_alive(pid: int) -> bool | None:
     """Liveness WITHOUT signalling. None when it cannot be determined.
 
     Never ``os.kill(pid, 0)``: on Windows CPython routes signal 0 through
@@ -475,6 +476,14 @@ def _pid_alive(pid: int) -> bool | None:
     target's whole console group (bpo-14484). ``gateway.status._pid_exists``
     is the repo's one correct answer to this question — read, not edited;
     ``dispatch_store.restore_undelivered_dispatches`` already depends on it.
+
+    PUBLIC since the listener-start-path stage (R-L2), and that is the whole
+    point of the rename: ``SocketOwnerLock`` has to decide "is the pid in the
+    owner sidecar still running" and this classification's ``stale_dead_pid``
+    answers the identical question one directory over. Two spellings of
+    "is that process alive" would be two things to keep true, and the socket
+    lock is precisely the caller that must not be the one that drifts — it
+    hands a launcher the word ``took_over_from``.
     """
 
     try:

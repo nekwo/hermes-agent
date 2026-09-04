@@ -2498,7 +2498,12 @@ def serve_loop(
                 )
                 from agent_runtime.serve_auth import read_token as _read_serve_token
 
-                socket_lock = SocketOwnerLock(store_root_path)
+                # ``log`` is what makes R-L2's takeover an OPERATOR-visible
+                # event rather than a field on a frame nobody kept: the
+                # ``serve_socket_owner_takeover`` line lands on the same service
+                # log as ``serve_instances_pruned``, correlatable by boot_id
+                # against this boot's ready frame.
+                socket_lock = SocketOwnerLock(store_root_path, log=_service_log)
                 lock_result = socket_lock.acquire()
                 if lock_result.acquired:
                     socket_server = ServeSocketServer(
@@ -2545,6 +2550,15 @@ def serve_loop(
                         "port": port,
                         "started_at": socket_server.started_at,
                     }
+                    # R-L2. Present only when this boot inherited a PROVEN-dead
+                    # owner's lane, which makes it the receipt for a recovered
+                    # restart: a launcher that respawned a serve and sees
+                    # ``took_over_from`` naming the pid it killed knows the
+                    # replacement is the socket owner, rather than inferring it
+                    # from the absence of ``lock_held_by``.
+                    if lock_result.took_over_from is not None:
+                        socket_block["took_over_from"] = lock_result.took_over_from
+                        socket_block["owner_started_at"] = lock_result.owner_started_at
                 else:
                     socket_block = lock_result.payload()
             except Exception as exc:

@@ -139,6 +139,18 @@ The holder's identity lives in a sidecar, ``serve_socket.owner.json``, and not
 in the lock file itself: on Windows ``msvcrt.locking`` is a MANDATORY lock, so
 a loser cannot read the bytes of the file it just lost.
 
+**A DEAD owner is not an owner** (R-L2, 2026-09-04). The sidecar outlives its
+process — a killed serve never gets to unlink it — and until this stage a boot
+that found one simply believed it. On the operator's machine that cost a whole
+session: the replacement serve read a sidecar naming a corpse, answered
+``lock_held_by``, ran stdio-only, and therefore never opened the LAN listener
+the operator had just enabled. :class:`SocketOwnerLock` now proves the pid with
+the same probe the registry uses for ``stale_dead_pid``
+(``serve_registry.pid_alive``) and, when it is provably gone, takes the lane and
+says so: ``took_over_from`` and ``owner_started_at`` on the block, and one
+``serve_socket_owner_takeover`` line on the service log. A LIVE owner is refused
+exactly as before.
+
 Fingerprint exclusion (load-bearing)
 ------------------------------------
 
@@ -354,6 +366,23 @@ MAX_LINE_BYTES = 1 << 20
 LOCK_OUTCOME_ACQUIRED = "acquired"
 LOCK_OUTCOME_HELD = "lock_held_by"
 
+#: What the PREVIOUS owner sidecar was, at the moment this process took (or
+#: failed to take) the lock. Diagnostic only — it rides the log line and the
+#: result object, never the greeting: a launcher decides on ``outcome`` plus
+#: ``took_over_from``, and a fifth vocabulary on the wire would be a fifth thing
+#: to keep true. ``OWNER_STATE_DEAD`` deliberately spells ``pid_not_running``,
+#: the same word ``serve_registry.classify_serve_instance`` gives its
+#: ``stale_dead_pid`` rows, because it is the same probe answering the same
+#: question about the same process.
+OWNER_STATE_ABSENT = "absent"
+OWNER_STATE_UNREADABLE = "sidecar_unreadable"
+OWNER_STATE_MALFORMED = "sidecar_malformed"
+OWNER_STATE_PID_MISSING = "pid_missing"
+OWNER_STATE_SELF = "self"
+OWNER_STATE_DEAD = "pid_not_running"
+OWNER_STATE_LIVE = "pid_running"
+OWNER_STATE_LIVENESS_UNKNOWN = "liveness_unreadable"
+
 
 # ── the one-owner lock ───────────────────────────────────────────────────────
 
@@ -376,13 +405,45 @@ class SocketLockResult:
     #: (from the sidecar) on ``lock_held_by``, None when the sidecar is absent.
     pid: int | None
     path: str
+    #: The sidecar's ``started_at`` for the pid named in :attr:`pid` /
+    #: :attr:`took_over_from`. On ``lock_held_by`` it is how a launcher tells
+    #: "the same incumbent I saw last time" from "a fresh one"; on a takeover it
+    #: is when the corpse had booted. None when the sidecar did not say.
+    owner_started_at: str | None = None
+    #: R-L2. The pid of the PREVIOUS owner whose advertisement this process
+    #: replaced, and it appears only when that pid was PROVEN not running. Never
+    #: set on the ordinary uncontested boot (no sidecar, or our own).
+    took_over_from: int | None = None
+    #: One of the ``OWNER_STATE_*`` words: what the pre-existing sidecar was.
+    #: Diagnostic — it never reaches a greeting frame (see :meth:`payload`).
+    owner_state: str = OWNER_STATE_ABSENT
 
     @property
     def acquired(self) -> bool:
         return self.outcome == LOCK_OUTCOME_ACQUIRED
 
     def payload(self) -> dict[str, Any]:
-        return {"outcome": self.outcome, "pid": self.pid, "path": self.path}
+        """The three keys this block has always had, plus the two R-L2 facts.
+
+        Additive and absent-when-unknown, deliberately: a reader written against
+        the three-key block finds exactly those three unchanged, and a reader
+        that learned ``took_over_from`` can tell "this serve inherited a dead
+        owner's lane" from "this serve booted into an empty root" — which is the
+        difference between a launcher reporting a recovered restart and a
+        launcher reporting nothing at all. ``owner_state`` is deliberately NOT
+        here; it is a debugging word, and the wire gets outcomes.
+        """
+
+        row: dict[str, Any] = {
+            "outcome": self.outcome,
+            "pid": self.pid,
+            "path": self.path,
+        }
+        if self.owner_started_at is not None:
+            row["owner_started_at"] = self.owner_started_at
+        if self.took_over_from is not None:
+            row["took_over_from"] = self.took_over_from
+        return row
 
 
 class SocketOwnerLock:
@@ -391,14 +452,47 @@ class SocketOwnerLock:
     Non-blocking by design. A serve that loses this race has a job to do
     (stdio) and must not spend its boot waiting for a lock whose holder is
     healthy — the loser degrades loudly instead.
+
+    A DEAD owner is not a holder (R-L2)
+    -----------------------------------
+
+    The window this closes was measured on the operator's machine on
+    2026-09-04: the launcher killed the old serve child and respawned without
+    awaiting its exit, the replacement's ``acquire()`` answered ``lock_held_by``
+    naming pid 25672, and 25672 was gone. The replacement then ran stdio-only
+    for the rest of the session — no socket lane, and therefore (``serve.py``)
+    no LAN listener either, which is how a toggle that had written its config
+    correctly produced a door that never opened.
+
+    **The OS lock is not the stale part; the SIDECAR is.** Both
+    ``msvcrt.locking`` and ``flock`` are released by the kernel when the holding
+    process dies, so a sidecar naming a corpse cannot describe the current
+    holder of a lock that is still held. There are therefore exactly two shapes
+    and this class answers both:
+
+    * the lock is FREE and a sidecar from a dead owner is lying beside it — the
+      ordinary crash/kill leftover. ``acquire()`` succeeds on the first try and
+      records ``took_over_from``, so the takeover is a receipt rather than a
+      silent overwrite of the previous owner's advertisement.
+    * the lock is HELD and the sidecar names a dead pid — the exit is genuinely
+      in flight (the corpse's handle has closed a hair before or after the
+      probe, or the sidecar was never rewritten). One retry, and one only: a
+      lock we could not take on the second attempt is held by something the
+      sidecar does not describe, and this class does not spin.
+
+    What it does NOT do is take a lock away from a LIVE owner. That refusal is
+    unchanged, byte for byte — ``lock_held_by`` with the winner's pid — because
+    the whole point of the lock is that "connect to the service for root X" has
+    one answer.
     """
 
-    def __init__(self, store_root: Path | str) -> None:
+    def __init__(self, store_root: Path | str, *, log: Callable | None = None) -> None:
         self._path = socket_lock_path(store_root)
         self._owner_path = socket_owner_path(store_root)
         self._handle = None
         self._acquired = False
         self._lock = threading.Lock()
+        self._log = log
 
     @property
     def path(self) -> Path:
@@ -408,39 +502,138 @@ class SocketOwnerLock:
         with self._lock:
             if self._acquired:
                 return SocketLockResult(
-                    outcome=LOCK_OUTCOME_ACQUIRED, pid=os.getpid(), path=str(self._path)
-                )
-            try:
-                self._path.parent.mkdir(parents=True, exist_ok=True)
-                handle = open(self._path, "a+b")
-            except OSError as exc:
-                return SocketLockResult(
-                    outcome=f"error:{_os_error_token(exc)}",
-                    pid=None,
+                    outcome=LOCK_OUTCOME_ACQUIRED,
+                    pid=os.getpid(),
                     path=str(self._path),
+                    owner_state=OWNER_STATE_SELF,
                 )
-            try:
-                _lock_first_byte(handle)
-            except _LockUnavailable:
-                handle.close()
-                owner = read_socket_owner(self._owner_path.parent)
-                return SocketLockResult(
-                    outcome=LOCK_OUTCOME_HELD,
-                    pid=_int_or_none(owner.get("pid")) if owner else None,
+            # READ THE SIDECAR FIRST. This is the only moment the previous
+            # owner's identity is still on disk: `publish_owner` overwrites it
+            # a few lines later in the caller, and after that nothing can say
+            # whose lane this used to be.
+            owner, owner_state = self._classify_owner()
+            owner_pid = _int_or_none(owner.get("pid"))
+            owner_started_at = _text_or_none(owner.get("started_at"))
+
+            handle, failure = self._try_lock()
+            if handle is None and failure is None and owner_state == OWNER_STATE_DEAD:
+                # The one retry. See the class docstring: a lock whose sidecar
+                # names a proven-dead pid is a lock in the act of being
+                # released, and the kernel has already done the releasing.
+                handle, failure = self._try_lock()
+            if handle is None:
+                result = SocketLockResult(
+                    outcome=(
+                        LOCK_OUTCOME_HELD if failure is None else f"error:{failure}"
+                    ),
+                    pid=owner_pid if failure is None else None,
                     path=str(self._path),
+                    owner_started_at=(
+                        owner_started_at if failure is None else None
+                    ),
+                    owner_state=owner_state,
                 )
-            except OSError as exc:
-                handle.close()
-                return SocketLockResult(
-                    outcome=f"error:{_os_error_token(exc)}",
-                    pid=None,
-                    path=str(self._path),
-                )
+                self._note(result, owner_pid=owner_pid)
+                return result
+
             self._handle = handle
             self._acquired = True
-            return SocketLockResult(
-                outcome=LOCK_OUTCOME_ACQUIRED, pid=os.getpid(), path=str(self._path)
+            took_over = owner_pid if owner_state == OWNER_STATE_DEAD else None
+            result = SocketLockResult(
+                outcome=LOCK_OUTCOME_ACQUIRED,
+                pid=os.getpid(),
+                path=str(self._path),
+                owner_started_at=owner_started_at if took_over is not None else None,
+                took_over_from=took_over,
+                owner_state=owner_state,
             )
+            self._note(result, owner_pid=owner_pid)
+            return result
+
+    # ── acquire's three helpers ─────────────────────────────────────────────
+
+    def _try_lock(self) -> tuple[Any, str | None]:
+        """``(handle, None)`` on success, ``(None, None)`` when CONTENDED, or
+        ``(None, "<token>")`` when the filesystem itself refused.
+
+        The three-way answer is what lets :meth:`acquire` retry a contended
+        lock without retrying a broken directory: ``lock_held_by`` and
+        ``error:EACCES`` are different facts and only one of them is worth a
+        second attempt.
+        """
+
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            handle = open(self._path, "a+b")
+        except OSError as exc:
+            return None, _os_error_token(exc)
+        try:
+            _lock_first_byte(handle)
+        except _LockUnavailable:
+            handle.close()
+            return None, None
+        except OSError as exc:
+            handle.close()
+            return None, _os_error_token(exc)
+        return handle, None
+
+    def _classify_owner(self) -> tuple[dict[str, Any], str]:
+        """The pre-existing sidecar and one ``OWNER_STATE_*`` word for it.
+
+        Liveness comes from ``serve_registry.pid_alive`` — the SAME probe that
+        classifies a registry row ``stale_dead_pid``, imported rather than
+        re-implemented, because a second answer to "is that pid alive" is a
+        second answer that can drift. The fail-safe direction is the OPPOSITE of
+        the registry's, and deliberately so: a probe that cannot answer lands on
+        ``liveness_unreadable``, which is NOT a takeover. Guessing "dead" here
+        would publish ``took_over_from`` about a process that is serving.
+        """
+
+        record, state = _read_owner_record(self._owner_path)
+        if record is None:
+            return {}, state or OWNER_STATE_ABSENT
+        pid = _int_or_none(record.get("pid"))
+        if pid is None or pid <= 0:
+            return record, OWNER_STATE_PID_MISSING
+        if pid == os.getpid():
+            return record, OWNER_STATE_SELF
+        alive = _owner_pid_alive(pid)
+        if alive is None:
+            return record, OWNER_STATE_LIVENESS_UNKNOWN
+        return record, OWNER_STATE_LIVE if alive else OWNER_STATE_DEAD
+
+    def _note(self, result: SocketLockResult, *, owner_pid: int | None) -> None:
+        """One log line whenever the sidecar was anything but empty-or-ours.
+
+        R-L2 asks for the takeover to be logged; the other states are here for
+        the same money and answer the question an operator asks next. A
+        malformed sidecar beside a lock we took is worth a line precisely
+        because the boot then LOOKS clean — nothing else would ever mention it.
+        """
+
+        if self._log is None or result.owner_state in (
+            OWNER_STATE_ABSENT,
+            OWNER_STATE_SELF,
+        ):
+            return
+        try:
+            self._log(
+                {
+                    "event": (
+                        "serve_socket_owner_takeover"
+                        if result.took_over_from is not None
+                        else "serve_socket_owner_stale"
+                    ),
+                    "pid": os.getpid(),
+                    "outcome": result.outcome,
+                    "owner_state": result.owner_state,
+                    "owner_pid": owner_pid,
+                    "owner_started_at": result.owner_started_at,
+                    "path": result.path,
+                }
+            )
+        except Exception:  # noqa: BLE001 — an instrument never fails a boot
+            pass
 
     def publish_owner(self, record: dict[str, Any]) -> None:
         """Write the identity sidecar. Best effort; the LOCK is the authority."""
@@ -506,14 +699,60 @@ def read_socket_owner(store_root: Path | str) -> dict[str, Any]:
     """
 
     try:
-        raw = socket_owner_path(store_root).read_bytes().decode("utf-8", "replace")
-    except OSError:
+        record, _state = _read_owner_record(socket_owner_path(store_root))
+    except Exception:  # noqa: BLE001 — advisory data, never a raise
         return {}
+    return record or {}
+
+
+def _read_owner_record(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    """``(record, None)`` when it parsed, ``(None, OWNER_STATE_*)`` when not.
+
+    The reason word is the whole difference from :func:`read_socket_owner`,
+    which collapses "no file" and "half a file" into the same ``{}``. That
+    collapse is fine for discovery — either way there is no port to dial — and
+    is exactly wrong for the lock, which has to be able to LOG that it took a
+    lane while a corrupt sidecar sat beside it. One reader, two callers, so the
+    parse rules cannot drift.
+    """
+
+    try:
+        raw = path.read_bytes().decode("utf-8", "replace")
+    except FileNotFoundError:
+        return None, OWNER_STATE_ABSENT
+    except OSError:
+        return None, OWNER_STATE_UNREADABLE
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+        return None, OWNER_STATE_MALFORMED
+    if not isinstance(parsed, dict):
+        return None, OWNER_STATE_MALFORMED
+    return parsed, None
+
+
+def _owner_pid_alive(pid: int) -> bool | None:
+    """ONE liveness question, asked of the module that already answers it.
+
+    ``serve_registry.pid_alive`` is imported here rather than copied because it
+    carries a hard-won prohibition — never ``os.kill(pid, 0)`` on Windows, where
+    CPython routes signal 0 through ``GenerateConsoleCtrlEvent`` and the probe
+    Ctrl-C's the target's console group (bpo-14484). A second implementation of
+    this check is a second place for that to be got wrong. Lazily imported to
+    keep this module's import graph flat, and ``None`` on any failure, which the
+    caller reads as "no takeover".
+    """
+
+    try:
+        from .serve_registry import pid_alive
+
+        return pid_alive(int(pid))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _text_or_none(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
 # ── hello rate limiting ──────────────────────────────────────────────────────

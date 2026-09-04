@@ -15,8 +15,11 @@ has to be tested, not asserted in a commit message.
 from __future__ import annotations
 
 import json
+import os
 import queue
 import socket
+import subprocess
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -371,6 +374,270 @@ def test_the_second_serve_for_a_root_degrades_to_stdio_and_names_the_owner():
             assert row["port"] is None
     finally:
         incumbent.release()
+
+
+# ── R-L2: a dead owner yields, a live one does not ──────────────────────────
+#
+# The defect these pin was MEASURED, not imagined (2026-09-04, the operator's
+# machine): the launcher killed a serve child and respawned without awaiting its
+# exit, the replacement read `serve_socket.owner.json` naming the corpse
+# (pid 25672), answered `lock_held_by`, and ran stdio-only for the rest of the
+# session. No socket lane means no LAN listener, which is how a toggle that had
+# written its config correctly produced a door that never opened.
+
+
+@contextmanager
+def _a_live_foreign_process():
+    """A pid that is running and is NOT this test process.
+
+    Spawned rather than borrowed: ``os.getpid()`` classifies as ``self`` (the
+    lock's own re-acquire path) and a parent pid is not guaranteed to outlive
+    the assertion. The child does nothing but sleep, and is killed on exit.
+    """
+
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        yield child.pid
+    finally:
+        child.kill()
+        child.wait(timeout=WAIT)
+
+
+def test_a_dead_owners_lane_is_taken_over_and_the_takeover_is_a_receipt():
+    """R-L2's first half, and the one the operator's session needed.
+
+    A sidecar left by a killed serve is not a holder: the kernel released that
+    process's lock when it died, and the file is the only thing still claiming
+    the lane. Taking it is right; taking it SILENTLY is what would leave a
+    launcher unable to tell a recovered restart from a boot into an empty root.
+    """
+
+    root = _store_root()
+    dead = _dead_pid()
+    lines: list[dict] = []
+    socket_owner_path(root).parent.mkdir(parents=True, exist_ok=True)
+    socket_owner_path(root).write_text(
+        json.dumps(
+            {
+                "pid": dead,
+                "boot_id": "the-corpse",
+                "host": "127.0.0.1",
+                "port": 61000,
+                "started_at": "2026-09-04T10:28:16.817Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    lock = SocketOwnerLock(root, log=lines.append)
+    try:
+        result = lock.acquire()
+        assert result.acquired is True
+        assert result.took_over_from == dead
+        assert result.owner_started_at == "2026-09-04T10:28:16.817Z"
+        assert result.owner_state == "pid_not_running"
+        # The word the launcher decodes rides the BLOCK, not only the object.
+        assert result.payload()["took_over_from"] == dead
+        assert result.payload()["outcome"] == "acquired"
+    finally:
+        lock.release()
+
+    takeovers = [row for row in lines if row["event"] == "serve_socket_owner_takeover"]
+    assert len(takeovers) == 1
+    assert takeovers[0]["owner_pid"] == dead
+    assert takeovers[0]["owner_state"] == "pid_not_running"
+    assert takeovers[0]["pid"] == os.getpid()
+
+
+def test_a_live_owner_is_refused_exactly_as_before_and_nothing_is_taken_over():
+    """R-L2's second half, which is the half that must NOT change.
+
+    The lock exists so that "connect to the service for root X" has one answer.
+    A takeover rule that could fire against a running serve would give it two.
+    """
+
+    root = _store_root()
+    lines: list[dict] = []
+    incumbent = SocketOwnerLock(root)
+    assert incumbent.acquire().acquired is True
+    try:
+        with _a_live_foreign_process() as live:
+            incumbent.publish_owner(
+                {"pid": live, "port": 61001, "started_at": "2026-09-04T11:00:00.000Z"}
+            )
+            loser = SocketOwnerLock(root, log=lines.append)
+            result = loser.acquire()
+
+            assert result.outcome == "lock_held_by"
+            assert result.acquired is False
+            assert result.pid == live
+            assert result.took_over_from is None
+            assert result.owner_state == "pid_running"
+            # R-L1 wants the incumbent's boot time on the wire: it is how a
+            # launcher tells "the same holder I saw last time" from "a fresh
+            # one that took the lane while I was away".
+            assert result.payload()["owner_started_at"] == "2026-09-04T11:00:00.000Z"
+            assert "took_over_from" not in result.payload()
+    finally:
+        incumbent.release()
+    assert [row["event"] for row in lines] == ["serve_socket_owner_stale"]
+
+
+def test_a_held_lock_whose_sidecar_names_a_corpse_is_still_refused():
+    """The retry is bounded at one and never steals a lock that IS held.
+
+    This is the shape where the two sources of truth genuinely disagree — the
+    OS says held, the sidecar says dead — and the OS wins, because it is the
+    one that cannot be stale. One retry, then the honest ``lock_held_by``.
+    """
+
+    root = _store_root()
+    incumbent = SocketOwnerLock(root)
+    assert incumbent.acquire().acquired is True
+    try:
+        incumbent.publish_owner({"pid": _dead_pid(), "port": 61002})
+        result = SocketOwnerLock(root).acquire()
+        assert result.outcome == "lock_held_by"
+        assert result.took_over_from is None
+        assert result.owner_state == "pid_not_running"
+    finally:
+        incumbent.release()
+
+
+def test_an_absent_sidecar_is_an_ordinary_boot_and_says_nothing_at_all():
+    root = _store_root()
+    lines: list[dict] = []
+    assert not socket_owner_path(root).exists()
+    lock = SocketOwnerLock(root, log=lines.append)
+    try:
+        result = lock.acquire()
+        assert result.acquired is True
+        assert result.took_over_from is None
+        assert result.owner_started_at is None
+        assert result.owner_state == "absent"
+        # The three keys this block has always had, and not one more: the R-L2
+        # fields are ADDITIVE and absent-when-unknown, so a reader written
+        # against the old shape sees the old shape.
+        assert set(result.payload()) == {"outcome", "pid", "path"}
+    finally:
+        lock.release()
+    assert lines == []
+
+
+def test_a_corrupt_sidecar_does_not_block_the_boot_and_is_logged_by_name():
+    """Acquired, because half a JSON file is not a holder — and LOGGED, because
+    a boot that steps over one otherwise looks perfectly clean and nothing else
+    in the runtime would ever mention it."""
+
+    root = _store_root()
+    lines: list[dict] = []
+    socket_owner_path(root).parent.mkdir(parents=True, exist_ok=True)
+    socket_owner_path(root).write_text('{"pid": 25672, "por', encoding="utf-8")
+
+    lock = SocketOwnerLock(root, log=lines.append)
+    try:
+        result = lock.acquire()
+        assert result.acquired is True
+        assert result.took_over_from is None
+        assert result.owner_state == "sidecar_malformed"
+    finally:
+        lock.release()
+    assert [row["event"] for row in lines] == ["serve_socket_owner_stale"]
+    assert lines[0]["owner_state"] == "sidecar_malformed"
+    # And the advisory reader still collapses it to "nothing to dial", which is
+    # the behaviour discovery has always had and must keep.
+    assert read_socket_owner(root) == {}
+
+
+def test_the_lock_asks_the_registrys_own_liveness_function_and_not_a_second_one():
+    """"Factor one function both call" — asserted, not assumed.
+
+    Patching ``serve_registry.pid_alive`` must change the LOCK's verdict. If
+    this module ever grew its own probe the patch would land on nothing and the
+    two answers to "is that pid alive" could drift — which is exactly how a
+    ``stale_dead_pid`` row and a ``lock_held_by`` block came to disagree about
+    the same process in the first place.
+    """
+
+    from agent_runtime import serve_registry
+
+    root = _store_root()
+    socket_owner_path(root).parent.mkdir(parents=True, exist_ok=True)
+    socket_owner_path(root).write_text(
+        json.dumps({"pid": 4242, "started_at": "2026-09-04T10:28:16.817Z"}),
+        encoding="utf-8",
+    )
+
+    calls: list[int] = []
+
+    def _fake_alive(pid: int):
+        calls.append(int(pid))
+        return False
+
+    original = serve_registry.pid_alive
+    serve_registry.pid_alive = _fake_alive
+    try:
+        lock = SocketOwnerLock(root)
+        result = lock.acquire()
+        lock.release()
+    finally:
+        serve_registry.pid_alive = original
+
+    assert calls == [4242]
+    assert result.took_over_from == 4242
+
+
+def test_a_probe_that_cannot_answer_is_never_read_as_a_takeover():
+    """The fail-safe direction, and it is the OPPOSITE of the registry's.
+
+    ``serve_registry`` refuses to call an unreadable probe ``live``; the lock
+    refuses to call one DEAD. Publishing ``took_over_from`` about a process that
+    is actually serving would be a receipt for something that did not happen.
+    """
+
+    from agent_runtime import serve_registry
+
+    root = _store_root()
+    socket_owner_path(root).parent.mkdir(parents=True, exist_ok=True)
+    socket_owner_path(root).write_text(json.dumps({"pid": 4242}), encoding="utf-8")
+
+    original = serve_registry.pid_alive
+    serve_registry.pid_alive = lambda pid: None
+    try:
+        lock = SocketOwnerLock(root)
+        result = lock.acquire()
+        lock.release()
+    finally:
+        serve_registry.pid_alive = original
+
+    assert result.acquired is True
+    assert result.took_over_from is None
+    assert result.owner_state == "liveness_unreadable"
+
+
+def test_the_ready_frame_reports_the_takeover_it_performed():
+    """The whole point, on the frame a launcher actually reads."""
+
+    root = _store_root()
+    dead = _dead_pid()
+    socket_owner_path(root).parent.mkdir(parents=True, exist_ok=True)
+    socket_owner_path(root).write_text(
+        json.dumps({"pid": dead, "port": 61003, "started_at": "2026-09-04T10:28:16.817Z"}),
+        encoding="utf-8",
+    )
+
+    with running_serve() as handle:
+        block = handle.ready["socket"]
+        assert block["outcome"] == "listening"
+        assert block["took_over_from"] == dead
+        assert block["owner_started_at"] == "2026-09-04T10:28:16.817Z"
+        # And the sidecar now names THIS process, so the next boot inherits a
+        # truthful file rather than the corpse's.
+        assert read_socket_owner(root)["pid"] == handle.ready["pid"]
 
 
 # ── auth is first, and it is everything ─────────────────────────────────────
