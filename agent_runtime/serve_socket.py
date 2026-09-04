@@ -522,6 +522,17 @@ class SocketOwnerLock:
                 # released, and the kernel has already done the releasing.
                 handle, failure = self._try_lock()
             if handle is None:
+                if failure is None:
+                    # RE-READ before naming the winner, which is what this
+                    # branch did before the takeover rule existed and must keep
+                    # doing: the incumbent publishes its sidecar just after it
+                    # takes the lock, so the copy read above can predate the
+                    # very process that beat us. The read-first copy exists for
+                    # the takeover receipt; the freshest copy is what a loser
+                    # reports.
+                    owner, owner_state = self._classify_owner()
+                    owner_pid = _int_or_none(owner.get("pid"))
+                    owner_started_at = _text_or_none(owner.get("started_at"))
                 result = SocketLockResult(
                     outcome=(
                         LOCK_OUTCOME_HELD if failure is None else f"error:{failure}"
