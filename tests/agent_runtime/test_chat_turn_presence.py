@@ -245,6 +245,46 @@ def test_the_publishes_live_in_the_chat_turn_core(function_name, attr):
     )
 
 
+@pytest.mark.usefixtures("persisted_persona_samples")
+def test_a_turn_typed_at_the_cli_publishes_both_frames(
+    monkeypatch, capsys, isolate_agent_runtime_root
+):
+    """The OTHER entry point, driven rather than asserted structurally.
+
+    The real-serve proof in ``test_serve_gateway_chat_reply_lanes.py`` drives
+    ``runtime.chat.message``. This drives the lane the LOCAL launcher still uses
+    — ``_cmd_mission_chat_message`` itself, on the rig
+    ``test_chat_lease_finalization_tail`` built for exactly this (the production
+    lease, journal and finalization tail; a stub provider and transcript DB) —
+    and asserts the same two appends land, in order, with the journal's terminal
+    state on the end row.
+    """
+
+    from tests.agent_runtime.test_chat_lease_finalization_tail import (
+        _args,
+        _install_chat_lane,
+    )
+
+    harness = _install_chat_lane(monkeypatch)
+    assert harness._cmd_mission_chat_message(_args("cm-presence-1")) == 0
+    capsys.readouterr()
+
+    started = _rows(EVENT_TURN_STARTED)
+    ended = _rows(EVENT_TURN_ENDED)
+    assert len(started) == 1, started
+    assert len(ended) == 1, ended
+    assert started[0].payload["client_message_id"] == "cm-presence-1"
+    assert ended[0].payload["client_message_id"] == "cm-presence-1"
+    # The row's disappearance is the end frame's whole content, so the state it
+    # reports must be one the ``running_work`` chat-turn lane no longer counts.
+    from agent_runtime.mission_chat_turns import INFLIGHT_TURN_STATES
+
+    assert ended[0].payload["state"] not in INFLIGHT_TURN_STATES, ended[0].payload
+    # Order, off the log itself: a turn cannot end before it starts.
+    tail = [event.type for event in EventLog().tail(40)]
+    assert tail.index(EVENT_TURN_STARTED) < tail.index(EVENT_TURN_ENDED)
+
+
 def test_the_end_publish_is_in_a_finally():
     """Not at "the" end — there is no such place.
 

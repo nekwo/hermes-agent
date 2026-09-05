@@ -307,7 +307,7 @@ Two consequences, and the second is the one the operator would have felt:
 |---|---|---|
 | 1 — the publish | `6ef511230a` | `agent_runtime/chat_turn_presence.py` (`ChatTurnPresence`), two event contracts (`persona_chat.turn_started` / `persona_chat.turn_ended`), both call sites in the chat-turn core, the count golden moved 64 → 66, seven stream goldens regenerated |
 | 2 — the owner field | `8be38db8e0` | `running_work._collect_chat_turns` resolves the persona through `_owner_of` with the build-scoped memo every other lane uses |
-| 3 — the assertions | `50d71186d0` | the forcing writes removed from the C1h measurement test; `tests/agent_runtime/test_chat_turn_presence.py` (11 tests) for the publisher's contract and the two AST pins |
+| 3 — the assertions | `50d71186d0` | the forcing writes removed from the C1h measurement test; `tests/agent_runtime/test_chat_turn_presence.py` (12 tests) for the publisher's contract, the CLI lane driven end to end, and the two AST pins |
 | 4 — these notes | this commit | — |
 
 ### The frame is the delta, and the publish is an event append
@@ -335,8 +335,14 @@ this as the no-divergence guarantee), so the publish sits in the core the two
 share — `_mission_chat_commit_turn` for the START, `_cmd_mission_chat_message`
 for the END. A publish in the method shim would have left every locally-typed
 turn silent, which is the lane the local launcher still uses. It is pinned by
-AST rather than left to a reader:
-`test_chat_turn_presence.py::test_the_publishes_live_in_the_chat_turn_core`.
+AST rather than left to a reader
+(`test_chat_turn_presence.py::test_the_publishes_live_in_the_chat_turn_core`),
+and the CLI lane is also DRIVEN: `test_a_turn_typed_at_the_cli_publishes_both_frames`
+runs the real `_cmd_mission_chat_message` on the lease/journal rig
+`test_chat_lease_finalization_tail` built, and asserts both appends land, in
+order, with the journal's terminal state on the end row. The real-serve proof
+covers the method lane; between them both doors are exercised, not just
+structurally related.
 
 ## 8. What was measured AFTER
 
