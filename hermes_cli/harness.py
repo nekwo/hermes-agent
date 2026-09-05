@@ -1763,6 +1763,17 @@ def build_parser(parent_subparsers) -> None:
         action="store_true",
         help="Run stdio-only: do not race for the per-root socket ownership lock and do not listen (the ready frame reports socket.outcome=disabled)",
     )
+    serve.add_argument(
+        "--service",
+        action="store_true",
+        help=(
+            "Run as a durable service: stdin EOF means the starter DETACHED, not stop. The "
+            "runtime keeps serving both socket lanes and ends only on `serve connect --drain`, "
+            "SIGTERM, or a stdio `shutdown` sent before EOF. A starter that loses the per-root "
+            "ownership lock exits 0 naming the winner instead of becoming a second executor. "
+            "Incompatible with --no-socket (a drain would have no lane to arrive on)."
+        ),
+    )
     serve.set_defaults(func=_cmd_serve)
     # Sub-verbs under `serve`. The subparser is NOT required, so a bare
     # `harness serve --ndjson` keeps parsing exactly as it always has and still

@@ -248,6 +248,45 @@ because the socket lane is injected and OFF unless ``_cmd_serve`` turns it on.
 Client disconnect unsubscribes and does NOTHING else: the backend state a
 client was watching is the runtime's, not the client's, and surviving a client
 is the entire point of the durable service.
+
+Service mode (``--service``, L-h)
+---------------------------------
+
+Everything above survived a socket CLIENT leaving. Until this flag existed
+nothing survived the STDIO OWNER leaving: the reader loop is the main loop, so
+stdin EOF ended the process — pool joined, socket lanes closed, registry entry
+removed — and "the runtime" was in practice a child of whichever launcher had
+started it.
+
+``harness serve --ndjson --service`` separates the two facts EOF used to
+conflate:
+
+- **stdin EOF = the starter detached.** The loop logs
+  ``{"event":"stdio_owner_detached","boot_id":…,"starter_pid":…}``, broadcasts
+  it to attached socket clients, swaps the stdio frame sink for a null sink
+  (nothing is reading that pipe, and a late write must not raise), keeps BOTH
+  socket lanes serving, and parks the main thread.
+- **a stdio ``{"op":"shutdown"}`` received BEFORE EOF is still an order** and
+  ends the runtime exactly as it always has. This is what keeps the flag safe
+  for a caller that does own the pipe.
+- the park ends on ``{"op":"drain","force":true}`` over the socket (the
+  operator's stop/restart verb, from outside), on ``SIGTERM`` where the platform
+  delivers one, or on that stdio ``shutdown``. Then the SAME finalization runs:
+  pool shutdown, terminal frame, lane close, unregister, unchanged exit codes.
+- a ``--service`` starter that LOSES the per-root ownership lock exits 0 with
+  ``{"event":"serve_owner_exists","pid":<winner>,"port":<winner's>}`` and serves
+  nothing — no pool, no registry row, no ready frame. A stdio serve that loses
+  the lock still runs stdio (unchanged); a service that lost it would be a
+  second, undiscoverable executor against one store, which is the thing F1
+  named.
+- ``service`` (bool) and ``starter_pid`` ride the registry row and all three
+  greeting frames (``ready``/``hello_ok``/``version``), and ``"service"`` is
+  additionally a key on the ``ops`` manifest whose PRESENCE tells a client that
+  this runtime understands the flag at all. The ops contract integer is
+  unchanged: these are added keys, not a new shape.
+
+Without ``--service`` none of the above is reachable and every frame, code and
+teardown order is byte-identical to what it was.
 """
 
 from __future__ import annotations
@@ -970,6 +1009,57 @@ _DRAIN_EXIT_DEADLINE_SECONDS = 15.0
 #: is normally one poll interval away; past this bound the drain is declared
 #: abandoned IN A FRAME rather than exiting silently.
 _DRAIN_ABANDON_GRACE_SECONDS = 5.0
+#: How often the ``--service`` park re-checks the drain latch while waiting on
+#: its stop event. The event itself is what normally wakes it — this is a cheap
+#: safety net, not the mechanism: a missed wakeup would otherwise be a service
+#: that drained, published its terminal frame, and then sat there forever. Half
+#: a second of a sleeping thread costs nothing and bounds that class of bug.
+_SERVICE_PARK_POLL_SECONDS = 0.5
+
+
+def _install_service_stop_signal(stop: threading.Event) -> Any:
+    """Make ``SIGTERM`` set *stop*; return what to restore, or ``None``.
+
+    Installed only for the ``--service`` park and removed when it ends, so no
+    non-service serve's signal disposition is touched at all.
+
+    Honest about the platform, because this is the half that cannot be proven
+    here. On POSIX this is the ordinary stop verb: ``kill <pid>`` sets the event
+    and the finalization below runs unchanged. **On Windows it is very nearly
+    decoration** — a handler can be registered, but nothing in the OS delivers
+    SIGTERM to another process: ``os.kill(pid, SIGTERM)`` is ``TerminateProcess``
+    and the handler never runs. The Windows stop verbs are therefore the socket
+    ones (``harness serve connect --drain``), which is what the launcher will
+    use, and what the e2e proof exercises.
+
+    Never raises: ``signal.signal`` refuses to run off the main thread, which is
+    exactly where every ``serve_loop`` unit test calls this from. That case
+    degrades to "no handler", which is today's behaviour.
+    """
+
+    try:
+        import signal as _signal
+
+        previous = _signal.getsignal(_signal.SIGTERM)
+        _signal.signal(_signal.SIGTERM, lambda *_args: stop.set())
+        return (_signal.SIGTERM, previous)
+    except Exception:  # pragma: no cover - platform/thread dependent
+        return None
+
+
+def _restore_service_stop_signal(saved: Any) -> None:
+    """Undo :func:`_install_service_stop_signal`. Never raises."""
+
+    if not saved:
+        return
+    try:
+        import signal as _signal
+
+        _signal.signal(saved[0], saved[1])
+    except Exception:  # pragma: no cover - platform/thread dependent
+        pass
+
+
 #: How long ONE request may produce nothing before the loop describes it, on
 #: the lane that asked, as ``{"id":…,"event":"request_progress","state":…}``.
 #:
@@ -1347,17 +1437,53 @@ def current_serve_request_id() -> str | None:
 
 
 class _FrameWriter:
-    """Sole owner of the real stdout; one lock keeps frames atomic."""
+    """Sole owner of the real stdout; one lock keeps frames atomic.
 
-    def __init__(self, stream: TextIO):
-        self._stream = stream
+    ``detachable`` is the service lane's one concession (L-h item 1) and it is
+    OFF by default, which is what keeps every non-``--service`` serve
+    byte-identical: with it off there is no ``detach()`` call site and the
+    ``BrokenPipeError`` branch below is unreachable, so a write to a dead pipe
+    raises exactly where it always did. With it on, the writer can be told its
+    audience has gone — the starter closed our stdin and walked away — after
+    which frames are DROPPED rather than raised. A durable service must not die
+    of the observer leaving; that is the whole finding.
+    """
+
+    def __init__(self, stream: TextIO, *, detachable: bool = False):
+        self._stream: TextIO | None = stream
         self._lock = threading.Lock()
+        self._detachable = bool(detachable)
+
+    def detach(self) -> None:
+        """Swap the starter's pipe for a null sink. Idempotent."""
+
+        with self._lock:
+            self._stream = None
+
+    @property
+    def detached(self) -> bool:
+        with self._lock:
+            return self._stream is None
 
     def emit(self, frame: dict[str, Any]) -> None:
         payload = json.dumps(frame, ensure_ascii=False, default=str)
         with self._lock:
-            self._stream.write(payload + "\n")
-            self._stream.flush()
+            stream = self._stream
+            if stream is None:
+                # Detached: nobody is reading this pipe and there is nowhere to
+                # put the frame. Socket clients are told separately, on the lane
+                # they are actually attached to.
+                return
+            try:
+                stream.write(payload + "\n")
+                stream.flush()
+            except BrokenPipeError:
+                if not self._detachable:
+                    raise
+                # The starter went between the detach check and the write: the
+                # same fact, learned a microsecond later. Latched here so the
+                # next frame does not have to rediscover it.
+                self._stream = None
 
 
 class _LineFrameProxy(io.TextIOBase):
@@ -1892,6 +2018,7 @@ def serve_loop(
     drain_wakeup: Callable[[], None] | None = None,
     hard_exit: Callable[[int], None] | None = None,
     socket_lane: bool = False,
+    service: bool = False,
     stream_source_factory: Callable[[], Any] | None = None,
     stream_buffer_limit: int | None = None,
     stream_byte_limit: int | None = None,
@@ -1906,6 +2033,23 @@ def serve_loop(
     binds an ephemeral loopback port before ``ready`` (so the ready frame and
     the registry entry can both carry it), and starts accepting only after the
     request pool exists.
+
+    ``service`` is L-h: the runtime's lifetime stops being the stdin's. OFF by
+    default and injected like every other lever here, so a serve that nobody
+    asked to outlive its starter behaves exactly as it always has — stdin EOF
+    ends everything, byte for byte.
+
+    With it ON, EOF means one thing only: **the starter detached.** The loop
+    logs ``stdio_owner_detached``, swaps the stdio frame sink for a null sink
+    (the pipe has no reader left, and a service must not die of its observer
+    leaving), keeps BOTH socket lanes serving, and parks the main thread on a
+    stop event. Three things set that event and nothing else does: a
+    ``{"op":"drain","force":true}`` over the socket (the operator's restart
+    verb, from outside), ``SIGTERM`` where the platform delivers one, and — the
+    unchanged case — a stdio ``shutdown`` received BEFORE EOF, which never
+    reaches the park at all. When the park ends, the finalization below runs
+    exactly as it does for a stdio EOF: pool shutdown, terminal frame,
+    ``_close_socket_lane``, ``_unregister_instance``, the same exit codes.
 
     ``stream_source_factory`` is the shared subscription producer, likewise
     injectable: the default builds the real ``agent_runtime.stream``
@@ -1959,7 +2103,7 @@ def serve_loop(
 
     timeline = boot_timeline if boot_timeline is not None else BootTimeline()
     _annotate_import_tax(timeline)
-    frames = _FrameWriter(writer)
+    frames = _FrameWriter(writer, detachable=service)
     # Emitted before ANY heavy boot work (the agent_runtime import, root
     # config load, registry init, and the pre-ready orphan sweep below): a
     # supervising launcher can tell a live cold boot from a wedged child by
@@ -2189,6 +2333,21 @@ def serve_loop(
     reader_unwound = threading.Event()
     pool_shutdown_wait = True
     boot_id = uuid.uuid4().hex
+    #: WHO started this runtime, read NOW and never again. In service mode the
+    #: whole point is that the starter goes away, and a parent read after that
+    #: names the reaper/init that adopted us — a different process, and on
+    #: Windows often no process at all. Published on the greeting frames and the
+    #: registry row so an attaching client can tell "the launcher I am running
+    #: in started this" from "this was already here", which is the difference
+    #: between RL-4's ``started by this launcher`` and ``attached``.
+    starter_pid: int | None
+    try:
+        starter_pid = int(os.getppid())
+    except Exception:  # pragma: no cover - os.getppid exists everywhere we run
+        starter_pid = None
+    #: The service park's only wakeup. Set by the drain's terminal path, by
+    #: SIGTERM where the platform delivers one, and by nothing else.
+    service_stop = threading.Event()
 
     # ── socket lane state (all None unless ``socket_lane`` is on AND this
     # serve wins the per-root ownership lock) ────────────────────────────────
@@ -3956,6 +4115,12 @@ def serve_loop(
             _close_socket_lane(reason="drain")
             _unregister_instance()
             drain_finished.set()
+            # The service park's wakeup, set at the SAME instant and for the
+            # same reason as the reader's below: in service mode the main thread
+            # is parked on this event rather than blocked on a pipe, so THIS is
+            # what ``{"op":"drain","force":true}`` over the socket actually
+            # pulls. Untouched and unread on every non-service boot.
+            service_stop.set()
             if drain_wakeup is not None:
                 try:
                     drain_wakeup()
@@ -5005,13 +5170,69 @@ def serve_loop(
         # Explicit construction + shutdown rather than ``with``: the drain's
         # timeout path must be able to stop waiting on work that has proven it
         # will not finish, and a context manager always joins.
+        def _detach_stdio_owner() -> None:
+            """The starter has gone; stop writing to its pipe and say so once.
+
+            Order matters and is the whole function: the receipt is published
+            BEFORE the sink is swapped, so a starter that is merely slow to
+            close (or a socket client attached right now) actually sees it, and
+            a starter that has already gone costs one swallowed
+            ``BrokenPipeError`` instead of taking the runtime down with it.
+            """
+
+            detached = {
+                "event": "stdio_owner_detached",
+                "pid": os.getpid(),
+                "boot_id": boot_id,
+                "starter_pid": starter_pid,
+            }
+            _service_log(detached)
+            # Attached socket clients are owed this too: from here the runtime
+            # answers only them, and "the launcher that started this closed" is
+            # a fact a client showing a runtime sheet wants without asking.
+            _broadcast_lanes(detached)
+            frames.detach()
+
+        def _park_until_service_stop() -> None:
+            """Hold the main thread open until something asks the service to stop.
+
+            This is the ENTIRE lifetime change. The reader is gone, the pool and
+            both socket lanes are untouched and still serving, and the thread
+            that used to be blocked on ``os.read`` is blocked here instead —
+            so when it is released, the finalization below it runs exactly as
+            it does for a stdio EOF. Nothing is skipped, nothing is duplicated.
+
+            The event is the mechanism; the poll is a bound. See
+            ``_SERVICE_PARK_POLL_SECONDS``.
+            """
+
+            saved = _install_service_stop_signal(service_stop)
+            try:
+                while not service_stop.wait(_SERVICE_PARK_POLL_SECONDS):
+                    if drain_terminal_published.is_set():
+                        break
+            finally:
+                _restore_service_stop_signal(saved)
+
         try:
+            stdio_shutdown = False
             for raw in reader:
                 line = raw.strip()
                 if not line:
                     continue
                 if _handle_line(line, frames) == "shutdown":
+                    stdio_shutdown = True
                     break
+            # A stdio ``shutdown`` is an ORDER and EOF is an OBSERVATION, and
+            # until service mode existed the loop could not tell them apart —
+            # both simply ended the reader. They part here, and only here: an
+            # order still ends the runtime exactly as it always has (which is
+            # what makes ``--service`` safe for Update/Repair to keep using),
+            # while EOF on a service means the starter closed its end and
+            # walked away.
+            if service and not stdio_shutdown:
+                _detach_stdio_owner()
+                _park_until_service_stop()
         finally:
             # The reader is done; from here the process is unwinding normally,
             # which is what the drain monitor's grace window is waiting to see.
@@ -5146,6 +5367,25 @@ def _cmd_serve(args) -> int:
             )
         )
         return 2
+    if getattr(args, "service", False) and getattr(args, "no_socket", False):
+        # Refused rather than accepted-and-degraded, because what the
+        # combination asks for is a process with no way in and no way out: a
+        # service parks past stdin EOF, and the socket lane is the only lane a
+        # ``drain`` can arrive on. On Windows there is not even a SIGTERM to
+        # fall back to. The two flags each stay valid alone.
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": "unsupported_combination",
+                    "detail": (
+                        "--service needs the socket lane: it is the only "
+                        "transport a drain can reach a detached runtime on"
+                    ),
+                }
+            )
+        )
+        return 2
     protocol_in, protocol_out = _claim_protocol_pipes()
     writer = os.fdopen(protocol_out, "w", encoding="utf-8", newline="\n")
     # Function-local on purpose: this file is exec'd into harness.py's globals.
@@ -5199,6 +5439,10 @@ def _cmd_serve(args) -> int:
             # ``serve_loop`` unit test observes the byte-identical stdio loop
             # unless it asks for the socket by name.
             socket_lane=not getattr(args, "no_socket", False),
+            # L-h. ON only when the operator (or the launcher) says so: the
+            # default serve is still the launcher's stdio child and still dies
+            # with the pipe it was born on.
+            service=getattr(args, "service", False),
         )
     finally:
         try:
