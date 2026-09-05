@@ -243,7 +243,19 @@ REMOVED_EVENT_TYPES = frozenset(
 # writer and from the external-write memo, ``roster`` from the roster cache, and
 # ``reachability`` from the dial result on a change of word. This counter went
 # red on that commit and was moved deliberately — which is the counter working.
-SURVIVING_EVENT_COUNT = 64
+# C1h-bis registered ``persona_chat.turn_started`` / ``persona_chat.turn_ended``
+# (64 -> 66) in the SAME commit as their emitter
+# (``agent_runtime.chat_turn_presence.ChatTurnPresence``, called from the
+# chat-turn core both the method lane and the CLI lane share), per S55. They
+# exist because the stream hub publishes only when the event log moves and a
+# chat turn running a model appended nothing of its own between its write-ahead
+# record and its projection commit — so the ``running_work`` chat_turn row was in
+# the projection and no subscriber was ever handed a frame carrying it. Two types
+# rather than one with a ``change_kind``, on the ``dispatch.recorded`` /
+# ``dispatch.completed`` precedent: the row appears on one and disappears on the
+# other. This counter went red on that commit and was moved deliberately — which
+# is, again, the counter working.
+SURVIVING_EVENT_COUNT = 66
 
 
 def test_the_unemittable_event_types_are_no_longer_registered():

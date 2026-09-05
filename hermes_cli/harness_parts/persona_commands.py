@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from agent_runtime import paths
 from agent_runtime.call_authorization import CLI_CONSOLE
 from agent_runtime.chat_session_scope import is_canonical_session_persistence
+from agent_runtime.chat_turn_presence import ChatTurnPresence
 from agent_runtime.cli_format import emit_json
 from agent_runtime.config import (
     ensure_persisted_personas,
@@ -3295,6 +3296,16 @@ def _cmd_mission_chat_message(args) -> int:
     # inside the lease refused the operator's next message ``chat_busy`` long
     # after the reply it answered was on screen.
     deferred = MissionChatDeferredFinalization()
+    # C1h-bis: the turn's own two stream publishes. START is issued inside the
+    # commit, immediately after the write-ahead record that puts this turn in
+    # the ``running_work`` projection; END rides the ``finally`` below, which is
+    # the one place EVERY exit of the commit passes through — fourteen terminal
+    # journal transitions, a bare ``return`` on each refusal, and an exception
+    # that propagates all land there. Unpaired by construction: ``publish_ended``
+    # is a no-op unless START actually appended, so the busy/refused paths (which
+    # never reach a write-ahead) announce nothing. See
+    # ``agent_runtime.chat_turn_presence``.
+    presence = ChatTurnPresence()
     try:
         # Provenance decided in ONE place (owner id + observer kind from the
         # same serve-request fact) — see _mission_chat_lease_provenance for the
@@ -3305,7 +3316,7 @@ def _cmd_mission_chat_message(args) -> int:
             owner_id=safe_assignment_token(lease_owner_id),
             observer_kind=lease_observer_kind,
         ):
-            exit_code = _mission_chat_commit_turn(plan, deferred)
+            exit_code = _mission_chat_commit_turn(plan, deferred, presence)
     except PersonaChatBusyError as exc:
         # "The root is busy" is not one answer, it is four — and which one it is
         # depends on whether the turn holding the lease IS this message. The
@@ -3323,6 +3334,13 @@ def _cmd_mission_chat_message(args) -> int:
             session_established=session_established,
             exc=exc,
         )
+    finally:
+        # The turn has left the in-flight set (or never entered it). Publishing
+        # here rather than at each terminal transition is deliberate: the END
+        # frame must be built from a projection that no longer carries the row,
+        # and only this point is past every write the commit performs. Fail-safe
+        # and idempotent — see ``ChatTurnPresence.publish_ended``.
+        presence.publish_ended()
     # ── lease RELEASED ─────────────────────────────────────────────────────
     # Everything the turn owed the root is committed and reported. The root is
     # free from here, so a slow or failing deferred step delays nobody's next
@@ -3332,7 +3350,7 @@ def _cmd_mission_chat_message(args) -> int:
     return exit_code
 
 
-def _mission_chat_commit_turn(plan, deferred) -> int:
+def _mission_chat_commit_turn(plan, deferred, presence) -> int:
     """The SOLE writer for a mission-chat turn. Runs under the chat-root lease.
 
     Every durable write from ``open_chat`` onward lives here, so the lease that
@@ -3350,6 +3368,12 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
     exits. Nothing that writes the root's turn or transcript state may go in it;
     it exists for post-emit decoration whose only cost is time — today, the
     auxiliary-LLM auto-title and the metadata event that reports a title change.
+
+    ``presence`` is a ``ChatTurnPresence`` the caller owns (C1h-bis). This
+    function publishes the turn's START on it, one line after the write-ahead
+    journal record that puts the turn in the ``running_work`` projection; the
+    caller publishes the END from its ``finally``, because this function has
+    fourteen terminal transitions and no single exit.
     """
 
     # Function-local: this file is exec'd into harness.py's globals (see the
@@ -4019,6 +4043,23 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
                 MISSION_CHAT_TURN_PHASES_KEY: turn_phases.snapshot(),
             },
         )
+        # C1h-bis: the turn's START, published the moment its row is real and
+        # not one line earlier. The hub builds a FRESH projection when the event
+        # log moves, so an event appended before this record exists produces a
+        # frame with no row on it — indistinguishable, to a second console, from
+        # never publishing at all. Gated on the record actually persisting for
+        # the same reason: a skipped or rejected journal write leaves nothing for
+        # the projection to carry, and announcing it would be a claim about a row
+        # that is not there.
+        if write_ahead_outcome is MissionChatTurnPersistOutcome.PERSISTED:
+            presence.publish_started(
+                session_id=session_id,
+                client_message_id=client_message_id,
+                turn_id=stream_emitter.turn_id,
+                persona_id=normalized_persona,
+                persona_instance_id=instance.id,
+                active_session_id=active_session_id,
+            )
         # Live-log mirror, at the write-ahead point ON PURPOSE: this lane does
         # not append the operator row itself (native continuity: the runtime
         # persists it with the turn), and a head agent checking on a teammate

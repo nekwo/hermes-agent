@@ -12,6 +12,24 @@ and parses them through its real decode + read-model pipeline
 split is structural, not an oversight, and the script names both halves
 (`GENERATED_FRAME_FILES` / `PINNED_ONLY_FILES`).
 
+> **CROSS-STACK COPY STATUS (C1h-bis, 2026-09-05) — OPEN, launcher mirror OWED.**
+> Seven generated goldens moved ONE value and nothing else:
+> `core.decision_contract_hash`, from `114a8576…` to `fc9ac589…`. Two event
+> contracts were registered — `persona_chat.turn_started` and
+> `persona_chat.turn_ended`, the publishes that make a running chat turn visible
+> to a SECOND console on the `stream` lane — and that hash is a fingerprint of
+> the whole event catalog, so registering anything moves it. No frame shape, no
+> key, no row changed; the byte diff on each of the seven files is that one hex
+> string. Runtime-safe on the launcher side, which reads the field as an opaque
+> fingerprint, so the OWED work is the byte mirror plus its manifest, not a Dart
+> change: copy `delta.json`, `delta_agent_create_narrow_profile.json`,
+> `delta_batch.json`, `hydrate.json`,
+> `hydrate_authoritative_same_offset.json`, `hydrate_running_work_owner.json`,
+> `hydrate_stale_first.json` and `MANIFEST.sha256` into
+> `test/fixtures/harness_stream/` and update both manifests in the landing wave.
+> It supersedes nothing: the S0a mirror below is still owed and the same copy
+> settles both.
+
 > **CROSS-STACK COPY STATUS (S0a, 2026-09-03) — OPEN, launcher mirror OWED.**
 > Five generated goldens gained ONE additive key inside every
 > `core.persona_instances.<id>` row: `toolset_declaration` (null in these

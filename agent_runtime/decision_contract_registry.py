@@ -194,6 +194,25 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "persona_instance.chat_opened": EventContract("persona_instance.chat_opened", "Persona instance chat opened", ("persona_instance_id", "session_id"), ("persona_id",)),
     "persona_chat.projected": EventContract("persona_chat.projected", "Persona chat turn projection committed", ("persona_instance_id", "root_chat_session_id", "client_message_id", "turn_id", "change_kind"), ("active_session_id", "native_revision")),
     "persona_chat.metadata_updated": EventContract("persona_chat.metadata_updated", "Persona chat session metadata updated", ("persona_instance_id", "root_chat_session_id", "change_kind"), ()),
+    # C1h-bis (2026-09-05). The turn's own two publishes, and the reason they are
+    # a PAIR of types rather than one type with a ``change_kind``: the
+    # ``running_work`` chat_turn row APPEARS on one and DISAPPEARS on the other,
+    # so "how many turns began here" and "which of them settled" are different
+    # questions about different rows and a log an operator greps should answer
+    # them separately. The precedent is one lane over in the SAME projection —
+    # ``dispatch.recorded`` / ``dispatch.completed`` — which is exactly why that
+    # lane's rows reach a subscriber's screen and, until these landed, the chat
+    # lane's did not: the hub publishes when the event log moves, and a turn
+    # running a model appends nothing of its own between its write-ahead record
+    # and its projection commit. No new FRAME kind rides with them — the
+    # running_work delta the existing pipeline already builds IS the frame.
+    # Emitter: ``agent_runtime.chat_turn_presence.ChatTurnPresence``, called from
+    # the chat-turn core that the method lane (``runtime.chat.message``) and the
+    # CLI lane (``harness mission-chat message``) share. ``state`` on the end row
+    # is the journal's own word, read at publish time, so it cannot drift from
+    # what the projection will report.
+    "persona_chat.turn_started": EventContract("persona_chat.turn_started", "Persona chat turn started", ("persona_instance_id", "root_chat_session_id", "client_message_id", "turn_id"), ("active_session_id",)),
+    "persona_chat.turn_ended": EventContract("persona_chat.turn_ended", "Persona chat turn left the in-flight set", ("persona_instance_id", "root_chat_session_id", "client_message_id", "turn_id", "state"), ("active_session_id",)),
     # The refusal counter-record (2026-08-09). Every durable write a mission-chat
     # turn performs lives inside the chat-root lease, so a send REFUSED on the
     # way to that lease wrote nothing at all — the investigation went looking for
