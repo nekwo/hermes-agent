@@ -38,7 +38,7 @@ from pathlib import Path
 
 from agent.charsheet import prompts
 from agent.charsheet.errors import ProviderTimeout
-from agent.charsheet.palette import DEFAULT_MAX_COLORS, build_palette, lock_to_palette
+from agent.charsheet.palette import DEFAULT_MAX_COLORS, build_palette, lock_to_palette, palette_table
 from agent.charsheet.spec import CHAR8, RowSpec, SheetSpec, row_key
 
 # --- Upstream reuse (the ONE intentional drift surface) ----------------------
@@ -89,6 +89,7 @@ __all__ = [
     "generate_turnaround",
     "handedness_summary",
     "pad_to_square",
+    "palette_table",
     "provider_timeout_seconds",
     "recomposite_on_magenta",
     "registration_window",

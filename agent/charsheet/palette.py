@@ -134,6 +134,52 @@ def palette_colors(palette) -> list[tuple[int, int, int]]:
     return triples
 
 
+def palette_table(image) -> list[str]:
+    """*image*'s opaque colour table as ``#RRGGBBAA``, most-used pixel first.
+
+    This is the COMPOSE-TIME palette in the shape a consumer can render. The
+    sheet is quantized INTO :func:`build_palette`'s table, so its distinct
+    opaque colours are that table — and counting them here gives the one thing
+    the palette image cannot: how much of the character each colour is. A swatch
+    strip's first swatches are then the character's dominant colours instead of
+    whatever order the median cut happened to assign its slots.
+
+    Measured off the composed sheet rather than off the ``P``-mode palette on
+    purpose: a slot the quantizer allocated and no cell ever used is not a
+    colour of this character, and would render as a swatch of a colour that is
+    nowhere on the sheet.
+
+    Alpha is ``ff`` on every entry, and that is a statement rather than filler.
+    The locked palette is an OPAQUE RGB table — :func:`lock_to_palette` carries
+    alpha separately, byte for byte, so one jacket blue appears at dozens of
+    alphas along an antialiased edge — and grouping by RGBA would answer
+    thousands of entries for a 48-colour sheet. Pixels at or below
+    :data:`ALPHA_FLOOR` are background and vote for nothing: the same floor
+    :func:`build_palette` samples with.
+
+    Ties break on the colour itself, so equal coverage always comes back in one
+    order and a consumer diffing two sheets' tables reads a real change rather
+    than a histogram's iteration order.
+    """
+    rgba = _as_rgba(image)
+    # Cap = pixel count, so this can only answer None for an image with more
+    # distinct colours than pixels, which does not exist.
+    colors = rgba.getcolors(maxcolors=max(1, rgba.width * rgba.height))
+    if colors is None:  # pragma: no cover — unreachable by the line above
+        raise ValueError("could not histogram the sheet: too many distinct colours")
+    counts: dict[tuple[int, int, int], int] = {}
+    for count, pixel in colors:
+        red, green, blue, alpha = pixel
+        if alpha <= ALPHA_FLOOR:
+            continue
+        key = (red, green, blue)
+        counts[key] = counts.get(key, 0) + count
+    return [
+        "#{:02x}{:02x}{:02x}ff".format(*color)
+        for color in sorted(counts, key=lambda color: (-counts[color], color))
+    ]
+
+
 def lock_to_palette(frame_rgba, palette):
     """Quantize *frame_rgba*'s RGB into *palette*, keeping its alpha unchanged.
 

@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from agent.charsheet import palette as palette_mod
+from agent.charsheet.palette import palette_table
 from agent.charsheet import pipeline
 from agent.charsheet import prompts
 from agent.charsheet.spec import (
@@ -430,6 +431,86 @@ def test_locking_a_cell_keeps_its_alpha_and_zeroes_only_transparent_pixels(refs)
 def test_locking_refuses_anything_that_is_not_a_built_palette(refs):
     with pytest.raises(ValueError, match="must be a 'P'-mode image"):
         palette_mod.lock_to_palette(Image.new("RGBA", (4, 4)), Image.new("RGB", (4, 4)))
+
+
+# ───────────────────── the persisted colour table ─────────────────────
+
+
+def _swatches(*runs):
+    """A 1-pixel-tall RGBA image spelling ``(colour, count)`` runs left to right."""
+    pixels = [color for color, count in runs for _ in range(count)]
+    image = Image.new("RGBA", (len(pixels), 1))
+    image.putdata(pixels)
+    return image
+
+
+def test_the_table_is_the_colours_in_DESCENDING_pixel_count():
+    """Two colours, and the ORDER is the assertion — positionally, not as a set.
+
+    The strip's first swatches have to be the character's dominant colours, so
+    reversing or dropping the sort must go red on something. A membership
+    assertion would pass under both.
+    """
+    table = palette_table(_swatches(((10, 20, 30, 255), 3), ((200, 100, 50, 255), 9)))
+
+    assert table == ["#c86432ff", "#0a141eff"]
+
+
+def test_a_third_colour_lands_where_its_coverage_puts_it():
+    """Two entries can be ordered by luck; three cannot."""
+    table = palette_table(
+        _swatches(((1, 1, 1, 255), 5), ((2, 2, 2, 255), 50), ((3, 3, 3, 255), 20))
+    )
+
+    assert table == ["#020202ff", "#030303ff", "#010101ff"]
+
+
+def test_equal_coverage_breaks_the_tie_on_the_colour_itself():
+    """Determinism: the same sheet must answer the same table, run after run.
+
+    Without a total order the tie falls to histogram iteration order, and a
+    consumer diffing two sheets' tables would read a change that is not one.
+    """
+    runs = (((9, 9, 9, 255), 4), ((1, 2, 3, 255), 4))
+
+    assert palette_table(_swatches(*runs)) == ["#010203ff", "#090909ff"]
+    assert palette_table(_swatches(*reversed(runs))) == ["#010203ff", "#090909ff"]
+
+
+def test_background_pixels_vote_for_nothing():
+    """At or below the sample floor is background — the same floor the palette
+    was BUILT with, so the table cannot name a colour the palette never saw."""
+    image = _swatches(((7, 7, 7, 255), 2), ((250, 0, 250, palette_mod.ALPHA_FLOOR), 40))
+
+    assert palette_table(image) == ["#070707ff"]
+
+
+def test_one_colour_at_many_alphas_is_ONE_entry_at_full_alpha():
+    """The locked palette is an opaque RGB table; alpha rides separately.
+
+    Grouping by RGBA instead would answer one entry per antialiased edge step —
+    thousands of swatches for a 48-colour sheet.
+    """
+    image = _swatches(
+        ((60, 70, 80, 255), 2), ((60, 70, 80, 40), 2), ((60, 70, 80, 200), 2)
+    )
+
+    assert palette_table(image) == ["#3c4650ff"]
+
+
+def test_the_composed_sheet_s_table_is_exactly_the_colours_on_it(sheet):
+    """End to end: the table names the sheet's own distinct opaque colours."""
+    colors = sheet.getcolors(maxcolors=sheet.width * sheet.height) or []
+    opaque = {
+        "#{:02x}{:02x}{:02x}ff".format(r, g, b)
+        for _count, (r, g, b, alpha) in colors
+        if alpha > palette_mod.ALPHA_FLOOR
+    }
+
+    table = palette_table(sheet)
+
+    assert set(table) == opaque
+    assert len(table) == len(opaque), "a colour must not appear twice in the table"
 
 
 # ───────────────────── grounding references / magenta ─────────────────────

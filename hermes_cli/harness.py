@@ -4379,12 +4379,21 @@ def _characters_installed_rows() -> list[dict]:
     to one that passed clean — which is the shape this whole lane exists to
     retire. It is a list of ``{row, gain, basis}``, empty for nearly every
     character.
+
+    ``palette`` is the compose-time colour table (``#RRGGBBAA``, most-used
+    first) and is CONDITIONAL, unlike its neighbours: a character composed
+    before the table existed carries no key at all rather than an empty list.
+    "Nobody recorded a palette" and "this sheet has no colours" are different
+    facts, and the launcher's swatch strip owes an old character a blank strip
+    and a colourless one a defect report. See
+    ``agent/charsheet/draft.py::read_palette``.
     """
     from agent.charsheet.draft import (
         MANIFEST_FILENAME,
         SHEET_FILENAME,
         _handedness_accepted,
         characters_dir,
+        read_palette,
     )
 
     root = characters_dir()
@@ -4400,6 +4409,7 @@ def _characters_installed_rows() -> list[dict]:
         if not isinstance(manifest, dict):
             manifest = {}
         sheet = child / SHEET_FILENAME
+        palette = read_palette(child)
         rows.append(
             {
                 "slug": str(manifest.get("slug", "") or child.name),
@@ -4409,6 +4419,7 @@ def _characters_installed_rows() -> list[dict]:
                 "directory": str(child),
                 "sheet": str(sheet) if sheet.is_file() else "",
                 "installed": sheet.is_file(),
+                **({"palette": palette} if palette is not None else {}),
                 "handednessAccepted": _handedness_accepted(manifest),
             }
         )

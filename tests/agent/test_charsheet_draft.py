@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from agent.charsheet import palette as palette_mod
 from agent.charsheet import pipeline
 from agent.charsheet.draft_lock import LOCK_FILENAME
 from agent.charsheet.errors import DraftBusy
@@ -30,6 +31,7 @@ from agent.charsheet.draft import (
     DEFAULT_THUMB_SCALE,
     DRAFTS_DIRNAME,
     MANIFEST_FILENAME,
+    PALETTE_FILENAME,
     SHEET_FILENAME,
     STAGES,
     CharacterDraft,
@@ -2886,3 +2888,102 @@ def test_a_clean_compose_records_no_acceptance_at_all(installed):
     )
 
     assert "handednessAccepted" not in manifest
+
+
+# ─────────────────────── the persisted colour table ───────────────────────
+
+
+def _sheet_counts(sheet):
+    """``{#rrggbbff: pixels}`` over the sheet's opaque pixels."""
+    counts: dict[str, int] = {}
+    for count, (r, g, b, alpha) in sheet.getcolors(maxcolors=sheet.width * sheet.height) or []:
+        if alpha <= palette_mod.ALPHA_FLOOR:
+            continue
+        key = "#{:02x}{:02x}{:02x}ff".format(r, g, b)
+        counts[key] = counts.get(key, 0) + count
+    return counts
+
+
+def test_compose_writes_the_colour_table_beside_the_draft_AND_the_install(installed):
+    """One measurement, two homes — and they are the same bytes.
+
+    The draft's copy is what `status --json` answers with while an operator is
+    still working; the install's is what `characters list` answers with after.
+    Neither can stand in for the other (a slug can be re-composed only by the
+    draft that owns it, which is why the clobber guard exists), so both are
+    written from the one table measured off the sheet being installed.
+    """
+    install = characters_dir() / installed["slug"]
+    draft = CharacterDraft.load(installed["id"])
+
+    from_install = json.loads((install / PALETTE_FILENAME).read_text(encoding="utf-8"))
+    from_draft = json.loads((draft.directory / PALETTE_FILENAME).read_text(encoding="utf-8"))
+
+    assert from_install == from_draft
+    assert from_install, "a validated sheet has opaque pixels, so the table is never empty"
+    assert all(re.fullmatch(r"#[0-9a-f]{8}", entry) for entry in from_install)
+
+
+def test_the_persisted_order_is_DESCENDING_pixel_count_on_the_real_sheet(installed):
+    """The killing mutation is reversing (or dropping) the sort.
+
+    Asserted against counts recomputed from the installed sheet, and the
+    assertion is given teeth first: a sheet whose colours all covered the same
+    area would pass any order, so the distinct-count check runs before the
+    ordering one.
+    """
+    install = characters_dir() / installed["slug"]
+    with Image.open(install / SHEET_FILENAME) as opened:
+        sheet = opened.convert("RGBA")
+    counts = _sheet_counts(sheet)
+    table = json.loads((install / PALETTE_FILENAME).read_text(encoding="utf-8"))
+
+    assert set(table) == set(counts)
+    ordered = [counts[entry] for entry in table]
+    assert len(set(ordered)) > 1, "this sheet cannot tell any order from any other"
+    assert ordered == sorted(ordered, reverse=True)
+    assert ordered != sorted(ordered), "a reversed sort must not read as passing"
+
+
+def test_status_publishes_the_table_the_draft_carries(installed):
+    draft = CharacterDraft.load(installed["id"])
+    on_disk = json.loads((draft.directory / PALETTE_FILENAME).read_text(encoding="utf-8"))
+
+    assert draft.status_payload()["palette"] == on_disk
+
+
+def test_a_draft_that_has_not_composed_carries_NO_palette_key(fake, base):
+    """Absent stays absent. An uncomposed draft has no colour table, and `[]`
+    would tell a consumer this sheet has no colours — a different fact, and one
+    a validated sheet cannot have."""
+    draft = run_to_rows(base)
+
+    payload = draft.status_payload()
+
+    assert "palette" not in payload
+    assert payload["stage"] == "rows"
+
+
+def test_a_table_that_cannot_be_read_is_absence_and_not_an_exception(installed):
+    """A display detail must not take the whole payload down.
+
+    The file is restored afterwards: `installed` is a module-scoped character
+    several tests read, and a fixture left corrupt by one of them is the kind of
+    cross-test coupling per-file isolation cannot save anyone from.
+    """
+    draft = CharacterDraft.load(installed["id"])
+    table = draft.directory / PALETTE_FILENAME
+    original = table.read_bytes()
+    try:
+        table.write_text("{not json", encoding="utf-8")
+        assert "palette" not in draft.status_payload()
+
+        table.write_text('{"colors": []}', encoding="utf-8")
+        assert "palette" not in draft.status_payload()
+
+        table.unlink()
+        assert "palette" not in draft.status_payload()
+    finally:
+        table.write_bytes(original)
+
+    assert draft.status_payload()["palette"] == json.loads(original)

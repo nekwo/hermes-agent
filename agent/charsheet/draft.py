@@ -97,6 +97,14 @@ DRAFTS_DIRNAME = ".drafts"
 DRAFT_FILENAME = "draft.json"
 MANIFEST_FILENAME = "character.json"
 SHEET_FILENAME = "sheet.webp"
+# The compose-time colour table, beside the sheet AND beside the draft that
+# composed it. Its own file rather than a manifest key: the launcher's swatch
+# strip is a display surface that wants only this, and the two directories that
+# carry it are different objects whose lifetimes do not agree (a draft can be
+# recomposed over a slug another draft installed — see the clobber guard in
+# `compose`), so neither one can answer for the other. Absent means a character
+# composed before 2026-09-04; see `read_palette`.
+PALETTE_FILENAME = "palette.json"
 REVISIONS_DIRNAME = "revisions"
 THUMBS_DIRNAME = "thumbs"
 
@@ -342,7 +350,7 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _write_json_atomic(path: Path, payload: dict) -> None:
+def _write_json_atomic(path: Path, payload: dict | list) -> None:
     """tmp + fsync + :func:`os.replace` — a reader never sees a partial file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
@@ -478,6 +486,31 @@ def path_or_none(path: Path | None) -> str | None:
     how the fourth field got missed; the CLI imports this one now.
     """
     return str(path) if path is not None else None
+
+
+def read_palette(directory: Path) -> list[str] | None:
+    """The compose-time colour table in *directory*, or ``None`` if there is none.
+
+    ``None`` and ``[]`` are DIFFERENT facts on the wire and this is where the
+    difference is made. ``None`` means nobody wrote a table here — the character
+    was composed before the table existed, or this draft has not composed yet —
+    and every payload built on it omits the key entirely. ``[]`` would mean a
+    sheet with no opaque pixels at all, which validation refuses, so it is not a
+    value any composed character can carry. A producer that flattened absence to
+    an empty list would hand the launcher one value for two facts, and the strip
+    would render "no colours" for a character that simply predates this field.
+
+    Total by construction: a missing, unreadable or malformed file is absence,
+    not an exception. A colour table is a display detail, and taking
+    ``characters list`` down over one is a worse outcome than a missing strip.
+    """
+    try:
+        raw = json.loads((directory / PALETTE_FILENAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, list):
+        return None
+    return [str(entry) for entry in raw]
 
 
 # ─────────────────────────────── the draft ───────────────────────────────
@@ -1641,6 +1674,19 @@ class CharacterDraft:
         sheet_path = directory / SHEET_FILENAME
         _write_bytes_atomic(sheet_path, pipeline.atlas_to_webp_bytes(sheet))
 
+        # The colour table, measured ONCE off the sheet that is being written
+        # and copied to both homes. The producer knows this at write time; a
+        # consumer deriving it would decode a 1536x2080 WebP per character on a
+        # surface that asks this process even for a cropped thumbnail. Both
+        # directories get it because they are different objects: the draft's
+        # copy is what `status --json` answers with while the operator is still
+        # working, and the install's is what `characters list` answers with
+        # after — and a recompose over a slug another draft owns is refused
+        # above precisely because the two cannot stand in for each other.
+        palette = pipeline.palette_table(sheet)
+        _write_json_atomic(directory / PALETTE_FILENAME, palette)
+        _write_json_atomic(self.directory / PALETTE_FILENAME, palette)
+
         rows = [_row_json(row) for row in spec.rows()]
         manifest = {
             "schema": SCHEMA,
@@ -1718,6 +1764,11 @@ class CharacterDraft:
             row.key: self._item_status(store, row_item(row.key))
             for row in spec.authored_rows()
         }
+        # ABSENT, not empty, when this draft has not composed. The key is spelled
+        # as a conditional entry in a fixed position rather than appended, so a
+        # consumer reading key order sees one shape; and an uncomposed draft is
+        # not the same fact as a sheet with no colours (`read_palette`).
+        palette = read_palette(self.directory)
         return {
             "schema": SCHEMA,
             "id": self.id,
@@ -1735,6 +1786,7 @@ class CharacterDraft:
             "created": str(self._data.get("created", "")),
             "updated": str(self._data.get("updated", "")),
             "baseImage": path_or_none(base),
+            **({"palette": palette} if palette is not None else {}),
             "spec": {
                 **spec_to_dict(spec),
                 "rows": [_row_json(row) for row in spec.rows()],

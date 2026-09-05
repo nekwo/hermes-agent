@@ -407,6 +407,36 @@ def _thumb_kind(probes: list[dict], drafts: list[tuple[str, str, str]]) -> tuple
     }, documents
 
 
+#: What ``compose`` writes beside a draft and beside its install. Two entries is
+#: enough to be a list of colour strings and nothing here reads the values --
+#: this dump records key PATHS, never values.
+_PROBE_PALETTE = ["#112233ff", "#445566ff"]
+
+
+@contextlib.contextmanager
+def _palette_files(directories: list[Path]):
+    """Put a colour table beside each directory for the duration of a probe.
+
+    Nothing in this module can run a real ``compose`` -- that needs a provider
+    and ten generated rows -- so the file is written the way ``compose`` writes
+    it and removed again. It has to exist for SOME probe or the ``palette`` key
+    would be invisible to this dump entirely, which is the exact blindness the
+    module exists to end: a conditional key nobody measures is a key the
+    launcher meets for the first time at runtime, and its
+    ``sidecarDisagreementsWithHermes`` walks every payload key by default-deny.
+    """
+    from agent.charsheet.draft import PALETTE_FILENAME
+
+    written = [directory / PALETTE_FILENAME for directory in directories]
+    for path in written:
+        path.write_text(json.dumps(_PROBE_PALETTE), encoding="utf-8")
+    try:
+        yield
+    finally:
+        for path in written:
+            path.unlink(missing_ok=True)
+
+
 def _status_kind(probes: list[dict], drafts: list[tuple[str, str, str]]) -> tuple[dict, dict]:
     """The whole draft state, item records included.
 
@@ -416,15 +446,27 @@ def _status_kind(probes: list[dict], drafts: list[tuple[str, str, str]]) -> tupl
     :data:`DYNAMIC_KEY` is the difference: the names stay out, the shape comes
     in. It is also where ``hermesHome`` lives, the field whose absence from this
     dump cost a person a re-run of the verbs to discover.
+
+    Two modes, and the second is a fact about the DRAFT DIRECTORY rather than
+    about a flag: a draft that has composed carries a colour table beside it and
+    answers a ``palette`` key; one that has not answers no key at all. Modes are
+    how this dump already says "present here, absent there", and the alternative
+    -- probing only the uncomposed state -- would have recorded a contract that
+    is silent about a key every composed character emits.
     """
+    from agent.charsheet.draft import CharacterDraft
     from hermes_cli.harness import _cmd_characters_status
 
-    documents = {
-        "default": [
+    def emit() -> list[dict]:
+        return [
             _emit(_cmd_characters_status, draft=draft_id)
             for draft_id, _row, _dir in drafts
         ]
-    }
+
+    documents = {"default": emit()}
+    directories = [CharacterDraft.load(draft_id).directory for draft_id, _row, _dir in drafts]
+    with _palette_files(directories):
+        documents["palette"] = emit()
     return {
         "argv": "harness characters status --draft <id> --json",
         "producer": "agent/charsheet/draft.py::CharacterDraft.status_payload",
@@ -444,10 +486,21 @@ def _list_kind(probes: list[dict], drafts: list[tuple[str, str, str]]) -> tuple[
     caught by the same rule as everywhere else.
 
     The second field the row wanted is here: ``drafts[].hermesHome``.
+
+    The ``palette`` mode is the installed side of the same conditional
+    ``status`` carries: a character composed before the colour table existed has
+    no ``palette`` key on its row, one composed after has the table. Both are
+    probed because the launcher's swatch strip owes the two different renders.
     """
+    from agent.charsheet.draft import characters_dir
     from hermes_cli.harness import _cmd_characters_list
 
-    documents = {"default": [_emit(_cmd_characters_list), _emit(_cmd_characters_list)]}
+    def emit() -> list[dict]:
+        return [_emit(_cmd_characters_list), _emit(_cmd_characters_list)]
+
+    documents = {"default": emit()}
+    with _palette_files([characters_dir() / probe["slug"] for probe in probes]):
+        documents["palette"] = emit()
     return {
         "argv": "harness characters list --json",
         "producer": (

@@ -2587,3 +2587,58 @@ def test_the_autopilot_has_no_door_for_overriding_a_handedness_refusal():
         )
 
     assert harness._characters_auto_next("compose", object()) is None
+
+
+# ──────────────────── the colour table on the list row ────────────────────
+
+
+def _compose_one(capsys, base_image) -> tuple[str, str]:
+    """Drive the whole flow to an installed character; return (draft id, slug)."""
+    draft_id = start_draft(capsys, "--base-image", str(base_image))
+    run(["harness", "characters", "turnaround", "--draft", draft_id, "--json"], capsys)
+    run(["harness", "characters", "approve-direction", "--draft", draft_id, "--all", "--json"], capsys)
+    run(["harness", "characters", "rows", "--draft", draft_id, "--json"], capsys)
+    code, composed = run(["harness", "characters", "compose", "--draft", draft_id, "--json"], capsys)
+    assert (code, composed["ok"]) == (0, True)
+    return draft_id, composed["slug"]
+
+
+def test_an_installed_row_and_the_draft_status_publish_the_SAME_table(
+    fake, base_image, capsys
+):
+    """The launcher reads both payloads, and a swatch strip drawn from one must
+    not disagree with a strip drawn from the other."""
+    from agent.charsheet.draft import PALETTE_FILENAME
+
+    draft_id, slug = _compose_one(capsys, base_image)
+
+    code, listed = run(["harness", "characters", "list", "--json"], capsys)
+    assert code == 0
+    row = next(entry for entry in listed["characters"] if entry["slug"] == slug)
+    code, status = run(["harness", "characters", "status", "--draft", draft_id, "--json"], capsys)
+    assert code == 0
+
+    on_disk = json.loads(
+        (get_shared_characters_dir() / slug / PALETTE_FILENAME).read_text(encoding="utf-8")
+    )
+    assert row["palette"] == on_disk
+    assert status["status"]["palette"] == on_disk
+    assert on_disk == sorted(set(on_disk), key=on_disk.index), "no colour twice"
+
+
+def test_a_character_composed_before_the_table_existed_carries_NO_key(
+    fake, base_image, capsys
+):
+    """Absent, never `[]`. The launcher owes an old character a blank strip and a
+    colourless one a defect report, and one value for both facts destroys that."""
+    from agent.charsheet.draft import PALETTE_FILENAME
+
+    _draft_id, slug = _compose_one(capsys, base_image)
+    (get_shared_characters_dir() / slug / PALETTE_FILENAME).unlink()
+
+    code, listed = run(["harness", "characters", "list", "--json"], capsys)
+
+    assert code == 0
+    row = next(entry for entry in listed["characters"] if entry["slug"] == slug)
+    assert "palette" not in row
+    assert row["installed"] is True
