@@ -230,6 +230,8 @@ def register_serve_instance(
     port: int | None = None,
     socket_started_at: str | None = None,
     hermes_home: str | None = None,
+    service: bool = False,
+    starter_pid: int | None = None,
 ) -> ServeInstanceRegistration:
     """Announce this serve under *store_root*. Best effort, always reported.
 
@@ -241,6 +243,18 @@ def register_serve_instance(
     socket ownership lock, so discovery reads the port off the entry whose
     liveness this module has already classified rather than out of a second file
     with its own staleness story.
+
+    ``service`` and ``starter_pid`` are the service-lifetime fields (L-h) and
+    follow the same ALWAYS-WRITTEN rule, for a sharper version of the same
+    reason: a client discovering this row is deciding whether to ATTACH to the
+    process or to start one, and "closing my end of that pipe would kill this
+    runtime" versus "it will keep going without me" is the whole decision.
+    ``False`` says the runtime dies with its stdin; a MISSING key says the row
+    was written by a hermes that predates service mode — which is a different
+    fact, and the launcher's fallback condition. ``starter_pid`` is the pid that
+    STARTED the process (its parent at boot, computed by the caller like
+    ``hermes_home`` above), not its parent now: a detached service is reparented
+    the moment its starter exits, so a value read later names somebody else.
 
     ``hermes_home`` follows the same additive-null rule and is likewise ALWAYS
     written — see the module docstring for what it does and does not mean. The
@@ -268,6 +282,11 @@ def register_serve_instance(
         # this key will not have moved. Null says "resolution failed"; an
         # ABSENT key says "this entry predates the field".
         "hermes_home": None if hermes_home is None else str(hermes_home),
+        # Whether this runtime outlives the stdin it was started on, and who
+        # started it. See the docstring: present-and-false and absent are two
+        # different answers.
+        "service": bool(service),
+        "starter_pid": None if starter_pid is None else int(starter_pid),
         "started_at": _now_iso(),
         # The identity baseline the recycled-pid check compares against. None
         # when the OS would not say — recorded as null so the reader knows the

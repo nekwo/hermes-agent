@@ -309,6 +309,12 @@ def test_stdio_learns_the_op_set_from_ready_and_can_re_ask_version():
             "version",
         ],
         "subscribe_lanes": ["stream"],
+        # L-h. Present on every manifest and FALSE here, because this serve is
+        # an ordinary stdio child started without ``--service``. The PRESENCE of
+        # the key is the launcher's membership gate — a hermes that predates
+        # service mode carries no ``service`` key anywhere — and the value is
+        # this one process's lifetime.
+        "service": False,
     }
     with _stdio_serve() as (pipe, sink):
         ready = sink.wait_for("ready")
@@ -349,6 +355,9 @@ def test_the_socket_greeting_advertises_the_ops_it_will_actually_answer():
                     "version",
                 ],
                 "subscribe_lanes": ["stream"],
+                # L-h, on the socket greeting for the same reason as on
+                # ``ready``: an attach-first client reads only this frame.
+                "service": False,
             }
             # The omission is a fact about this transport, not a preference.
             assert "shutdown" not in hello_ok["ops"]["ops"]

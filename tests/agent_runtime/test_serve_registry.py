@@ -295,6 +295,69 @@ def test_the_socket_fields_are_always_present_even_on_a_stdio_only_serve(tmp_pat
     assert with_socket["socket_started_at"] == "2026-08-13T00:00:00.000Z"
 
 
+# ── the service lifetime's additive fields (L-h) ────────────────────────────
+
+
+def test_the_service_fields_are_always_present_and_default_to_a_stdio_child(tmp_path):
+    """Present-and-false and ABSENT are two different answers.
+
+    ``service: false`` says "this runtime dies with the stdin it was started
+    on"; a MISSING key says "this row was written by a hermes that predates
+    service mode". A client deciding whether to ATTACH to a running process or
+    to start one of its own has to tell those apart — the second is the
+    launcher's condition for falling back to the stdio-pipe transport — so the
+    default WRITES the key rather than omitting it.
+    """
+
+    register_serve_instance(tmp_path, pid=4242, probe=_probe())
+    plain = json.loads((tmp_path / "serve_instances" / "4242.json").read_bytes())
+
+    assert plain["service"] is False
+    assert plain["starter_pid"] is None
+
+    register_serve_instance(
+        tmp_path, pid=4243, probe=_probe(), service=True, starter_pid=1234
+    )
+    durable = json.loads((tmp_path / "serve_instances" / "4243.json").read_bytes())
+
+    assert durable["service"] is True
+    # The pid that STARTED it, computed by the caller at boot — a detached
+    # service is reparented the moment its starter exits, so a parent read later
+    # names somebody else entirely.
+    assert durable["starter_pid"] == 1234
+
+
+def test_a_record_written_before_the_service_fields_existed_still_classifies(tmp_path):
+    """The fallback condition has to survive meeting an old row.
+
+    A registry written by a hermes that predates L-h has no ``service`` key at
+    all, and reading it must be an ordinary classification — not a KeyError, and
+    not a row silently treated as a service.
+    """
+
+    directory = tmp_path / "serve_instances"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "4242.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "pid": 4242,
+                "boot_id": "old",
+                "transport": "stdio+socket",
+                "port": 51515,
+                "started_at_ticks": 1000,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rows = list_serve_instances(tmp_path, probe=_probe())
+
+    assert len(rows) == 1
+    assert rows[0]["classification"] == CLASSIFICATION_LIVE
+    assert "service" not in rows[0]
+
+
 # ── the resolved home (D-3) ─────────────────────────────────────────────────
 
 

@@ -406,7 +406,7 @@ OPS_GATEWAY_DENIED: tuple[str, ...] = ("drain",)
 SUBSCRIBE_LANES: tuple[str, ...] = ("stream",)
 
 
-def ops_manifest(*, transport: str) -> dict[str, Any]:
+def ops_manifest(*, transport: str, service: bool = False) -> dict[str, Any]:
     """What this runtime's OP lane offers *transport*, for the greeting frames.
 
     Rides ``ready`` (stdio), ``hello_ok`` (socket) and the re-askable ``version``
@@ -414,6 +414,22 @@ def ops_manifest(*, transport: str) -> dict[str, Any]:
     reason: a durable service outlives the install it was started from, so "does
     the thing I am attached to carry the push lane" must be answerable at any
     time and not only from a greeting a client read hours ago.
+
+    ``service`` is read TWICE by a client and the two readings are both
+    deliberate (RL-2):
+
+    * **presence of the key** says this runtime understands ``--service`` at
+      all. A hermes that predates L-h carries no ``service`` key anywhere, and
+      that absence is the launcher's membership gate for falling back to the
+      stdio-pipe transport — a condition it can evaluate without version
+      arithmetic, which is the same set-plus-integer rule the ops list itself
+      already uses.
+    * **the value** says whether THIS process is running as one, i.e. whether
+      its lifetime is independent of the stdin it was started on.
+
+    The contract integer is untouched: this is an added key on an existing
+    block, and every reader written against the four-key block finds exactly
+    those four unchanged.
     """
 
     ops = set(OPS_EVERY_TRANSPORT)
@@ -431,6 +447,7 @@ def ops_manifest(*, transport: str) -> dict[str, Any]:
         "transport": transport,
         "ops": sorted(ops),
         "subscribe_lanes": sorted(SUBSCRIBE_LANES),
+        "service": bool(service),
     }
 
 
@@ -3026,6 +3043,13 @@ def serve_loop(
                         socket_server.started_at if socket_server is not None else None
                     ),
                     hermes_home=resolved_home,
+                    # L-h item 3. The row is what an attach-first client reads
+                    # BEFORE it dials anything, so "is this runtime going to
+                    # outlive the launcher that started it" has to be answerable
+                    # from the file — not only from a greeting you get after
+                    # connecting.
+                    service=service,
+                    starter_pid=starter_pid,
                 ).payload()
             except Exception as exc:
                 instance_block = {"outcome": f"error:{type(exc).__name__}"}
@@ -3132,6 +3156,14 @@ def serve_loop(
             # own fields say `unknown`/`error:…` reads as what it is — the
             # measurement was attempted and this is what it found.
             "boot_id": boot_id,
+            # L-h item 3, on all three greeting frames by the same rule as
+            # ``boot_id`` above: always present, never inferred from absence. A
+            # client reads ``service`` to know whether closing its end of this
+            # pipe DETACHES from a runtime that keeps going or KILLS it, and
+            # ``starter_pid`` to know whether the process it is looking at is
+            # the one it started itself.
+            "service": service,
+            "starter_pid": starter_pid,
             "build": build_block,
             "auth": auth_block,
             # WHICH INSTALL this is, by the same "always present, states its own
@@ -3169,7 +3201,7 @@ def serve_loop(
             # stdio's greeting, so this is where a stdio client learns that
             # ``{"op":"subscribe","lane":"stream"}`` is carried here rather than
             # having to send one and read the answer's tea leaves.
-            "ops": ops_manifest(transport="stdio"),
+            "ops": ops_manifest(transport="stdio", service=service),
         }
         if orphaned_repaired:
             ready_frame["orphaned_turns_repaired"] = len(orphaned_repaired)
@@ -3998,6 +4030,12 @@ def serve_loop(
                 "event": "hello_ok",
                 "pid": os.getpid(),
                 "boot_id": boot_id,
+                # L-h item 3. The socket greeting is the ONLY frame an
+                # attach-first client reads, so this is where it learns that
+                # what it just attached to is a durable service rather than
+                # somebody else's stdio child.
+                "service": service,
+                "starter_pid": starter_pid,
                 # The frame-protocol contract this service speaks. A client that
                 # does not recognise it must not proceed on hope.
                 "contract": SERVE_SCHEMA_VERSION,
@@ -4049,7 +4087,9 @@ def serve_loop(
                 # both sockets, and ``drain`` additionally on the gateway one.
                 # A device learns what it may ask by MEMBERSHIP rather than by
                 # trying and reading an error.
-                "ops": ops_manifest(transport=connection.transport),
+                "ops": ops_manifest(
+                    transport=connection.transport, service=service
+                ),
                 # What the SECOND door is doing, on the greeting a client
                 # already reads. For a device this is the lane it is standing
                 # on; for the local launcher it is the answer to "is this
@@ -4404,6 +4444,12 @@ def serve_loop(
                             "stdio" if connection is None else connection.transport
                         ),
                         "runtime_root": runtime_root,
+                        # L-h item 3, re-askable like everything else on this
+                        # reply: a client that attached hours ago must be able
+                        # to re-read what it is attached to without a restart it
+                        # cannot cause.
+                        "service": service,
+                        "starter_pid": starter_pid,
                         "build": version_build,
                         "auth": auth_block,
                         # Re-askable like the two blocks above it. Resolved ONCE
@@ -4437,7 +4483,8 @@ def serve_loop(
                         "ops": ops_manifest(
                             transport=(
                                 "stdio" if connection is None else connection.transport
-                            )
+                            ),
+                            service=service,
                         ),
                     }
                 )
@@ -5652,6 +5699,16 @@ def _cmd_serve_connect(args) -> int:
             )
             _emit(report)
             return SERVE_CONNECT_REJECTED_EXIT_CODE
+        # L-h item 3, lifted to the TOP of the report rather than left to be
+        # dug out of the greeting: "is the thing I just reached a durable
+        # service, and who started it" is the first question an operator
+        # running this verb has, and the second is what they should type to
+        # stop it. Read off the hello this connection actually completed, so
+        # it cannot disagree with the frame printed below it. ``None`` when the
+        # service predates the field — never guessed as False, which would say
+        # "this runtime dies with its starter" about a runtime that does not.
+        report["service"] = hello.get("service")
+        report["starter_pid"] = hello.get("starter_pid")
         if getattr(args, "probe", False):
             connection.send({"op": "version"})
             report["version"] = connection.read_frame()
