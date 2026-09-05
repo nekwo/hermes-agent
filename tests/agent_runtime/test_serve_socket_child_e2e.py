@@ -145,13 +145,32 @@ def _connect(env: dict[str, str], *args: str) -> tuple[int, dict | None, str]:
 _REAL_CHILD_SPAWN = pytest.mark.live_system_guard_bypass
 
 
-def _spawn_serve(env: dict[str, str]) -> "_Child":
+def _spawn_serve(
+    env: dict[str, str], *extra_args: str, detached_stdin: bool = False
+) -> "_Child":
+    """A real ``harness serve`` child.
+
+    ``detached_stdin`` hands it the null device instead of a pipe, which is
+    L-h's case stated literally: nothing will ever be written to this process's
+    stdin, so the reader reaches EOF the moment the boot finishes. Everything
+    before ``ready`` is unaffected — the reader is only iterated after the pool
+    exists — so ``ready`` still arrives on stdout and is read here as usual.
+    """
+
     return _Child(
         subprocess.Popen(
-            [sys.executable, "-m", "hermes_cli.main", "harness", "serve", "--ndjson"],
+            [
+                sys.executable,
+                "-m",
+                "hermes_cli.main",
+                "harness",
+                "serve",
+                "--ndjson",
+                *extra_args,
+            ],
             cwd=str(REPO_ROOT),
             env=env,
-            stdin=subprocess.PIPE,
+            stdin=subprocess.DEVNULL if detached_stdin else subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
@@ -159,6 +178,49 @@ def _spawn_serve(env: dict[str, str]) -> "_Child":
         ),
         env,
     )
+
+
+def _argv_over_socket(
+    env: dict[str, str], port: int, argv: list[str], *, rid: str = "e2e-argv-1"
+) -> tuple[dict, list[dict]]:
+    """Run ONE argv request over the child's authenticated loopback socket.
+
+    The real handshake against the real token file the child wrote, on the lane
+    the launcher will use. "The detached runtime still EXECUTES" is a different
+    claim from "it still answers a probe", and this is the one that proves it:
+    the request pool the EOF path used to join has to still be there.
+    """
+
+    from agent_runtime.serve_auth import serve_auth_token_path
+    from agent_runtime.serve_socket import ServeSocketClient
+
+    root = Path(env["HERMES_AGENT_RUNTIME_ROOT"])
+    token = serve_auth_token_path(root).read_bytes().decode().strip()
+    assert token
+    connection = ServeSocketClient("127.0.0.1", int(port), timeout_seconds=120.0)
+    connection.connect()
+    try:
+        hello = connection.hello(token=token, client="e2e-argv", client_build=None)
+        assert isinstance(hello, dict) and hello.get("event") == "hello_ok", hello
+        connection.send({"id": rid, "argv": list(argv)})
+        frames: list[dict] = []
+        for _ in range(500):
+            frame = connection.read_frame()
+            if frame is None:
+                break
+            frames.append(frame)
+            if frame.get("event") == "exit" and frame.get("id") == rid:
+                return hello, frames
+        raise AssertionError(
+            f"no exit frame for {rid!r}; saw {[f.get('event') for f in frames]}"
+        )
+    finally:
+        connection.close()
+
+
+def _registry_rows(env: dict[str, str]) -> list[Path]:
+    runtime = Path(env["HERMES_AGENT_RUNTIME_ROOT"])
+    return list((runtime / "serve_instances").glob("*.json"))
 
 
 @_REAL_CHILD_SPAWN
@@ -477,3 +539,193 @@ def test_the_challenge_response_handshake_against_a_real_serve_child(tmp_path):
         if process.poll() is None:
             process.kill()
             process.wait(timeout=30)
+
+
+# ── L-h: the service lifetime, against real processes ───────────────────────
+#
+# The seam tests (``test_serve_service_mode.py``) hold the same four outcomes in
+# process, where the park can be inspected and the drain settles in
+# milliseconds. These four are here because two of their premises cannot exist
+# at that seam: a stdin that was NEVER a pipe (the null device, closed at spawn
+# — which is how a detached launcher starts a runtime), and two processes
+# contending for one OS lock. Neither file replaces the other.
+
+
+@_REAL_CHILD_SPAWN
+@pytest.mark.timeout(E2E_TEST_TIMEOUT_SECONDS)
+def test_a_service_child_spawned_with_no_stdin_keeps_serving_and_drains_to_zero(
+    tmp_path,
+):
+    """L-h item 4(a). The whole row, in the order an operator would meet it.
+
+    Spawned with the null device on stdin, so EOF is not a thing that happens
+    later — it is the first thing the reader sees. Before ``--service`` that
+    ended the process outright: the pool joined, both lanes closed and the
+    registry entry went, all before anybody could connect. Here the child says
+    ``stdio_owner_detached`` and carries on, and the proof is that the operator
+    verb finds it, an argv request EXECUTES on it, and the drain then ends it
+    cleanly.
+    """
+
+    env = _sandbox_env(tmp_path)
+    child = _spawn_serve(env, "--service", detached_stdin=True)
+    try:
+        ready = child.wait_for("ready")
+        assert ready["socket"]["outcome"] == "listening", ready["socket"]
+        assert ready["service"] is True
+        assert isinstance(ready["starter_pid"], int)
+        assert ready["ops"]["service"] is True
+        # The registry row says the same thing to a client that has not
+        # connected yet, which is the whole point of publishing it there.
+        rows = _registry_rows(env)
+        assert len(rows) == 1
+        row = json.loads(rows[0].read_bytes())
+        assert row["service"] is True
+        assert row["starter_pid"] == ready["starter_pid"]
+        assert row["port"] == ready["socket"]["port"]
+
+        # 1. The verb an operator types still finds it, and says what it found.
+        code, probe, output = _connect(env, "--probe")
+        assert code == 0, output
+        assert probe["ok"] is True
+        assert probe["service"] is True
+        assert probe["starter_pid"] == ready["starter_pid"]
+        assert probe["hello"]["service"] is True
+        assert probe["hello"]["boot_id"] == ready["boot_id"]
+        assert probe["version"]["service"] is True
+        assert probe["version"]["ops"]["service"] is True
+        # Classified live by the registry's own read-time probe — the check the
+        # in-process seam cannot make, because a serve running inside pytest is
+        # not a process whose command line looks like a hermes serve.
+        assert probe["target"]["classification"] == "live"
+
+        # 2. It EXECUTES, not merely answers: the pool that EOF used to join.
+        hello, frames = _argv_over_socket(
+            env, ready["socket"]["port"], ["harness", "status", "--json"]
+        )
+        assert hello["service"] is True
+        assert frames[-1] == {"id": "e2e-argv-1", "event": "exit", "code": 0}
+
+        # 3. And the stop verb ends it, from outside, with nothing on stdin.
+        code, drained, output = _connect(env, "--drain", "--deadline-seconds", "30")
+        assert code == 0, output
+        assert drained["drain_outcome"] == "drain_complete"
+
+        assert child.process.wait(timeout=60) == 0
+        assert _registry_rows(env) == []
+    finally:
+        if child.process.poll() is None:
+            child.process.kill()
+            child.process.wait(timeout=30)
+
+
+@_REAL_CHILD_SPAWN
+@pytest.mark.timeout(E2E_TEST_TIMEOUT_SECONDS)
+def test_a_second_service_starter_names_the_winner_and_exits_without_serving(tmp_path):
+    """L-h item 4(b), and F1's "never an extra stdio executor" stated as a test.
+
+    Two real processes, one real OS lock, no arrangement: the loser is decided
+    by the kernel. It must exit 0 (losing this race is the ORDINARY outcome of
+    two starters — a launcher that respawned, a second launcher — and the
+    caller's next act is to attach to the winner), it must name the winner's pid
+    and port so the caller can do that without guessing, and it must leave
+    nothing behind: no registry row, no ready frame, no request pool.
+    """
+
+    env = _sandbox_env(tmp_path)
+    first = _spawn_serve(env, "--service", detached_stdin=True)
+    try:
+        first_ready = first.wait_for("ready")
+        assert first_ready["socket"]["outcome"] == "listening"
+        first_port = first_ready["socket"]["port"]
+
+        loser = _spawn_serve(env, "--service", detached_stdin=True)
+        try:
+            exists = loser.wait_for("serve_owner_exists")
+            assert exists["pid"] == first_ready["pid"]
+            assert exists["port"] == first_port
+            assert exists["socket"]["outcome"] == "lock_held_by"
+            assert loser.process.wait(timeout=60) == 0
+            # It never became a runtime: no ready frame anywhere in its output.
+            assert "ready" not in [frame.get("event") for frame in loser.frames]
+        finally:
+            if loser.process.poll() is None:
+                loser.process.kill()
+                loser.process.wait(timeout=30)
+
+        # ONE registry row for this root — the winner's — and the winner is
+        # unharmed by the attempt.
+        rows = _registry_rows(env)
+        assert len(rows) == 1
+        assert json.loads(rows[0].read_bytes())["pid"] == first_ready["pid"]
+
+        code, probe, output = _connect(env, "--probe")
+        assert code == 0, output
+        assert probe["hello"]["boot_id"] == first_ready["boot_id"]
+        assert probe["target"]["port"] == first_port
+    finally:
+        if first.process.poll() is None:
+            first.process.kill()
+            first.process.wait(timeout=30)
+
+
+@_REAL_CHILD_SPAWN
+@pytest.mark.timeout(E2E_TEST_TIMEOUT_SECONDS)
+def test_a_stdio_shutdown_before_eof_still_ends_a_service_child(tmp_path):
+    """L-h item 4(c). An ORDER is not an observation.
+
+    ``--service`` splits the two things EOF used to mean; it does not take the
+    stdio owner's verb away. A caller that still holds the pipe keeps exactly
+    the behaviour Update / Repair already depend on, which is what makes the
+    flag safe to turn on for them.
+    """
+
+    env = _sandbox_env(tmp_path)
+    child = _spawn_serve(env, "--service")
+    try:
+        ready = child.wait_for("ready")
+        assert ready["service"] is True
+
+        child.process.stdin.write(json.dumps({"op": "shutdown"}) + "\n")
+        child.process.stdin.flush()
+
+        assert child.wait_for("shutdown")["pid"] == ready["pid"]
+        assert child.process.wait(timeout=60) == 0
+        # No detach receipt: the owner ordered a stop, it did not walk away.
+        assert "stdio_owner_detached" not in [f.get("event") for f in child.frames]
+        assert _registry_rows(env) == []
+    finally:
+        if child.process.poll() is None:
+            child.process.kill()
+            child.process.wait(timeout=30)
+
+
+@_REAL_CHILD_SPAWN
+@pytest.mark.timeout(E2E_TEST_TIMEOUT_SECONDS)
+def test_without_service_a_child_still_ends_when_its_stdin_closes(tmp_path):
+    """L-h item 4(d) — the regression arm, against a real process.
+
+    ``--service`` is a lever and not a change of default. Every launcher and
+    script that spawns ``harness serve --ndjson`` over pipes today still owns
+    the child's lifetime, and closing the pipe still ends it: shutdown frame,
+    exit 0, registry entry gone.
+    """
+
+    env = _sandbox_env(tmp_path)
+    child = _spawn_serve(env)
+    try:
+        ready = child.wait_for("ready")
+        assert ready["service"] is False
+        assert isinstance(ready["starter_pid"], int)
+        assert ready["ops"]["service"] is False
+        assert len(_registry_rows(env)) == 1
+
+        child.process.stdin.close()
+
+        assert child.wait_for("shutdown")["pid"] == ready["pid"]
+        assert child.process.wait(timeout=60) == 0
+        assert _registry_rows(env) == []
+    finally:
+        if child.process.poll() is None:
+            child.process.kill()
+            child.process.wait(timeout=30)
