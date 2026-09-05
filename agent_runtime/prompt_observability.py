@@ -877,6 +877,69 @@ def _evict_final_model_input(chat_contexts: list[dict[str, Any]]) -> None:
             )
 
 
+#: The verb that resolves an evicted ``prompt_layers[].content``. It is the
+#: SAME persisted row ``chat_contexts_ref`` already advertises — the layer
+#: bodies ride that row, so eviction adds no new fetch lane, only a new
+#: pointer into the one that exists.
+PROMPT_LAYER_CONTENT_FETCH = "harness prompt-context show --context-id <id> --json"
+
+
+def _prompt_layer_content_stub(content: str) -> dict[str, Any]:
+    """The evicted ``prompt_layers[].content`` frame value: an accounting stub.
+
+    Carries the exact char count (so the launcher's token attribution keeps its
+    number), the content hash (so two turns' identical layer bodies are
+    comparable without either body) and the fetch verb. Never a silent absence,
+    and deliberately never a PREVIEW — a rendered prefix of a body is the
+    truncate option the 2026-09-05 ruling declined, "a lie of a different
+    kind"."""
+
+    return {
+        "evicted": True,
+        "chars": len(content),
+        "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        "fetch": PROMPT_LAYER_CONTENT_FETCH,
+    }
+
+
+def _evict_prompt_layer_content(chat_contexts: list[dict[str, Any]]) -> None:
+    """Replace each prompt layer's heavy ``content`` with the accounting stub.
+
+    w13/h4, ruled 2026-09-05. ``prompt_layers[].content`` was the single largest
+    slice of the agent-create stream golden (35.7% of 56,627 bytes across the
+    two chat contexts) and of every live delta that carries the same projection.
+
+    The stub lands under a SIBLING key, ``content_ref`` — not under ``content``
+    re-typed as a map. The launcher decodes ``content`` through a nullable
+    STRING parser, so a map there would silently become null and take the
+    accounting with it; an ABSENT ``content`` degrades to the null that model
+    already declares, and the stub rides beside it under this module's existing
+    ``*_ref`` convention.
+
+    Mutates ``chat_contexts`` in place. The persisted row on disk is untouched —
+    only the FRAME copy is stubbed, so ``PROMPT_LAYER_CONTENT_FETCH`` resolves
+    the exact body (archive-never-delete)."""
+
+    for row in chat_contexts:
+        if not isinstance(row, dict):
+            continue
+        layers = row.get("prompt_layers")
+        if not isinstance(layers, list):
+            continue
+        for layer in layers:
+            if not isinstance(layer, dict):
+                continue
+            content = layer.get("content")
+            # A non-string body is left exactly where it is: this function
+            # accounts text, and inventing a hash for something else would be a
+            # fabricated receipt. An already-stubbed layer has no ``content``
+            # left to find, which is what makes a second pass a no-op.
+            if not isinstance(content, str):
+                continue
+            layer.pop("content", None)
+            layer["content_ref"] = _prompt_layer_content_stub(content)
+
+
 # S54 removed ``load_final_model_input_for_context`` and
 # ``_mission_chat_template_prompt_chars``: a disk read-back accessor and a
 # template-size helper, neither with a production caller.
@@ -1044,6 +1107,10 @@ def snapshot_prompt_observability(
             if isinstance(rows, list):
                 catalog_sink.setdefault(ref, to_jsonable(rows))
     _evict_final_model_input(chat_contexts)
+    # w13/h4: the same move, one field over, to what became the largest slice —
+    # the prompt-layer BODIES. The descriptor table stays whole (the row's own
+    # re-measurement ruled that cut not worth its churn).
+    _evict_prompt_layer_content(chat_contexts)
     # C1: ref-shaped persisted rows reach the frame already carrying their
     # ``*_ref`` hashes (no inline lists for the hoist to fold) — the frame's
     # catalog accounting must include those refs too, or the pointer stub would

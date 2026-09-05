@@ -201,7 +201,7 @@ what the fixture mirror below enforces.
 | turn-record `phases` block (schema v3) | `agent_runtime/mission_chat_phases.py`; the key lands via `_safe_journal_metadata` (`mission_chat_turns.py:428`, `:487`) → `safe_turn_phases` (`:1230`) | `tool/mission_chat_latency_audit.dart` |
 | `[MissionChatTiming]` / `[MissionChatOutcome]` / `[MissionDropTiming]` | launcher — see the launcher section below | `tool/mission_chat_latency_audit.dart`; drop line read by eye |
 | `[MissionAgentCreate] lane=… gesture=… correlation=… …` and `[MissionOfficeWrite] <ws> retire lane: …` | launcher — see the launcher section below | the placement verb's two lanes, read by eye; the ADOPT line is also read by `mission_office_placement_instance_key_test.dart` |
-| `prompt_observability` rows + `trace_events` | `agent_runtime/prompt_observability.py:108`, persisted `:1205-1240` | `harness prompt-context show --context-id` (`hermes_cli/harness.py:880-886`) and the slimmed `chat.final` echo |
+| `prompt_observability` rows + `trace_events` | `agent_runtime/prompt_observability.py:108`, persisted `:1300-1335` | `harness prompt-context show --context-id` (`hermes_cli/harness.py:880-886`) and the slimmed `chat.final` echo |
 
 ### The snapshot build family
 
@@ -395,22 +395,37 @@ relative to `lib/features/mission_control/`.
 Per-turn prompt provenance, not timing: what the model was actually shown. Built
 by `mission_chat_prompt_observability` (`prompt_observability.py:108`), turn
 results attached at `:551`, persisted through **one** chokepoint —
-`persist_prompt_observability_context` (`:1198-1233`) — which ref-transforms the
+`persist_prompt_observability_context` (`:1300-1335`) — which ref-transforms the
 skills catalogs, writes compactly, updates the latest-pointer index and applies
 retention. Layout: `<store>/prompt_observability/<context_id>.json`,
 `prompt_observability_catalogs/<hash>.json`, `prompt_observability_archive/`,
 `prompt_observability_index.json` (`agent_runtime/paths.py:306-328`). Retention
 keeps the newest 2 rows per `(persona_instance_id, session_id)` lane and ARCHIVES
-the rest, never deletes (`:1185-1187`); an absent catalog is honest absence,
-never a fake empty list (`:1217-1220`). Two consumers: the live `chat.final`
+the rest, never deletes (`PROMPT_OBSERVABILITY_RETAIN_PER_LANE`, `:1287-1289`);
+an absent catalog is honest absence, never a fake empty list (`:1319-1321`).
+Two consumers: the live `chat.final`
 echo carries a slimmed projection (`slim_chat_final_observability`,
 `persona_commands.py:4557`); evicted rows are
 fetched by `harness prompt-context show --context-id <id> [--json]`
 (`hermes_cli/harness.py:876-886`, handler `:3081-3113`) — read-only, honest
 `not_found` on absence. `trace_events` are the turn's tool-call trace, passed at
 `persona_commands.py:3416` and read by `used_skills_context`
-(`prompt_observability.py:2683-2708`) to report which skills were actually
+(`prompt_observability.py:2777-2802`) to report which skills were actually
 loaded — `skill_view` entries only, redaction-safe.
+
+**The frame projection evicts the two heaviest fields, not the row.** The
+persisted row above is complete; what `snapshot_prompt_observability` ships in a
+stream frame is not. `final_model_input` becomes a typed accounting stub
+(`_evict_final_model_input`), and since w13/h4 (operator ruling 2026-09-05) each
+`prompt_layers[]` body does too: `content` LEAVES the frame and an accounting
+sibling `content_ref` (`{evicted, chars, sha256, fetch}`) takes its place
+(`_evict_prompt_layer_content`, `:905-940`, called `:1113`). The stub is a sibling key rather
+than a re-typed `content` because the launcher decodes `content` through a
+nullable STRING parser — a map parked under that name would decode to null and
+take the accounting with it. Measured on the agent-create narrow-profile golden:
+the frame went 56,627 → 36,990 bytes and `prompt_observability` 32,459 → 12,799
+(57.3% → 34.6% of the frame). Deliberately NOT a preview: a rendered prefix of a
+body is the truncate option the ruling declined.
 
 ## The consumers
 

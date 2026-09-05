@@ -16,6 +16,7 @@ by the test's own ``_hoist_skills_catalogs`` primitive, not a legacy runtime fla
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 
 from agent_runtime import prompt_observability as po
@@ -225,6 +226,156 @@ def test_final_model_input_fetchable_by_context(isolate_agent_runtime_root):
     assert row is not None and row["final_model_input"] == fmi
     # A missing id resolves to None, not a fake-empty payload.
     assert po.load_persisted_context_row("ctx_missing") is None
+
+
+# --------------------------------------------------------------------------- #
+# w13/h4 stage 1 — evict ``prompt_layers[].content`` (operator ruling
+# 2026-09-05: "evict with an accounting stub", the fourth application of the
+# settled pattern above, to the field that is now the frame's largest).
+#
+# The stub is a SIBLING key (``content_ref``), never a re-typed ``content``:
+# the launcher's ``MissionPromptLayer.fromJson`` reads ``content`` through
+# ``_nullableString``, so a map parked under that name would decode to null and
+# lose the accounting. An absent ``content`` degrades to the null that model
+# already declares (``this.content``), and the accounting rides beside it under
+# the repo's existing ``*_ref`` naming.
+# --------------------------------------------------------------------------- #
+def _layer(kind: str, content: str | None = None, **extra) -> dict:
+    layer = {
+        "name": kind,
+        "kind": kind,
+        "status": "loaded",
+        "summary": f"{kind} summary",
+        "owner": "mission_control",
+        "order": 20,
+        "injection_location": "system_context",
+        "included": True,
+        "token_attribution": "direct",
+        **extra,
+    }
+    if content is not None:
+        layer["content"] = content
+        layer["chars"] = len(content)
+        layer["token_estimate"] = len(content) // 4
+    return layer
+
+
+def test_evict_prompt_layer_content_replaces_body_with_accounting_stub():
+    body = "You are Hermes. " * 300
+    rows = [
+        {
+            "context_id": "ctx_a",
+            "prompt_layers": [
+                _layer("runtime_identity", body),
+                _layer("system_core"),
+            ],
+        }
+    ]
+
+    po._evict_prompt_layer_content(rows)
+
+    evicted, descriptor_only = rows[0]["prompt_layers"]
+    # The body is GONE from the frame, not re-typed in place.
+    assert "content" not in evicted
+    stub = evicted["content_ref"]
+    assert stub["evicted"] is True
+    assert stub["chars"] == len(body)
+    assert stub["sha256"] == hashlib.sha256(body.encode("utf-8")).hexdigest()
+    assert "prompt-context show" in stub["fetch"]
+    # Descriptor fields are untouched — this cut is the BODY only (the row's own
+    # re-measurement ruled the descriptor cut not worth its churn).
+    assert evicted["chars"] == len(body)
+    assert evicted["token_estimate"] == len(body) // 4
+    assert evicted["summary"] == "runtime_identity summary"
+    assert evicted["injection_location"] == "system_context"
+    # A layer that never carried a body grows neither a stub nor a fake-empty
+    # one: absence and emptiness are different statements.
+    assert "content" not in descriptor_only
+    assert "content_ref" not in descriptor_only
+
+
+def test_evict_prompt_layer_content_is_idempotent_and_keeps_a_real_empty():
+    rows = [
+        {
+            "context_id": "ctx_empty",
+            "prompt_layers": [_layer("surface", ""), _layer("runtime_identity")],
+        },
+        {"context_id": "ctx_no_layers"},
+        {"context_id": "ctx_bad_layers", "prompt_layers": "not-a-list"},
+    ]
+
+    po._evict_prompt_layer_content(rows)
+    first_pass = copy.deepcopy(rows)
+    po._evict_prompt_layer_content(rows)
+
+    # A present-but-empty body is a REAL zero and is still accounted, distinct
+    # from a layer that carries no body at all.
+    stub = rows[0]["prompt_layers"][0]["content_ref"]
+    assert stub["chars"] == 0
+    assert stub["evicted"] is True
+    # Second pass changes nothing (no stub-of-a-stub, no re-hash).
+    assert rows == first_pass
+    # Malformed shapes are skipped, never crashed on and never invented.
+    assert "prompt_layers" not in rows[1]
+    assert rows[2]["prompt_layers"] == "not-a-list"
+
+
+def test_snapshot_evicts_layer_bodies_while_disk_keeps_them(
+    isolate_agent_runtime_root,
+):
+    body = "Operator-channel rules. " * 200
+    po.persist_prompt_observability_context(
+        {
+            "context_id": "ctx_alice",
+            "persona_id": "profile:alice",
+            "persona_instance_id": "personainst_profile_alice",
+            "profile": "alice",
+            "session_id": "persona_chat_alice",
+            "prompt_layers": [_layer("operator_channel_rules", body)],
+        }
+    )
+
+    section = po.snapshot_prompt_observability(
+        personas=[],
+        persona_instances=[_profile_instance("persona_chat_alice")],
+    )
+    row = next(r for r in section["chat_contexts"] if r["context_id"] == "ctx_alice")
+    layer = row["prompt_layers"][0]
+    assert "content" not in layer
+    assert layer["content_ref"]["chars"] == len(body)
+
+    # Archive-never-delete: only the FRAME copy is stubbed. The persisted row
+    # the stub's fetch verb resolves still carries the exact body.
+    persisted = po.load_persisted_context_row("ctx_alice")
+    assert persisted is not None
+    assert persisted["prompt_layers"][0]["content"] == body
+
+
+def test_layer_body_eviction_is_the_frame_shrink_it_claims():
+    """The cut is worth its cross-repo churn — measured, not asserted by name."""
+
+    body = "x" * 5000
+    rows = [
+        {
+            "context_id": f"ctx_{i}",
+            "prompt_layers": [_layer("runtime_identity", body), _layer("system_core")],
+        }
+        for i in range(2)
+    ]
+    before = json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
+    po._evict_prompt_layer_content(copy.deepcopy(rows))
+    evicted = copy.deepcopy(rows)
+    po._evict_prompt_layer_content(evicted)
+    after = json.dumps(evicted, ensure_ascii=False, separators=(",", ":"))
+
+    assert len(after) < len(before) // 2
+    # …and the accounting survives the shrink: chars are still recoverable.
+    assert sum(
+        layer["content_ref"]["chars"]
+        for row in evicted
+        for layer in row["prompt_layers"]
+        if "content_ref" in layer
+    ) == 2 * len(body)
 
 
 # --------------------------------------------------------------------------- #

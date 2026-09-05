@@ -1,7 +1,9 @@
 # w13/h4 — a projection budget for `prompt_layers[].content` in the patch/delta lane
 
-**Status: PLAN ONLY. Nothing here is implemented. Stage 1 is blocked on an
-operator ruling (R-1 below).**
+**Status: R-1 RULED 2026-09-05 (evict with an accounting stub). Stages 1 and 2
+are BUILT on the hermes side by w17/ha. Stage 3 and the launcher half of stage 2
+(the mirror re-vendor) are NOT built — they are a launcher row. This file stays
+in `planned/` until that row lands; §4 is the ledger.**
 
 Filed 2026-09-04 for the mission-control queue row "A stream golden carries
 another subsystem's churn — and the bulk is the prompt BODIES, not the
@@ -69,9 +71,10 @@ The row's other half is confirmed and unchanged: the launcher's own
 FOLD only and touches no `prompt_observability` field, so the launcher pays a
 cross-repo byte regeneration for a subsystem that test does not read.
 
-## §1 The ruling this is blocked on
+## §1 The ruling this was blocked on
 
-**R-1 — does `prompt_layers[].content` leave the frame?**
+**R-1 — does `prompt_layers[].content` leave the frame? RULED 2026-09-05
+(operator): answer 1, evict with an accounting stub.**
 
 Three answers, in ascending cost:
 
@@ -96,9 +99,9 @@ a contract. The bytes are a symptom; the projection is the defect.
 is "fixtures change only in a cross-stack change that lands both repos
 together", so whichever wave takes stage 2 takes the launcher half with it.
 
-## §2 Stages (each blocked until R-1 is answered)
+## §2 Stages
 
-### Stage 1 — the eviction, red-first (hermes)
+### Stage 1 — the eviction, red-first (hermes) — **BUILT 2026-09-05, w17/ha**
 
 * **Files:** `agent_runtime/prompt_observability.py`
   (new `_evict_prompt_layer_content`, called from
@@ -113,7 +116,36 @@ together", so whichever wave takes stage 2 takes the launcher half with it.
   field; `final_model_input`'s own stub; the `*_ref` hashes.
 * **Check:** `scripts/run_tests.sh tests/agent_runtime/test_prompt_observability.py`.
 
-### Stage 2 — the golden, and the launcher mirror (both repos, one wave)
+**As built, and the two deviations, both deliberate:**
+
+1. **The stub is a SIBLING key, `content_ref` — not a re-typed `content`.** The
+   plan's §1 answer 1 wrote "`content` is replaced by `{evicted, chars,
+   sha256}`". Building it that way would have been silent data loss: the
+   launcher's `MissionPromptLayer.fromJson` reads `content` through
+   `_nullableString`, so a map parked under that name decodes to `null` and the
+   accounting never reaches the screen. `content` therefore LEAVES the layer
+   (degrading to exactly the null `this.content` already declares) and the stub
+   rides beside it as `content_ref` — the same `*_ref` convention
+   `available_skills_ref` / `chat_contexts_ref` / `skills_catalogs_ref` already
+   use in this file. `chars` and `token_estimate` stay on the layer untouched,
+   so the launcher's token attribution never loses its number.
+2. **The tests live in `tests/agent_runtime/test_snapshot_prompt_hoist.py`,** not
+   `test_prompt_observability.py` as the plan wrote. That is where the three
+   sibling applications of this pattern are already tested
+   (`_hoist_skills_catalogs`, `_evict_final_model_input`, and the durability
+   read-back), and the fourth belongs with them.
+
+Four tests, all red before the function existed (`AttributeError: module
+'agent_runtime.prompt_observability' has no attribute
+'_evict_prompt_layer_content'`): the stub's shape and the untouched descriptors;
+idempotence plus a present-but-empty body as a real `0`; the snapshot
+integration proving the persisted row on disk keeps the exact body; and a
+measured shrink assertion (evicted rows are less than half the un-evicted
+bytes). `PROMPT_LAYER_CONTENT_FETCH` is the SAME verb `chat_contexts_ref`
+already advertises — eviction adds a pointer into an existing fetch lane, not a
+new lane.
+
+### Stage 2 — the golden, and the launcher mirror (both repos, one wave) — **hermes half BUILT 2026-09-05, w17/ha; launcher mirror OWED**
 
 * **Files:** regenerate `tests/fixtures/stream_frames/*` via
   `scripts/generate_agent_runtime_stream_fixtures.py`, refresh
@@ -126,18 +158,104 @@ together", so whichever wave takes stage 2 takes the launcher half with it.
   promotion decision the two agent-create goldens exist to pin, or any
   non-`prompt_observability` core section's bytes.
 
-### Stage 3 — the launcher's read (launcher)
+**What actually changed, and the one thing that was already broken.** Exactly
+one golden moved — `delta_agent_create_narrow_profile.json`, the only frame that
+carries a full core with `prompt_observability.chat_contexts` — plus its
+`MANIFEST.sha256` row. A structural diff of the old and new frames reports nine
+differences: the eight expected `content` → `content_ref` swaps (two layers ×
+two chat contexts, removed and added), and ONE that is not mine:
+`core/agents[0]/skill_hash_absent` was ADDED.
+
+That key is pre-existing drift, not this change. `2fde2a0c56` (2026-09-04,
+"the persona and status rows project `skill_hash_absent`") added the field to
+`snapshot.py:2568`, and the golden was last regenerated 2026-09-03
+(`36a9be9b32`). Proven rather than assumed: with `prompt_observability.py`
+reverted to `HEAD` and only the generator run, this same golden and manifest
+still come back modified. So the launcher's `hermes-cli-contract` CI job — which
+checks out hermes, runs this generator and byte-compares — was ALREADY red before
+w17/ha touched anything, and the mirror re-vendor was already owed. This
+regeneration carries that fix along with the eviction.
+
+### Stage 3 — the launcher's read (launcher) — **NOT BUILT; handed back as a launcher row**
 
 * **Files:**
   `lib/features/mission_control/agent_chat/initial_chat_context_dialog.dart`
   — when `layer.content` is absent and the layer says `evicted`, render the
-  `preview` plus a fetch affordance rather than a blank.
+  fetch affordance rather than the "exact text unavailable" notice.
 * **Check:** the touched suite plus `flutter analyze` on the touched paths.
 * **Must not change:** `MissionPromptLayer`'s constructor arity (`content` is
   already optional).
+
+**Correction to this stage as written: there is no `preview` to render.** The
+plan said "render the `preview` plus a fetch affordance". The two layers that
+carry a body — `runtime_identity` and `operator_channel_rules` — carry no
+`preview` at all; `preview` is emitted only on the `surface` layer, which has no
+`content` and is not evicted. Adding a preview to the evicted layers would put
+~4.8 KB back into this golden and would BE answer 2 (truncate), which the ruling
+declined. So the launcher renders the summary it already has plus the eviction
+receipt, and does not invent a body prefix.
+
+The exact launcher work, in one place:
+
+* `MissionPromptLayer` gains a parsed `contentRef` off `json['content_ref']`
+  (`{evicted: bool, chars: int, sha256: String, fetch: String}`). `content` and
+  its existing nullable parse stay — a persisted row fetched on demand still
+  carries the real body, and old frames still decode.
+* `_promptLayerDocument`'s fallback (the branch after
+  `final captured = layer.content?.trim();`) must distinguish two states it
+  currently collapses into one. Today an absent body always yields the subtitle
+  "Layer metadata · exact text unavailable in this captured turn" — which after
+  this change is FALSE for an evicted layer: the text is available, it is on
+  disk, and the frame says exactly where. When `layer.contentRef?.evicted == true`,
+  render the summary plus the receipt (`chars`, the short `sha256`, and the
+  verb `harness prompt-context show --context-id <id> --json` with the row's
+  own `context_id` substituted) and say the body was evicted from the frame, not
+  that it was never captured. The "never captured" wording stays for layers with
+  neither `content` nor `content_ref`.
+* Re-vendor `test/fixtures/harness_stream/delta_agent_create_narrow_profile.json`
+  and `MANIFEST.sha256` byte-identically from hermes (this is stage 2's launcher
+  half, and it is separately owed for the `skill_hash_absent` drift above).
+* Red-first: a widget/unit test on `_promptLayerDocument` for an evicted layer,
+  and `mission_stream_contract_fixture_test.dart` green on the re-vendored bytes.
 
 ## §3 What this plan deliberately does not do
 
 Nothing in stages 1–3 touches the descriptor fields the row was ORIGINALLY
 filed about. They are 12% of one layer table and the row's own re-measurement
 already ruled that cut not worth its churn.
+
+## §4 Ledger — the frame, re-measured after the cut
+
+`tests/fixtures/stream_frames/delta_agent_create_narrow_profile.json`, hermes
+w17/ha, 2026-09-05. Measured by slicing the RAW committed bytes with a brace
+scan, so every number is what the golden costs on disk — no re-serialisation
+drift. That is also why the "before" column differs slightly from §0's
+33,143/32,666: §0 re-encoded the decoded value (`ensure_ascii=True` gives
+32,639 for the same bytes), while this table reads the file.
+
+| slice | before | after | delta |
+|---|---|---|---|
+| whole frame | 56,627 | **36,990** | **−19,637 (−34.7%)** |
+| `core.prompt_observability` | 32,459 (57.3%) | **12,799 (34.6%)** | −19,660 |
+| `…chat_contexts` (2 entries) | 32,016 (56.5%) | 12,356 (33.4%) | −19,660 |
+| each entry's `prompt_layers` (8 layers) | 12,937 (22.8%) | 3,107 (8.4%) | −9,830 each |
+| each entry's `sum(len(layer.content))` | 10,094 | 0 | −10,094 each |
+| next-largest core section (`persona_instances`) | 5,870 | 5,870 | unchanged |
+
+Two layers per entry carried a body (`runtime_identity`,
+`operator_channel_rules`); both now carry `content_ref` instead. Every
+non-`prompt_observability` core section is byte-unchanged except
+`core.agents[0]`, which gained the pre-existing `skill_hash_absent` key
+documented under stage 2 — drift from `2fde2a0c56`, not from this cut.
+
+`prompt_observability` is no longer the majority of the frame: it went from
+57.3% to 34.6%, and the frame is now a third smaller for every subscriber that
+takes a full-core demote. The same share comes off every live delta carrying
+this projection, which was always the point — the golden is the instrument, not
+the target.
+
+**Still open after this wave:** stage 3 and stage 2's launcher mirror, both in
+the launcher repo, both above. Until the mirror is re-vendored the launcher's
+`hermes-cli-contract` byte-compare is red — it already was, for the
+`skill_hash_absent` reason, so this does not make a green job red; it adds a
+second reason to the same red.
