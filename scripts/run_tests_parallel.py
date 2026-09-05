@@ -158,9 +158,23 @@ def _split_path_list(raw: str) -> list[str]:
     file literally named ``C`` under the repo root. Re-join any single ASCII
     letter that is immediately followed by a path separator — that is a drive
     qualifier, not a list delimiter.
+
+    The ``exists()`` probe is a fast path for "the argument IS one path that
+    happens to contain a colon", and its failure has to be swallowed: a joined
+    LIST is not a path, and asking the OS whether one exists is not a question
+    every OS answers with False. On Linux a list past ``PATH_MAX`` makes
+    ``stat()`` return ``ENAMETOOLONG``, which ``pathlib`` does not ignore, so
+    the probe RAISES — while Windows folds the same overflow into its ignored
+    winerror set and answers False. That asymmetry is the whole bug: every CI
+    ``--files`` slice (8 slices × ~380 files ≈ 30 KB of argument) died here
+    before collecting a single test, on every push from 2026-08-04 on, while
+    the identical call was green on every developer's Windows box.
     """
-    if Path(raw).exists():
-        return [raw]
+    try:
+        if Path(raw).exists():
+            return [raw]
+    except OSError:
+        pass
     parts = raw.split(":")
     out: list[str] = []
     index = 0

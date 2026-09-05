@@ -268,3 +268,109 @@ archived once per machine and never realm-wide. That is arguably correct
 (archive is local diagnostic state, exactly like the office family's) and it is
 what the code does. **Handed back as a decision row, with the recommendation:
 close it as a non-goal until a reader exists.**
+
+---
+
+## 3. Does CI actually run the coverage-claim gate? It dispatches it and it never reaches a test
+
+**Asked.** Option 1 first: read `ci.yml`, `tests.yml` and the slice generator,
+check the run history, and either wire failure notification for main-push runs
+and delete the row, or hand it back narrowed to option 3.
+
+### The ruling's premise, checked line by line — and it holds
+
+| claim | measured |
+|---|---|
+| `ci.yml` fires on `push: branches: [main]` | yes, and the `tests` job is gated on `detect.outputs.python` |
+| `detect` fails open on push | yes — `.github/actions/detect-changes` only gates `pull_request`; every other event leaves `CHANGED` empty and every lane runs |
+| the slice matrix's discovery reaches the two scopes | yes. `python3 scripts/run_tests_parallel.py --generate-slices 8` on this tree: **3,040 files** over 8 slices, including `tests/test_coverage_claims_resolve.py` and all **18** files under `tests/scripts/` |
+
+So "these gates sit outside the lane" is false of CI, exactly as the ruling
+said. Every conclusion above is from the artifacts, not from reading intent.
+
+### And then the run history, which answers a different question
+
+`gh run list --repo nekwo/hermes-agent` (the fork these gates live on; plain
+`gh run list` resolves to `NousResearch/hermes-agent` and answers about
+somebody else's code):
+
+```
+60 CI runs on main, 2026-09-02 → 2026-09-05:  55 failure, 5 cancelled, 0 success
+```
+
+Every one of those runs dispatched all 8 test slices. Every slice failed. The
+reason is the same one every time, and it is not a test:
+
+```
+File "scripts/run_tests_parallel.py", line 162, in _split_path_list
+OSError: [Errno 36] File name too long: 'tests/plugins/test_kanban_dashboard_plugin.py:tests/…'
+```
+
+`--files` hands the runner ONE colon-joined slice — ~380 files, roughly 30 KB —
+and `_split_path_list` opened with `if Path(raw).exists()`, a fast path for
+"the argument IS one path that contains a colon". A joined list is not a path,
+and the two hosts disagree about how to say so: Linux's `stat()` answers
+`ENAMETOOLONG` for anything past `PATH_MAX` and `pathlib` does not ignore that
+errno, so the probe RAISES; Windows folds the same overflow into its ignored
+winerror set and answers `False`. **The identical call is green on every
+developer's Windows box and fatal on every CI runner.**
+
+Bisected against the history: the 2026-07-03 and 2026-07-25 runs collect and
+run files (red for ordinary reasons); the 2026-08-04 run — the first main push
+after `0c9d48d9fb` (2026-07-31) added the probe — carries the `ENAMETOOLONG`
+signature, and so does every run since, through 2026-09-05.
+
+**So the honest answer to the row is neither of its two options.** CI *runs the
+job*; the job dies 8 seconds in, before pytest is invoked, in the runner's
+argument parsing. `tests/test_coverage_claims_resolve.py` has been in scope and
+unexecuted for a month, and so has every other test in the repo.
+
+### What this lane did about it
+
+Fixed the crash, because it is one line and it is the only thing standing
+between the ruling's option 1 and being true: the `exists()` probe is wrapped
+in `try/except OSError`, with the asymmetry written at the site so the next
+author does not re-add it.
+
+Red-first, and the test asserts both halves because either alone is a
+half-test — the real over-`PATH_MAX` list (which is what CI passes, and enough
+on POSIX) and a forced `OSError` from `Path.exists` (which is what makes a
+Windows author trip here rather than shipping the same asymmetry again).
+Verified red at `HEAD` with the exact CI error, green after.
+
+### Why the notification half was NOT wired, and what to wire instead
+
+There is no failure-notification mechanism in this repo at all. The only
+notifier in `.github/workflows/` is `comment-live`, gated
+`github.event_name == 'pull_request'`; nothing matches `failure()`,
+`actions/github-script`, an issue-opening action or a webhook. GitHub's own
+default — an email to the pusher when a workflow fails on the default branch —
+is therefore the entire mechanism, and it has fired on 55 consecutive main
+pushes without anyone acting on it.
+
+That is the argument against arming a second channel today: a notifier pointed
+at a lane that is red on 100% of pushes trains its reader to ignore it, which
+is the failure mode the row is about, one layer further out. **Arm it after the
+first green run, not before.**
+
+The smallest one, for when that happens: a job in `ci.yml` with
+`needs: [all-checks-pass]`, `if: failure() && github.event_name == 'push' &&
+github.ref == 'refs/heads/main'`, using `actions/github-script` to upsert ONE
+issue titled `CI red on main` (search by label, reopen and comment rather than
+opening a second) with `all-checks-pass`'s `needs-json` output — which already
+exists and already names the failed jobs — in the body. It needs only
+`issues: write`, no secret and no external service, and the upsert is what
+keeps a month of red from becoming a month of issues.
+
+### The row, and why it is narrowed rather than deleted
+
+Not deleted: the fix is unverified where it matters. This lane cannot push, so
+the claim "CI now runs the gate" is a prediction until a main push turns the
+slices green — and the same runs are also red on `ruff enforcement`, the
+`Changed-line mutation claims` job and `Desktop E2E`, none of which this lane
+touched and each of which will still be red behind the fixed slices.
+
+Not option 3 either: a second, post-landing local runner is a second runner for
+work CI does once the crash is fixed, and the ruling already said so. What
+survives is one verification step and one conditional build. The verbatim text
+is in this lane's hand-back.

@@ -567,6 +567,42 @@ def test_file_list_split_keeps_windows_drive_letters(tmp_path: Path) -> None:
     assert mod._split_discovery_roots("tests:packages") == ["tests", "packages"]
 
 
+def test_a_file_list_longer_than_the_os_will_stat_still_splits(monkeypatch) -> None:
+    """The list CI actually passes, and the reason nobody saw it break.
+
+    ``--files`` carries one colon-joined slice — 8 slices over ~3,040 files is
+    roughly 30 KB of argument — and the split began with an ``exists()`` probe
+    for the "the argument IS one path with a colon in it" case. A joined list is
+    not a path, and the two hosts disagree about how to say so: Linux's
+    ``stat()`` answers ``ENAMETOOLONG`` for anything past ``PATH_MAX`` and
+    ``pathlib`` does not ignore that errno, so the probe RAISED; Windows folds
+    the same overflow into its ignored winerror set and answers ``False``.
+
+    So every CI matrix slice died in ``_split_path_list`` before collecting a
+    test — measured on nekwo/hermes-agent, all 8 slices red with
+    ``OSError: [Errno 36] File name too long`` on every main push from
+    2026-08-04 (the first run after the probe landed) through 2026-09-05 — while
+    the identical call was green on every developer's Windows box.
+
+    Both halves are asserted because either alone is a half-test: the real
+    over-long list is what CI passes and is enough on POSIX, and the forced
+    ``OSError`` is what makes a Windows author trip here too rather than
+    shipping the same asymmetry again.
+    """
+    mod = _load_runner_module()
+
+    joined = ":".join(f"tests/dir{index}/test_module_{index}.py" for index in range(600))
+    assert len(joined) > 4096, "the case needs a list past PATH_MAX"
+    assert mod._split_path_list(joined) == joined.split(":")
+
+    def _too_long(self) -> bool:
+        raise OSError(36, "File name too long")
+
+    monkeypatch.setattr(mod.Path, "exists", _too_long)
+    assert mod._split_path_list("tests/a.py:tests/b.py") == ["tests/a.py", "tests/b.py"]
+    assert mod._split_discovery_roots("tests:packages") == ["tests", "packages"]
+
+
 def _drive_main_over_one_file(
     mod, monkeypatch, tmp_path: Path, attempts: list[tuple[int, str, dict]]
 ) -> int:
