@@ -24,6 +24,7 @@ from agent_runtime.board_sync import read_board_baseline, update_board_baseline_
 from agent_runtime.office_store import OfficeStore
 from agent_runtime.office_sync import read_office_baseline, update_office_baseline_after_sync
 from agent_runtime.realm_revert import (
+    FAMILIES,
     OUTCOME_ARCHIVED_LOCAL_ONLY,
     OUTCOME_BASELINE_DROPPED,
     OUTCOME_RESTORED,
@@ -39,8 +40,10 @@ from agent_runtime.realm_revert import (
 from agent_runtime.realm_sync import (
     DRIFT_FAMILY_BOARD,
     DRIFT_FAMILY_BOARD_CARD,
+    DRIFT_FAMILY_FLOW_GRAPH,
     DRIFT_FAMILY_OFFICE_ACTOR,
     DRIFT_FAMILY_OFFICE_SURFACE,
+    DRIFT_FAMILY_PERSONA_INSTANCE,
     DRIFT_KIND_ADDED,
     DRIFT_KIND_CHANGED,
     DRIFT_KIND_REMOVED,
@@ -543,3 +546,278 @@ def test_status_carries_the_items_beside_the_unchanged_counts(tmp_path, monkeypa
         "kind": DRIFT_KIND_REMOVED,
     } in drift["items"]
     assert status["unpublished_changes"] is True
+
+
+# ── the CANVAS family (w13/h2 replication, revert arm w17/hb) ─────────────
+#
+# The canvas joined the drift set in the same change as this arm, and that
+# ordering IS the design: ``revert_realm_sync`` subscripts
+# ``_PROCESS_ORDER[row.family]`` and dispatches on family for the upstream
+# lookup, the baseline and the store door, so a drift family with no arm here
+# hands ``revert --all`` a ``KeyError`` and offers the operator an exit that
+# does not exist.
+
+CANVAS_INSTANCE_ID = "personainst_dev_agent_9682caf4"
+#: What the launcher ASKS for. ``parse_flow_graph_doc`` runs it through
+#: ``safe_assignment_token``, which rewrites the ``:`` separator, so the id the
+#: store, the projection, the baseline and therefore the drift row all carry is
+#: the underscore spelling below. Both are here because both are real: a test
+#: that only knew one would pass against a lane that had lost the other.
+CANVAS_GRAPH_ID = f"runtime:{CANVAS_INSTANCE_ID}"
+CANVAS_STORED_GRAPH_ID = f"runtime_{CANVAS_INSTANCE_ID}"
+
+
+def _desk_with_instance(tmp_path):
+    """A realm whose one desk names a persona INSTANCE — the canvas's owner.
+
+    The canvas projection is scoped to ``_office_publish_scan(...).instance_ids``
+    (the desks a publish already ships), so an actor with no
+    ``persona_instance_id`` has no canvas to publish and no row to revert.
+    """
+
+    realm_id, ws = _make_realm_workspace(tmp_path)
+    subtree = _subtree(realm_id, tmp_path)
+    OfficeStore().upsert_actor(
+        ws,
+        {
+            "persona_id": "dev",
+            "persona_instance_id": CANVAS_INSTANCE_ID,
+            "items": [
+                {
+                    "item_id": "dev",
+                    "persona_id": "dev",
+                    "kind": "agent",
+                    "position": [1.0, 2.0],
+                    "folder": "Agents",
+                }
+            ],
+        },
+    )
+    return realm_id, ws, subtree
+
+
+def _store_canvas(x: int = 10) -> None:
+    from agent_runtime.flow_graph import FlowGraphStore, parse_flow_graph_doc
+
+    FlowGraphStore().set_doc(
+        parse_flow_graph_doc(
+            {
+                "graph_id": CANVAS_GRAPH_ID,
+                "nodes": [{"id": "n_owner", "agent": CANVAS_INSTANCE_ID, "x": x, "y": 2}],
+                "edges": [],
+            }
+        ),
+        requested_by="operator",
+    )
+
+
+def _publish_canvas(realm_id: str, subtree):
+    """Write the projection into the last-pulled subtree AND record the
+    baseline — the two halves a real publish does, so the drift walk starts at
+    zero the way it does after one."""
+
+    from agent_runtime.flow_graph_sync import update_flow_graph_baseline_after_publish
+    from agent_runtime.realm_sync import _resolve_artifacts_with_projection
+
+    projection = _resolve_artifacts_with_projection(realm_id).flow_graph_projection
+    path = subtree / "store" / "flow_graphs.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(projection.to_bytes())
+    update_flow_graph_baseline_after_publish(realm_id, projection)
+    return projection
+
+
+def _canvas_x():
+    from agent_runtime.flow_graph import FlowGraphStore
+
+    stored = FlowGraphStore().get(CANVAS_GRAPH_ID)
+    return stored["doc"]["nodes"][0]["x"]
+
+
+def _canvas_rows(realm_id):
+    return [item for item in _drift(realm_id) if item.family == DRIFT_FAMILY_FLOW_GRAPH]
+
+
+def test_every_drift_family_the_walk_can_produce_has_a_revert_arm():
+    """The invariant the canvas row was blocked on, stated once.
+
+    ``_PROCESS_ORDER`` is subscripted directly for every selected row, so a
+    family present in the walk and absent here is not a missing feature — it is
+    a ``KeyError`` in the middle of a ``--all`` pass, after earlier rows have
+    already been written. Asserting the SETS is what makes the next family's
+    author trip here rather than in an operator's store.
+    """
+
+    from agent_runtime.realm_revert import _PROCESS_ORDER
+
+    assert set(_PROCESS_ORDER) == FAMILIES
+    assert DRIFT_FAMILY_FLOW_GRAPH in FAMILIES
+
+
+def test_a_canvas_is_reverted_after_the_agents_its_nodes_bind():
+    """Ordering, as a relationship rather than a snapshot of two integers.
+
+    The pull runs ``apply_flow_graph_pull`` after ``apply_persona_instance_pull``
+    because owner-liveness reaping archives a drawing whose owner is gone, and a
+    canvas restored before its owner instance looks exactly like that. A
+    ``--all`` revert carries both families in one pass, and without this the
+    sort key would order them by family NAME — ``flow_graph`` before
+    ``persona_instance``.
+    """
+
+    from agent_runtime.realm_revert import _PROCESS_ORDER
+
+    assert _PROCESS_ORDER[DRIFT_FAMILY_FLOW_GRAPH] > _PROCESS_ORDER[DRIFT_FAMILY_PERSONA_INSTANCE]
+
+
+def test_an_edited_canvas_is_reverted_to_the_published_drawing(tmp_path):
+    realm_id, _, subtree = _desk_with_instance(tmp_path)
+    _store_canvas(x=10)
+    _publish_canvas(realm_id, subtree)
+    assert _canvas_rows(realm_id) == []
+
+    _store_canvas(x=99)
+    (item,) = _canvas_rows(realm_id)
+    assert item.kind == DRIFT_KIND_CHANGED
+    assert item.item_key == CANVAS_STORED_GRAPH_ID
+    assert item.container == CANVAS_INSTANCE_ID
+
+    result = revert_realm_sync(realm_id, item_specs=[item.spec])
+
+    assert [row["outcome"] for row in result["items"]] == [OUTCOME_REVERTED]
+    assert _canvas_x() == 10
+    # The baseline was realigned from the store's own post-write content, so a
+    # second status reads zero without anything being republished.
+    assert _canvas_rows(realm_id) == []
+
+
+def test_a_reaped_canvas_is_restored_from_the_published_drawing(tmp_path):
+    """``removed`` for this family is a drawing that was archived HERE.
+
+    Owner-liveness reaping archives a canvas whose owner instance is gone, and
+    hand cleanup moves the same file. Either way the realm still carries it, so
+    the revert writes it back through the pull's own door rather than reading a
+    local absence as a realm-wide removal.
+    """
+
+    from agent_runtime.flow_graph import FlowGraphStore
+
+    realm_id, _, subtree = _desk_with_instance(tmp_path)
+    _store_canvas(x=10)
+    _publish_canvas(realm_id, subtree)
+
+    store = FlowGraphStore()
+    store.archive(CANVAS_GRAPH_ID, store.stale_dir())
+    assert store.get(CANVAS_GRAPH_ID) is None
+
+    (item,) = _canvas_rows(realm_id)
+    assert item.kind == DRIFT_KIND_REMOVED
+
+    result = revert_realm_sync(realm_id, item_specs=[item.spec])
+
+    assert [row["outcome"] for row in result["items"]] == [OUTCOME_RESTORED]
+    assert _canvas_x() == 10
+
+
+def test_reverting_a_local_only_canvas_archives_it_and_never_deletes_it(tmp_path):
+    """The ruling's shape for this family: archive, no ledger entry, no delete.
+
+    A canvas carries no realm-visible tombstone anywhere, so
+    ``record_tombstone=False`` is structural here rather than a parameter — and
+    the operator's own last local bytes land in ``flow_graphs_stale/``, which is
+    where owner-liveness reaping puts them too.
+    """
+
+    from agent_runtime.flow_graph import FlowGraphStore
+
+    realm_id, _, subtree = _desk_with_instance(tmp_path)
+    # The realm has published nothing for this family: no projection artifact at
+    # all, which is the normal shape for a realm where nobody has drawn one.
+    (subtree / "store").mkdir(parents=True, exist_ok=True)
+    _store_canvas(x=7)
+
+    (item,) = _canvas_rows(realm_id)
+    assert item.kind == DRIFT_KIND_ADDED
+
+    result = revert_realm_sync(realm_id, item_specs=[item.spec])
+
+    assert [row["outcome"] for row in result["items"]] == [OUTCOME_ARCHIVED_LOCAL_ONLY]
+    store = FlowGraphStore()
+    assert store.get(CANVAS_GRAPH_ID) is None
+    assert list(store.stale_dir().glob("*.json")), "the drawing was deleted, not archived"
+    assert _canvas_rows(realm_id) == []
+
+
+def test_an_unreadable_canvas_projection_is_refused_not_read_as_absence(tmp_path):
+    """Absence drives the archive arm, so a parse failure must never fold into
+    it — the same rule every other family in this lane holds."""
+
+    from agent_runtime.flow_graph import FlowGraphStore
+
+    realm_id, _, subtree = _desk_with_instance(tmp_path)
+    _store_canvas(x=7)
+    path = subtree / "store" / "flow_graphs.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("kind: realm_flow_graphs\ngraphs: [oops\n", encoding="utf-8")
+
+    (item,) = _canvas_rows(realm_id)
+    result = revert_realm_sync(realm_id, item_specs=[item.spec])
+
+    assert [row["outcome"] for row in result["items"]] == [REFUSED_UNREADABLE_UPSTREAM]
+    assert FlowGraphStore().get(CANVAS_GRAPH_ID) is not None
+
+
+def test_a_remote_canvas_the_pull_would_reject_is_refused_here_too(tmp_path):
+    """The canvas family's admission door is ``parse_flow_graph_doc`` and only
+    it — the exact door ``apply_flow_graph_pull`` holds, so a revert neither
+    writes what a pull could not have written nor refuses what it would have
+    admitted."""
+
+    import yaml
+
+    realm_id, _, subtree = _desk_with_instance(tmp_path)
+    _store_canvas(x=7)
+    path = subtree / "store" / "flow_graphs.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "kind": "realm_flow_graphs",
+                "schema_version": 1,
+                # Two nodes sharing one id: a document the parser rejects.
+                "graphs": {
+                    CANVAS_STORED_GRAPH_ID: {
+                        "graph_id": CANVAS_STORED_GRAPH_ID,
+                        "nodes": [
+                            {"id": "n_owner", "agent": CANVAS_INSTANCE_ID, "x": 1, "y": 1},
+                            {"id": "n_owner", "agent": CANVAS_INSTANCE_ID, "x": 2, "y": 2},
+                        ],
+                        "edges": [],
+                    }
+                },
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    (item,) = _canvas_rows(realm_id)
+    result = revert_realm_sync(realm_id, item_specs=[item.spec])
+
+    assert [row["outcome"] for row in result["items"]] == [REFUSED_ADMISSION]
+    assert _canvas_x() == 7, "a refused document was written anyway"
+
+
+def test_a_canvas_dry_run_writes_nothing(tmp_path):
+    realm_id, _, subtree = _desk_with_instance(tmp_path)
+    _store_canvas(x=10)
+    _publish_canvas(realm_id, subtree)
+    _store_canvas(x=99)
+
+    (item,) = _canvas_rows(realm_id)
+    result = revert_realm_sync(realm_id, item_specs=[item.spec], dry_run=True)
+
+    assert result["dry_run"] is True
+    assert [row["outcome"] for row in result["items"]] == [OUTCOME_REVERTED]
+    assert _canvas_x() == 99
+    assert [item.kind for item in _canvas_rows(realm_id)] == [DRIFT_KIND_CHANGED]

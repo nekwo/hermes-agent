@@ -117,6 +117,14 @@ fixture mirror, and whether a pulled canvas opens read-only until its owner is
 minted. The canvas revert arm. `flow_graphs_stale/` still does not replicate, by
 the plan's §3.
 
+> **Corrected 2026-09-05 (w17/hb).** The canvas revert arm is BUILT, and the S5
+> deviation above is now history rather than the state: `flow_graph` is a
+> `store_drift` family with rows, counts and a revert arm, ordered last in
+> `_PROCESS_ORDER` after the agents its nodes bind. The deviation's argument was
+> right and is what made the arm land as one change instead of two. The launcher
+> half and `flow_graphs_stale/` are still open; the latter has no requester and
+> is a decision, not work — see `w17-hb-field-notes.md` §2.
+
 ---
 
 ## Row 2 — the `profile:` spelling the launcher places without the ownership check (`4f79e484bd`)

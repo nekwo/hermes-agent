@@ -43,6 +43,11 @@
         "cards_changed": 0,
         "cards_removed": 0
       },
+      "flow_graphs": {
+        "canvases_added": 0,
+        "canvases_changed": 0,
+        "canvases_removed": 0
+      },
       "items": [],
       "office": {
         "actors_added": 0,

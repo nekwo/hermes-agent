@@ -31,8 +31,10 @@ The write arms are the PULL lane's arms, not new ones: ``adopt_remote_actor`` /
 ``adopt_remote_surface`` / ``adopt_remote_board`` / ``adopt_remote_card`` /
 ``restore_actor`` / ``restore_card`` / ``archive_card`` / ``remove_actor``,
 and — since the replicated persona-INSTANCE family joined on 2026-08-31 —
-``replicate_instance`` / ``retire_replica``, plus the same admission door every
-pulled payload passes. A revert writes nothing a pull could not have written.
+``replicate_instance`` / ``retire_replica``, and since the replicated CANVAS
+family joined on 2026-09-05, ``FlowGraphStore.set_doc`` / ``.archive``, plus the
+same admission door every pulled payload passes. A revert writes nothing a pull
+could not have written.
 (The two board adopt verbs arrived on 2026-09-02 with the pull arm that grew
 them; until then both lanes wrote board rows with a raw ``atomic_json_write``
 and emitted nothing, which is why the sentence above was true and the module's
@@ -41,7 +43,10 @@ own "a live subscriber that never heard" note below was not.)
 The instance family's ``added`` arm needs no ``record_tombstone=False``
 parameter, and that is not an omission: a persona-instance record carries no
 realm-visible ledger at all, so the only place this lane could mint one is the
-office half — and ``retire_replica`` deliberately does not run it.
+office half — and ``retire_replica`` deliberately does not run it. The canvas
+family's arm is the same shape for the same reason, one step simpler:
+``FlowGraphStore.archive`` moves the file into ``flow_graphs_stale/`` and writes
+no ledger anywhere, so archive-never-delete holds with no parameter at all.
 """
 
 from __future__ import annotations
@@ -55,6 +60,7 @@ from . import board_models, office_models, paths
 from .realm_sync import (
     DRIFT_FAMILY_BOARD,
     DRIFT_FAMILY_BOARD_CARD,
+    DRIFT_FAMILY_FLOW_GRAPH,
     DRIFT_FAMILY_OFFICE_ACTOR,
     DRIFT_FAMILY_OFFICE_SURFACE,
     DRIFT_FAMILY_PERSONA_INSTANCE,
@@ -128,20 +134,29 @@ FAMILIES = frozenset(
         DRIFT_FAMILY_OFFICE_SURFACE,
         DRIFT_FAMILY_OFFICE_ACTOR,
         DRIFT_FAMILY_PERSONA_INSTANCE,
+        DRIFT_FAMILY_FLOW_GRAPH,
     }
 )
 
-#: Rows before containers. A restored actor leaves its workspace's
-#: resurrection-guard ledger, which CHANGES the surface hash — so the surface
-#: arm (and the baseline realignment that follows it) must run after the rows it
-#: is downstream of, or a ``--all`` pass realigns the surface against a picture
-#: one write out of date.
+#: Rows before containers, and the CANVAS after the agents it binds. A restored
+#: actor leaves its workspace's resurrection-guard ledger, which CHANGES the
+#: surface hash — so the surface arm (and the baseline realignment that follows
+#: it) must run after the rows it is downstream of, or a ``--all`` pass realigns
+#: the surface against a picture one write out of date.
+#:
+#: The canvas sits LAST for the pull lane's reason, not the surface's: a canvas
+#: binds nodes to instance ids, owner-liveness reaping archives a drawing whose
+#: owner is gone, and a canvas restored before its owner instance looks exactly
+#: like that. ``apply_flow_graph_pull`` runs after ``apply_persona_instance_pull``
+#: for this, and a ``--all`` revert that carried both would otherwise restore
+#: them in family-name order — ``flow_graph`` before ``persona_instance``.
 _PROCESS_ORDER = {
     DRIFT_FAMILY_OFFICE_ACTOR: 0,
     DRIFT_FAMILY_BOARD_CARD: 0,
     DRIFT_FAMILY_PERSONA_INSTANCE: 0,
     DRIFT_FAMILY_OFFICE_SURFACE: 1,
     DRIFT_FAMILY_BOARD: 1,
+    DRIFT_FAMILY_FLOW_GRAPH: 2,
 }
 
 
@@ -263,6 +278,8 @@ class _Upstream:
         #: The instance family is ONE document for the whole realm, so it caches
         #: as one entry rather than per container.
         self._instances: tuple[dict[str, Any], str | None] | None = None
+        #: So is the canvas projection.
+        self._flow_graphs: tuple[dict[str, Any], str | None] | None = None
 
     def _office(self, workspace_id: str):
         from .office_sync import _read_remote_office
@@ -299,6 +316,26 @@ class _Upstream:
             return None, True
         return bodies.get(instance_id), False
 
+    def _flow_graph(self, graph_id: str) -> tuple[Any, bool]:
+        """One canvas BODY out of the pulled projection, and whether the
+        document itself would not decode.
+
+        The instance family's shape exactly, and for the same reason: the whole
+        family is ONE artifact, so ``unreadable`` is a property of the document
+        rather than of the row. An ABSENT projection is not unreadable — an
+        older publisher carries none, and reading that as "the realm dropped
+        every drawing" would archive the operator's canvases on a version skew.
+        """
+
+        from .flow_graph_sync import read_remote_flow_graphs
+
+        if self._flow_graphs is None:
+            self._flow_graphs = read_remote_flow_graphs(self._subtree)
+        bodies, source = self._flow_graphs
+        if source == "unreadable":
+            return None, True
+        return bodies.get(graph_id), False
+
     def lookup(self, family: str, container: str, item_key: str) -> tuple[Any, bool]:
         """``(entity_or_None, unreadable)``. ``unreadable`` True means the
         artifact is not decodable HERE, which is never the same answer as
@@ -306,6 +343,8 @@ class _Upstream:
 
         if family == DRIFT_FAMILY_PERSONA_INSTANCE:
             return self._instance(item_key)
+        if family == DRIFT_FAMILY_FLOW_GRAPH:
+            return self._flow_graph(item_key)
         if family == DRIFT_FAMILY_OFFICE_SURFACE:
             remote = self._office(container)
             return remote.surface, remote.surface_unreadable
@@ -396,6 +435,7 @@ def revert_realm_sync(
                 continue
             selected.append(item)
 
+    from .flow_graph_sync import read_flow_graph_baseline, write_flow_graph_baseline
     from .persona_instance_sync import (
         read_persona_instance_baseline,
         write_persona_instance_baseline,
@@ -407,7 +447,8 @@ def revert_realm_sync(
     office_baseline = read_office_baseline(realm.id)
     board_baseline = read_board_baseline(realm.id)
     instance_baseline = read_persona_instance_baseline(realm.id)
-    touched_office = touched_board = touched_instances = False
+    flow_graph_baseline = read_flow_graph_baseline(realm.id)
+    touched_office = touched_board = touched_instances = touched_flow_graphs = False
 
     for item in sorted(selected, key=lambda row: (_PROCESS_ORDER[row.family], row.family, row.container, row.item_key)):
         row = _revert_one(
@@ -418,6 +459,7 @@ def revert_realm_sync(
             office_baseline=office_baseline,
             board_baseline=board_baseline,
             instance_baseline=instance_baseline,
+            flow_graph_baseline=flow_graph_baseline,
             realm_id=realm.id,
             dry_run=dry_run,
         )
@@ -427,6 +469,8 @@ def revert_realm_sync(
                 touched_office = True
             elif item.family == DRIFT_FAMILY_PERSONA_INSTANCE:
                 touched_instances = True
+            elif item.family == DRIFT_FAMILY_FLOW_GRAPH:
+                touched_flow_graphs = True
             else:
                 touched_board = True
 
@@ -443,6 +487,8 @@ def revert_realm_sync(
             write_board_baseline(realm.id, board_baseline)
         if touched_instances:
             write_persona_instance_baseline(realm.id, instance_baseline)
+        if touched_flow_graphs:
+            write_flow_graph_baseline(realm.id, flow_graph_baseline)
         if applied:
             _append_realm_sync_event(
                 REVERT_EVENT_TYPE, realm, changed=True, artifacts=len(applied)
@@ -476,6 +522,7 @@ def _revert_one(
     office_baseline: dict[str, str],
     board_baseline: dict[str, str],
     instance_baseline: dict[str, str] | None = None,
+    flow_graph_baseline: dict[str, str] | None = None,
     realm_id: str | None = None,
     dry_run: bool,
 ) -> RevertRow:
@@ -507,6 +554,8 @@ def _revert_one(
         baseline = office_baseline
     elif item.family == DRIFT_FAMILY_PERSONA_INSTANCE:
         baseline = instance_baseline if instance_baseline is not None else {}
+    elif item.family == DRIFT_FAMILY_FLOW_GRAPH:
+        baseline = flow_graph_baseline if flow_graph_baseline is not None else {}
     else:
         baseline = board_baseline
     key = item.baseline_key()
@@ -529,6 +578,14 @@ def _revert_one(
             from .persona_instance_sync import refuse_persona_instance
 
             refusal = refuse_persona_instance(item.item_key, entity)
+        elif item.family == DRIFT_FAMILY_FLOW_GRAPH:
+            # The canvas family's door is ``parse_flow_graph_doc`` and ONLY
+            # that, because that is the only door ``apply_flow_graph_pull``
+            # holds. Adding the shared ``refuse_entity`` scan here would make a
+            # revert stricter than the pull for the same bytes — the operator
+            # would be refused a drawing that already landed on this machine
+            # through the pull, which is a worse lie than either door alone.
+            refusal = _refuse_flow_graph(entity)
         else:
             refusal = refuse_entity(key, payload=to_jsonable(entity))
         if refusal is not None:
@@ -573,6 +630,27 @@ def _revert_one(
     return row
 
 
+def _refuse_flow_graph(body):
+    """The canvas family's admission door — ``parse_flow_graph_doc``, and only it.
+
+    A ``Refusal`` in the shared shape so the row reads like every other family's,
+    carrying the parser's own code. Nothing else is added: this is the exact door
+    ``apply_flow_graph_pull`` holds, and a revert must write nothing a pull could
+    not have written — nor refuse what a pull would have admitted.
+    """
+
+    from .flow_graph import FlowGraphDocError, parse_flow_graph_doc
+    from .flow_graph_sync import REFUSAL_INVALID_REMOTE_DOCUMENT
+    from .sync_admission import Refusal
+
+    graph_id = str((body or {}).get("graph_id") or "") if isinstance(body, dict) else ""
+    try:
+        parse_flow_graph_doc(body)
+    except FlowGraphDocError as exc:
+        return Refusal(graph_id, REFUSAL_INVALID_REMOTE_DOCUMENT, str(exc))
+    return None
+
+
 def _restore_from_upstream(
     item: StoreDriftItem, entity, *, office_store, board_store, realm_id: str | None = None
 ) -> None:
@@ -596,6 +674,19 @@ def _restore_from_upstream(
     not "is this key archived".
     """
 
+    if item.family == DRIFT_FAMILY_FLOW_GRAPH:
+        # A canvas has no un-archive verb either, and for a stronger reason than
+        # the instance family's: ``FlowGraphStore.archive`` MOVES the file into
+        # ``flow_graphs_stale/`` and leaves no ledger entry behind, so there is
+        # no resurrection guard to clear and "restore" and "adopt" are the same
+        # write. The stale copy stays where archive-never-delete put it — a
+        # second copy of a drawing the projection can rebuild is not worth a
+        # second verb, and the operator's own last local bytes are exactly what
+        # ``flow_graphs_stale/`` is for.
+        _adopt_from_upstream(
+            item, entity, office_store=office_store, board_store=board_store, realm_id=realm_id
+        )
+        return
     if item.family == DRIFT_FAMILY_PERSONA_INSTANCE:
         # A replicated AGENT has no un-archive verb of its own and does not need
         # one: the store door mints a row for an id with no live file, deriving
@@ -642,6 +733,15 @@ def _adopt_from_upstream(
     that still writes nothing a pull could not have written.
     """
 
+    if item.family == DRIFT_FAMILY_FLOW_GRAPH:
+        # ``set_doc`` is the pull's own arm, so the document is validated by
+        # ``parse_flow_graph_doc`` on the way in and never written raw.
+        # ``requested_by`` says which lane moved it, the way ``REVERT_ACTOR_REF``
+        # does for the stores that take an ``updated_by``.
+        from .flow_graph import FlowGraphStore, parse_flow_graph_doc
+
+        FlowGraphStore().set_doc(parse_flow_graph_doc(entity), requested_by=REVERT_ACTOR_REF)
+        return
     if item.family == DRIFT_FAMILY_PERSONA_INSTANCE:
         # Through the SAME store door the pull writes replicas with, so a revert
         # writes nothing a pull could not have written — including the delta
@@ -681,6 +781,18 @@ def _archive_local_only(item: StoreDriftItem, *, office_store, board_store) -> N
     ``record_tombstone=False`` lane on both stores, so no realm-visible ledger
     entry is minted. See the module docstring (§AX7)."""
 
+    if item.family == DRIFT_FAMILY_FLOW_GRAPH:
+        # A drawing the realm does not have. ``archive`` MOVES it into
+        # ``flow_graphs_stale/`` — the same door owner-liveness reaping uses —
+        # so archive-never-delete holds and the operator's map is recoverable by
+        # hand. ``record_tombstone=False`` is structural here rather than a
+        # parameter: a graph carries no realm-visible ledger at all, so there is
+        # nowhere for this lane to mint one.
+        from .flow_graph import FlowGraphStore
+
+        store = FlowGraphStore()
+        store.archive(item.item_key, store.stale_dir())
+        return
     if item.family == DRIFT_FAMILY_PERSONA_INSTANCE:
         # A locally-authored agent the realm does not have. The instance record
         # carries NO realm-visible ledger at all, so ``record_tombstone=False``
@@ -721,6 +833,13 @@ def _current_content_hash(item: StoreDriftItem, *, office_store, board_store) ->
     make the sheet read in-sync for content this install does not hold.
     """
 
+    if item.family == DRIFT_FAMILY_FLOW_GRAPH:
+        from .flow_graph import FlowGraphStore
+        from .flow_graph_sync import flow_graph_def_hash, project_flow_graph
+
+        return flow_graph_def_hash(
+            project_flow_graph(FlowGraphStore().get(item.item_key), dropped=[])
+        )
     if item.family == DRIFT_FAMILY_PERSONA_INSTANCE:
         from .persona_assignments import PersonaInstanceStore
         from .persona_instance_sync import persona_instance_def_hash, project_persona_instance

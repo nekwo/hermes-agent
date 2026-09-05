@@ -4,12 +4,19 @@ Every other sync family accounts for what it dropped and what it held; this one
 now does too, so "the chart is empty because the drawing did not travel / is
 held / would not read" is answerable from the status envelope.
 
-The stage plan assumed a fourth ``store_drift`` family. It is a top-level key
-instead, and the reason is measured rather than stylistic: ``store_drift`` rows
-are exactly the set ``realm_revert`` addresses, and it sorts them through
+The stage plan assumed a fourth ``store_drift`` family and S5 shipped a
+top-level key instead, for a measured reason: ``store_drift`` rows are exactly
+the set ``realm_revert`` addresses, and it sorts them through
 ``_PROCESS_ORDER[row.family]`` — a direct subscript that raises for a family
 with no revert arm. A count without a revert arm is honest; a drift row
 offering an exit that does not exist is not.
+
+The revert arm landed 2026-09-05 (w17/hb) and the drift rows landed with it, so
+the family is now BOTH — and the two answer different questions. This file owns
+the top-level row: ``publishable`` (how many drawings this realm ships),
+``held`` (conflict sidecars, which are not drift and must not be reverted away)
+and ``unreadable`` (a canvas with no revertable row by construction). The drift
+rows and their revert arm are ``tests/agent_runtime/test_realm_revert.py``.
 """
 
 from __future__ import annotations
@@ -124,7 +131,15 @@ def test_the_status_envelope_carries_the_row(tmp_path):
 
     assert envelope["flow_graphs"]["publishable"] == 1
     assert envelope["flow_graphs"]["unpublished"] == 1
-    # The canvas family is NOT a store_drift family, so it does not move
-    # ``unpublished_changes`` — the flag whose exits are Publish and Revert, and
-    # the canvas has only one of those.
-    assert "flow_graphs" not in envelope["store_drift"]
+    # Since the revert arm landed (w17/hb) the canvas IS a store_drift family,
+    # so an unpublished drawing moves ``unpublished_changes`` — the flag whose
+    # exits are Publish and Revert, and the canvas now has both.
+    assert envelope["store_drift"]["flow_graphs"]["canvases_added"] == 1
+    assert envelope["unpublished_changes"] is True
+    # The two totals are not the same arithmetic and must not be conflated:
+    # ``unpublished`` counts drawings the realm has not seen (added + changed),
+    # while a reaped canvas is a drift ROW with nothing left to publish.
+    assert envelope["flow_graphs"]["unpublished"] == (
+        envelope["store_drift"]["flow_graphs"]["canvases_added"]
+        + envelope["store_drift"]["flow_graphs"]["canvases_changed"]
+    )

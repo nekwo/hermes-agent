@@ -254,6 +254,13 @@ def realm_sync_status(
         # answer, and exactly the reason the office family was added on 2026-08-29
         # ("the sheet kept saying In sync while the local store had drifted").
         "persona_instances": _drift_counts(drift_items, _PERSONA_INSTANCE_DRIFT_COUNTS),
+        # Additive fourth family (canvas-replication w13/h2, revert arm w17/hb).
+        # It arrives WITH its revert arm, which is why it was not here before:
+        # a drift row the revert lane cannot address is an exit that does not
+        # exist. ``_any_store_drift`` sums it like the rest, so an unpublished
+        # drawing now lights "unpublished changes" instead of being visible only
+        # as a count on the ``flow_graphs`` row below.
+        "flow_graphs": _drift_counts(drift_items, _FLOW_GRAPH_DRIFT_COUNTS),
         "items": [item.as_dict() for item in drift_items],
     }
     profile_artifacts_held = _held_profile_artifacts(realm, repo)
@@ -321,18 +328,22 @@ def realm_sync_status(
 def _flow_graph_status_row(realm_id: str, workspaces: list[Workspace]) -> dict[str, Any]:
     """``{publishable, unpublished, held, unreadable}`` for the canvas family.
 
-    **Why this is a top-level key and NOT a fourth ``store_drift`` family**,
-    which is what the stage plan assumed: ``store_drift`` rows are exactly the
-    set the REVERT lane addresses. ``realm_revert`` sorts them through
+    **Why this is a top-level key AS WELL AS a ``store_drift`` family.** It was
+    only this one until 2026-09-05: ``store_drift`` rows are exactly the set the
+    REVERT lane addresses, ``realm_revert`` sorts them through
     ``_PROCESS_ORDER[row.family]`` — a direct subscript — and dispatches on
     family for the upstream lookup, the baseline and the store door, so a family
-    added there without a revert arm would hand ``revert --all`` a KeyError and
-    offer the operator an exit that does not exist. A count without a revert arm
-    is honest; a drift row without one is not. The canvas revert arm is its own
-    row.
+    added there without a revert arm would have handed ``revert --all`` a
+    ``KeyError`` and offered the operator an exit that does not exist. The
+    canvas revert arm landed (w17/hb) and the rows landed with it.
 
-    ``unpublished`` is the same hash-vs-baseline compare the other families
-    make, spent here only as a count.
+    What stays here is what a drift row cannot say: ``publishable`` (how many
+    drawings this realm ships at all), ``held`` (conflict sidecars — a hold is
+    not drift, and reverting one would discard the parked remote), and
+    ``unreadable`` (a canvas the projection refuses, which has no revertable
+    row by construction). ``unpublished`` is the same hash-vs-baseline compare
+    ``_flow_graph_store_drift_items`` makes, spent here as a count — one walk's
+    arithmetic in two shapes, never two walks.
     """
 
     from .flow_graph_sync import flow_graph_baseline_key, read_flow_graph_baseline
@@ -1434,7 +1445,7 @@ def _board_publish_scan(workspaces: list[Workspace]) -> BoardPublishScan:
     return BoardPublishScan(artifacts=artifacts, refused=refused)
 
 
-#: The four itemizable store-drift families. A family is the pair (store, row
+#: The itemizable store-drift families. A family is the pair (store, row
 #: granularity) — never the layer — because it is what a per-item revert has to
 #: address: ``board``/``office_surface`` are the CONTAINER definitions,
 #: ``board_card``/``office_actor`` the rows inside them.
@@ -1448,6 +1459,13 @@ DRIFT_FAMILY_OFFICE_ACTOR = "office_actor"
 #: its desk), so folding the two into one family would let one row's publish
 #: silently speak for the other's.
 DRIFT_FAMILY_PERSONA_INSTANCE = "persona_instance"
+#: The replicated CANVAS family (canvas-replication plan w13/h2). Joined the
+#: drift set on 2026-09-05, in the same change as its revert arm — w14/h2
+#: deliberately shipped the counts as a top-level ``flow_graphs`` key first,
+#: because ``realm_revert`` subscripts ``_PROCESS_ORDER[row.family]`` and a
+#: drift row with no revert arm offers the operator an exit that does not exist.
+#: The arm exists now, so the rows do.
+DRIFT_FAMILY_FLOW_GRAPH = "flow_graph"
 
 DRIFT_KIND_ADDED = "added"
 DRIFT_KIND_CHANGED = "changed"
@@ -1519,6 +1537,14 @@ class StoreDriftItem:
             # workspace-qualified key would be a second spelling of an identity
             # that has only one.
             return instance_baseline_key(self.item_key)
+        if self.family == DRIFT_FAMILY_FLOW_GRAPH:
+            from .flow_graph_sync import flow_graph_baseline_key
+
+            # Same reasoning as the instance family's, one step further along:
+            # graph identity IS the owner instance's id (``runtime:<id>``), so
+            # the key is already realm-unique and the container is display and
+            # scoping only.
+            return flow_graph_baseline_key(self.item_key)
         return _actor_key(self.container, self.item_key)
 
 
@@ -1546,6 +1572,18 @@ _PERSONA_INSTANCE_DRIFT_COUNTS = (
     ("instances_added", DRIFT_FAMILY_PERSONA_INSTANCE, DRIFT_KIND_ADDED),
     ("instances_removed", DRIFT_FAMILY_PERSONA_INSTANCE, DRIFT_KIND_REMOVED),
 )
+#: The canvas family's counts, additive beside the instance family's and shaped
+#: identically. The top-level ``flow_graphs`` row keeps its own ``unpublished``
+#: number and the two are NOT the same total: ``unpublished`` counts drawings
+#: this machine holds that the realm has not seen, so it equals
+#: ``canvases_added + canvases_changed`` and says nothing about
+#: ``canvases_removed`` — a graph that was reaped here still has a baseline
+#: entry and nothing left to publish. One walk, two questions.
+_FLOW_GRAPH_DRIFT_COUNTS = (
+    ("canvases_changed", DRIFT_FAMILY_FLOW_GRAPH, DRIFT_KIND_CHANGED),
+    ("canvases_added", DRIFT_FAMILY_FLOW_GRAPH, DRIFT_KIND_ADDED),
+    ("canvases_removed", DRIFT_FAMILY_FLOW_GRAPH, DRIFT_KIND_REMOVED),
+)
 
 
 def _drift_counts(
@@ -1572,7 +1610,71 @@ def store_drift_items(realm_id: str, workspaces: list[Workspace]) -> list[StoreD
         *_board_store_drift_items(realm_id, workspaces),
         *_office_store_drift_items(realm_id, workspaces),
         *_persona_instance_store_drift_items(realm_id, workspaces),
+        *_flow_graph_store_drift_items(realm_id, workspaces),
     ]
+
+
+def _flow_graph_store_drift_items(
+    realm_id: str, workspaces: list[Workspace]
+) -> list[StoreDriftItem]:
+    """The CANVAS half of the drift walk (canvas-replication w13/h2, revert arm).
+
+    Scoped exactly as the publish is — ``_office_publish_scan(workspaces)
+    .instance_ids``, the desks this realm ships — and resolved through
+    :func:`_flow_graph_projection`, so the hash compared here is the same
+    projected body the publish would have written. A second walk of the graph
+    directory would report drawings this realm does not publish, and offer a
+    revert whose upstream could never exist.
+
+    Two guards, both the sibling families':
+
+    * a canvas the projection REFUSES (unreadable, no ``graph_id``, an owner
+      mismatch) contributes no row. It is already named on the top-level
+      ``flow_graphs.unreadable`` list, and a drift row would offer a revert that
+      reads a file this machine cannot project.
+    * ``removed`` is a baselined graph id with no live canvas behind it — a
+      drawing that was reaped or archived here.
+
+    **The container is the OWNER INSTANCE id, not the workspace.** Every other
+    family's container is the thing that holds the row (a workspace, a board),
+    and for a canvas that is the desk — whose identity in this family IS the
+    owner instance id, since graph identity is derived from it
+    (``runtime_<instance id>``). Two properties follow, and the second is why
+    the workspace was rejected: it is derived from the graph id itself, so it is
+    never blank — and a blank container makes ``FAMILY:CONTAINER:KEY``
+    unparseable, which would leave exactly the ``removed`` rows (the desk is
+    gone, so its workspace cannot be looked up) addressable only by ``--all``.
+    """
+
+    from .flow_graph import owner_instance_id_of
+    from .flow_graph_sync import flow_graph_baseline_key, read_flow_graph_baseline
+
+    scan = _office_publish_scan(workspaces)
+    projection = _flow_graph_projection(scan.instance_ids)
+    baseline = read_flow_graph_baseline(realm_id)
+    prefix = flow_graph_baseline_key("")
+    baselined_ids = {key[len(prefix):] for key in baseline if key.startswith(prefix)}
+
+    def _row(graph_id: str, kind: str) -> StoreDriftItem:
+        return StoreDriftItem(
+            family=DRIFT_FAMILY_FLOW_GRAPH,
+            container=owner_instance_id_of(graph_id),
+            item_key=graph_id,
+            kind=kind,
+        )
+
+    items: list[StoreDriftItem] = []
+    current_ids: set[str] = set()
+    for graph_id, body_hash in sorted(projection.hashes().items()):
+        current_ids.add(graph_id)
+        base_hash = baseline.get(flow_graph_baseline_key(graph_id))
+        if base_hash is None:
+            items.append(_row(graph_id, DRIFT_KIND_ADDED))
+        elif base_hash != body_hash:
+            items.append(_row(graph_id, DRIFT_KIND_CHANGED))
+    for graph_id in sorted(baselined_ids - current_ids):
+        items.append(_row(graph_id, DRIFT_KIND_REMOVED))
+    return items
 
 
 def _persona_instance_store_drift_items(

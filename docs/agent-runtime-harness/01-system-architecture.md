@@ -519,13 +519,32 @@ instance family's pattern rather than beside it:
 - **Accounting.** `result["flow_graph_sync"]` on a pull ack (emitted
   unconditionally, `source: "projection" | "unreadable" | null`, same skew
   argument as the instance row) and a top-level `flow_graphs` key on
-  `realm_sync_status` — `{publishable, unpublished, held, unreadable}`. It is
-  deliberately NOT a fourth `store_drift` family: those rows are exactly the set
-  `realm_revert` addresses, dispatched through `_PROCESS_ORDER[row.family]`, so
-  a family with no revert arm would hand `revert --all` a `KeyError` and offer
-  an exit that does not exist (`tests/agent_runtime/test_flow_graph_status.py`).
-  The canvas revert arm, and the launcher's rendering of the held/conflict rows,
-  are separate rows.
+  `realm_sync_status` — `{publishable, unpublished, held, unreadable}`
+  (`tests/agent_runtime/test_flow_graph_status.py`).
+- **Revert, and why it arrived second (2026-09-05).** The canvas is also a
+  `store_drift` family (`flow_graph`, counts `canvases_added` /
+  `canvases_changed` / `canvases_removed`), so an unpublished drawing lights
+  `unpublished_changes` and is addressable as
+  `flow_graph:<owner instance id>:<graph id>`. It was deliberately NOT one for
+  the first day it shipped: drift rows are exactly the set `realm_revert`
+  addresses, dispatched through `_PROCESS_ORDER[row.family]`, so a family with
+  no revert arm would have handed `revert --all` a `KeyError` and offered an
+  exit that did not exist. The arm writes through the pull's own doors —
+  `set_doc` for adopt and restore (there is no un-archive verb, and none is
+  needed: `archive` moves the file and leaves no ledger entry, so the two are
+  the same write), `archive` into `flow_graphs_stale/` for a local-only
+  drawing, and `parse_flow_graph_doc` as the only admission door, because that
+  is the only door the pull holds. It is ordered LAST, after the agents its
+  nodes bind, for the reason the pull runs after the mint door
+  (`tests/agent_runtime/test_realm_revert.py`).
+- **The container of a canvas drift row is the OWNER INSTANCE id**, not the
+  workspace: graph identity is derived from it, so it is never blank — and a
+  blank container makes `FAMILY:CONTAINER:KEY` unparseable, which would leave
+  the `removed` rows (the desk is gone; its workspace cannot be looked up)
+  reachable only through `--all`.
+- **Still separate rows:** the launcher's rendering of the held/conflict rows,
+  and replication of `flow_graphs_stale/` — which the plan's §3 left undecided
+  and which has no requester (see `planned/w13-h2-flow-graph-canvas-replication.md`).
 
 ## The board
 

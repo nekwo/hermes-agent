@@ -166,3 +166,105 @@ side effect and were not the target: `draft.py` 29 → 25, `draft_lock.py` 8 →
   calls the code at all), and still nobody's row.
 * The report is still a REPORT: nothing consumes its exit code, and this lane
   did not change that.
+
+---
+
+## 2. The flow-graph canvas: the two hermes follow-ups
+
+**Asked.** The row lists exactly two, both hermes-side: the canvas REVERT arm
+(`store_drift` deliberately does not carry this family until it exists, or
+`revert --all` KeyErrors on `_PROCESS_ORDER`), and `flow_graphs_stale/`, which
+still does not replicate per the plan's §3.
+
+### (a) The canvas revert arm — BUILT
+
+The blocker was real and w14/h2 stated it exactly: `revert_realm_sync` sorts
+selected rows through `_PROCESS_ORDER[row.family]` — a direct subscript — and
+dispatches on family for the upstream lookup, the baseline and the store door.
+So the family joins the drift set and gains its arm in ONE change, never two.
+
+What landed, family-shaped like the persona-INSTANCE family beside it:
+
+| concern | the canvas family's answer |
+|---|---|
+| drift rows | `_flow_graph_store_drift_items`, scoped to `_office_publish_scan(...).instance_ids` — the desks a publish already ships, never a second walk of the graph directory (which legitimately holds drawings for owners no realm places) |
+| counts | `store_drift.flow_graphs` = `canvases_added` / `canvases_changed` / `canvases_removed`, additive |
+| upstream | `read_remote_flow_graphs(subtree)` cached as ONE document, so `unreadable` is a property of the projection and never of a row |
+| admission | `parse_flow_graph_doc` and only it |
+| adopt / restore | `FlowGraphStore.set_doc` |
+| local-only | `FlowGraphStore.archive(graph_id, stale_dir())` |
+| baseline | `flow_graph_baseline_key`, realigned per item from the STORE's post-write content |
+| order | LAST (`_PROCESS_ORDER` rank 2) |
+
+**Three decisions worth the ink.**
+
+*The container is the OWNER INSTANCE id, not the workspace.* Written with the
+workspace first, and the tests caught it in the shape that matters: a
+`removed` row is a drawing whose desk is GONE, so there is no instance record
+to read a workspace off, the container came back `""`, and
+`flow_graph::runtime_x` is refused by `parse_item_spec` — the exact rows an
+operator most needs to revert would have been reachable only through `--all`.
+Derived from the graph id instead (`runtime_<instance id>` → the owner), it
+cannot be blank by construction. **The persona-instance family has the same
+latent hole** — `_persona_instance_store_drift_items` leaves `container=""` for
+a removed instance with no record, and `--item` cannot address it. Not touched
+here; it is a row.
+
+*The admission door is `parse_flow_graph_doc` and NOT the shared
+`refuse_entity` scan every other family adds.* The lane's contract is "a revert
+writes nothing a pull could not have written", and `apply_flow_graph_pull`
+holds only the parser. Adding the shared door here would refuse the operator a
+drawing that already landed on this machine through the pull — a worse
+inconsistency than either door alone.
+
+*An ABSENT projection drives the archive arm, and that is deliberate.* A realm
+where nobody has drawn anything publishes no `store/flow_graphs.yaml` at all
+(the publish appends the artifact only when the projection is non-empty), so
+absence is the NORMAL shape for a genuinely local-only drawing. It is also what
+an older publisher looks like — the version-skew case — and the two are
+indistinguishable from here. The cost is bounded by archive-never-delete: the
+drawing lands in `flow_graphs_stale/` and is recoverable by hand, which is the
+same place owner-liveness reaping puts one.
+
+**Two claims that were true when written and are now false**, corrected in the
+same change rather than left: `_flow_graph_status_row`'s docstring and
+`test_flow_graph_status.py`'s "the canvas family is NOT a store_drift family"
+assertion. The top-level `flow_graphs` row stays — it answers what a drift row
+cannot (`publishable`, `held` sidecars, `unreadable`) — and its `unpublished`
+is now pinned as `canvases_added + canvases_changed`, which is NOT the row
+total: a reaped canvas is a drift row with nothing left to publish.
+
+Response-envelope fixtures regenerated through
+`scripts/generate_agent_runtime_response_fixtures.py` (additive key only, two
+files). **The launcher mirror under
+`EterniaLauncher/test/fixtures/hermes_responses/` is the cross-repo half and is
+NOT done here** — it is in this lane's hand-back.
+
+Measured: `scripts/run_tests.sh` over the 11 touched suites — 242 passed, 0
+failed. 8 new tests, the first of which is the one that would have caught the
+original hazard: `set(_PROCESS_ORDER) == FAMILIES`.
+
+### (b) `flow_graphs_stale/` — a DECISION, not work, and it is handed back
+
+The plan's §3 is headed *"What this plan does not decide"* and its whole entry
+is: *"Archived docs stay local. Replicating a reaped drawing has no
+requester."* That is a statement of the current behaviour plus the reason
+nobody built the alternative — not a ruling either way.
+
+This lane did not build it, and the argument for not building it is
+`AGENTS.md`'s own: **speculative infrastructure — a hook with no concrete
+consumer — is rejected even when well built.** Nothing on either repo reads a
+stale canvas: `flow_graphs_stale/` has exactly one writer (`FlowGraphStore
+.archive`, from owner-liveness reaping and now from a local-only revert) and
+zero readers outside `tests/agent_runtime/test_s25_graph_prune_on_reap.py`.
+Replicating it would put a second machine's reaped drawings on the wire for a
+surface that does not exist.
+
+What it is NOT is settled, and the honest shape of the remaining question is
+one sentence: *when a member reaps a canvas whose owner departed, should the
+drawing survive on the peers that never saw the departure?* Today it does —
+each member reaps its own copy on its own liveness view, so a drawing is
+archived once per machine and never realm-wide. That is arguably correct
+(archive is local diagnostic state, exactly like the office family's) and it is
+what the code does. **Handed back as a decision row, with the recommendation:
+close it as a non-goal until a reader exists.**
