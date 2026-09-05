@@ -2397,14 +2397,22 @@ def validate_sheet(
         med_h = max(1, heights[len(heights) // 2])
         if widths[-1] > max(med_w * 3.0, med_w + 96) and heights[-1] <= med_h * 1.6:
             errors.append(f"row '{key}' contains a multi-pose frame outlier")
-        if global_med_w and global_med_h:
-            if med_w < max(32, round(global_med_w * 0.42)) or med_h < max(
-                40, round(global_med_h * 0.50)
-            ):
-                errors.append(
-                    f"row '{key}' appears collapsed (median {med_w}x{med_h}px, "
-                    f"sheet median {global_med_w}x{global_med_h}px)"
-                )
+        # The `if global_med_w and global_med_h:` guard that used to wrap this
+        # was a branch no sheet could take, and is deleted (2026-09-05, off the
+        # one-armed-branch report). Reaching this line means `boxes_by_row`
+        # carries a row with at least two boxes; every box is a `getbbox()` and
+        # so spans at least one pixel; and a non-empty `boxes_by_row` is exactly
+        # what makes `all_widths`/`all_heights` non-empty above, which is what
+        # assigns both medians. Both are therefore >= 1 here, and the zeroes
+        # they are initialised to are only ever read by the check above this
+        # loop.
+        if med_w < max(32, round(global_med_w * 0.42)) or med_h < max(
+            40, round(global_med_h * 0.50)
+        ):
+            errors.append(
+                f"row '{key}' appears collapsed (median {med_w}x{med_h}px, "
+                f"sheet median {global_med_w}x{global_med_h}px)"
+            )
 
     residue = _rgb_residue_count(rgba)
     if residue:

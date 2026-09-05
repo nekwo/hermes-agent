@@ -84,6 +84,12 @@ DEFAULT_SOURCES = ("agent/charsheet",)
 #: the whole measurement look red for a reason that is not about branches.
 DEFAULT_TEST_TIMEOUT = 120
 
+#: The runner's own PER-FILE cap, raised for the same reason one level up. Its
+#: 300s default is generous for an untraced file and not for a traced one: the
+#: charsheet pipeline's 110 tests cross it and come back as "no tests ran",
+#: which reds the suite and makes the whole report suspect.
+DEFAULT_FILE_TIMEOUT = 1500
+
 
 def _coverage_config(destination: Path, data_file: Path, sources: list[str]) -> Path:
     """Write the config the traced subprocesses read.
@@ -112,7 +118,9 @@ def _coverage_config(destination: Path, data_file: Path, sources: list[str]) -> 
     return path
 
 
-def _run_suite(rcfile: Path, suite: list[str], jobs: int | None, timeout: int) -> int:
+def _run_suite(
+    rcfile: Path, suite: list[str], jobs: int | None, timeout: int, file_timeout: int
+) -> int:
     """Run the suite through the canonical runner with tracing on."""
     bash = shutil.which("bash")
     if bash is None:
@@ -121,7 +129,25 @@ def _run_suite(rcfile: Path, suite: list[str], jobs: int | None, timeout: int) -
             "scripts/run_tests.sh on purpose (the pins and the hermetic env are "
             "that script's, not this one's). Run it from Git Bash / a POSIX shell."
         )
-    argv = [bash, "scripts/run_tests.sh", *suite, f"--timeout={timeout}"]
+    # The runner's PER-FILE cap is the same hazard as the per-test one above,
+    # one level up, and it bites harder: 110 traced pipeline tests in one file
+    # cross the 300s default, the runner SIGKILLs the process tree and reports
+    # "no tests ran" — which reds the suite and makes every number below read as
+    # suspect for a reason that is not about branches. Measured 2026-09-05,
+    # twice.
+    #
+    # It rides the ARGV and not the environment, which is not a style choice:
+    # `run_tests.sh` execs the runner under `env -i` and forwards exactly the
+    # variables it names, and `HERMES_TEST_FILE_TIMEOUT` is not one of them. A
+    # `--file-timeout` in the environment is silently dropped at that fence —
+    # measured, by a run that came back red with the variable set.
+    argv = [
+        bash,
+        "scripts/run_tests.sh",
+        *suite,
+        f"--timeout={timeout}",
+        f"--file-timeout={file_timeout}",
+    ]
     if jobs:
         argv += ["-j", str(jobs)]
     environment = dict(os.environ)
@@ -272,6 +298,15 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_TEST_TIMEOUT,
         help=f"per-test timeout under tracing (default: {DEFAULT_TEST_TIMEOUT}s)",
     )
+    parser.add_argument(
+        "--file-timeout",
+        type=int,
+        default=DEFAULT_FILE_TIMEOUT,
+        help=(
+            "per-FILE wall-clock cap handed to the runner under tracing "
+            f"(default: {DEFAULT_FILE_TIMEOUT}s)"
+        ),
+    )
     parser.add_argument("--json", type=Path, default=None, help="also write the records here")
     args = parser.parse_args(argv)
 
@@ -301,7 +336,9 @@ def main(argv: list[str] | None = None) -> int:
         workspace = Path(tmp)
         data_file = workspace / "coverage-data"
         rcfile = _coverage_config(workspace, data_file, sources)
-        suite_code = _run_suite(rcfile, suite, args.jobs, args.timeout)
+        suite_code = _run_suite(
+            rcfile, suite, args.jobs, args.timeout, args.file_timeout
+        )
         try:
             document = _combine_and_dump(rcfile, data_file, workspace / "coverage.json")
         except (RuntimeError, FileNotFoundError) as exc:

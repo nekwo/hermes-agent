@@ -88,7 +88,7 @@ def build_palette(images: Iterable, max_colors: int = DEFAULT_MAX_COLORS):
         # only return None for an image with more distinct colours than pixels
         # (impossible), never for a photographic reference.
         colors = rgba.getcolors(maxcolors=max(1, rgba.width * rgba.height))
-        if colors is None:
+        if colors is None:  # pragma: no cover — unreachable by the line above
             raise ValueError(f"could not histogram {source!r}: too many distinct colours")
         for count, pixel in colors:
             red, green, blue, alpha = pixel
@@ -125,13 +125,19 @@ def palette_colors(palette) -> list[tuple[int, int, int]]:
     if getattr(palette, "mode", "") != "P":
         raise ValueError(f"expected a 'P'-mode palette image, got mode {getattr(palette, 'mode', None)!r}")
     raw = palette.getpalette() or []
-    used = palette.palette.colors if getattr(palette, "palette", None) else None
+    # Empty, not None, when there is no palette object: the unfiltered fallback
+    # this used to carry was a branch no input could distinguish. `getpalette()`
+    # answers out of the SAME palette object, so bytes here imply a non-empty
+    # `.colors` and no bytes imply an empty `triples` — the two arms returned
+    # the identical list for every reachable image, and the false one only ever
+    # returned `[]` the long way round. Measured 2026-09-05 against the
+    # one-armed-branch report; the equivalence is pinned in
+    # `tests/agent/test_charsheet_branch_triage.py`.
+    used = palette.palette.colors if getattr(palette, "palette", None) else {}
     triples = [tuple(raw[i : i + 3]) for i in range(0, len(raw), 3)]
-    if used:
-        # Pillow pads the palette out to 256 entries; keep only the ones the
-        # quantizer actually assigned so callers can assert set membership.
-        return [triple for triple in triples if triple in used]
-    return triples
+    # Pillow pads the palette out to 256 entries; keep only the ones the
+    # quantizer actually assigned so callers can assert set membership.
+    return [triple for triple in triples if triple in used]
 
 
 def palette_table(image) -> list[str]:

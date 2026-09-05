@@ -14,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+import scripts.unreachable_branch_report as report  # noqa: E402
 from scripts.unreachable_branch_report import _ranges, summarise  # noqa: E402
 
 
@@ -125,3 +126,58 @@ def test_line_runs_collapse_and_singletons_survive():
     assert _ranges([3, 4, 5, 9]) == "3-5, 9"
     assert _ranges([]) == "-"
     assert _ranges([7, 7, 6]) == "6-7"
+
+
+# ─────────────────── the runner's per-file cap, under tracing ───────────────────
+
+
+def _captured_run(monkeypatch):
+    """Run `_run_suite` against a stubbed subprocess and return its environment."""
+    seen = {}
+
+    class _Result:
+        returncode = 0
+
+    def fake_run(argv, cwd=None, env=None):
+        seen["argv"] = argv
+        seen["env"] = env
+        return _Result()
+
+    monkeypatch.setattr(report.shutil, "which", lambda _name: "/usr/bin/bash")
+    monkeypatch.setattr(report.subprocess, "run", fake_run)
+    return seen
+
+
+def test_the_traced_run_raises_the_runners_per_file_cap(monkeypatch):
+    """A traced file crosses the runner's 300s default and reads as "no tests ran".
+
+    Which reds the suite, and a red suite makes every branch number in the
+    report suspect — for a reason that has nothing to do with branches. Measured
+    2026-09-05: `test_charsheet_pipeline.py`'s 110 tests took 310s traced and
+    were SIGKILL'd mid-collection. The script already raises the PER-TEST
+    timeout for exactly this hazard; this is the same hazard one level up.
+    """
+    seen = _captured_run(monkeypatch)
+
+    report._run_suite(Path("rc"), ["tests/agent/test_charsheet_spec.py"], 4, 120, 1500)
+
+    assert "--file-timeout=1500" in seen["argv"]
+    assert "--timeout=120" in seen["argv"]
+
+
+def test_the_per_file_cap_rides_the_argv_because_the_runner_drops_the_variable(monkeypatch):
+    """`run_tests.sh` execs under `env -i` and forwards a NAMED set of variables.
+
+    `HERMES_TEST_FILE_TIMEOUT` is not in it, so a cap set in the environment is
+    dropped at that fence and the runner uses its 300s default anyway — measured
+    2026-09-05 by a run that came back red with the variable set. Pinned as a
+    test because the failure is silent: the variable is accepted, ignored, and
+    the report reds for a reason that looks like a branch finding.
+    """
+    monkeypatch.setenv("HERMES_TEST_FILE_TIMEOUT", "42")
+    seen = _captured_run(monkeypatch)
+
+    report._run_suite(Path("rc"), ["tests/agent/test_charsheet_spec.py"], None, 120, 900)
+
+    assert "--file-timeout=900" in seen["argv"]
+    assert not any(arg.startswith("--file-timeout=42") for arg in seen["argv"])
