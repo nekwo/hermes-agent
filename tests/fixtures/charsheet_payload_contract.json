@@ -1,0 +1,1257 @@
+{
+  "payloads": {
+    "list": {
+      "argv": "harness characters list --json",
+      "keys": {
+        "characters": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "characters[].created": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "characters[].directory": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "characters[].displayName": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "characters[].draftId": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "characters[].handednessAccepted": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "characters[].handednessAccepted[].basis": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "characters[].handednessAccepted[].gain": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "characters[].handednessAccepted[].row": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "characters[].installed": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "characters[].palette": {
+          "conditional": true,
+          "dynamic": false,
+          "modes": [
+            "palette"
+          ]
+        },
+        "characters[].sheet": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "characters[].slug": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "drafts": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "drafts[].authoredBy": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "drafts[].authoredRows": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "drafts[].baseImage": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "drafts[].concept": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "drafts[].directions": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "drafts[].directory": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "drafts[].displayName": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "drafts[].hermesHome": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "drafts[].id": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "drafts[].rows": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "drafts[].shadows": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "drafts[].slug": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "drafts[].stage": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "drafts[].style": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "ok": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        }
+      },
+      "modes": [
+        "default",
+        "palette"
+      ],
+      "object": "",
+      "producer": "hermes_cli/harness.py::_characters_draft_summary / _characters_installed_rows"
+    },
+    "sprite": {
+      "argv": "harness characters sprite <slug> --json [--no-sheet]",
+      "keys": {
+        "character": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.directions": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.directions.authored": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.directions.mirrored": {
+          "conditional": false,
+          "dynamic": true,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.directions.mirrored.{}": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.directions.order": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.displayName": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.frameH": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.frameW": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.framesByRow": {
+          "conditional": false,
+          "dynamic": true,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.framesByRow.{}": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.handednessAccepted": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.handednessAccepted[].basis": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.handednessAccepted[].gain": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.handednessAccepted[].row": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.loopMs": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.mime": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.rows": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.rows[].direction": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.rows[].frames": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.rows[].key": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.rows[].row": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.rows[].state": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.scale": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.sheet": {
+          "conditional": true,
+          "dynamic": false,
+          "modes": [
+            "no-sheet"
+          ]
+        },
+        "character.slug": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.spritesheetBase64": {
+          "conditional": true,
+          "dynamic": false,
+          "modes": [
+            "sheet"
+          ]
+        },
+        "character.spritesheetRevision": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.stateRows": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.states": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.states[].directional": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.states[].frames": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "character.states[].name": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        },
+        "ok": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "no-sheet",
+            "sheet"
+          ]
+        }
+      },
+      "modes": [
+        "no-sheet",
+        "sheet"
+      ],
+      "object": "character",
+      "producer": "agent/charsheet/draft.py::sprite_payload"
+    },
+    "status": {
+      "argv": "harness characters status --draft <id> --json",
+      "keys": {
+        "draft": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "ok": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "stage": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.authoredBy": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.baseImage": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.concept": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.created": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.displayName": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.hermesHome": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.id": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.missing": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.missing.rows": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.missing.turnaround": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.palette": {
+          "conditional": true,
+          "dynamic": false,
+          "modes": [
+            "palette"
+          ]
+        },
+        "status.pending": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.pending.rows": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.pending.turnaround": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.rows": {
+          "conditional": false,
+          "dynamic": true,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.rows.{}": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.rows.{}.approved": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.rows.{}.approvedPath": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.rows.{}.attempts": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.rows.{}.current": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.rows.{}.history": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.rows.{}.history[].attempt": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.rows.{}.history[].created": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.rows.{}.history[].note": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.rows.{}.history[].path": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.rows.{}.history[].rejected": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.rows.{}.key": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.rows.{}.rejected": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.schema": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.slug": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.spec": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.spec.frameH": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.spec.frameW": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.spec.rows": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.spec.rows[].direction": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.spec.rows[].frames": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.spec.rows[].key": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.spec.rows[].row": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.spec.rows[].state": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.spec.scheme": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.spec.scheme.authored": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.spec.scheme.mirrored": {
+          "conditional": false,
+          "dynamic": true,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.spec.scheme.mirrored.{}": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.spec.scheme.order": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.spec.sheetHeight": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.spec.sheetWidth": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.spec.states": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.spec.states[].directional": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.spec.states[].frames": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.spec.states[].name": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.stage": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.stages": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.style": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.turnaround": {
+          "conditional": false,
+          "dynamic": true,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.turnaround.{}": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.turnaround.{}.approved": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.turnaround.{}.approvedPath": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.turnaround.{}.attempts": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.turnaround.{}.current": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.turnaround.{}.history": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.turnaround.{}.history[].attempt": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.turnaround.{}.history[].created": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.turnaround.{}.history[].note": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.turnaround.{}.history[].path": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.turnaround.{}.history[].rejected": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.turnaround.{}.key": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.turnaround.{}.rejected": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        },
+        "status.updated": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "default",
+            "palette"
+          ]
+        }
+      },
+      "modes": [
+        "default",
+        "palette"
+      ],
+      "object": "status",
+      "producer": "agent/charsheet/draft.py::CharacterDraft.status_payload"
+    },
+    "thumb": {
+      "argv": "harness characters thumb --draft <id> (--row <key> | --direction <dir>) --json",
+      "keys": {
+        "attempt": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "direction",
+            "row"
+          ]
+        },
+        "attempts": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "direction",
+            "row"
+          ]
+        },
+        "direction": {
+          "conditional": true,
+          "dynamic": false,
+          "modes": [
+            "direction"
+          ]
+        },
+        "draft": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "direction",
+            "row"
+          ]
+        },
+        "frame": {
+          "conditional": true,
+          "dynamic": false,
+          "modes": [
+            "row"
+          ]
+        },
+        "frames": {
+          "conditional": true,
+          "dynamic": false,
+          "modes": [
+            "row"
+          ]
+        },
+        "height": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "direction",
+            "row"
+          ]
+        },
+        "ok": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "direction",
+            "row"
+          ]
+        },
+        "path": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "direction",
+            "row"
+          ]
+        },
+        "row": {
+          "conditional": true,
+          "dynamic": false,
+          "modes": [
+            "row"
+          ]
+        },
+        "scale": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "direction",
+            "row"
+          ]
+        },
+        "source": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "direction",
+            "row"
+          ]
+        },
+        "square": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "direction",
+            "row"
+          ]
+        },
+        "stage": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "direction",
+            "row"
+          ]
+        },
+        "width": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "direction",
+            "row"
+          ]
+        },
+        "withinConsoleBudget": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "direction",
+            "row"
+          ]
+        },
+        "withinOwnSheet": {
+          "conditional": false,
+          "dynamic": false,
+          "modes": [
+            "direction",
+            "row"
+          ]
+        }
+      },
+      "modes": [
+        "direction",
+        "row"
+      ],
+      "object": "",
+      "producer": "agent/charsheet/draft.py::CharacterDraft.row_thumb / CharacterDraft.direction_thumb"
+    }
+  },
+  "schema": "charsheet_payload_contract/v1"
+}

@@ -1460,6 +1460,34 @@ flag is not a fixture update — it is a launcher operator button that now exits
 Re-sync the launcher's own fixture in the same wave and record the sync in its
 `tool/hermes_cli_contract/README.md`.
 
+### The character payload contract dump
+
+`scripts/dump_payload_contract.py` runs this repo's `harness characters`
+producers and gates `tests/fixtures/charsheet_payload_contract.json` on the key
+paths they emit.
+
+```bash
+python scripts/dump_payload_contract.py --check   # the gate; run it after any payload change
+python scripts/dump_payload_contract.py --write   # regenerate after a producer change
+```
+
+The same hole, one repo over: the launcher compares every character payload key
+against a copy of this document **vendored in the launcher**
+(`tool/charsheet_payload_contract/`), by default-deny, so a hermes-side producer
+move left every hermes test green while that copy lied. Three moves landed blind
+that way — `handednessAccepted` added (`34a8dad32e`, which threw for every
+character on every machine with hermes installed), `cardSafe` removed
+(`4659127eba`, which left every live crop read as unjudged), the conditional
+`sheet` slot added (`a4f8e62af7`). Now the repo that MOVED is the repo that goes
+red. The gate and its round-tripped failure are pinned by
+`tests/hermes_cli/test_payload_contract_dump.py`.
+
+**When this gate reds, read the diff before regenerating.** A REMOVED key is the
+dangerous half: an added key the launcher does not know about throws, a removed
+one leaves it acting on a stale default. Re-vendor
+`tool/charsheet_payload_contract/` in the same wave and record the new sha256 in
+its README.
+
 ### Python
 **ALWAYS use `scripts/run_tests.sh`** — do not call `pytest` directly. The script enforces
 hermetic environment parity with CI (unset credential vars, TZ=UTC, LANG=C.UTF-8,
