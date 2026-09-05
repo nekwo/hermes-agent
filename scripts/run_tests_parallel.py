@@ -385,6 +385,31 @@ _FLAKY_RESULTS: List[Tuple[Path, str]] = []
 _flaky_lock = threading.Lock()
 
 
+#: Set to a coverage config file to trace every per-file subprocess. The ONLY
+#: consumer is ``scripts/unreachable_branch_report.py``; see :func:`_pytest_argv`.
+_COVERAGE_RC_ENV = "HERMES_TEST_COVERAGE_RC"
+
+
+def _pytest_argv(file: Path, pytest_args: List[str]) -> List[str]:
+    """``python -m pytest <file> …``, wrapped in ``coverage run`` when asked.
+
+    The wrap is the seam ``scripts/unreachable_branch_report.py`` measures
+    through. Without it the report would have to re-implement ``run_tests.sh``'s
+    hermetic environment to trace anything, and a second spelling of that
+    environment is a second thing to keep in sync — the report would then be
+    measuring branches under pins and env the suite never runs with.
+
+    Absent-safe by construction: with the variable unset the argv is
+    byte-identical to what this runner has always spawned, so an ordinary run
+    pays nothing and cannot be traced by accident. Every other decision
+    (``branch``, ``parallel``, ``data_file``, ``source``) lives in the config
+    file the report writes, so this seam carries ONE path and no policy.
+    """
+    rcfile = os.environ.get(_COVERAGE_RC_ENV, "").strip()
+    prefix = ["-m", "coverage", "run", f"--rcfile={rcfile}"] if rcfile else []
+    return [sys.executable, *prefix, "-m", "pytest", str(file), *pytest_args]
+
+
 def _run_one_file_once(
     file: Path,
     pytest_args: List[str],
@@ -392,8 +417,8 @@ def _run_one_file_once(
     file_timeout: float,
 ) -> Tuple[Path, int, str, dict[str, int], float]:
     """Single attempt of a per-file pytest subprocess (see _run_one_file)."""
-    cmd = [sys.executable, "-m", "pytest", str(file), *pytest_args]
-    
+    cmd = _pytest_argv(file, pytest_args)
+
     subproc_start = time.monotonic()
     # launch the pytest process
     proc = subprocess.Popen(

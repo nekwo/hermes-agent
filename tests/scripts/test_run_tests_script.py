@@ -88,3 +88,25 @@ def test_run_tests_hands_the_gateway_fence_the_real_store_root():
     exec_block = script[script.index("exec env -i") :]
     assert 'HERMES_HOME="$HERMES_HOME"' not in exec_block
     assert "HERMES_HOME=" not in exec_block
+
+
+def test_run_tests_forwards_the_branch_measurement_config_var():
+    """``HERMES_TEST_COVERAGE_RC`` reaches the hermetic child, absent-safe.
+
+    ``scripts/unreachable_branch_report.py`` measures THROUGH this runner rather
+    than re-spelling its ``env -i`` block, so the one variable that switches
+    tracing on has to survive the drop. It is forwarded with the same
+    ``${VAR:+…}`` guard every other opt-in uses, so a run without it is
+    byte-for-byte the run it always was — asserted here, because a plain
+    ``VAR="$VAR"`` would hand the child an empty value and make every run a
+    traced one.
+    """
+    script = Path("scripts/run_tests.sh").read_text(encoding="utf-8")
+    exec_block = script[script.index("exec env -i") :]
+    assert (
+        '${HERMES_TEST_COVERAGE_RC:+HERMES_TEST_COVERAGE_RC="$HERMES_TEST_COVERAGE_RC"}'
+        in exec_block
+    )
+    assert 'HERMES_TEST_COVERAGE_RC="$HERMES_TEST_COVERAGE_RC"' not in exec_block.replace(
+        '${HERMES_TEST_COVERAGE_RC:+HERMES_TEST_COVERAGE_RC="$HERMES_TEST_COVERAGE_RC"}', ""
+    )

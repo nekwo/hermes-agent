@@ -45,6 +45,10 @@ TEST_ONLY_DISTRIBUTIONS = {
     "ty",
     "iniconfig",
     "pluggy",
+    # Measurement only: `scripts/unreachable_branch_report.py` traces a suite
+    # with it and nothing the product ships imports it, so the live install is
+    # RIGHT not to carry it. Added 2026-09-04 with the pyproject `[dev]` pin.
+    "coverage",
 }
 
 

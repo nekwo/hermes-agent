@@ -119,7 +119,12 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 #
 #   <live venv>/Scripts/python.exe -m pip freeze  # minus the -e editable line
 #   python -m venv <shared>; <shared>/Scripts/python.exe -m pip install \
-#       -r <those pins> pytest pytest-asyncio pytest-timeout setuptools
+#       -r <those pins> pytest pytest-asyncio pytest-timeout setuptools coverage
+#
+# ``coverage`` joined that list on 2026-09-04 and is measurement only — nothing
+# the product ships imports it, so the LIVE install is right not to carry it
+# and ``scripts/check_test_env_drift.py`` lists it as test-only. Its consumer is
+# ``scripts/unreachable_branch_report.py``; the pin is in pyproject's [dev].
 #
 # The editable ``-e ...#egg=hermes_agent`` line is dropped ON PURPOSE: it
 # resolves to ONE checkout, and a shared venv that imports the primary
@@ -308,6 +313,17 @@ fi
 echo "▶ pre-compiling bytecode cache"
 "$PYTHON" -m compileall -q -j 0 -- $(git ls-files '*.py') >/dev/null 2>&1 || true
 
+# ── The branch measurement's one variable ───────────────────────────────────
+#
+# HERMES_TEST_COVERAGE_RC names a coverage config file. When it is set, every
+# per-file subprocess becomes `coverage run --rcfile=<it> -m pytest <file>`
+# (``run_tests_parallel.py::_pytest_argv``); when it is not, the argv is
+# byte-identical to what it has always been, so an ordinary run pays nothing.
+# Its only caller is ``scripts/unreachable_branch_report.py``, which measures
+# THROUGH this runner rather than re-spelling the hermetic env below — a second
+# spelling of that env would report branches taken under pins and variables no
+# suite actually runs with. Nothing consumes the report's exit code: it is a
+# report, not a gate.
 echo "▶ launching test runner"
 exec env -i \
   PATH="$PATH" \
@@ -321,6 +337,7 @@ exec env -i \
   ${HERMES_RUN_SLOW_PET_TESTS:+HERMES_RUN_SLOW_PET_TESTS="$HERMES_RUN_SLOW_PET_TESTS"} \
   ${HERMES_E2E_BROWSER:+HERMES_E2E_BROWSER="$HERMES_E2E_BROWSER"} \
   ${HERMES_TEST_TMP_ROOT:+HERMES_TEST_TMP_ROOT="$HERMES_TEST_TMP_ROOT"} \
+  ${HERMES_TEST_COVERAGE_RC:+HERMES_TEST_COVERAGE_RC="$HERMES_TEST_COVERAGE_RC"} \
   ${REAL_HERMES_ROOT:+HERMES_TEST_REAL_ROOT="$REAL_HERMES_ROOT"} \
   ${EXTRA_PYTHONPATH:+PYTHONPATH="$EXTRA_PYTHONPATH"} \
   ${EXTRA_PYTEST_PLUGINS:+PYTEST_PLUGINS="$EXTRA_PYTEST_PLUGINS"} \

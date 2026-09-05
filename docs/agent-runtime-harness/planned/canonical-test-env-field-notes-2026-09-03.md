@@ -117,6 +117,43 @@ cd X:\wt\test-env
 the import base and the RUNNING tree wins. `pywin32` also needed checking
 (its `.pth` normally wants a post-install step): `import win32api` works.
 
+### 2026-09-04 addendum: `coverage` joins the test-only delta (operator ruling)
+
+The recipe above is left exactly as it ran on 2026-09-03 — it is the record of
+what built this venv, not a live manifest. One distribution has been added since,
+by the ruling on the recurrence row (wave 15, hermes lane):
+
+```
+<test venv>\Scripts\python.exe -m pip install coverage
+# -> Successfully installed coverage-7.16.0 ; `pip check` clean afterwards
+```
+
+Pinned in `pyproject.toml`'s `[dev]` extra as `coverage==7.16.0` with `uv.lock`
+regenerated (`uv lock` reported exactly `Added coverage v7.16.0`; `uv lock
+--check` exits 0), and added to `scripts/check_test_env_drift.py`'s
+`TEST_ONLY_DISTRIBUTIONS` — the live install is RIGHT not to carry it, because
+no module the product ships imports it. Its one consumer is
+`scripts/unreachable_branch_report.py`, a report and never a gate.
+
+The drift report run while adding it is worth recording, because 15 of its 16
+lines were not mine and predate this change:
+
+```
+python scripts/check_test_env_drift.py --live <live venv> --test <test venv>
+-> 16 difference(s)   (before: coverage plus 15 others)
+-> 15 difference(s)   (after the allowlist entry)
+```
+
+The surviving 15 are `modal==1.5.5` and its dependency closure (`boto3`,
+`botocore`, `cbor2`, `grpclib`, `h2`, `hpack`, `hyperframe`, `jmespath`,
+`protobuf`, `s3transfer`, `synchronicity`, `toml`, `types-certifi`,
+`types-toml`) sitting in the TEST venv and absent from the live one. Nothing
+recorded installing them, and open question 1 below — nothing rebuilds this venv
+from the live freeze — is exactly the hole they came through. Not fixed here: a
+lane adding one pin does not get to reshape the shared environment. It does mean
+the drift report is not at zero today, and a run reporting 15 is the known state
+rather than a new finding.
+
 ### pytest: the `[dev]` pin moved to 9.0.3 (operator ruling)
 
 The venv got 9.0.3 deliberately — it is what the ad-hoc waves have actually

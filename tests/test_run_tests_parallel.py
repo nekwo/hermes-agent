@@ -663,3 +663,49 @@ def test_a_straggler_that_recovers_only_skips_still_counts_as_collection(
 
     assert "NO TESTS RAN" not in out, out
     assert code == 0, out
+
+
+# ── the branch-measurement seam ─────────────────────────────────────────────
+
+
+def test_an_untraced_run_spawns_exactly_what_it_always_did(monkeypatch) -> None:
+    """No config var, no wrapper — the argv is byte-identical to the old one.
+
+    The seam has to be free when nobody asked for it: a runner that could be
+    traced by accident would report suite numbers measured under an
+    instrumented interpreter, which is a different run from the one everyone
+    else's results came from.
+    """
+    mod = _load_runner_module()
+    monkeypatch.delenv(mod._COVERAGE_RC_ENV, raising=False)
+
+    probe = Path("tests/agent/test_x.py")
+    assert mod._pytest_argv(probe, ["-q"]) == [
+        sys.executable, "-m", "pytest", str(probe), "-q",
+    ]
+
+
+def test_the_config_var_wraps_each_file_in_coverage_run(monkeypatch) -> None:
+    """``coverage run`` goes BEFORE ``-m pytest``, and carries the rcfile.
+
+    Position is the whole assertion. ``python -m pytest -m coverage run`` would
+    hand pytest a ``-m`` marker expression and trace nothing, and the run would
+    still be green — the failure mode the report cannot see from its own side,
+    because it would simply find no data and blame the suite.
+    """
+    mod = _load_runner_module()
+    monkeypatch.setenv(mod._COVERAGE_RC_ENV, "/tmp/rc")
+
+    probe = Path("tests/agent/test_x.py")
+    assert mod._pytest_argv(probe, ["-q"]) == [
+        sys.executable, "-m", "coverage", "run", "--rcfile=/tmp/rc",
+        "-m", "pytest", str(probe), "-q",
+    ]
+
+
+def test_a_blank_config_var_is_the_same_as_an_absent_one(monkeypatch) -> None:
+    """An empty value must not produce ``--rcfile=``, which coverage refuses."""
+    mod = _load_runner_module()
+    monkeypatch.setenv(mod._COVERAGE_RC_ENV, "   ")
+
+    assert "coverage" not in mod._pytest_argv(Path("tests/agent/test_x.py"), [])
