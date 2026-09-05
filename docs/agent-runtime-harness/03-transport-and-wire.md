@@ -307,6 +307,21 @@ paired device does not get to decide even at `console` tier. A device learns
 what it may ask by MEMBERSHIP; the manifest and the dispatcher cannot disagree,
 because both read one tuple (`OPS_EVERY_TRANSPORT` minus `OPS_GATEWAY_DENIED`).
 
+**`hello_ok` also carries `reached_at: {host, port}` — the one address on this
+lane that is measured rather than inferred** (D12, ruled 2026-09-05). It is the
+accepting socket's own `getsockname()`, read once at accept
+(`serve_socket.py::_reached_at`, parked on `SocketConnection.reached_at`), so on
+a wildcard bind it names the single interface *this* connection arrived on — the
+address that demonstrably carried a packet, as against the routing-table read
+(R-D8) and datagram probe (R-D2) every published candidate comes from. The same
+value rides each `connections` row (`SocketConnection.payload`), which is how
+the accepting install's own launcher reads it, and the `gateway peers join` ack,
+copied off the frame and never re-derived. Absent — never fabricated — when the
+socket cannot answer, when the sockaddr is not an IP one, or when the host is a
+wildcard: R-D1's "never hand out a bind address" held at a new door. On the
+loopback lane it honestly reads `127.0.0.1`; a consumer promoting it to a
+published endpoint reads `transport` first.
+
 **The `rpc` roster is THIRTEEN methods, and each is named by its handler** —
 every one registered by a `@method("…")` decorator in `serve_rpc.py`, which is
 the only registration site, so this list is
@@ -732,7 +747,7 @@ workspace id that failed the private "id under `<workspace_id>/`" restatement
 becomes a resync notification; an UNKNOWN frame type takes the same branch
 deliberately. Drops are typed, never silent: a subscriber outrunning its bounded
 buffer gets `subscription_dropped` naming which of the two bounds tripped —
-frame count or bytes — then is unsubscribed (`serve.py:4344`).
+frame count or bytes — then is unsubscribed (`serve.py:4357`).
 
 ## 7. The PUSH-vs-RPC boundary, and the fork boundary
 

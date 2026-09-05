@@ -655,6 +655,53 @@ def test_the_socket_greeting_names_which_install_the_client_reached():
             assert reply["contract"] == serve_module.SERVE_SCHEMA_VERSION
 
 
+def test_the_greeting_reports_the_address_this_connection_actually_reached():
+    """D12: the ONE measured answer to "which of my addresses works".
+
+    Every other candidate this install advertises is an INFERENCE — a
+    routing-table read (R-D8) or a datagram probe (R-D2). The accepting
+    socket's own ``getsockname()`` is not: it is the local address the kernel
+    bound this accepted connection to, i.e. exactly the address the far side
+    dialled and reached. It was being thrown away on every accept.
+    """
+
+    with running_serve() as handle:
+        with client(handle, name="probe") as (_conn, reply):
+            reached = reply["reached_at"]
+            assert set(reached) == {"host", "port"}
+            # The loopback lane reaches this install on loopback, and says so
+            # rather than guessing something more useful. A consumer promoting
+            # this to a published endpoint reads ``transport`` first.
+            assert reached["host"] == "127.0.0.1"
+            assert reached["port"] == handle.ready["socket"]["port"]
+            assert reached["port"] == handle.port
+            # Additive: nothing else on the greeting moved.
+            assert reply["contract"] == serve_module.SERVE_SCHEMA_VERSION
+            assert reply["transport"] == "socket"
+
+
+def test_the_connections_row_carries_the_same_reached_address():
+    """The accepting install's OWN read path.
+
+    The greeting hands ``reached_at`` to the far side, which is the half the
+    row is written about. But R-D7 makes THIS install's launcher the consumer
+    that matters — it is the one that writes the address first on its own row
+    and re-publishes it — and a launcher reads the ``connections`` block, never
+    a greeting addressed to somebody else. One fact, two readers, one source.
+    """
+
+    with running_serve() as handle:
+        with client(handle, name="probe") as (connection, reply):
+            connection.send({"op": "connections"})
+            frame = _read_until(connection, "socket_connections")
+            row = next(
+                item
+                for item in frame["connections"]
+                if item["connection"] == reply["connection"]
+            )
+            assert row["reached_at"] == reply["reached_at"]
+
+
 def test_a_client_on_the_same_build_is_not_flagged_and_one_on_another_build_is():
     from agent_runtime.build_stamp import build_stamp
 

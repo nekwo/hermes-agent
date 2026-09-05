@@ -99,3 +99,78 @@ in `planned/`).
 Stage 3 and stage 2's launcher mirror. Both in the launcher row.
 
 ---
+
+## Row 2 — peer discovery `reached_at`
+
+Ruled 2026-09-05: approved as staged. Hermes half only; the launcher half is
+gated on the D3 proof so the two are never proven in the same run.
+
+### What I did
+
+One source — `agent_runtime/serve_socket.py::_reached_at(sock)` — read at
+ACCEPT, not lazily at greeting time (a TLS wrap or an admission refusal can
+close the socket before the frame is built), parked on
+`SocketConnection.reached_at`. Never raises; returns `None` rather than
+guessing when the socket cannot answer, the sockaddr is not an IP one, or the
+host is a wildcard. That last exclusion is R-D1 held at a new door: handing the
+far side a `0.0.0.0` here would re-introduce exactly what D1 removed from every
+payload.
+
+Three emit surfaces, all additive, all absent when there is nothing to say:
+`hello_ok` (`serve.py::_hello_ok_frame`), each `connections` row
+(`SocketConnection.payload`), and the `gateway peers join` ack
+(`gateway_commands.py`, copied off the reply and never re-derived).
+
+Design note in `planned/d12-reached-at-measured-address.md`; the shipped fact is
+recorded in `03-transport-and-wire.md` §2.
+
+### The surface the row did not name
+
+The row says the far side reads `reached_at` off `hello_ok`. But R-D7 makes
+**this** install's launcher the consumer that matters — it is the one that
+writes the address first on its own row and re-publishes — and a launcher reads
+the `connections` block, never a greeting addressed to somebody else. Without
+the `payload()` half there is no read path for the party the design is written
+for. Added, with a test that the two agree.
+
+### Red first
+
+- `test_the_greeting_reports_the_address_this_connection_actually_reached`
+- `test_the_connections_row_carries_the_same_reached_address`
+  (both `KeyError: 'reached_at'` before the field existed)
+- the two-roots e2e's join-ack assertion (`KeyError: 'reached_at'`, on the real
+  two-install ceremony over real sockets)
+
+### One existing test moved, and why it is not a waiver
+
+`test_serve_gateway_lane.py::test_the_loopback_lane_is_byte_identical_with_the_gateway_lane_up`
+compares two boots' greetings with a `volatile` key set. `reached_at.port` is
+the boot's ephemeral listener port, so the two boots differed and the test
+reddened — correctly. I did **not** add `reached_at` to `volatile`: I narrowed
+`_stable` to compare `reached_at`'s HOST and drop its port. The host is the
+claim that test makes (bringing the gateway lane up must not change which
+address a loopback client reaches); the port is as boot-dependent as `socket`
+and `connection` already in that set. The comparison got narrower exactly where
+it was comparing two port numbers to each other, and nowhere else.
+
+### The CLI contract dump is NOT part of this
+
+Checked rather than assumed: `scripts/dump_cli_contract.py` walks the argparse
+tree — command paths, flags, defaults — and says nothing about a verb's output
+shape. `reached_at` is an ack key, so the dump does not move. `--check` green
+(191 command paths, sha unchanged at `4a30a35fbcf67d7c`).
+
+### Left
+
+The launcher half, verbatim in the report and in §4 of the design note.
+
+---
+
+## Cites I re-anchored across both rows
+
+Inserting into `serve.py` and `serve_socket.py` drifted two more checked cites
+(`03-transport-and-wire.md:735` `subscription_dropped`,
+`04-boot-and-lifecycle.md:26` `_cmd_serve`/`BootTimeline`). Re-anchored to the
+real current lines. The gate found every one of them; nothing was waived and
+the baseline was not touched.
+

@@ -2101,6 +2101,29 @@ def cmd_gateway_peers_join(args) -> int:
     row["fingerprint_attested"] = attested
     if correlation is not None:
         row["correlation"] = correlation
+    # D12 — the far install's own MEASUREMENT of where this dial landed, read
+    # off the ``hello_ok`` and never re-derived here. `endpoints` on this row is
+    # what THIS side dialled: a candidate off a list, correct only as far as the
+    # list was. `reached_at` is what the accepting kernel bound the connection
+    # to, which is the address that demonstrably carries packets from here to
+    # there. They differ exactly where it matters — a wildcard-bound install
+    # with several interfaces, an alias, a port-forward — and where they differ
+    # the measurement is the one worth publishing (R-D7).
+    #
+    # Absent when the far side predates this field or could not answer: never
+    # backfilled from `dialled`, because a fabricated measurement is worse than
+    # no measurement — it would look like proof and be an echo of the guess.
+    reached_at = reply.get("reached_at")
+    if (
+        isinstance(reached_at, dict)
+        and isinstance(reached_at.get("host"), str)
+        and reached_at.get("host")
+        and isinstance(reached_at.get("port"), int)
+    ):
+        row["reached_at"] = {
+            "host": reached_at["host"],
+            "port": int(reached_at["port"]),
+        }
     # What the OTHER side now holds about us, so one ack answers "is this edge
     # symmetric" without an operator walking to the other machine to check.
     row["this_install"] = {

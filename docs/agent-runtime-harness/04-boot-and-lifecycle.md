@@ -23,7 +23,7 @@ runtime. Everything else launcher-side belongs to the Launcher's docs.
 
 ## Stage 1 — interpreter and import tax (`interpreter_ms` and its segments)
 
-`_cmd_serve` starts a `BootTimeline` as its first instruction (`serve.py:5114-5116`).
+`_cmd_serve` starts a `BootTimeline` as its first instruction (`serve.py:5131-5137`).
 Everything before that instant is `interpreter_ms`: process creation → the command's own first
 statement, resolved through psutil and **simply absent when the platform will not give a
 creation time** (`agent_runtime/boot_timeline.py:108-118`). That one number used to be the

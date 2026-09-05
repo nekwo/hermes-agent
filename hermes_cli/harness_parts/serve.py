@@ -3800,6 +3800,19 @@ def serve_loop(
                 # a verb this connection is refused.
                 "transport": connection.transport,
                 "connection": connection.key,
+                # D12 — the address this client actually REACHED, read off the
+                # accepting socket's own ``getsockname()`` rather than off any
+                # candidate list. Every other address this install offers is an
+                # inference; this one is a measurement, and it is the only one
+                # that already proved a packet got through. Absent when the
+                # socket could not answer or the bind is not a dialable
+                # address — never a fabricated `0.0.0.0`, which is the thing
+                # R-D1 spent a wave removing from every payload.
+                **(
+                    {"reached_at": dict(connection.reached_at)}
+                    if isinstance(getattr(connection, "reached_at", None), dict)
+                    else {}
+                ),
                 "runtime_root": runtime_root,
                 "build": build_block,
                 # The socket greeting's half of the install identity. A socket

@@ -462,7 +462,18 @@ def test_the_loopback_lane_is_byte_identical_with_the_gateway_lane_up(
     }
 
     def _stable(frame: dict) -> dict:
-        return {k: v for k, v in frame.items() if k not in volatile}
+        stable = {k: v for k, v in frame.items() if k not in volatile}
+        reached = stable.get("reached_at")
+        if isinstance(reached, dict):
+            # D12's ``reached_at`` is half claim, half ephemeral. The HOST is
+            # exactly what this test is about — bringing the gateway lane up
+            # must not change which address a loopback client reaches — so it
+            # stays in the comparison. The PORT is this boot's ephemeral
+            # listener, as boot-dependent as ``socket`` and ``connection``
+            # above, and comparing it would only re-prove that two boots got
+            # two ports.
+            stable["reached_at"] = {"host": reached.get("host")}
+        return stable
 
     # WARM THE ROOT FIRST, and discard that boot. A fresh root mints its serve
     # token and its install identity on the first boot and loads them on every

@@ -973,6 +973,13 @@ class SocketConnection:
     sock: Any
     peer: str
     connected_at: str
+    #: D12 — the local address the kernel bound this ACCEPTED connection to,
+    #: read once at accept and never re-read. It is the only MEASURED answer
+    #: this install has to "which of my addresses can be reached from over
+    #: there": every other candidate it publishes is an inference (a routing
+    #: table read, R-D8, or a datagram probe, R-D2). ``None`` when the socket
+    #: could not answer or the sockaddr is not an IP one — never a guess.
+    reached_at: dict[str, Any] | None = None
     client: str | None = None
     client_build: str | None = None
     authenticated: bool = False
@@ -1062,6 +1069,16 @@ class SocketConnection:
                 "frames_out": self.frames_out,
                 "bytes_out": self.bytes_out,
             }
+            if self.reached_at is not None:
+                # D12, additive and only on a row that HAS one. This is the
+                # accepting install's own read path: the greeting hands the
+                # measurement to the far side, but R-D7 makes this install's
+                # launcher the consumer that promotes it to a published
+                # endpoint, and a launcher reads this block — never a greeting
+                # addressed to somebody else. Not a secret: it is this
+                # machine's own LAN address, which every attached client on
+                # that interface already knows.
+                payload["reached_at"] = dict(self.reached_at)
             if self.device_id is not None:
                 # ADDITIVE, and only on a row that has one — so every existing
                 # `connections` consumer reads the shape it was written against.
@@ -1495,6 +1512,11 @@ class ServeSocketServer:
             sock=sock,
             peer=_peer_text(peer),
             connected_at=_now_iso(),
+            # Read HERE, at accept, and not lazily at greeting time: a TLS wrap
+            # or a refusal can close this socket before the frame is built, and
+            # a `getsockname()` on a closed socket answers nothing useful. The
+            # measurement is a property of the accept, so it is taken there.
+            reached_at=_reached_at(sock),
             transport=self._transport_name,
         )
         try:
@@ -2556,6 +2578,35 @@ def _peer_text(peer: Any) -> str:
         return f"{peer[0]}:{peer[1]}"
     except Exception:
         return str(peer)
+
+
+def _reached_at(sock: Any) -> dict[str, Any] | None:
+    """``{host, port}`` the far side actually reached, or ``None``.
+
+    D12. ``getsockname()`` on an ACCEPTED socket returns the local end of that
+    particular connection — not the listener's bind — so on a wildcard listener
+    it names the one interface this client arrived on. That is the measurement
+    the pairing lane keeps re-deriving and throwing away.
+
+    Never raises and never guesses: a socket that cannot answer, or answers
+    with a sockaddr that is not an IP one (an AF_UNIX path, a raw family),
+    yields ``None``. A wildcard or empty host is also refused — a bind address
+    is not something anyone can dial (R-D1), and passing one along here would
+    hand the far side exactly the ``0.0.0.0`` that lane spent a wave removing.
+    """
+
+    try:
+        sockaddr = sock.getsockname()
+    except Exception:
+        return None
+    try:
+        host = str(sockaddr[0])
+        port = int(sockaddr[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+    if not host or host in {"0.0.0.0", "::", "*"} or port <= 0:
+        return None
+    return {"host": host, "port": port}
 
 
 def _is_fatal_accept_error(exc: OSError) -> bool:

@@ -329,6 +329,14 @@ def test_two_isolated_installs_pair_through_both_verbs_and_ping_across_the_edge(
     assert joined["this_install"]["endpoints"] == [
         {"host": "127.0.0.1", "port": b.gateway_port}
     ]
+    # D12 — the one MEASURED address on this ack. ``endpoints`` above is what B
+    # DIALLED (its own candidate list, an inference); ``reached_at`` is what A's
+    # kernel says the accepted connection actually landed on. They agree here
+    # because both roots are on loopback, and the case the field exists for is
+    # the one where they do not: a wildcard-bound install behind three
+    # interfaces learns which of them carried a packet, and learns it from an
+    # arrival rather than from a routing table it can only infer with.
+    assert joined["reached_at"] == {"host": "127.0.0.1", "port": a.gateway_port}
 
     # ── 3. BOTH stores recorded the edge ─────────────────────────────────────
     _c, a_rows, _o = a.cli("gateway", "peers", "list")
