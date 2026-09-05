@@ -38,6 +38,19 @@ agent says, and a real provider here would measure the provider.
 
 The assertions are what was OBSERVED. The recorded answer is in
 ``<repo>/docs/agent-runtime-harness/planned/remote-chat-parity-field-notes-2026-09-05.md``.
+
+C1h-bis, in this file
+---------------------
+C1h's answer came with a caveat it had to work around: **nothing published a
+stream frame on a chat turn's own account**, so the second measurement below
+could only sample the ``running_work`` row by FORCING publishes with unrelated
+real writes. Stage C1h-bis gave the chat-turn core its own two appends
+(``persona_chat.turn_started`` / ``persona_chat.turn_ended``,
+``agent_runtime.chat_turn_presence``), so the forcing writes are gone and the
+same test now asserts what it previously had to arrange: the row arrives on the
+lane within a small multiple of one hub publish interval of the ack, and is
+retired within the same of the turn's exit. The caveat is kept as history in the
+field notes, not re-asserted here.
 """
 
 from __future__ import annotations
@@ -301,6 +314,75 @@ def _carries_running_chat_turn(turn_request_id: str):
     return _predicate
 
 
+def _event_types_of(frame: dict) -> list[str]:
+    """Every event type a frame NAMES — the single-event ``entity`` and, on a
+    coalesced batch, each row of ``events``."""
+
+    found: list[str] = []
+    entity = frame.get("entity")
+    if isinstance(entity, dict):
+        event = entity.get("event")
+        if isinstance(event, dict) and isinstance(event.get("type"), str):
+            found.append(event["type"])
+    for event in frame.get("events") or []:
+        if isinstance(event, dict):
+            inner = event.get("event")
+            if isinstance(inner, dict) and isinstance(inner.get("type"), str):
+                found.append(inner["type"])
+    return found
+
+
+def _publishes_the_start(turn_request_id: str):
+    """A frame that NAMES the turn's own start event AND carries its row.
+
+    Both halves, and the conjunction is the whole point. "A frame carrying the
+    row" alone does not prove the turn published anything: with
+    ``new_session: true`` the runtime also appends ``persona_instance.created``
+    and ``persona_instance.chat_opened`` around the same moment, and a core
+    built for one of THOSE can pick the row up if the write-ahead happened to
+    land first. That is precisely the race C1h measured — it passed on some runs
+    and timed out on others. Requiring the frame to name
+    ``persona_chat.turn_started`` asks the question this stage actually owns:
+    did the turn's OWN publish put the row in front of a subscriber.
+    """
+
+    carries = _carries_running_chat_turn(turn_request_id)
+
+    def _predicate(frame: dict) -> bool:
+        return carries(frame) and "persona_chat.turn_started" in _event_types_of(frame)
+
+    return _predicate
+
+
+def _publishes_the_end(turn_request_id: str):
+    """A frame that names the turn's end event and no longer holds its row.
+
+    The ``running_work`` section must be PRESENT: a frame without one (a
+    ``patch``, or a hydrate that predates the store) says nothing about running
+    work, which is a different fact from "this turn is over" and must not be
+    allowed to answer for the end publish.
+    """
+
+    work_id = f"chat_turn:{turn_request_id}"
+
+    def _predicate(frame: dict) -> bool:
+        if not _is_stream(frame):
+            return False
+        if "persona_chat.turn_ended" not in _event_types_of(frame):
+            return False
+        core = frame.get("core")
+        running = core.get("running_work") if isinstance(core, dict) else None
+        if not isinstance(running, dict):
+            return False
+        rows = running.get("rows")
+        return not any(
+            isinstance(row, dict) and row.get("work_id") == work_id
+            for row in rows or []
+        )
+
+    return _predicate
+
+
 def _stream_payload(frame: dict) -> dict:
     """A stream frame IS its payload on this lane — there is no envelope."""
 
@@ -493,14 +575,12 @@ def _stream_says_about(
         op = frame.get("op")
         if isinstance(op, str):
             delta_ops.append(op)
-        entity = frame.get("entity")
-        if isinstance(entity, dict):
-            event = entity.get("event")
-            if isinstance(event, dict) and isinstance(event.get("type"), str):
-                event_types.append(event["type"])
-        for event in frame.get("events") or []:
-            if isinstance(event, dict) and isinstance(event.get("type"), str):
-                event_types.append(event["type"])
+        # ONE extraction, shared with the two publish predicates. The version
+        # inlined here read ``type`` off the top of each ``events`` row, where
+        # ``_delta_entity`` does not put it, so a coalesced batch's types went
+        # unreported — which is exactly the kind of quiet under-reporting a
+        # measurement file must not have.
+        event_types.extend(_event_types_of(frame))
         core = frame.get("core")
         running = core.get("running_work") if isinstance(core, dict) else None
         if isinstance(running, dict):
@@ -556,11 +636,35 @@ def _print_lane_report(
 #: bounded so the file stays under its wall.
 SLOW_TURN_SECONDS = 12.0
 
-#: How many real writes are issued during the dwell to force the hub to publish,
-#: and how long each one is given to produce a frame. Their product stays under
-#: :data:`SLOW_TURN_SECONDS` so every publish happens while the turn is running.
-_MID_TURN_NUDGES = 5
-_MID_TURN_NUDGE_WAIT_SECONDS = 1.5
+#: ONE publish interval of the serve hub's producer, from ``stream_frames``'
+#: own defaults: ``poll_interval_seconds`` 0.25 + ``delta_debounce_seconds``
+#: 0.2. A frame also costs the core build the delta carries, which is real work
+#: on a real serve and is not a constant, so the deadlines below are multiples
+#: of this rather than the number itself.
+_PUBLISH_INTERVAL_SECONDS = 0.45
+
+#: How long the turn's OWN start publish gets to put a row on the lane, measured
+#: from the ACK. Half the dwell, and the reason it is not one publish interval is
+#: a measured fact worth stating: the ack is returned when the turn is ACCEPTED,
+#: and the row cannot exist until the write-ahead record lands, which is after
+#: the session mint, the chat open and the actor prewarm — 1.4–1.9 s of real
+#: work in this fixture. So this bound says "promptly, and by a margin that
+#: cannot be the turn's end"; :data:`_START_ROW_ELAPSED_CEILING_SECONDS` is the
+#: one that says "within a publish interval of the row becoming real".
+_START_ROW_ACK_CEILING_SECONDS = SLOW_TURN_SECONDS / 2
+
+#: The tight bound, read off the ROW rather than off the clock: the turn's own
+#: ``elapsed_seconds`` at the moment the frame carrying it was built. Anchored on
+#: the write-ahead stamp, so it measures exactly the gap this stage closed — one
+#: publish interval, one core build, and an integer floor. Before C1h-bis no
+#: frame carried the row at all inside the dwell.
+_START_ROW_ELAPSED_CEILING_SECONDS = 3
+
+#: How long the END publish gets to retire the row, measured from the turn's exit
+#: frame. A small multiple of one publish interval: by the exit the journal has
+#: already made its terminal transition, so this is the hub's latency and
+#: nothing else.
+_END_ROW_DEADLINE_SECONDS = 8 * _PUBLISH_INTERVAL_SECONDS
 
 
 @pytest.fixture
@@ -571,7 +675,7 @@ def slow_scripted_model(monkeypatch, scripted_model):
 
 
 @pytest.mark.timeout(300)
-def test_a_running_turn_is_in_the_projection_but_nothing_publishes_it(
+def test_a_running_turn_publishes_its_own_start_and_end_on_the_stream_lane(
     gateway_on, placed_agent, slow_scripted_model, capfd
 ):
     """The other half of the measurement, and the one C1l's shape turns on.
@@ -582,27 +686,33 @@ def test_a_running_turn_is_in_the_projection_but_nothing_publishes_it(
     holds the turn open for :data:`SLOW_TURN_SECONDS` and asks the question of a
     turn that is provably in flight.
 
-    **The question has to be asked in two halves, because the first way of
-    asking it is not stable and the instability IS the finding.** Simply waiting
-    for a row to appear during a slow turn passes on some runs and times out on
-    others — the stream hub is EVENT-DRIVEN, so it publishes when the event log
-    moves, and a chat turn running a model appends nothing of its own until it
-    is over. So:
+    **What this asserted before C1h-bis, and why it had to.** The stream hub is
+    EVENT-DRIVEN — it publishes when the event log moves — and a chat turn
+    running a model appended nothing of its own between its write-ahead record
+    and its projection commit. So simply waiting for the row during a slow turn
+    passed on some runs and timed out on others, and that instability was the
+    finding rather than a flake to tune away: the row was in the projection and
+    no frame carried it. The test therefore FORCED publishes — up to five real
+    ``runtime.agent.create`` calls across the dwell, the shape of an operator
+    moving the office while a turn runs — and asked what the projection said at a
+    moment it chose. The C1h field notes keep that measurement (a row sampled
+    +3187 ms into a turn, ``owner.persona_id`` null) as history.
 
-    1. a delta is FORCED while the turn is in flight, by doing something
-       unrelated on the same connection (placing a second agent — the shape of
-       an operator moving the office while a turn runs). What the projection on
-       that frame says is a fact about the PROJECTION, asked at a moment this
-       test chose rather than one the poll phase chose.
-    2. the standing caveat is recorded rather than asserted: nothing publishes a
-       frame on the turn's own account, so a second console holding only this
-       lane may see a running turn LATE or not until something else moves.
+    **What it asserts now.** The turn publishes on its own account
+    (``persona_chat.turn_started`` at the write-ahead,
+    ``persona_chat.turn_ended`` when it leaves the in-flight set — see
+    ``agent_runtime.chat_turn_presence``), so the forcing writes are GONE and
+    nothing else moves the event log inside this test's windows. The row must
+    arrive within :data:`_START_ROW_ACK_CEILING_SECONDS` of the ack AND carry an
+    ``elapsed_seconds`` no greater than
+    :data:`_START_ROW_ELAPSED_CEILING_SECONDS` — the second is the tight bound,
+    because it is anchored on the write-ahead stamp rather than on an ack that
+    precedes the row's existence by the whole session mint. It must then be
+    RETIRED within :data:`_END_ROW_DEADLINE_SECONDS` of the turn's exit.
 
     A SECOND console watching the same runtime (the Mac's own launcher, which is
     exactly C5's arrangement) has only this lane.
     """
-
-    from agent_runtime import serve_rpc
 
     instance_id = placed_agent["persona_instance_id"]
     credential = pair_device(tier=TIER_CONSOLE, name="the mac")
@@ -637,69 +747,49 @@ def test_a_running_turn_is_in_the_projection_but_nothing_publishes_it(
                         },
                     }
                 )
-                _ack_at, ack = recorder.wait_for(
+                ack_at, ack = recorder.wait_for(
                     lambda frame: frame.get("id") == "slow-turn-1",
                     what="the chat turn ack",
                 )
                 assert "error" not in ack, ack
                 request_id = ack["result"]["request_id"]
 
-                # (1) the forced publishes, mid-turn. A second placement is a
-                # real write on a real verb: it appends events, so the hub
-                # publishes, so the projection on that frame is taken while this
-                # turn is running. Issued REPEATEDLY across the dwell rather than
-                # once, because a single nudge fired the instant the ack came
-                # back can be projected before the turn's journal row exists —
-                # and "the projection was taken too early" would read exactly
-                # like "the projection never carries the row".
-                projected_at = None
-                for index in range(_MID_TURN_NUDGES):
-                    nudge_id = f"nudge-{index}"
-                    connection.send(
-                        {
-                            "jsonrpc": "2.0",
-                            "id": nudge_id,
-                            "method": "runtime.agent.create",
-                            "params": {
-                                "persona_id": PERSONA,
-                                "workspace_id": WORKSPACE,
-                                "position": [7.0 + index, 8.0],
-                                "idempotency_key": f"mid-turn-nudge-{index}",
-                                "placement_id": f"qa_agent_c0ffee0{index}",
-                            },
-                        }
-                    )
-                    _nudge_at, nudge = recorder.wait_for(
-                        lambda frame, wanted=nudge_id: frame.get("id") == wanted,
-                        what=f"the mid-turn placement ack {nudge_id}",
-                    )
-                    assert "error" not in nudge, nudge
-                    try:
-                        projected_at, _frame = recorder.wait_for(
-                            _carries_running_chat_turn("slow-gesture-1"),
-                            what="a running_work chat_turn row for this turn",
-                            timeout=_MID_TURN_NUDGE_WAIT_SECONDS,
-                        )
-                    except AssertionError:
-                        continue
-                    break
-                assert projected_at is not None, (
-                    "no stream frame carried a running_work row for this turn, "
-                    f"across {_MID_TURN_NUDGES} forced publishes"
+                # (1) THE START, on the turn's own account. No forcing write:
+                # nothing else touches this runtime between the ack and the row,
+                # so a frame carrying it can only have come from the turn's own
+                # ``persona_chat.turn_started`` append. Before C1h-bis this wait
+                # timed out for the whole dwell.
+                started_at, _start_frame = recorder.wait_for(
+                    _publishes_the_start("slow-gesture-1"),
+                    what="the frame that publishes this turn's own start row",
+                    timeout=_START_ROW_ACK_CEILING_SECONDS,
                 )
-                first_row_ms = (projected_at - sent_at) * 1000.0
+                start_row_ms = (started_at - ack_at) * 1000.0
+                first_row_ms = (started_at - sent_at) * 1000.0
                 in_flight = recorder.matching(_is_stream)
                 exited_early = recorder.matching(
                     lambda frame: frame.get("id") == request_id
                     and frame.get("event") == "exit"
                 )
 
-                recorder.wait_for(
+                exit_at, _exit_frame = recorder.wait_for(
                     lambda frame: frame.get("id") == request_id
                     and frame.get("event") == "exit",
                     what="the slow turn's exit",
                     timeout=180.0,
                 )
+                # (2) THE END. The row has to be RETIRED on the lane, not merely
+                # stop being republished: a second console paints a pending
+                # bubble off this row and needs a frame that no longer carries
+                # it. Identified by the turn's own end event for the same reason
+                # the start is — an empty projection on an unrelated frame is
+                # not this turn's end being published.
+                ended_at, _end_frame = recorder.wait_for(
+                    _publishes_the_end("slow-gesture-1"),
+                    what="the frame that publishes this turn's end",
+                    timeout=_END_ROW_DEADLINE_SECONDS,
+                )
+                end_row_ms = (ended_at - exit_at) * 1000.0
                 _settle_stream(recorder, seconds=3.0)
             finally:
                 recorder.stop()
@@ -720,7 +810,9 @@ def test_a_running_turn_is_in_the_projection_but_nothing_publishes_it(
         request_id=request_id,
     )
     print("\n=== WHILE THE TURN WAS STILL RUNNING ===")
-    print(f"  projection forced at: +{first_row_ms:.0f} ms after the send")
+    print(f"  start row on the stream lane: +{start_row_ms:.0f} ms after the ack")
+    print(f"                               (+{first_row_ms:.0f} ms after the send)")
+    print(f"  row retired on the stream lane: +{end_row_ms:.0f} ms after the exit")
     for key, value in mid.items():
         print(f"  {key}: {value}")
     print("=== OVER THE WHOLE TURN ===")
@@ -729,8 +821,10 @@ def test_a_running_turn_is_in_the_projection_but_nothing_publishes_it(
 
     # ── the finding ─────────────────────────────────────────────────────────
     # A turn that is still running IS in the projection the stream lane
-    # publishes, as a ``running_work`` row — so a second console CAN paint a
-    # pending bubble for a turn it did not start, once a frame arrives.
+    # publishes, as a ``running_work`` row — and since C1h-bis the turn itself
+    # is what puts a frame carrying it on the lane, so a second console CAN
+    # paint a pending bubble for a turn it did not start without waiting for an
+    # unrelated write.
     rows = mid["running_work_chat_turn_rows"]
     assert rows, mid
     row = rows[-1]
@@ -742,6 +836,28 @@ def test_a_running_turn_is_in_the_projection_but_nothing_publishes_it(
     assert row["work_id"] == "chat_turn:slow-gesture-1"
     assert row["owner"]["session_id"] == payload["session_id"]
     assert row["owner"]["persona_instance_id"] == instance_id
+    # C1h measured this field NULL beside the two above it. A console rendering
+    # "who is talking" reads it, so it is asserted rather than described.
+    assert row["owner"]["persona_id"] == PERSONA
+
+    # Both publishes are PROMPT, and the numbers are the assertion. Nothing else
+    # moved this runtime's event log in either window, so these are the turn's
+    # own two appends and nobody else's.
+    #
+    # The start is bounded TWICE because the two bounds answer different
+    # questions. Off the clock: it arrived within half the dwell of the ack, so
+    # it cannot be the turn's end arriving. Off the ROW: the turn had been in
+    # flight for at most :data:`_START_ROW_ELAPSED_CEILING_SECONDS` when the
+    # frame carrying it was built — that is one publish interval plus a core
+    # build plus the field's integer floor, measured from the write-ahead stamp
+    # rather than from the ack that precedes it by the whole session mint.
+    assert start_row_ms < _START_ROW_ACK_CEILING_SECONDS * 1000.0, start_row_ms
+    assert row["elapsed_seconds"] <= _START_ROW_ELAPSED_CEILING_SECONDS, row
+    assert end_row_ms < _END_ROW_DEADLINE_SECONDS * 1000.0, end_row_ms
+
+    # And the two publishes are on the record as the turn's OWN, by type.
+    assert "persona_chat.turn_started" in whole["event_types"], whole
+    assert "persona_chat.turn_ended" in whole["event_types"], whole
 
     # What the lane still does NOT carry, at any speed: the reply text, and the
     # ack's ``request_id``.
