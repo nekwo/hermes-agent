@@ -623,6 +623,7 @@ def test_the_envelope_itself_is_validated_with_upstreams_codes():
         "runtime.office.surface.update",
         "runtime.office.unsubscribe",
         "runtime.office.upsert",
+        "runtime.persona.instance.open_chat",
         "runtime.persona.prewarm",
         # Plan WS4, additive for the third time: the two scope-pointer verbs.
         # They ARE advertised like every other method — the restriction on them
@@ -805,6 +806,7 @@ def test_stdio_learns_the_method_set_from_ready_and_can_re_ask_version():
             "runtime.office.surface.update",
             "runtime.office.unsubscribe",
             "runtime.office.upsert",
+            "runtime.persona.instance.open_chat",
             "runtime.persona.prewarm",
             # Plan WS4, additive: the two scope-pointer verbs.
             "runtime.realm.use",
@@ -833,6 +835,7 @@ def test_stdio_learns_the_method_set_from_ready_and_can_re_ask_version():
             "runtime.office.surface.update": "console",
             "runtime.office.unsubscribe": "read",
             "runtime.office.upsert": "console",
+            "runtime.persona.instance.open_chat": "console",
             "runtime.persona.prewarm": "read",
             "runtime.realm.use": "console",
             "runtime.workspace.use": "console",
@@ -910,6 +913,7 @@ def test_the_method_surface_is_transport_agnostic_and_answers_on_the_socket():
                     "runtime.office.surface.update",
                     "runtime.office.unsubscribe",
                     "runtime.office.upsert",
+                    "runtime.persona.instance.open_chat",
                     "runtime.persona.prewarm",
                     # Plan WS4, additive: the two scope-pointer verbs.
                     "runtime.realm.use",
@@ -938,6 +942,7 @@ def test_the_method_surface_is_transport_agnostic_and_answers_on_the_socket():
                     "runtime.office.surface.update": "console",
                     "runtime.office.unsubscribe": "read",
                     "runtime.office.upsert": "console",
+                    "runtime.persona.instance.open_chat": "console",
                     "runtime.persona.prewarm": "read",
                     "runtime.realm.use": "console",
                     "runtime.workspace.use": "console",

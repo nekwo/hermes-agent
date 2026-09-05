@@ -2242,6 +2242,7 @@ def test_the_reclaim_pair_joins_the_manifest_without_moving_the_contract_version
         # Stage 3a of the agent-drop-latency plan. ADDITIVE: a method joins the
         # set, no existing shape moves, so the integer below stays 1 — a client
         # only calls methods it found in the set.
+        "runtime.persona.instance.open_chat",
         "runtime.persona.prewarm",
         # Plan WS4, additive again: the two scope-pointer verbs. They ARE
         # advertised like every other method — what restricts them is a

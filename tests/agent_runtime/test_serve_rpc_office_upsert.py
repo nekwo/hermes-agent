@@ -1092,6 +1092,7 @@ def test_the_method_set_grew_and_the_contract_integer_did_not_move():
             "runtime.office.surface.update",
             "runtime.office.unsubscribe",
             "runtime.office.upsert",
+            "runtime.persona.instance.open_chat",
             "runtime.persona.prewarm",
             # Plan WS4, additive: the two scope-pointer verbs. Advertised
             # like any other method; what restricts them is a caller-KIND
@@ -1123,6 +1124,7 @@ def test_the_method_set_grew_and_the_contract_integer_did_not_move():
             "runtime.office.surface.update": "console",
             "runtime.office.unsubscribe": "read",
             "runtime.office.upsert": "console",
+            "runtime.persona.instance.open_chat": "console",
             "runtime.persona.prewarm": "read",
             "runtime.realm.use": "console",
             "runtime.workspace.use": "console",
@@ -1274,6 +1276,7 @@ def test_the_write_method_is_transport_agnostic_and_answers_on_the_socket():
                     "runtime.office.surface.update",
                     "runtime.office.unsubscribe",
                     "runtime.office.upsert",
+                    "runtime.persona.instance.open_chat",
                     "runtime.persona.prewarm",
                     # Plan WS4, additive: the two scope-pointer verbs.
                     "runtime.realm.use",
@@ -1302,6 +1305,7 @@ def test_the_write_method_is_transport_agnostic_and_answers_on_the_socket():
                     "runtime.office.surface.update": "console",
                     "runtime.office.unsubscribe": "read",
                     "runtime.office.upsert": "console",
+                    "runtime.persona.instance.open_chat": "console",
                     "runtime.persona.prewarm": "read",
                     "runtime.realm.use": "console",
                     "runtime.workspace.use": "console",
