@@ -2740,6 +2740,7 @@ def serve_loop(
                     SOCKET_HOST,
                     ServeSocketServer,
                     SocketOwnerLock,
+                    read_socket_owner,
                 )
                 from agent_runtime.serve_auth import read_token as _read_serve_token
 
@@ -2806,6 +2807,59 @@ def serve_loop(
                         socket_block["owner_started_at"] = lock_result.owner_started_at
                 else:
                     socket_block = lock_result.payload()
+                    if service:
+                        # L-h item 2, and F1's explicit requirement: a
+                        # ``--service`` starter that loses the ownership race
+                        # SERVES NOTHING.
+                        #
+                        # A stdio serve that loses this lock has a job to do and
+                        # keeps doing it — that is the pre-existing contract and
+                        # it is untouched above. A SERVICE that lost it does
+                        # not: it was asked to be "the runtime for this root",
+                        # there already is one, and the only thing it could do
+                        # by carrying on is become a second execution process
+                        # against the same store — an extra stdio executor
+                        # nobody discovers, nobody drains, and nobody knows to
+                        # stop. So it names the winner and leaves, before the
+                        # request pool, the registry row and the ready frame
+                        # exist, which is what "serves nothing" means literally.
+                        #
+                        # Exit code 0: losing this race is the ORDINARY outcome
+                        # of two starters (a launcher that respawned, two
+                        # launchers on one machine), and the caller's next act
+                        # is to re-read the registry and attach to the winner —
+                        # RL-4. A nonzero code would read as "the runtime failed
+                        # to start" for a root that has a healthy runtime.
+                        #
+                        # Both a FRAME and a service-log line, because the two
+                        # have different audiences and either can be the only
+                        # one present: a launcher that spawned us over pipes
+                        # reads the frame, and a launcher that spawned us
+                        # DETACHED (which is the normal case — RL-2) has no
+                        # stdout to read at all.
+                        try:
+                            owner_record = read_socket_owner(store_root_path)
+                        except Exception:
+                            owner_record = {}
+                        owner_port = owner_record.get("port")
+                        exists = {
+                            "event": "serve_owner_exists",
+                            # The WINNER's pid, from the sidecar — not ours.
+                            "pid": lock_result.pid,
+                            "port": owner_port if isinstance(owner_port, int) else None,
+                            "boot_id": boot_id,
+                            "starter_pid": starter_pid,
+                            "runtime_root": runtime_root,
+                            "owner_started_at": lock_result.owner_started_at,
+                            "socket": socket_block,
+                        }
+                        _service_log(exists)
+                        frames.emit(exists)
+                        try:
+                            socket_lock.release()
+                        except Exception:
+                            pass
+                        return 0
             except Exception as exc:
                 # A transport that failed to come up must not take the runtime
                 # with it: stdio still works, and the typed outcome is how an
