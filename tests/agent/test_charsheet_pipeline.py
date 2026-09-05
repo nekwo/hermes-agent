@@ -560,6 +560,58 @@ def test_a_missing_base_image_is_refused_before_any_generation(fake, tmp_path):
     assert fake.calls == []
 
 
+def test_a_turnaround_strip_that_cannot_be_cut_into_the_authored_directions_is_refused(
+    base_image, tmp_path, monkeypatch
+):
+    """A provider stub whose strip does not divide into the authored count.
+
+    The arc w16/ha named and left unwritten (``pipeline.py`` 752→753): the
+    turnaround's "yielded N cutouts for M authored directions" guard. Writing
+    the case proves the guard could never speak — the extractor answers either
+    EXACTLY the count it was asked for or an exception, so the branch was
+    deleted and this test is what stands in its place.
+
+    Both halves are here because either alone would be a half-proof:
+
+    * A strip carrying FEWER poses than there are authored directions is
+      refused — by ``_validate_extracted_frames``'s hard tier one module over
+      (``agent/pet/generate/atlas.py``), which is the module that owns the
+      contract. The docstring's promise ("slicing failures raise") is kept, and
+      nothing is written to ``out_dir``: a failed roll is re-rolled whole, never
+      salvaged into a partial turnaround.
+    * A strip carrying MORE poses comes back at exactly ``len(order)``, which is
+      the other way the deleted guard could have been true and is not.
+    """
+
+    order = pipeline.turnaround_order(SPEC.scheme.authored)
+    assert len(order) >= 2, "the case needs a strip that can be one pose short"
+    generated = tmp_path / "generated"
+    generated.mkdir(parents=True, exist_ok=True)
+    out_dir = tmp_path / "turnaround"
+
+    def _one_pose_short(prompt, *, reference_images, aspect_ratio, prefix, provider):
+        assert prefix == pipeline.PREFIX_TURNAROUND
+        path = generated / "short-turnaround.png"
+        strip_image([(direction, 0, 1) for direction in order[:-1]]).save(path, format="PNG")
+        return path
+
+    monkeypatch.setattr(pipeline, "_generate_image", _one_pose_short)
+
+    with pytest.raises(ValueError) as caught:
+        pipeline.generate_turnaround(
+            SPEC, "an arrow knight", base_image, out_dir=out_dir
+        )
+    # The extractor's own refusal, not a count re-check in this module.
+    assert "cutouts for" not in str(caught.value)
+    assert list(out_dir.glob("turnaround-*.png")) == []
+
+    # The over-full strip: still exactly the authored count, never more.
+    over_full = strip_image(
+        [(order[index % len(order)], 0, 1) for index in range(len(order) + 1)]
+    )
+    assert len(pipeline.extract_strip_frames(over_full, len(order), fit=False)) == len(order)
+
+
 def test_a_direction_reroll_is_one_square_generation_carrying_the_note(fake, base_image, tmp_path):
     out = pipeline.generate_direction_view(
         "e", "an arrow knight", base_image, note="less shine on the helm", out=tmp_path / "e.png"

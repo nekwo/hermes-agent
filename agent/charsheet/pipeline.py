@@ -748,12 +748,15 @@ def generate_turnaround(
         prefix=PREFIX_TURNAROUND,
         provider=provider,
     )
+    # No count re-check on the way out. ``extract_strip_frames`` ends in
+    # ``_validate_extracted_frames``, whose FIRST tier is "wrong frame count"
+    # and raises under BOTH methods, and the fit branch after it is a per-frame
+    # map — so this call answers exactly ``len(order)`` cutouts or it raises.
+    # The guard that stood here could never be true (w17/hb); the two other
+    # ``extract_strip_frames`` call sites in this module already trust that
+    # contract instead of re-checking it, and the refusal is pinned by
+    # ``test_a_turnaround_strip_that_cannot_be_cut_into_the_authored_directions_is_refused``.
     cutouts = extract_strip_frames(strip, len(order), fit=False)
-    if len(cutouts) != len(order):
-        raise ValueError(
-            f"turnaround strip yielded {len(cutouts)} cutouts for {len(order)} "
-            f"authored directions ({', '.join(order)})"
-        )
 
     refs: dict[str, Path] = {}
     for direction, cutout in zip(order, cutouts):

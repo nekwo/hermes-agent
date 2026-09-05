@@ -379,6 +379,50 @@ def test_a_directional_row_is_grounded_on_its_approved_direction_reference(fake,
     assert result["rows"]["walk-e"]["reference"] == str(draft.store.current(turnaround_item("e")))
 
 
+def test_a_row_whose_direction_reference_was_withdrawn_under_it_is_refused(fake, base):
+    """The approval a row is grounded on can disappear between the stages.
+
+    The arc w16/ha named and left unwritten (``draft.py`` 1100→1101):
+    ``_row_reference`` finding no approved turnaround reference for a row that
+    has a direction. It reads as unreachable — stage ``rows`` is only entered
+    once EVERY authored direction is approved — and it is not, because the stage
+    is read off the frame's OWN ``draft.json`` snapshot, and two frames over one
+    draft are the case this package is built for (the serve child runs four pool
+    workers in one process).
+
+    Nothing here is faked. ``stale`` is a second real ``CharacterDraft`` loaded
+    before the advance, so its in-memory stage is honestly ``turnaround`` and
+    ``reroll_direction`` is a legal verb for it. ``propose`` clears the approval
+    (a new candidate reopens QA), the revision store caches nothing between
+    calls, and the advanced frame therefore reads ``current() is None`` on its
+    next generation. The lock does not stand in the way: the two verbs are
+    serial, and its contract is one WRITER at a time, not one frame per draft.
+    """
+
+    draft = CharacterDraft.create(concept=CONCEPT, slug=SLUG, spec=SPEC, base_image=base)
+    draft.run_turnaround()
+    stale = CharacterDraft.load(draft.id)
+    assert stale.stage == "turnaround"
+
+    draft.approve_all_directions()
+    assert draft.stage == "rows"
+
+    row = next(row for row in SPEC.authored_rows() if row.direction)
+    stale.reroll_direction(row.direction, note="the helm again")
+    assert draft.store.current(turnaround_item(row.direction)) is None
+
+    with pytest.raises(ValueError) as excinfo:
+        draft.run_rows(only=[row.key])
+
+    message = str(excinfo.value)
+    assert row.key in message
+    assert repr(row.direction) in message
+    assert "which is not approved" in message
+    # Refused before the generation was spent, and the stage did not move.
+    assert draft.store.history(row_item(row.key)) == []
+    assert draft.stage == "rows"
+
+
 def test_re_rolling_a_row_keeps_it_approved_and_records_the_note(fake, base):
     draft = run_to_rows(base)
     draft.run_rows(only=["walk-e"])
@@ -488,6 +532,45 @@ def test_compose_refuses_while_any_authored_row_lacks_an_approved_strip(fake, ba
     for key in missing:
         assert key in message
     assert draft.stage == "rows"
+
+
+def test_compose_is_refused_when_a_direction_reference_was_withdrawn_after_the_rows(fake, base):
+    """Every row is approved and the SHEET PALETTE still has nothing to read.
+
+    The arc w16/ha named and left unwritten (``draft.py`` 1627→1628). It is the
+    second half of ``_row_reference``'s and needs its own case, because the two
+    refusals answer different questions and only one of them is about rows: a
+    composed sheet locks every cell to a palette built from the approved
+    turnaround references (``build_sheet_palette``), so a withdrawn reference
+    leaves the palette short even when the strips are all there and approved.
+    The row loop above it passes — which is exactly why the guard is not
+    redundant with the "row(s) have no approved strip" refusal.
+
+    Same honest mechanism as the row case: a second frame loaded before the
+    advance re-rolls one direction, which clears its approval.
+    """
+
+    draft = CharacterDraft.create(concept=CONCEPT, slug=SLUG, spec=SPEC, base_image=base)
+    draft.run_turnaround()
+    stale = CharacterDraft.load(draft.id)
+    draft.approve_all_directions()
+    draft.run_rows()
+
+    withdrawn = SPEC.scheme.authored[0]
+    stale.reroll_direction(withdrawn)
+    assert draft.store.current(turnaround_item(withdrawn)) is None
+    for row in SPEC.authored_rows():
+        assert draft.store.current(row_item(row.key)) is not None
+
+    with pytest.raises(ValueError) as excinfo:
+        draft.compose()
+
+    message = str(excinfo.value)
+    assert repr(withdrawn) in message
+    assert "no approved reference to take the palette from" in message
+    # Nothing was installed and the draft is still open at rows.
+    assert draft.stage == "rows"
+    assert not (draft.directory / SHEET_FILENAME).exists()
 
 
 def test_compose_installs_a_validated_sheet_and_a_manifest_carrying_the_spec(installed):
@@ -1394,6 +1477,42 @@ def test_a_row_with_no_attempt_yet_says_so_instead_of_cropping_nothing(fake, bas
         draft.row_thumb("walk-e")
 
 
+def test_a_row_attempt_whose_image_vanished_is_refused_and_names_the_missing_file(fake, base):
+    """Recorded history, no file: the second of the two "nothing to crop" cases.
+
+    The arc w16/ha named and left unwritten (``draft.py`` 1355→1356). It is NOT
+    the "no attempt yet" refusal one guard above it — history is intact here, so
+    ``attempt_index`` resolves and the store hands back the path it recorded.
+    What is gone is the file, which is a real thing that happens to a library
+    kept on disk: a ``characters delete`` under a frame that still holds the
+    draft, a half-restored backup, an antivirus quarantine, a sync that dropped
+    a blob.
+
+    History is deliberately left ALONE: the store's own rule is that state can
+    never reference an image that is missing, so this is the one direction the
+    invariant can break in, and the refusal has to name the path an operator
+    would go looking for.
+    """
+
+    draft = run_to_rows(base)
+    draft.run_rows(only=["walk-e"])
+    key = row_item("walk-e")
+    vanished = draft.store.attempt_path(key, -1)
+    assert vanished.is_file()
+
+    vanished.unlink()
+
+    with pytest.raises(ValueError) as excinfo:
+        draft.row_thumb("walk-e")
+
+    message = str(excinfo.value)
+    assert "'walk-e' has no image on disk" in message
+    assert str(vanished) in message
+    # The attempt is still on record — the refusal reports, it does not repair.
+    assert len(draft.store.history(key)) == 1
+    assert not (draft.directory / "thumbs").exists(), "the refusal wrote a file anyway"
+
+
 # ─────────────────────── the square crop (hero-card shape) ───────────────────
 #
 # Why a second shape at all: the console's hero card is a fixed 1:1 centre-cover
@@ -1739,6 +1858,34 @@ def test_a_direction_with_no_attempt_yet_is_refused_before_anything_is_written(d
     with pytest.raises(ValueError, match="has no attempt to crop yet"):
         draft.direction_thumb("e")
 
+    assert not (draft.directory / "thumbs").exists(), "the refusal wrote a file anyway"
+
+
+def test_a_direction_attempt_whose_image_vanished_is_refused_and_names_the_missing_file(
+    fake, base
+):
+    """The direction arm of the row case above (``draft.py`` 1433→1434).
+
+    Its own test rather than a parametrize over the row one: the two verbs
+    resolve different items, and a single case that could not tell ``row@…``
+    from ``turnaround@…`` apart would leave whichever arm it did not take
+    exactly as unreached as it was.
+    """
+
+    draft = run_to_rows(base)
+    key = turnaround_item("e")
+    vanished = draft.store.attempt_path(key, -1)
+    assert vanished.is_file()
+
+    vanished.unlink()
+
+    with pytest.raises(ValueError) as excinfo:
+        draft.direction_thumb("e")
+
+    message = str(excinfo.value)
+    assert "direction 'e' has no image on disk" in message
+    assert str(vanished) in message
+    assert len(draft.store.history(key)) == 1
     assert not (draft.directory / "thumbs").exists(), "the refusal wrote a file anyway"
 
 

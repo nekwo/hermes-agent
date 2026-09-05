@@ -18,6 +18,7 @@ import json
 import os
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -128,6 +129,129 @@ def test_the_same_thread_re_enters_and_the_nested_exit_does_not_release(lock_pat
     assert [type(exc) for exc in refused] == [DraftBusy]
     # The holder named is the OUTERMOST verb, which is the one still running.
     assert refused[0].safe_details["verb"] == "auto"
+
+
+def test_a_reentrant_release_that_arrives_after_the_outer_one_is_survivable(lock_path):
+    """The registry entry is GONE by the time the nested exit looks for it.
+
+    The arc w16/ha named and left unwritten (``draft_lock.py`` 189→191): the
+    ``if held is not None`` guard in the re-entrant ``finally``. It was filed as
+    a two-process race, and it is not one — the entry is process-local, and what
+    removes it early is an exit order that is not LIFO. The outermost
+    acquisition's own ``finally`` pops the key unconditionally, so ANY release
+    that arrives after it finds nothing: an ``ExitStack`` unwound in the wrong
+    order, a nested context manager kept alive past its owner, or a generator
+    holding one that is closed at collection time rather than at its ``with``.
+
+    Driven through the raw context-manager protocol because that is the only way
+    to SPELL a non-LIFO release — nothing is faked, both objects are real locks
+    over the real file and the registry is never touched by this test. Without
+    the guard the nested release raises ``TypeError: 'NoneType' object is not
+    subscriptable`` inside a ``finally``, which would replace whatever exception
+    was already travelling.
+    """
+
+    outer = draft_generation_lock(lock_path, draft_id="d1", verb="auto")
+    outer.__enter__()
+    assert lock_path.is_file()
+
+    nested = draft_generation_lock(lock_path, draft_id="d1", verb="rows")
+    assert nested.__enter__()["reentered"] is True
+
+    # Out of order: the OUTER one releases first, which unlinks the file and
+    # drops the registry entry the nested release is about to look for.
+    assert outer.__exit__(None, None, None) is not True
+    assert not lock_path.exists()
+
+    assert nested.__exit__(None, None, None) is not True
+    assert not lock_path.exists()
+
+    # And the lock is still usable afterwards — a survived mis-order must not
+    # leave a depth count behind that refuses the next honest writer.
+    with draft_generation_lock(lock_path, draft_id="d1", verb="turnaround"):
+        assert lock_path.is_file()
+    assert not lock_path.exists()
+
+
+def test_a_stale_lock_broken_and_taken_by_another_writer_first_names_that_writer(
+    lock_path, monkeypatch
+):
+    """The break wins the unlink and loses the re-claim.
+
+    The arc w16/ha named and left unwritten (``draft_lock.py`` 221→222): two
+    writers break the SAME stale lock and only one of them gets it back. The
+    window is between ``path.unlink()`` and the retry ``_claim`` — three lines
+    with no seam of their own — so the INTERLEAVING is controlled here and
+    nothing else is:
+
+    * the rival is a real second thread taking the real lock through the public
+      ``draft_generation_lock``, so its holder record is its own;
+    * the file it leaves behind is a real file, so the retry ``_claim`` fails for
+      the real reason (``O_EXCL`` on a path that exists);
+    * the refusal is read back from that file by ``_read_holder``, which is what
+      makes the message name ``compose`` and not the stale ``rows`` this call
+      broke.
+
+    Controlling WHEN the rival runs is what makes a race deterministic; a test
+    that reached into ``_REGISTRY`` or stubbed ``_claim`` would instead be
+    asserting the stub. The seam used is ``Path.unlink`` because that is the
+    last instruction before the window opens.
+    """
+
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(
+        json.dumps({"draft": "d1", "verb": "rows", "pid": 4321}), encoding="utf-8"
+    )
+    stale = time.time() - 600.0
+    os.utime(lock_path, (stale, stale))
+
+    took_it = threading.Event()
+    release = threading.Event()
+    rival_failure: list[BaseException] = []
+    started: list[str] = []
+
+    def _rival() -> None:
+        try:
+            with draft_generation_lock(lock_path, draft_id="d1", verb="compose"):
+                took_it.set()
+                release.wait(WAIT)
+        except BaseException as exc:  # noqa: BLE001 - reported, not swallowed
+            rival_failure.append(exc)
+            took_it.set()
+
+    rival = threading.Thread(target=_rival)
+    real_unlink = Path.unlink
+
+    def _unlink_then_lose_the_lock(self, *args, **kwargs):
+        real_unlink(self, *args, **kwargs)
+        if self == lock_path and not started:
+            started.append("rival")
+            rival.start()
+            assert took_it.wait(WAIT), "the rival never took the broken lock"
+
+    monkeypatch.setattr(Path, "unlink", _unlink_then_lose_the_lock)
+
+    with pytest.raises(DraftBusy) as caught:
+        with draft_generation_lock(
+            lock_path, draft_id="d1", verb="rows", stale_after_seconds=60.0
+        ):
+            pass
+
+    release.set()
+    rival.join(WAIT)
+    assert not rival.is_alive()
+    assert rival_failure == []
+
+    # A second break would be the bug: the stale holder was already cleared, so
+    # what holds the file now is a LIVE writer and the answer is a refusal.
+    assert "a stale lock was broken and another writer took it first" in str(caught.value)
+    assert caught.value.safe_details["verb"] == "compose"
+    assert caught.value.safe_details["pid"] == os.getpid()
+    assert caught.value.safe_details["draft"] == "d1"
+    assert caught.value.code == "draft_busy"
+    # The rival held it to the end and released it; the refused caller wrote
+    # nothing over it on the way out.
+    assert not lock_path.exists()
 
 
 def test_a_stale_holder_is_broken_by_the_age_ceiling_and_not_by_a_pid_probe(lock_path):
