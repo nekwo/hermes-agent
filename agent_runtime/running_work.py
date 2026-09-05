@@ -1292,6 +1292,10 @@ def _collect_chat_turns(
         )
 
     rows: list[dict[str, Any]] = []
+    # Build-scoped, like every other lane's: a burst of turns on one root asks
+    # the same ownership question once. See ``_owner_of`` for why it is never
+    # cached module-side.
+    owners: dict[str, tuple[str, str]] = {}
     for record in records:
         if not isinstance(record, dict):
             continue
@@ -1306,6 +1310,30 @@ def _collect_chat_turns(
         started_epoch = _parse_iso(started_at)
         state = str(record.get("state") or "")
         instance_id = _safe_text(record.get("persona_instance_id"), limit=200)
+        session_id = _safe_text(
+            record.get("session_id")
+            or record.get("root_chat_session_id")
+            or record.get("active_session_id"),
+            limit=240,
+        )
+        # C1h-bis. This lane shipped ``owner.persona_id: null`` on every row
+        # while the two OTHER owner fields were populated — measured on a real
+        # serve in C1h — so a console rendering "who is talking" off the field
+        # every other lane fills got nothing from the one lane that is literally
+        # an agent talking. The persona comes from the shared authority
+        # (``_owner_of`` → ``chat_session_owner_persona``), never derived here,
+        # per honesty rule 5.
+        #
+        # The record's OWN ``persona_instance_id`` stays the row's instance: the
+        # journal recorded which instance ran this turn, and that is a stronger
+        # fact than a re-derivation from the root's current binding. When the two
+        # disagree — a root rebound to another instance while an older turn is
+        # still in flight — the persona is left BLANK rather than pairing this
+        # turn's instance with another instance's persona. A blank is renderable
+        # as "no owning agent"; a mismatched pair is a confident falsehood.
+        owner_persona, owner_instance = _owner_of(session_id, memo=owners)
+        if instance_id and owner_instance and owner_instance != instance_id:
+            owner_persona = ""
         rows.append(
             _row(
                 kind=KIND_CHAT_TURN,
@@ -1317,13 +1345,9 @@ def _collect_chat_turns(
                 # shared ``unknown`` and must not be dressed up as running.
                 status=STATUS_RUNNING if state in {"pending", "executing", "running"} else STATUS_UNKNOWN,
                 source_lane=LANE_DURABLE,
-                persona_instance_id=instance_id,
-                session_id=_safe_text(
-                    record.get("session_id")
-                    or record.get("root_chat_session_id")
-                    or record.get("active_session_id"),
-                    limit=240,
-                ),
+                persona_id=owner_persona,
+                persona_instance_id=instance_id or owner_instance,
+                session_id=session_id,
                 started_at=started_at,
                 elapsed_seconds=_elapsed(started_epoch, now=now),
                 progress=_progress(available=False),
