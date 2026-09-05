@@ -475,6 +475,24 @@ and a `{"event": "shutdown", "pid": …}` frame is emitted. Socket clients hear 
 transport closes under them — an attached client whose socket simply died could not otherwise
 tell a clean shutdown from a crash. Returns 0.
 
+**Detached (`--service` only, L-h 2026-09-05).** Under `harness serve --ndjson --service`
+those two endings stop being one. A `shutdown` op is an ORDER and takes the paragraph above,
+unchanged. EOF is an OBSERVATION — *the starter detached* — so the loop logs
+`stdio_owner_detached`, broadcasts it to attached socket clients, swaps the stdio frame sink
+for a null sink (`_FrameWriter.detach`; a late write that loses the pipe latches the same
+state from its `BrokenPipeError` rather than raising), keeps BOTH socket lanes serving, and
+parks the main thread on a `service_stop` event ABOVE the finalization — so releasing it runs
+the teardown above in its untouched order rather than a second copy. Three things release it:
+`{"op":"drain","force":true}` over the socket (`_finish_drain` sets the event beside the
+reader's existing `drain_wakeup`, at the same instant), `SIGTERM` where the platform delivers
+one (which Windows does not — `os.kill(pid, SIGTERM)` is `TerminateProcess` and runs no
+handler), and a stdio `shutdown` received before EOF, which never reaches the park. A
+`--service` starter that LOSES the socket ownership lock exits 0 with
+`{"event":"serve_owner_exists","pid":…,"port":…}` before a pool, a registry row or a `ready`
+frame exists — a stdio loser still serves stdio, but a service loser would be a second
+executor against one store that nothing discovers and nothing can stop.
+`--service --no-socket` is refused: the socket is the only lane a drain can arrive on.
+
 **Drained.** When a drain is in flight the DRAIN owns the terminal frame (`drain_complete` /
 `drain_timeout`); emitting `shutdown` too would tell a consumer that a TIMED-OUT drain ended
 cleanly. If the reader gets there first it waits `_DRAIN_ABANDON_GRACE_SECONDS = 5.0` for the

@@ -297,7 +297,17 @@ thing I am attached to carry" must be answerable at any time. Two manifests ride
 `ready` (stdio), `hello_ok` (socket), and the re-askable `version` reply:
 `"rpc"` from `serve_rpc.manifest()` (`agent_runtime/serve_rpc.py`) and `"ops"`
 from `ops_manifest(transport=…)` (`serve.py::ops_manifest`),
-`{"contract", "transport", "ops", "subscribe_lanes"}`.
+`{"contract", "transport", "ops", "subscribe_lanes", "service"}`.
+
+`service` is read two ways and both are deliberate (L-h, 2026-09-05). Its
+PRESENCE says this runtime understands `--service` at all — a hermes predating
+the flag carries no `service` key anywhere, which is the launcher's membership
+gate for falling back to the stdio-pipe transport — and its VALUE says whether
+this process is running as one. The same fact, plus `starter_pid` (the parent at
+BOOT; a detached service is reparented the moment its starter exits), rides all
+three greeting frames as top-level keys beside `pid` and `boot_id`, and the
+registry row. The contract integer did not move: an added key on an existing
+block is the set-plus-integer rule these manifests already use.
 
 `ops` answers PER TRANSPORT because the answer genuinely differs, and there are
 now three answers rather than two: `shutdown` is stdio-only (it is the verb of
