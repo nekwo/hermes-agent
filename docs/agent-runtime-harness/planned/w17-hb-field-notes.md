@@ -3,11 +3,11 @@
 Three rows, branch `w17/hb`, cut from `4e8c053a0a`, worked in its own worktree.
 Nothing pushed; the operator lands.
 
-| row | queue | outcome |
-|---|---|---|
-| the seven remaining one-armed branches in `agent/charsheet` | `spatial-queue.md`:96 | CLOSED — 7 → 0 |
-| flow-graph canvas replication: the two hermes follow-ups | `mission-control-queue.md`:409 | see §2 |
-| the coverage-claim gate: is the lane ENABLED anywhere | `mission-control-queue.md`:594 | see §3 |
+| row | queue | outcome | commit |
+|---|---|---|---|
+| the seven remaining one-armed branches in `agent/charsheet` | `spatial-queue.md`:96 | CLOSED — 7 → 0 | `1355dabeef` |
+| flow-graph canvas replication: the two hermes follow-ups | `mission-control-queue.md`:409 | half CLOSED (the revert arm), half handed back as a DECISION (§2) | `504daeaeb4` |
+| the coverage-claim gate: is the lane ENABLED anywhere | `mission-control-queue.md`:594 | NARROWED — CI runs the job and it never reaches a test; the crash is fixed here (§3) | `84f9d159e5` |
 
 ---
 
