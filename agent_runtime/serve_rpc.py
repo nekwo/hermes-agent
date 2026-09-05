@@ -2411,6 +2411,71 @@ def _runtime_agent_retire(
     return ok(rid, outcome.result)
 
 
+# ── runtime.persona.instance.open_chat ───────────────────────────────────────
+
+
+@method("runtime.persona.instance.open_chat", tier=TIER_CONSOLE)
+def _runtime_persona_instance_open_chat(
+    rid: Any, params: dict, context: RpcContext | None = None
+) -> dict:
+    """Open — or mint — the chat root a persona instance is bound to.
+
+    Params: ``persona_id`` (required); ``persona_instance_id``, ``session_id``,
+    ``new_session``, ``kill_active``, ``idempotency_key`` (alias
+    ``client_message_id``), ``requested_by``, ``correlation_id`` (optional).
+
+    Result: the CLI verb's own success row, verbatim. It carries ``session_id``
+    and ``persona_instance_id`` on BOTH arms — which is not a coincidence but
+    the contract: the launcher's bridge reads exactly those two keys back off
+    ``persona.instance.open_chat`` today, and this method exists so that reader
+    is fed unchanged when the gesture is aimed at another install. The
+    ``--new-session`` arm adds ``mission_chat_root_id``, ``selected``,
+    ``superseded``, ``idempotent_replay`` and ``mint_receipt_state``; the
+    rebind arm adds ``previous_session_id``, ``binding_receipt`` and ``mode``.
+
+    **Why this method exists at all** (plan ``remote-chat-parity.md``, ruling
+    R-C5). The office verbs, the two chat-turn verbs and both agent-lifecycle
+    verbs are on this lane, so a console aimed at another install could place an
+    agent, move it, retire it and talk to it — and could not START the
+    conversation, because opening a chat had only an argv lowering and the argv
+    lane is refused to a remote aim on purpose. Ruling R-C4 makes that the
+    general rule: a write lane the launcher touches gets a method before its
+    launcher half is built, and the argv arm becomes a compatibility fallback
+    with a deletion condition.
+
+    **Tier: ``console``, and NOT on ``LOCAL_CONSOLE_METHODS``.** A paired
+    console device opening a chat on the install it is aimed at is the feature,
+    not a hole — the same argument ``runtime.chat.message`` already carries at
+    length, and the stronger one, since a chat turn RUNS an agent with tools and
+    this only binds a pointer and mints a transcript row. The restricted set is
+    for verbs whose subject is the machine owner's own session (the scope
+    pointers, the peer directory), and a chat root is not one.
+
+    A TRANSLATION SHIM, exactly like ``_runtime_agent_create`` — with the shim
+    landing one step lower, the way ``_runtime_chat_message``'s does: the
+    sequence is an argparse handler rather than a ``perform_*``, so the service
+    builds that handler's namespace and takes the payload off its
+    ``payload_sink`` seam. Everything below is envelope work; every refusal
+    string, ``error_kind`` and ``next_expected`` comes out of the CLI handler
+    unchanged, because a second spelling here would be the copy the discipline
+    exists to abolish. See :mod:`agent_runtime.persona_open_chat`.
+
+    Adding this name GROWS the manifest's ``methods`` set without moving
+    ``RPC_CONTRACT_VERSION``: a manifest is a set plus an integer, and the
+    integer moves only when an existing method's shape changes incompatibly.
+    """
+
+    from agent_runtime.persona_open_chat import perform_persona_instance_open_chat
+
+    outcome = perform_persona_instance_open_chat(
+        params, caller=context.caller if context is not None else None
+    )
+    if outcome.refusal is not None:
+        refusal = outcome.refusal
+        return err(rid, refusal.code, refusal.message, refusal.data)
+    return ok(rid, outcome.result)
+
+
 # ── runtime.persona.prewarm ──────────────────────────────────────────────────
 
 

@@ -1005,7 +1005,7 @@ def _cmd_persona_instance_open_chat(args) -> int:
         )
         if not auth.ok:
             data = _coordinator_confirm_payload("persona.instance.open_chat", coordinator_id, auth)
-            print(emit_json(data) if args.json else data["status"])
+            _emit_persona_open_chat_payload(args, data, plain=data["status"])
             return 2
         coordinator_scope = auth.scope
     elif coordinator_id and bool(getattr(args, "kill_active", False)):
@@ -1023,7 +1023,7 @@ def _cmd_persona_instance_open_chat(args) -> int:
         )
         if not auth.ok:
             data = _coordinator_confirm_payload("persona.instance.close", coordinator_id, auth)
-            print(emit_json(data) if args.json else data["status"])
+            _emit_persona_open_chat_payload(args, data, plain=data["status"])
             return 2
     if bool(getattr(args, "new_session", False)):
         return _cmd_persona_instance_open_new_chat(
@@ -1037,7 +1037,7 @@ def _cmd_persona_instance_open_chat(args) -> int:
             placement_id = safe_assignment_token(getattr(args, "placement_id", None))
             if not placement_id:
                 data = {"ok": False, "error": "placement_id is required when add_instance is true"}
-                print(emit_json(data) if args.json else data["error"])
+                _emit_persona_open_chat_payload(args, data)
                 return 2
             # UC-H4, scoped to --add-instance ONLY. The other branches of this
             # verb REBIND an instance that already exists (and the recorded
@@ -1049,7 +1049,7 @@ def _cmd_persona_instance_open_chat(args) -> int:
 
             refusal = require_known_persona(persona_id, persona)
             if refusal is not None:
-                print(emit_json(refusal) if args.json else refusal["error"])
+                _emit_persona_open_chat_payload(args, refusal)
                 return 2
             # AFTER the roster check, matching the order `persona instance
             # create` already had: "that agent does not exist" is the more
@@ -1058,7 +1058,7 @@ def _cmd_persona_instance_open_chat(args) -> int:
             # about the agent. Both still refuse before any store write.
             placement_refusal = _placement_discriminability_refusal(placement_id)
             if placement_refusal is not None:
-                print(emit_json(placement_refusal) if args.json else placement_refusal["error"])
+                _emit_persona_open_chat_payload(args, placement_refusal)
                 return 2
             try:
                 # Local import: this file is exec'd into harness.py globals, and
@@ -1110,7 +1110,7 @@ def _cmd_persona_instance_open_chat(args) -> int:
         else:
             if not safe_assignment_text(getattr(args, "session_id", None), limit=200):
                 data = {"ok": False, "error": "session_id is required unless add_instance is true"}
-                print(emit_json(data) if args.json else data["error"])
+                _emit_persona_open_chat_payload(args, data)
                 return 2
             # RETIREMENT, asked before the session-existence cutoff below.
             # Retiring a placement archives the row but deliberately leaves its
@@ -1148,7 +1148,7 @@ def _cmd_persona_instance_open_chat(args) -> int:
                     "error_kind": ChatErrorKind.UNKNOWN_CHAT_SESSION,
                     "error": f"unknown explicit persona chat root: {args.session_id}",
                 }
-                print(emit_json(data) if args.json else data["error"])
+                _emit_persona_open_chat_payload(args, data)
                 return 2
             target_instance_id = safe_assignment_token(
                 getattr(args, "persona_instance_id", None)
@@ -1190,7 +1190,7 @@ def _cmd_persona_instance_open_chat(args) -> int:
                         "session_id": args.session_id,
                         "next_expected": "use the server-minted root returned for this exact persona instance",
                     }
-                    print(emit_json(data) if args.json else data["error"])
+                    _emit_persona_open_chat_payload(args, data)
                     return 2
                 target_instance_id = session_owner
             try:
@@ -1215,11 +1215,11 @@ def _cmd_persona_instance_open_chat(args) -> int:
                     "session_id": args.session_id,
                     "next_expected": "open the instance that owns this chat session, or start a fresh thread",
                 }
-                print(emit_json(data) if args.json else data["error"])
+                _emit_persona_open_chat_payload(args, data)
                 return 2
     except RetiredPersonaInstanceError as exc:
         data = _retired_persona_instance_payload(exc)
-        print(emit_json(data) if args.json else data["error"])
+        _emit_persona_open_chat_payload(args, data)
         return 2
     except PersonaChatPersistenceError as exc:
         # ``add_instance``'s mint refuses rather than binding an unpersistable
@@ -1233,7 +1233,7 @@ def _cmd_persona_instance_open_chat(args) -> int:
             "persona_id": persona_id,
             "next_expected": "restore canonical persona chat transcript storage and retry",
         }
-        print(emit_json(data) if args.json else data["error"])
+        _emit_persona_open_chat_payload(args, data)
         return 2
     try:
         _ensure_persona_chat_session(
@@ -1254,7 +1254,7 @@ def _cmd_persona_instance_open_chat(args) -> int:
             "session_id": instance.default_chat_session_id,
             "next_expected": "restore canonical persona chat transcript storage and retry",
         }
-        print(emit_json(data) if args.json else data["error"])
+        _emit_persona_open_chat_payload(args, data)
         return 2
     # Placed AFTER the transcript row is durable (the ensure above) so the warm
     # can read the root's native tip and revision — the two values that decide
@@ -1300,7 +1300,11 @@ def _cmd_persona_instance_open_chat(args) -> int:
         "coordinator_permission_scope": asdict(coordinator_scope) if coordinator_scope is not None else None,
         "next_expected": "resume or send on this chat session to boot the persona instance history",
     }
-    print(emit_json(data) if args.json else f"opened {instance.id} on chat {instance.default_chat_session_id}")
+    _emit_persona_open_chat_payload(
+        args,
+        data,
+        plain=f"opened {instance.id} on chat {instance.default_chat_session_id}",
+    )
     return 0
 
 
@@ -1412,7 +1416,7 @@ def _cmd_persona_instance_open_new_chat(args, *, persona_id: str, coordinator_sc
                         "mint_receipt_state": receipt.state,
                         "next_expected": "restore canonical persona chat transcript storage and retry with the same idempotency key",
                     }
-                    print(emit_json(data) if args.json else data["error"])
+                    _emit_persona_open_chat_payload(args, data)
                     return 2
                 try:
                     instance = store.open_chat(
@@ -1431,7 +1435,7 @@ def _cmd_persona_instance_open_new_chat(args, *, persona_id: str, coordinator_sc
                             "mint_receipt_state": receipt.state,
                         }
                     )
-                    print(emit_json(data) if args.json else data["error"])
+                    _emit_persona_open_chat_payload(args, data)
                     return 2
                 receipt = mint.mark_bound()
     except PersonaChatMintError as exc:
@@ -1469,10 +1473,10 @@ def _cmd_persona_instance_open_new_chat(args, *, persona_id: str, coordinator_sc
         else None,
         "next_expected": "resume or send on this server-minted chat root",
     }
-    print(
-        emit_json(data)
-        if args.json
-        else f"opened {instance.id} on new chat {receipt.session_id}"
+    _emit_persona_open_chat_payload(
+        args,
+        data,
+        plain=f"opened {instance.id} on new chat {receipt.session_id}",
     )
     return 0
 
@@ -1506,6 +1510,35 @@ def _prewarm_chat_actor_for_open(session_id) -> None:
         pass
 
 
+def _emit_persona_open_chat_payload(args, data: dict, *, plain: str | None = None) -> None:
+    """Hand ONE open-chat payload to whoever owns this call's transport.
+
+    The exact seam ``_emit_mission_chat_payload`` is for the send lane, one verb
+    over, and it exists for the same reason and against the same alternative.
+    ``runtime.persona.instance.open_chat`` (plan C1h, ruling R-C5) is an
+    IN-PROCESS second door onto this handler, running on a serve's reader loop —
+    so the only other way for it to read the row would be
+    ``contextlib.redirect_stdout``, which rebinds ``sys.stdout``
+    PROCESS-GLOBALLY and would briefly steal the serve's own frame protocol from
+    every other thread on it. That argument is written out in full at
+    :func:`_emit_mission_chat_payload`; nothing about it is weaker here.
+
+    ``args.payload_sink`` is the seam, and it is absent on every argparse
+    Namespace, so the CLI and the serve's argv bridge are untouched: with no
+    sink this prints byte-for-byte what each call site printed before.
+
+    ``plain`` is the non-JSON console line; ``None`` keeps the historical
+    ``data["error"]``. Deliberately no ``stream`` arm — opening a chat is not a
+    turn and has never had one.
+    """
+
+    sink = getattr(args, "payload_sink", None)
+    if callable(sink):
+        sink(data)
+        return
+    print(emit_json(data) if args.json else (data["error"] if plain is None else plain))
+
+
 def _emit_persona_open_chat_error(
     args,
     *,
@@ -1523,7 +1556,7 @@ def _emit_persona_open_chat_error(
         "persona_instance_id": persona_instance_id,
         "next_expected": next_expected,
     }
-    print(emit_json(data) if args.json else data["error"])
+    _emit_persona_open_chat_payload(args, data)
     return 2
 
 
@@ -1537,7 +1570,7 @@ def _cmd_persona_chat_delete(args) -> int:
     session_id = safe_assignment_text(getattr(args, "session_id", None), limit=200)
     if not session_id:
         data = {"ok": False, "error": "session_id is required"}
-        print(emit_json(data) if args.json else data["error"])
+        _emit_persona_open_chat_payload(args, data)
         return 2
 
     requested_persona = None
