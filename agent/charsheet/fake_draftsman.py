@@ -167,7 +167,8 @@ def square_image(direction, *, size_px: int = SQUARE_PX, glyph_px: int = SQUARE_
 # against prose, which is a coupling worth naming rather than hiding: the
 # alternative is a second copy of the sheet spec travelling beside every call,
 # and the call signature is the pipeline's documented test seam. A prompt
-# re-wording breaks `test_charsheet_fake_draftsman.py::the prompt anchors`
+# re-wording breaks
+# `test_charsheet_fake_draftsman.py::test_the_anchors_read_the_prompts_this_repository_builds`
 # first, which is a red on a fixture rather than a batch that half-draws.
 
 #: ``1. Pose 1 (leftmost is pose 1), direction S: …`` — turnaround, in order.
