@@ -749,3 +749,81 @@ def test_without_service_a_child_still_ends_when_its_stdin_closes(tmp_path):
         if child.process.poll() is None:
             child.process.kill()
             child.process.wait(timeout=30)
+
+
+def _dead_pid() -> int:
+    """A pid that is provably gone: spawned, waited on, reaped."""
+
+    process = subprocess.Popen([sys.executable, "-c", "pass"])
+    process.wait(timeout=30)
+    return process.pid
+
+
+@_REAL_CHILD_SPAWN
+@pytest.mark.timeout(E2E_TEST_TIMEOUT_SECONDS)
+def test_a_service_boots_and_writes_what_its_prune_removed_into_its_own_log(
+    tmp_path,
+):
+    """RO-3, against the two real files it has to join.
+
+    The 2026-09-06 field run could not say who removed the registry row for a
+    runtime that had died unexplained: the boot that pruned it wrote nothing a
+    person could read. Both halves of the fix are here and neither can be
+    faked in process — the row is deleted by a REAL boot's prune, and the line
+    lands in the file RL-17's ``DEVNULL`` stdio would otherwise have swallowed
+    (``<pid>.stderr.log``, which exists only under ``--service``).
+
+    *Killing mutation:* arm the stderr log AFTER the prune (its position before
+    2026-09-06) and this row goes red — the events are written to a stderr
+    nothing is reading, and the log carries no ``serve_registry_pruned`` line.
+    """
+
+    from agent_runtime.serve_registry import (
+        SERVE_REGISTRY_PRUNED_EVENT,
+        register_serve_instance,
+        serve_instance_path,
+    )
+
+    env = _sandbox_env(tmp_path)
+    runtime_root = Path(env["HERMES_AGENT_RUNTIME_ROOT"])
+    wreckage = _dead_pid()
+    # A row exactly like the one a hard-killed runtime leaves: written by the
+    # real writer, and provably dead by the time the boot classifies it.
+    assert register_serve_instance(runtime_root, pid=wreckage).registered is True
+    assert serve_instance_path(runtime_root, wreckage).exists()
+
+    child = _spawn_serve(env, "--service", detached_stdin=True)
+    try:
+        ready = child.wait_for("ready")
+        assert ready["service"] is True
+        # The prune ran: the dead row is gone and this boot's own row is not.
+        assert not serve_instance_path(runtime_root, wreckage).exists()
+        assert [path.stem for path in _registry_rows(env)] == [str(ready["pid"])]
+
+        log = runtime_root / "serve_instances" / f"{ready['pid']}.stderr.log"
+        assert log.is_file(), sorted(
+            p.name for p in (runtime_root / "serve_instances").iterdir()
+        )
+        events = [
+            json.loads(line)
+            for line in log.read_text(encoding="utf-8").splitlines()
+            if line.startswith("{") and SERVE_REGISTRY_PRUNED_EVENT in line
+        ]
+        assert len(events) == 1, log.read_text(encoding="utf-8")
+        assert events[0] == {
+            "event": SERVE_REGISTRY_PRUNED_EVENT,
+            "action": "removed",
+            "pid": wreckage,
+            # The classifier's own two words, unchanged on the way to the log.
+            "reason": "stale_dead_pid",
+            "classification_reason": "pid_not_running",
+            "by_pid": ready["pid"],
+            "row_boot_id": events[0]["row_boot_id"],
+            # Joins this line to this boot's own ``ready`` frame.
+            "boot_id": ready["boot_id"],
+        }
+        assert isinstance(events[0]["row_boot_id"], str)
+    finally:
+        if child.process.poll() is None:
+            child.process.kill()
+            child.process.wait(timeout=30)

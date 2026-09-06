@@ -72,6 +72,15 @@ Ordering is load-bearing (register first, then prune) and so is the classifier:
 the boot caller passes no widened classification set, so ``unknown`` and
 ``stale_recycled_pid`` survive a boot exactly as they survive everything else.
 
+And since RO-3 the prune says what it did ROW BY ROW as it does it, not only in
+the aggregate report: one ``serve_registry_pruned`` event per row removed or
+refused, through the caller's ``emit`` sink (``serve.py``'s ``_service_log`` —
+the ``--service`` runtime's own stderr file, and an ordinary ``stderr`` frame
+to the supervisor otherwise). The aggregate was written only when the count was
+non-zero, which meant the removal of one specific row — the question actually
+asked on 2026-09-06, *who deleted pid 43244's record* — was answerable only by
+inference. Live rows emit nothing; see :func:`prune_stale_serve_instances`.
+
 The end-reason sidecar: why the last runtime ended (RL-16)
 -----------------------------------------------------------
 
@@ -180,6 +189,8 @@ __all__ = [
     "SERVE_ENDED_SUFFIX",
     "SERVE_INSTANCES_DIRNAME",
     "SERVE_INSTANCE_SCHEMA_VERSION",
+    "SERVE_REGISTRY_PRUNED_EVENT",
+    "SERVE_REGISTRY_PRUNE_ACTIONS",
     "SERVE_STDERR_HEADER_PREFIX",
     "SERVE_STDERR_SUFFIX",
     "ProcessProbe",
@@ -554,7 +565,11 @@ def classify_serve_instance(
 
 
 def prune_stale_serve_instances(
-    store_root: Path | str, *, probe: ProcessProbe | None = None
+    store_root: Path | str,
+    *,
+    probe: ProcessProbe | None = None,
+    emit: Callable[[dict[str, Any]], None] | None = None,
+    boot_id: str | None = None,
 ) -> dict[str, Any]:
     """Delete ONLY provably-dead entries, and report exactly what went.
 
@@ -562,6 +577,15 @@ def prune_stale_serve_instances(
     names a live process this registry no longer understands (an operator
     should see that), and the second means a probe failed — deleting on a
     failed probe is how a prune removes a running service.
+
+    ``emit`` is RO-3's sink (see :data:`SERVE_REGISTRY_PRUNED_EVENT`): one
+    event per row this call ACTED ON — removed, refused, or tried to remove and
+    failed — and nothing at all for a ``live`` row, which is every healthy
+    boot's own entry and the one thing a per-row channel must not be noisy
+    about. The returned report is unchanged and is still the caller's summary.
+    ``boot_id`` is the CALLER'S boot, carried so an event joins the pruning
+    runtime's ``ready`` frame the way ``serve_instances_pruned`` already does;
+    the pruned row's own boot rides as ``row_boot_id``.
     """
 
     deleted: list[dict[str, Any]] = []
@@ -576,15 +600,79 @@ def prune_stale_serve_instances(
         }
         if row.get("classification") != CLASSIFICATION_STALE_DEAD_PID:
             kept.append(summary)
+            if row.get("classification") != CLASSIFICATION_LIVE:
+                _emit_pruned_event(emit, summary, action="refused", boot_id=boot_id)
             continue
         try:
             Path(str(row.get("path"))).unlink()
         except OSError as exc:
             summary["error"] = type(exc).__name__
             kept.append(summary)
+            _emit_pruned_event(emit, summary, action="remove_failed", boot_id=boot_id)
             continue
         deleted.append(summary)
+        _emit_pruned_event(emit, summary, action="removed", boot_id=boot_id)
     return {"deleted": deleted, "kept": kept, "deleted_count": len(deleted)}
+
+
+#: RO-3's event name: what a prune REMOVED, and what it REFUSED to remove.
+#:
+#: The prune was this directory's one silent writer. A boot deleted a row and
+#: said so only in aggregate (``serve_instances_pruned``, and only when the
+#: count was non-zero), so "who removed the record for pid 43244, and when" had
+#: no answer at all — while every neighbouring lane had one (``SocketOwnerLock``
+#: logs its takeover, the end-reason sidecar names the exit). One event per row
+#: acted on closes it, on the sink the serve already owns.
+SERVE_REGISTRY_PRUNED_EVENT = "serve_registry_pruned"
+
+#: What the prune DID to the row an event is about. Three words, and the middle
+#: one is why the ruling says "what it removes AND what it refuses": a row that
+#: SURVIVED a prune is a fact an operator wants ("that recycled pid is still
+#: here, and it was looked at"), and a deletion count cannot carry it.
+SERVE_REGISTRY_PRUNE_ACTIONS = ("removed", "refused", "remove_failed")
+
+
+def _emit_pruned_event(
+    emit: Callable[[dict[str, Any]], None] | None,
+    summary: dict[str, Any],
+    *,
+    action: str,
+    boot_id: str | None,
+) -> None:
+    """One RO-3 event, best effort. Never raises, never changes the prune.
+
+    **The vocabulary is the CLASSIFIER'S, not a second one.** ``reason`` carries
+    :func:`classify_serve_instance`'s classification verbatim —
+    ``stale_dead_pid`` / ``stale_recycled_pid`` / ``unknown`` — and
+    ``classification_reason`` its finer word (``pid_not_running``,
+    ``start_time_mismatch``, ``record_unreadable``, …), which is also exactly
+    what the report's rows already carry. Minting a parallel set of words for
+    the same three states is how two vocabularies drift into a reader that has
+    to know both.
+
+    Best effort by construction: this is bookkeeping ABOUT bookkeeping, and a
+    sink that raised would take a boot down over a line of telemetry.
+    """
+
+    if emit is None:
+        return
+    event: dict[str, Any] = {
+        "event": SERVE_REGISTRY_PRUNED_EVENT,
+        "action": action,
+        "pid": summary.get("pid"),
+        "reason": summary.get("classification"),
+        "classification_reason": summary.get("classification_reason"),
+        "by_pid": os.getpid(),
+        "row_boot_id": summary.get("boot_id"),
+    }
+    if boot_id is not None:
+        event["boot_id"] = str(boot_id)
+    if summary.get("error"):
+        event["error"] = summary.get("error")
+    try:
+        emit(event)
+    except Exception:
+        pass
 
 
 # ── the end-reason sidecar (RL-16) ──────────────────────────────────────────

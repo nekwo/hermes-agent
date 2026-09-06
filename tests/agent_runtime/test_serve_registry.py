@@ -11,6 +11,7 @@ guessing "stale" is how a prune deletes a running service's entry.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -22,6 +23,7 @@ from agent_runtime.serve_registry import (
     CLASSIFICATION_STALE_DEAD_PID,
     CLASSIFICATION_STALE_RECYCLED_PID,
     CLASSIFICATION_UNKNOWN,
+    SERVE_REGISTRY_PRUNED_EVENT,
     ProcessProbe,
     list_serve_instances,
     prune_stale_serve_instances,
@@ -205,6 +207,135 @@ def test_prune_deletes_only_provably_dead_entries_and_says_which(tmp_path):
     assert not serve_instance_path(tmp_path, 101).exists()
     assert serve_instance_path(tmp_path, 202).exists()
     assert serve_instance_path(tmp_path, 303).exists()
+
+
+def test_a_prune_that_removes_a_dead_row_says_so_once(tmp_path):
+    """RO-3: the prune was this directory's one silent writer.
+
+    Deleting pid 101's record used to leave nothing on any channel until the
+    aggregate report was assembled — and that report is written only when the
+    count is non-zero, so "who removed the row for pid 43244, and when" was
+    answerable by inference alone (the 2026-09-06 field run).
+
+    *Killing mutation:* drop the ``_emit_pruned_event(..., action="removed")``
+    call and this row goes red on ``len(events) == 1``.
+    """
+
+    _register(tmp_path, pid=101, probe=_probe(start_time=1))
+    events: list[dict] = []
+
+    report = prune_stale_serve_instances(
+        tmp_path,
+        probe=_probe(alive=False),
+        emit=events.append,
+        boot_id="bootcafe",
+    )
+
+    assert report["deleted_count"] == 1
+    assert len(events) == 1, events
+    event = events[0]
+    assert event["event"] == SERVE_REGISTRY_PRUNED_EVENT
+    assert event["action"] == "removed"
+    assert event["pid"] == 101
+    # The CLASSIFIER's word, not a second vocabulary minted for the log.
+    assert event["reason"] == CLASSIFICATION_STALE_DEAD_PID
+    assert event["classification_reason"] == "pid_not_running"
+    assert event["by_pid"] == os.getpid()
+    assert event["boot_id"] == "bootcafe"
+
+
+def test_a_recycled_row_is_refused_and_the_refusal_is_a_line_too(tmp_path):
+    """"What it removes AND what it refuses" — a survivor is a fact as well.
+
+    A live process wearing a dead serve's pid number is exactly what an
+    operator wants told: the prune deliberately keeps it, and a report that
+    only ever lists deletions cannot say that anything looked at it.
+
+    *Killing mutation:* emit only on the delete arm (drop the ``refused``
+    call) and this row goes red on an empty event list.
+    """
+
+    _register(tmp_path, pid=303, probe=_probe(start_time=3))
+    events: list[dict] = []
+
+    prune_stale_serve_instances(
+        tmp_path,
+        probe=_probe(start_time=999),
+        emit=events.append,
+        boot_id="bootcafe",
+    )
+
+    assert [event["action"] for event in events] == ["refused"]
+    assert events[0]["reason"] == CLASSIFICATION_STALE_RECYCLED_PID
+    assert events[0]["classification_reason"] == "start_time_mismatch"
+    assert serve_instance_path(tmp_path, 303).exists()
+
+
+def test_a_live_row_says_nothing_at_all(tmp_path):
+    """The quiet rule. This boot's OWN row classifies ``live`` on every prune;
+    a line for it would be a line on every boot, which is how a channel stops
+    being read.
+
+    *Killing mutation:* emit for every row (drop the ``!= CLASSIFICATION_LIVE``
+    guard) and this row goes red with one ``refused`` event.
+    """
+
+    _register(tmp_path, pid=707, probe=_probe(start_time=7))
+    events: list[dict] = []
+
+    prune_stale_serve_instances(
+        tmp_path, probe=_probe(start_time=7), emit=events.append
+    )
+
+    assert events == []
+
+
+def test_an_unreadable_row_is_refused_under_the_classifiers_own_reason(tmp_path):
+    """``unknown`` is the fail-safe direction, and it is REPORTED, not silent."""
+
+    serve_instances_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+    (serve_instances_dir(tmp_path) / "99.json").write_bytes(b"{not json")
+    events: list[dict] = []
+
+    prune_stale_serve_instances(tmp_path, probe=_probe(), emit=events.append)
+
+    assert [event["reason"] for event in events] == [CLASSIFICATION_UNKNOWN]
+    assert events[0]["classification_reason"] == "record_unreadable"
+    assert events[0]["action"] == "refused"
+    # No caller boot to name: the key is ABSENT rather than null or invented.
+    assert "boot_id" not in events[0]
+
+
+def test_a_sink_that_raises_never_costs_the_prune_its_work(tmp_path):
+    """Bookkeeping about bookkeeping. A logging sink is not allowed to be the
+    reason a boot fails or a dead row survives.
+
+    *Killing mutation:* call ``emit(event)`` unguarded and this row goes red
+    with the sink's own ``RuntimeError``.
+    """
+
+    _register(tmp_path, pid=808, probe=_probe(start_time=8))
+
+    def _explode(_event):
+        raise RuntimeError("the sink is on fire")
+
+    report = prune_stale_serve_instances(
+        tmp_path, probe=_probe(alive=False), emit=_explode
+    )
+
+    assert report["deleted_count"] == 1
+    assert not serve_instance_path(tmp_path, 808).exists()
+
+
+def test_the_prune_reports_the_same_thing_with_no_sink_at_all(tmp_path):
+    """``emit`` is additive: every existing caller passes none."""
+
+    _register(tmp_path, pid=909, probe=_probe(start_time=9))
+
+    report = prune_stale_serve_instances(tmp_path, probe=_probe(alive=False))
+
+    assert report["deleted_count"] == 1
+    assert [row["pid"] for row in report["deleted"]] == [909]
 
 
 def test_prune_keeps_entries_it_could_not_classify(tmp_path):

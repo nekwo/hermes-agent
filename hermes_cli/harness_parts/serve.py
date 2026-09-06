@@ -3636,10 +3636,59 @@ def serve_loop(
                 ).payload()
             except Exception as exc:
                 instance_block = {"outcome": f"error:{type(exc).__name__}"}
-            # ...and, having just written, drop the records that are provably
-            # wreckage. AFTER registration on purpose: this serve's own entry
-            # then exists and classifies `live`, so the sweep can never be the
-            # thing that removes it.
+        # ── RL-19: the service runtime keeps its own stderr ─────────────────
+        #
+        # BEFORE the RL-16 block below, for two reasons that are both ordering:
+        # the sidecar prune down there now floors this family too, and this
+        # boot's own log has to exist by then so that it is the NEWEST of its
+        # family and can never be the file the prune picks; and an arming that
+        # happens after the recorder would miss nothing but is harder to read.
+        #
+        # And BEFORE the row prune below, which is RO-3's ordering: the prune
+        # now says row by row what it removed and what it refused, and on a
+        # ``--service`` runtime the only place that can be READ is this file.
+        # Armed after it, the boot prune's verdicts would go to the DEVNULL
+        # stderr RL-17 hands a service — which is the exact silence RO-3 exists
+        # to end. It is safe this early for the same reason the prune is: the
+        # log is not a registry row (``_NON_ROW_SUFFIXES``), so no scan and no
+        # prune between here and there can see it.
+        #
+        # ``service`` only. A serve started the old way is a child whose parent
+        # is holding its stderr pipe open and reading it as frames — moving that
+        # output into a file would take it away from the process that asked for
+        # it (pinned by the non-service arm of the child e2e).
+        if service and store_root_path is not None:
+            try:
+                from agent_runtime.serve_registry import open_serve_stderr_log
+
+                service_stderr_log = open_serve_stderr_log(
+                    store_root_path, boot_id=boot_id, build=build_block
+                )
+            except Exception:  # pragma: no cover - the opener never raises
+                service_stderr_log = None
+            if service_stderr_log is not None:
+                stderr_proxy.set_mirror(service_stderr_log)
+                _repoint_logging_root_stderr(
+                    service_stderr_log,
+                    previous=(original_stderr, sys.__stderr__, stderr_proxy),
+                )
+                # What ``sys.stderr`` becomes again when this loop unwinds. The
+                # mirror above covers the loop's own lifetime; this covers
+                # everything written to stderr AFTER it — an interpreter-level
+                # message, a late ``atexit`` hook, a warning during teardown.
+                # Named as defence and not as the traceback's route: the
+                # traceback is written explicitly by the uncaught arm below,
+                # because nothing in this process prints one (see there).
+                original_stderr = service_stderr_log
+                # Never closed on purpose: the writes worth having are the ones
+                # made on the way down, and the OS closes it when the process
+                # ends. Line-buffered, so nothing is owed a flush.
+
+        if store_root_path is not None:
+            # ...and, having registered and armed the log, drop the records that
+            # are provably wreckage. AFTER registration on purpose: this serve's
+            # own entry then exists and classifies `live`, so the sweep can
+            # never be the thing that removes it.
             #
             # WHY THIS DOES NOT CONTRADICT "listing never prunes"
             # ---------------------------------------------------
@@ -3678,12 +3727,21 @@ def serve_loop(
             # Silent when it found nothing to do: a line every boot saying it
             # deleted zero files is the kind of noise that trains an operator to
             # stop reading the channel this report needs to be seen on.
+            #
+            # RO-3 keeps that rule and adds the row-level story the aggregate
+            # could not carry: ``emit=_service_log`` writes one
+            # ``serve_registry_pruned`` line per row REMOVED or REFUSED, at the
+            # instant it happens, on the same channel and joinable by the same
+            # ``boot_id``. A live row — this boot's own entry, every time —
+            # writes nothing, so a quiet machine's log stays quiet.
             try:
                 from agent_runtime.serve_registry import (
                     prune_stale_serve_instances,
                 )
 
-                prune_report = prune_stale_serve_instances(store_root_path)
+                prune_report = prune_stale_serve_instances(
+                    store_root_path, emit=_service_log, boot_id=boot_id
+                )
                 if prune_report.get("deleted_count") or any(
                     "error" in row for row in prune_report.get("kept") or ()
                 ):
@@ -3699,44 +3757,6 @@ def serve_loop(
                 # Bookkeeping must never take a boot with it.
                 pass
 
-        # ── RL-19: the service runtime keeps its own stderr ─────────────────
-        #
-        # BEFORE the RL-16 block below, for two reasons that are both ordering:
-        # the sidecar prune down there now floors this family too, and this
-        # boot's own log has to exist by then so that it is the NEWEST of its
-        # family and can never be the file the prune picks; and an arming that
-        # happens after the recorder would miss nothing but is harder to read.
-        #
-        # ``service`` only. A serve started the old way is a child whose parent
-        # is holding its stderr pipe open and reading it as frames — moving that
-        # output into a file would take it away from the process that asked for
-        # it (pinned by the non-service arm of the child e2e).
-        if service and store_root_path is not None:
-            try:
-                from agent_runtime.serve_registry import open_serve_stderr_log
-
-                service_stderr_log = open_serve_stderr_log(
-                    store_root_path, boot_id=boot_id, build=build_block
-                )
-            except Exception:  # pragma: no cover - the opener never raises
-                service_stderr_log = None
-            if service_stderr_log is not None:
-                stderr_proxy.set_mirror(service_stderr_log)
-                _repoint_logging_root_stderr(
-                    service_stderr_log,
-                    previous=(original_stderr, sys.__stderr__, stderr_proxy),
-                )
-                # What ``sys.stderr`` becomes again when this loop unwinds. The
-                # mirror above covers the loop's own lifetime; this covers
-                # everything written to stderr AFTER it — an interpreter-level
-                # message, a late ``atexit`` hook, a warning during teardown.
-                # Named as defence and not as the traceback's route: the
-                # traceback is written explicitly by the uncaught arm below,
-                # because nothing in this process prints one (see there).
-                original_stderr = service_stderr_log
-                # Never closed on purpose: the writes worth having are the ones
-                # made on the way down, and the OS closes it when the process
-                # ends. Line-buffered, so nothing is owed a flush.
         # ── RL-16: arm the end-reason recorder ──────────────────────────────
         #
         # HERE, and not earlier, because the recorder writes into the directory
