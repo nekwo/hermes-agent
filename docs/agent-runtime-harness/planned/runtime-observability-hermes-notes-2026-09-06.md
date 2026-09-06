@@ -256,9 +256,9 @@ $ python scripts/doc_cite_adjacency.py --exclude archive --exclude planned
       FAILED                  : 107          <- main: 107, after this stage: 107
 ```
 
-Ruff: `X:\Eternia\.hermes\venvs\hermes-agent\Scripts\python.exe -m ruff` is not
-installed and `ruff` is not on PATH in this shell — **not run**, as the dispatch
-allows.
+Ruff: **not run.** `X:\Eternia\.hermes\venvs\hermes-agent\Scripts\` holds no
+`ruff`, and `command -v ruff` finds none on PATH in this shell — the dispatch's
+stated fallback.
 
 ### Flake seen once
 
