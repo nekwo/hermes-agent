@@ -508,9 +508,16 @@ def test_a_spent_budget_refuses_before_the_lock_and_names_both_cures(
     """
 
     ran: list[list[str]] = []
-    monkeypatched = pytest.MonkeyPatch()
-    monkeypatched.setattr(gate, "_run_command", lambda command: ran.append(list(command)) or 0)
-    try:
+    # A SCOPED context, not a hand-rolled instance plus `undo()` in a `finally`:
+    # `tests/agent_runtime/test_no_midtest_monkeypatch_undo.py` refuses every
+    # `.undo()` under `tests/` by AST, on purpose and with no allowlist, because
+    # the receiver of an `.undo()` cannot be told apart from the shared per-test
+    # `monkeypatch` by reading the call. The context manager is the cure that
+    # gate names, and it needs no `undo()` call at all.
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(
+            gate, "_run_command", lambda command: ran.append(list(command)) or 0
+        )
         claims = _claims_file(
             tmp_path, [_claim("a", claim_files["first"], "alpha = 1", "alpha = 99")]
         )
@@ -523,8 +530,6 @@ def test_a_spent_budget_refuses_before_the_lock_and_names_both_cures(
             wall_budget_seconds=0,
             list_only=False,
         )
-    finally:
-        monkeypatched.undo()
     err = capsys.readouterr().err
 
     assert code == 2
