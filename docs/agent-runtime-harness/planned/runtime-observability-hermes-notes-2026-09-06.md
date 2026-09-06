@@ -11,7 +11,10 @@ Rulings built: **RO-3** (hermes logs what it removes) and **RO-7**'s producer
 half (the additive `timing` block on a chat turn's terminal frame).
 
 Branch `feat/runtime-observability-hermes`, from `origin/main` at
-`af894484` — in a hermes worktree at `X:\wt\o-h-hermes`. The worktree the
+`af894484`, rebased onto `31cba73477` once the gates were green (the rebase was
+clean; the three touched-file rows and the new
+`tests/scripts/test_mutation_claims_still_anchor.py` were re-run after it) — in a
+hermes worktree at `X:\wt\o-h-hermes`. The worktree the
 dispatch named (`X:\wt\o-h`) is a worktree of the **EterniaLauncher** repo, not
 this one; it was left untouched.
 
