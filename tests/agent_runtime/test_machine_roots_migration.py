@@ -4,6 +4,23 @@ The migration is a text rewrite of files that carry hand-written comments, so
 the safety property is not "the code looks right" but "the rewritten file
 re-expands to the same document". Every planned file carries its own
 verification result and an unverified plan is never written.
+
+THE HOST THESE TESTS SPEAK FOR
+------------------------------
+The fixture config below is the live WINDOWS profile: a ``.exe`` command, a
+``.ps1`` helper, and the same root written in both separator styles. That is
+not an arbitrary choice — the migration derives its roots from paths that must
+exist on the machine running it (``suggest_roots_from_configs`` stats them),
+so a Windows config is migrated on the Windows box, and verification is
+correctly HOST-RELATIVE: ``expand_config_paths`` resolves ``${exe_suffix}`` to
+``.exe`` on Windows and to the empty string everywhere else.
+
+So ``_windows_host`` pins ``current_platform_key`` for the module. Without it
+these tests were green on a developer's Windows box and red on every Linux
+runner — 6 of them in run 33969282189 — for a difference that says nothing
+about the migration. The pin is stated, not hidden:
+:func:`test_expansion_is_host_relative_and_that_is_why_the_pin_exists` turns it
+off and asserts the POSIX answer.
 """
 
 from __future__ import annotations
@@ -14,8 +31,10 @@ from pathlib import Path
 import pytest
 import yaml
 
+from agent_runtime import machine_roots
 from agent_runtime.machine_roots import MachineRoots, machine_roots_cache_clear
 from agent_runtime.machine_roots_migration import (
+    _absolute_paths_in,
     apply_config_migration,
     plan_config_migration,
     snake_case_root_name,
@@ -31,6 +50,16 @@ def _clear_roots_cache():
     machine_roots_cache_clear()
     yield
     machine_roots_cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _windows_host(monkeypatch):
+    """Migrate the Windows fixture config as the Windows box would. See the
+    module docstring: ``${exe_suffix}`` is host-relative by design."""
+
+    monkeypatch.setattr(
+        machine_roots, "current_platform_key", lambda: machine_roots.PLATFORM_WINDOWS
+    )
 
 
 def _launcher_repo(tmp_path: Path) -> Path:
@@ -121,6 +150,49 @@ def test_unmapped_absolute_paths_reports_residue_honestly(tmp_path):
     assert not any(str(repo) in item for item in residue)
 
 
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        # The drive-letter half already tolerates spaces — that is what
+        # `_ABS_PATH_RE`'s own comment says it exists to do.
+        (
+            "  root: X:\\Unreal Engine\\EterniaLauncher\n",
+            ["X:\\Unreal Engine\\EterniaLauncher"],
+        ),
+        # The POSIX half has to say the same thing. A macOS checkout under
+        # "My Projects" is the ordinary case, not an edge case, and a pattern
+        # that stops at the first space discovers "/Users/tony/My" — a path
+        # that does not exist, so the migration silently finds no root.
+        (
+            "  root: /Users/tony/My Projects/EterniaLauncher\n",
+            ["/Users/tony/My Projects/EterniaLauncher"],
+        ),
+        # And the same shape as a Linux CI runner's tmp tree, which is where
+        # this asymmetry was found (run 33969282189, slice 6).
+        (
+            "  root: /tmp/pytest-1/Unreal Engine/EterniaLauncher\n",
+            ["/tmp/pytest-1/Unreal Engine/EterniaLauncher"],
+        ),
+    ],
+)
+def test_absolute_paths_with_spaces_are_found_whole_in_both_shapes(text, expected):
+    assert _absolute_paths_in(text) == expected
+
+
+def test_slashes_in_prose_are_not_absolute_paths():
+    """The guard the space tolerance must not cost.
+
+    Two slashes in a sentence are the shape a naive widening turns into a
+    two-segment path. The rule that stops it is that a segment may contain a
+    space but may never OPEN with one — the case below has three slashes, so a
+    class of ``[A-Za-z0-9_.\\- ]+`` alone would match ``/ split the diff /``.
+    """
+
+    assert _absolute_paths_in("# raise the budget / split the diff / stop\n") == []
+    assert _absolute_paths_in("# see docs/tooling and/or the queue\n") == []
+    assert _absolute_paths_in("# a / b / c\n") == []
+
+
 def test_url_schemes_are_not_mistaken_for_drive_letters(tmp_path):
     config = tmp_path / "config.yaml"
     config.write_text(
@@ -132,6 +204,35 @@ def test_url_schemes_are_not_mistaken_for_drive_letters(tmp_path):
 
 
 # ── Verification ────────────────────────────────────────────────────────────
+
+
+def test_expansion_is_host_relative_and_that_is_why_the_pin_exists(tmp_path, monkeypatch):
+    """The module's ``_windows_host`` pin, stated as a fact rather than hidden.
+
+    ``${exe_suffix}`` means "the executable suffix on the machine that will run
+    this config". Verifying a Windows rewrite therefore only round-trips on a
+    Windows host, and that is correct behaviour, not a bug: off Windows the
+    token expands to the empty string and verification honestly reports the
+    ``.exe`` as changed. The pin exists so the other tests in this file assert
+    the migration, not the runner's OS.
+    """
+
+    repo = _launcher_repo(tmp_path)
+    config = tmp_path / "config.yaml"
+    config.write_text(_config_text(repo), encoding="utf-8")
+    roots = MachineRoots(roots={"eternia_launcher": str(repo)})
+
+    # With the pin (the module default): verified.
+    assert plan_config_migration([config], roots).files[0].verification == ()
+
+    # Without it, on a POSIX host: the .exe is reported, and nothing is written.
+    monkeypatch.setattr(
+        machine_roots, "current_platform_key", lambda: machine_roots.PLATFORM_LINUX
+    )
+    posix_plan = plan_config_migration([config], roots)
+    problems = posix_plan.files[0].verification
+    assert problems and ".exe" in problems[0]
+    assert posix_plan.safe is False
 
 
 def test_plan_verifies_the_rewrite_reexpands_to_the_original_document(tmp_path):

@@ -157,14 +157,25 @@ def unmapped_absolute_paths(config_paths: list[Path], roots: MachineRoots) -> li
     return residue
 
 
-# Windows roots routinely contain SPACES ("X:\\Unreal Engine\\..."), so a
-# whitespace-terminated pattern silently truncates every one of them and the
-# migration finds nothing to do. Terminate on YAML/shell delimiters instead.
-# The leading lookbehind keeps a URL scheme ("https://", "docker://") from being
-# read as a one-letter drive.
+# Roots routinely contain SPACES, so a whitespace-terminated pattern silently
+# truncates them and the migration finds nothing to do. That is true of the
+# drive-letter shape ("X:\\Unreal Engine\\...") and EQUALLY true of the POSIX
+# shape: a macOS checkout under "/Users/tony/My Projects/..." is the ordinary
+# case on the second machine, and a segment class that stopped at the space
+# discovered "/Users/tony/My" — a directory that does not exist, so
+# `_nearest_repo_root` walked up from the wrong place and returned nothing.
+# Both alternatives therefore tolerate internal spaces:
+#   * the drive-letter branch runs to the first YAML/shell delimiter;
+#   * the POSIX branch keeps its two-segment structure (so one slash in prose
+#     is not a path) and lets a space appear INSIDE a segment but never as the
+#     character that OPENS one — which is what keeps "budget / diff / stop"
+#     from reading as a rooted path. `_absolute_paths_in` strips the ends.
+# The leading lookbehinds keep a URL scheme ("https://", "docker://") from being
+# read as a one-letter drive or as a rooted POSIX path.
 _ABS_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\r\n'\";|]*"
-    r"|(?<![\w.:/\\])/(?:[A-Za-z0-9_.\-]+/)+[A-Za-z0-9_.\-]*"
+    r"|(?<![\w.:/\\])/(?:[A-Za-z0-9_.\-][A-Za-z0-9_.\- ]*/)+"
+    r"(?:[A-Za-z0-9_.\-][A-Za-z0-9_.\- ]*)?"
 )
 
 
