@@ -110,6 +110,92 @@ MAX_MESSAGE_LENGTH = 64_000
 #: Mirrors the ``client_message_id`` normaliser's cap in the chat handler.
 MAX_TURN_REQUEST_ID_LENGTH = 200
 
+#: Cap on ``workspace_name``, matching ``safe_assignment_text(..., limit=120)``
+#: in the argv handler that reads it. A boundary that accepted more would hand
+#: the handler a string it silently truncates, and the operator would never
+#: learn which half arrived.
+MAX_WORKSPACE_NAME_LENGTH = 120
+#: Cap on ``clarify_token``, matching the handler's own
+#: ``safe_assignment_text(..., limit=240)``.
+MAX_CLARIFY_TOKEN_LENGTH = 240
+#: Cap on ``surface_prompt``, matching ``safe_assignment_text(..., limit=4000)``.
+MAX_SURFACE_PROMPT_LENGTH = 4000
+#: Cap on ``intent_hint``: the handler reads it through ``safe_assignment_token``,
+#: which truncates at 120.
+MAX_INTENT_HINT_LENGTH = 120
+#: Cap on ``provider`` / ``model``, matching ``_CHAT_PROVIDER_MODEL_RE``'s own
+#: ``{1,200}`` in ``persona_commands``. The CHARSET stays the handler's to
+#: enforce — it refuses out loud with a sentence naming the allowed characters,
+#: and duplicating the regex here would be a second place to keep correct.
+MAX_MODEL_OVERRIDE_LENGTH = 200
+
+#: The parser defaults for the two keys that are only lowered when the operator
+#: moved them off the default. ``harness mission-chat message`` declares
+#: ``--surface-prompt`` default ``""`` and ``--intent-hint`` default ``"chat"``,
+#: and the launcher's console decorator puts the default word on EVERY ordinary
+#: send — so lowering them unconditionally would put two flags on every remote
+#: turn that a local turn does not carry, which is the divergence this whole
+#: lane exists to prevent.
+SURFACE_PROMPT_DEFAULT = ""
+INTENT_HINT_DEFAULT = "chat"
+
+#: R-C8. Every param key :func:`normalize_chat_message` reads, sorted, spelled
+#: ONCE — this tuple is what :func:`agent_runtime.serve_rpc.manifest` advertises
+#: under ``params``, so the advertisement cannot drift from the code that
+#: honours it. A test drives the normaliser through a recording mapping and
+#: asserts the two are the same set, which is the only way to keep them in step
+#: without a second hand-maintained list.
+#:
+#: The block exists because of what the C5 field run measured on 2026-09-06:
+#: the launcher's lowering could see WHICH methods a runtime has and not WHAT
+#: any of them carries, so a console send decorated with ``workspace_name`` fell
+#: to the argv arm — and argv to a remote install is a designed wall, not a
+#: fallback. Unknown params are still ignored rather than refused (a client
+#: cannot be refused for a key this runtime has never heard of), and this list
+#: is what lets a client tell "ignored" from "honoured" BEFORE it sends.
+CHAT_MESSAGE_PARAMS: tuple[str, ...] = (
+    "clarify_token",
+    "correlation_id",
+    "intent_hint",
+    "max_seconds",
+    "message",
+    "model",
+    "new_session",
+    "persona_id",
+    "persona_instance_id",
+    "provider",
+    "session_id",
+    "stream",
+    "surface_prompt",
+    "title",
+    "turn_request_id",
+    "use_agent_default",
+    "workspace_id",
+    "workspace_name",
+)
+
+#: The same, for :func:`normalize_chat_steer` — which R-C8 found already whole,
+#: so this tuple advertises a surface rather than growing one. ``title`` is
+#: absent on purpose: the steer verb has no such flag and both lanes drop a
+#: defaulted one.
+CHAT_STEER_PARAMS: tuple[str, ...] = (
+    "correlation_id",
+    "message",
+    "persona_id",
+    "persona_instance_id",
+    "session_id",
+    "turn_request_id",
+)
+
+#: The manifest's ``params`` block, before it is turned into JSON lists.
+#: ``peer.agent_chat.execute`` is deliberately absent: a device reads the
+#: greeting, a peer is admitted by the pairing ceremony, and the two surfaces
+#: are declared in different places on purpose.
+CHAT_TURN_METHOD_PARAMS: dict[str, tuple[str, ...]] = {
+    CHAT_MESSAGE_METHOD: CHAT_MESSAGE_PARAMS,
+    CHAT_STEER_METHOD: CHAT_STEER_PARAMS,
+}
+
 
 class ChatTurnInvalid(Exception):
     """A refusable request. ``reason`` is what the client branches on."""
@@ -265,9 +351,35 @@ def normalize_chat_message(params: dict) -> ChatTurnRequest:
     persona_instance_id = _text(params, "persona_instance_id", limit=200)
     workspace_id = _text(params, "workspace_id", limit=200)
     title = _text(params, "title", limit=200)
+    # R-C8, the rest of the operator's surface. Read here — before the conflict
+    # rule and before the argv is built — so that the set of keys this function
+    # ASKS FOR is exactly ``CHAT_MESSAGE_PARAMS``, which is what the manifest
+    # advertises and what the drift test walks.
+    workspace_name = _text(params, "workspace_name", limit=MAX_WORKSPACE_NAME_LENGTH)
+    provider = _text(params, "provider", limit=MAX_MODEL_OVERRIDE_LENGTH)
+    model = _text(params, "model", limit=MAX_MODEL_OVERRIDE_LENGTH)
+    use_agent_default = _flag(params, "use_agent_default")
+    clarify_token = _text(params, "clarify_token", limit=MAX_CLARIFY_TOKEN_LENGTH)
+    surface_prompt = _text(params, "surface_prompt", limit=MAX_SURFACE_PROMPT_LENGTH)
+    intent_hint = _text(params, "intent_hint", limit=MAX_INTENT_HINT_LENGTH)
     new_session = _flag(params, "new_session")
     stream = _flag(params, "stream")
     correlation_id = _correlation_id(params)
+
+    if use_agent_default and (provider or model):
+        # The argv handler's own rule (``_requested_chat_model_override`` raises
+        # ``ValueError`` for it), moved to the door. Over argv that ValueError
+        # surfaces inside the turn, which on this lane would mean an ACCEPTED
+        # turn that dies as a handler failure — a client that already holds an
+        # ack, a receipt keyed on its ``turn_request_id``, and no answer. The
+        # boundary is where a request that cannot be honoured should be refused,
+        # and ``ERR_INVALID_PARAMS`` with a reason is what the client branches
+        # on.
+        raise ChatTurnInvalid(
+            "model_override_conflict",
+            "invalid params: use_agent_default cannot be combined with provider "
+            "or model",
+        )
 
     max_seconds_raw = params.get("max_seconds")
     max_seconds: float | None = None
@@ -323,6 +435,26 @@ def normalize_chat_message(params: dict) -> ChatTurnRequest:
         argv.append("--stream")
     if max_seconds is not None:
         argv += ["--max-seconds", repr(max_seconds)]
+    # R-C8's seven, appended after the original set so an existing pin on a
+    # send that carries none of them still reads the same argv. Each one is
+    # lowered only when the operator actually expressed it: an absent optional
+    # is the absence of a flag, not a flag carrying the parser's own default,
+    # because the CLI tells "not given" from "given as the default" for several
+    # of these and a remote turn must be the same execution as a local one.
+    if workspace_name:
+        argv += ["--workspace-name", workspace_name]
+    if provider:
+        argv += ["--provider", provider]
+    if model:
+        argv += ["--model", model]
+    if use_agent_default:
+        argv.append("--use-agent-default")
+    if clarify_token:
+        argv += ["--clarify-token", clarify_token]
+    if surface_prompt and surface_prompt != SURFACE_PROMPT_DEFAULT:
+        argv += ["--surface-prompt", surface_prompt]
+    if intent_hint and intent_hint != INTENT_HINT_DEFAULT:
+        argv += ["--intent-hint", intent_hint]
 
     return ChatTurnRequest(
         verb=CHAT_MESSAGE_METHOD,
