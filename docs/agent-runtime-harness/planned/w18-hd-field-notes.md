@@ -114,9 +114,35 @@ them yet.
 
 ## Gates
 
-`doc_cite_adjacency.py` is **red on `main` before this branch**, and the failure
-set is byte-identical with mine apart from one line number that moved because I
+**`doc_cite_adjacency.py` is red on `main` before this branch.** The failure set
+is byte-identical with mine apart from one line number that moved because I
 inserted text above an already-failing cite in
 `docs/agent-runtime-harness/01-system-architecture.md`. Diffed run-against-run
 against the primary checkout rather than asserted; it is not this lane's row.
+
+**`tests/test_coverage_claims_resolve.py` now times out in fixture setup, on
+`main`, and the number wants a row.** The file declares
+`pytestmark = pytest.mark.timeout(180)` and its own comment records the
+measurement that sized it: `collect_claims()` cost **27-31 s** over three runs on
+the Windows dev box, 2026-09-02. Measured today, twice, calling
+`collect_claims()` directly with nothing else running:
+
+| tree | walk | corpus census |
+| --- | --- | --- |
+| primary checkout, unmodified `main` | **211.5 s** | 241 md / 4097 py / 3089 test / 725 claims |
+| this wave worktree | **279.5 s** | identical, to the claim |
+
+Seven to nine times its own measurement, and past its own marker, on a tree that
+does not carry my change — and the census is IDENTICAL in both, so it is not
+corpus growth from anything this lane added. It passed for me once mid-lane
+(4 passed, 176.4 s) which is how close to the 180 s edge it sits; two later runs
+died in `scan` → `collect_claims` → `_read`.
+
+Not raised, and not baselined. A ceiling only goes down, and this one is a
+declared bound with a written measurement behind it — the honest reading is that
+either the walk regressed or this workstation's IO did, and finding out which is
+a row, not a marker edit. The worktree being ~30% slower than the primary is
+worth a second look on its own: the operator's Defender exclusion covers the
+primary checkout's drive path and not the wave worktrees'.
+
 Every other Lane A gate is green.
