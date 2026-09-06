@@ -17,6 +17,7 @@ import pytest
 
 from tools.environments import local
 from tools.environments.local import (
+    _WINDOWS_PATH_SEP,
     _augment_windows_system_path,
     _bash_from_git,
     _find_bash,
@@ -137,7 +138,14 @@ class TestFindWindowsGitBash:
 
 class TestWindowsSystemPathAugmentation:
     """The agent must be able to reach powershell.exe / cmd.exe / pwsh from its
-    bash terminal even under a minimal gateway PATH."""
+    bash terminal even under a minimal gateway PATH.
+
+    These drive the WINDOWS branch of ``_augment_windows_system_path`` (which
+    is a documented no-op off Windows), so the fixture pins ``_IS_WINDOWS``.
+    They split on ``_WINDOWS_PATH_SEP`` and never on ``os.pathsep``: on POSIX
+    CI ``os.pathsep`` is ``:``, which cuts ``C:\\some\\proj\\bin`` in half at
+    the drive letter and reduces the first assertion to ``'C'``.
+    """
 
     @pytest.fixture
     def fake_windows(self, tmp_path, monkeypatch):
@@ -147,6 +155,7 @@ class TestWindowsSystemPathAugmentation:
         pwsh7 = tmp_path / "Program Files" / "PowerShell" / "7"
         for d in (system32, psdir, pwsh7, system32 / "Wbem", system32 / "OpenSSH"):
             d.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(local, "_IS_WINDOWS", True)
         monkeypatch.setenv("SystemRoot", str(win))
         monkeypatch.setenv("ProgramFiles", str(tmp_path / "Program Files"))
         monkeypatch.delenv("ProgramW6432", raising=False)
@@ -155,7 +164,7 @@ class TestWindowsSystemPathAugmentation:
 
     def test_appends_missing_system_dirs(self, fake_windows):
         result = _augment_windows_system_path(r"C:\some\proj\bin")
-        entries = result.split(os.pathsep)
+        entries = result.split(_WINDOWS_PATH_SEP)
         # Caller entry preserved and still first (precedence untouched).
         assert entries[0] == r"C:\some\proj\bin"
         # PowerShell 5.1, cmd (System32), and pwsh 7 all reachable now.
@@ -164,18 +173,27 @@ class TestWindowsSystemPathAugmentation:
         assert fake_windows["pwsh7"] in entries
 
     def test_does_not_duplicate_present_dirs(self, fake_windows):
-        existing = os.pathsep.join([fake_windows["system32"], r"C:\proj"])
+        existing = _WINDOWS_PATH_SEP.join([fake_windows["system32"], r"C:\proj"])
         result = _augment_windows_system_path(existing)
         # System32 already present (case/if slash-variant) is not re-appended.
         occurrences = [
-            e for e in result.split(os.pathsep)
+            e for e in result.split(_WINDOWS_PATH_SEP)
             if os.path.normcase(e.rstrip("\\/")) == os.path.normcase(fake_windows["system32"])
         ]
         assert len(occurrences) == 1
 
     def test_only_existing_dirs_are_added(self, tmp_path, monkeypatch):
         # SystemRoot points at a dir with no System32 → nothing bogus appended.
+        monkeypatch.setattr(local, "_IS_WINDOWS", True)
         monkeypatch.setenv("SystemRoot", str(tmp_path / "empty"))
         monkeypatch.setenv("ProgramFiles", str(tmp_path / "none"))
+        monkeypatch.delenv("ProgramW6432", raising=False)
+        monkeypatch.delenv("ProgramFiles(x86)", raising=False)
         assert _windows_system_path_dirs() == []
         assert _augment_windows_system_path(r"C:\proj") == r"C:\proj"
+
+    def test_off_windows_it_is_a_no_op(self, fake_windows, monkeypatch):
+        """The guard stated on its own: the caller PATH comes back byte-identical
+        even though every fake system dir exists and would otherwise be added."""
+        monkeypatch.setattr(local, "_IS_WINDOWS", False)
+        assert _augment_windows_system_path(r"C:\some\proj\bin") == r"C:\some\proj\bin"

@@ -1231,6 +1231,14 @@ def _windows_system_path_dirs() -> "list[str]":
     return dirs
 
 
+# A Windows ``PATH`` is semicolon-separated. That is a property of the string
+# being built, not of the host building it: ``os.pathsep`` is ``:`` on POSIX,
+# and a ``:``-joined list cannot represent ``C:\proj\bin`` at all. Naming the
+# separator here makes this helper mean the same thing on every host — which
+# is also what lets its Windows behaviour be tested from POSIX CI.
+_WINDOWS_PATH_SEP = ";"
+
+
 def _augment_windows_system_path(existing_path: str) -> str:
     """Append missing Windows system tooling dirs to ``existing_path``.
 
@@ -1240,12 +1248,16 @@ def _augment_windows_system_path(existing_path: str) -> str:
     """
     if not _IS_WINDOWS:
         return existing_path
-    entries = [e for e in existing_path.split(os.pathsep) if e] if existing_path else []
+    entries = (
+        [e for e in existing_path.split(_WINDOWS_PATH_SEP) if e]
+        if existing_path
+        else []
+    )
     present = {os.path.normcase(e.rstrip("\\/")) for e in entries}
     for directory in _windows_system_path_dirs():
         if os.path.normcase(directory.rstrip("\\/")) not in present:
             entries.append(directory)
-    return os.pathsep.join(entries)
+    return _WINDOWS_PATH_SEP.join(entries)
 
 # Cached directory containing the ``hermes`` console-script.
 # ``_SENTINEL`` distinguishes "not resolved yet" from a resolved ``None``.
