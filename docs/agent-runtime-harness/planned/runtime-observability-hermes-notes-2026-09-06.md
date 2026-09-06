@@ -228,8 +228,14 @@ $ bash scripts/run_tests.sh --paths tests/agent_runtime/test_stream_contract_fix
 $ bash scripts/run_tests.sh --paths tests/agent_runtime/test_office_layout_policy.py
 === Summary: 1 files, 49 tests passed, 0 failed (100% complete) in 45.5s (8 workers) ===
 
+$ bash scripts/run_tests.sh --paths tests/agent_runtime/test_serve_ended_sidecar.py
+=== Summary: 1 files, 29 tests passed, 0 failed (100% complete) in 20.3s (8 workers) ===
+
+$ bash scripts/run_tests.sh --paths tests/agent_runtime/test_serve_rpc_chat_turn.py
+=== Summary: 1 files, 22 tests passed, 0 failed (100% complete) in 37.3s (8 workers) ===
+
 $ bash scripts/run_tests.sh --paths tests/test_coverage_claims_resolve.py
-=== Summary: 1 files, 4 tests passed, 0 failed (100% complete) in 101.1s (8 workers) ===
+=== Summary: 1 files, 4 tests passed, 0 failed (100% complete) in 135.2s (8 workers) ===
 ```
 
 Cross-repo, from the launcher checkout (read-only there):
