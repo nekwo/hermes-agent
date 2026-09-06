@@ -104,9 +104,22 @@ def test_rendered_launcher_names_the_managed_interpreter(tmp_path):
     """The rendering body, against realistic input, with the artifact read back
     off disk — not an assertion on a mocked accessor. Both launchers matter:
     the .vbs is what the Scheduled Task runs, the .cmd is what a manual run
-    uses, and either one pinning the wrong interpreter is an outage."""
+    uses, and either one pinning the wrong interpreter is an outage.
+
+    The expectation is the WINDOWS layout spelled out, not re-derived from
+    ``_venv_interpreter``. Two reasons, and the second is why this was red on
+    every Linux runner (run 33969282189, slice 7): re-deriving asks the code
+    under test what it believes, and it asks OUTSIDE ``_render``'s patch.
+    ``mock.patch.object(gateway_windows.sys, "platform", "win32")`` mutates the
+    one and only ``sys`` module, so inside ``_render`` the whole process is
+    Windows and the launcher is rendered with ``Scripts\\python.exe`` — while
+    ``_venv_interpreter`` called out here answered ``bin/python`` on Linux and
+    ``Scripts\\python.exe`` on Windows. This is the WINDOWS gateway launcher;
+    the interpreter it names lives under ``Scripts``, on whatever host is
+    asking.
+    """
     venv = _make_venv(tmp_path)
-    expected = str(gateway._venv_interpreter(venv))
+    expected = str(venv / "Scripts" / "python.exe")
 
     script_path = _render(tmp_path, venv)
 
