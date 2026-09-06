@@ -141,6 +141,25 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # The sliced suite carries gates that READ THIS REPO'S HISTORY, and
+          # the default fetch-depth of 1 handed them a one-commit clone:
+          #   * tests/agent_runtime/test_tombstone_registry.py runs
+          #     `git diff --name-only 4a21f0779..HEAD -- tests` at module
+          #     import — exit 128 on a shallow clone, which took the ENTIRE
+          #     4,300-line gate file out at collection (run 33969282189,
+          #     slice 8: "1 error during collection");
+          #   * tests/test_docket_stage_claims.py asks git `merge-base
+          #     --is-ancestor` per cited sha — with no history every answer is
+          #     "no", so it accused seven BACKED dockets of being unbacked
+          #     (same run, slice 7).
+          # `blob:none` is what keeps this affordable across eight parallel
+          # slices: both gates need commits and trees, not file contents, so a
+          # blobless clone fetches blobs lazily and only for the handful of
+          # `git show` calls the round-4 walk makes. The `generate` job above
+          # already takes fetch-depth: 0 for its own reasons.
+          fetch-depth: 0
+          filter: blob:none
 
       - name: Install ripgrep (prebuilt binary)
         run: |
