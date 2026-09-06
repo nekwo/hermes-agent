@@ -785,6 +785,164 @@ write, which is the property that stops any reader from seeing two live rows.
   its own at the same time):
 
 ```
+
+# L-h-d — the service runtime keeps its own stderr (RL-19, 2026-09-06)
+
+Fourth hermes stage on the same plan (`local-runtime-ownership-and-retry-safety.md`
+§8.9 item 4, ruling RL-19, hermes half). Worktree `wt/l-serve-service`, branch
+`feat/lh-serve-stderr-log`, from main `f7b89826eb`. Two files of product code
+(`agent_runtime/serve_registry.py`, `hermes_cli/harness_parts/serve.py`), two new
+test modules, two canon docs. Nothing touched the operator's live store or the
+live venv: every real serve this stage spawned ran under a temp root with
+`HERMES_AGENT_RUNTIME_ROOT`, `HERMES_HOME`, `HERMES_HEAD_HOME`, `HOME`,
+`USERPROFILE`, `LOCALAPPDATA` and `APPDATA` all pinned inside `tmp_path`.
+
+## 1. What was measured, before anything was changed
+
+| Claim | Verdict |
+|---|---|
+| `list_serve_instances` needs teaching to ignore a third suffix | **half true.** It globs `*.json`, and `.stderr.log` is not one — the suffix could never have matched. Pinned anyway, and the filter became a tuple (`_NON_ROW_SUFFIXES`), because "the glob happens not to match it" survives only until somebody widens the glob |
+| every other `serve_instances` scanner L-h-c listed needs the same teaching | **no.** `resolve_socket_target`, `runtime_commands._attach_runtime_service_blocks` and `prune_stale_serve_instances` all go through `list_serve_instances`; `test_serve_socket_child_e2e`'s two row-gone globs are `*.json` minus the sidecar suffix, which excludes a `.log` already. One test in the new module pins that property where it is decided, so a future suffix change fails there first |
+| the RL-16 sidecar's retention can simply learn a second suffix | true, but not as one pool. Floored SEPARATELY at 20 each: pooled, twenty service boots would evict every reason a non-service serve ever wrote, and the reason is what the launcher reads |
+| **an uncaught fault in a serve child prints a traceback to stderr** | **FALSE, and it is the finding of this stage.** See §2 |
+
+## 2. The red, measured — and the thing RL-19 assumed
+
+Both modules were written first and run against `origin/main`'s code:
+
+| Test | Expected | Actual before the fix |
+|---|---|---|
+| `test_serve_stderr_log.py` (20 tests) | 20 pass | `ImportError: cannot import name 'SERVE_STDERR_HEADER_PREFIX' from 'agent_runtime.serve_registry'` — collection error, 0 collected |
+| `…child_e2e::test_a_faulting_service_runtime_leaves_its_traceback_in_its_own_log` | the traceback in `<pid>.stderr.log` | no such file: `assert False = exists()` on `…/serve_instances/<pid>.stderr.log` |
+| `…child_e2e::test_a_drained_service_runtimes_log_names_it_on_the_first_line` | a header naming pid/boot_id | the same missing file |
+| `…child_e2e::test_a_non_service_childs_stderr_still_reaches_the_parents_pipe` | a traceback on the parent's stderr pipe | `'Traceback (most recent call last)' in 'harness serve: skill install — 4 package(s), 4 refreshed…'` — **the pipe carried the boot's skill-install line and nothing else** |
+
+That last red is not a defect in the test. Probed directly (`--ndjson`, no
+`--service`, `HERMES_SERVE_BOOT_FAULT=raise`, both pipes captured, the test venv's
+interpreter):
+
+```
+returncode: 1
+stdout: {"event": "booting" …}
+        {"event": "root_anchor" …}
+        {"event": "ready" …}
+stderr: harness serve: skill install — 4 package(s), 4 refreshed, 0 failed …
+```
+
+Three frames, exit 1, **no account of the fault on any channel.** The exception
+leaves `serve_loop`, `_cmd_serve` re-raises it, and the harness dispatch converts
+it into an error envelope that the `--ndjson` serve does not emit; the
+interpreter never sees it, so nothing calls the default excepthook.
+
+RL-19 is worded as *redirect `sys.stderr`* on the assumption that a traceback is
+written there. It is not — not under `--service`, and not before RL-17 either.
+Restoring `sys.stderr` therefore restores a channel nobody was going to print to.
+So the ruling's PROMISE (§8.9: "the next one leaves a traceback or a silence, and
+either is a reading") is kept by making the uncaught arm write the traceback
+itself, into the file the redirect opened. Recorded as a deviation in §5.
+
+## 3. What changed
+
+**`agent_runtime/serve_registry.py`.** `SERVE_STDERR_SUFFIX = ".stderr.log"`,
+`SERVE_STDERR_HEADER_PREFIX`, `_NON_ROW_SUFFIXES`, and three functions:
+`serve_stderr_log_path` (beside `serve_ended_path`), `open_serve_stderr_log`
+(the opener — mkdir, truncate, line-buffered UTF-8 with `errors="replace"`,
+`newline="\n"`, header written, `None` on any failure, never raises) and
+`list_serve_stderr_logs` (newest first by the header's own `started=`, never by
+mtime). `list_serve_instances` filters the tuple. `prune_serve_ended` floors both
+families and reports them separately under `families`.
+
+The opener lives in the registry rather than in `serve.py` for the reason
+`write_serve_ended` does: one writer for this directory, and the header format
+stays in the same module as the retention ordering that reads it back.
+
+**`hermes_cli/harness_parts/serve.py`.** `_LineFrameProxy` gained an optional
+mirror (`set_mirror`, `_mirror_lines`), teeing every completed line — and a
+`flush_request` tail — into a stream while the frame lane is untouched.
+`_repoint_logging_root_stderr` moves root `StreamHandler`s that were writing to
+stderr, and only those. In `serve_loop`, immediately BEFORE the RL-16 arming:
+open the log (service only), mirror the stderr proxy into it, repoint logging,
+and rebind `original_stderr` so the `finally` restores the file rather than a
+`DEVNULL` handle. In the uncaught arm, after `_note_end`, the traceback is
+written to the handle.
+
+Ordering is load-bearing in one place: the log is opened before
+`prune_serve_ended`, so this boot's own file is the newest of its family and can
+never be the file the prune picks. (On Windows it is also open, which the
+prune's `OSError` arm keeps rather than reports.)
+
+The handle is never closed. The writes worth having are the ones made on the way
+down; it is line-buffered, so nothing is owed a flush.
+
+## 4. A real file
+
+From a sandboxed `--service` child with all three handles on `DEVNULL`, killed
+by `HERMES_SERVE_BOOT_FAULT=raise`:
+
+```
+# harness serve --service pid=8476 boot_id=e64d4601872544e694530de3b34586b0 build=f7b89826eb28eb825a2c99029887b857c01ce8f2 started=2026-09-06T09:55:48.649Z
+Traceback (most recent call last):
+  File "…\hermes_cli\harness_parts\serve.py", line 3797, in serve_loop
+    _maybe_inject_boot_fault()
+  File "…\hermes_cli\harness_parts\serve.py", line 1438, in _maybe_inject_boot_fault
+    raise RuntimeError(f"{BOOT_FAULT_ENV_VAR}={mode!r}: injected boot fault")
+RuntimeError: HERMES_SERVE_BOOT_FAULT='raise': injected boot fault
+```
+
+Beside it in the same directory: `8476.json` (the row the crash left) and
+`8476.ended.json` (`uncaught:RuntimeError`). Two records and a cause, joined by
+`boot_id`.
+
+## 5. Deviations from RL-19, and why
+
+1. **The traceback is written, not redirected.** §2. The redirect is still wired
+   exactly as ruled — proxy mirror, logging root, restored `sys.stderr` — but it
+   is described in the code as defence for whatever is written to stderr after
+   the loop unwinds, not as the traceback's route, because on this codebase
+   nothing prints one.
+2. **The opener is in `serve_registry`, not `serve.py`.** The ruling says
+   "opened through the registry's own directory helper"; this goes one step
+   further and puts the `open()` there too. One writer for the directory, and the
+   header parse sits beside the header format.
+3. **`prune_serve_ended` keeps its name** and grew a `families` block rather than
+   splitting into two functions. It is called once, at boot, by one caller; two
+   calls would be two chances to add only one of them.
+4. **No fd-level `dup2`.** The ruling names `sys.stderr` and `logging`; a raw fd 2
+   would be inherited by every subprocess a handler spawns, which is a different
+   question with a different blast radius.
+5. **A non-service serve is byte-identical.** Pinned by an e2e arm rather than
+   asserted: the mirror is `None`, the logging root untouched, no file written.
+
+## 6. Mutation record
+
+Each mutation applied to the landed code, the named test run, then reverted:
+
+| Mutation | Test that died |
+|---|---|
+| drop the traceback write from the uncaught arm | `…child_e2e::test_a_faulting_service_runtime_leaves_its_traceback_in_its_own_log` — and only that one: the sidecar still said `uncaught:RuntimeError` and the log still had its header, which is exactly main's state |
+| arm the redirect unconditionally (drop `service and`) | `…child_e2e::test_a_non_service_childs_stderr_still_reaches_the_parents_pipe` — a `<pid>.stderr.log` that should not exist |
+| `prune_serve_ended` forgets the stderr family | 4 tests in `test_serve_stderr_log.py` (retention ×3, the header-less arm) |
+| `list_serve_instances` globs `*` AND loses the suffix from `_NON_ROW_SUFFIXES` | 3 tests — the lister ×2 and the boot row prune, each reporting a pid-less ghost |
+| `_LineFrameProxy.write` loses its mirror call | `test_the_stderr_proxy_tees_completed_lines_into_the_log` |
+
+## 7. Gates
+
+`scripts/run_tests.sh`, the shared test venv, on the branch tree.
+
+**The serve set** — `test_serve_request_silence`, `test_harness_serve`,
+`test_serve_drain_accounting`, `test_serve_socket_lane`, `test_serve_service_mode`,
+`test_serve_stream_lane_parity`, `test_serve_ended_sidecar`,
+`test_serve_ended_sidecar_child_e2e`, `test_serve_socket_child_e2e`,
+`test_serve_registry`, plus both new modules:
+
+```
+=== Summary: 12 files, 247 tests passed, 0 failed (100% complete) in 50.1s (8 workers) ===
+```
+
+**`tests/agent_runtime` + `tests/hermes_cli`**:
+
+```
+=== Summary: 1035 files, 12577 tests passed, 3 failed (100% complete) in 2623.5s (8 workers) ===
 === 3 files with test failures (3 tests failed) ===
   tests\agent_runtime\test_duplicate_helper_bodies.py  (1 test failed)
   tests\agent_runtime\test_no_midtest_monkeypatch_undo.py  (1 test failed)
@@ -827,3 +985,45 @@ write, which is the property that stops any reader from seeing two live rows.
   this stage rewrites an existing store: supersession applies from the next
   redeem, and the prune only removes rows something revoked. Collapsing the
   existing five is an operator action (re-pair, or `harness gateway revoke`).
+
+```
+
+Every red, named, and what it is:
+
+| File | Verdict |
+|---|---|
+| `test_duplicate_helper_bodies::test_no_new_duplicate_helper_bodies_in_agent_runtime` | PRE-EXISTING. Re-run alone: still red, and the pair it names is `realm_sync.py::_ledger_time == store.py::_stamp` — neither file is in this stage |
+| `test_no_midtest_monkeypatch_undo::test_no_test_in_the_tree_unwinds_the_shared_monkeypatch` | PRE-EXISTING. Re-run alone: still red |
+| `test_harness_json_root_observability::test_ledger_does_not_rot` | PRE-EXISTING. Re-run alone: still red — `LEDGER entry '_cmd_persona_instance_open_chat' no longer emits JSON` |
+
+Two more files went red in an EARLIER run of the same gate and are named here
+because a run that names only its final state is not a measurement:
+
+| File | Verdict |
+|---|---|
+| `test_kanban_init_lock_bounded` | CONTENTION. Re-run alone: `2 tests passed`; green in the run above |
+| `test_stream_stale_first_routing` | TIMEOUT, and worth the paragraph. Six tests pass, then `test_the_pin_covers_every_production_call_site_there_is` expires the 30 s per-test cap inside its whole-tree `ast.parse` walk and the file reports 0 collected — the same expiry L-h-c named for this file. It failed under contention AND on its own at the default 8 workers (86.0 s); the runner's bounded retry at 1-worker isolation passed it (`RETRY PASS … 33.3s at 1 worker`), which is what the run above records. **Proven not this stage's**: with `serve_registry.py` and `serve.py` reverted to `origin/main`'s content and nothing else changed, it times out identically (87.6 s vs 86.0 s). The walk needs a budget; that is not RL-19's row |
+
+Lint: `uvx ruff@0.15.10 check` on both product files and both test modules —
+`All checks passed!`
+
+## 8. What is NOT proven
+
+* **The 09:09:18Z hub stall itself.** RL-19 buys the evidence for the NEXT one.
+  Whether that stall wrote a traceback, a warning, or nothing at all is still
+  unknown, and a silent file will be as much of a reading as a loud one.
+* **The launcher half.** Nothing on the launcher side opens this file yet: the
+  runtime sheet's "Open runtime log" line and the QA bundle's pickup are not in
+  this stage and were not ruled into it.
+* **`logging` root repointing, in the field.** The unit tests cover the mirror
+  and the file; the repoint is exercised only in the sense that every real child
+  in the e2e ran it (root handlers writing to stderr: whatever the boot had
+  configured). No test asserts a `logging.warning` landing in the file, because
+  nothing in a serve boot reliably emits one.
+* **Retention against a real machine's directory.** The prune's twenty-of-each is
+  proven on synthesised files; the operator's live root has never held twenty
+  service logs, because this is the first day they exist.
+* **A recycled pid.** The log is truncated per pid, exactly as the sidecar is
+  overwritten per pid. A runtime that inherits a dead runtime's number loses that
+  runtime's log, which is the trade RL-16 already made and the reason the header
+  line names the boot.

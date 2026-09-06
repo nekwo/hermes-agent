@@ -157,6 +157,20 @@ nothing ever consumes a reason. Armed ONLY when the caller passes `record_end_re
 `skill_install`: arming it mutates the HOST process. The record's shape is in
 `02-runtime-data-and-shapes.md`; which word each ending writes is in "How it ends" below.
 
+**A `--service` runtime opens its own stderr log first** (RL-19, 2026-09-06), immediately BEFORE
+the recorder — `open_serve_stderr_log(...)` puts `serve_instances/<pid>.stderr.log` in the same
+directory, so it exists before `prune_serve_ended` runs (that prune now floors both families, and
+this boot's own log is the newest of its family and therefore never a candidate). Three sinks are
+wired to one file and they are not the same sink: the loop's stderr proxy MIRRORS every completed
+line into it (so `_service_log`'s transport events survive having no reader on the frame lane);
+`logging`'s root `StreamHandler` is repointed if — and only if — it was writing to stderr; and the
+handle becomes the loop's `original_stderr`, which is what the `finally` restores when the loop
+unwinds. Never closed: the writes worth having are the ones made on the way down, it is
+line-buffered, and the OS closes it. `service` only — a serve started the old way is a child whose
+parent is holding its stderr pipe open and reading it as frames, and moving that into a file would
+take the output away from the process that asked for it. There is no fd-level `dup2`: a raw fd 2
+would be inherited by every subprocess a handler spawns, which is a different question.
+
 ## Stage 5 — the hygiene sweeps
 
 **Orphaned turns** (`orphaned_turn_sweep_ms`, `serve.py:2896` →
@@ -533,13 +547,21 @@ written, and why there:
 | the console window closed | `ctrl_close` | the console handler (`CTRL_CLOSE_EVENT`) |
 | logoff or machine shutdown | `logoff` | the console handler (`CTRL_LOGOFF`/`CTRL_SHUTDOWN`), and `SIGHUP` on POSIX |
 | `SIGTERM` | `sigterm` | the boot handler, or the `--service` park's own handler while it holds the disposition |
-| an uncaught exception | `uncaught:<Type>` | `serve_loop`'s `except Exception`, which records and re-raises |
+| an uncaught exception | `uncaught:<Type>` | `serve_loop`'s `except Exception`, which records, writes the TRACEBACK into the service stderr log (RL-19) and re-raises |
 | anything else that unwound the interpreter | `unknown_exit` | the `atexit` hook |
 | `TerminateProcess` / `taskkill /F` / a Job kill | **nothing** | nothing runs in the target; the ABSENCE is the reading, and the launcher words it `ended=absent` |
 
 One word for all three drain outcomes on purpose: the sidecar answers *why did this runtime
 end*, and the answer is "somebody drained it". HOW the drain went is already on the wire, in the
 terminal frame, with the counters that make it meaningful.
+
+The `uncaught:` row is the one where the word alone was never enough, and RL-19 measured why:
+an uncaught exception out of a serve child produces **no traceback on any channel** — the harness
+dispatch converts it into an error envelope that the `--ndjson` serve does not emit, so a faulting
+child writes `booting`, `root_anchor`, `ready` and exits 1 having said nothing about the fault.
+Restoring `sys.stderr` therefore restores a channel nobody was going to print to; the uncaught arm
+writes the traceback into the service stderr log itself. A NON-service child still says nothing —
+that is unchanged behaviour, not a regression, and its parent still has the exit code and the pipe.
 
 ---
 

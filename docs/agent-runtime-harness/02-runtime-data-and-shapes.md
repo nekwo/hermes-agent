@@ -40,7 +40,7 @@ Directories present in the live root, with the module that owns each:
 | `flow_graphs/` | `checkpoint.py:62` | checkpoint flow graphs |
 | `realm_sync/`, `realm_sync_state/` | `realm_sync.py:1871` | per-realm git worktrees + sync state |
 | `serve_read_model/` | `core_cache.py:244` | the persisted snapshot core (below) |
-| `serve_instances/` | `serve_registry.py:119` | one `<pid>.json` per live serve, plus one `<pid>.ended.json` per serve that ended (below) |
+| `serve_instances/` | `serve_registry.py` (`SERVE_INSTANCES_DIRNAME`) | one `<pid>.json` per live serve, one `<pid>.ended.json` per serve that ended, one `<pid>.stderr.log` per `--service` runtime (below) |
 | `deleted_archive/`, `migration_backups/`, `wt_reaped_patches/`, `locks/` | `paths.py:302`, `default_scope.py:552`, `delivery_directive.py:65` | archive-never-delete and lock trees |
 
 `paths.py` also declares `runs/`, `runtime_instances/`, `incidents/` and
@@ -55,9 +55,9 @@ kept deliberately: without it, a store that ran `harness snapshot` before the cu
 has an orphan nothing in the tree can name. `read_model.db` was the other such
 file and has no helper at all any more — `ReadModel` is deleted.
 
-### serve_instances — the row, and the end-reason sidecar
+### serve_instances — the row, the end-reason sidecar, and the service log
 
-Two file shapes, one directory. `<pid>.json` is the REGISTRY ROW: written at
+Three file shapes, one directory. `<pid>.json` is the REGISTRY ROW: written at
 boot, removed on any clean exit, classified at read time by
 `list_serve_instances` (see `04-boot-and-lifecycle.md`).
 
@@ -97,12 +97,39 @@ Three properties are load-bearing:
    → `harness serve connect` and the launcher's `local_serve_attach`,
    `prune_stale_serve_instances`, `harness status`'s `serves=` count), and a
    sidecar read as a row is a pid-less record that classifies `unknown` — the
-   fail-safe direction, and therefore silent.
+   fail-safe direction, and therefore silent. Since RL-19 the filter is a tuple
+   (`_NON_ROW_SUFFIXES`), and the `.stderr.log` below is excluded twice over: it
+   is not a `.json`, and it is named there anyway.
 
 Retention is a boot-time floor: `prune_serve_ended` keeps the newest
 `SERVE_ENDED_RETENTION = 20` by the record's own `at` (never mtime — a copied or
 restored store's mtimes say when it was moved), because nothing ever consumes a
 reason. It is blind to rows by construction.
+
+`<pid>.stderr.log` is the SERVICE RUNTIME'S OWN STDERR (RL-19, 2026-09-06,
+`serve_registry.py` "the service runtime's stderr"). Written only under
+`--service`, opened by `open_serve_stderr_log` at boot — line-buffered UTF-8,
+truncated per pid, never closed — and carrying one header line before anything
+the runtime says:
+
+```
+# harness serve --service pid=8476 boot_id=e64d4601872544e694530de3b34586b0 build=f7b89826eb28eb825a2c99029887b857c01ce8f2 started=2026-09-06T09:55:48.649Z
+```
+
+It exists because RL-17 hands the launcher's runtime three `DEVNULL` handles: a
+pipe nobody reads is a runtime that blocks on its first full buffer (the older
+defect), and the price was that everything it wrote to stderr went nowhere.
+Measured 2026-09-06: an uncaught fault in a serve child leaves NO traceback on
+any channel — the harness dispatch turns it into an error envelope the `--ndjson`
+serve never emits — so `serve_loop`'s uncaught arm writes the traceback into this
+file itself, beside the `uncaught:<Type>` the sidecar records. Two records, one
+death: the reason and the cause, joined by `boot_id`.
+
+Not a contract and not parsed — the header is read back for one purpose only,
+ordering the retention. `prune_serve_ended` floors this family at the same
+newest-20, SEPARATELY from the reasons (pooling them would let twenty service
+boots evict every reason a non-service serve wrote). A non-service serve writes
+no log at all: its parent is holding its stderr pipe and reading it as frames.
 
 ---
 
