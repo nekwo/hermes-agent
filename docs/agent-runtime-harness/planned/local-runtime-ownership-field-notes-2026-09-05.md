@@ -786,11 +786,11 @@ write, which is the property that stops any reader from seeing two live rows.
 
 ```
 === 3 files with test failures (3 tests failed) ===
-  testsgent_runtime	est_duplicate_helper_bodies.py  (1 test failed)
-  testsgent_runtime	est_no_midtest_monkeypatch_undo.py  (1 test failed)
-  tests\hermes_cli	est_harness_json_root_observability.py  (1 test failed)
+  tests\agent_runtime\test_duplicate_helper_bodies.py  (1 test failed)
+  tests\agent_runtime\test_no_midtest_monkeypatch_undo.py  (1 test failed)
+  tests\hermes_cli\test_harness_json_root_observability.py  (1 test failed)
 === 1 file where no tests ran (collection/import error, timeout before collection, etc.) ===
-  testsgent_runtime	est_stream_stale_first_routing.py
+  tests\agent_runtime\test_stream_stale_first_routing.py
 ```
 
   All four accounted for, none of them this stage's:
