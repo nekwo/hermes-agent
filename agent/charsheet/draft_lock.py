@@ -126,13 +126,34 @@ def _read_holder(path: Path) -> dict:
 
 
 def _claim(path: Path, payload: dict) -> bool:
-    """Create *path* exclusively and write *payload* into it; False if taken."""
+    """Create *path* exclusively and write *payload* into it; False if taken.
+
+    "Taken" is ONE condition with two errnos. ``O_EXCL`` against a path a
+    DIRECTORY sits on raises ``EEXIST`` on POSIX and ``EACCES`` on Windows, so
+    catching only ``FileExistsError`` gave the identical draft two contracts —
+    a typed :class:`~agent.charsheet.errors.DraftBusy` on one host, an unhandled
+    ``OSError`` out of the middle of the verb on the other. That is precisely
+    the split :func:`agent_runtime.locks._file_lock`'s docstring exists to
+    forbid, and it is the module docstring's own rule above: one policy on both
+    hosts.
+
+    The ``EACCES`` arm is conditioned on the path EXISTING, and the condition is
+    the whole care. ``EACCES`` also means "this process may not create files
+    here" — a read-only draft, a bad ACL — which is not a held lock: answering
+    "taken" there would tell an operator to wait for a holder that does not
+    exist and then delete a lock file nobody ever wrote. So a permission fault
+    over an empty path travels as itself.
+    """
 
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
         return False
+    except PermissionError:
+        if path.exists():
+            return False
+        raise
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
             json.dump(payload, stream)

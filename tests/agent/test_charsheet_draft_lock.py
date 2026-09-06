@@ -312,6 +312,92 @@ def test_an_unreadable_holder_still_holds_and_ages_off_its_mtime(lock_path):
         pass
 
 
+@pytest.mark.parametrize("raised", [FileExistsError, PermissionError])
+def test_an_occupied_lock_path_answers_taken_on_both_hosts(lock_path, monkeypatch, raised):
+    """One condition, two errnos, and until 2026-09-06 two different answers.
+
+    ``os.open(path, O_CREAT|O_EXCL|O_WRONLY)`` against a path a DIRECTORY sits
+    on raises ``EEXIST`` on POSIX and ``EACCES`` on Windows — ``FileExistsError``
+    and ``PermissionError``. ``_claim`` caught only the first, so the identical
+    draft refused the identical generation with a typed ``DraftBusy`` on one host
+    and an unhandled ``OSError`` out of the middle of the verb on the other. That
+    is the defect ``agent_runtime.locks._file_lock``'s own docstring was written
+    to remove — "the same call had two contracts" — reappearing one package over.
+
+    The errno is PARAMETRIZED rather than left to the host so that both arms are
+    proven wherever this runs: a Linux runner exercises the Windows arm and a
+    Windows workstation exercises the POSIX one, and neither host can be the only
+    place a regression shows up. The directory underneath is real either way,
+    because the fix reads the path's existence and a fake that skipped it would
+    be asserting the stub instead of the rule.
+    """
+
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.mkdir()
+    real_open = os.open
+
+    def _open(path, flags, *args, **kwargs):
+        if str(path) == str(lock_path):
+            raise raised(str(path))
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", _open)
+
+    with pytest.raises(DraftBusy) as caught:
+        with draft_generation_lock(lock_path, draft_id="d1", verb="rows"):
+            pass
+    assert caught.value.code == "draft_busy"
+    # The path is in the refusal, because clearing what sits there by hand is
+    # the recovery — and here it is a directory, which is not a lock this
+    # runtime ever wrote.
+    assert caught.value.safe_details["lock"] == str(lock_path)
+    assert str(lock_path) in str(caught.value)
+    assert lock_path.is_dir()
+
+
+def test_a_directory_at_the_lock_path_is_refused_on_this_host_unfaked(lock_path):
+    """The same rule with nothing patched at all — whatever errno THIS host
+    raises, the answer is the typed refusal. The parametrized test above proves
+    both arms; this one proves the real host is one of them."""
+
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.mkdir()
+
+    with pytest.raises(DraftBusy):
+        with draft_generation_lock(lock_path, draft_id="d1", verb="rows"):
+            pass
+    assert lock_path.is_dir()
+
+
+def test_a_permission_error_with_nothing_at_the_lock_path_is_not_a_busy_draft(
+    lock_path, monkeypatch
+):
+    """The narrowing, and why the fix is not a bare ``except PermissionError``.
+
+    ``EACCES`` also means "this process may not create files in this directory"
+    — a read-only draft, a bad ACL, a quarantined copy. Answering ``DraftBusy``
+    there would tell an operator to wait for a holder that does not exist and
+    then to delete a lock file that was never created. So the taken-answer is
+    conditioned on something actually BEING at the path, and a permission fault
+    over an empty path travels as itself.
+    """
+
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    real_open = os.open
+
+    def _open(path, flags, *args, **kwargs):
+        if str(path) == str(lock_path):
+            raise PermissionError(13, "Permission denied")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", _open)
+
+    with pytest.raises(PermissionError):
+        with draft_generation_lock(lock_path, draft_id="d1", verb="rows"):
+            pass
+    assert not lock_path.exists()
+
+
 def test_the_ceiling_clears_the_launcher_long_run_ticket_it_must_not_break():
     """A contract about two numbers, not a snapshot of one.
 

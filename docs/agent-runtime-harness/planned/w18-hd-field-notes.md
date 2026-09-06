@@ -60,4 +60,52 @@ it actually is.
 
 ## 2. `draft_lock._claim` answered two different things on two hosts
 
-(filled in with the second commit)
+**The read, reproduced.** With a DIRECTORY at the lock path,
+`os.open(path, O_CREAT|O_EXCL|O_WRONLY)` raises `EEXIST` on POSIX and `EACCES`
+on Windows. `_claim` caught only `FileExistsError`, so the identical draft
+refused the identical generation with a typed `DraftBusy` on one host and an
+unhandled `OSError` from the middle of the verb on the other. Measured here
+before the fix, unfaked: `PermissionError: [Errno 13] Permission denied` out of
+`draft_lock.py:133`. That is the exact split
+`agent_runtime.locks._file_lock`'s docstring exists to forbid — "the same call
+had two contracts" — and the module's own rule is one policy on both hosts.
+
+**The fix, and the one narrowing that matters.** `except PermissionError:` is
+added, but it answers "taken" only when the path EXISTS. `EACCES` also means
+"this process may not create files here" — a read-only draft, a bad ACL, a
+quarantined copy — and that is not a held lock. Answering `DraftBusy` there
+would tell an operator to wait for a holder that does not exist and then delete
+a lock file nobody ever wrote, so a permission fault over an empty path travels
+as itself. That refusal-not-to-lie has its own test.
+
+**The errno is parametrized rather than left to the host.** A Windows-only test
+of a Windows-only errno proves nothing on the Linux runner that would have to
+catch the regression, and vice versa. So the occupied-path test raises each
+error class over a real planted directory, and a second test runs the same
+scenario with nothing patched at all — whatever this host raises, the answer is
+the typed refusal. On this workstation the unfaked one is the Windows arm.
+
+**Red → green.** Red: 2 failed, 10 passed (`…[PermissionError]` and the unfaked
+directory test; the `[FileExistsError]` arm and the propagation test were the
+guard rails and were green from the start). Green: 12 passed.
+
+**Killing mutations** (both registered in `tests/mutation_claims.json`):
+
+| mutation | reds |
+| --- | --- |
+| delete the `except PermissionError` arm | `…answers_taken_on_both_hosts[PermissionError]`, and the unfaked host test |
+| widen it to an unconditional `return False` | `…nothing_at_the_lock_path_is_not_a_busy_draft` |
+
+**The row's sibling note is not this lane and is left open.** COLD statements in
+`agent/charsheet` are untriaged — `draft.py` 25, `draft_lock.py` 6,
+`revisions.py` 6 — a different class from one-armed, and nobody has asked for
+them yet.
+
+## Gates
+
+`doc_cite_adjacency.py` is **red on `main` before this branch**, and the failure
+set is byte-identical with mine apart from one line number that moved because I
+inserted text above an already-failing cite in
+`docs/agent-runtime-harness/01-system-architecture.md`. Diffed run-against-run
+against the primary checkout rather than asserted; it is not this lane's row.
+Every other Lane A gate is green.

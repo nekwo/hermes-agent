@@ -4533,6 +4533,36 @@
         "-q",
         "tests/agent_runtime/test_persona_instance_drift.py::test_a_blank_container_is_not_a_wildcard"
       ]
+    },
+    {
+      "id": "w18hd-an-occupied-lock-path-is-taken-on-both-hosts",
+      "path": "agent/charsheet/draft_lock.py",
+      "symbol": "_claim",
+      "operator": "drop-the-eacces-arm",
+      "find": "    except PermissionError:\n        if path.exists():\n            return False\n        raise\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_charsheet_draft_lock.py::test_an_occupied_lock_path_answers_taken_on_both_hosts"
+      ]
+    },
+    {
+      "id": "w18hd-an-unwritable-draft-is-not-a-busy-one",
+      "path": "agent/charsheet/draft_lock.py",
+      "symbol": "_claim",
+      "operator": "read-every-eacces-as-a-held-lock",
+      "find": "    except PermissionError:\n        if path.exists():\n            return False\n        raise\n",
+      "replace": "    except PermissionError:\n        return False\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_charsheet_draft_lock.py::test_a_permission_error_with_nothing_at_the_lock_path_is_not_a_busy_draft"
+      ]
     }
   ]
 }
