@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 # The snapshot roster does not render per-profile model/provider settings. Use
 # the metadata-only catalog so a cold build does not parse every config.yaml.
