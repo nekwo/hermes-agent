@@ -3498,8 +3498,8 @@
       "path": "agent/charsheet/draft_lock.py",
       "symbol": "_claim",
       "operator": "admit-a-taken-lock",
-      "find": "        return False",
-      "replace": "        return True",
+      "find": "    except FileExistsError:\n        return False",
+      "replace": "    except FileExistsError:\n        return True",
       "test": [
         "{python}",
         "-m",
