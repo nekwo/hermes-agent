@@ -330,6 +330,15 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
     # covered by tests that set it explicitly (``tests/hermes_cli/test_gateway.py``
     # :259 deletes it, :289 sets it), and those run after this fixture.
     "HERMES_GATEWAY_DETACHED",
+    # The charsheet draftsman seam (RL-26). Set to "fake" it rebinds the ONE
+    # charsheet provider door to a local Pillow drawing — which is exactly the
+    # right thing for a sandboxed child and exactly the wrong thing to inherit
+    # from an operator shell mid-suite: every charsheet test that patches
+    # ``pipeline._generate_image`` would keep passing while the test that pins
+    # the DEFAULT door read the operator's environment instead of the default.
+    # Unset is what CI has; the tests that exercise it set it themselves, after
+    # this fixture.
+    "HERMES_CHARSHEET_DRAFTSMAN",
     # ── Path-shaped discovery overrides ──────────────────────────────────────
     # Every one of these REDIRECTS a lookup at a filesystem path the operator
     # controls: which profile name the kanban/author defaults resolve to

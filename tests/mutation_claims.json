@@ -4366,6 +4366,143 @@
         "tests/hermes_cli/test_path_setup.py::TestShimInstallDir::test_posix_without_home_resolves_to_nothing",
         "tests/hermes_cli/test_path_setup.py::TestShimInstallDir::test_posix_reads_home_from_the_env_not_the_password_database"
       ]
+    },
+    {
+      "id": "ph-draftsman-seam-never-honoured",
+      "path": "agent/charsheet/pipeline.py",
+      "symbol": "_draftsman",
+      "operator": "ignore-the-declared-seam",
+      "find": "    fake = draftsman_from_env()\n    return _generate_image if fake is None else fake",
+      "replace": "    draftsman_from_env()\n    return _generate_image",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_charsheet_fake_draftsman.py::test_with_the_seam_armed_the_resolution_is_the_fake",
+        "tests/agent/test_charsheet_fake_draftsman.py::test_a_full_offline_flow_under_the_seam_calls_no_provider"
+      ]
+    },
+    {
+      "id": "ph-draftsman-resolved-once-per-process",
+      "path": "agent/charsheet/pipeline.py",
+      "symbol": "_draftsman",
+      "operator": "resolve-at-import-time",
+      "find": "def _draftsman():",
+      "replace": "@__import__('functools').lru_cache(maxsize=None)\ndef _draftsman():",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_charsheet_fake_draftsman.py::test_the_environment_is_read_at_call_time_not_at_import"
+      ]
+    },
+    {
+      "id": "ph-any-value-arms-the-fake",
+      "path": "agent/charsheet/fake_draftsman.py",
+      "symbol": "draftsman_from_env",
+      "operator": "drop-the-exact-word-refusal",
+      "find": "    if raw != FAKE_DRAFTSMAN:\n        _refuse(raw)\n        return None",
+      "replace": "    if False:\n        _refuse(raw)\n        return None",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_charsheet_fake_draftsman.py::test_any_other_value_is_ignored_and_the_real_door_stands"
+      ]
+    },
+    {
+      "id": "ph-refusal-line-per-generation",
+      "path": "agent/charsheet/fake_draftsman.py",
+      "symbol": "_refuse",
+      "operator": "report-every-time",
+      "find": "    if value in _REPORTED:\n        return\n    _REPORTED.add(value)",
+      "replace": "    _REPORTED.add(value)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_charsheet_fake_draftsman.py::test_an_ignored_value_is_reported_once_per_process"
+      ]
+    },
+    {
+      "id": "ph-fake-bytes-vary-per-call",
+      "path": "agent/charsheet/fake_draftsman.py",
+      "symbol": "FakeDraftsman.__call__",
+      "operator": "leak-the-call-index-into-the-picture",
+      "find": "        image = self.draw(prompt, prefix)",
+      "replace": "        image = self.draw(prompt, prefix)\n        image.putpixel((0, 0), (index % 255, 0, 0, 255))",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_charsheet_fake_draftsman.py::test_the_same_request_answers_the_same_bytes"
+      ]
+    },
+    {
+      "id": "ph-row-frames-not-read-from-the-request",
+      "path": "agent/charsheet/fake_draftsman.py",
+      "symbol": "slots_for",
+      "operator": "hardcode-the-frame-count",
+      "find": "        frames = _layout_count(prompt, prefix)\n        facing = _ROW_FACING.search(prompt)",
+      "replace": "        frames = 2\n        facing = _ROW_FACING.search(prompt)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_charsheet_fake_draftsman.py::test_a_row_carries_every_frame_the_request_asked_for"
+      ]
+    },
+    {
+      "id": "ph-payload-hides-the-fake-door",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_characters_emit",
+      "operator": "drop-the-draftsman-stamp",
+      "find": "    print(emit_json({**data, **_characters_draftsman()}) if getattr(args, \"json\", False) else human)",
+      "replace": "    print(emit_json(data) if getattr(args, \"json\", False) else human)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_characters_draftsman_seam.py::test_with_the_seam_armed_every_verb_says_which_draftsman_drew",
+        "tests/agent_runtime/test_serve_charsheet_fake_draftsman_child_e2e.py"
+      ]
+    },
+    {
+      "id": "ph-payload-stamps-the-provider-door-too",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_characters_draftsman",
+      "operator": "name-the-real-door-as-well",
+      "find": "    name = active_draftsman_name()\n    return {\"draftsman\": name} if name else {}",
+      "replace": "    name = active_draftsman_name()\n    return {\"draftsman\": name or \"real\"}",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_characters_draftsman_seam.py::test_with_the_seam_unset_no_payload_carries_a_draftsman_key"
+      ]
+    },
+    {
+      "id": "ph-autopilot-stream-hides-the-fake-door",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_characters_auto_write",
+      "operator": "drop-the-draftsman-stamp",
+      "find": "        (emit_json_line({**data, **_characters_draftsman()}) if getattr(args, \"json\", False) else human) + \"\\n\"",
+      "replace": "        (emit_json_line(data) if getattr(args, \"json\", False) else human) + \"\\n\"",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_characters_draftsman_seam.py::test_every_line_of_the_autopilots_stream_says_it"
+      ]
     }
   ]
 }

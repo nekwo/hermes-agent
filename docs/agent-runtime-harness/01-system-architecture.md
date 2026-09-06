@@ -782,6 +782,34 @@ repair and the QA crops behave identically, and it RESUMES rather than restarts:
 a stage whose work already exists is skipped with the reason on its summary
 line.
 
+**One provider door, and a declared way to close it (RL-26, 2026-09-06).** Every
+generation in the charsheet package funnels through
+`agent/charsheet/pipeline.py::_generate_image` — nothing else there talks to a
+provider — and which door a call takes is resolved at CALL time by
+`agent/charsheet/pipeline.py::_draftsman`. Unset, that is the real door and the
+behaviour is what it has always been. Set to exactly `fake`, the environment
+variable `HERMES_CHARSHEET_DRAFTSMAN` binds it instead to the deterministic
+Pillow draftsman in `agent/charsheet/fake_draftsman.py` (`FakeDraftsman`), which
+reads the built prompt for what to draw and answers the same bytes for the same
+request. Any other value is IGNORED — the real door stands — with one stderr
+line per distinct value per process; there is no CLI flag and no config key, on
+purpose, because the point of the seam is reach: an environment variable is
+armable by whatever process SPAWNS the runtime, which a monkeypatch is not.
+
+That reach is the whole reason it exists. `characters turnaround|rows|auto` are
+the runtime's only long runs and every one of them is a generation, so before
+this seam no sandboxed `harness serve` could run a batch to completion without
+spending money, and the long-run acceptance proof stopped at its own fixture
+gate (`EterniaLauncher/docs/mission_control/planned/local-runtime-ownership-and-retry-safety.md`
+§8.10b). It is also VISIBLE rather than silent: while it is armed, every
+`characters` verb's `--json` result carries `"draftsman": "fake"`
+(`hermes_cli/harness.py::_characters_draftsman`, applied in `_characters_emit`
+and `_characters_error`). The key is absent — never `"real"` — on the provider
+door, so an existing reader sees byte-identical output on the path it has always
+taken, a sandbox that forgot to arm the seam reads as a paid run rather than a
+silent one, and a field run that armed it by accident says so on every row it
+writes.
+
 ## What the mission-lane removal deleted, and why
 
 On 2026-07-30 the goal/task mission lane was removed whole. Deleted: goal and

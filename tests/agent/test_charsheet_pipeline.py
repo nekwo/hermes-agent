@@ -22,6 +22,10 @@ import pytest
 from agent.charsheet import palette as palette_mod
 from agent.charsheet.palette import palette_table
 from agent.charsheet import pipeline
+from agent.charsheet.fake_draftsman import FakeDraftsman, slots_for
+from agent.charsheet.fake_draftsman import draw_glyph as _draw_glyph
+from agent.charsheet.fake_draftsman import square_image as _square_image
+from agent.charsheet.fake_draftsman import strip_image as _strip_image
 from agent.charsheet import prompts
 from agent.charsheet.spec import (
     CHAR8,
@@ -46,17 +50,6 @@ SQUARE_PX = 512
 GLYPH_PX = 60
 MAGENTA = (*pipeline.MAGENTA, 255)
 
-_UNIT = {
-    "n": (0.0, -1.0),
-    "ne": (0.7071, -0.7071),
-    "e": (1.0, 0.0),
-    "se": (0.7071, 0.7071),
-    "s": (0.0, 1.0),
-    "sw": (-0.7071, 0.7071),
-    "w": (-1.0, 0.0),
-    "nw": (-0.7071, -0.7071),
-}
-
 
 @pytest.fixture(autouse=True)
 def _hermes_home(tmp_path, monkeypatch):
@@ -65,94 +58,53 @@ def _hermes_home(tmp_path, monkeypatch):
 
 
 # ────────────────────────── the fake draftsman ──────────────────────────
-
-
-def _draw_glyph(draw, cx, cy, size, direction, tick, ticks):
-    half = size // 2
-    ring = max(4, size // 15)
-    draw.rectangle([cx - half, cy - half, cx + half, cy + half], outline=(30, 40, 120, 255), width=ring)
-    ux, uy = _UNIT[direction]
-    reach = half - ring - max(4, size // 12)
-    tip = (cx + ux * reach, cy + uy * reach)
-    tail = (cx - ux * reach * 0.55, cy - uy * reach * 0.55)
-    perp = (-uy, ux)
-    wing = reach * 0.42
-    draw.polygon(
-        [
-            tip,
-            (tail[0] + perp[0] * wing, tail[1] + perp[1] * wing),
-            (tail[0] - perp[0] * wing, tail[1] - perp[1] * wing),
-        ],
-        fill=(230, 110, 40, 255),
-    )
-    tick_px = max(6, size // 10)
-    inner = size - 2 * ring - tick_px - 8
-    step = inner / max(1, ticks)
-    x0 = cx - half + ring + 4 + int(tick * step)
-    y0 = cy - half + ring + 4
-    draw.rectangle([x0, y0, x0 + tick_px, y0 + tick_px], fill=(30, 190, 110, 255))
+#
+# The drawing moved to `agent/charsheet/fake_draftsman.py` (RL-26), where a
+# SPAWNED runtime can import it too; this module keeps its own GEOMETRY, because
+# the collapse and registration guards below are measured against a 768x256
+# strip, and its own two BAD rolls, which are what the retry path is made of.
 
 
 def strip_image(slots, *, spread=1.0):
-    """One landscape strip: ``slots`` is ``[(direction, tick, ticks), …]``."""
-    image = Image.new("RGBA", (STRIP_W, STRIP_H), MAGENTA)
-    draw = ImageDraw.Draw(image)
-    width = STRIP_W / len(slots)
-    for index, (direction, tick, ticks) in enumerate(slots):
-        centre = STRIP_W / 2 + (width * (index + 0.5) - STRIP_W / 2) * spread
-        _draw_glyph(draw, int(centre), STRIP_H // 2, GLYPH_PX, direction, tick, ticks)
-    return image
+    """One landscape strip; ``slots`` is ``[(direction, tick, ticks), …]``."""
+    return _strip_image(slots, size=(STRIP_W, STRIP_H), glyph_px=GLYPH_PX, spread=spread)
 
 
 def square_image(direction):
-    image = Image.new("RGBA", (SQUARE_PX, SQUARE_PX), MAGENTA)
-    _draw_glyph(ImageDraw.Draw(image), SQUARE_PX // 2, SQUARE_PX // 2, 200, direction, 0, 1)
-    return image
+    return _square_image(direction, size_px=SQUARE_PX)
 
 
-class FakeProvider:
-    """Records every call at the seam and answers it with a synthetic image."""
+class FakeProvider(FakeDraftsman):
+    """The shared draftsman, plus the two rolls this module needs to go wrong.
 
-    def __init__(self, spec, out_dir, *, mode="good"):
-        self.spec = spec
-        self.out_dir = out_dir
-        self.out_dir.mkdir(parents=True, exist_ok=True)
-        self.mode = mode
-        self.calls: list[dict] = []
-        self.order = pipeline.turnaround_order(spec.scheme.authored)
-        self._rows = {pipeline.row_prefix(row.key): row for row in spec.authored_rows()}
-        self._views = {pipeline.view_prefix(d): d for d in spec.scheme.order}
+    ``blank`` answers a bare chroma field (no frames to segment) and
+    ``touching-once`` draws the FIRST row so tight the poses touch — the two
+    shapes ``generate_row_strip``'s attempt loop exists for. Both apply to row
+    strips only; a turnaround still draws clean, because a fixture that broke
+    every generation would never reach the retry under test.
+    """
 
-    def __call__(self, prompt, *, reference_images, aspect_ratio, prefix, provider):
-        refs = [str(ref) for ref in (reference_images or [])]
-        self.calls.append(
-            {"prompt": prompt, "refs": refs, "aspect": aspect_ratio, "prefix": prefix}
+    def __init__(self, out_dir, *, mode="good"):
+        super().__init__(
+            out_dir, strip_size=(STRIP_W, STRIP_H), square_px=SQUARE_PX, glyph_px=GLYPH_PX
         )
-        if prefix == pipeline.PREFIX_TURNAROUND:
-            image = strip_image([(direction, 0, 1) for direction in self.order])
-        elif prefix in self._views:
-            image = square_image(self._views[prefix])
-        elif prefix in self._rows:
-            row = self._rows[prefix]
-            direction = row.direction or pipeline.NON_DIRECTIONAL_VIEW
-            slots = [(direction, index, row.frames) for index in range(row.frames)]
-            if self.mode == "blank":
-                image = Image.new("RGBA", (STRIP_W, STRIP_H), MAGENTA)
-            elif self.mode == "touching-once" and len(self.calls) == 1:
-                image = strip_image(slots, spread=0.04)
-            else:
-                image = strip_image(slots)
-        else:  # pragma: no cover - a new generation kind would need a fixture
-            raise AssertionError(f"unexpected generation prefix {prefix!r}")
-        path = self.out_dir / f"{prefix}-{len(self.calls)}.png"
-        image.save(path, format="PNG")
-        return path
+        self.mode = mode
+
+    def draw(self, prompt, prefix):
+        if self.mode == "good" or not prefix.startswith(pipeline.row_prefix("")):
+            return super().draw(prompt, prefix)
+        if self.mode == "blank":
+            return Image.new("RGBA", (STRIP_W, STRIP_H), MAGENTA)
+        if self.mode == "touching-once" and len(self.calls) == 1:
+            _, slots = slots_for(prompt, prefix)
+            return strip_image(slots, spread=0.04)
+        return super().draw(prompt, prefix)
 
 
 @pytest.fixture
 def fake(tmp_path, monkeypatch):
     """The seam, replaced. Returns the recorder so tests can read its calls."""
-    provider = FakeProvider(SPEC, tmp_path / "generated")
+    provider = FakeProvider(tmp_path / "generated")
     monkeypatch.setattr(pipeline, "_generate_image", provider)
     return provider
 
@@ -173,7 +125,7 @@ def built(tmp_path_factory, base_image):
     need to observe the provider seam use the function-scoped ``fake`` instead.
     """
     root = tmp_path_factory.mktemp("built")
-    provider = FakeProvider(SPEC, root / "generated")
+    provider = FakeProvider(root / "generated")
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(pipeline, "_generate_image", provider)
         refs = pipeline.generate_turnaround(
@@ -671,7 +623,7 @@ def test_the_diagonal_view_language_pairs_are_exact_left_right_mirrors():
 
 
 def test_a_row_whose_poses_touch_is_re_rolled_rather_than_accepted(monkeypatch, refs, tmp_path, base_image):
-    provider = FakeProvider(SPEC, tmp_path / "retry", mode="touching-once")
+    provider = FakeProvider(tmp_path / "retry", mode="touching-once")
     monkeypatch.setattr(pipeline, "_generate_image", provider)
     row = SPEC.row_by_key("walk-e")
 
@@ -684,7 +636,7 @@ def test_a_row_whose_poses_touch_is_re_rolled_rather_than_accepted(monkeypatch, 
 
 
 def test_a_row_that_never_becomes_sliceable_fails_loudly(monkeypatch, refs, tmp_path):
-    provider = FakeProvider(SPEC, tmp_path / "blank", mode="blank")
+    provider = FakeProvider(tmp_path / "blank", mode="blank")
     monkeypatch.setattr(pipeline, "_generate_image", provider)
     row = SPEC.row_by_key("walk-e")
 

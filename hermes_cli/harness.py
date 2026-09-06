@@ -4195,8 +4195,28 @@ def _characters_error(args, exc: BaseException, **extra) -> int:
     """
     data = {"ok": False, "error": str(exc)}
     data.update(extra)
-    print(emit_json(data) if getattr(args, "json", False) else data["error"])
+    print(emit_json({**data, **_characters_draftsman()}) if getattr(args, "json", False) else data["error"])
     return 2
+
+
+def _characters_draftsman() -> dict:
+    """``{"draftsman": "fake"}`` while the seam is armed, and NOTHING when it is not.
+
+    Additive and conditional, in that order. Additive: the character payloads
+    are ruled supersets, so a key that appears is free. Conditional, and never
+    ``"real"``: an old reader must see byte-identical output on the door it has
+    always used, so "absent" keeps meaning "the provider door" and the key
+    exists only to make the OTHER case impossible to miss — a sandbox that
+    forgot to arm the seam reads as a paid run rather than a silent one, and a
+    field run that armed it by accident says so on every row it writes.
+
+    Read per emit, not once: the variable belongs to the process, and a serve
+    may be spawned by a launcher that set it (RL-26).
+    """
+    from agent.charsheet.fake_draftsman import active_draftsman_name
+
+    name = active_draftsman_name()
+    return {"draftsman": name} if name else {}
 
 
 def _characters_next(verb: str, *flags: str, alternatives=()) -> dict:
@@ -4235,7 +4255,7 @@ def _characters_next(verb: str, *flags: str, alternatives=()) -> dict:
 
 
 def _characters_emit(args, data: dict, human: str) -> int:
-    print(emit_json(data) if getattr(args, "json", False) else human)
+    print(emit_json({**data, **_characters_draftsman()}) if getattr(args, "json", False) else human)
     return 0
 
 
@@ -4969,8 +4989,15 @@ def _characters_auto_write(args, data: dict, human: str) -> None:
     `--json` frames with `emit_json_line`, never `emit_json`: the indenting
     encoder every other verb uses would break the newline framing this stream
     IS. Human mode prints the verb's own line, which for `compose` is a block.
+
+    Every line carries the draftsman stamp when the seam is armed, not just the
+    summary: each one IS a `characters` result, and the consumer reading this
+    stream mid-batch is exactly the reader who needs to know which door drew the
+    rows it is watching land (RL-26).
     """
-    sys.stdout.write((emit_json_line(data) if getattr(args, "json", False) else human) + "\n")
+    sys.stdout.write(
+        (emit_json_line({**data, **_characters_draftsman()}) if getattr(args, "json", False) else human) + "\n"
+    )
     sys.stdout.flush()
 
 

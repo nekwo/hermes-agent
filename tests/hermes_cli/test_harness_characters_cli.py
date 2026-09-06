@@ -24,6 +24,9 @@ from pathlib import Path
 import pytest
 
 from agent.charsheet import pipeline
+from agent.charsheet.fake_draftsman import FakeDraftsman
+from agent.charsheet.fake_draftsman import square_image as _square_image
+from agent.charsheet.fake_draftsman import strip_image as _strip_image
 from agent.charsheet.draft import drafts_dir
 from agent.charsheet.draft_lock import LOCK_FILENAME, STALE_HOLDER_SECONDS
 from agent.charsheet.revisions import STATE_FILENAME
@@ -46,17 +49,6 @@ STRIP_W, STRIP_H = 512, 192
 SQUARE_PX = 384
 GLYPH_PX = 44
 MAGENTA = (*pipeline.MAGENTA, 255)
-
-_UNIT = {
-    "n": (0.0, -1.0),
-    "ne": (0.7071, -0.7071),
-    "e": (1.0, 0.0),
-    "se": (0.7071, 0.7071),
-    "s": (0.0, 1.0),
-    "sw": (-0.7071, 0.7071),
-    "w": (-1.0, 0.0),
-    "nw": (-0.7071, -0.7071),
-}
 
 
 def parser():
@@ -82,73 +74,20 @@ def run(argv, capsys):
 
 
 # ────────────────────────── the fake draftsman ──────────────────────────
-
-
-def _draw_glyph(draw, cx, cy, size, direction, tick, ticks):
-    half = size // 2
-    ring = max(4, size // 15)
-    draw.rectangle([cx - half, cy - half, cx + half, cy + half], outline=(30, 40, 120, 255), width=ring)
-    ux, uy = _UNIT[direction]
-    reach = half - ring - max(4, size // 12)
-    tip = (cx + ux * reach, cy + uy * reach)
-    tail = (cx - ux * reach * 0.55, cy - uy * reach * 0.55)
-    perp = (-uy, ux)
-    wing = reach * 0.42
-    draw.polygon(
-        [
-            tip,
-            (tail[0] + perp[0] * wing, tail[1] + perp[1] * wing),
-            (tail[0] - perp[0] * wing, tail[1] - perp[1] * wing),
-        ],
-        fill=(230, 110, 40, 255),
-    )
-    tick_px = max(6, size // 10)
-    inner = size - 2 * ring - tick_px - 8
-    step = inner / max(1, ticks)
-    x0 = cx - half + ring + 4 + int(tick * step)
-    y0 = cy - half + ring + 4
-    draw.rectangle([x0, y0, x0 + tick_px, y0 + tick_px], fill=(30, 190, 110, 255))
+#
+# It used to be spelled out here, and again in two other test modules. It now
+# lives in `agent/charsheet/fake_draftsman.py`, because a SPAWNED runtime has to
+# be able to import it (RL-26) — and one copy is the point of moving it, so this
+# module reads it from there. Only the GEOMETRY stays local: this file's crop,
+# thumb and console-budget assertions are written against a 512x192 strip.
 
 
 def strip_image(slots):
-    image = Image.new("RGBA", (STRIP_W, STRIP_H), MAGENTA)
-    draw = ImageDraw.Draw(image)
-    width = STRIP_W / len(slots)
-    for index, (direction, tick, ticks) in enumerate(slots):
-        _draw_glyph(draw, int(width * (index + 0.5)), STRIP_H // 2, GLYPH_PX, direction, tick, ticks)
-    return image
+    return _strip_image(slots, size=(STRIP_W, STRIP_H), glyph_px=GLYPH_PX)
 
 
 def square_image(direction):
-    image = Image.new("RGBA", (SQUARE_PX, SQUARE_PX), MAGENTA)
-    _draw_glyph(ImageDraw.Draw(image), SQUARE_PX // 2, SQUARE_PX // 2, 200, direction, 0, 1)
-    return image
-
-
-class FakeProvider:
-    def __init__(self, spec, out_dir):
-        self.out_dir = out_dir
-        self.out_dir.mkdir(parents=True, exist_ok=True)
-        self.calls: list[str] = []
-        self.order = pipeline.turnaround_order(spec.scheme.authored)
-        self._rows = {pipeline.row_prefix(row.key): row for row in spec.authored_rows()}
-        self._views = {pipeline.view_prefix(d): d for d in spec.scheme.order}
-
-    def __call__(self, prompt, *, reference_images, aspect_ratio, prefix, provider):
-        self.calls.append(prefix)
-        if prefix == pipeline.PREFIX_TURNAROUND:
-            image = strip_image([(direction, 0, 1) for direction in self.order])
-        elif prefix in self._views:
-            image = square_image(self._views[prefix])
-        elif prefix in self._rows:
-            row = self._rows[prefix]
-            direction = row.direction or pipeline.NON_DIRECTIONAL_VIEW
-            image = strip_image([(direction, i, row.frames) for i in range(row.frames)])
-        else:  # pragma: no cover - a new generation kind would need a fixture
-            raise AssertionError(f"unexpected generation prefix {prefix!r}")
-        path = self.out_dir / f"{prefix}-{len(self.calls)}.png"
-        image.save(path, format="PNG")
-        return path
+    return _square_image(direction, size_px=SQUARE_PX)
 
 
 @pytest.fixture(autouse=True)
@@ -159,7 +98,13 @@ def home(tmp_path, monkeypatch):
 
 @pytest.fixture
 def fake(tmp_path, monkeypatch):
-    provider = FakeProvider(SPEC, tmp_path / "generated")
+    """The one provider seam, replaced in-process. Returns the recorder."""
+    provider = FakeDraftsman(
+        tmp_path / "generated",
+        strip_size=(STRIP_W, STRIP_H),
+        square_px=SQUARE_PX,
+        glyph_px=GLYPH_PX,
+    )
     monkeypatch.setattr(pipeline, "_generate_image", provider)
     return provider
 
@@ -179,11 +124,16 @@ SPEC_WITH_ADDED = SheetSpec(
 
 
 @pytest.fixture
-def fake_grown(tmp_path, monkeypatch):
-    """A draftsman that also knows the rows `add-state` is about to author."""
-    provider = FakeProvider(SPEC_WITH_ADDED, tmp_path / "generated")
-    monkeypatch.setattr(pipeline, "_generate_image", provider)
-    return provider
+def fake_grown(fake):
+    """The same draftsman, under the name the growing-spec tests ask for.
+
+    It used to be a SECOND provider built from a superset spec, because the old
+    fixture mapped a prefix back to a row through the spec it was constructed
+    with — so a row `add-state` authored later arrived as an unexpected prefix.
+    The shared draftsman reads the REQUEST, so a state that did not exist at
+    fixture time draws like any other and there is nothing to pre-teach.
+    """
+    return fake
 
 
 def start_draft(capsys, *extra):

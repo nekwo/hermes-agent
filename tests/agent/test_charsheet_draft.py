@@ -25,6 +25,9 @@ import pytest
 
 from agent.charsheet import palette as palette_mod
 from agent.charsheet import pipeline
+from agent.charsheet.fake_draftsman import FakeDraftsman
+from agent.charsheet.fake_draftsman import square_image as _square_image
+from agent.charsheet.fake_draftsman import strip_image as _strip_image
 from agent.charsheet.draft_lock import LOCK_FILENAME
 from agent.charsheet.errors import DraftBusy
 from agent.charsheet.draft import (
@@ -66,96 +69,26 @@ SQUARE_PX = 384
 GLYPH_PX = 44
 MAGENTA = (*pipeline.MAGENTA, 255)
 
-_UNIT = {
-    "n": (0.0, -1.0),
-    "ne": (0.7071, -0.7071),
-    "e": (1.0, 0.0),
-    "se": (0.7071, 0.7071),
-    "s": (0.0, 1.0),
-    "sw": (-0.7071, 0.7071),
-    "w": (-1.0, 0.0),
-    "nw": (-0.7071, -0.7071),
-}
-
 
 # ────────────────────────── the fake draftsman ──────────────────────────
-
-
-def _draw_glyph(draw, cx, cy, size, direction, tick, ticks):
-    half = size // 2
-    ring = max(4, size // 15)
-    draw.rectangle([cx - half, cy - half, cx + half, cy + half], outline=(30, 40, 120, 255), width=ring)
-    ux, uy = _UNIT[direction]
-    reach = half - ring - max(4, size // 12)
-    tip = (cx + ux * reach, cy + uy * reach)
-    tail = (cx - ux * reach * 0.55, cy - uy * reach * 0.55)
-    perp = (-uy, ux)
-    wing = reach * 0.42
-    draw.polygon(
-        [
-            tip,
-            (tail[0] + perp[0] * wing, tail[1] + perp[1] * wing),
-            (tail[0] - perp[0] * wing, tail[1] - perp[1] * wing),
-        ],
-        fill=(230, 110, 40, 255),
-    )
-    tick_px = max(6, size // 10)
-    inner = size - 2 * ring - tick_px - 8
-    step = inner / max(1, ticks)
-    x0 = cx - half + ring + 4 + int(tick * step)
-    y0 = cy - half + ring + 4
-    draw.rectangle([x0, y0, x0 + tick_px, y0 + tick_px], fill=(30, 190, 110, 255))
+#
+# Moved to `agent/charsheet/fake_draftsman.py` (RL-26) so a SPAWNED runtime can
+# import it too; only the geometry this module's assertions are written against
+# stays here.
 
 
 def strip_image(slots):
-    image = Image.new("RGBA", (STRIP_W, STRIP_H), MAGENTA)
-    draw = ImageDraw.Draw(image)
-    width = STRIP_W / len(slots)
-    for index, (direction, tick, ticks) in enumerate(slots):
-        _draw_glyph(draw, int(width * (index + 0.5)), STRIP_H // 2, GLYPH_PX, direction, tick, ticks)
-    return image
+    return _strip_image(slots, size=(STRIP_W, STRIP_H), glyph_px=GLYPH_PX)
 
 
 def square_image(direction):
-    image = Image.new("RGBA", (SQUARE_PX, SQUARE_PX), MAGENTA)
-    _draw_glyph(ImageDraw.Draw(image), SQUARE_PX // 2, SQUARE_PX // 2, 200, direction, 0, 1)
-    return image
+    return _square_image(direction, size_px=SQUARE_PX)
 
 
-class FakeProvider:
-    """Answers every call at the seam with a deterministic synthetic image."""
-
-    def __init__(self, spec, out_dir):
-        self.spec = spec
-        self.out_dir = out_dir
-        self.out_dir.mkdir(parents=True, exist_ok=True)
-        self.calls: list[dict] = []
-        self.order = pipeline.turnaround_order(spec.scheme.authored)
-        self._rows = {pipeline.row_prefix(row.key): row for row in spec.authored_rows()}
-        self._views = {pipeline.view_prefix(d): d for d in spec.scheme.order}
-
-    def __call__(self, prompt, *, reference_images, aspect_ratio, prefix, provider):
-        self.calls.append(
-            {
-                "prompt": prompt,
-                "refs": [str(ref) for ref in (reference_images or [])],
-                "aspect": aspect_ratio,
-                "prefix": prefix,
-            }
-        )
-        if prefix == pipeline.PREFIX_TURNAROUND:
-            image = strip_image([(direction, 0, 1) for direction in self.order])
-        elif prefix in self._views:
-            image = square_image(self._views[prefix])
-        elif prefix in self._rows:
-            row = self._rows[prefix]
-            direction = row.direction or pipeline.NON_DIRECTIONAL_VIEW
-            image = strip_image([(direction, i, row.frames) for i in range(row.frames)])
-        else:  # pragma: no cover - a new generation kind would need a fixture
-            raise AssertionError(f"unexpected generation prefix {prefix!r}")
-        path = self.out_dir / f"{prefix}-{len(self.calls)}.png"
-        image.save(path, format="PNG")
-        return path
+def draftsman(out_dir):
+    return FakeDraftsman(
+        out_dir, strip_size=(STRIP_W, STRIP_H), square_px=SQUARE_PX, glyph_px=GLYPH_PX
+    )
 
 
 def write_base(directory):
@@ -190,7 +123,7 @@ def home(tmp_path, monkeypatch):
 
 @pytest.fixture
 def fake(tmp_path, monkeypatch):
-    provider = FakeProvider(SPEC, tmp_path / "generated")
+    provider = draftsman(tmp_path / "generated")
     monkeypatch.setattr(pipeline, "_generate_image", provider)
     return provider
 
@@ -212,7 +145,7 @@ def _installed(tmp_path_factory):
     root = tmp_path_factory.mktemp("installed")
     with pytest.MonkeyPatch.context() as patch:
         patch.setenv("HERMES_HOME", str(root / "home"))
-        patch.setattr(pipeline, "_generate_image", FakeProvider(SPEC, root / "generated"))
+        patch.setattr(pipeline, "_generate_image", draftsman(root / "generated"))
         draft = run_to_composed(write_base(root / "src"))
         return {"home": root / "home", "id": draft.id, "slug": draft.slug}
 
@@ -649,24 +582,23 @@ PREFERRED_ATTEMPT = 0
 
 
 @pytest.fixture
-def fake_grown(tmp_path, monkeypatch):
-    """A draftsman that also knows the rows ``add_state`` is about to author.
+def fake_grown(fake):
+    """``fake``, under the name the ``add_state`` tests ask for.
 
-    Same seam as ``fake``; a superset spec, because the provider builds its row
-    lookup once and a row keyed by a state that did not exist at fixture time
-    would be an unexpected prefix rather than a picture.
+    It used to be a SECOND provider built from a superset spec, because the old
+    fixture built its row lookup once from the spec it was constructed with — so
+    a row keyed by a state that did not exist at fixture time arrived as an
+    unexpected prefix rather than a picture. The shared draftsman reads the
+    REQUEST, so the added state draws like any other, including the ``:fixed``
+    one — which is why ``fake_grown_fixed`` is now the same fixture again.
     """
-    provider = FakeProvider(GROWN, tmp_path / "generated")
-    monkeypatch.setattr(pipeline, "_generate_image", provider)
-    return provider
+    return fake
 
 
 @pytest.fixture
-def fake_grown_fixed(tmp_path, monkeypatch):
-    """``fake_grown``, but the added state is ``:fixed`` — ONE row, no direction."""
-    provider = FakeProvider(GROWN_FIXED, tmp_path / "generated")
-    monkeypatch.setattr(pipeline, "_generate_image", provider)
-    return provider
+def fake_grown_fixed(fake):
+    """``fake_grown``, for the added state that is ``:fixed`` — ONE row, no direction."""
+    return fake
 
 
 def run_to_rows_keeping_the_older_attempt(base, *, direction=REROLLED_DIRECTION):

@@ -9,9 +9,12 @@ the consumer flips the other three at draw time.
 
 Three constraints are load-bearing here:
 
-* **One provider seam.** Every generation goes through :func:`_generate_image`.
-  Nothing else in the charsheet package talks to a provider, so the whole flow
-  runs offline against a fake by replacing that one function.
+* **One provider seam.** Every generation goes through :func:`_generate_image`,
+  resolved at call time by :func:`_draftsman`. Nothing else in the charsheet
+  package talks to a provider, so the whole flow runs offline against a fake by
+  replacing that one function in-process — or, for a process nobody is
+  monkeypatching, by arming ``HERMES_CHARSHEET_DRAFTSMAN=fake``
+  (:mod:`agent.charsheet.fake_draftsman`).
 * **Grounding refs carry the chroma field.** The row prompts tell the model to
   reuse "the same flat chroma-key field as the attached reference"; a sliced
   turnaround cutout is transparent, so it is re-composited onto flat magenta
@@ -424,6 +427,27 @@ def _generate_image(
     return Path(images[0])
 
 
+def _draftsman():
+    """WHICH door a generation goes through, resolved at CALL time.
+
+    The real one — unless the declared, default-off seam is armed
+    (``HERMES_CHARSHEET_DRAFTSMAN=fake``; see
+    :mod:`agent.charsheet.fake_draftsman`, ruling RL-26). Call time rather than
+    import time is the whole point: a serve started WITHOUT the variable and a
+    child started WITH it are two processes reading two environments, and a
+    module-level constant would freeze whichever booted first.
+
+    ``_generate_image`` is looked up as a module global here, so the in-process
+    test seam (``monkeypatch.setattr(pipeline, "_generate_image", …)``) is
+    untouched and still answers for everything that runs in-process. This
+    function only adds the arm a SPAWNED process can reach.
+    """
+    from agent.charsheet.fake_draftsman import draftsman_from_env
+
+    fake = draftsman_from_env()
+    return _generate_image if fake is None else fake
+
+
 # ───────────────────────── grounding references ─────────────────────────
 
 
@@ -741,7 +765,7 @@ def generate_turnaround(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    strip = _generate_image(
+    strip = _draftsman()(
         prompts.build_turnaround_prompt(concept, order, style=style),
         reference_images=[base],
         aspect_ratio="landscape",
@@ -787,7 +811,7 @@ def generate_direction_view(
     if not base.is_file():
         raise ValueError(f"base image not found: {base}")
 
-    generated = _generate_image(
+    generated = _draftsman()(
         prompts.build_direction_view_prompt(concept, direction, style=style, note=note),
         reference_images=[base],
         aspect_ratio="square",
@@ -834,7 +858,7 @@ def generate_row_strip(
     for attempt in range(_ROW_GEN_ATTEMPTS):
         strict = attempt < _ROW_GEN_ATTEMPTS - 1
         try:
-            candidate = _generate_image(
+            candidate = _draftsman()(
                 prompt,
                 reference_images=[ref],
                 aspect_ratio="landscape",

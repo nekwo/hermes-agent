@@ -1027,3 +1027,142 @@ Lint: `uvx ruff@0.15.10 check` on both product files and both test modules —
   overwritten per pid. A runtime that inherits a dead runtime's number loses that
   runtime's log, which is the trade RL-16 already made and the reason the header
   line names the boot.
+## P-h — the fake draftsman a spawned runtime can reach (RL-26)
+
+Branch `feat/charsheet-fake-draftsman`, worktree `X:/wt/p-fake-draftsman`, base
+`origin/main` at `f7b89826eb`. Filed by
+`EterniaLauncher/docs/mission_control/planned/local-runtime-ownership-and-retry-safety.md`
+§8.10b, after the P-l builder stopped at RL-25's own fixture gate and wrote the
+gap down instead of spending a provider call.
+
+### The premise, re-checked before anything was written
+
+Every claim in §8.10b held against main, and the P-l builder's search was the
+map:
+
+* one provider door — `agent/charsheet/pipeline.py::_generate_image`, three
+  call sites (`generate_turnaround`, `generate_direction_view`,
+  `generate_row_strip`), and the module docstring says so;
+* every deterministic charsheet test reaches it by
+  `monkeypatch.setattr(pipeline, "_generate_image", …)` — in
+  `tests/agent/test_charsheet_pipeline.py`, `tests/agent/test_charsheet_draft.py`
+  and `tests/hermes_cli/test_harness_characters_cli.py`, which each carried
+  their OWN copy of the same Pillow drawing;
+* `HERMES_PET_IMAGE_PROVIDER` still honours a forced name only inside
+  `_REF_CAPABLE`'s five billed backends (`agent/pet/generate/imagegen.py`), so
+  it is not the door.
+
+### What landed
+
+**`agent/charsheet/fake_draftsman.py`** — the drawing, moved out of the three
+test modules (one copy now, and they import it from there), plus two things the
+fixtures never needed:
+
+* `FakeDraftsman` reads the REQUEST rather than a `SheetSpec`. The in-test fakes
+  mapped a provider prefix back to a row through the spec they were constructed
+  with, which a spawned process has no handle on; this one recovers what to draw
+  from the built prompt — the numbered turnaround slot list, the
+  `LAYOUT: arrange the N …` count, the row's frozen `This is the E facing` — plus
+  the prefix. Those three anchors are the coupling to `prompts.py` and they are
+  pinned by a test that builds real prompts and reads them back, so a re-worded
+  prompt reds a fixture instead of half-drawing a batch. A prompt that lost an
+  anchor raises `DraftsmanCannotRead` rather than guessing a slot count.
+* Slot PITCH replaces fixed strip width. The fixtures drew 512px strips because
+  they knew their own row was two or three frames wide; a spawned runtime is
+  asked for whatever the operator declared, and a twelve-frame row on a
+  fixed-width strip packs poses until the extractor refuses a picture the
+  draftsman drew correctly. Width is now `max(512, 128 × slots)`.
+
+**The seam.** `agent/charsheet/pipeline.py::_draftsman` resolves which door a
+generation takes, at CALL time, and the three call sites go through it.
+`HERMES_CHARSHEET_DRAFTSMAN=fake` — exactly that word, after a strip — binds the
+fake; anything else is ignored with ONE stderr line per distinct value per
+process (`_REPORTED`, not a memoizing decorator, so a test can clear it without
+depending on how the once-ness is spelled) and the real door stands. Unset is
+the default and the untouched path. `_generate_image` is still looked up as a
+module global inside `_draftsman`, so every existing in-process monkeypatch
+still wins for its own process — this is an added arm, not a replacement.
+
+**The receipt.** `hermes_cli/harness.py::_characters_draftsman` puts
+`"draftsman": "fake"` on every `characters` `--json` result while the seam is
+armed — through `_characters_emit`, `_characters_error` AND
+`_characters_auto_write`, because a refusal spent the same draftsman and the
+autopilot's newline-framed stream is a `characters` result per line, read by the
+consumer watching a batch land. Absent, never `"real"`, when it is not: an existing
+reader must see byte-identical output on the door it has always used, so
+"absent" keeps meaning the provider door, a sandbox that forgot to arm the seam
+reads as a paid run rather than a silent one, and a field run that armed it by
+accident says so on every row. No wire change, no argparse flag, no config key.
+
+**`tests/conftest.py`** blanks `HERMES_CHARSHEET_DRAFTSMAN` per test, beside
+`HERMES_HEAD_HOME` and `HERMES_GATEWAY_DETACHED` and for the same reason: a
+variable inherited from an operator shell would leave the test that pins the
+DEFAULT door reading the operator's environment instead of the default.
+
+### The child e2e, and how it knows no provider was called
+
+`tests/agent_runtime/test_serve_charsheet_fake_draftsman_child_e2e.py` spawns
+`python -m hermes_cli.main harness serve --ndjson --service` under one temp root
+(every `HERMES_*` plus `HOME`/`USERPROFILE`/`LOCALAPPDATA`/`APPDATA`) with the
+variable set, and drives `characters start → turnaround → approve-direction
+--all → rows → status` down the argv lane. It reads back **three** direction
+references, **three** row strips (`idle-e`, `idle-n`, `idle-s`), one attempt
+each, all approved, `pending.rows == []`, and `"draftsman": "fake"` on every
+result.
+
+"No provider was called" is asserted twice, from both sides:
+
+* NEGATIVE — the child's environment is built by dropping every
+  credential-shaped name (`KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|OPENAI|ANTHROPIC|
+  OPENROUTER|NOUS|KREA|FAL|XAI|DEEPINFRA`) and the test asserts none survived,
+  so the child could not have authenticated a backend even if it had tried;
+* POSITIVE — the bytes the child committed for `idle-e` are compared to what the
+  PARENT process draws from `fake_draftsman.strip_image` for the same slots, and
+  they are equal. A remote backend does not answer with the local Pillow
+  drawing, and the comparison also proves the determinism claim across a process
+  boundary.
+
+The in-process suites carry the third form: `pipeline.imagegen.generate` is
+monkeypatched to raise, a whole flow runs green under the seam, and the sibling
+test shows the same call reaching that trap when the seam is unset — the route
+is proven without taking it.
+
+### Mutation record (each applied to the tree, run, reverted)
+
+| # | mutation | killed by |
+| --- | --- | --- |
+| M1 | `_draftsman` ignores `draftsman_from_env` | 4 tests in `test_charsheet_fake_draftsman.py`, incl. the no-provider flow |
+| M2 | any non-empty value arms the fake | `test_any_other_value_is_ignored_and_the_real_door_stands` (5 params) + the once-per-process arm |
+| M3 | refusal line printed every time | `test_an_ignored_value_is_reported_once_per_process` |
+| M4 | payload stamps `"real"` on the provider door | `test_with_the_seam_unset_no_payload_carries_a_draftsman_key` |
+| M5 | `_draftsman` memoized (import-time resolution) | 10 tests, incl. `test_the_environment_is_read_at_call_time_not_at_import` |
+| M6 | call index leaked into the picture's bytes | `test_the_same_request_answers_the_same_bytes` AND the child e2e |
+| M7 | row frame count hardcoded to 2 | `test_a_row_carries_every_frame_the_request_asked_for[3,8,12]` + the anchors test |
+| M8 | the child spawned WITHOUT the variable | the child e2e (nothing billed — the child has no credentials) |
+| M9 | `_characters_emit` drops the stamp | 2 CLI-seam tests + the child e2e |
+| M10 | `_characters_auto_write` drops the stamp | `test_every_line_of_the_autopilots_stream_says_it` |
+
+M3 and M6 initially SURVIVED and both were the test's fault, not the code's: the
+once-ness was an `lru_cache` whose `cache_clear` the fixture called, so removing
+the decorator errored the file instead of failing the assertion; and the
+determinism test compared two FRESH draftsmen, which a per-call-index leak
+cannot separate. The refusal became an explicit `_REPORTED` set and the
+determinism test now calls the SAME draftsman twice. Both mutations kill now.
+Nine of the ten are registered in `tests/mutation_claims.json` (`ph-*`); M8 is a
+mutation of the test's own fixture and has no production anchor to claim.
+
+### What is NOT proven
+
+* **RL-25 itself.** This is the fixture the long-run acceptance proof was
+  missing, not the proof. P-l is re-armed, not done: no consumer ceiling, no
+  unrelated read timing out, no drain assertion here.
+* **`characters auto` end to end.** The autopilot IS driven here, through
+  `--through rows` in-process (three generations, every receipt line stamped),
+  but not through `compose` and not through a spawned child — the child e2e
+  drives the verbs one at a time, which is the shape RL-25's e2e needs anyway.
+* **A real provider call.** Nothing in this stage called one, by design, so the
+  claim "the seam is off by default" rests on identity (`_draftsman() is
+  _generate_image`) and on `imagegen.generate` being reached with the seam
+  unset — never on a billed round trip.
+* **The field.** No operator has run a launcher-spawned serve with the variable
+  set; the spawn proven here is the test's own.

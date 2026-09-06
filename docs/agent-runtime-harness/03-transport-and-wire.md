@@ -76,7 +76,12 @@ differs — a chat turn ends in seconds, a `characters rows` batch may be fiftee
 minutes from done. The long-run hold is only bounded because the generation is:
 `agent/charsheet/pipeline.py::PROVIDER_TIMEOUT_SECONDS` puts a deadline on every
 provider call, which is what stops one wedged image backend from holding a drain
-open forever. Cancel semantics are unchanged — a RUNNING generation still
+open forever. A long run being a generation is also why a sandboxed
+proof of this lane needs the draftsman seam: `HERMES_CHARSHEET_DRAFTSMAN=fake`
+(RL-26, `agent/charsheet/fake_draftsman.py`) is the declared, default-off way a
+SPAWNED serve runs `characters turnaround|rows|auto` to real, committed
+revisions with no provider call, and every `characters` `--json` result it draws
+says `"draftsman": "fake"`. Cancel semantics are unchanged — a RUNNING generation still
 answers `cancel_denied`, and a running `harness stream` request is still the sole
 exception to "running requests cannot be cancelled", cooperatively cancelled and
 releasing its pool worker (`is_runtime_stream`, `:835`, used `:2952`).
