@@ -2070,8 +2070,8 @@
       "path": "hermes_cli/harness.py",
       "symbol": "_characters_auto_write",
       "operator": "use-the-indenting-encoder",
-      "find": "emit_json_line(data)",
-      "replace": "emit_json(data)",
+      "find": "emit_json_line({**data, **_characters_draftsman()})",
+      "replace": "emit_json({**data, **_characters_draftsman()})",
       "test": [
         "{python}",
         "-m",
@@ -2580,8 +2580,8 @@
       "path": "agent_runtime/realm_revert.py",
       "symbol": "FAMILIES",
       "operator": "drop-the-family-from-the-revert-selector",
-      "find": "        DRIFT_FAMILY_PERSONA_INSTANCE,\n    }\n)",
-      "replace": "    }\n)",
+      "find": "        DRIFT_FAMILY_PERSONA_INSTANCE,\n",
+      "replace": "",
       "test": [
         "{python}",
         "-m",
@@ -2625,8 +2625,8 @@
       "path": "agent_runtime/patch_coverage.py",
       "symbol": "module",
       "operator": "un-gate-the-paired-domain-events",
-      "find": "    \"workspace.activated\": SCOPE_ENTITY,\n    \"realm.activated\": SCOPE_ENTITY,\n}",
-      "replace": "}",
+      "find": "    \"workspace.activated\": SCOPE_ENTITY,\n    \"realm.activated\": SCOPE_ENTITY,\n",
+      "replace": "",
       "test": [
         "{python}",
         "-m",
@@ -3468,8 +3468,8 @@
       "path": "hermes_cli/harness_support.py",
       "symbol": "_error_code_for_exception",
       "operator": "fall-through-to-internal-error",
-      "find": "    if isinstance(exc, IdempotencyKeyVerbMismatch):\n        return exc.code",
-      "replace": "    if False:\n        return exc.code",
+      "find": "        declared = getattr(exc, \"code\", None)\n        if isinstance(declared, str) and declared:\n            return declared",
+      "replace": "        declared = getattr(exc, \"code\", None)\n        if False:\n            return declared",
       "test": [
         "{python}",
         "-m",
