@@ -538,15 +538,54 @@ reads the FILE beside the stale row it has already found.
 
 ## 6. Gates
 
-`scripts/run_tests.sh tests/agent_runtime tests/hermes_cli`, plus the six serve
-modules and every module touched, run individually first. Summary lines are
-recorded verbatim in the stage report; the reds carried in are the four already
-named in the L-h-b section above, one of which (`test_cli_contract_dump`) is
-still this plan's own two-repo debt, plus
-`test_serve_stream_lane_parity::test_the_advertisement_grew_and_no_contract_integer_moved`,
-which went red on main at `7ea3ac94ea` when `serve_rpc.manifest()` grew a
-`params` key that the pin had not learned. None of the five are on this branch's
-diff.
+The two new modules, then the six serve modules plus every module touched, then
+the whole of `tests/agent_runtime` + `tests/hermes_cli`:
+
+```
+=== Summary: 1 files, 29 tests passed, 0 failed (100% complete) in 4.7s (8 workers) ===
+=== Summary: 1 files, 9 tests passed, 0 failed (100% complete) in 37.8s (8 workers) ===
+=== Summary: 11 files, 262 tests passed, 0 failed (100% complete) in 79.5s (8 workers) ===
+=== Summary: 1 files, 7 tests passed, 0 failed (100% complete) in 56.7s (8 workers) ===
+=== Summary: 1033 files, 12543 tests passed, 14 failed (100% complete) in 2500.2s (8 workers) ===
+```
+
+`uvx ruff@0.15.10 check` clean on every changed file (with `UV_CACHE_DIR` pointed
+at a scratch directory — the same `os error 32` cache collision the L-h-b notes
+name, which is the Defender-exclusion row this program already owes).
+
+**Nine tests failed across eight files. None are this stage's.** Four are the
+reds already named in the L-h-b section above, unchanged:
+`test_duplicate_helper_bodies`, `test_no_midtest_monkeypatch_undo`,
+`test_cli_contract_dump` (still this plan's own two-repo `--service` fixture
+debt) and `test_harness_json_root_observability::test_ledger_does_not_rot`. A
+fifth is new on main and not on this branch:
+`test_serve_stream_lane_parity::test_the_advertisement_grew_and_no_contract_integer_moved`
+went red at `7ea3ac94ea`, when `serve_rpc.manifest()` grew a `params` key the pin
+had not learned — `git diff origin/main --name-only` does not contain
+`serve_rpc.py`.
+
+The remaining four are 8-way contention, and were re-run together in isolation:
+`6 files, 141 tests passed, 0 failed`.
+
+| File | Shape under contention | Alone |
+|---|---|---|
+| `test_serve_rpc_office_subscribe_live_hub` | 10 × `timed out after 5.0s waiting for: a patch on the re-joined lane` | flaky — failed once, passed on retry, both in the gate and in isolation; already named as flaky in the L-h-b section |
+| `test_stream_stale_first_routing` | the 30 s cap expired inside its whole-tree `ast.parse` walk | green; named in L-h-b for the same reason |
+| `test_harness_cli` | the 30 s cap expired inside `_cmd_verify`'s `subprocess.run` | green |
+| `test_kanban_boards` | the 30 s cap expired inside `boards create`'s `subprocess.run` | green |
+
+Two further files were flaky WITHIN the gate and passed on their own retry
+(`test_serve_stream_hub`, `test_session_recovery`).
+
+One flake worth naming because it is on a path this stage touched and is
+therefore the one that had to be ruled out:
+`test_serve_drain_accounting::test_a_drain_the_reader_outran_is_declared_abandoned_in_a_frame`
+failed once in the 11-file batch and passed on retry. That test waits out
+`_DRAIN_ABANDON_GRACE_SECONDS = 5.0`. Run alone three times: `9 tests passed`
+each time. The stage's addition to that branch is `_note_end` + `_write_end`,
+both of which are no-ops in a `serve_loop` unit test (`record_end_reason`
+defaults False, so the recorder is `None`), so it cannot be the cause — but the
+check was made rather than assumed.
 
 ## 7. What is NOT proven
 
