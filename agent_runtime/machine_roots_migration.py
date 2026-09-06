@@ -291,10 +291,22 @@ def _root_pattern(root: Path) -> re.Pattern[str]:
     configs in BOTH separator styles (``X:\\Unreal Engine\\...`` in
     ``mcp_servers``, ``X:/Unreal Engine/...`` in ``repo_scope``). One pattern
     has to catch both or the migration silently leaves half the refs behind.
+
+    A root that STARTS at the separator keeps it. A drive-letter root carries
+    its own anchor (``X:``) through the split; a POSIX root's anchor is the
+    leading ``/``, and dropping it with the other empties left a pattern that
+    could only ever match from the ``t`` of ``/tmp``. Two things read that
+    pattern and both were wrong on the second machine:
+    ``unmapped_absolute_paths`` matches at position 0, so a root the operator
+    had just bound was reported as unmapped residue; and ``tokenize_text``
+    substituted everything but the slash, writing ``/${roots.<name>}`` — a
+    token that re-expands to a doubled root and fails ``verify_roundtrip``.
     """
 
     parts = [part for part in re.split(r"[\\/]+", str(root)) if part]
     body = r"[\\/]+".join(re.escape(part) for part in parts)
+    if parts and str(root)[:1] in ("/", "\\"):
+        body = r"[\\/]+" + body
     return re.compile(body, re.IGNORECASE)
 
 

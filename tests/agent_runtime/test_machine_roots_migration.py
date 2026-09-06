@@ -150,6 +150,39 @@ def test_unmapped_absolute_paths_reports_residue_honestly(tmp_path):
     assert not any(str(repo) in item for item in residue)
 
 
+def test_a_posix_root_is_bound_from_its_leading_slash(tmp_path):
+    """The second machine is a Mac, so its bound roots are POSIX-rooted.
+
+    Nothing here depends on the host: the root is a literal, and neither
+    ``unmapped_absolute_paths`` nor ``tokenize_text`` stats it. What made the
+    sibling above green on Windows and red on Linux is that ``tmp_path`` there
+    is drive-rooted, so its pattern kept an anchor (``X:``) that every POSIX
+    root loses — see ``_root_pattern``. Both readers of that pattern are
+    asserted, because they were wrong in different directions: the residue
+    report called a bound root unmapped, and the rewrite left the slash behind
+    and wrote a token that re-expands to ``//Users/...``.
+    """
+
+    root = "/Users/tony/My Projects/EterniaLauncher"
+    roots = MachineRoots(roots={"eternia_launcher": root})
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "agent_runtime:\n"
+        "  personas:\n"
+        "    dev:\n"
+        f"      repo_scope: {root}\n"
+        "  other:\n"
+        "    command: /opt/tools/thing\n",
+        encoding="utf-8",
+    )
+
+    assert unmapped_absolute_paths([config], roots) == ["/opt/tools/thing"]
+
+    after, count = tokenize_text(f"repo_scope: {root}\n", roots)
+    assert after == "repo_scope: ${roots.eternia_launcher}\n"
+    assert count == 1
+
+
 @pytest.mark.parametrize(
     "text, expected",
     [

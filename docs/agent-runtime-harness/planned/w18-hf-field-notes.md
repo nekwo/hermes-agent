@@ -80,3 +80,40 @@ semantics on any host. Without the wakeup the new test reds on Windows with
 deleting the single `self._signal_wakeup()` line from `_close_listener` reds it
 again (exit 1). `bare_server` gained a `start_accepting=False` knob so the
 substitution can happen between `bind()` and the thread.
+
+## Row 3 — `_root_pattern` dropped a POSIX root's leading slash
+
+`test_unmapped_absolute_paths_reports_residue_honestly` was still red on Linux
+after `854f0f2482`, and the pinned `current_platform_key` turns out to be
+irrelevant to it: nothing on the residue path reads the platform key. The
+difference is `tmp_path` — drive-rooted on Windows, `/tmp/...` on Linux.
+
+`_root_pattern` builds its regex from `re.split(r"[\\/]+", str(root))` with the
+empties dropped. A drive-letter root keeps its anchor (`X:`) through that split;
+a POSIX root's anchor IS the leading `/`, and it was thrown away with the empty
+first element. The pattern could then only match from the `t` of `/tmp`. Two
+callers read it and both were wrong on a Mac:
+
+- `unmapped_absolute_paths` uses `pattern.match(raw)`, anchored at position 0.
+  `raw` starts with `/`, the pattern starts with `tmp`, so **a root the operator
+  had just bound was reported as unmapped residue** — which is exactly the
+  assertion CI failed.
+- `tokenize_text` uses `pattern.subn`, which searches, so it matched — and
+  replaced everything except the slash. Measured before the fix:
+  `repo_scope: /Users/tony/My Projects/EterniaLauncher` rewrote to
+  `repo_scope: /${roots.eternia_launcher}`, a token that re-expands to a doubled
+  root (`//Users/...`) and fails `verify_roundtrip`. After:
+  `repo_scope: ${roots.eternia_launcher}`.
+
+Product fixed: a root whose string starts at a separator keeps it, as a leading
+`[\\/]+` on the pattern body (which also covers a UNC root). Drive-letter roots
+are untouched. `Path("/Users/...")` on Windows normalizes to `\Users\...`, so
+the leading-separator test reads the same on both hosts.
+
+The red-first test is host-independent on purpose — a literal POSIX root, and
+neither function stats it — so the Linux-only failure is now reproducible on
+Windows. It asserts both readers, because they failed in different directions.
+Reverting the product line reds it on Windows: `assert ['/Users/tony/My
+Projects/EterniaLauncher', '/opt/tools/thing'] == ['/opt/tools/thing']`.
+The pre-existing sibling needed no edit; it goes green on Linux from the product
+fix alone.
