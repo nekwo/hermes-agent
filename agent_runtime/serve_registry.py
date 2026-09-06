@@ -100,6 +100,22 @@ Retention is a boot-time floor (:func:`prune_serve_ended`, newest
 ``SERVE_ENDED_RETENTION``): nothing ever consumes a reason, so without one the
 directory grows forever.
 
+The stderr log: what the runtime was saying (RL-19)
+---------------------------------------------------
+
+A row says a runtime is here and a sidecar says why the last one left; neither
+says what it was SAYING. Since RL-17 the launcher starts the service with all
+three stdio handles on ``DEVNULL``, so every traceback it writes goes nowhere —
+measured on 2026-09-06, when a local hub stream stalled for thirty seconds and
+the runtime's half of that half hour was simply unrecoverable. So a
+``--service`` runtime opens ``serve_instances/<pid>.stderr.log`` at boot
+(:func:`open_serve_stderr_log`) and keeps its stderr there: line-buffered UTF-8
+text, one file per runtime, a header line naming pid/boot_id/build/start so a
+file read cold still says whose it was. It is a THIRD shape in this directory,
+so :func:`list_serve_instances` ignores it (by glob and by name) and
+:func:`prune_serve_ended` floors it — newest ``SERVE_ENDED_RETENTION`` of each
+family, separately.
+
 ``hermes_home``: which home, answered from OUTSIDE the process
 --------------------------------------------------------------
 
@@ -164,11 +180,15 @@ __all__ = [
     "SERVE_ENDED_SUFFIX",
     "SERVE_INSTANCES_DIRNAME",
     "SERVE_INSTANCE_SCHEMA_VERSION",
+    "SERVE_STDERR_HEADER_PREFIX",
+    "SERVE_STDERR_SUFFIX",
     "ProcessProbe",
     "ServeInstanceRegistration",
     "default_process_probe",
     "list_serve_ended",
     "list_serve_instances",
+    "list_serve_stderr_logs",
+    "open_serve_stderr_log",
     "pid_alive",
     "prune_serve_ended",
     "prune_stale_serve_instances",
@@ -177,6 +197,7 @@ __all__ = [
     "serve_ended_path",
     "serve_instance_path",
     "serve_instances_dir",
+    "serve_stderr_log_path",
     "unregister_serve_instance",
     "write_serve_ended",
 ]
@@ -202,6 +223,28 @@ SERVE_ENDED_SUFFIX = ".ended.json"
 #: stale row it just found), and an operator reconstructing a bad afternoon
 #: reads the tail.
 SERVE_ENDED_RETENTION = 20
+
+#: The service runtime's own stderr, filed beside its row and its reason:
+#: ``serve_instances/<pid>.stderr.log`` (RL-19). NOT ``.json`` on purpose — it
+#: is a text log, so the row scan's ``*.json`` glob cannot see it at all, which
+#: is the cheapest possible answer to "does a third file shape break the
+#: reader". The suffix is still named, exported and pinned by a test, because
+#: "the glob happens not to match it" survives only until somebody widens the
+#: glob.
+SERVE_STDERR_SUFFIX = ".stderr.log"
+
+#: Everything in this directory that is NOT a registry row. One tuple, one
+#: place: two non-row shapes joined the row here within a day of each other,
+#: and the next reader written must not have to rediscover both.
+_NON_ROW_SUFFIXES = (SERVE_ENDED_SUFFIX, SERVE_STDERR_SUFFIX)
+
+#: The first line of a stderr log, and the only line the RUNTIME'S OWN code
+#: puts there. It exists so a file read COLD — days later, out of a QA bundle,
+#: with no registry row left to join it to — still says which runtime it
+#: belonged to. Parsed back by :func:`list_serve_stderr_logs` for the retention
+#: ordering, which is why the format is a constant here and not a print in
+#: ``serve.py``.
+SERVE_STDERR_HEADER_PREFIX = "# harness serve --service"
 
 CLASSIFICATION_LIVE = "live"
 CLASSIFICATION_STALE_DEAD_PID = "stale_dead_pid"
@@ -423,11 +466,14 @@ def list_serve_instances(
         # directory (RL-16): ``<pid>.ended.json`` matches it, and a sidecar read
         # as a registry record is a row with no pid, no port and no identity
         # baseline — which every reader downstream then classifies ``unknown``
-        # and reports. Two file shapes, one directory, one place that knows.
+        # and reports. Three file shapes now, one directory, one place that
+        # knows: the RL-19 stderr log is excluded by name here as well as by the
+        # glob, so widening the glob one day cannot quietly turn a text log into
+        # a phantom runtime.
         entries = sorted(
             entry
             for entry in directory.glob("*.json")
-            if not entry.name.endswith(SERVE_ENDED_SUFFIX)
+            if not entry.name.endswith(_NON_ROW_SUFFIXES)
         )
     except OSError:
         return rows
@@ -639,7 +685,7 @@ def list_serve_ended(store_root: Path | str) -> list[dict[str, Any]]:
 def prune_serve_ended(
     store_root: Path | str, *, keep: int = SERVE_ENDED_RETENTION
 ) -> dict[str, Any]:
-    """Floor the sidecar directory at the newest *keep* records.
+    """Floor BOTH forensic families at the newest *keep* records each.
 
     Called once at serve boot, beside the row prune and for the mirror-image
     reason: that one exists because a crash deliberately leaves its row behind,
@@ -647,30 +693,211 @@ def prune_serve_ended(
     only safe direction — the record a reader wants is the one belonging to the
     runtime that just died.
 
-    Blind to registry rows by construction (it globs the sidecar suffix), which
-    matters more here than it reads: this prune runs at boot, milliseconds after
-    this very serve wrote its own row into the same directory.
+    Two families, one call, one retention (RL-19): the end reason and the stderr
+    log are written by the same runtime about the same ending, and a directory
+    where one is floored at twenty while the other grows forever would hand an
+    operator a reason with no log or a log with no reason. They are floored
+    SEPARATELY rather than as one pool of forty — a machine that runs twenty
+    service serves would otherwise evict every reason a non-service serve wrote.
+
+    Blind to registry rows by construction (it globs the two non-row suffixes),
+    which matters more here than it reads: this prune runs at boot, milliseconds
+    after this very serve wrote its own row into the same directory — and, since
+    RL-19, milliseconds after it opened its own stderr log there, which is the
+    NEWEST file of its family and therefore never a candidate.
     """
 
-    rows = list_serve_ended(store_root)
     limit = max(0, int(keep))
     deleted: list[dict[str, Any]] = []
-    for row in rows[limit:]:
-        try:
-            Path(str(row.get("path"))).unlink()
-        except OSError:
-            continue
-        deleted.append({"pid": row.get("pid"), "path": row.get("path")})
+    families: dict[str, dict[str, int]] = {}
+    for kind, rows in (
+        ("ended", list_serve_ended(store_root)),
+        ("stderr", list_serve_stderr_logs(store_root)),
+    ):
+        gone = 0
+        for row in rows[limit:]:
+            try:
+                Path(str(row.get("path"))).unlink()
+            except OSError:
+                # Including "still open by this very process" on Windows, where
+                # an open file cannot be unlinked. Keeping it is the right
+                # answer to that error, not a consolation prize.
+                continue
+            gone += 1
+            deleted.append(
+                {"pid": row.get("pid"), "path": row.get("path"), "kind": kind}
+            )
+        families[kind] = {
+            "deleted_count": gone,
+            "kept_count": max(0, len(rows) - gone),
+        }
     return {
         "deleted": deleted,
         "deleted_count": len(deleted),
-        "kept_count": max(0, len(rows) - len(deleted)),
+        "kept_count": sum(family["kept_count"] for family in families.values()),
+        "families": families,
     }
 
 
 def _ended_sort_key(row: dict[str, Any]) -> tuple[str, str]:
     at = row.get("at")
     return (at if isinstance(at, str) else "", str(row.get("path") or ""))
+
+
+# ── the service runtime's stderr (RL-19) ────────────────────────────────────
+#
+# A row says a runtime is here; a sidecar says why the last one left. Neither
+# could say what the runtime was SAYING while it was here — and since RL-17 the
+# launcher starts the service with all three stdio handles on ``DEVNULL``, so
+# every traceback, warning and library gripe it writes to stderr goes nowhere at
+# all. That is a real cost, paid on 2026-09-06 at 09:09:18Z: a local hub stream
+# went silent for thirty seconds, the watchdog tore it down, and the runtime
+# side of that half hour is unrecoverable because nothing was listening to the
+# only channel it had.
+#
+# So a ``--service`` runtime keeps its own stderr, in this directory, next to
+# the two records that name it. Three properties are load-bearing:
+#
+# * It is a TEXT log, not a record. Nothing parses it, nothing branches on it,
+#   and it is never a contract — it is the channel the process already writes
+#   to, kept.
+# * It is per-pid and TRUNCATED at boot, exactly like the sidecar it sits
+#   beside: one file per runtime, and a recycled pid overwrites, which is the
+#   same trade RL-16 already made and the reason the header line exists.
+# * The DIRECTORY is shared, so every reader of it must ignore this shape —
+#   ``list_serve_instances`` does (the ``*.json`` glob cannot see a ``.log``,
+#   and the name check says so out loud), and ``prune_serve_ended`` floors it
+#   rather than ignoring it, because an unfloored log directory on a machine
+#   that restarts its runtime a dozen times a day is the growth RL-16 already
+#   refused to allow for reasons.
+
+
+def serve_stderr_log_path(store_root: Path | str, pid: int) -> Path:
+    return serve_instances_dir(store_root) / f"{int(pid)}{SERVE_STDERR_SUFFIX}"
+
+
+def open_serve_stderr_log(
+    store_root: Path | str,
+    *,
+    boot_id: str,
+    pid: int | None = None,
+    build: Any = None,
+    at: str | None = None,
+) -> Any:
+    """Open this runtime's stderr log, header written. ``None`` if it cannot.
+
+    Line-buffered and UTF-8 with ``errors="replace"``, both deliberately: a
+    crash's last partial line is worth more than a tidy buffer, and a byte
+    sequence some library wrote must never be able to raise inside a write to
+    the log that exists to record crashes.
+
+    Opened here rather than in ``serve.py`` for the same reason
+    :func:`write_serve_ended` is written here: one writer for this directory,
+    which is what keeps the header format and the retention ordering that reads
+    it back in the same module. WIRING the handle to ``sys.stderr`` and to the
+    logging root stays the caller's job — that is process policy, and this
+    module owns files.
+
+    Never raises. A runtime that cannot open its log still boots.
+    """
+
+    resolved_pid = int(pid if pid is not None else os.getpid())
+    if isinstance(build, dict):
+        commit = build.get("commit")
+    else:
+        commit = build
+    header = " ".join(
+        (
+            SERVE_STDERR_HEADER_PREFIX,
+            f"pid={resolved_pid}",
+            f"boot_id={boot_id}",
+            f"build={commit or 'unknown'}",
+            f"started={at or _now_iso()}",
+        )
+    )
+    path = serve_stderr_log_path(store_root, resolved_pid)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(
+            path,
+            "w",
+            buffering=1,
+            encoding="utf-8",
+            errors="replace",
+            newline="\n",
+        )
+        handle.write(header + "\n")
+    except Exception:
+        return None
+    return handle
+
+
+def list_serve_stderr_logs(store_root: Path | str) -> list[dict[str, Any]]:
+    """Every stderr log under *store_root*, NEWEST FIRST, each carrying ``path``.
+
+    Ordered by the header line's own ``started=`` stamp and then by filename,
+    never by mtime — same argument as :func:`list_serve_ended`, and sharper
+    here: a log is APPENDED to for the life of its runtime, so its mtime says
+    when that runtime last spoke, while the question the ordering answers is
+    which runtime is oldest.
+
+    A file with no readable header sorts oldest and is pruned first. That is the
+    fail-safe direction for a log: a header-less file is either half-written or
+    from a shape this code does not know, and neither is the record an operator
+    is about to want.
+    """
+
+    rows: list[dict[str, Any]] = []
+    directory = serve_instances_dir(store_root)
+    try:
+        entries = sorted(directory.glob(f"*{SERVE_STDERR_SUFFIX}"))
+    except OSError:
+        return rows
+    for entry in entries:
+        header = _read_first_line(entry)
+        rows.append(
+            {
+                "path": str(entry),
+                "pid": _pid_from_filename(Path(entry.name[: -len(SERVE_STDERR_SUFFIX)])),
+                "started": _header_field(header, "started"),
+                "boot_id": _header_field(header, "boot_id"),
+                "header": header,
+            }
+        )
+    rows.sort(key=_stderr_log_sort_key, reverse=True)
+    return rows
+
+
+def _stderr_log_sort_key(row: dict[str, Any]) -> tuple[str, str]:
+    started = row.get("started")
+    return (started if isinstance(started, str) else "", str(row.get("path") or ""))
+
+
+#: How much of a log to read looking for its header. The header is the first
+#: line and is under 200 bytes; the cap is what stops a reader of a directory
+#: from pulling a runtime's whole afternoon into memory to sort it.
+_STDERR_HEADER_READ_BYTES = 4096
+
+
+def _read_first_line(path: Path) -> str:
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            head = handle.read(_STDERR_HEADER_READ_BYTES)
+    except OSError:
+        return ""
+    return head.split("\n", 1)[0].strip()
+
+
+def _header_field(header: str, key: str) -> str | None:
+    """``key=value`` out of the header line, or ``None``. Never raises."""
+
+    if not header.startswith(SERVE_STDERR_HEADER_PREFIX):
+        return None
+    for token in header.split():
+        name, sep, value = token.partition("=")
+        if sep and name == key:
+            return value or None
+    return None
 
 
 # ── OS probes ───────────────────────────────────────────────────────────────

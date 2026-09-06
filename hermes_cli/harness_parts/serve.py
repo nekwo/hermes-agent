@@ -1362,6 +1362,75 @@ def _install_signal_reason_handlers(recorder: _ServeEndReason) -> None:
             continue
 
 
+# ── RL-19: the service runtime keeps its own stderr ─────────────────────────
+#
+# RL-17 gave the launcher's intermediary three ``DEVNULL`` handles, which was
+# right — a pipe nobody reads is a runtime that blocks on its first full buffer
+# — and it cost this: everything the runtime writes to stderr goes nowhere. On
+# 2026-09-06 at 09:09:18Z a local hub stream went silent for thirty seconds and
+# the watchdog tore it down, and the runtime's side of that half hour did not
+# exist to be read.
+#
+# So under ``--service`` the runtime keeps its stderr in a file beside its own
+# registry row: ``serve_instances/<pid>.stderr.log``, opened by the registry
+# (one writer for that directory), floored by the same boot prune as the RL-16
+# sidecars. Three sinks are wired to it and they are NOT the same sink:
+#
+# 1. the loop's stderr proxy MIRRORS every completed line into it, so the
+#    ``_service_log`` transport events and every handler's stderr survive
+#    having no audience on the frame lane;
+# 2. ``logging``'s root handler is repointed if it was writing to stderr —
+#    a library's ``logging.warning`` is exactly the material this file is for;
+# 3. it becomes the loop's ``original_stderr``, so it is what is RESTORED when
+#    ``serve_loop`` unwinds — anything written to stderr after that point, a
+#    late ``atexit`` hook or a warning during teardown, still lands in the file.
+#
+# And one thing the redirect could NOT buy, discovered while proving it: an
+# uncaught exception out of a serve child prints no traceback anywhere at all.
+# The harness dispatch turns it into an error envelope the ``--ndjson`` serve
+# never emits, so the interpreter never displays it and a restored
+# ``sys.stderr`` is a channel nobody writes to. ``serve_loop``'s uncaught arm
+# therefore writes the traceback into this file itself — see the
+# ``except Exception`` at the bottom of that function.
+#
+# What is NOT here: an fd-level ``dup2``. A subprocess's raw fd 2 is a
+# different question with a different blast radius (every child a handler
+# spawns would inherit it), and the ruling is about what this process writes.
+
+
+def _repoint_logging_root_stderr(stream: Any, *, previous: tuple[Any, ...]) -> int:
+    """Move root ``StreamHandler``s that were writing to stderr onto *stream*.
+
+    Only the handlers whose stream IS one of *previous* — the objects that were
+    stderr at some point in this boot. A handler someone deliberately pointed at
+    a file, a socket or stdout is left exactly where it is: this redirects the
+    stderr lane, it does not collect logging.
+
+    Returns how many it moved, and never raises: a boot must not fail because
+    ``logging`` was configured in a shape this did not expect.
+    """
+
+    moved = 0
+    try:
+        import logging as _logging
+
+        for handler in list(_logging.getLogger().handlers):
+            handler_stream = getattr(handler, "stream", None)
+            if handler_stream is None or not any(
+                handler_stream is candidate for candidate in previous
+            ):
+                continue
+            setter = getattr(handler, "setStream", None)
+            if callable(setter):
+                setter(stream)
+            else:  # pragma: no cover - every StreamHandler has setStream
+                handler.stream = stream
+            moved += 1
+    except Exception:  # pragma: no cover - defensive
+        return moved
+    return moved
+
+
 #: The e2e's only way to make a REAL serve child end uncaught, exit plainly, or
 #: vanish without a word. Inert without the variable — read once, right after
 #: the ready frame, and absent from every other code path.
@@ -1824,6 +1893,28 @@ class _LineFrameProxy(io.TextIOBase):
         self._buffers: dict[tuple[int | None, str | None], str] = {}
         self._captures: dict[tuple[int | None, str | None], list[str]] = {}
         self._lock = threading.Lock()
+        #: RL-19. A file that every completed line is ALSO written to, set for
+        #: the ``--service`` arm only. A frame is addressed to whoever is
+        #: reading the transport; under ``--service`` that may be nobody at all
+        #: (the launcher's three ``DEVNULL`` handles), and the runtime's own
+        #: account of its afternoon must survive having no audience.
+        self._mirror: Any = None
+
+    def set_mirror(self, stream: Any) -> None:
+        """Tee completed lines into *stream* as well as onto the frame sink."""
+
+        self._mirror = stream
+
+    def _mirror_lines(self, lines: list[str]) -> None:
+        """Best effort by contract: a full disk must not break a print."""
+
+        mirror = self._mirror
+        if mirror is None or not lines:
+            return
+        try:
+            mirror.write("".join(line + "\n" for line in lines))
+        except Exception:
+            pass
 
     def writable(self) -> bool:  # pragma: no cover - io protocol
         return True
@@ -1859,6 +1950,7 @@ class _LineFrameProxy(io.TextIOBase):
             capture = self._captures.get(slot)
             if capture is not None:
                 capture.extend(lines)
+        self._mirror_lines(lines)
         sink = _request_sink.get() or self._frames
         for line in lines:
             sink.emit({"id": rid, "event": self._event, "line": line})
@@ -1888,6 +1980,7 @@ class _LineFrameProxy(io.TextIOBase):
                 if capture is not None:
                     capture.append(remainder)
         if remainder:
+            self._mirror_lines([remainder])
             sink = _request_sink.get() or self._frames
             sink.emit({"id": rid, "event": self._event, "line": remainder})
 
@@ -2783,6 +2876,11 @@ def serve_loop(
     #: unit test — which is why every use goes through the two shims beside it
     #: rather than through the attribute.
     end_reason: Any = None
+    #: RL-19's file handle, opened below for the ``--service`` arm only and
+    #: ``None`` in every other serve and every unit test. Held as a name because
+    #: the uncaught arm at the bottom of this function writes the one thing the
+    #: rest of the wiring cannot deliver — see there.
+    service_stderr_log: Any = None
 
     def _note_end(reason: str) -> None:
         """Latch WHY this runtime is ending. Inert when unarmed; never raises."""
@@ -3601,6 +3699,44 @@ def serve_loop(
                 # Bookkeeping must never take a boot with it.
                 pass
 
+        # ── RL-19: the service runtime keeps its own stderr ─────────────────
+        #
+        # BEFORE the RL-16 block below, for two reasons that are both ordering:
+        # the sidecar prune down there now floors this family too, and this
+        # boot's own log has to exist by then so that it is the NEWEST of its
+        # family and can never be the file the prune picks; and an arming that
+        # happens after the recorder would miss nothing but is harder to read.
+        #
+        # ``service`` only. A serve started the old way is a child whose parent
+        # is holding its stderr pipe open and reading it as frames — moving that
+        # output into a file would take it away from the process that asked for
+        # it (pinned by the non-service arm of the child e2e).
+        if service and store_root_path is not None:
+            try:
+                from agent_runtime.serve_registry import open_serve_stderr_log
+
+                service_stderr_log = open_serve_stderr_log(
+                    store_root_path, boot_id=boot_id, build=build_block
+                )
+            except Exception:  # pragma: no cover - the opener never raises
+                service_stderr_log = None
+            if service_stderr_log is not None:
+                stderr_proxy.set_mirror(service_stderr_log)
+                _repoint_logging_root_stderr(
+                    service_stderr_log,
+                    previous=(original_stderr, sys.__stderr__, stderr_proxy),
+                )
+                # What ``sys.stderr`` becomes again when this loop unwinds. The
+                # mirror above covers the loop's own lifetime; this covers
+                # everything written to stderr AFTER it — an interpreter-level
+                # message, a late ``atexit`` hook, a warning during teardown.
+                # Named as defence and not as the traceback's route: the
+                # traceback is written explicitly by the uncaught arm below,
+                # because nothing in this process prints one (see there).
+                original_stderr = service_stderr_log
+                # Never closed on purpose: the writes worth having are the ones
+                # made on the way down, and the OS closes it when the process
+                # ends. Line-buffered, so nothing is owed a flush.
         # ── RL-16: arm the end-reason recorder ──────────────────────────────
         #
         # HERE, and not earlier, because the recorder writes into the directory
@@ -6006,6 +6142,25 @@ def serve_loop(
         # orderly exit that set no reason is exactly what ``unknown_exit`` is
         # for. Re-raised unchanged: this arm records, it never handles.
         _note_end(f"uncaught:{type(exc).__name__}")
+        # RL-19, and the one thing the redirect alone cannot deliver. MEASURED
+        # 2026-09-06 on this branch: an uncaught exception out of a serve child
+        # produces no traceback on ANY channel, service or not — the harness
+        # dispatch converts it into an error envelope and the ``--ndjson`` serve
+        # emits nothing for it, so all three frames on stdout are ``booting``,
+        # ``root_anchor``, ``ready`` and the process exits 1 having said nothing
+        # about why. The interpreter never gets the exception, so restoring
+        # ``sys.stderr`` restores a channel nobody writes the traceback to.
+        # This line is therefore the traceback's only author.
+        if service_stderr_log is not None:
+            try:
+                import traceback as _traceback
+
+                rendered = _traceback.format_exc()
+                service_stderr_log.write(
+                    rendered if rendered else f"{type(exc).__name__}: {exc}\n"
+                )
+            except Exception:  # pragma: no cover - a dying process, best effort
+                pass
         raise
     finally:
         sys.stdout, sys.stderr = original_stdout, original_stderr
