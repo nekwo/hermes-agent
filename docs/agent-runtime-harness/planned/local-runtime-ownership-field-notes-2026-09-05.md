@@ -771,6 +771,42 @@ write, which is the property that stops any reader from seeing two live rows.
   `assert ['dev_2a3391c…', 'dev_bfa9bb6e7411fd6d'] == ['dev_bfa9bb6e7411fd6d']`
   — the ancient revoked row survives the boot. Restored.
 
+### Q-h.9 Gates
+
+`scripts/run_tests.sh` only, every run in this worktree.
+
+* The serve set — `test_harness_serve`, `test_serve_request_silence`,
+  `test_serve_socket_lane`, `test_serve_service_mode`, `test_serve_gateway_lane`,
+  `test_serve_gateway_peers_rpc`, `test_peer_authorization`,
+  `test_serve_rpc_caller_identity`, `test_serve_gateway_auth`:
+  `9 files, 241 tests passed, 0 failed (100% complete) in 34.1s`.
+* `scripts/run_tests.sh tests/agent_runtime tests/hermes_cli` (45 min, run
+  alongside ANOTHER worktree's full suite — `X:/wt/l-serve-service` was running
+  its own at the same time):
+
+```
+=== 3 files with test failures (3 tests failed) ===
+  testsgent_runtime	est_duplicate_helper_bodies.py  (1 test failed)
+  testsgent_runtime	est_no_midtest_monkeypatch_undo.py  (1 test failed)
+  tests\hermes_cli	est_harness_json_root_observability.py  (1 test failed)
+=== 1 file where no tests ran (collection/import error, timeout before collection, etc.) ===
+  testsgent_runtime	est_stream_stale_first_routing.py
+```
+
+  All four accounted for, none of them this stage's:
+
+  | file | verdict |
+  |---|---|
+  | `test_duplicate_helper_bodies` | pre-existing — names `realm_sync::_ledger_time == store::_stamp`, neither touched here |
+  | `test_no_midtest_monkeypatch_undo` | pre-existing — names `tests/scripts/test_changed_line_mutation_check.py:527`, not touched here |
+  | `test_harness_json_root_observability::test_ledger_does_not_rot` | pre-existing — `_cmd_persona_instance_open_chat`, not touched here |
+  | `test_stream_stale_first_routing` | contention: it walks every production file's AST and hit the file timeout mid-read. Alone: `1 files, 8 tests passed, 0 failed … in 41.9s` |
+
+  The runner's own `=== Summary:` count line did not survive the background
+  capture (progress is written with carriage returns); what is quoted above is
+  the verbatim tail it kept, and the run exited 0.
+* `uvx ruff@0.15.10 check` on all five touched files: `All checks passed!`.
+
 ### Q-h.8 Deviations, and what is NOT proven
 
 * **`handler_exit` is unreachable in production today.** No shipped handler calls
