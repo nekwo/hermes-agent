@@ -834,7 +834,7 @@ existed the log named none of them:
 
 | Caller | `op` / `purpose` | Site |
 |---|---|---|
-| socket/stdio op lane | `subscribe` / `stream_lane` | `serve.py:5368-5370` |
+| socket/stdio op lane | `subscribe` / `stream_lane` | `serve.py:5388-5390` |
 | RPC office lane | `runtime.office.subscribe` / `office_patch` | `serve_office_subscriptions.py:902` |
 | argv CLI | `harness_stream` / `cli_stream` | `runtime_commands.py:630-631` |
 
@@ -846,7 +846,7 @@ never raises — an instrument must not be why a subscribe fails.
 
 **Who paints the boot's one stale core is a property of the ROOM**, so
 `stream_frames(wants_stale_first=…)` is stated by the caller —
-`serve.py::_room_wants_stale_first` (`:4319`) reads the hub's two subscriber
+`serve.py::_room_wants_stale_first` (`:4339`) reads the hub's two subscriber
 tables at producer-build time, `_cmd_stream` (`runtime_commands.py:620`) states
 `True`, default `False`. It cannot be re-derived inside the producer: the
 subscriber attaching FIRST at boot is the RPC office lane, whose sink discards
@@ -869,7 +869,7 @@ workspace id that failed the private "id under `<workspace_id>/`" restatement
 becomes a resync notification; an UNKNOWN frame type takes the same branch
 deliberately. Drops are typed, never silent: a subscriber outrunning its bounded
 buffer gets `subscription_dropped` naming which of the two bounds tripped —
-frame count or bytes — then is unsubscribed (`serve.py:5335`).
+frame count or bytes — then is unsubscribed (`serve.py:5355`).
 
 ## 7. The PUSH-vs-RPC boundary, and the fork boundary
 

@@ -23,7 +23,7 @@ runtime. Everything else launcher-side belongs to the Launcher's docs.
 
 ## Stage 1 — interpreter and import tax (`interpreter_ms` and its segments)
 
-`_cmd_serve` starts a `BootTimeline` as its first instruction (`serve.py:6219-6221`).
+`_cmd_serve` starts a `BootTimeline` as its first instruction (`serve.py:6235-6241`).
 Everything before that instant is `interpreter_ms`: process creation → the command's own first
 statement, resolved through psutil and **simply absent when the platform will not give a
 creation time** (`agent_runtime/boot_timeline.py:108-118`). That one number used to be the
@@ -173,7 +173,7 @@ would be inherited by every subprocess a handler spawns, which is a different qu
 
 ## Stage 5 — the hygiene sweeps
 
-**Orphaned turns** (`orphaned_turn_sweep_ms`, `serve.py:3810` →
+**Orphaned turns** (`orphaned_turn_sweep_ms`, `serve.py:3830` →
 `agent_runtime/persona_chat_continuity.py:891`). A native turn holds the OS-backed root lease for
 its entire execution and the kernel releases it when the holder dies, so "in-flight record AND
 acquirable lease" is proof the turn can no longer settle itself; a session whose lease is HELD is
@@ -182,7 +182,7 @@ requested after — so repaired records project as typed `turn_interrupted` mark
 instead of a console stuck "running" forever. When anything flips, a `state.reconciled` event is
 appended so already-connected watermark-gated consumers converge too. Best-effort.
 
-**Detached dispatches** (`dispatch_restore_ms`, `serve.py:3826`). Same moment, same reason:
+**Detached dispatches** (`dispatch_restore_ms`, `serve.py:3846`). Same moment, same reason:
 a row still marked `running` whose owning process is provably gone can never finish, and the
 sender is owed that answer. Identity-verified — a recycled PID is not the old owner — and
 fail-open. Both counts ride the ready frame when nonzero.
@@ -317,7 +317,7 @@ event at all, and an offset key cannot see them at any price.
 A mismatch does not mean a blank canvas: `take_stale_first_core` serves the last persisted core
 **labeled stale** while the build runs (`core_cache.py:3817`, `stream.py:1321`). The one-shot
 belongs to the SUBSCRIBER, not the process — derived at producer-build time by
-`serve.py::_room_wants_stale_first` (`:4319`) — because a boot starts two `stream_frames`
+`serve.py::_room_wants_stale_first` (`:4339`) — because a boot starts two `stream_frames`
 generators and the module-global version handed the allowance to whichever raced first. A
 forced-refresh one-shot is refused the stale core outright.
 

@@ -155,19 +155,19 @@ magnitudes are dropped rather than coerced.
 ## 3. Model selection
 
 Four tiers, highest wins, resolved once in `_chat_effective_model_payload`
-(`persona_commands.py:7028`):
+(`persona_commands.py:7049`):
 
 ```
 chat-session override  >  instance override  >  persona default  >  config default
 ```
 
 The chat-session override persists under `mission_control_chat_model_override`
-(`persona_commands.py:6560`, `agent_runtime/persona_chat_history.py:234`) via
-`_resolve_chat_model_override` (`:6932`), called at `:3471`. Its scope is literally
-`mission_control_chat_session` (`:5788`, inside `_chat_effective_model_payload`) — per-thread,
+(`persona_commands.py:6581`, `agent_runtime/persona_chat_history.py:234`) via
+`_resolve_chat_model_override` (`:7035`), called at `:3531`. Its scope is literally
+`mission_control_chat_session` (`:7085`, inside `_chat_effective_model_payload`) — per-thread,
 not per-instance. Values validate against
-`^[A-Za-z0-9_.:/@+-]{1,200}$` (`:5285`); a violation is a typed refusal, a persist failure is
-`CHAT_MODEL_OVERRIDE_PERSIST_FAILED` (`:2745-2760`). The payload reports every tier separately
+`^[A-Za-z0-9_.:/@+-]{1,200}$` (`:6582`); a violation is a typed refusal, a persist failure is
+`CHAT_MODEL_OVERRIDE_PERSIST_FAILED` (`:3552-3558`). The payload reports every tier separately
 rather than folding them, so `model_is_default` and `model_is_instance_override` are answerable from
 one record. Chat-lane compaction has its own cap:
 `agent_runtime.mission_chat.compaction_threshold_tokens`, default **150,000**
