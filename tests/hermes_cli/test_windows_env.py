@@ -77,6 +77,24 @@ def test_add_user_path_prepends_when_absent(fake_reg):
     assert vtype == REG_EXPAND_SZ  # type preserved, %VARS% not flattened
 
 
+def test_path_segments_are_compared_by_windows_rules_on_any_host():
+    """The comparison is about a WINDOWS PATH, not about the running host.
+
+    ``os.path.normcase`` binds to ``posixpath`` off Windows, where it is the
+    identity: it neither casefolds nor folds ``/`` onto ``\\``. So on Linux the
+    idempotence case below was comparing raw strings and re-added a segment
+    that was already on PATH — CI run 33969282189, slice 4. Stated here on the
+    helper, where it holds on either host.
+    """
+    normalize = windows_env._normalize_segment
+
+    assert normalize("C:\\Users\\x\\AppData\\Local\\hermes\\bin\\") == normalize(
+        "c:/users/x/appdata/local/hermes/BIN"
+    )
+    # …and it still tells two different directories apart.
+    assert normalize("C:\\hermes\\bin") != normalize("C:\\hermes\\bin2")
+
+
 def test_add_user_path_is_idempotent_case_and_slash_insensitive(fake_reg):
     fake_reg.values["Path"] = (r"C:\Users\x\AppData\Local\hermes\bin\;C:\Windows", REG_SZ)
     assert windows_env.add_user_path_entry(r"c:\users\x\appdata\local\hermes\BIN")

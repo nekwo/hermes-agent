@@ -21,7 +21,7 @@ removal path, not an edit to ``uninstall.py``.
 
 from __future__ import annotations
 
-import os
+import ntpath
 
 try:  # pragma: no cover - platform gate
     import winreg  # type: ignore
@@ -42,8 +42,19 @@ def is_windows() -> bool:
 
 
 def _normalize_segment(entry: str) -> str:
-    """Casefold + strip trailing separators for PATH-segment comparison."""
-    return os.path.normcase(entry.rstrip("\\/"))
+    """Casefold + strip trailing separators for PATH-segment comparison.
+
+    ``ntpath``, not ``os.path``: what is being compared is always a WINDOWS
+    registry PATH, whatever host the interpreter runs on, and ``os.path`` binds
+    to ``posixpath`` off Windows — where ``normcase`` is the identity function
+    and neither casefolds nor folds ``/`` onto ``\\``. Every caller here is
+    gated on ``winreg``, so production only ever reaches this on Windows and
+    the two agree; the module's tests deliberately run everywhere through a
+    fake ``winreg`` (see this file's first docstring line), and on Linux they
+    were comparing raw strings — CI run 33969282189, slice 4, found the
+    idempotence case adding a second `hermes` segment.
+    """
+    return ntpath.normcase(entry.rstrip("\\/"))
 
 
 def set_user_env(name: str, value: str) -> bool:
