@@ -67,10 +67,36 @@ HERMES_CONSOLE_SCRIPTS = frozenset({"hermes", "hermes-agent", "hermes-acp"})
 _EXECUTABLE_SUFFIXES = (".exe", ".cmd", ".bat", ".pyw", ".pyc", ".py")
 
 
+def _argv0_basename(text: str) -> str:
+    """The last path component of ``argv0`` under EITHER separator.
+
+    ``argv[0]`` is a path in the syntax of the launcher that produced it, and
+    the Windows launcher shapes this module exists to recognise
+    (``C:\\venv\\Scripts\\hermes.exe``, ``…\\hermes-script.py``) are
+    backslash-separated. ``os.path.basename`` only knows the RUNNING host's
+    separator: on POSIX it hands the whole Windows path back, so
+    :func:`entrypoint_name` returned ``c:\\venv\\scripts\\hermes`` and the gate
+    compared THAT against the console-script names. Splitting on both is right
+    on both hosts — a POSIX console script's path never carries a backslash,
+    and a Windows one may carry either — and it is what lets the Windows
+    shapes be asserted from the Linux CI runners instead of only on a
+    developer's box.
+    """
+
+    tail = str(text or "").strip().strip('"')
+    for separator in ("\\", "/"):
+        tail = tail.rpartition(separator)[2]
+    # A drive-relative argv[0] ("C:hermes.exe") has no separator at all;
+    # ntpath.basename drops the drive, so this keeps parity with it.
+    if len(tail) > 1 and tail[1] == ":" and tail[0].isalpha():
+        tail = tail[2:]
+    return tail
+
+
 def entrypoint_name(argv0: str) -> str:
     """The bare program name behind ``argv[0]``, launcher decoration removed."""
 
-    name = os.path.basename(str(argv0 or "").strip().strip('"'))
+    name = _argv0_basename(argv0)
     lowered = name.lower()
     for suffix in _EXECUTABLE_SUFFIXES:
         if lowered.endswith(suffix):

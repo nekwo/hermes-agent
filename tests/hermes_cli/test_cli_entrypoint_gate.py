@@ -137,6 +137,28 @@ def test_entrypoint_name_strips_launcher_decoration_only():
     assert entrypoint_name("/usr/bin/hermes-qa") == "hermes-qa"
 
 
+def test_the_directory_is_dropped_under_either_separator_on_either_host():
+    """``argv[0]`` carries the syntax of the launcher that produced it, not of
+    the host reading it.
+
+    ``os.path.basename`` knows only the running host's separator, so on the
+    Linux CI runners it handed the whole Windows path back and the gate
+    compared ``c:\\venv\\scripts\\hermes`` against the console-script names —
+    green on Windows, red on every runner since this file landed. The rule is
+    that BOTH separators end a directory, whoever is asking.
+    """
+
+    assert entrypoint_name(r"C:\venv\Scripts\hermes.exe") == "hermes"
+    assert entrypoint_name("C:/venv/Scripts/hermes.exe") == "hermes"
+    assert entrypoint_name(r"C:\venv/Scripts\hermes.exe") == "hermes"
+    assert entrypoint_name("/usr/local/bin/hermes") == "hermes"
+    # A drive-relative argv0 carries no separator at all; ntpath.basename drops
+    # the drive, so this keeps parity with it.
+    assert entrypoint_name("C:hermes.exe") == "hermes"
+    # Quoting and surrounding whitespace are still stripped before any of that.
+    assert entrypoint_name('  "C:\\venv\\Scripts\\hermes.exe"  ') == "hermes"
+
+
 # ---------------------------------------------------------------------------
 # The module that owns the pre-parse does nothing at import
 # ---------------------------------------------------------------------------
