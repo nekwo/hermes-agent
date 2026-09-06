@@ -33,6 +33,15 @@ import {
 const UNREAD_DOT_LABEL = 'Finished — unread'
 /** Background-running dot aria-label. */
 const BG_DOT_LABEL = 'Background task running'
+/**
+ * Running-turn dot aria-label — the sidebar's "this session's turn is live"
+ * signal. `sessionDotState` (src/app/chat/sidebar/session-row-state.ts) paints
+ * ONE dot per session and ranks `isWorking` above `hasBackground`, so a
+ * session running a turn shows this label even while it holds a live
+ * `terminal(background=true)` process. BG_DOT_LABEL only becomes reachable
+ * once the turn goes idle, so it can never stand in for "the turn started".
+ */
+const RUNNING_DOT_LABEL = 'Session running'
 
 /** Locate a session's sidebar row by its preview text. */
 function sessionRow(page: import('@playwright/test').Page, text: string) {
@@ -57,11 +66,13 @@ async function startTurnAndSwitchAway(page: import('@playwright/test').Page) {
     { timeout: 15_000 },
   )
 
-  // Wait for the background dot — confirms the turn is running.
+  // Wait for the running dot — THAT is what confirms the turn is running. The
+  // background dot cannot: a working session paints the running dot instead,
+  // so waiting on it here would only be satisfied by the turn ending.
   await expect
     .poll(
-      () => page.locator(`[aria-label="${BG_DOT_LABEL}"]`).count(),
-      { timeout: 30_000, message: 'background dot should appear' },
+      () => page.locator(`[aria-label="${RUNNING_DOT_LABEL}"]`).count(),
+      { timeout: 30_000, message: 'running dot should appear while the turn runs' },
     )
     .toBeGreaterThan(0)
 

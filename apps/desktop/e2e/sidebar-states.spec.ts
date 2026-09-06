@@ -27,6 +27,19 @@ import {
 const BG_DOT_LABEL = 'Background task running'
 /** Finished-unread dot aria-label. */
 const UNREAD_DOT_LABEL = 'Finished — unread'
+/**
+ * Running-turn dot aria-label — the ONLY "this session's turn is live" signal
+ * the sidebar paints.
+ *
+ * `sessionDotState` (src/app/chat/sidebar/session-row-state.ts) resolves ONE
+ * mutually-exclusive dot per session and ranks `isWorking` ABOVE
+ * `hasBackground`, so a session that is running a turn AND holding a live
+ * `terminal(background=true)` process paints this label; the background label
+ * is by design unreachable until the turn goes idle. Never poll BG_DOT_LABEL
+ * to learn that a turn has started — that wait can only be satisfied by the
+ * turn ENDING.
+ */
+const RUNNING_DOT_LABEL = 'Session running'
 
 /** Send a message and wait for the final response to appear. */
 async function sendMessageAndWait(
@@ -111,10 +124,11 @@ test.describe('sidebar states — background process and subagent', () => {
 })
 
 // ────────────────────────────────────────────────────────────────────────
-// Test 2: subagent running shows background dot too (longer bg process)
+// Test 2: a subagent turn holds the running dot; its self-exiting background
+// process leaves no dot behind once it finishes (the auto-dismiss path).
 // ────────────────────────────────────────────────────────────────────────
 
-test.describe('sidebar states — subagent and background dot coexist', () => {
+test.describe('sidebar states — subagent turn and background auto-dismiss', () => {
   test.describe.configure({ mode: 'serial' })
 
   let fixture: MockBackendFixture
@@ -129,11 +143,11 @@ test.describe('sidebar states — subagent and background dot coexist', () => {
     await fixture?.cleanup()
   })
 
-  test('background dot visible while subagent runs', async () => {
+  test('running dot visible while subagent runs, background dot gone after it exits', async () => {
     const page = fixture.page
 
     // Start the turn but DON'T wait for the final answer yet — we want
-    // to assert the background dot is visible WHILE the subagent runs.
+    // to assert the row's live state WHILE the subagent runs.
     const composer = page.locator('[contenteditable="true"]').first()
     await composer.waitFor({ state: 'visible', timeout: 10_000 })
     await composer.click()
@@ -147,17 +161,21 @@ test.describe('sidebar states — subagent and background dot coexist', () => {
       { timeout: 15_000 },
     )
 
-    // The background process (sleep 5) should show a "Background task
-    // running" dot while the subagent is also running.
+    // While the subagent runs the session is working, so its single dot is the
+    // running one. The background dot is NOT a second dot that lights up
+    // alongside it — `sessionDotState` ranks working above background — so
+    // this used to be a poll on BG_DOT_LABEL that could only be satisfied once
+    // the turn had already settled, in the shrinking window before `sleep 5`
+    // exited. That window is the wall-clock race 3a3bc41c7e set out to kill.
     await expect
       .poll(
-        () => page.locator(`[aria-label="${BG_DOT_LABEL}"]`).count(),
-        { timeout: 30_000, message: 'background dot should appear while subagent runs' },
+        () => page.locator(`[aria-label="${RUNNING_DOT_LABEL}"]`).count(),
+        { timeout: 30_000, message: 'running dot should appear while subagent runs' },
       )
       .toBeGreaterThan(0)
 
-    // Evidence: the background dot is visible while the subagent runs.
-    await page.screenshot({ path: 'test-results/bg-dot-while-subagent-runs.png' })
+    // Evidence: the running dot is visible while the subagent runs.
+    await page.screenshot({ path: 'test-results/running-dot-while-subagent-runs.png' })
 
     // Now wait for the final answer to appear.
     await page.waitForFunction(
@@ -211,11 +229,14 @@ test.describe('sidebar states — cross-session dot transition', () => {
     await composer.type('E2E_SIDEBAR_CROSS', { delay: 20 })
     await page.keyboard.press('Enter')
 
-    // Wait for the background dot to appear.
+    // Wait for the turn to be running. This has to be the RUNNING dot, not the
+    // background one: while the turn is live the session's single dot is
+    // "Session running" no matter how much background work it holds, so a wait
+    // on BG_DOT_LABEL here could only be satisfied by the turn finishing.
     await expect
       .poll(
-        () => page.locator(`[aria-label="${BG_DOT_LABEL}"]`).count(),
-        { timeout: 30_000, message: 'background dot should appear' },
+        () => page.locator(`[aria-label="${RUNNING_DOT_LABEL}"]`).count(),
+        { timeout: 30_000, message: 'running dot should appear while the turn runs' },
       )
       .toBeGreaterThan(0)
 
