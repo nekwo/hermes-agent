@@ -128,6 +128,7 @@ from agent_runtime.prompt_observability import (
     slim_chat_final_observability,
     turn_usage_from_result,
 )
+from agent_runtime.root_observability import attach_root_observability
 from agent_runtime.states import WorkerSessionState
 from agent_runtime.store import AgentStore
 from agent_runtime.tool_permissions import (
