@@ -103,12 +103,36 @@ def test_the_json_is_what_the_atlas_regenerates_from(emitter):
 
 
 # ── the gate can red: one mutation per artifact ──────────────────────────────
+#
+# Every mutation below writes with ``newline=""``. The check compares the
+# committed bytes (read with ``newline=""``) against a rendering that came
+# through ``read_text``'s universal newlines, so a plain ``write_text`` on
+# Windows re-writes the whole artifact CRLF and reds the check on the LINE
+# ENDINGS rather than on the mutation — every one of these would then pass
+# whatever it had mutated, which is exactly the vacuity the module docstring
+# says these cases exist to prevent.
 
 
 def test_a_mutated_skill_block_reds_the_check(emitter, repo_copy, capsys):
+    """The mutation has to land INSIDE the generated block.
+
+    ``splice_skill`` regenerates only what lies between the markers, so a
+    rename in the surrounding prose leaves the artifacts byte-identical and
+    reds through ``cross_check`` instead — which is the sibling lane
+    ``test_a_manual_that_names_an_unregistered_tool_reds`` already owns, on the
+    very same line 35 occurrence this used to hit with ``replace(..., 1)``. It
+    read as green only where the accidental CRLF rewrite manufactured a DRIFT;
+    on Linux (CI run 33969282189, slice 2) the stderr carried no DRIFT at all.
+    """
+
     path = repo_copy / emitter.SKILL_MD
-    text = path.read_text(encoding="utf-8")
-    path.write_text(text.replace("`agent_chat_send`", "`agent_chat_yell`", 1), encoding="utf-8")
+    head, marker, rest = path.read_text(encoding="utf-8").partition(emitter.BEGIN_MARKER)
+    assert marker, "the fixture's SKILL.md must carry the generated markers"
+    path.write_text(
+        head + marker + rest.replace("`agent_chat_send`", "`agent_chat_yell`", 1),
+        encoding="utf-8",
+        newline="",
+    )
 
     assert emitter.main(["--check", "--root", str(repo_copy)]) == 1
     assert "DRIFT" in capsys.readouterr().err
@@ -117,7 +141,11 @@ def test_a_mutated_skill_block_reds_the_check(emitter, repo_copy, capsys):
 def test_a_mutated_reference_table_reds_the_check(emitter, repo_copy, capsys):
     path = repo_copy / emitter.INVENTORY_MD
     text = path.read_text(encoding="utf-8")
-    path.write_text(text.replace("| `board_cards` |", "| `board_cardz` |", 1), encoding="utf-8")
+    path.write_text(
+        text.replace("| `board_cards` |", "| `board_cardz` |", 1),
+        encoding="utf-8",
+        newline="",
+    )
 
     assert emitter.main(["--check", "--root", str(repo_copy)]) == 1
     assert "tool-inventory.md" in capsys.readouterr().err
@@ -127,7 +155,11 @@ def test_a_mutated_json_reds_the_check(emitter, repo_copy, capsys):
     path = repo_copy / emitter.INVENTORY_JSON
     inventory = json.loads(path.read_text(encoding="utf-8"))
     inventory["counts"]["tools"] = 999
-    path.write_text(json.dumps(inventory, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(inventory, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+        newline="",
+    )
 
     assert emitter.main(["--check", "--root", str(repo_copy)]) == 1
     assert "tool-inventory.json" in capsys.readouterr().err
@@ -152,6 +184,7 @@ def test_a_manual_that_names_an_unregistered_tool_reds(emitter, repo_copy, capsy
     path.write_text(
         text.replace("the in-model `agent_chat_send` tool", "the in-model `agent_chat_holler` tool", 1),
         encoding="utf-8",
+        newline="",
     )
 
     assert emitter.main(["--check", "--root", str(repo_copy)]) == 1
@@ -165,7 +198,11 @@ def test_a_cli_only_verb_without_its_operate_row_reds(emitter, repo_copy, capsys
     path = repo_copy / emitter.SKILL_MD
     text = path.read_text(encoding="utf-8")
     assert "mission-chat queue-skill" in text
-    path.write_text(text.replace("mission-chat queue-skill", "mission-chat queue_skill"), encoding="utf-8")
+    path.write_text(
+        text.replace("mission-chat queue-skill", "mission-chat queue_skill"),
+        encoding="utf-8",
+        newline="",
+    )
 
     assert emitter.main(["--check", "--root", str(repo_copy)]) == 1
     assert "CLI-only" in capsys.readouterr().err
