@@ -12044,6 +12044,14 @@
           "required": false,
           "type": "int"
         },
+        "--service": {
+          "action": "store_true",
+          "canonical": "--service",
+          "choices": null,
+          "nargs": 0,
+          "required": false,
+          "type": null
+        },
         "-h": {
           "action": "help",
           "canonical": "--help",
