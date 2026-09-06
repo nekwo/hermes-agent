@@ -270,7 +270,7 @@ since S3-FW (2026-09-03): the launcher's host-firewall lane probes the rule,
 escalates once, confirms it and retries (`EterniaLauncher/lib/core/services/host_firewall/`),
 and the sentence this paragraph carried until 2026-09-06 — "and by nothing
 else either" — is false. What is still honest is the Stage 1 gap in
-[planned/remote-gateway.md](planned/remote-gateway.md): no test on THIS side
+[archive/remote-gateway.md](archive/remote-gateway.md): no test on THIS side
 binds beyond loopback. The whole lane is drawn in
 [09 — Multi-device runtime](09-multi-device-runtime.md).
 
@@ -606,7 +606,7 @@ The record is `<store_root>/gateway/install.json`, per store root and
 mint-iff-absent — deliberately NOT `monitoring.install_id` (home-scoped and
 rotatable by design) nor the telemetry `install_id` (an anonymity primitive).
 The argument is in the module's own docstring; the staged plan is
-`planned/remote-gateway.md`.
+`archive/remote-gateway.md`.
 
 ### 2.1 The `fetch` family — media by content handle (gateway Stage 8)
 
@@ -1025,8 +1025,8 @@ authority, so in-process tool relay, CLI and serve transport get the same depth
   [09 — Multi-device runtime](09-multi-device-runtime.md) § Open rows (R12/R13
   unruled, the broker appendix unstaged, the A→B→A cycle, the `unknown_device`
   read, D12's launcher half). The staged history stays where it is:
-  `planned/universal-remote-gateway.md` in the EterniaLauncher repo and
-  [planned/remote-gateway.md](planned/remote-gateway.md), the hermes-half
+  `archive/universal-remote-gateway.md` in the EterniaLauncher repo and
+  [archive/remote-gateway.md](archive/remote-gateway.md), the hermes-half
   pointer.
 - **`serve.py:105` says the RPC registry holds "currently eight" methods; ten
   are registered.** That same docstring warns "a docstring that copies a

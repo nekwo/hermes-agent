@@ -3,7 +3,7 @@
 The centre of this file is :func:`test_every_persona_instance_field_is_classified`.
 Everything else guards one door; that one guards the SPLIT, which is the thing
 a future field can rot silently. The plan
-(``docs/mission_control/planned/instance-replication.md`` §1) classifies 32
+(``docs/mission_control/archive/instance-replication.md`` §1) classifies 32
 fields by hand; this asserts the classification is total over
 ``dataclasses.fields(PersonaInstance)`` so a field added tomorrow cannot compile
 green until somebody decides which side of the machine boundary it lives on.

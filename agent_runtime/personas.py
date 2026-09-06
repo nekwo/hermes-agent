@@ -152,7 +152,7 @@ def blocked_tool_names() -> frozenset[str]:
 
 # ── the harness lane's ONE capability declaration (S0a A1, 2026-09-03) ───────
 #
-# Read ``docs/agent-runtime-harness/planned/s0a-atlas-cleanup.md`` §0.2 before
+# Read ``docs/agent-runtime-harness/archive/s0a-atlas-cleanup.md`` §0.2 before
 # changing any of this. The short version: nothing on the harness lane used to
 # read a profile's ``toolsets:`` key at all. The shipped permission posture is
 # ``unbounded`` and that branch resolved ``all_registered_toolsets()`` — every

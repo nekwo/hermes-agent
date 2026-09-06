@@ -1239,7 +1239,7 @@ DEFAULT_CONFIG = {
     # ── Remote gateway (agent-runtime serve socket lane) ──────────────────────
     #
     # Stage 1 of the remote-gateway plan
-    # (docs/agent-runtime-harness/planned/remote-gateway.md) reads these, and
+    # (docs/agent-runtime-harness/archive/remote-gateway.md) reads these, and
     # they are what bind the second listener. Off by default, forever.
     #
     # **The key is `remote_gateway`, and Stage 0a's `gateway` was a defect

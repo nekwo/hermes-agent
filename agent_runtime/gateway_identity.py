@@ -24,7 +24,7 @@ paired launcher on the next serve restart rather than on the next greeting.
 / ``version`` greeting frames in the clear, and it authenticates nobody: proving
 you may talk to this runtime is ``serve_auth``'s job today and the device/peer
 credential tiers' job from Stage 1 (see
-``docs/agent-runtime-harness/planned/remote-gateway.md``). An id that both names
+``docs/agent-runtime-harness/archive/remote-gateway.md``). An id that both names
 and authorises is the shape where "I know your install id" becomes "I am you";
 this module exists to keep those two facts apart from the first commit.
 

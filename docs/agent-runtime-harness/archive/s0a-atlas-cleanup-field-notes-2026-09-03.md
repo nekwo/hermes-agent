@@ -9,7 +9,7 @@ reads.
 
 ## What I read, in order
 
-1. The pairing plan (launcher `docs/mission_control/planned/same-account-instant-pairing.md`):
+1. The pairing plan (launcher `docs/mission_control/archive/same-account-instant-pairing.md`):
    §1 R-IP9..R-IP13, §3 S0a rows A1–A6, §7 order + queue sweep, §5 ledger.
 2. `toolsets.py`: `_HERMES_CORE_TOOLS` (`:31`, 62 names incl. the kanban and
    HA verbs), `TOOLSETS` (`:101`), the `hermes-cli` entry (`:462`),

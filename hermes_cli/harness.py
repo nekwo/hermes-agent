@@ -329,7 +329,7 @@ def build_parser(parent_subparsers) -> None:
     # give one parser both the reader's full flag set and the writer's
     # `--dry-run`, so a single verb would have had to advertise one of them
     # falsely. The deviation is recorded in
-    # `docs/agent-runtime-harness/planned/remote-gateway.md` § Stage 0b.
+    # `docs/agent-runtime-harness/archive/remote-gateway.md` § Stage 0b.
     gateway = subs.add_parser(
         "gateway",
         help="This runtime root's remote-gateway install identity — the name and id a phone's install picker shows",

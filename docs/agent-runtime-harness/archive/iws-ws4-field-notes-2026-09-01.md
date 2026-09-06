@@ -1,9 +1,9 @@
 # Field notes — IWS WS4, hermes half (2026-09-01)
 
 Running record for lane C of the instant-workspace-switching wave. Authority:
-`EterniaLauncher/docs/mission_control/planned/instant-workspace-switching.md`
+`EterniaLauncher/docs/mission_control/archive/instant-workspace-switching.md`
 §1.4 / stage WS4 / rulings R-W0, R-W1; hermes pointer
-`planned/instant-workspace-switching.md`.
+`archive/instant-workspace-switching.md`.
 
 ## 0. Baseline and worktree
 

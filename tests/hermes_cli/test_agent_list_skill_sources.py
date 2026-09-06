@@ -1,6 +1,6 @@
 """`harness agent list --json` says WHICH tier answered `skills` (S0a A6c).
 
-Plan: ``docs/agent-runtime-harness/planned/s0a-atlas-cleanup.md`` §2 A6c.
+Plan: ``docs/agent-runtime-harness/archive/s0a-atlas-cleanup.md`` §2 A6c.
 
 The folded queue row asked why a config-side ``skills:`` addition does not reach
 a placement. The mechanism is the same store-wins merge as toolsets

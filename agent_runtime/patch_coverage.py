@@ -406,7 +406,7 @@ LIVE_COVERED_DOMAIN_EVENT_TYPES: frozenset[str] = frozenset(
         # event in any batch restores it. The plan's §1.1 claim that "nothing
         # else in the core varies with the pointer" is FALSE as written and true
         # of everything the switch surfaces render — the correction is filed in
-        # ``planned/iws-ws12-field-notes-2026-09-01.md``.
+        # ``archive/iws-ws12-field-notes-2026-09-01.md``.
         "workspace.activated",
         "realm.activated",
         # The CONFLICT-LEDGER half (w12/l3, 2026-09-04). Pairs with the

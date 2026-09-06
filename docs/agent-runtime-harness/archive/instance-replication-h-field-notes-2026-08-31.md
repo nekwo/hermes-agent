@@ -2,8 +2,8 @@
 
 Running record written AS the work happened, per the field-notes ruling
 (`feedback_field_notes_lane`): one file, this repo, this agent. The authority is
-the launcher repo's `docs/mission_control/planned/instance-replication.md`; the
-mandate is `docs/mission_control/planned/dispatch-instance-replication-2026-08-31.md`.
+the launcher repo's `docs/mission_control/archive/instance-replication.md`; the
+mandate is `docs/mission_control/archive/dispatch-instance-replication-2026-08-31.md`.
 Nothing here amends either — deltas are reported for the orchestrator to stamp.
 
 **Base recorded:** `origin/main` at `51b96505f0a5457f1702877770ff08ffdb23cc6f`

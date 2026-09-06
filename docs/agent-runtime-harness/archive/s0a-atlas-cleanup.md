@@ -10,7 +10,7 @@ status line below is history.**
 **Status: PLANNED — no code touched. Build plan for an Opus builder; written
 2026-09-03 against hermes `504953f6ad` (`origin/main`, worktree
 `X:/wt/s0a-atlas`, branch `feat/s0a-atlas-cleanup`) and the launcher's
-`docs/mission_control/planned/same-account-instant-pairing.md` at `c4b67fcab`
+`docs/mission_control/archive/same-account-instant-pairing.md` at `c4b67fcab`
 (§1 R-IP13 ADOPTED, §3 "S0a — Atlas cleanup" rows A1–A6, §7 order).**
 Consumes **R-IP13** ("Clean the atlas before adding to it? Yes — S0a gates
 S2b"). Field notes for this plan:

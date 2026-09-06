@@ -9,7 +9,7 @@ the operator register. The status line below is history.**
 correction: BUILT — every numbered stage shipped 2026-08-27/28.** The
 paragraph below is the pre-build gating history, kept as the record of how the
 rulings fell; the primary plan
-(`docs/mission_control/planned/universal-remote-gateway.md`, EterniaLauncher)
+(`docs/mission_control/archive/universal-remote-gateway.md`, EterniaLauncher)
 carries the per-stage shas and the live remainder (R12/R13, the broker
 appendix, the no-second-machine gap).
 
@@ -25,7 +25,7 @@ under the operator's "implement it all" directive (overridable until the
 consuming stage lands) — the primary plan's §5 carries the status block. Stage 1
 is fully unblocked.**
 **Primary plan (full architecture, stages, rulings):** EterniaLauncher repo,
-`docs/mission_control/planned/universal-remote-gateway.md`. This pointer carries only
+`docs/mission_control/archive/universal-remote-gateway.md`. This pointer carries only
 the hermes-owned half so the harness canon names its own work.
 
 **Operator rulings already binding:** LAN-direct only (no Eternia backend broker in any
@@ -114,7 +114,7 @@ The drift addendum below ordered an inventory before minting a third
 **distinct** — the argument lives in `agent_runtime/gateway_identity.py`'s
 module docstring (the file that would be deleted if the verdict were ever
 reversed), and is summarised here so
-[duplicate-implementation-retirement.md](duplicate-implementation-retirement.md)
+[duplicate-implementation-retirement.md](../planned/duplicate-implementation-retirement.md)
 reads a decision rather than an accident:
 
 | | scope | lifetime | audience |
@@ -361,7 +361,7 @@ claimed as enforced.
 5. **`icacls` narrowing is reported but not asserted.** No test checks that the
    resulting DACL is what was asked for; the function returns its outcome and
    nothing reads it yet.
-6. **The primary plan (launcher `docs/mission_control/planned/universal-remote-gateway.md`)
+6. **The primary plan (launcher `docs/mission_control/archive/universal-remote-gateway.md`)
    still describes Stage 1 as unbuilt.** Its §4 block and §5's R1/R3/R11 records
    are owed a receipt. Not written here: a sibling session was landing Stage 2
    receipts into that same file, and this lane's launcher writes were scoped to
@@ -834,7 +834,7 @@ Stage 5 is launcher-owned; what is hermes' is the two rows the primary plan
 assigned here. `782e87f6f9` (per-subscriber promotion at the hub — R10's
 recorded consequence), `49f6500ca3` (server-side watermark resume — Stage 2's
 recorded gap). The launcher half and its own receipts are in that repo's
-`docs/mission_control/planned/universal-remote-gateway.md` §4 Stage 5. Full
+`docs/mission_control/archive/universal-remote-gateway.md` §4 Stage 5. Full
 running record, both findings and every honest bound, in this directory's
 `remote-gateway-field-notes.md`.
 

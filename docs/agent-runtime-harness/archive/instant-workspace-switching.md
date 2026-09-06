@@ -18,7 +18,7 @@ pre-existing offenders, zero added — proven by offender-list diff); it is
 owed its own row.
 
 **Primary plan:** EterniaLauncher repo,
-`docs/mission_control/planned/instant-workspace-switching.md` — architecture,
+`docs/mission_control/archive/instant-workspace-switching.md` — architecture,
 measured cost model, stages WS0–WS5, rulings R-W0..R-W3 (all RULED
 2026-09-01). This pointer carries only the hermes-owned work so the harness
 canon names its own lanes, per the gateway program's two-repo convention.

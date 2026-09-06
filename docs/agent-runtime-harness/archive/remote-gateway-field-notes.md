@@ -32,7 +32,7 @@ legacy-marking. Docs only.
 - The launcher's side of the same verbs:
   `lib/features/mission_control/data/harness_capability_registry.dart:1488-1530`.
 - The primary plan's §5 R1/R11 and §6, launcher
-  `docs/mission_control/planned/universal-remote-gateway.md:524-527`, `:568-578`,
+  `docs/mission_control/archive/universal-remote-gateway.md:524-527`, `:568-578`,
   `:589-612`.
 
 **What contradicted the brief.** Three things, and the first is the one that

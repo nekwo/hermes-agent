@@ -25,15 +25,15 @@ create door mint the same `CLI_CONSOLE` identity through one helper. The policy
 allows every caller that exists, so no current caller's observable outcome
 moved — asserted directly in `tests/agent_runtime/test_serve_rpc_authorization.py`
 rather than inferred from a green suite. Landing receipts and the honest gaps
-are in [remote-gateway-field-notes.md](../planned/remote-gateway-field-notes.md),
+are in [remote-gateway-field-notes.md](../archive/remote-gateway-field-notes.md),
 2026-08-27.
 
 **Owner surface:**
 [06 — Office and board](../06-office-and-board.md) § "Authorization has an
 enforcement point" and its Open row.
-**Blocks:** [remote-gateway.md](../planned/remote-gateway.md) Stage 1, and through it the
+**Blocks:** [remote-gateway.md](../archive/remote-gateway.md) Stage 1, and through it the
 primary plan's R11 (launcher
-`docs/mission_control/planned/universal-remote-gateway.md` §5).
+`docs/mission_control/archive/universal-remote-gateway.md` §5).
 **Everything below §1 was a READ when it was written.** No test was run and no
 serve was started during the survey; §5 records what that cost, and the
 per-stage LANDED blocks record which of those bounds the build discharged.
@@ -617,7 +617,7 @@ refuse-console-verbs, not allow.
 ### Ruling B — R1, TLS posture on LAN (gateway Stage 1)
 
 **Question.** How is the LAN link protected? Restated from the primary plan
-(launcher `docs/mission_control/planned/universal-remote-gateway.md:524-527`,
+(launcher `docs/mission_control/archive/universal-remote-gateway.md:524-527`,
 elaborated at `:346-352`) — these are its three options, unchanged:
 
 - **(a)** Self-signed per-install certificate, fingerprint pinned via the

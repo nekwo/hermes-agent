@@ -1,6 +1,6 @@
 """The manual's in-turn tool inventory is GENERATED, and its gate can red.
 
-Plan: ``docs/agent-runtime-harness/planned/s0a-atlas-cleanup.md`` §2 A4.
+Plan: ``docs/agent-runtime-harness/archive/s0a-atlas-cleanup.md`` §2 A4.
 
 `SKILL.md` is preloaded into every mission-chat turn, so it is the routing model
 every harness agent reads before it acts — and on 2026-09-03 it named exactly ONE

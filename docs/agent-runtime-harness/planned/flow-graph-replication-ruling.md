@@ -24,7 +24,7 @@ still out of it.
 Owner doc: [`06-office-and-board.md`](../06-office-and-board.md) for the sync
 contracts; [`02-runtime-data-and-shapes.md`](../02-runtime-data-and-shapes.md) for the flow graph's
 place. Origin: the instance-replication survey (2026-08-31), whose plan lives in
-the launcher repo (`docs/mission_control/planned/instance-replication.md` §1.4).
+the launcher repo (`docs/mission_control/archive/instance-replication.md` §1.4).
 
 ## 1. What the row said, and what is actually there
 

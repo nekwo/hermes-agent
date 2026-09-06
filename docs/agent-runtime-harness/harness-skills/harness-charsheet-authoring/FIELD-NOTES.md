@@ -1545,7 +1545,7 @@ because every draft on disk failed an EARLIER gate than the one that wave is fix
   the wave's launcher FIELD-NOTES file already created by `6bb28eebc`. The hermes working
   tree also carried two unrelated modified docs from another session
   (`docs/agent-runtime-harness/03-transport-and-wire.md`,
-  `docs/agent-runtime-harness/planned/remote-gateway.md`) — left alone; this strip
+  `docs/agent-runtime-harness/archive/remote-gateway.md`) — left alone; this strip
   commits only this file.
   *Consequence:* a strip that re-takes a plan fact by HASH will mis-fire in this program's
   shared checkouts. Re-take facts at the file, as the wave's own preamble instructs.

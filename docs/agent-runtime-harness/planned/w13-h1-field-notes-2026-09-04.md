@@ -27,9 +27,9 @@ walked away with the opposite conclusion:
 - `agent_runtime/persona_prewarm.py` — the docstring's re-take block gains the
   ruling: KEEP, the two reads never conflicted, and any per-persona warm beyond
   the first is ruled out.
-- `docs/agent-runtime-harness/planned/s0a-atlas-cleanup-field-notes-2026-09-03.md`
+- `docs/agent-runtime-harness/archive/s0a-atlas-cleanup-field-notes-2026-09-03.md`
   — the A6b block's "Recorded, not acted on" is answered in place.
-- `docs/agent-runtime-harness/planned/s0a-atlas-cleanup.md` — §2 A6b's decision
+- `docs/agent-runtime-harness/archive/s0a-atlas-cleanup.md` — §2 A6b's decision
   rule is marked DONE and its retire branch WITHDRAWN, with the reason (it keyed
   on the second warm, which was the wrong input); the §"Prewarm memo re-measure"
   pointer says the decision is ruled.
@@ -236,7 +236,7 @@ what the diff put on the hook.
 
 3. **`tests/test_coverage_claims_resolve.py::test_every_coverage_claim_names_a_test_that_exists`
    is red at base.** Every failing citation is in
-   `docs/agent-runtime-harness/planned/s2-introduce-directory-push.md` — a file
+   `docs/agent-runtime-harness/archive/s2-introduce-directory-push.md` — a file
    this branch does not touch, and the five claims w13/h4 was dispatched to
    repoint. Proved to predate my first commit: the same run over a tree carrying
    only row 1's edits was already `1 failed, 3 passed`.

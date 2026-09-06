@@ -1,7 +1,7 @@
 # Field notes — instant workspace switching, lane A (WS1 hermes half), 2026-09-01
 
 Running record, written as the work happened. Authority is the launcher's
-`docs/mission_control/planned/instant-workspace-switching.md`; this file records
+`docs/mission_control/archive/instant-workspace-switching.md`; this file records
 where the ground disagreed with it and what was done about it.
 
 Baseline: hermes `c894c2b159`, branch `ws12-scope-entity`, worktree

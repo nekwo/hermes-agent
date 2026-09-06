@@ -244,7 +244,7 @@ PEER_METHOD_ALLOWLIST: frozenset[str] = frozenset(
 
 #: **Verbs whose authority is a KIND and not a strength** — the machine owner at
 #: this install's own console, and nobody else, however strong their credential
-#: (plan WS4 / ruling R-W1, ``planned/instant-workspace-switching.md``).
+#: (plan WS4 / ruling R-W1, ``archive/instant-workspace-switching.md``).
 #:
 #: Why a set and not a tier. The two scope-pointer verbs
 #: (``runtime.workspace.use`` / ``runtime.realm.use``) park THIS install's

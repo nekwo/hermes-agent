@@ -1,9 +1,9 @@
 # S0b Add-install data model — hermes-side notes (2026-09-03)
 
 Planning survey, read-only, for stage S0b of
-`EterniaLauncher/docs/mission_control/planned/same-account-instant-pairing.md`
+`EterniaLauncher/docs/mission_control/archive/same-account-instant-pairing.md`
 (rulings R-IP14 consumed; R-IP12 read). The build plan lives launcher-side at
-`EterniaLauncher/docs/mission_control/planned/s0b-add-install-data-model.md`
+`EterniaLauncher/docs/mission_control/archive/s0b-add-install-data-model.md`
 (§1 sub-ruling S0b-R9 is the hermes scope; §2 B1 and B5 are the hermes rows).
 Baseline hermes `504953f6ad` (`origin/main`), worktree `wt/s0b-hermes`, branch
 `feat/s0b-add-install-hermes`. No code touched.
@@ -130,4 +130,4 @@ What S2c inherits: the frozensets make `peers_cache.json` a MOVE rather than a
 re-derivation — the cache set is already named, and the test fails the moment a
 tenth key appears without a side. The launcher half's build record (the
 Unpair far-side deferral, the connector-factory answer) is in
-`EterniaLauncher/docs/mission_control/planned/s0b-add-install-data-model-field-notes-2026-09-03.md`.
+`EterniaLauncher/docs/mission_control/archive/s0b-add-install-data-model-field-notes-2026-09-03.md`.

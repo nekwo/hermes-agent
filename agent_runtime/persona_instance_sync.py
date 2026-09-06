@@ -9,7 +9,7 @@ receiving machine with no runtime instance behind it and the launcher badged the
 desk "Not linked here — this machine has no runtime instance for it".
 
 The operator's ruling (2026-08-31, plan
-``docs/mission_control/planned/instance-replication.md`` §0):
+``docs/mission_control/archive/instance-replication.md`` §0):
 
     Workspaces are SHARED live objects across realm members. Syncing one must
     bring working agents. A pulled desk whose instance is absent locally should

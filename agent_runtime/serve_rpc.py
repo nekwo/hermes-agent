@@ -2573,7 +2573,7 @@ def _runtime_persona_prewarm(
 # chat turn at all, and chat is what this gateway is for.
 #
 # So the two chat-turn verbs are ported to the method lane, which is the
-# direction ``planned/runtime-rpc-call-half.md`` already had, and the scope is
+# direction ``archive/runtime-rpc-call-half.md`` already had, and the scope is
 # deliberately those two and not the argv surface. The local stdio lane keeps
 # its argv path byte-for-byte: nothing here changes how the launcher's local
 # session sends a turn today.
@@ -2700,7 +2700,7 @@ def _runtime_chat_steer(
 
 # ── runtime.workspace.use / runtime.realm.use ────────────────────────────────
 #
-# Plan WS4 (``planned/instant-workspace-switching.md``), ruling R-W1. TWO things
+# Plan WS4 (``archive/instant-workspace-switching.md``), ruling R-W1. TWO things
 # at once, and the second is the reason the stage exists rather than a latency
 # footnote:
 #

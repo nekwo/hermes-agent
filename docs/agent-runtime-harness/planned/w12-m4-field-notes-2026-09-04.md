@@ -229,7 +229,7 @@ ports, no sleeps and no wall-clock waits. Worth re-running the full
 
 `tests/test_coverage_claims_resolve.py::test_every_coverage_claim_names_a_test_that_exists`
 fails at base on five claims in
-`docs/agent-runtime-harness/planned/s2-introduce-directory-push.md` (`:583`,
+`docs/agent-runtime-harness/archive/s2-introduce-directory-push.md` (`:583`,
 `:588`, `:589`, `:593`) and
 `.../s2-introduce-directory-push-field-notes-2026-09-03.md:107`. Named in the
 wave brief as pre-existing; confirmed to be exactly those five and nothing of

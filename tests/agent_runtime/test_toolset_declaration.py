@@ -1,6 +1,6 @@
 """The harness lane's ONE capability declaration (S0a A1, 2026-09-03).
 
-Plan: ``docs/agent-runtime-harness/planned/s0a-atlas-cleanup.md`` §2 A1.
+Plan: ``docs/agent-runtime-harness/archive/s0a-atlas-cleanup.md`` §2 A1.
 
 What is at stake, so a future reader does not "tidy" one of these away:
 

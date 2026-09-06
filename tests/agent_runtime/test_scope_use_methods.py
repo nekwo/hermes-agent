@@ -1,6 +1,6 @@
 """WS4: the scope pointer's method lane, and the door that is closed to devices.
 
-Plan `EterniaLauncher/docs/mission_control/planned/instant-workspace-switching.md`
+Plan `EterniaLauncher/docs/mission_control/archive/instant-workspace-switching.md`
 §1.4, ruling R-W1. Three claims are under test and they are different kinds of
 claim, which is why they are in one file:
 

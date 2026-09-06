@@ -13,7 +13,7 @@ read-only verbs only. No push.
 
 ### What was read, and the shas
 
-* Parent plan `EterniaLauncher/docs/mission_control/planned/same-account-instant-pairing.md`
+* Parent plan `EterniaLauncher/docs/mission_control/archive/same-account-instant-pairing.md`
   at launcher `791cc8030` — all 17 rulings ADOPTED (R-IP15 AMENDED), §2 flows
   + parity table, §3 S2/S2b/S2c with hardening bullets, §5 ledger (S0a
   `e94e022fb6`, S0b `b4a383a1e8`, blocker `368387ae0b` LANDED), §6 audit
@@ -22,7 +22,7 @@ read-only verbs only. No push.
   has FIFTEEN members incl. `browser-cdp`; ratchet 43 / 0 / 0 / 1149 per
   persona; the inventory emitter gates three artifacts; the stream goldens
   moved in S0a and the launcher mirror was closed at launcher `791cc8030`.
-* S0b hermes notes (`planned/s0b-add-install-hermes-notes-2026-09-03.md`)
+* S0b hermes notes (`archive/s0b-add-install-hermes-notes-2026-09-03.md`)
   and the launcher-side S0b plan: the trust/cache frozensets and their
   partition test; the launcher reads the `gateway` block by key; Unpair
   revokes the LOCAL peer first and defers the far row to S2c.

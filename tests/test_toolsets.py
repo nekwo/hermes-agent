@@ -317,7 +317,7 @@ class TestHarnessCoreToolset:
     """``harness_core`` — the ONE toolset an Eternia persona profile declares.
 
     S0a A1 (2026-09-03), plan
-    ``docs/agent-runtime-harness/planned/s0a-atlas-cleanup.md``. The numbers here
+    ``docs/agent-runtime-harness/archive/s0a-atlas-cleanup.md``. The numbers here
     are the ratchet's static twin: what the harness lane admits, in tool NAMES,
     resolved from this file alone.
     """

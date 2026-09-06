@@ -252,14 +252,14 @@ launcher doc carries the launcher and backend halves.
 
 | lane | landed (hermes) | plan of record |
 |---|---|---|
-| Universal remote gateway, stages 0–8 (install identity, LAN bind + TLS, device pairing, peer ceremony, cross-install chat, media handles) | 2026-08-27/28, 24 commits, all ancestors of `main` | `planned/remote-gateway.md` → `EterniaLauncher/docs/mission_control/planned/universal-remote-gateway.md` |
+| Universal remote gateway, stages 0–8 (install identity, LAN bind + TLS, device pairing, peer ceremony, cross-install chat, media handles) | 2026-08-27/28, 24 commits, all ancestors of `main` | `archive/remote-gateway.md` → `EterniaLauncher/docs/mission_control/archive/universal-remote-gateway.md` |
 | Instance replication H1–H4 | `a0c171af47` | 01 § The instance-replication lane |
-| Instant workspace switching WS1/WS4 (`scope` fold entity, `runtime.workspace.use` / `runtime.realm.use`, R-B wall) | `cf9abaac4b`, `ffd540bf73` | `planned/instant-workspace-switching.md` |
+| Instant workspace switching WS1/WS4 (`scope` fold entity, `runtime.workspace.use` / `runtime.realm.use`, R-B wall) | `cf9abaac4b`, `ffd540bf73` | `archive/instant-workspace-switching.md` |
 | Cross-install media P4 | `ed3c6a11aa` | `EterniaLauncher/…/planned/remote-parity-and-two-machine-proof.md` |
-| Same-account pairing S0a/S0b/S2 (`introduce`, peer directory, `peer.roster.list` / `peer.thread.read`, `peer.announce`, `runtime.gateway.peers.*`) | `e94e022fb6`, `b4a383a1e8`, `dcba382f0a` | `EterniaLauncher/…/planned/same-account-instant-pairing.md` §5 |
-| Dialable addresses D1/D1b/D4h/D5h/D6h/D7h/D8h (ordered dial, first candidate, store writes on Windows, `local_policy`, lock deadline) | through `74bb73a124` | `EterniaLauncher/…/planned/dialable-addresses.md` |
+| Same-account pairing S0a/S0b/S2 (`introduce`, peer directory, `peer.roster.list` / `peer.thread.read`, `peer.announce`, `runtime.gateway.peers.*`) | `e94e022fb6`, `b4a383a1e8`, `dcba382f0a` | `EterniaLauncher/…/archive/same-account-instant-pairing.md` §5 |
+| Dialable addresses D1/D1b/D4h/D5h/D6h/D7h/D8h (ordered dial, first candidate, store writes on Windows, `local_policy`, lock deadline) | through `74bb73a124` | `EterniaLauncher/…/archive/dialable-addresses.md` |
 | `reached_at` measured address (D12) | `355460290a` | `planned/d12-reached-at-measured-address.md` |
-| Reachable-switch L1 (dead owner yields, greeting never silent) | `abc13e283c` | `EterniaLauncher/…/planned/reachable-switch-lifecycle.md` |
+| Reachable-switch L1 (dead owner yields, greeting never silent) | `abc13e283c` | `EterniaLauncher/…/archive/reachable-switch-lifecycle.md` |
 | Remote chat parity C1h/C1h-bis/C6h (`open_chat` method, turn presence, 18-key message + `params` block) | `997900010e`, `23df196e69`, `28e502e286` | `EterniaLauncher/…/planned/remote-chat-parity.md` |
 | Local runtime ownership L-h/L-h-b/L-h-c/L-h-d + Q-h (`--service`, busy split, `.ended.json`, `.stderr.log`, RL-23 supersede, RL-24 three exits) | `286a29db04`, `940396b992`, `f7b89826eb`, `a12b16f287`, `6c1dfaf444` | `EterniaLauncher/…/planned/local-runtime-ownership-and-retry-safety.md` §8 |
 
@@ -279,11 +279,12 @@ receipts in the owning plan's field run section.
   D3 run #7; `planned/d12-reached-at-measured-address.md`.
 - **R12 / R13 of the gateway plan** (chat-bridge thinness, connector plugins)
   stay deliberately unruled — nothing staged consumes them.
-- **Shipped plans still sit in `planned/`** — `remote-gateway.md`,
-  `instant-workspace-switching.md` and the field notes of landed lanes carry
-  corrected status headers but have not moved to `archive/` per the 00-index
-  rule; a records lane owes the move once the launcher's ledger doc (10) is
-  the fold-in target.
+- **Shipped plans moved to `archive/` 2026-09-06** — `remote-gateway.md`,
+  `instant-workspace-switching.md`, `s0a-atlas-cleanup.md`,
+  `s2-introduce-directory-push.md` and eleven field-notes files, each plan of
+  record stamped under its H1 with its landing shas and a pointer here.
+  `d12-reached-at-measured-address.md`, `chat-turn-prep-cost.md` and the field
+  notes of lanes still building stayed in `planned/`.
 
 ## Supersedes
 

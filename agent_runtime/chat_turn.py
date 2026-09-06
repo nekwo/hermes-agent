@@ -16,7 +16,7 @@ devices would make every tier declaration bypassable in one frame. Gating argv
 instead would mean assigning a tier to every CLI verb in this repo and keeping
 that map correct forever. So the union is not "RPC or argv" for a device; it is
 RPC, and porting the two chat-turn verbs onto it is the direction
-``planned/runtime-rpc-call-half.md`` already had. Scope is deliberately those
+``archive/runtime-rpc-call-half.md`` already had. Scope is deliberately those
 two verbs and not the argv surface.
 
 One service, two doors — and the door is LOWER than usual

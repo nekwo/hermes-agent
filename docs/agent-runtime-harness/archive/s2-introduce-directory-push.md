@@ -10,7 +10,7 @@ status line below is history.**
 **Status: PLANNED — no code touched. Build plan for an Opus builder; written
 2026-09-03 against hermes `55fdc99148` (`origin/main`; worktree
 `X:/wt/s2-hermes`, branch `feat/s2-introduce-directory-push`), the launcher's
-`docs/mission_control/planned/same-account-instant-pairing.md` at launcher
+`docs/mission_control/archive/same-account-instant-pairing.md` at launcher
 `791cc8030` (§1 rulings ALL ADOPTED, R-IP15 as AMENDED; §2 flows + parity
 table; §3 S2/S2b/S2c with their "Hardening (audit 2026-09-03)" bullets; §5
 ledger S0a `e94e022fb6` / S0b `b4a383a1e8` / blocker `368387ae0b` LANDED; §7

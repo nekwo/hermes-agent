@@ -27,7 +27,7 @@ three stale docstring citations in `test_agent_create_subphases.py`. Rewrote
 doc 04's Stage 9 as a short retirement note, dropped the dead receipt row and
 citations from doc 07, dropped the tier-explanation paragraph and table row
 from doc 03, and annotated the debt-ledger and S0a-cleanup-plan mentions in
-doc 08 / `planned/s0a-atlas-cleanup.md` rather than leaving them dangling.
+doc 08 / `archive/s0a-atlas-cleanup.md` rather than leaving them dangling.
 Removed 4 now-stale entries from `cite-adjacency-baseline.json` (the citations
 they waived no longer exist) — the baseline shrank 75 → 71, no new waivers
 added.

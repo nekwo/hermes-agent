@@ -1,6 +1,6 @@
 """The S0a ratchet: 44 tools, 0 withheld, 0 requirement failures, per persona.
 
-Plan: ``docs/agent-runtime-harness/planned/s0a-atlas-cleanup.md`` §2 A3.
+Plan: ``docs/agent-runtime-harness/archive/s0a-atlas-cleanup.md`` §2 A3.
 
 Baseline this replaces, measured 2026-09-03 on the live box with
 ``HERMES_HOME=X:\\Eternia\\.hermes``: every one of the four mission personas

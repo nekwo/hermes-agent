@@ -1,6 +1,6 @@
 """``persona tool-diff`` reports WHERE the capability came from (S0a A2).
 
-Plan: ``docs/agent-runtime-harness/planned/s0a-atlas-cleanup.md`` §2 A2.
+Plan: ``docs/agent-runtime-harness/archive/s0a-atlas-cleanup.md`` §2 A2.
 
 The defect this closes is an accounting one. Three copies of a per-persona
 ``toolsets`` list exist (profile config, store row, realm-sync body) and since

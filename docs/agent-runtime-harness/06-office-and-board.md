@@ -86,7 +86,7 @@ EterniaLauncher repo).
 > `2026-09-01T05:42:04Z`, `source: "realm_sync"`), the badge cleared, and a
 > chat with the replica produced a real turn record — a working agent, not a
 > reference. Authority for the stage list, the landed wire contract, and the
-> proof receipts: `docs/mission_control/planned/instance-replication.md` in the
+> proof receipts: `docs/mission_control/archive/instance-replication.md` in the
 > EterniaLauncher repo, stamped EXECUTED AND PROVEN LIVE.
 >
 > **The one non-convergence that stage filed is CLOSED, 2026-09-02.** A steering
@@ -864,8 +864,8 @@ Receipts: `8d69f8858b` (A1), `4d60060dc3` (A2), `dba7ed19b6` (A3),
 ### What a remote connector inherits (the gateway check, folded from plan §A.11)
 
 The placement verb was designed against the unbuilt Hermes Gateway
-(`hermes-agent/docs/agent-runtime-harness/planned/remote-gateway.md`, launcher
-`EterniaLauncher/docs/mission_control/planned/universal-remote-gateway.md`) so that
+(`hermes-agent/docs/agent-runtime-harness/archive/remote-gateway.md`, launcher
+`EterniaLauncher/docs/mission_control/archive/universal-remote-gateway.md`) so that
 no part of
 it would have to be redesigned when a remote connector arrives. The obligations
 below are stated as what the SHIPPED verb already is; the gateway itself is not

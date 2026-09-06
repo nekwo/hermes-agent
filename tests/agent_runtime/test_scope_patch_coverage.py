@@ -1,8 +1,8 @@
 """WS1: the ``scope`` fold entity, and the demote that stops firing.
 
 Instant-workspace-switching plan §1.1 (EterniaLauncher
-``docs/mission_control/planned/instant-workspace-switching.md``; hermes pointer
-``docs/agent-runtime-harness/planned/instant-workspace-switching.md``).
+``docs/mission_control/archive/instant-workspace-switching.md``; hermes pointer
+``docs/agent-runtime-harness/archive/instant-workspace-switching.md``).
 
 A workspace switch is the cheapest state change this runtime has — two scalars
 in a pointer file — and it was among the most expensive on the wire: neither
@@ -160,7 +160,7 @@ _ACTIVE_ID_READERS: dict[str, str] = {
 #: arrives. Named here so the residue is a listed fact with a size rather than
 #: an omission — the argument for accepting it is in ``patch_coverage``'s entry
 #: comment, and the plan's "nothing else in the core varies with the pointer" is
-#: corrected in ``planned/iws-ws12-field-notes-2026-09-01.md``.
+#: corrected in ``archive/iws-ws12-field-notes-2026-09-01.md``.
 _INDIRECT_READERS = frozenset(
     {
         "active workspace NAME for the situational HUD",

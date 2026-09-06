@@ -5,7 +5,7 @@ first on the install's row, re-publish through R-D7 — is NOT built and is
 deliberately gated on the D3 proof, so the two are never proven in the same
 run.**
 
-Successor to the launcher's `docs/mission_control/planned/dialable-addresses.md`
+Successor to the launcher's `docs/mission_control/archive/dialable-addresses.md`
 (D1–D11) on the hermes side. Filed by the operator 2026-09-04 ("definitely add
 it in case we forget"); RULED 2026-09-05, approved as staged.
 

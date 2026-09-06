@@ -1,7 +1,7 @@
 # Field notes — the realm-switch field defect, hermes half, 2026-09-01
 
 Running record. The launcher half — where the defect and both fixes live — is at
-`EterniaLauncher/docs/mission_control/planned/iws-fix-realm-switch-field-notes-2026-09-01.md`
+`EterniaLauncher/docs/mission_control/archive/iws-fix-realm-switch-field-notes-2026-09-01.md`
 (two files, split by repo, not by subject). Read that one for the defect; this
 one records what hermes was asked, what it answered, and the two tests that
 turned the answer into a fact.

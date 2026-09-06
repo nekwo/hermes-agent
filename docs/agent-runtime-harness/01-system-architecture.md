@@ -463,7 +463,7 @@ published; the Mac's freshly booted serve pulled and minted
 `source: "realm_sync"`), the launcher's "Not linked here" badge cleared, and
 the operator's chat with the replica produced a real turn record. A realm pull
 delivers a working agent, demonstrated live across two machines — the receipt
-ledger is `docs/mission_control/planned/instance-replication.md` in the
+ledger is `docs/mission_control/archive/instance-replication.md` in the
 EterniaLauncher repo.
 
 **And the CANVAS travels with the agent** (2026-09-04, stages S1–S5). The

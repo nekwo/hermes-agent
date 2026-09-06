@@ -1,7 +1,7 @@
 # Canonical test environment — field notes, 2026-09-03
 
 The record for the pre-dispatch blocker of the launcher plan
-`docs/mission_control/planned/same-account-instant-pairing.md` §7 ("Before
+`docs/mission_control/archive/same-account-instant-pairing.md` §7 ("Before
 dispatch"): *hermes-agent has no canonical test environment, so
 `scripts/run_tests.sh` has no interpreter and every test wave works around it
 ad hoc.*
