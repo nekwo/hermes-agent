@@ -156,7 +156,37 @@ def test_the_report_exits_zero_over_the_live_canon(capsys):
     assert "PATH DOES NOT RESOLVE:" in out
 
 
-def test_every_sha_verdict_costs_two_git_processes_however_many_shas(monkeypatch):
+def _four_commit_repo(root):
+    """A throwaway git repo with four commits, so ``HEAD~3`` resolves.
+
+    The checkout this file sits in is NOT the fixture. ``actions/checkout``
+    carries no ``fetch-depth`` in ``.github/workflows/ci.yml``, so its default
+    of 1 applies and the runner's clone holds exactly one commit: reading the
+    checkout's own ``HEAD~3`` exited 128 on CI (run 33969282189, slice 1) while
+    answering fine on any developer box. That is a property of the clone, not
+    of ``_classify_shas``. What the assertion below needs is a repo where one
+    cite is an ancestor of the base and another is not — four commits of
+    anything, built right here.
+    """
+
+    root.mkdir(parents=True, exist_ok=True)
+    identity = (
+        "-c", "user.name=doc-cite-report test",
+        "-c", "user.email=doc-cite-report@tests.invalid",
+        "-c", "commit.gpgsign=false",
+    )
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True, capture_output=True)
+    for n in range(4):
+        subprocess.run(
+            ["git", *identity, "commit", "-q", "--allow-empty", "-m", f"c{n}"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        )
+    return root
+
+
+def test_every_sha_verdict_costs_two_git_processes_however_many_shas(monkeypatch, tmp_path):
     """The row's whole finding: process creation was the report.
 
     Per sha this used to be `cat-file -e` then `merge-base --is-ancestor` — two
@@ -168,6 +198,7 @@ def test_every_sha_verdict_costs_two_git_processes_however_many_shas(monkeypatch
     classification and not a probe that never resolves anything.
     """
 
+    monkeypatch.setattr(report, "REPO_ROOT", _four_commit_repo(tmp_path / "clone"))
     head, ancestor, base = (
         subprocess.run(
             ["git", "rev-parse", rev],
