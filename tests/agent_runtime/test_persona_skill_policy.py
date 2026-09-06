@@ -523,11 +523,15 @@ def test_a_preload_over_its_declared_ceiling_fails_the_install_verifier(
         skill_install.SkillSizeCeiling(200, "a 200 B budget, for this test only"),
     )
 
-    _write_skill_package(source_root, skill, "# small\n")
+    small = _write_skill_package(source_root, skill, "# small\n")
     # Not installed yet, so the hash lane fails and prints the per-skill report
     # — which now carries the budget beside the bytes, on every line it writes.
+    # Measured off the file for the same reason the grown case below is: text
+    # mode turns the body's one `\n` into two bytes on Windows and one on
+    # Linux, and the hand-typed `9` was the Windows number (CI run
+    # 33969282189, slice 2 read `preload 8 / 200 B`).
     assert main(["--check"]) == 1
-    assert "preload 9 / 200 B" in capsys.readouterr().out
+    assert f"preload {small.stat().st_size} / 200 B" in capsys.readouterr().out
     assert main([]) == 0
 
     # Grow the preload past its budget. Nothing else about the package changes.
