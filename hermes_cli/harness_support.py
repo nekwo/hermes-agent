@@ -21,9 +21,20 @@ DEPENDENT on it. These names used to arrive implicitly from whatever
 only when an operator ran the one verb that touched it: a latent break with an
 arbitrarily long fuse, discovered in production by whoever reached for the
 least-used command. Re-importing a name ``harness.py`` also imports rebinds it
-to the identical object, so the explicit header costs nothing at runtime. Both
-halves — that the header is present, and that it rebinds identically — are
-checked by ``tests/hermes_cli/test_harness_parts_namespace.py``.
+to the identical object, so the explicit header costs nothing at runtime.
+
+Two different gates hold the two halves, and it matters which is which. That
+the header is COMPLETE is ruff's F821 (``pyproject.toml``'s
+``[tool.ruff.lint] select``, with no per-file ignore for ``harness_parts/``):
+ruff reads each part as the standalone file it is not yet, so any name the
+part reads and does not import is an error there. That it rebinds IDENTICALLY,
+and that every free name resolves once all six parts are loaded, is
+``tests/hermes_cli/test_harness_parts_namespace.py``. The namespace test alone
+cannot see an incomplete header — it asks whether the loaded namespace can
+supply the name, and harness.py's own imports always can — which is how 38
+free names accumulated in ``persona_commands`` and ``runtime_commands``
+between 2026-08-01 and 2026-09-05 with that test green the whole way. Read the
+docstring above as the rationale; read the ruff run as the enforcement.
 
 Nothing here knows about argparse wiring or any specific command: harness.py
 keeps its 50 local command bodies and re-imports these names, so

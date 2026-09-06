@@ -2,9 +2,9 @@
 # Keep command bodies here so parser registration stays separate from persona/chat behavior.
 
 # Explicit import header — its rationale lives ONCE, in
-# ``hermes_cli/harness_support.py``'s module docstring, and the pair of
-# guarantees it rests on are checked by
-# tests/hermes_cli/test_harness_parts_namespace.py.
+# ``hermes_cli/harness_support.py``'s module docstring, which also names the
+# two gates that hold it: ruff's F821 for the header being complete, and
+# tests/hermes_cli/test_harness_parts_namespace.py for the load-order namespace.
 
 from __future__ import annotations
 

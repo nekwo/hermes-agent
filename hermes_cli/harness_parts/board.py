@@ -12,9 +12,9 @@
 # from the card id itself.
 
 # Explicit import header — its rationale lives ONCE, in
-# ``hermes_cli/harness_support.py``'s module docstring, and the pair of
-# guarantees it rests on are checked by
-# tests/hermes_cli/test_harness_parts_namespace.py.
+# ``hermes_cli/harness_support.py``'s module docstring, which also names the
+# two gates that hold it: ruff's F821 for the header being complete, and
+# tests/hermes_cli/test_harness_parts_namespace.py for the load-order namespace.
 #
 # Snapshot row builders (``board_summary_row`` / ``_board_card_row``) are
 # imported FUNCTION-LOCALLY rather than here on purpose: a module-level import
