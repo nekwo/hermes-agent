@@ -28,7 +28,16 @@ from agent_runtime.observability import build_observability
 from agent_runtime.profile_context import active_profile_name
 from agent_runtime.provider_health import provider_health_for_personas
 from agent_runtime.status import build_status
-from hermes_cli.harness_support import harness_repo_root
+from hermes_cli.harness_support import (
+    ERROR_EXIT_CODES,
+    _error_envelope,
+    _list_envelope,
+    _object_envelope,
+    _print_stage42,
+    _require_yes,
+    _sort_rows,
+    harness_repo_root,
+)
 
 
 def _cmd_worktree_reap(args) -> int:
