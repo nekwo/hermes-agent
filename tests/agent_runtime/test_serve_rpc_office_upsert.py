@@ -1129,6 +1129,41 @@ def test_the_method_set_grew_and_the_contract_integer_did_not_move():
             "runtime.realm.use": "console",
             "runtime.workspace.use": "console",
         },
+        # R-C8: the manifest is a set, a map, an integer — and now a second map
+        # saying which PARAMS the chat verbs honour. Additive by this test's own
+        # rule: no existing method's request or result shape moved, so a client
+        # that ignores the key keeps working, and a manifest WITHOUT it reads as
+        # "the runtime that predates R-C8" rather than as an error.
+        "params": {
+            "runtime.chat.message": [
+                "clarify_token",
+                "correlation_id",
+                "intent_hint",
+                "max_seconds",
+                "message",
+                "model",
+                "new_session",
+                "persona_id",
+                "persona_instance_id",
+                "provider",
+                "session_id",
+                "stream",
+                "surface_prompt",
+                "title",
+                "turn_request_id",
+                "use_agent_default",
+                "workspace_id",
+                "workspace_name",
+            ],
+            "runtime.chat.steer": [
+                "correlation_id",
+                "message",
+                "persona_id",
+                "persona_instance_id",
+                "session_id",
+                "turn_request_id",
+            ],
+        },
     }
     assert serve_rpc.manifest() == expected
     assert serve_rpc.RPC_CONTRACT_VERSION == 1
@@ -1309,6 +1344,38 @@ def test_the_write_method_is_transport_agnostic_and_answers_on_the_socket():
                     "runtime.persona.prewarm": "read",
                     "runtime.realm.use": "console",
                     "runtime.workspace.use": "console",
+                },
+                # R-C8: the socket greeting carries the same block, because the
+                # lowering decision a socket client makes is the same one.
+                "params": {
+                    "runtime.chat.message": [
+                        "clarify_token",
+                        "correlation_id",
+                        "intent_hint",
+                        "max_seconds",
+                        "message",
+                        "model",
+                        "new_session",
+                        "persona_id",
+                        "persona_instance_id",
+                        "provider",
+                        "session_id",
+                        "stream",
+                        "surface_prompt",
+                        "title",
+                        "turn_request_id",
+                        "use_agent_default",
+                        "workspace_id",
+                        "workspace_name",
+                    ],
+                    "runtime.chat.steer": [
+                        "correlation_id",
+                        "message",
+                        "persona_id",
+                        "persona_instance_id",
+                        "session_id",
+                        "turn_request_id",
+                    ],
                 },
             }
 

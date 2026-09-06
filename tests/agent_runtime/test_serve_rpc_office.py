@@ -339,8 +339,13 @@ def test_a_class_keyed_actor_sends_an_explicit_null_never_an_omitted_key():
         assert item["persona_instance_id"] is None
 
     # Present as an explicit JSON null on the wire, not merely absent-and-falsy.
+    # Scoped to the REPLY frame rather than to any line mentioning the key: the
+    # greeting now carries R-C8's ``params`` block, in which
+    # ``persona_instance_id`` appears as one of ``runtime.chat.message``'s
+    # advertised param NAMES. A bare substring walk stopped on that frame and
+    # asserted about a manifest instead of about an office item.
     for line in _lines(out):
-        if '"persona_instance_id"' in line:
+        if '"rpc-1"' in line and '"persona_instance_id"' in line:
             assert '"persona_instance_id": null' in line
             break
     else:
@@ -840,6 +845,42 @@ def test_stdio_learns_the_method_set_from_ready_and_can_re_ask_version():
             "runtime.realm.use": "console",
             "runtime.workspace.use": "console",
         },
+        # R-C8, additive again: a third key beside ``methods`` and ``tiers``,
+        # saying which PARAMS the chat verbs honour. The C5 field run is why —
+        # the launcher could see that ``runtime.chat.message`` EXISTS and not
+        # that it ignored ``workspace_name``, so an ordinary console send to a
+        # remote install fell to the argv wall. It covers the chat verbs only:
+        # they are the ones whose surface an operator types into.
+        "params": {
+            "runtime.chat.message": [
+                "clarify_token",
+                "correlation_id",
+                "intent_hint",
+                "max_seconds",
+                "message",
+                "model",
+                "new_session",
+                "persona_id",
+                "persona_instance_id",
+                "provider",
+                "session_id",
+                "stream",
+                "surface_prompt",
+                "title",
+                "turn_request_id",
+                "use_agent_default",
+                "workspace_id",
+                "workspace_name",
+            ],
+            "runtime.chat.steer": [
+                "correlation_id",
+                "message",
+                "persona_id",
+                "persona_instance_id",
+                "session_id",
+                "turn_request_id",
+            ],
+        },
     }
     ready = next(f for f in frames if f.get("event") == "ready")
     assert ready["rpc"] == expected
@@ -946,6 +987,39 @@ def test_the_method_surface_is_transport_agnostic_and_answers_on_the_socket():
                     "runtime.persona.prewarm": "read",
                     "runtime.realm.use": "console",
                     "runtime.workspace.use": "console",
+                },
+                # R-C8: the socket greeting carries the same block, because a
+                # socket client never sees ``ready`` and the lowering decision
+                # it has to make is the same one.
+                "params": {
+                    "runtime.chat.message": [
+                        "clarify_token",
+                        "correlation_id",
+                        "intent_hint",
+                        "max_seconds",
+                        "message",
+                        "model",
+                        "new_session",
+                        "persona_id",
+                        "persona_instance_id",
+                        "provider",
+                        "session_id",
+                        "stream",
+                        "surface_prompt",
+                        "title",
+                        "turn_request_id",
+                        "use_agent_default",
+                        "workspace_id",
+                        "workspace_name",
+                    ],
+                    "runtime.chat.steer": [
+                        "correlation_id",
+                        "message",
+                        "persona_id",
+                        "persona_instance_id",
+                        "session_id",
+                        "turn_request_id",
+                    ],
                 },
             }
 

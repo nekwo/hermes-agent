@@ -71,8 +71,11 @@ def test_the_manifest_grew_by_two_names_and_the_integer_did_not_move():
     assert CHAT_STEER_METHOD in manifest["methods"]
     assert manifest["contract"] == 1
     assert serve_rpc.RPC_CONTRACT_VERSION == 1
-    # Shape unchanged: the ops ride BESIDE this, they do not join it.
-    assert set(manifest) == {"contract", "methods", "tiers"}
+    # The ops still ride BESIDE this and do not join it. ``params`` (R-C8) DID
+    # join it, additively: a client that ignores the key keeps working, and the
+    # keys it lists are exactly the ones these two verbs already honour.
+    assert set(manifest) == {"contract", "methods", "tiers", "params"}
+    assert set(manifest["params"]) == {CHAT_MESSAGE_METHOD, CHAT_STEER_METHOD}
 
 
 def test_every_verb_in_the_chat_turn_vocabulary_is_advertised_and_console_tiered():

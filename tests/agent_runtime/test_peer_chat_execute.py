@@ -72,7 +72,10 @@ def test_the_verb_is_registered_allowlisted_and_declares_console():
     assert manifest["tiers"][PEER_CHAT_EXECUTE_METHOD] == TIER_CONSOLE
     # A set plus an integer, again: the manifest grew and the contract did not.
     assert manifest["contract"] == 1
-    assert set(manifest) == {"contract", "methods", "tiers"}
+    # R-C8 joined params to the shape, additively: a client that ignores
+    # the key keeps working, which is the same rule the set and the map already
+    # ride under.
+    assert set(manifest) == {"contract", "methods", "tiers", "params"}
     assert PEER_CHAT_EXECUTE_METHOD in PEER_METHOD_ALLOWLIST
 
 

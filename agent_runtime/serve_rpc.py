@@ -432,12 +432,37 @@ def manifest() -> dict[str, Any]:
     string, and ``{"runtime.office.get": "read"}`` is the shape a client can
     index; wrapping each value in ``{"tier": …}`` would buy room for fields that
     do not exist and would make the addition of one look like a shape change.
+
+    ``params`` (R-C8) says WHICH KEYS a method honours, for the same reason and
+    under the same additive rule. The C5 field run is why: a console send to the
+    Mac was refused before a byte left the launcher, because the launcher's
+    lowering could see that ``runtime.chat.message`` EXISTS and not that it
+    ignores ``workspace_name``, and a client that cannot tell "ignored" from
+    "honoured" must assume the worst about every key it is not certain of. This
+    lane ignores unknown params by contract — a client cannot be refused for a
+    key a runtime has never heard of — so the only way to make that safe is to
+    publish what is heard. It covers the chat verbs and only those: they are the
+    ones whose surface an operator types into, and a block that claimed to be
+    exhaustive over twenty-six methods would be a promise this function cannot
+    keep. A client reading a manifest with NO ``params`` block reads it as "the
+    runtime that predates R-C8", not as "no params" — the same way a runtime
+    with no ``rpc`` block at all reads as "argv only".
+
+    The lists are derived from ``chat_turn``'s own tuples, which its normalisers
+    read, so the advertisement cannot drift from the code that honours it; a
+    test walks a recording mapping through each normaliser and asserts the two
+    agree.
     """
+
+    from .chat_turn import CHAT_TURN_METHOD_PARAMS
 
     return {
         "contract": RPC_CONTRACT_VERSION,
         "methods": method_names(),
         "tiers": method_tiers(),
+        "params": {
+            name: list(keys) for name, keys in sorted(CHAT_TURN_METHOD_PARAMS.items())
+        },
     }
 
 

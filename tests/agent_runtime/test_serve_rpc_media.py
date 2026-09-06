@@ -340,7 +340,10 @@ def test_the_family_joined_the_set_without_moving_the_integer():
     assert manifest["tiers"][GET] == TIER_CONSOLE
     assert manifest["contract"] == 1
     assert serve_rpc.RPC_CONTRACT_VERSION == 1
-    assert set(manifest) == {"contract", "methods", "tiers"}
+    # R-C8 joined params to the shape, additively: a client that ignores
+    # the key keeps working, which is the same rule the set and the map already
+    # ride under.
+    assert set(manifest) == {"contract", "methods", "tiers", "params"}
 
 
 # ── Stage P4: peer.media.get, and the proxy arm on runtime.media.get ─────────
