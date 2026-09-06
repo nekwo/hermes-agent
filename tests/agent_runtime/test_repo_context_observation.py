@@ -148,6 +148,45 @@ def _backend_like_repo(tmp_path, *, venv_contents: bool = True):
     return repo
 
 
+def test_support_link_is_excluded_whatever_shape_the_host_gives_it(tmp_path, monkeypatch):
+    """The exclude has to match a symlink as well as a junction.
+
+    `_link_local_support_dir` makes a junction on Windows and an `os.symlink`
+    everywhere else. git walks a junction as a DIRECTORY and records a symlink
+    as a BLOB, so a directory-only exclude pattern (`<name>/`) matches the first
+    and not the second: on POSIX the support link stayed untracked, which shows
+    in every diff an agent takes and — via `_worktree_is_reapable`'s
+    `git status --short` check — makes the worktree permanently unreapable.
+    Green on every developer box, red on every CI slice (run 33969282189,
+    slice 4, both of this file's failures).
+
+    A plain file stands in for the symlink: git's ignore rules draw exactly the
+    same file-vs-directory line for both, and creating a real symlink needs a
+    privilege Windows does not hand a test.
+    """
+
+    import agent_runtime.repo_context as rc
+
+    runtime_root = tmp_path / "runtime"
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(runtime_root))
+
+    def _as_a_blob(source, target):
+        target.write_text("link stand-in\n", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(rc, "_link_local_support_dir", _as_a_blob)
+    repo = _backend_like_repo(tmp_path)
+    source = RepoExecutionContext(workdir=repo, repo_label="eternia-backend", source="test")
+
+    isolated = isolated_repo_context_for_run(source, task_id="t", run_id="run_link")
+
+    assert (isolated.workdir / ".EterniaBackendVirtualEnv").exists()
+    assert _git(isolated.workdir, "status", "--short").stdout.strip() == "", (
+        "the support link must be excluded whether the host materialized it as "
+        "a junction or as a symlink"
+    )
+
+
 def test_worktree_removal_severs_venv_link_and_preserves_real_venv(tmp_path, monkeypatch):
     """git worktree remove --force follows directory junctions on Windows; the
     GC must sever support links first so the REAL venv survives (live incident

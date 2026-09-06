@@ -621,16 +621,24 @@ def _materialize_worktree_local_support(source_root: Path, worktree: Path) -> No
 
     source_venv = source_root / ".EterniaBackendVirtualEnv"
     target_venv = worktree / ".EterniaBackendVirtualEnv"
+    # NO trailing slash. `_link_local_support_dir` makes a junction on Windows
+    # and an `os.symlink` everywhere else; git walks the junction as a directory
+    # but records the symlink as a blob, and a `<name>/` pattern is
+    # directory-only. With the slash the link stayed untracked on POSIX, which
+    # `_worktree_is_reapable`'s `git status --short` reads as uncommitted work —
+    # so the worktree was never reaped and every diff carried the link.
+    # Slashless matches both shapes, and still ignores the tree underneath.
+    _VENV_EXCLUDE = ".EterniaBackendVirtualEnv"
     if source_venv.is_dir() and not target_venv.exists():
         if _link_local_support_dir(source_venv, target_venv):
-            support_patterns.append(".EterniaBackendVirtualEnv/")
+            support_patterns.append(_VENV_EXCLUDE)
         else:
             _log_worktree_event(
                 "worktree_support_failed",
                 {"worktree": str(worktree), "support": ".EterniaBackendVirtualEnv"},
             )
     elif target_venv.exists():
-        support_patterns.append(".EterniaBackendVirtualEnv/")
+        support_patterns.append(_VENV_EXCLUDE)
 
     if target_venv.exists() and not _venv_has_interpreter(target_venv):
         # A hollow venv link (dir exists, no interpreter) means every agent
