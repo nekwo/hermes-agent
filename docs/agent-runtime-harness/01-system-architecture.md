@@ -18,8 +18,8 @@ There is one runtime execution surface. `GPTPersonaRuntime`
 (`agent_runtime/persona_runtime.py:51`) exposes exactly **one** public method,
 `mission_chat_reply` (`:72`) — there is no `run_persona`, no tick, no worker
 loop. The entry point is `_cmd_mission_chat_message` — defined at
-`hermes_cli/harness_parts/persona_commands.py:2637`, exec-loaded into
-`harness.py` globals (`hermes_cli/harness.py:6446`) and wired to argparse at
+`hermes_cli/harness_parts/persona_commands.py:2672`, exec-loaded into
+`harness.py` globals (`hermes_cli/harness.py:6491-6495`) and wired to argparse at
 `harness.py:1419`.
 
 Turn ingress has one path. Asynchronous agent-to-agent delivery
@@ -781,7 +781,7 @@ directional character sheets behind `hermes harness` verbs
 (`hermes_cli/harness.py:3001+`), and a placement carries its sprite as
 `OfficeItem.pet_slug` (`models.py:174`). Since 2026-08-31 the interactive
 per-verb lane has a one-shot sibling: `harness characters auto`
-(`harness.py:5025`, `_cmd_characters_auto` at `:5025`, shipped `2321a2a9c3`,
+(`harness.py:5063`, `_cmd_characters_auto` at `:5063`, shipped `2321a2a9c3`,
 plan stamped a ledger at `8e0617a458`) drives turnaround → approve → generate →
 compose → install in ONE process, printing a receipt line per stage. It is for
 an operator's explicit "drive it all the way" ask and nothing else, because it

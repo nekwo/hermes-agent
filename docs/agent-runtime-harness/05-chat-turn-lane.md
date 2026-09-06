@@ -155,14 +155,14 @@ magnitudes are dropped rather than coerced.
 ## 3. Model selection
 
 Four tiers, highest wins, resolved once in `_chat_effective_model_payload`
-(`persona_commands.py:6953`):
+(`persona_commands.py:7028`):
 
 ```
 chat-session override  >  instance override  >  persona default  >  config default
 ```
 
 The chat-session override persists under `mission_control_chat_model_override`
-(`persona_commands.py:6485`, `agent_runtime/persona_chat_history.py:234`) via
+(`persona_commands.py:6560`, `agent_runtime/persona_chat_history.py:234`) via
 `_resolve_chat_model_override` (`:6932`), called at `:3471`. Its scope is literally
 `mission_control_chat_session` (`:5788`, inside `_chat_effective_model_payload`) — per-thread,
 not per-instance. Values validate against
