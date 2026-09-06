@@ -260,9 +260,14 @@ is unreachable from every other machine — `ready` will say `listening` and be
 telling the truth, which is why the firewall is named here rather than inferred
 from a connection failure. A pinned `remote_gateway.port` is what makes a
 `netsh advfirewall` rule writable in advance; an ephemeral port cannot have one.
-**Undriven by any test in this repo**, and by nothing else either — see the
-Stage 1 honest gaps in
-[planned/remote-gateway.md](planned/remote-gateway.md).
+**Undriven by any test in this repo.** It is driven from the product side
+since S3-FW (2026-09-03): the launcher's host-firewall lane probes the rule,
+escalates once, confirms it and retries (`EterniaLauncher/lib/core/services/host_firewall/`),
+and the sentence this paragraph carried until 2026-09-06 — "and by nothing
+else either" — is false. What is still honest is the Stage 1 gap in
+[planned/remote-gateway.md](planned/remote-gateway.md): no test on THIS side
+binds beyond loopback. The whole lane is drawn in
+[09 — Multi-device runtime](09-multi-device-runtime.md).
 
 ### 1.2 The peer hello — the same door, a second kind of caller
 
@@ -302,7 +307,10 @@ the peer field, a peer credential on the device field, and each code in the
 other ceremony's verb.
 
 **A peer holds an ALLOWLIST, not a tier** (`call_authorization.PEER_METHOD_ALLOWLIST`
-= `{peer.ping, peer.agent_chat.execute}` since gateway Stage 7), and the arm
+— `{peer.ping, peer.agent_chat.execute}` since gateway Stage 7, six at HEAD
+with `peer.media.get` (P4), `peer.roster.list` / `peer.thread.read` (S2b,
+read-only by R-IP9) and `peer.announce` (S2c); the set and each member's
+reason are in [09](09-multi-device-runtime.md)), and the arm
 runs BEFORE the read-tier arm — which is open to
 every caller, so a peer evaluated after it would inherit the whole read surface.
 This is where canon 06's exclusion ("agents never mint or retire agents on
@@ -502,8 +510,9 @@ membership test. Reads stay open to `unknown`, deliberately and not by
 omission: nothing on the read side mutates a level.
 
 **A PEER is refused by an allowlist rather than by a tier** (Stage 6, §1.2).
-`PEER_METHOD_ALLOWLIST` is `{peer.ping, peer.agent_chat.execute}` (Stage 7
-widened it by one, §1.3, with the reason in a comment beside the set) and the
+`PEER_METHOD_ALLOWLIST` was `{peer.ping, peer.agent_chat.execute}` (Stage 7
+widened it by one, §1.3, with the reason in a comment beside the set; the
+same-account pairing lane and P4 took it to six — §1.2 names them) and the
 arm runs before the read-tier
 arm — which is open to every caller, so a peer evaluated after it would hold
 this runtime's entire read surface including verbs nobody has written yet. The
@@ -997,19 +1006,22 @@ authority, so in-process tool relay, CLI and serve transport get the same depth
   `runtime.agent.create` carry the token, the remaining argv capability lanes do
   not, and the one-grep acceptance was never scripted
   ([planned/correlation-id-coverage.md](planned/correlation-id-coverage.md)).
-- **The remote gateway SHIPPED (stages 0–8, 2026-08-27/28) — this row said
-  "planned and unstarted" until 2026-09-01, which §1.1 of this same doc already
-  contradicted.** The socket lane became the gateway lane: `gateway.listen`,
-  install identity, TLS-only bind beyond loopback, device pairing, the peer
-  ceremony, cross-install `agent_chat_send`, and the two-verb media family.
-  What remains is the primary plan's live remainder, not unbuilt stages: R12/R13
-  unruled, the backend-broker connector unstaged, and the standing live gaps —
-  no physical second machine has exercised the LAN bind, no cross-install
-  media, and the remote fullscreen viewer still reads `File(path)`. That
-  remainder is the same-account multi-machine program's ground. Authority:
-  `planned/universal-remote-gateway.md` in the EterniaLauncher repo (status
-  corrected 2026-08-30: BUILT, remainder live);
-  [planned/remote-gateway.md](planned/remote-gateway.md) is the hermes-half
+- **The remote gateway SHIPPED (stages 0–8, 2026-08-27/28), and the live gaps
+  this row carried are CLOSED (re-read 2026-09-06).** The socket lane became
+  the gateway lane: `gateway.listen`, install identity, TLS-only bind beyond
+  loopback, device pairing, the peer ceremony, cross-install
+  `agent_chat_send`, and the two-verb media family. The row said until
+  2026-09-06 that no physical second machine had exercised the LAN bind and
+  that cross-install media was unbuilt; both were stale — the Mac paired both
+  ways on 2026-09-04, the cockpit switched to it with a live stream on
+  2026-09-05, console chat to a Mac agent rode the method lane on
+  2026-09-06, and cross-install media landed as P4 (`ed3c6a11aa`). What is
+  genuinely open is enumerated in
+  [09 — Multi-device runtime](09-multi-device-runtime.md) § Open rows (R12/R13
+  unruled, the broker appendix unstaged, the A→B→A cycle, the `unknown_device`
+  read, D12's launcher half). The staged history stays where it is:
+  `planned/universal-remote-gateway.md` in the EterniaLauncher repo and
+  [planned/remote-gateway.md](planned/remote-gateway.md), the hermes-half
   pointer.
 - **`serve.py:105` says the RPC registry holds "currently eight" methods; ten
   are registered.** That same docstring warns "a docstring that copies a

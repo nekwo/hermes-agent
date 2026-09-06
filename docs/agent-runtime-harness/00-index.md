@@ -11,7 +11,7 @@
 Consolidated 2026-08-22 from 56 files. The rules that keep it consolidated are
 at the bottom; read them before adding a document.
 
-## The eight domains
+## The nine domains
 
 Read in this order for a full picture; each stands alone for its own territory.
 
@@ -25,6 +25,7 @@ Read in this order for a full picture; each stands alone for its own territory.
 | [06 — Office and board](06-office-and-board.md) | The scene surface: office write verbs on the RPC lane, folds, optimistic rendering vs snapshot truth, drops and their timings, the board's (unmigrated) lane. |
 | [07 — Observability](07-observability.md) | How the system is measured: the honesty contract (canonical home), the receipt census (emitter → format → consumer), the audit tools, the zero-scan lesson. |
 | [08 — Performance and debt ledger](08-performance-and-debt-ledger.md) | The numbers: live baselines with dates and sources, landed optimizations with shas, the value-ordered burn-down, the open debt register. |
+| [09 — Multi-device runtime](09-multi-device-runtime.md) | One account, many machines, one runtime per machine: the target picture, the three tiers, the entities a runtime holds (install, runtime, paired device, paired peer, peer directory), the credential doors and their membership sets, code-free pairing by account grant, dialable addresses, cross-install chat and reads, the runtime that outlives its launcher — and the ledger of what landed. The launcher half is `EterniaLauncher/docs/mission_control/10-multi-device-architecture.md`. Added 2026-09-06: the material was spread over 01/03/04 and eleven plans, and none of them said what the whole was for. |
 
 ## planned/ — designed, not implemented
 
