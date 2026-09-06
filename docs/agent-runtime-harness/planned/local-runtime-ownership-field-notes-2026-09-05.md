@@ -623,7 +623,9 @@ check was made rather than assumed.
 
 ## Q-h — the parser owns its failure; one live device row (RL-24, RL-23)
 
-Queue follow-ups from the launcher plan's §8.10 (verdicts 3, 4 and 10), built in
+Queue follow-ups from §8.10 of
+`EterniaLauncher/docs/mission_control/planned/local-runtime-ownership-and-retry-safety.md`
+(verdicts 3, 4 and 10), built in
 worktree `wt/c1-open-chat`, branch `feat/queue-hermes-followups`, from main
 `f7b89826eb`. Two rulings, one commit each. Nothing here touched the operator's
 live store or the live venv: RL-24 is held at the `serve_loop` seam with injected
@@ -637,7 +639,7 @@ functions a `tmp_path` root, which is what those functions take as an argument.
 | `dispatch_argv` builds the HARNESS parser only | present (`_build_harness_parser` → `hermes_cli.harness.build_parser`) |
 | `parser.parse_args(argv)` and `func(args)` share one `SystemExit` path | present — `dispatch_argv` re-raised the handler's `SystemExit` and the loop's one `except SystemExit` arm framed it `argv_parse_failed` |
 | a non-`harness` root is an argparse rejection | present — reproduced as the third red below |
-| `hermes profile delete` exists as a CLI verb | present (`hermes_cli/subcommands/profile.py`) — so the lane, not the verb, is what was refusing |
+| `hermes profile delete` exists as a CLI verb | present — `profile_subparsers.add_parser("delete")` with `-y/--yes`, `hermes_cli/subcommands/profile.py:66`; so the lane, not the verb, is what was refusing |
 | the redeem writes a row and revokes nothing | present (`serve_gateway_auth.redeem_pairing_code`) |
 | no shipped handler calls `sys.exit()` | true today — grep over `hermes_cli/harness_parts/` and `hermes_cli/harness.py` finds none, which is why the defect was latent and not reported |
 
@@ -775,7 +777,8 @@ write, which is the property that stops any reader from seeing two live rows.
   `sys.exit()` (grep, recorded above), so the frame is proven by a parser
   injected in the test and not by a hermes verb. That is the point of landing it
   now: the launcher's fallback stops depending on a property of the handler set.
-* **No launcher fixture was captured.** `tool/hermes_serve_frames/generate.py`
+* **No launcher fixture was captured.**
+  `EterniaLauncher/tool/hermes_serve_frames/generate.py`
   captures `error_argv_parse_failed` from a real child and that frame is
   byte-unchanged, so `--check` stays green. The two new words have no fixture
   and no launcher decode yet; both are Q-l's, and the frames are pinned on this
