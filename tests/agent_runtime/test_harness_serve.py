@@ -7,8 +7,10 @@ from __future__ import annotations
 import io
 import json
 import os
+import sys
 import threading
 import time
+from pathlib import Path
 
 from hermes_cli.harness_parts.serve import dispatch_argv, serve_loop
 
@@ -409,6 +411,111 @@ def test_real_dispatch_argv_parse_failure(isolate_agent_runtime_root):
     exits = [f for f in frames if f.get("event") == "exit"]
     assert exits[0]["code"] == 2
     assert any(f.get("event") == "stderr" for f in frames)
+
+
+# ── RL-24: a parse failure is raised from the parser and nowhere else ───────
+#
+# ``argv_parse_failed`` is the word the LAUNCHER replays on: its stale-child
+# fallback re-runs the same argv on a fresh CLI, and it may do that only because
+# the frame is supposed to mean "the parser refused this before a handler was
+# bound". Until this stage ``parser.parse_args(argv)`` and ``func(args)`` shared
+# one ``SystemExit`` path, so a handler that called ``sys.exit()`` AFTER its
+# effect landed reported the same word and got the effect replayed. These three
+# tests own the three shapes that lane can now answer with.
+
+
+def _exiting_handler_parser(marker_writes: list[str]):
+    """A parser whose one verb writes a marker file and then ``sys.exit(3)``.
+
+    Built here rather than found in ``hermes_cli/``: no shipped handler exits
+    that way today (which is why the defect was latent rather than reported),
+    and a test that waited for one to appear would be a test of the future.
+    """
+
+    import argparse
+
+    def _handler(args) -> int:
+        Path(args.marker).write_text("effect", encoding="utf-8")
+        marker_writes.append(args.marker)
+        sys.exit(3)
+
+    parser = argparse.ArgumentParser(prog="hermes")
+    subparsers = parser.add_subparsers(dest="command")
+    harness = subparsers.add_parser("harness")
+    verbs = harness.add_subparsers(dest="harness_command")
+    exiting = verbs.add_parser("exiting")
+    exiting.add_argument("marker")
+    exiting.set_defaults(func=_handler)
+    return parser
+
+
+def test_a_handler_that_exits_is_handler_exit_and_not_a_parse_failure(
+    tmp_path, monkeypatch, isolate_agent_runtime_root
+):
+    """The effect happened. The frame must not invite a second one."""
+
+    from hermes_cli.harness_parts import serve as serve_module
+
+    marker = tmp_path / "handler-effect.txt"
+    writes: list[str] = []
+    monkeypatch.setattr(
+        serve_module,
+        "_build_harness_parser",
+        lambda: _exiting_handler_parser(writes),
+    )
+
+    frames = _run(
+        [_request("h", ["harness", "exiting", str(marker)]), SHUTDOWN],
+        dispatch=dispatch_argv,
+    )
+
+    errors = [f for f in frames if f.get("event") == "error" and f.get("id") == "h"]
+    assert [f["error"] for f in errors] == ["handler_exit"]
+    assert errors[0]["code"] == 3
+    # The effect is the whole point of the distinction: it landed, and the
+    # launcher must never be told this argv was rejected before it ran.
+    assert marker.read_text(encoding="utf-8") == "effect"
+    assert len(writes) == 1
+    # The exit frame still follows with the same code, so a launcher that has
+    # never heard of ``handler_exit`` settles this request exactly as it does
+    # today (its error router ignores kinds it does not know).
+    exits = [f for f in frames if f.get("event") == "exit" and f.get("id") == "h"]
+    assert exits == [{"id": "h", "event": "exit", "code": 3}]
+
+
+def test_a_non_harness_root_is_refused_before_any_parser_is_built(
+    monkeypatch, isolate_agent_runtime_root
+):
+    """R-C11's runtime half. ``hermes profile delete <p> --yes`` is a real CLI
+    verb, but this lane owns the HARNESS parser only, so the honest answer is a
+    named refusal rather than an argparse rejection that reads like a stale
+    child and gets replayed on a fresh CLI forever."""
+
+    from hermes_cli.harness_parts import serve as serve_module
+
+    built: list[int] = []
+    real = serve_module._build_harness_parser
+
+    def _counting_parser():
+        built.append(1)
+        return real()
+
+    monkeypatch.setattr(serve_module, "_build_harness_parser", _counting_parser)
+
+    frames = _run(
+        [_request("p", ["profile", "delete", "persona_x", "--yes"]), SHUTDOWN],
+        dispatch=dispatch_argv,
+    )
+
+    errors = [f for f in frames if f.get("event") == "error" and f.get("id") == "p"]
+    assert [f["error"] for f in errors] == ["argv_root_unsupported"]
+    assert errors[0]["root"] == "profile"
+    # Refused BEFORE parsing: no parser was built, so no usage text was
+    # forwarded and nothing in the harness tree was consulted.
+    assert built == []
+    assert not [f for f in frames if f.get("event") == "stderr" and f.get("id") == "p"]
+    exits = [f for f in frames if f.get("event") == "exit" and f.get("id") == "p"]
+    assert exits == [{"id": "p", "event": "exit", "code": 2}]
 
 
 def test_cancel_drops_a_queued_request_before_dispatch():

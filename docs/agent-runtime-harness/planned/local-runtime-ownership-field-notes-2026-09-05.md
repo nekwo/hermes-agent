@@ -618,3 +618,82 @@ check was made rather than assumed.
   (`Popen.pid`) and asserts on the runtime (`ready["pid"]`). A kill that reached
   only the redirector would leave the runtime up and write no sidecar —
   correctly, but that arrangement was not exercised.
+
+---
+
+## Q-h — the parser owns its failure; one live device row (RL-24, RL-23)
+
+Queue follow-ups from the launcher plan's §8.10 (verdicts 3, 4 and 10), built in
+worktree `wt/c1-open-chat`, branch `feat/queue-hermes-followups`, from main
+`f7b89826eb`. Two rulings, one commit each. Nothing here touched the operator's
+live store or the live venv: RL-24 is held at the `serve_loop` seam with injected
+streams and a monkeypatched parser factory, and every RL-23 test hands the store
+functions a `tmp_path` root, which is what those functions take as an argument.
+
+### Q-h.1 Revalidation, before anything was changed
+
+| §8.10 claim | Verdict at `f7b89826eb` |
+|---|---|
+| `dispatch_argv` builds the HARNESS parser only | present (`_build_harness_parser` → `hermes_cli.harness.build_parser`) |
+| `parser.parse_args(argv)` and `func(args)` share one `SystemExit` path | present — `dispatch_argv` re-raised the handler's `SystemExit` and the loop's one `except SystemExit` arm framed it `argv_parse_failed` |
+| a non-`harness` root is an argparse rejection | present — reproduced as the third red below |
+| `hermes profile delete` exists as a CLI verb | present (`hermes_cli/subcommands/profile.py`) — so the lane, not the verb, is what was refusing |
+| the redeem writes a row and revokes nothing | present (`serve_gateway_auth.redeem_pairing_code`) |
+| no shipped handler calls `sys.exit()` | true today — grep over `hermes_cli/harness_parts/` and `hermes_cli/harness.py` finds none, which is why the defect was latent and not reported |
+
+### Q-h.2 RL-24 — the red, measured
+
+Three tests in `tests/agent_runtime/test_harness_serve.py`, all through the real
+`dispatch_argv` and the real `serve_loop`:
+
+```
+FAILED test_a_handler_that_exits_is_handler_exit_and_not_a_parse_failure
+FAILED test_a_non_harness_root_is_refused_before_any_parser_is_built
+  AssertionError: assert ['argv_parse_failed'] == ['argv_root_unsupported']
+2 failed, 1 passed, 32 deselected in 13.61s
+```
+
+The one that passed is `test_real_dispatch_argv_parse_failure` — the frame whose
+bytes must NOT change, run in the same command as the two reds so that "the new
+words landed" and "the old word is untouched" are one measurement.
+
+### Q-h.3 RL-24 — what changed
+
+`dispatch_argv` now has three exits and each raises its own type:
+
+* `ArgvRootUnsupported(root)` before a parser is built, when `argv[0] != "harness"`;
+* a bare `SystemExit` out of either `parse_args` call — the parser's own refusal,
+  and the ONLY one the loop still calls `argv_parse_failed`;
+* `HandlerExit(code)`, converted from a `SystemExit` escaping `func(args)`.
+
+Both new types subclass `SystemExit` deliberately: `hermes_cli.main` and the test
+harness CLI catch that, and neither should change process behaviour because the
+serve lane learned to tell two exits apart. The request loop's `except` arms are
+ordered new-types-first for the same reason. `_system_exit_code` is the loop's
+old `None → 0, non-int → 2` normalisation, moved out so both call sites share it.
+
+The three frames, verbatim from the run:
+
+```json
+{"id":"bad","event":"error","error":"argv_parse_failed","detail":"argparse rejected the request argv; usage was forwarded as stderr frames"}
+{"id":"h","event":"error","error":"handler_exit","code":3,"detail":"the request handler exited; any effect it had already happened and must not be replayed"}
+{"id":"p","event":"error","error":"argv_root_unsupported","root":"profile","detail":"the serve argv lane owns the 'harness' parser only; this root is a CLI verb the caller runs itself"}
+```
+
+Each is followed by the request's own `exit` frame with the same code (2, 3, 2),
+which is what makes the two new words additive: the launcher's error router
+ignores kinds it does not know, and the exit frame settles the request exactly as
+it does today. `root` is cleaned before it is framed (printable, one line, 16
+chars) — the value comes off the wire, and a refusal that echoes an unbounded
+caller string is a write amplifier.
+
+### Q-h.4 RL-24 — mutation record
+
+* Restore the old shared path (delete the `except SystemExit → HandlerExit`
+  conversion in `dispatch_argv`): the handler test goes red with
+  `assert ['argv_parse_failed'] == ['handler_exit']` — i.e. the effect landed and
+  the frame invited the launcher to replay it. Restored.
+* Delete the root guard: the third test goes red with
+  `assert ['argv_parse_failed'] == ['argv_root_unsupported']` — the same red
+  as before the fix, i.e. the harness parser is reached and rejects a verb it
+  does not own. Restored.

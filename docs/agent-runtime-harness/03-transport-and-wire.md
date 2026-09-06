@@ -27,6 +27,33 @@ turns emit deltas live, so stdout/stderr are swapped once for contextvar-dispatc
 proxies (`_LineFrameProxy`, `:706`), one write lock keeps frames atomic, and
 writes from handler-spawned threads carry `"id": null`.
 
+**A parse failure is raised from the parser and nowhere else** (RL-24,
+2026-09-06). `argv_parse_failed` is a word the LAUNCHER acts on — its
+stale-child fallback re-runs that argv on a fresh CLI, which is safe only
+because the frame is supposed to mean "the parser refused this before a handler
+was bound". Until this stage `parser.parse_args(argv)` and `func(args)` shared
+one `SystemExit` path in `dispatch_argv`, so a handler calling `sys.exit()`
+AFTER its effect landed reported the parser's word and had the effect replayed.
+Three exits now, three frames, all on the request's own sink and all followed by
+the usual `exit` frame with the same code:
+
+| escape | frame | means |
+| --- | --- | --- |
+| `argv[0] != "harness"` | `error: argv_root_unsupported`, `root: <word>` | refused BEFORE a parser was built |
+| `SystemExit` from `parse_args` | `error: argv_parse_failed` (unchanged bytes) | nothing ran; replay is safe |
+| `SystemExit` from the handler | `error: handler_exit`, `code: <int>` | it ran; terminal for this attempt |
+
+`HandlerExit` and `ArgvRootUnsupported` (`serve.py`) are `SystemExit`
+subclasses, so every non-serve caller of `dispatch_argv` keeps the process
+behaviour it had; the request loop orders their `except` arms above the generic
+one. The root refusal is R-C11's runtime half: `hermes profile delete <p> --yes`
+is a real CLI verb, this lane owns the harness parser only, and an argparse
+`invalid choice` was indistinguishable from a stale child — so the launcher
+replayed the identical argv the identical way, forever. A consumer that has
+never heard of the two new words decodes them as it does today (an unknown
+`error` kind is ignored and the `exit` frame settles the request); only
+`argv_parse_failed` may be replayed.
+
 **Chat turns AND long runs are marked at the argv boundary, and the mark is a
 safety contract.** Two tuples, one derivation: `_CHAT_TURN_COMMANDS` is
 `mission-chat message|steer` and `_LONG_RUN_COMMANDS` is

@@ -127,6 +127,16 @@ Protocol (NDJSON, one frame per line):
              A RUNNING read-only ``harness stream`` is cooperatively cancelled
              and releases its pool worker; it is the sole running exception.
 - errors:    ``{"id":…,"event":"error","error":"invalid_request"|…,"detail":…}``
+             A request's argv can end three ways and each has its OWN word
+             (RL-24): ``argv_root_unsupported`` (``"root":<word>``) when
+             ``argv[0]`` is not ``harness`` — refused before a parser is built;
+             ``argv_parse_failed`` when the parser refused it, which is the
+             only one a client may replay, because it is the only one that
+             proves nothing ran; and ``handler_exit`` (``"code":<int>``) when
+             the HANDLER called ``sys.exit`` — its effect already happened. All
+             three are followed by the request's ``exit`` frame carrying the
+             same code, so a client that knows only the middle word decodes
+             them exactly as it does today.
 - method:    ``{"jsonrpc":"2.0","id":…,"method":"runtime.office.get"|…,
              "params":{…}}`` → ``{"jsonrpc":"2.0","id":…,"result":{…}}`` or
              ``{"jsonrpc":"2.0","id":…,"error":{"code":…,"message":…,"data":…}}``.
@@ -2092,11 +2102,101 @@ def _build_harness_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _system_exit_code(exc: SystemExit) -> int:
+    """``SystemExit.code`` as an int, by the interpreter's own conventions.
+
+    ``None`` is success and a non-int (a message string, the shape
+    ``sys.exit("usage: …")`` produces) is the shell's generic failure — the
+    normalisation the request loop has always applied, written once now that
+    two call sites need it.
+    """
+
+    raw = exc.code
+    if isinstance(raw, int):
+        return raw
+    return 0 if raw is None else 2
+
+
+#: The ONE argv root this lane owns. ``_build_harness_parser`` builds the
+#: harness tree and nothing else, so every other root — ``profile``, ``agent``,
+#: ``gateway`` — reaches the parser only to be rejected by it (RL-24/R-C11).
+ARGV_ROOT = "harness"
+
+
+def _clean_argv_root(value: Any) -> str:
+    """The rejected root, safe to put on a frame: printable, one line, bounded.
+
+    The value came off the wire, and a refusal that echoes an unbounded caller
+    string is how a rejection becomes a write amplifier. Sixteen characters is
+    longer than every root this CLI has.
+    """
+
+    text = "".join(ch for ch in str(value or "") if ch.isprintable()).strip()
+    return text[:16]
+
+
+class HandlerExit(SystemExit):
+    """A ``SystemExit`` raised by a request HANDLER, after the parser bound it.
+
+    The distinction this type exists to make is the whole of RL-24. The
+    launcher's stale-child fallback re-runs an ``argv_parse_failed`` argv on a
+    fresh CLI, and it is allowed to do that only because that word is supposed
+    to mean "the parser refused this before anything ran". A handler that calls
+    ``sys.exit()`` has already had its effect; reporting it with the parser's
+    word invites a SECOND effect. So the handler's exit is converted here, at
+    the only place that knows which of the two raised, and :func:`serve_loop`
+    answers it with its own terminal frame.
+
+    A ``SystemExit`` subclass on purpose: every other caller of
+    :func:`dispatch_argv` — ``hermes_cli.main``, the test harness CLI — keeps
+    the exact process behaviour it had, because to a plain ``except SystemExit``
+    this IS one.
+    """
+
+    def __init__(self, code: int) -> None:
+        super().__init__(code)
+        #: The handler's exit code, already normalised to an int.
+        self.handler_code = code
+
+
+class ArgvRootUnsupported(SystemExit):
+    """An argv whose root is not :data:`ARGV_ROOT`, refused BEFORE parsing.
+
+    ``hermes profile delete <profile> --yes`` is a real CLI verb (R-C11), and
+    the launcher rendered it into this lane for as long as the capability has
+    existed. What it met was an argparse ``invalid choice`` — indistinguishable
+    from a stale child that has not learned a new verb — so the launcher's
+    fallback re-ran the identical argv the identical way, forever. Refusing by
+    NAME, before a parser is built, is what lets the far side route the verb to
+    the machine that owns it instead of retrying a lane that can never carry it.
+    """
+
+    def __init__(self, root: str) -> None:
+        super().__init__(2)
+        #: The rejected root, exactly as it arrived (bounded when framed).
+        self.root = root
+
+
 def dispatch_argv(argv: list[str]) -> int:
     """Parse and run one request exactly as ``hermes <argv…>`` would,
-    including the harness error-envelope contract."""
+    including the harness error-envelope contract.
+
+    Three ways out, and they are deliberately three different exceptions
+    (RL-24): :class:`ArgvRootUnsupported` before anything is built, a bare
+    ``SystemExit`` from ``parse_args`` — which the loop maps to
+    ``argv_parse_failed``, unchanged — and :class:`HandlerExit` from the
+    handler. Only the middle one means "nothing ran".
+    """
     from hermes_cli.harness import emit_harness_error
 
+    root = argv[0] if argv else ""
+    if root != ARGV_ROOT:
+        raise ArgvRootUnsupported(str(root))
+
+    # Everything from here to ``func`` is the PARSER's. A ``SystemExit`` out of
+    # either ``parse_args`` call — a usage error, or the ``--help`` exit-0 for a
+    # root verb with no handler — propagates as itself and is the only thing the
+    # loop is allowed to call a parse failure.
     parser = _build_harness_parser()
     args = parser.parse_args(argv)
     func = getattr(args, "func", None)
@@ -2105,8 +2205,8 @@ def dispatch_argv(argv: list[str]) -> int:
         return 0
     try:
         code = func(args)
-    except SystemExit:
-        raise
+    except SystemExit as exc:
+        raise HandlerExit(_system_exit_code(exc)) from exc
     except BaseException as exc:  # mirror hermes_cli.main harness dispatch
         return emit_harness_error(exc, args=args)
     return code if isinstance(code, int) else 0
@@ -2914,9 +3014,44 @@ def serve_loop(
                             code = dispatch(list(request.argv))
                     else:
                         code = dispatch(list(request.argv))
+            except ArgvRootUnsupported as exc:
+                # RL-24, refused before a parser existed. Ordered ABOVE the
+                # generic ``SystemExit`` arm because both of RL-24's new types
+                # are ``SystemExit`` subclasses — which is what keeps every
+                # non-serve caller of ``dispatch_argv`` behaving as it did.
+                code = _system_exit_code(exc)
+                sink.emit(
+                    {
+                        "id": request.rid,
+                        "event": "error",
+                        "error": "argv_root_unsupported",
+                        "root": _clean_argv_root(exc.root),
+                        "detail": (
+                            "the serve argv lane owns the 'harness' parser only; "
+                            "this root is a CLI verb the caller runs itself"
+                        ),
+                    }
+                )
+            except HandlerExit as exc:
+                # The handler ran and then exited. Its effect, whatever it was,
+                # has already happened — so this frame carries the code and NOT
+                # the parser's word, and the launcher treats it as terminal for
+                # the attempt rather than as a stale child to replay.
+                code = exc.handler_code
+                sink.emit(
+                    {
+                        "id": request.rid,
+                        "event": "error",
+                        "error": "handler_exit",
+                        "code": code,
+                        "detail": (
+                            "the request handler exited; any effect it had "
+                            "already happened and must not be replayed"
+                        ),
+                    }
+                )
             except SystemExit as exc:  # argparse usage errors land here
-                raw = exc.code
-                code = raw if isinstance(raw, int) else (0 if raw is None else 2)
+                code = _system_exit_code(exc)
                 if code != 0:
                     sink.emit(
                         {
