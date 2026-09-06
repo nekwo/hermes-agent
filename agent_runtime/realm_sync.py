@@ -35,6 +35,11 @@ from .store import (
     RealmStore,
     WorkspaceStore,
     active_skill_tombstones,
+    # One body, this lane's spelling. The definition lives in `store` (its
+    # docstring says why); the local name stays because every call site below
+    # reads as a ledger-merge step, and one of them is a mutation claim's
+    # needle in `tests/mutation_claims.json`.
+    ledger_time as _ledger_time,
     prune_settled_ledger,
     skill_tombstoned,
     workspace_lift_is_active,
@@ -2558,29 +2563,6 @@ _REALM_AUTHORITY_FIELDS = (
 #: ``deleted_workspace_ids`` because the deleted-id union SUBTRACTS the ids the
 #: merged lift register says are live (w13/h2).
 _UNIONED_REALM_LEDGERS = ("skill_tombstones", "workspace_lifts", "deleted_workspace_ids")
-
-
-def _ledger_time(value: Any) -> "datetime | None":
-    """A ledger stamp as an aware datetime, or ``None`` when it will not parse.
-
-    Deliberately tolerant, and deliberately NOT ``serde.from_jsonable``: this
-    runs over a PEER's bytes at pull time, where an unparseable stamp must cost
-    that one entry its rank in the merge and nothing more. A naive stamp is read
-    as UTC — that is the only timezone any writer in this lane mints.
-    """
-
-    if isinstance(value, datetime):
-        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
-    text = str(value or "").strip()
-    if not text:
-        return None
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
 def _tombstone_transition_at(row: dict[str, Any]) -> "datetime | None":

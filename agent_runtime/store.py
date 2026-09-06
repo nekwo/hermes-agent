@@ -652,18 +652,26 @@ def workspace_lift_is_active(lift: Any) -> bool:
 
     restored_at = lift.get("restored_at") if isinstance(lift, dict) else getattr(lift, "restored_at", None)
     deleted_at = lift.get("deleted_at") if isinstance(lift, dict) else getattr(lift, "deleted_at", None)
-    restored_at = _stamp(restored_at)
+    restored_at = ledger_time(restored_at)
     if restored_at is None:
         return False
-    deleted_at = _stamp(deleted_at)
+    deleted_at = ledger_time(deleted_at)
     return deleted_at is None or restored_at > deleted_at
 
 
-def _stamp(value: Any) -> "datetime | None":
+def ledger_time(value: Any) -> "datetime | None":
     """A ledger stamp as an aware datetime, or ``None`` when it will not parse.
 
-    Deliberately tolerant: at pull time this runs over a PEER's bytes, where an
-    unparseable stamp must cost that one entry its rank and nothing more.
+    The ONE authority for reading a ledger stamp. ``realm_sync`` carried a
+    byte-identical copy of this body under the name ``_ledger_time`` until
+    2026-09-06, when ``test_duplicate_helper_bodies`` finally ran on CI and
+    named the pair; ``realm_sync`` already imports from this module, so the
+    lower layer is where the body belongs and the name went public with it.
+
+    Deliberately tolerant, and deliberately NOT ``serde.from_jsonable``: at pull
+    time this runs over a PEER's bytes, where an unparseable stamp must cost
+    that one entry its rank in the merge and nothing more. A naive stamp is read
+    as UTC — that is the only timezone any writer in this lane mints.
     """
 
     if isinstance(value, datetime):
