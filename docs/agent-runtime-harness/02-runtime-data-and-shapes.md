@@ -131,6 +131,50 @@ newest-20, SEPARATELY from the reasons (pooling them would let twenty service
 boots evict every reason a non-service serve wrote). A non-service serve writes
 no log at all: its parent is holding its stderr pipe and reading it as frames.
 
+#### Who removed a row: `serve_registry_pruned` (RO-3, 2026-09-06)
+
+The boot prune (`serve_registry.prune_stale_serve_instances`, called once from
+`serve_loop` right after this runtime registers itself) was this directory's one
+silent writer. It reported only in aggregate — `serve_instances_pruned`, and only
+when the count was non-zero — so the question the 2026-09-06 field run actually
+asked, *who removed the row for pid 43244 and when*, had no answer on any channel
+while `SocketOwnerLock`'s takeover and the end-reason sidecar each had one.
+
+It now emits one event per row it ACTED ON, through the caller's sink (the serve
+passes `_service_log`, so the line lands in `<pid>.stderr.log` under `--service`
+and reaches the supervisor as an ordinary `stderr` frame otherwise):
+
+```json
+{"event": "serve_registry_pruned", "action": "removed", "pid": 43244,
+ "reason": "stale_dead_pid", "classification_reason": "pid_not_running",
+ "by_pid": 11728, "row_boot_id": "1cb3ba79...", "boot_id": "e64d4601..."}
+```
+
+Four things are load-bearing, and each is a rule a neighbouring lane already
+follows:
+
+* **`action` is three words** (`SERVE_REGISTRY_PRUNE_ACTIONS`): `removed`,
+  `refused` — a recycled or unclassifiable row the prune deliberately KEEPS, the
+  ruling's "and what it refuses" — and `remove_failed`. A deletion count cannot
+  carry the middle one, and a surviving recycled pid is exactly what an operator
+  wants told.
+* **The vocabulary is `classify_serve_instance`'s, not a second one.** `reason`
+  is the classification verbatim (`stale_dead_pid` / `stale_recycled_pid` /
+  `unknown`) and `classification_reason` its finer word — the same two keys the
+  aggregate report's rows already carry.
+* **A `live` row says nothing.** That is this boot's own entry on every boot, and
+  a line every boot is how a channel stops being read.
+* **`boot_id` is the PRUNER's**, so an event joins that boot's `ready` frame the
+  way `serve_instances_pruned` does; the pruned row's own boot rides as
+  `row_boot_id`. Best effort throughout: a sink that raises changes nothing about
+  what the prune removed or kept.
+
+Ordering moved with it: `open_serve_stderr_log` is now armed BEFORE the prune,
+not after. Armed after, a `--service` runtime's verdicts went to the `DEVNULL`
+stderr RL-17 hands it — which is the silence this event exists to end. The real
+`--service` boot that removes a planted dead row and leaves the line in its own
+log is `tests/agent_runtime/test_serve_socket_child_e2e.py::test_a_service_boots_and_writes_what_its_prune_removed_into_its_own_log`.
+
 ---
 
 ### mission_chat_turns

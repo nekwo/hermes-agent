@@ -106,6 +106,52 @@ a trace payload, converted in `_stream_progress` (anchors re-read 2026-08-23 aft
 edits moved this file). The emitter's older `ttft_ms` is unchanged; `phases` is a superset, because the
 emitter is built ~1,100 lines in and its clock cannot see the profile bootstrap.
 
+### 2a. The `timing` block on the terminal payload (RO-7, 2026-09-06)
+
+Everything above is on the RECORD. Reading it took a hand-written script: on 2026-09-06 the
+question "why is a local turn slower than the Mac's" was answered by joining the launcher's
+`[MissionChatTiming]` diag line to `mission_chat_turns/*.json` on the turn id, and the answer —
+the extra seconds were spent BEFORE the provider, in context assembly correlated with overlapping
+visibility-bundle builds — was the opposite of what the launcher's line alone suggested. An
+operator cannot write that script.
+
+So the turn's terminal payload carries a seven-key projection, built by
+`mission_chat_phases.turn_timing_block` and copied in at commit inside
+`_mission_chat_commit_turn`, from the same two instruments the terminal persist writes in the same
+breath (`turn_phases` for the marks and counters, the handler's folded `profile_timing` superset
+for the runner's durations):
+
+| wire key | source |
+|---|---|
+| `turn_context_ms` | `profile_timing.profile_conversation_turn_context_ms` |
+| `request_assembled_ms` | `phases.request_assembled` |
+| `provider_first_byte_ms` | `phases.provider_first_byte` |
+| `responses_create_ms` | `profile_timing.profile_provider_responses_create_ms` |
+| `stream_consume_ms` | `profile_timing.profile_provider_stream_consume_ms` |
+| `builds_overlapped` | `phases.builds_overlapped` |
+| `resident_actor_reused` | `profile_timing.resident_actor_reused`, as a bool |
+
+**Which frame it rides, precisely.** The payload is the one dict `_mission_chat_emit` hands out:
+the argv lane's `--json` object, and the streamed lane's `chat.final`. Under a served
+`runtime.chat.message` that is the last frame carrying a PAYLOAD on the per-request lane — the
+frame after it, `exit`, carries `{id, event, code}` and nothing else, and the launcher's fold
+models it as exactly that (`MissionControlStreamLine.exit(code)`, routed `terminal: true`), while
+its bridge decodes `chat.final` into a map and calls it "the conversational terminal". `.steer`
+has no turn payload of its own: a steer injects into a running turn, and the block rides that
+turn's terminal frame.
+
+**It is additive in the strict sense.** No existing key moves, `RPC_CONTRACT_VERSION` /
+`OPS_CONTRACT_VERSION` / `SERVE_SCHEMA_VERSION` do not move, and both byte-pinned fixture families
+regenerated unchanged. `TURN_TIMING_ORDER` is the closed set a reader may see, so nothing new in
+the runner's open namespace can reach the wire without a decision.
+
+**The record's honesty contract travels with it.** A phase the turn never reached has NO key — a
+zeroed `provider_first_byte_ms` would report a turn that died before the provider as the fastest
+of the day — while a MEASURED zero (`builds_overlapped: 0`, the answer that acquits build
+contention) survives. Values are sanitized on the way OUT as well as in, because this block is read
+straight off a wire frame: non-integers, a `True` in a millisecond slot, negatives and absurd
+magnitudes are dropped rather than coerced.
+
 ## 3. Model selection
 
 Four tiers, highest wins, resolved once in `_chat_effective_model_payload`
