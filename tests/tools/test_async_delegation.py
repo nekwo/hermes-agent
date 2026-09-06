@@ -470,7 +470,22 @@ def test_in_tool_stall_uses_higher_threshold(monkeypatch):
 
 
 def test_real_process_restart_restores_owned_completion_once(tmp_path):
-    """Real-import E2E: a fresh interpreter restores a prior process's result."""
+    """Real-import E2E: a fresh interpreter restores a prior process's result.
+
+    The restore is an EXPLICIT startup step, not an import side effect.
+    `96cfc09a34` moved `restore_durable_completions()` out of
+    `ProcessRegistry.__init__` because the constructor runs when the module is
+    imported, so any read-only importer opened (and created) `state.db` and ran
+    `recover_abandoned_delegations()` before a verb executed. The entry points
+    that own a completion drain — gateway, interactive CLI, TUI gateway,
+    harness serve — call it themselves.
+
+    This test kept draining the queue straight after the import, so from that
+    day it asserted the old contract and was red everywhere; the tail probe was
+    worse than red, because "the queue is empty after the ack" is trivially
+    true in a process that never restored anything. Both child programs below
+    now do what a real entry point does.
+    """
     repo = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
     env = {**os.environ, "HERMES_HOME": str(tmp_path), "PYTHONPATH": repo}
     producer = r'''
@@ -495,6 +510,9 @@ print(r["delegation_id"])
     consumer = r'''
 import json
 from tools.process_registry import process_registry
+# What an entry point that owns a completion drain does at startup.
+restored = process_registry.restore_durable_completions()
+assert restored == 1, f"expected one restored completion, got {restored}"
 evt = process_registry.completion_queue.get_nowait()
 print(json.dumps(evt, sort_keys=True))
 '''
@@ -516,11 +534,20 @@ assert ad.mark_completion_delivered({delegation_id!r})
         [sys.executable, "-c", acker], cwd=repo, env=env,
         text=True, capture_output=True, timeout=15, check=True,
     )
+    # ...and the acked completion is not handed out a second time. The restore
+    # has to RUN here or this reads zero for the wrong reason.
+    probe_src = (
+        "from tools.process_registry import process_registry; "
+        "print(process_registry.restore_durable_completions()); "
+        "print(process_registry.completion_queue.qsize())"
+    )
     probe = subprocess.run(
-        [sys.executable, "-c", "from tools.process_registry import process_registry; print(process_registry.completion_queue.qsize())"],
+        [sys.executable, "-c", probe_src],
         cwd=repo, env=env, text=True, capture_output=True, timeout=15, check=True,
     )
-    assert probe.stdout.strip().splitlines()[-1] == "0"
+    restored_again, remaining = probe.stdout.strip().splitlines()[-2:]
+    assert restored_again == "0", "an acked completion was restored again"
+    assert remaining == "0"
 
 
 # ---------------------------------------------------------------------------
