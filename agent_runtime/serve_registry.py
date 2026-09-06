@@ -72,6 +72,34 @@ Ordering is load-bearing (register first, then prune) and so is the classifier:
 the boot caller passes no widened classification set, so ``unknown`` and
 ``stale_recycled_pid`` survive a boot exactly as they survive everything else.
 
+The end-reason sidecar: why the last runtime ended (RL-16)
+-----------------------------------------------------------
+
+A row says *there is a runtime here*. It never said *why the one that was here
+is gone*, and on 2026-09-05 that was the whole question: a leftover row named
+pid 33680, the pid was gone, and a closed console window, a logoff, an
+uncaught fault and a ``TerminateProcess`` from a hygiene sweep all left exactly
+the same evidence. So a serve now writes ``serve_instances/<pid>.ended.json``
+— ``{reason, at, boot_id, pid}`` — on any end it can observe, through the same
+atomic writer as the row.
+
+Three things about it are load-bearing and easy to break:
+
+* It is a SEPARATE file because the row is REMOVED on a clean exit and the
+  reason has to outlive that removal.
+* **Absence is a reading.** ``TerminateProcess`` runs no code in the target, so
+  it writes nothing; a stale row with no sidecar therefore says *something
+  killed this without asking* (the launcher words it ``ended=absent``). Nothing
+  may write a placeholder for an end it did not observe.
+* It shares this directory, so :func:`list_serve_instances` — the one scan every
+  other reader in the tree is built on — filters the suffix out. A sidecar read
+  as a row is a pid-less record that classifies ``unknown``, which is the
+  fail-safe direction and therefore silent.
+
+Retention is a boot-time floor (:func:`prune_serve_ended`, newest
+``SERVE_ENDED_RETENTION``): nothing ever consumes a reason, so without one the
+directory grows forever.
+
 ``hermes_home``: which home, answered from OUTSIDE the process
 --------------------------------------------------------------
 
@@ -132,22 +160,48 @@ __all__ = [
     "CLASSIFICATION_STALE_DEAD_PID",
     "CLASSIFICATION_STALE_RECYCLED_PID",
     "CLASSIFICATION_UNKNOWN",
+    "SERVE_ENDED_RETENTION",
+    "SERVE_ENDED_SUFFIX",
     "SERVE_INSTANCES_DIRNAME",
     "SERVE_INSTANCE_SCHEMA_VERSION",
     "ProcessProbe",
     "ServeInstanceRegistration",
     "default_process_probe",
+    "list_serve_ended",
     "list_serve_instances",
     "pid_alive",
+    "prune_serve_ended",
     "prune_stale_serve_instances",
+    "read_serve_ended",
     "register_serve_instance",
+    "serve_ended_path",
     "serve_instance_path",
     "serve_instances_dir",
     "unregister_serve_instance",
+    "write_serve_ended",
 ]
 
 SERVE_INSTANCES_DIRNAME = "serve_instances"
 SERVE_INSTANCE_SCHEMA_VERSION = 1
+
+#: The end-reason sidecar's filename tail: ``serve_instances/<pid>.ended.json``.
+#:
+#: It shares the row's directory ON PURPOSE — the row and the reason answer the
+#: same question about the same pid, and a second directory would be a second
+#: thing to create, sandbox, exclude from every freshness fingerprint, and
+#: remember to look in. The price of sharing is that the row scan must now tell
+#: two file shapes apart, which is exactly what a naive ``*.json`` glob does
+#: not; see :func:`list_serve_instances`.
+SERVE_ENDED_SUFFIX = ".ended.json"
+
+#: How many sidecars survive a serve boot. A registry row is removed on a clean
+#: exit, but a reason is written to be READ LATER — so nothing ever deletes one
+#: for having been used, and on a machine that restarts its runtime a dozen
+#: times a day the directory would grow without a ceiling forever. Twenty is a
+#: forensic window, not a quota: the launcher reads exactly one (the pid on the
+#: stale row it just found), and an operator reconstructing a bad afternoon
+#: reads the tail.
+SERVE_ENDED_RETENTION = 20
 
 CLASSIFICATION_LIVE = "live"
 CLASSIFICATION_STALE_DEAD_PID = "stale_dead_pid"
@@ -365,7 +419,16 @@ def list_serve_instances(
     rows: list[dict[str, Any]] = []
     directory = serve_instances_dir(store_root)
     try:
-        entries = sorted(directory.glob("*.json"))
+        # ``*.json`` alone is wrong since the end-reason sidecar joined this
+        # directory (RL-16): ``<pid>.ended.json`` matches it, and a sidecar read
+        # as a registry record is a row with no pid, no port and no identity
+        # baseline — which every reader downstream then classifies ``unknown``
+        # and reports. Two file shapes, one directory, one place that knows.
+        entries = sorted(
+            entry
+            for entry in directory.glob("*.json")
+            if not entry.name.endswith(SERVE_ENDED_SUFFIX)
+        )
     except OSError:
         return rows
     for entry in entries:
@@ -476,6 +539,138 @@ def prune_stale_serve_instances(
             continue
         deleted.append(summary)
     return {"deleted": deleted, "kept": kept, "deleted_count": len(deleted)}
+
+
+# ── the end-reason sidecar (RL-16) ──────────────────────────────────────────
+#
+# The registry row answers "is there a runtime here". It cannot answer the
+# question that was actually being asked on 2026-09-05: a row was found for pid
+# 33680, the pid was gone, and NOTHING on the machine could say why — closed
+# console window, logoff, drain that never finished, uncaught fault, or a
+# TerminateProcess from a hygiene sweep were all the same leftover file. The
+# sidecar makes the runtime name its own cause on the way out, so the next
+# unexplained death is read rather than guessed.
+#
+# Three properties carry the whole design:
+#
+# * It is a DIFFERENT FILE from the row, because a clean exit removes the row
+#   and the reason for the exit must survive the exit.
+# * It is written best effort and NEVER raises, because every caller is a
+#   process on its way down — an ``atexit`` hook, an OS-owned console control
+#   thread, a signal handler.
+# * ABSENCE IS A READING. A ``TerminateProcess`` runs no code in the target, so
+#   it writes nothing; a stale row with no sidecar therefore says "something
+#   killed this without asking", which the launcher words ``ended=absent``.
+#   Nothing may write a placeholder for an end it did not observe.
+
+
+def serve_ended_path(store_root: Path | str, pid: int) -> Path:
+    return serve_instances_dir(store_root) / f"{int(pid)}{SERVE_ENDED_SUFFIX}"
+
+
+def write_serve_ended(
+    store_root: Path | str,
+    *,
+    reason: str,
+    boot_id: str,
+    pid: int | None = None,
+    at: str | None = None,
+) -> bool:
+    """Record why this runtime ended. True when a file landed.
+
+    Four keys and no more: a launcher reading a dead runtime's last word needs
+    the word, when, which boot, and whose pid — and every additional key would
+    be a fact about a process that no longer exists to be asked about it.
+
+    Written through ``write_json_atomic``, the same helper the registry row
+    uses: tmp-and-rename in the destination directory, LF-canonical, and (this
+    is why it must not be a second writer) ACL-safe on Windows, where a file
+    created directly under a store root the launcher also reads has been the
+    source of enough grief already. One writer for this directory.
+
+    Never raises. The caller is dying.
+    """
+
+    resolved_pid = int(pid if pid is not None else os.getpid())
+    record = {
+        "reason": str(reason),
+        "at": at or _now_iso(),
+        "boot_id": str(boot_id),
+        "pid": resolved_pid,
+    }
+    try:
+        write_json_atomic(serve_ended_path(store_root, resolved_pid), record)
+    except Exception:
+        return False
+    return True
+
+
+def read_serve_ended(store_root: Path | str, pid: int) -> dict[str, Any] | None:
+    """This pid's last word, or ``None`` — which is itself the reading."""
+
+    return _read_json(serve_ended_path(store_root, pid))
+
+
+def list_serve_ended(store_root: Path | str) -> list[dict[str, Any]]:
+    """Every sidecar under *store_root*, NEWEST FIRST, each carrying ``path``.
+
+    Ordered by the record's own ``at`` and then by filename, never by mtime: a
+    copied, restored or archived directory has mtimes that say when the files
+    were moved, and the whole value of these records is a timeline.
+    """
+
+    rows: list[dict[str, Any]] = []
+    directory = serve_instances_dir(store_root)
+    try:
+        entries = sorted(directory.glob(f"*{SERVE_ENDED_SUFFIX}"))
+    except OSError:
+        return rows
+    for entry in entries:
+        record = _read_json(entry) or {}
+        row = dict(record)
+        row["path"] = str(entry)
+        if not isinstance(row.get("pid"), int):
+            row["pid"] = _pid_from_filename(Path(entry.name[: -len(SERVE_ENDED_SUFFIX)]))
+        rows.append(row)
+    rows.sort(key=_ended_sort_key, reverse=True)
+    return rows
+
+
+def prune_serve_ended(
+    store_root: Path | str, *, keep: int = SERVE_ENDED_RETENTION
+) -> dict[str, Any]:
+    """Floor the sidecar directory at the newest *keep* records.
+
+    Called once at serve boot, beside the row prune and for the mirror-image
+    reason: that one exists because a crash deliberately leaves its row behind,
+    this one because nothing ever consumes a reason. Deleting the OLDEST is the
+    only safe direction — the record a reader wants is the one belonging to the
+    runtime that just died.
+
+    Blind to registry rows by construction (it globs the sidecar suffix), which
+    matters more here than it reads: this prune runs at boot, milliseconds after
+    this very serve wrote its own row into the same directory.
+    """
+
+    rows = list_serve_ended(store_root)
+    limit = max(0, int(keep))
+    deleted: list[dict[str, Any]] = []
+    for row in rows[limit:]:
+        try:
+            Path(str(row.get("path"))).unlink()
+        except OSError:
+            continue
+        deleted.append({"pid": row.get("pid"), "path": row.get("path")})
+    return {
+        "deleted": deleted,
+        "deleted_count": len(deleted),
+        "kept_count": max(0, len(rows) - len(deleted)),
+    }
+
+
+def _ended_sort_key(row: dict[str, Any]) -> tuple[str, str]:
+    at = row.get("at")
+    return (at if isinstance(at, str) else "", str(row.get("path") or ""))
 
 
 # ── OS probes ───────────────────────────────────────────────────────────────

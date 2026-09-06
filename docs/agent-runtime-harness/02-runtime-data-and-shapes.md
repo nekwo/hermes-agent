@@ -40,7 +40,7 @@ Directories present in the live root, with the module that owns each:
 | `flow_graphs/` | `checkpoint.py:62` | checkpoint flow graphs |
 | `realm_sync/`, `realm_sync_state/` | `realm_sync.py:1871` | per-realm git worktrees + sync state |
 | `serve_read_model/` | `core_cache.py:244` | the persisted snapshot core (below) |
-| `serve_instances/` | `serve_registry.py:119` | one `<pid>.json` per live serve |
+| `serve_instances/` | `serve_registry.py:119` | one `<pid>.json` per live serve, plus one `<pid>.ended.json` per serve that ended (below) |
 | `deleted_archive/`, `migration_backups/`, `wt_reaped_patches/`, `locks/` | `paths.py:302`, `default_scope.py:552`, `delivery_directive.py:65` | archive-never-delete and lock trees |
 
 `paths.py` also declares `runs/`, `runtime_instances/`, `incidents/` and
@@ -54,6 +54,57 @@ answers *where a legacy copy would be* rather than where a live file is. It is
 kept deliberately: without it, a store that ran `harness snapshot` before the cut
 has an orphan nothing in the tree can name. `read_model.db` was the other such
 file and has no helper at all any more — `ReadModel` is deleted.
+
+### serve_instances — the row, and the end-reason sidecar
+
+Two file shapes, one directory. `<pid>.json` is the REGISTRY ROW: written at
+boot, removed on any clean exit, classified at read time by
+`list_serve_instances` (see `04-boot-and-lifecycle.md`).
+
+`<pid>.ended.json` is the END-REASON SIDECAR (RL-16, 2026-09-05,
+`serve_registry.py` "the end-reason sidecar"), written on the way out through
+the same `write_json_atomic` helper the row uses:
+
+```json
+{
+  "reason": "drained",
+  "at": "2026-09-06T01:26:35.245Z",
+  "boot_id": "1cb3ba7986944cff9968e67f7124bb67",
+  "pid": 39584
+}
+```
+
+Four keys, no `schema_version`: a fifth would be a fact about a process that no
+longer exists to be asked about it. The vocabulary is CLOSED — `drained`,
+`shutdown_op`, `stdin_eof`, `ctrl_close`, `ctrl_c`, `sigterm`, `logoff`,
+`unknown_exit`, plus the one open-ended `uncaught:<ExceptionTypeName>` — because
+the launcher's runtime sheet switches on it; a word the recorder does not
+recognise is written as `unknown_exit` rather than passed through to an
+operator's screen. Which ending writes which word is tabulated in
+`04-boot-and-lifecycle.md`.
+
+Three properties are load-bearing:
+
+1. **It is a separate file** because the row is REMOVED on a clean exit and the
+   reason has to outlive that removal.
+2. **Absence is a reading.** `TerminateProcess` (a `taskkill /F`, a Job kill)
+   runs no code in the target and writes nothing, so a stale row with no
+   sidecar says *something killed this without asking* — the launcher words it
+   `ended=absent`. Nothing may write a placeholder for an end it did not
+   observe.
+3. **Every reader of this directory filters the suffix.** `list_serve_instances`
+   is the single scan the rest of the tree is built on (`resolve_socket_target`
+   → `harness serve connect` and the launcher's `local_serve_attach`,
+   `prune_stale_serve_instances`, `harness status`'s `serves=` count), and a
+   sidecar read as a row is a pid-less record that classifies `unknown` — the
+   fail-safe direction, and therefore silent.
+
+Retention is a boot-time floor: `prune_serve_ended` keeps the newest
+`SERVE_ENDED_RETENTION = 20` by the record's own `at` (never mtime — a copied or
+restored store's mtimes say when it was moved), because nothing ever consumes a
+reason. It is blind to rows by construction.
+
+---
 
 ### mission_chat_turns
 

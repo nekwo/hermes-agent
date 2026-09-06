@@ -1041,11 +1041,20 @@ _DRAIN_ABANDON_GRACE_SECONDS = 5.0
 _SERVICE_PARK_POLL_SECONDS = 0.5
 
 
-def _install_service_stop_signal(stop: threading.Event) -> Any:
+def _install_service_stop_signal(
+    stop: threading.Event, *, note: Callable[[str], None] | None = None
+) -> Any:
     """Make ``SIGTERM`` set *stop*; return what to restore, or ``None``.
 
-    Installed only for the ``--service`` park and removed when it ends, so no
-    non-service serve's signal disposition is touched at all.
+    Installed only for the ``--service`` park and removed when it ends, so the
+    only signal disposition a non-service serve carries is the recorder's own
+    (RL-16), which re-raises the default and changes no behaviour.
+
+    *note* is the end-reason recorder's latch. It is passed here rather than
+    left to the boot-time handler because this handler REPLACES that one for the
+    duration of the park — a SIGTERM arriving while parked would otherwise wake
+    the service, run the ordinary shutdown tail, and record the ordinary
+    shutdown word for a death the operator caused with a signal.
 
     Honest about the platform, because this is the half that cannot be proven
     here. On POSIX this is the ordinary stop verb: ``kill <pid>`` sets the event
@@ -1061,11 +1070,16 @@ def _install_service_stop_signal(stop: threading.Event) -> Any:
     degrades to "no handler", which is today's behaviour.
     """
 
+    def _stop(*_args: Any) -> None:
+        if note is not None:
+            note("sigterm")
+        stop.set()
+
     try:
         import signal as _signal
 
         previous = _signal.getsignal(_signal.SIGTERM)
-        _signal.signal(_signal.SIGTERM, lambda *_args: stop.set())
+        _signal.signal(_signal.SIGTERM, _stop)
         return (_signal.SIGTERM, previous)
     except Exception:  # pragma: no cover - platform/thread dependent
         return None
@@ -1082,6 +1096,285 @@ def _restore_service_stop_signal(saved: Any) -> None:
         _signal.signal(saved[0], saved[1])
     except Exception:  # pragma: no cover - platform/thread dependent
         pass
+
+
+# ── RL-16: the runtime says why it ended ────────────────────────────────────
+#
+# The measurement this exists for: on 2026-09-05 a runtime (pid 33680) died
+# between two observations with its registry row left on disk, and NOTHING on
+# the machine could say what killed it. A closed console window, a logoff, an
+# uncaught fault, and a hygiene sweep's ``taskkill /F`` all leave the identical
+# evidence — a stale row — so the cause had to be GUESSED from a chain of
+# circumstantial process facts. It was guessed wrong twice (see the plan's
+# §8.8b, which struck its own §3).
+#
+# So the runtime now names its own cause on the way out, into
+# ``serve_instances/<pid>.ended.json``. Every mechanism below exists to catch
+# one more class of ending; the union is deliberately not complete, and the
+# hole is the point: a ``TerminateProcess`` runs no code in this process at all,
+# writes nothing, and THAT SILENCE IS THE READING — the launcher words a stale
+# row with no sidecar ``ended=absent``, which is a fact, not an absence of one.
+#
+#: Windows console control events → the word. ``wincon.h``'s numbers, matched
+#: rather than imported because ``signal.CTRL_*`` covers only two of the five.
+#:
+#: CTRL_BREAK shares ``ctrl_c``'s word on purpose: both are "the operator
+#: interrupted it from the console", and Break exists in this table mainly
+#: because it is the only one of the five that ``GenerateConsoleCtrlEvent`` can
+#: aim at a single process group — which is what makes the handler testable at
+#: all. LOGOFF and SHUTDOWN share ``logoff`` for the same reason RL-16 gave them
+#: one word: the distinction a reader needs is "the session/machine went away",
+#: not which of the two notifications the OS chose.
+CONSOLE_CTRL_END_REASONS: dict[int, str] = {
+    0: "ctrl_c",  # CTRL_C_EVENT
+    1: "ctrl_c",  # CTRL_BREAK_EVENT
+    2: "ctrl_close",  # CTRL_CLOSE_EVENT — the console window's X
+    5: "logoff",  # CTRL_LOGOFF_EVENT
+    6: "logoff",  # CTRL_SHUTDOWN_EVENT
+}
+
+#: POSIX signals → the word, by NAME because ``SIGHUP`` does not exist on
+#: Windows. ``SIGHUP`` maps to ``logoff`` rather than to a word of its own: a
+#: hangup is the session going away, which is what ``logoff`` means on the other
+#: platform, and one vocabulary that reads the same on both is worth more than a
+#: sixth word that only ever appears on one.
+SIGNAL_END_REASONS: dict[str, str] = {"SIGTERM": "sigterm", "SIGHUP": "logoff"}
+
+#: What nothing-set-a-reason writes. Not a failure: a route this recorder was
+#: never taught, said plainly instead of guessed at.
+END_REASON_UNKNOWN = "unknown_exit"
+
+#: ``uncaught:`` is the one open-ended word — the exception's type name is the
+#: whole value of it — and it is a PREFIX rather than a member below.
+END_REASON_UNCAUGHT_PREFIX = "uncaught:"
+
+#: The closed set. Closed because the launcher's runtime sheet switches on it,
+#: and a word it has never seen renders as a shrug. A caller that hands over
+#: anything else gets ``unknown_exit`` — the record says "I do not know", which
+#: is true, rather than passing an unvetted string through to an operator's UI.
+END_REASON_VOCABULARY: frozenset[str] = frozenset(
+    {
+        # the ordinary ends, one per code path
+        "drained",  # a drain op completed; _finish_drain owns it
+        "shutdown_op",  # {"op":"shutdown"} — an ORDER from the stdio owner
+        "stdin_eof",  # the pipe closed on a NON-service serve (see below)
+        # the operator and the OS
+        "ctrl_close",
+        "ctrl_c",
+        "sigterm",
+        "logoff",
+        # the fallback
+        END_REASON_UNKNOWN,
+    }
+)
+
+#: A type name arrives from ``type(exc).__name__`` and is therefore an
+#: identifier — but it reaches an operator's screen, so it is validated rather
+#: than trusted.
+_UNCAUGHT_TYPE_MAX_LENGTH = 64
+
+
+def _end_reason_is_known(reason: str) -> bool:
+    if reason in END_REASON_VOCABULARY:
+        return True
+    if not reason.startswith(END_REASON_UNCAUGHT_PREFIX):
+        return False
+    name = reason[len(END_REASON_UNCAUGHT_PREFIX) :]
+    return bool(name) and len(name) <= _UNCAUGHT_TYPE_MAX_LENGTH and name.isidentifier()
+
+
+class _ServeEndReason:
+    """One runtime's last word, written once, from wherever the end arrives.
+
+    Latch-then-write, and both halves matter. The LATCH is first-wins because
+    several of these mechanisms fire at once on a real ending — a CTRL_CLOSE
+    lands while the drain that was already running finishes, and the cause is
+    whichever got there first, not whichever finished last. The WRITE is
+    once-only because ``atexit`` runs after the drain path has already written
+    and a second write would restamp ``at`` with a time this process was already
+    dead at.
+
+    Every method is called from somewhere hostile — an ``atexit`` hook, an
+    OS-owned console-control thread, a signal handler, a drain that is holding
+    a watchdog open — so nothing here raises, allocates a logger, or waits.
+    """
+
+    __slots__ = ("_boot_id", "_lock", "_pid", "_reason", "_store_root", "_written")
+
+    def __init__(
+        self, store_root: Any, *, boot_id: str, pid: int | None = None
+    ) -> None:
+        self._store_root = store_root
+        self._boot_id = str(boot_id)
+        self._pid = int(pid if pid is not None else os.getpid())
+        self._reason: str | None = None
+        self._written = False
+        self._lock = threading.Lock()
+
+    def note(self, reason: str) -> None:
+        """Latch a cause. First one wins; never raises."""
+
+        try:
+            with self._lock:
+                if self._reason is None:
+                    self._reason = str(reason)
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+    def write(self, reason: str | None = None) -> bool:
+        """Put the record on disk. True the one time it lands."""
+
+        try:
+            with self._lock:
+                if self._written:
+                    return False
+                if reason is not None and self._reason is None:
+                    self._reason = str(reason)
+                word = self._reason or END_REASON_UNKNOWN
+                if not _end_reason_is_known(word):
+                    word = END_REASON_UNKNOWN
+                self._written = True
+        except Exception:  # pragma: no cover - defensive
+            return False
+        try:
+            from agent_runtime.serve_registry import write_serve_ended
+
+            return write_serve_ended(
+                self._store_root,
+                reason=word,
+                boot_id=self._boot_id,
+                pid=self._pid,
+            )
+        except Exception:
+            return False
+
+
+def _console_ctrl_reason_callback(recorder: _ServeEndReason) -> Callable[[int], int]:
+    """The console control handler's body, as a plain function so it is testable.
+
+    Returns 0 — FALSE, "not handled" — for every event including the ones it
+    recorded. That is the contract, not laziness: TRUE would mean this process
+    has taken responsibility for the event, and Ctrl-C would stop raising
+    ``KeyboardInterrupt``, a close would stop closing. The handler's only job is
+    to leave a record in the few seconds Windows gives it before the OS kills
+    the process anyway.
+    """
+
+    def _handle(event: int) -> int:
+        try:
+            reason = CONSOLE_CTRL_END_REASONS.get(int(event))
+            if reason is not None:
+                recorder.note(reason)
+                recorder.write()
+        except Exception:  # pragma: no cover - defensive
+            pass
+        return 0
+
+    return _handle
+
+
+#: The ctypes callback must outlive the call that registers it — Windows keeps
+#: only the function pointer, and a garbage-collected trampoline is an access
+#: violation the next time the operator presses Ctrl-C. Module-level, because
+#: there is exactly one serve per process.
+_CONSOLE_CTRL_HANDLER_KEEPALIVE: Any = None
+
+
+def _install_console_ctrl_reason_handler(recorder: _ServeEndReason) -> Any:
+    """``SetConsoleCtrlHandler`` for the five events. Never raises.
+
+    Returns the registered callback (kept alive at module scope) or ``None``
+    where there is nothing to install onto.
+
+    **It must install cleanly with NO CONSOLE**, which is the case RL-17 is
+    about to make normal: once the launcher starts the runtime with
+    ``CREATE_NO_WINDOW`` there is no window for anyone to close, so
+    ``CTRL_CLOSE_EVENT`` will rarely arrive again. Today's chain still has a
+    visible ``cmd /K`` console and closing it is one of the two live candidate
+    explanations for the 2026-09-05 death, so the handler matters NOW and must
+    cost nothing later.
+    """
+
+    global _CONSOLE_CTRL_HANDLER_KEEPALIVE
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+
+        prototype = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)
+        callback = prototype(_console_ctrl_reason_callback(recorder))
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        if not kernel32.SetConsoleCtrlHandler(callback, 1):
+            return None
+        _CONSOLE_CTRL_HANDLER_KEEPALIVE = callback
+        return callback
+    except Exception:
+        return None
+
+
+def _install_signal_reason_handlers(recorder: _ServeEndReason) -> None:
+    """Latch-and-die handlers for ``SIGTERM``/``SIGHUP``. Never raises.
+
+    Deliberately NOT a stop mechanism. Each handler records the word, restores
+    the default disposition, and re-raises the same signal at itself, so the
+    process dies exactly as it did before this existed — same exit status, same
+    timing. A handler that merely latched would silently make a serve immune to
+    ``kill``, which is a lifetime change nobody asked for.
+
+    ``signal.signal`` refuses to run off the main thread; that lands in the
+    ``except`` and degrades to today's behaviour.
+    """
+
+    try:
+        import signal as _signal
+    except Exception:  # pragma: no cover - signal is always importable
+        return
+
+    def _make(signum: int, reason: str) -> Callable[..., None]:
+        def _handler(*_args: Any) -> None:
+            recorder.note(reason)
+            recorder.write()
+            try:
+                _signal.signal(signum, _signal.SIG_DFL)
+                os.kill(os.getpid(), signum)
+            except Exception:  # pragma: no cover - defensive
+                pass
+
+        return _handler
+
+    for name, reason in SIGNAL_END_REASONS.items():
+        signum = getattr(_signal, name, None)
+        if signum is None:
+            continue
+        try:
+            _signal.signal(signum, _make(int(signum), reason))
+        except Exception:  # pragma: no cover - platform/thread dependent
+            continue
+
+
+#: The e2e's only way to make a REAL serve child end uncaught, exit plainly, or
+#: vanish without a word. Inert without the variable — read once, right after
+#: the ready frame, and absent from every other code path.
+BOOT_FAULT_ENV_VAR = "HERMES_SERVE_BOOT_FAULT"
+
+
+def _maybe_inject_boot_fault() -> None:
+    """Three endings a test cannot otherwise ask a real child for.
+
+    ``raise`` → an uncaught ``RuntimeError`` (proves ``uncaught:<Type>``),
+    ``exit`` → ``SystemExit`` (proves the ``atexit`` fallback ``unknown_exit``),
+    ``hard`` → ``os._exit`` (proves the ABSENCE that stands in for
+    ``TerminateProcess``). Anything else, including unset, does nothing at all.
+    """
+
+    mode = (os.environ.get(BOOT_FAULT_ENV_VAR) or "").strip().lower()
+    if not mode:
+        return None
+    if mode == "exit":
+        raise SystemExit(9)
+    if mode == "hard":
+        os._exit(9)
+    raise RuntimeError(f"{BOOT_FAULT_ENV_VAR}={mode!r}: injected boot fault")
 
 
 #: How long ONE request may produce nothing before the loop describes it, on
@@ -2043,6 +2336,7 @@ def serve_loop(
     hard_exit: Callable[[int], None] | None = None,
     socket_lane: bool = False,
     service: bool = False,
+    record_end_reason: bool = False,
     stream_source_factory: Callable[[], Any] | None = None,
     stream_buffer_limit: int | None = None,
     stream_byte_limit: int | None = None,
@@ -2074,6 +2368,18 @@ def serve_loop(
     reaches the park at all. When the park ends, the finalization below runs
     exactly as it does for a stdio EOF: pool shutdown, terminal frame,
     ``_close_socket_lane``, ``_unregister_instance``, the same exit codes.
+
+    ``record_end_reason`` is RL-16, and takes the SAME injection contract as
+    ``root_anchor`` and ``skill_install`` for a sharper version of their reason:
+    turning it on registers an ``atexit`` hook, a Windows console control
+    handler and ``SIGTERM``/``SIGHUP`` dispositions ON THE HOST PROCESS. In a
+    ``serve_loop`` unit test the host process is pytest — which would then
+    acquire a serve's signal handlers and write a sidecar into a long-deleted
+    ``tmp_path`` at interpreter exit. So the mechanism is OFF here and ON in
+    ``_cmd_serve``, where the host process really is the runtime; the reasons
+    themselves are proven against spawned children
+    (``test_serve_ended_sidecar_child_e2e.py``), which is the only honest seam
+    for "what happens when this process is killed" anyway.
 
     ``stream_source_factory`` is the shared subscription producer, likewise
     injectable: the default builds the real ``agent_runtime.stream``
@@ -2372,6 +2678,28 @@ def serve_loop(
     #: The service park's only wakeup. Set by the drain's terminal path, by
     #: SIGTERM where the platform delivers one, and by nothing else.
     service_stop = threading.Event()
+    #: RL-16's recorder, armed below once the store root is known AND the caller
+    #: asked for it. ``None`` until then — and forever, in every ``serve_loop``
+    #: unit test — which is why every use goes through the two shims beside it
+    #: rather than through the attribute.
+    end_reason: Any = None
+
+    def _note_end(reason: str) -> None:
+        """Latch WHY this runtime is ending. Inert when unarmed; never raises."""
+
+        if end_reason is not None:
+            end_reason.note(reason)
+
+    def _write_end(reason: str | None = None) -> None:
+        """Put the record on disk NOW, for a path that will not reach ``atexit``.
+
+        The drain's exit is ``os._exit``; a signal handler's is the OS. Both run
+        no interpreter shutdown at all, so the fallback hook is not a fallback
+        for them.
+        """
+
+        if end_reason is not None:
+            end_reason.write(reason)
 
     # ── socket lane state (all None unless ``socket_lane`` is on AND this
     # serve wins the per-root ownership lock) ────────────────────────────────
@@ -3137,6 +3465,39 @@ def serve_loop(
             except Exception:
                 # Bookkeeping must never take a boot with it.
                 pass
+
+        # ── RL-16: arm the end-reason recorder ──────────────────────────────
+        #
+        # HERE, and not earlier, because the recorder writes into the directory
+        # the row above just created — and not later, because from the ready
+        # frame onward this runtime can be killed, and an ending it cannot
+        # record is an ending nobody can explain. Everything below is best
+        # effort by construction: a bookkeeping arm that could fail a boot would
+        # be a worse defect than the one it exists to diagnose.
+        if record_end_reason and store_root_path is not None:
+            end_reason = _ServeEndReason(store_root_path, boot_id=boot_id)
+            _install_console_ctrl_reason_handler(end_reason)
+            _install_signal_reason_handlers(end_reason)
+            try:
+                import atexit as _atexit
+
+                # The floor under every other mechanism: a route none of them
+                # know about still leaves ``unknown_exit`` rather than silence,
+                # and silence is reserved for the hard kill (see the registry
+                # module's sidecar section — absence is a reading).
+                _atexit.register(end_reason.write)
+            except Exception:  # pragma: no cover - atexit is always importable
+                pass
+            # Retention, beside the row prune and for the mirror-image reason:
+            # a row is removed when its runtime exits cleanly, but nothing ever
+            # consumes a REASON, so without a floor this directory grows for the
+            # life of the machine.
+            try:
+                from agent_runtime.serve_registry import prune_serve_ended
+
+                prune_serve_ended(store_root_path)
+            except Exception:
+                pass
         timeline.mark("service_foundations_ms")
         # Orphaned-turn sweep BEFORE the ready frame: serve boot is the moment
         # a launcher restart replaces a dead runtime, and the first hydrate is
@@ -3302,6 +3663,12 @@ def serve_loop(
                 daemon=True,
             ).start()
         frames.emit(ready_frame)
+        # RL-16's test seam, and the ONLY line it costs the production path.
+        # AFTER ``ready`` because every arm that uses it needs a booted runtime
+        # with its recorder armed and its registry row on disk — the state a
+        # real death happens in. Inert without ``HERMES_SERVE_BOOT_FAULT``; see
+        # :func:`_maybe_inject_boot_fault` for the three endings it buys.
+        _maybe_inject_boot_fault()
         try:
             import logging as _logging
 
@@ -4245,6 +4612,19 @@ def serve_loop(
             _broadcast_lanes(frame)
             _close_socket_lane(reason="drain")
             _unregister_instance()
+            # RL-16, and it has to be HERE rather than in an ``atexit`` hook:
+            # the clean-drain tail can end in ``hard_exit``, which is
+            # ``os._exit``, and the timeout tail always does — neither runs an
+            # interpreter shutdown, so the fallback hook never fires on the one
+            # path the launcher's restart verb actually takes.
+            #
+            # One word for all three drain outcomes (complete, timeout,
+            # abandoned) on purpose: the sidecar answers *why did this runtime
+            # end*, and the answer is "somebody drained it". HOW the drain went
+            # is already on the wire, in the terminal frame this function just
+            # published, with the counters that make it meaningful.
+            _note_end("drained")
+            _write_end()
             drain_finished.set()
             # The service park's wakeup, set at the SAME instant and for the
             # same reason as the reader's below: in service mode the main thread
@@ -5344,7 +5724,7 @@ def serve_loop(
             ``_SERVICE_PARK_POLL_SECONDS``.
             """
 
-            saved = _install_service_stop_signal(service_stop)
+            saved = _install_service_stop_signal(service_stop, note=_note_end)
             try:
                 while not service_stop.wait(_SERVICE_PARK_POLL_SECONDS):
                     if drain_terminal_published.is_set():
@@ -5421,12 +5801,21 @@ def serve_loop(
                 _broadcast_lanes(abandoned)
                 _close_socket_lane(reason="drain_abandoned")
                 _unregister_instance()
+                _note_end("drained")
+                _write_end()
                 # Nonzero on purpose, and the SAME code a timeout uses: a
                 # supervisor must be able to tell "drained" from "gave up".
                 return DRAIN_TIMEOUT_EXIT_CODE
             # ``_finish_drain`` published the frame, closed the socket lane, and
             # unregistered; ``drain_exit_code`` is its verdict, not this path's.
             return drain_exit_code
+        # RL-16. The two events that reach this line are the two service mode
+        # taught the loop to tell apart, and the sidecar keeps them apart too: a
+        # stdio ``{"op":"shutdown"}`` is an ORDER somebody gave, while EOF is an
+        # OBSERVATION that the pipe closed. ``stdin_eof`` is unreachable under
+        # ``--service`` by construction — there EOF parks instead of exiting —
+        # so it is a word only a launcher's stdio child can ever write.
+        _note_end("shutdown_op" if stdio_shutdown else "stdin_eof")
         shutdown_frame = {"event": "shutdown", "pid": os.getpid()}
         # Socket clients hear it BEFORE the transport closes under them: an
         # attached client whose socket simply died could not tell a clean
@@ -5435,8 +5824,30 @@ def serve_loop(
         _broadcast_lanes(shutdown_frame)
         _close_socket_lane(reason="shutdown")
         _unregister_instance()
+        _write_end()
         frames.emit(shutdown_frame)
         return 0
+    except KeyboardInterrupt:
+        # POSIX's Ctrl-C, and Windows' too once the console handler has declined
+        # to handle it. Named rather than folded into ``uncaught:`` below
+        # because it is not a fault: somebody interrupted this runtime, which is
+        # the same fact the console table spells ``ctrl_c``. The latch is
+        # first-wins, so on Windows the handler's word is already in place and
+        # this is a no-op.
+        _note_end("ctrl_c")
+        raise
+    except Exception as exc:
+        # The class of death that used to be indistinguishable from a hard kill:
+        # a stale row, a gone pid, and no way to tell a bug in this process from
+        # a ``taskkill`` outside it. The type name is the whole value of the
+        # word — it is what turns "it crashed" into a grep.
+        #
+        # ``SystemExit`` and ``GeneratorExit`` are deliberately NOT caught here:
+        # they are BaseExceptions, an orderly exit runs ``atexit``, and an
+        # orderly exit that set no reason is exactly what ``unknown_exit`` is
+        # for. Re-raised unchanged: this arm records, it never handles.
+        _note_end(f"uncaught:{type(exc).__name__}")
+        raise
     finally:
         sys.stdout, sys.stderr = original_stdout, original_stderr
 
@@ -5581,6 +5992,11 @@ def _cmd_serve(args) -> int:
             # default serve is still the launcher's stdio child and still dies
             # with the pipe it was born on.
             service=getattr(args, "service", False),
+            # RL-16. ON here and nowhere else, the same contract as
+            # ``root_anchor`` and ``skill_install`` beside it: arming it
+            # registers an atexit hook and signal handlers on THIS process, and
+            # this is the only caller whose process is the runtime.
+            record_end_reason=True,
         )
     finally:
         try:

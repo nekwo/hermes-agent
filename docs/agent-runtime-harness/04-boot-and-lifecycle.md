@@ -145,6 +145,18 @@ know (`serve.py:1419-1632`):
 Liveness is proven at READ time, never trusted from the file: a clean exit removes its own entry,
 a crash leaves it.
 
+**The end-reason recorder is armed in the same step** (RL-16, 2026-09-05), immediately after the
+row and its prune — it writes into the directory the row just created, and from `ready` onward
+this runtime can be killed. Three mechanisms plus a floor: a Windows console control handler
+(`SetConsoleCtrlHandler` via ctypes, all five events, installed whether or not the process has a
+console); `SIGTERM`/`SIGHUP` handlers that record and then restore `SIG_DFL` and re-raise, so the
+process still dies exactly as it did before; and an `atexit` hook. Retention runs here too —
+`prune_serve_ended(...)` floors the directory at the newest `SERVE_ENDED_RETENTION = 20`, because
+nothing ever consumes a reason. Armed ONLY when the caller passes `record_end_reason=True`
+(`_cmd_serve` does; no `serve_loop` unit test does), for the same reason as `root_anchor` and
+`skill_install`: arming it mutates the HOST process. The record's shape is in
+`02-runtime-data-and-shapes.md`; which word each ending writes is in "How it ends" below.
+
 ## Stage 5 — the hygiene sweeps
 
 **Orphaned turns** (`orphaned_turn_sweep_ms`, `serve.py:2896` →
@@ -506,6 +518,28 @@ carrying a stuck worker hangs on the way out. Deadline `DEFAULT_DRAIN_DEADLINE_S
 `shutdown` is stdio-only (`OPS_STDIO_ONLY`, `serve.py:342`). There is no shutdown hook for the
 snapshot prewarm, the persona-prewarm worker, or the delivery drain: all three are daemons,
 deliberately, because a process on its way down must not wait on a cache fill.
+
+**Every ending names itself** (RL-16, 2026-09-05). Whichever of the paths above the runtime
+takes, it writes `serve_instances/<pid>.ended.json` on the way out — see
+`02-runtime-data-and-shapes.md` for the record and the closed vocabulary. Where each word is
+written, and why there:
+
+| ending | word | written by |
+| --- | --- | --- |
+| a drain (complete, timed out, or abandoned) | `drained` | `_finish_drain`, right after `_unregister_instance` — the tail can end in `os._exit`, which runs no `atexit` hook |
+| a stdio `{"op":"shutdown"}` | `shutdown_op` | the shutdown path, latched off `stdio_shutdown` |
+| stdin EOF on a NON-service serve | `stdin_eof` | the same path; unreachable under `--service`, where EOF parks |
+| Ctrl-C / Ctrl-Break, or a `KeyboardInterrupt` | `ctrl_c` | the console handler, else `serve_loop`'s `except KeyboardInterrupt` |
+| the console window closed | `ctrl_close` | the console handler (`CTRL_CLOSE_EVENT`) |
+| logoff or machine shutdown | `logoff` | the console handler (`CTRL_LOGOFF`/`CTRL_SHUTDOWN`), and `SIGHUP` on POSIX |
+| `SIGTERM` | `sigterm` | the boot handler, or the `--service` park's own handler while it holds the disposition |
+| an uncaught exception | `uncaught:<Type>` | `serve_loop`'s `except Exception`, which records and re-raises |
+| anything else that unwound the interpreter | `unknown_exit` | the `atexit` hook |
+| `TerminateProcess` / `taskkill /F` / a Job kill | **nothing** | nothing runs in the target; the ABSENCE is the reading, and the launcher words it `ended=absent` |
+
+One word for all three drain outcomes on purpose: the sidecar answers *why did this runtime
+end*, and the answer is "somebody drained it". HOW the drain went is already on the wire, in the
+terminal frame, with the counters that make it meaningful.
 
 ---
 

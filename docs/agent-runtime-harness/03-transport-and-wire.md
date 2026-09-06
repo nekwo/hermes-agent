@@ -101,6 +101,22 @@ Only authentication failures (`bad_proof`, `hello_required`, `hello_malformed`)
 charge the rate limiter; server-state reasons never do, because charging them
 made a blocked window extend itself forever.
 
+**Discovery reads rows, and rows only** (RL-16, 2026-09-05). Since the
+end-reason sidecar joined `serve_instances/`, that directory holds two file
+shapes — `<pid>.json` (the row) and `<pid>.ended.json` (why the runtime that
+wore that pid ended). `serve_registry.list_serve_instances` filters the suffix,
+and it is the ONE scan every consumer on this lane is built on:
+`resolve_socket_target` (hence `harness serve connect` and the launcher's
+`local_serve_attach`), `prune_stale_serve_instances`, and `harness status`'s
+`serves=<live>/<entries>`. A sidecar read as a row is a record with no pid, no
+port and no identity baseline, which classifies `unknown` — the fail-safe
+direction, and therefore a defect that reports nothing. **Nothing about the
+sidecar is on the wire**: no frame carries it, no op returns it, `ops` and `rpc`
+did not move, and the launcher reads the FILE beside the stale row it already
+found. The record's shape and its closed vocabulary are in
+`02-runtime-data-and-shapes.md`; which ending writes which word is in
+`04-boot-and-lifecycle.md`.
+
 ### 1.1 The gateway listener — the same lane, bound beyond loopback
 
 Since the remote gateway's Stage 1 a serve can open a SECOND listener. It is the

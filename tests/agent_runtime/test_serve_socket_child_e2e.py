@@ -219,8 +219,25 @@ def _argv_over_socket(
 
 
 def _registry_rows(env: dict[str, str]) -> list[Path]:
+    """The REGISTRY ROWS in ``serve_instances/`` — which is not everything in it.
+
+    Since RL-16 the directory holds a second file shape, ``<pid>.ended.json``,
+    the end-reason sidecar. It is written on the way out precisely so it
+    OUTLIVES the row's removal, so a helper that means "the row is gone" has to
+    say so; a bare ``*.json`` here turned every "registry entry gone" assertion
+    in this file into "the runtime left no forensic record", which is the
+    opposite claim. Same exclusion, same reason, as
+    ``serve_registry.list_serve_instances``.
+    """
+
+    from agent_runtime.serve_registry import SERVE_ENDED_SUFFIX
+
     runtime = Path(env["HERMES_AGENT_RUNTIME_ROOT"])
-    return list((runtime / "serve_instances").glob("*.json"))
+    return [
+        entry
+        for entry in (runtime / "serve_instances").glob("*.json")
+        if not entry.name.endswith(SERVE_ENDED_SUFFIX)
+    ]
 
 
 @_REAL_CHILD_SPAWN
@@ -372,7 +389,10 @@ def test_probe_then_drain_over_the_socket_against_a_real_serve_child(tmp_path):
         from agent_runtime.serve_socket import socket_lock_path, socket_owner_path
 
         runtime = tmp_path / "runtime"
-        assert list((runtime / "serve_instances").glob("*.json")) == []
+        # The ROW, not the directory: the RL-16 end-reason sidecar lives here
+        # too and is written to survive exactly this removal (see
+        # :func:`_registry_rows`, which this arm predates).
+        assert _registry_rows({"HERMES_AGENT_RUNTIME_ROOT": str(runtime)}) == []
         assert not socket_owner_path(runtime).exists()
         # The lock FILE survives on purpose — see SocketOwnerLock.release.
         # Unlinking it is a two-owner race on POSIX, where flock is held on
