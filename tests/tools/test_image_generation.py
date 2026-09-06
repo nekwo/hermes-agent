@@ -207,16 +207,27 @@ class TestGptQualityPinnedToMedium:
 # ---------------------------------------------------------------------------
 
 class TestModelResolution:
+    """`_resolve_fal_model` reads `load_config_readonly`, and so does this class.
 
-    def test_no_config_falls_back_to_default(self, image_tool):
-        with patch("hermes_cli.config.load_config", return_value={}):
+    It read `load_config` until `96cfc09a34` moved the tool onto the read-only
+    loader (a `load_config()` at import time scaffolds the home). These two
+    patched the retired name for months: the fallback case stayed green because
+    an unpatched empty home ALSO answers "no config", and the precedence case
+    went red the first time anything ran it with `FAL_IMAGE_MODEL` set — which
+    is CI slice 2 of run 33969282189, not a Linux fact. Patch what the function
+    calls or the assertion is about the ambient home.
+    """
+
+    def test_no_config_falls_back_to_default(self, image_tool, monkeypatch):
+        monkeypatch.delenv("FAL_IMAGE_MODEL", raising=False)
+        with patch("hermes_cli.config.load_config_readonly", return_value={}):
             mid, meta = image_tool._resolve_fal_model()
         assert mid == "fal-ai/flux-2/klein/9b"
 
 
     def test_config_wins_over_env_var(self, image_tool, monkeypatch):
         monkeypatch.setenv("FAL_IMAGE_MODEL", "fal-ai/z-image/turbo")
-        with patch("hermes_cli.config.load_config",
+        with patch("hermes_cli.config.load_config_readonly",
                    return_value={"image_gen": {"model": "fal-ai/nano-banana-pro"}}):
             mid, _ = image_tool._resolve_fal_model()
         assert mid == "fal-ai/nano-banana-pro"
