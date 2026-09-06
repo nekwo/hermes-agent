@@ -62,6 +62,8 @@ import time
 import pytest
 
 from agent_runtime.call_authorization import TIER_CONSOLE
+from agent_runtime.mission_chat_phases import TURN_TIMING_ORDER
+from agent_runtime.serve_rpc import RPC_CONTRACT_VERSION
 from hermes_cli.harness_parts.serve import dispatch_argv
 from tests.agent_runtime.test_serve_gateway_lane import (
     WAIT,
@@ -491,6 +493,39 @@ def test_a_device_tier_turn_reports_which_lane_carries_its_start_and_reply(
     # The turn's START is observable on this lane too: the first frame under the
     # request id arrives before its exit.
     assert per_request[0][0] < exit_at
+
+    # ── (a2) RO-7: the turn's own timing split rides that same payload ───────
+    #
+    # The per-request lane's LAST frame is the ``exit`` above, and it carries a
+    # code and nothing else — the launcher's fold models it as exactly that
+    # (``MissionControlStreamLine.exit(code)``, routed ``terminal: true`` by
+    # ``mission_control_serve_session_io.dart``). The last frame that carries a
+    # PAYLOAD is the ``--json`` object parsed above, which the launcher decodes
+    # into a map and its bridge calls "the conversational terminal". That is
+    # where a block a consumer has to READ can ride.
+    #
+    # This turn's agent is scripted and never reaches a provider, which makes
+    # it the honest demonstration of the absence rule on a REAL serve: the
+    # runner reported no provider durations, so those keys are not there — not
+    # zeroed.
+    timing = payload.get("timing")
+    assert timing is not None, payload
+    assert set(timing) <= set(TURN_TIMING_ORDER), timing
+    assert isinstance(timing["resident_actor_reused"], bool)
+    runner_timing = payload.get("profile_timing") or {}
+    for wire_key, source_key in (
+        ("turn_context_ms", "profile_conversation_turn_context_ms"),
+        ("responses_create_ms", "profile_provider_responses_create_ms"),
+        ("stream_consume_ms", "profile_provider_stream_consume_ms"),
+    ):
+        assert (wire_key in timing) == (source_key in runner_timing), (
+            wire_key,
+            timing,
+            runner_timing,
+        )
+    # ADDITIVE: the method surface's contract integer did not move for it, and
+    # the greeting a paired device gates on still says what it said.
+    assert hello["rpc"]["contract"] == RPC_CONTRACT_VERSION
 
     # ── (b) the stream lane ─────────────────────────────────────────────────
     # Recorded rather than hoped for, and asserted only where it is STABLE at

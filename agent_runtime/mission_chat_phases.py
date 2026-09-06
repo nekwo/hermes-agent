@@ -496,3 +496,115 @@ def safe_turn_phases(value: Any) -> dict[str, Any] | None:
             continue
         block[key] = coerced
     return block or None
+
+
+# ── RO-7: the turn's own split, on the wire ─────────────────────────────────
+#
+# The durable record has carried this breakdown since ``phases`` landed, and on
+# 2026-09-06 it answered the operator's question exactly once — by a
+# hand-written script that joined the launcher's ``[MissionChatTiming]`` line to
+# the ledger file on the turn id. That join said the extra seconds of a local
+# turn were spent BEFORE the provider (context assembly, correlated with
+# overlapping visibility-bundle builds), which is the opposite of what the
+# launcher's line alone suggested. An operator cannot write that script, and the
+# timing line is the only thing their log has.
+#
+# So the terminal payload of a chat turn carries a small, closed projection of
+# the same numbers. It is ADDITIVE in the strict sense (the set-plus-integer
+# rule's additive case): no existing key moves, no contract integer moves, and a
+# consumer that has never heard of it reads the payload exactly as before.
+
+#: The key the block rides under on a chat turn's terminal payload.
+TURN_TIMING_KEY = "timing"
+
+#: wire key → the ``phases`` mark/counter it copies. Elapsed-ms marks, so the
+#: same ceiling and the same absent-never-zero rule as the block they come from.
+_TIMING_FROM_PHASES: tuple[tuple[str, str], ...] = (
+    ("request_assembled_ms", "request_assembled"),
+    ("provider_first_byte_ms", "provider_first_byte"),
+    ("builds_overlapped", "builds_overlapped"),
+)
+
+#: wire key → the ``profile_timing`` key it copies. The ``profile_`` prefix is
+#: the runner's own namespacing (``profile_runner._profile_status_callback``);
+#: it is dropped here because the block's names are read by a person looking at
+#: one turn, not by a caller walking the runner's namespace.
+_TIMING_FROM_PROFILE: tuple[tuple[str, str], ...] = (
+    ("turn_context_ms", "profile_conversation_turn_context_ms"),
+    ("responses_create_ms", "profile_provider_responses_create_ms"),
+    ("stream_consume_ms", "profile_provider_stream_consume_ms"),
+)
+
+#: The runner's cold/warm receipt, copied as the BOOLEAN it means rather than
+#: the ``1``/``0`` it is written as. It is the one key here that is not a
+#: duration, and it is what makes the durations comparable across turns.
+_TIMING_REUSED_KEY = "resident_actor_reused"
+
+#: Every key the block may carry, in the order a human reads a turn: what
+#: hermes did, when the request left, when the first byte came back, what the
+#: provider spent, and the two facts that explain an outlier.
+TURN_TIMING_ORDER: tuple[str, ...] = (
+    "turn_context_ms",
+    "request_assembled_ms",
+    "provider_first_byte_ms",
+    "responses_create_ms",
+    "stream_consume_ms",
+    "builds_overlapped",
+    _TIMING_REUSED_KEY,
+)
+
+
+def turn_timing_block(
+    *, phases: Any, profile_timing: Any
+) -> dict[str, Any] | None:
+    """The ``timing`` block for one turn, or ``None`` when nothing is known.
+
+    Copies — never derives. Every value here was measured by the instrument
+    that owns it and is already on the durable record; this function's whole
+    job is to project seven of those numbers onto the turn's terminal payload
+    under names a person can read.
+
+    **The honesty contract is the record's own, unchanged.** A phase the turn
+    never reached has NO key — not ``0``, not ``null``. A turn that died before
+    the provider carries no ``provider_first_byte_ms``, and a consumer that
+    cannot tell that from a zero would report the fastest turn of the day.
+    Non-integers, booleans in a duration slot, negatives and absurd magnitudes
+    are DROPPED rather than coerced, exactly as :func:`safe_turn_phases` drops
+    them: this block is read straight off a wire frame, so it is sanitized on
+    the way out and not merely on the way in.
+    """
+
+    marks = phases if isinstance(phases, dict) else {}
+    timing = profile_timing if isinstance(profile_timing, dict) else {}
+    collected: dict[str, Any] = {}
+    for wire_key, source_key in _TIMING_FROM_PHASES:
+        value = _timing_int(
+            marks.get(source_key),
+            ceiling=_MAX_COUNT if wire_key == "builds_overlapped" else _MAX_ELAPSED_MS,
+        )
+        if value is not None:
+            collected[wire_key] = value
+    for wire_key, source_key in _TIMING_FROM_PROFILE:
+        value = _timing_int(timing.get(source_key), ceiling=_MAX_ELAPSED_MS)
+        if value is not None:
+            collected[wire_key] = value
+    reused = timing.get(_TIMING_REUSED_KEY)
+    if isinstance(reused, bool):
+        collected[_TIMING_REUSED_KEY] = reused
+    elif isinstance(reused, int):
+        collected[_TIMING_REUSED_KEY] = bool(reused)
+    block = {key: collected[key] for key in TURN_TIMING_ORDER if key in collected}
+    return block or None
+
+
+def _timing_int(raw: Any, *, ceiling: int) -> int | None:
+    """One non-negative integer under ``ceiling``, or ``None`` — never a zero
+    invented for an absence. ``bool`` is an ``int`` subclass, and a ``True``
+    that landed in a millisecond slot is corruption, not a one-ms phase."""
+
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    coerced = int(raw)
+    if coerced < 0 or coerced > ceiling:
+        return None
+    return coerced

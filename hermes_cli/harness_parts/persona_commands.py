@@ -3392,7 +3392,9 @@ def _mission_chat_commit_turn(plan, deferred, presence) -> int:
     )
     from agent_runtime.mission_chat_phases import (
         TURN_PHASES_KEY as MISSION_CHAT_TURN_PHASES_KEY,
+        TURN_TIMING_KEY as MISSION_CHAT_TURN_TIMING_KEY,
         mark_from_trace_payload as _mark_turn_phase_from_trace_payload,
+        turn_timing_block,
     )
     from agent_runtime.mission_chat_turns import (
         TURN_PROFILE_TIMING_KEY as MISSION_CHAT_TURN_PROFILE_TIMING_KEY,
@@ -4539,6 +4541,15 @@ def _mission_chat_commit_turn(plan, deferred, presence) -> int:
             requested_by_session=requested_by_session,
         )
 
+        # RO-7, built HERE and not inside the payload: the block is a COPY of
+        # what the ledger record carries, so it is read off the same two
+        # instruments the terminal persist below writes — `turn_phases` for the
+        # marks and counters, the handler's `_profile_timing` superset for the
+        # runner's durations. Built at commit, from the record's own numbers,
+        # so the frame and the file can never disagree about a turn.
+        turn_timing = turn_timing_block(
+            phases=turn_phases.snapshot(), profile_timing=_profile_timing
+        )
         data = {
             "ok": True,
             "protocol_version": 2 if stream else None,
@@ -4613,6 +4624,16 @@ def _mission_chat_commit_turn(plan, deferred, presence) -> int:
             # Without these, diagnosing a slow chat turn needs an in-process probe.
             "latency_ms": getattr(chat_result, "latency_ms", None),
             "profile_timing": dict(getattr(chat_result, "profile_timing", None) or {}) or None,
+            # RO-7: the same numbers, joined and named for a person. The two
+            # instruments above are the runner's own namespace and the record's
+            # phase marks; this is the seven-key projection of them, and it is
+            # what the launcher's `[MissionChatTiming]` line appends — so "where
+            # did this turn's time go" is one grep instead of a script that
+            # joins a diag line to a ledger file on the turn id. ABSENT when the
+            # turn knew nothing, and each key absent when its own phase never
+            # happened — never a zero. Additive: no key here moves and no
+            # contract integer moves with it.
+            **({MISSION_CHAT_TURN_TIMING_KEY: turn_timing} if turn_timing else {}),
             "resident_actor_reused": bool(
                 (getattr(chat_result, "profile_timing", None) or {}).get(
                     "resident_actor_reused"
