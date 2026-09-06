@@ -558,11 +558,14 @@ reds already named in the L-h-b section above, unchanged:
 `test_duplicate_helper_bodies`, `test_no_midtest_monkeypatch_undo`,
 `test_cli_contract_dump` (still this plan's own two-repo `--service` fixture
 debt) and `test_harness_json_root_observability::test_ledger_does_not_rot`. A
-fifth is new on main and not on this branch:
+fifth was new on main and not on this branch:
 `test_serve_stream_lane_parity::test_the_advertisement_grew_and_no_contract_integer_moved`
 went red at `7ea3ac94ea`, when `serve_rpc.manifest()` grew a `params` key the pin
 had not learned — `git diff origin/main --name-only` does not contain
-`serve_rpc.py`.
+`serve_rpc.py`. Main fixed it at `c3f339df1a` while this stage was running; the
+branch was replayed onto it and the whole serve set re-run there:
+`15 files, 326 tests passed, 0 failed (100% complete) in 91.6s (8 workers)`,
+covering the six serve modules, both new modules and every module touched.
 
 The remaining four are 8-way contention, and were re-run together in isolation:
 `6 files, 141 tests passed, 0 failed`.
