@@ -181,6 +181,26 @@ change.
 **Neither door accepts the other's credential**, in both directions: the root
 token is refused on the gateway lane, a pairing code is refused on loopback.
 
+**One live row per account device** (RL-23, 2026-09-06). A redeem used to write
+a row and revoke nothing, so a launcher re-pairing on a backoff left a live
+credential per attempt — five rows on this machine for one Mac, fourteen on the
+Mac for this one, every one of them able to open the door. A redeem whose
+pending entry named an `account_device_id` now revokes every non-revoked row
+carrying that same label IN THE SAME WRITE, stamping `revoked_reason:
+"superseded"` and `superseded_by: <the new device id>` (both additive; absent on
+every earlier row and on every hand-run `harness gateway revoke`, and absent
+reads as "nobody said"). No reader ever observes two live rows for one device.
+An UNLABELLED row supersedes nothing — `harness gateway pair` names no device,
+because a phone has no id until it redeems, so treating the absent label as a
+key would collapse every manually paired device into one. The far side's old
+credential still verifies as a signature and its row is revoked, so the door
+answers `device_revoked` — the honest word, and a different sentence from
+`unknown_device`, though the WIRE still collapses both into one `bad_proof`.
+`note_device_seen` and the verifier path are untouched.
+`serve_gateway_auth.prune_revoked_devices` deletes revoked rows thirty days past
+their `revoked_at` at serve boot, beside the two `serve_instances` prunes; a live
+row is never a candidate at any age, and an unreadable `revoked_at` is kept.
+
 **The argv lane is unreachable from a device**, and that refusal is what makes
 the tier gate real rather than decorative: `authorize_call` gates the METHOD
 lane, while `{"argv": ["harness", …]}` reaches the CLI dispatcher where no tier

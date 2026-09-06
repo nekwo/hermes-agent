@@ -22,6 +22,19 @@ Two files, both under ``<store_root>/gateway/`` beside ``install.json``:
   from the pending entry an ``introduce`` scoped, and nothing authenticates
   against it (:class:`DeviceRecord`).
 
+  **One live row per account device** (RL-23). A redeem scoped to an
+  ``account_device_id`` revokes every non-revoked row carrying the same label,
+  in the same write, stamping ``revoked_reason: "superseded"`` and
+  ``superseded_by: <the new device id>`` on each — two additive fields, absent
+  on every row written before the rule and absent on every hand-run revoke.
+  Before it, a launcher re-pairing on a backoff minted a live credential per
+  attempt: five rows on one machine for one far device, fourteen on the other
+  side. An UNLABELLED row supersedes nothing, because an unlabelled row is
+  attributable to nobody. The old credential's next hello answers
+  ``device_revoked`` — the honest word — and
+  :func:`prune_revoked_devices` removes revoked rows thirty days after their
+  ``revoked_at``, at serve boot, never a live one.
+
   **``expires_at`` is S2's one new credential rule** (R-IP15 as amended).
   ``None`` means never, and that is what every manual ``harness gateway pair``
   keeps minting; a code minted by ``harness gateway introduce`` carries
@@ -183,6 +196,8 @@ __all__ = [
     "MAX_FAILED_REDEEMS",
     "MAX_PENDING_CODES",
     "PAIRING_STORE_FILENAME",
+    "REVOKED_ROW_RETENTION_SECONDS",
+    "REVOKED_SUPERSEDED",
     "AUTH_BAD_PROOF",
     "AUTH_MALFORMED",
     "AUTH_OK",
@@ -201,6 +216,7 @@ __all__ = [
     "mint_pairing_code",
     "note_device_seen",
     "pairing_store_path",
+    "prune_revoked_devices",
     "redeem_pairing_code",
     "revoke_device",
     "verify_device_proof",
@@ -270,6 +286,20 @@ AUTH_EXPIRED = "device_expired"
 #: exists for the credential nobody carried by hand — the one a backend grant
 #: introduced — which is exactly the one that should not outlive its errand.
 CREDENTIAL_TTL_SECONDS_INTRODUCED = 30 * 86400
+
+#: Why a row was revoked, when this module revoked it rather than an operator
+#: (RL-23). The only value today: the far launcher redeemed a NEW code for the
+#: same ``account_device_id``, so the old credential is superfluous rather than
+#: compromised. An operator's ``harness gateway revoke`` still writes no reason
+#: at all, and that absence is the reading — nobody automated it.
+REVOKED_SUPERSEDED = "superseded"
+
+#: How long a REVOKED row is kept before the boot prune removes it — thirty
+#: days, the same span as an introduced credential and for a related reason: the
+#: row's remaining job is to answer "why did my Mac stop connecting", and after a
+#: month nobody is asking. A LIVE row is never a candidate at any age, and a row
+#: whose ``revoked_at`` will not parse is kept (:func:`prune_revoked_devices`).
+REVOKED_ROW_RETENTION_SECONDS = 30 * 86400
 
 #: The tier a pairing run on the install's own machine confers, per R11 as
 #: ruled: the operator standing at the console IS the account-auth trace, so the
@@ -361,6 +391,15 @@ class DeviceRecord:
     #: this row to the account row an operator sees in the launcher's sheet
     #: (R-IP14, one bookkeeping) — and nothing authenticates against it.
     account_device_id: str | None = None
+    #: Why this row was revoked, when the runtime revoked it rather than an
+    #: operator: :data:`REVOKED_SUPERSEDED`, or ``None`` for every hand-run
+    #: ``harness gateway revoke`` and every row written before RL-23.
+    revoked_reason: str | None = None
+    #: The credential that replaced this one, when :attr:`revoked_reason` is
+    #: ``superseded``. The two travel together on purpose — a revoked row that
+    #: names its successor turns a column of dead credentials into one device's
+    #: history.
+    superseded_by: str | None = None
 
     @property
     def expired(self) -> bool:
@@ -389,6 +428,8 @@ class DeviceRecord:
             "expires_at": self.expires_at,
             "expired": self.expired,
             "account_device_id": self.account_device_id,
+            "revoked_reason": self.revoked_reason,
+            "superseded_by": self.superseded_by,
         }
 
 
@@ -630,6 +671,62 @@ def revoke_device(
         return StoreRefusal(_os_reason(exc), str(exc))
 
 
+def prune_revoked_devices(
+    store_root: Path | str,
+    *,
+    retention_seconds: int = REVOKED_ROW_RETENTION_SECONDS,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Delete revoked rows whose ``revoked_at`` is older than the retention.
+
+    The floor under RL-23's supersession, and it is needed because that rule
+    turns every re-pair into a kept row: without a floor, a launcher that
+    re-pairs on a backoff writes a permanent line per attempt. Called once at
+    serve boot, beside the ``serve_instances`` prunes and for the same reason
+    they run there — a boot is a WRITE moment, and a read must not destroy the
+    evidence it reports.
+
+    Three things it will not do, each a fail-safe direction rather than an
+    optimisation:
+
+    * **A live row is never a candidate**, at any age. Age is not a revocation;
+      a credential nobody threw out is one somebody is still using.
+    * **An unreadable ``revoked_at`` is kept.** ``stamp_passed`` reads a stamp it
+      cannot parse as "not yet", and this call inherits that — a clock this build
+      cannot read must not authorise a delete.
+    * **It never raises.** A bookkeeping sweep that could fail a boot would be a
+      worse defect than the growth it exists to bound.
+    """
+
+    stamp = now if now is not None else time.time()
+    cutoff = stamp - max(0, int(retention_seconds))
+    deleted: list[str] = []
+    try:
+        with _store_lock(store_root):
+            rows = _read_devices(store_root)
+            for device_id, row in list(rows.items()):
+                if not isinstance(row, dict) or not row.get("revoked"):
+                    continue
+                if not _stamp_passed(row.get("revoked_at"), now=cutoff):
+                    continue
+                del rows[device_id]
+                deleted.append(str(device_id))
+            if deleted:
+                _write_devices(store_root, rows)
+            return {
+                "deleted": deleted,
+                "deleted_count": len(deleted),
+                "kept_count": len(rows),
+            }
+    except (OSError, HarnessLockUnavailable) as exc:
+        return {
+            "deleted": [],
+            "deleted_count": 0,
+            "kept_count": 0,
+            "error": _os_reason(exc),
+        }
+
+
 def mint_pairing_code(
     store_root: Path | str,
     *,
@@ -786,6 +883,38 @@ def redeem_pairing_code(
             except (TypeError, ValueError):
                 ttl_seconds = 0
             rows = _read_devices(store_root)
+            account_device_id = _clean_name(matched.get("for_device_id")) or None
+            # RL-23. One live row per account device, decided HERE because this
+            # is the only moment the store learns that a far launcher has a NEW
+            # credential — and therefore the only moment its old ones are
+            # provably superfluous. Before this, a launcher re-pairing on a
+            # backoff minted a row per attempt and revoked none: five live rows
+            # on this machine for one Mac, fourteen on the Mac for this one.
+            #
+            # Scoped by ``account_device_id`` and skipped when it is absent: an
+            # unlabelled row (every manual ``harness gateway pair`` — a phone has
+            # no id until it redeems) is attributable to nobody, so treating the
+            # absent label as a key would collapse every such device into one and
+            # let each redeem unpair all the others.
+            #
+            # In the SAME write as the new row, so no reader ever observes two
+            # live credentials for one device; and a revocation, not a delete,
+            # because revocation has always kept its row — that is what lets an
+            # audit tell "superseded on the 5th" from "never paired".
+            if account_device_id:
+                for prior in rows.values():
+                    if not isinstance(prior, dict) or prior.get("revoked"):
+                        continue
+                    if prior.get("account_device_id") != account_device_id:
+                        continue
+                    prior["revoked"] = True
+                    prior["revoked_at"] = _iso(stamp)
+                    # Additive, and the pair is the point: the WORD says an
+                    # operator did not do this, and the ID says which credential
+                    # replaced it. A revoked row that explains itself is the
+                    # difference between a history and five mysteries.
+                    prior["revoked_reason"] = REVOKED_SUPERSEDED
+                    prior["superseded_by"] = device_id
             rows[device_id] = {
                 "device_id": device_id,
                 "name": name,
@@ -860,6 +989,14 @@ def _decode_device(row: Any) -> DeviceRecord | None:
         account_device_id=(
             str(row["account_device_id"]) if row.get("account_device_id") else None
         ),
+        # Both absent on every row written before RL-23, and absent reads as
+        # "nobody said" — the same migration story ``expires_at`` has: a new
+        # fact with a legal empty value needs no rewrite pass and no contract
+        # bump.
+        revoked_reason=(
+            str(row["revoked_reason"]) if row.get("revoked_reason") else None
+        ),
+        superseded_by=(str(row["superseded_by"]) if row.get("superseded_by") else None),
     )
 
 

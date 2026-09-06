@@ -597,3 +597,177 @@ def test_the_account_device_id_label_lands_on_the_row_and_is_not_a_check(tmp_pat
     assert record.device_id.startswith("dev_")
     assert record.device_id != "dev-acct-1"
     assert record.payload()["account_device_id"] == "dev-acct-1"
+
+
+# ── RL-23: one live device row per account device ───────────────────────────
+#
+# The redeem wrote a new row per code and revoked nothing, so a launcher that
+# re-paired on a backoff minted a credential per attempt and every one of them
+# stayed live: five rows on this machine for ONE far device (§8.10 verdict 10,
+# the Mac's side held fourteen). Nothing authenticates against
+# ``account_device_id`` — it is a label — but it is exactly the label that says
+# which rows are the SAME far launcher, so it is the key the supersession reads.
+
+
+def redeem_for(root: Path, account_device_id: str | None, *, now: float):
+    """One full ceremony scoped (or not) to an account device."""
+
+    minted = mint_pairing_code(root, for_device_id=account_device_id, now=now)
+    assert isinstance(minted, PairingCode)
+    credential = redeem_pairing_code(root, minted.code, now=now + 1)
+    assert isinstance(credential, DeviceCredential)
+    return credential
+
+
+def test_a_second_redeem_for_one_account_device_leaves_exactly_one_live_row(
+    tmp_path: Path,
+):
+    """The whole ruling in one measurement: re-pairing replaces a credential, it
+    does not accumulate one. The superseded row is KEPT (revocation always keeps
+    its row, so an audit can tell it from never-paired) and it NAMES its
+    replacement, which is what makes five old rows readable as one device's
+    history rather than five unexplained live credentials."""
+
+    first = redeem_for(tmp_path, "ad3b6525", now=1000.0)
+    second = redeem_for(tmp_path, "ad3b6525", now=2000.0)
+
+    rows = {record.device_id: record for record in list_devices(tmp_path)}
+    assert len(rows) == 2
+    live = [record for record in rows.values() if not record.revoked]
+    assert [record.device_id for record in live] == [second.device_id]
+
+    superseded = rows[first.device_id]
+    assert superseded.revoked is True
+    assert superseded.revoked_at
+    assert superseded.revoked_reason == "superseded"
+    assert superseded.superseded_by == second.device_id
+    # Written in the SAME store write as the new row: a reader can never observe
+    # the window where both are live.
+    assert superseded.revoked_at == rows[second.device_id].created_at
+
+
+def test_a_redeem_for_a_different_account_device_leaves_the_others_alone(
+    tmp_path: Path,
+):
+    """Scoped by the label and by nothing else. A second far launcher pairing is
+    not evidence about the first one, and a supersession that ignored the label
+    would be an unpair nobody asked for."""
+
+    mac = redeem_for(tmp_path, "ad3b6525", now=1000.0)
+    phone = redeem_for(tmp_path, "ffff0001", now=2000.0)
+
+    records = {record.device_id: record for record in list_devices(tmp_path)}
+    assert records[mac.device_id].revoked is False
+    assert records[phone.device_id].revoked is False
+
+    proof = device_proof(mac.token, "a" * 64, port=8765, device_id=mac.device_id)
+    assert verify_device_proof(
+        tmp_path, mac.device_id, proof, "a" * 64, port=8765
+    ).outcome == AUTH_OK
+
+
+def test_a_row_with_no_account_device_id_supersedes_nothing(tmp_path: Path):
+    """``harness gateway pair`` names no device — a phone has no id until it
+    redeems — so an unlabelled row is not attributable to anybody. Treating the
+    absent label as a key would collapse every manually paired device on the
+    machine into one, and each redeem would revoke all the others."""
+
+    first = redeem_for(tmp_path, None, now=1000.0)
+    second = redeem_for(tmp_path, None, now=2000.0)
+    labelled = redeem_for(tmp_path, "ad3b6525", now=3000.0)
+
+    records = {record.device_id: record for record in list_devices(tmp_path)}
+    assert len(records) == 3
+    assert [record.revoked for record in records.values()] == [False, False, False]
+    assert records[first.device_id].account_device_id is None
+    assert records[second.device_id].account_device_id is None
+    assert records[labelled.device_id].account_device_id == "ad3b6525"
+
+
+def test_the_superseded_credential_is_refused_with_the_honest_word(tmp_path: Path):
+    """What the far side experiences. Its old token still verifies as a SIGNATURE
+    — the verifier is on the row until the prune removes it — and the row is
+    revoked, so the door answers ``device_revoked``. That is the truth the far
+    launcher needs to re-pair, and it is a different sentence from
+    ``unknown_device``, which would send an operator looking for a store that
+    lost their pairing."""
+
+    old = redeem_for(tmp_path, "ad3b6525", now=1000.0)
+    new = redeem_for(tmp_path, "ad3b6525", now=2000.0)
+
+    stale = device_proof(old.token, "b" * 64, port=8765, device_id=old.device_id)
+    refused = verify_device_proof(tmp_path, old.device_id, stale, "b" * 64, port=8765)
+    assert refused.outcome == AUTH_REVOKED
+    assert refused.ok is False
+
+    fresh = device_proof(new.token, "b" * 64, port=8765, device_id=new.device_id)
+    assert verify_device_proof(
+        tmp_path, new.device_id, fresh, "b" * 64, port=8765
+    ).outcome == AUTH_OK
+
+
+def test_the_boot_prune_deletes_only_revoked_rows_older_than_thirty_days(
+    tmp_path: Path,
+):
+    """The floor under the supersession. Without it every re-pair leaves a row
+    forever; with it a revoked row survives long enough to answer an operator's
+    "why did my Mac stop connecting" and then goes. A LIVE row is never a
+    candidate however old it is — age is not a revocation."""
+
+    from agent_runtime.serve_gateway_auth import (
+        REVOKED_ROW_RETENTION_SECONDS,
+        prune_revoked_devices,
+    )
+
+    assert REVOKED_ROW_RETENTION_SECONDS == 30 * 24 * 3600
+
+    # Three rows, revoked (or not) at known moments — the ages are what this
+    # test is about, so nothing here leans on the supersession that writes them.
+    ancient = redeem_for(tmp_path, "ffff0001", now=1000.0)
+    recent = redeem_for(tmp_path, "ffff0002", now=1000.0)
+    live = redeem_for(tmp_path, "ffff0003", now=1000.0)
+    assert not isinstance(revoke_device(tmp_path, ancient.device_id, now=1000.0), StoreRefusal)
+    assert not isinstance(
+        revoke_device(
+            tmp_path, recent.device_id, now=1000.0 + REVOKED_ROW_RETENTION_SECONDS
+        ),
+        StoreRefusal,
+    )
+
+    # A day past the ancient row's thirty days, and a day short of the recent
+    # one's — one deletion, one survivor, and the live row untouched.
+    when = 1000.0 + REVOKED_ROW_RETENTION_SECONDS + 86400.0
+    report = prune_revoked_devices(tmp_path, now=when)
+
+    assert report["deleted"] == [ancient.device_id]
+    assert report["deleted_count"] == 1
+    remaining = {record.device_id for record in list_devices(tmp_path)}
+    assert remaining == {recent.device_id, live.device_id}
+    assert lookup_device(tmp_path, live.device_id).revoked is False
+
+
+def test_the_prune_never_touches_a_live_row_or_an_unreadable_stamp(tmp_path: Path):
+    """Both fail-safe directions, together. A row with no readable ``revoked_at``
+    is kept — the same direction ``stamp_passed`` fails in, and for the same
+    reason: a clock this build cannot read must not authorise a delete."""
+
+    import json
+
+    from agent_runtime.serve_gateway_auth import prune_revoked_devices
+
+    live = redeem_for(tmp_path, "ffff0001", now=1000.0)
+    broken = redeem_for(tmp_path, "ffff0002", now=1000.0)
+    revoke_device(tmp_path, broken.device_id, now=1000.0)
+
+    path = device_store_path(tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["devices"][broken.device_id]["revoked_at"] = "not a timestamp"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    report = prune_revoked_devices(tmp_path, now=1000.0 + 10 * 365 * 86400)
+
+    assert report["deleted"] == []
+    assert {record.device_id for record in list_devices(tmp_path)} == {
+        live.device_id,
+        broken.device_id,
+    }

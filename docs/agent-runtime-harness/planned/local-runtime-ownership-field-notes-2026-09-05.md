@@ -697,3 +697,94 @@ caller string is a write amplifier.
   `assert ['argv_parse_failed'] == ['argv_root_unsupported']` — the same red
   as before the fix, i.e. the harness parser is reached and rejects a verb it
   does not own. Restored.
+
+### Q-h.5 RL-23 — the red, measured
+
+Six tests in `tests/agent_runtime/test_serve_gateway_auth.py` plus one boot
+wiring test in `tests/agent_runtime/test_serve_service_mode.py`. Run against the
+product file as it stood at `2b60814566` (the RL-24 commit), i.e. with no part of
+RL-23 in it:
+
+```
+FAILED test_a_second_redeem_for_one_account_device_leaves_exactly_one_live_row
+  AssertionError: assert ['dev_9c7ba12...417d17ae954e'] == ['dev_59e8417d17ae954e']
+FAILED test_the_superseded_credential_is_refused_with_the_honest_word
+  AssertionError: assert 'ok' == 'device_revoked'
+FAILED test_the_boot_prune_deletes_only_revoked_rows_older_than_thirty_days
+  ImportError: cannot import name 'REVOKED_ROW_RETENTION_SECONDS'
+FAILED test_the_prune_never_touches_a_live_row_or_an_unreadable_stamp
+  ImportError: cannot import name 'prune_revoked_devices'
+4 failed, 37 passed in 14.39s
+```
+
+The first line IS the defect, in the currency the queue row reported it in: two
+live rows for one account device, and the second is *"the old credential still
+authenticates"* — the reason five stale rows were not merely untidy.
+
+Two of the six were green before the change and are meant to be: the
+different-account test and the unlabelled-row test pin what must NOT move, and a
+supersession scoped by anything other than the label would have turned them red.
+
+### Q-h.6 RL-23 — what changed
+
+* `redeem_pairing_code` revokes prior non-revoked rows carrying the same
+  `account_device_id` in the SAME store write as the new row, stamping
+  `revoked_reason: "superseded"` and `superseded_by: <new device_id>`. Skipped
+  entirely when the label is absent.
+* `DeviceRecord` learns both fields (absent reads as `None` — the migration story
+  `expires_at` already has), and `payload()` carries them to the operator
+  surfaces.
+* `prune_revoked_devices(store_root, *, retention_seconds, now)` deletes revoked
+  rows past `REVOKED_ROW_RETENTION_SECONDS` (30 days), reusing `stamp_passed`
+  against a shifted cutoff so there is ONE stamp reader in this store. It never
+  raises, never touches a live row, and keeps a row whose `revoked_at` will not
+  parse.
+* `serve_loop`'s boot calls it beside the two `serve_instances` prunes, gated on
+  `store_root_path is not None` and NOT on `record_end_reason`: the device store
+  belongs to the root, not to service mode.
+
+`note_device_seen`, `verify_device_proof` and `revoke_device` are untouched. The
+row pair after a second redeem, from a throwaway root (verifiers elided here,
+never written by the test):
+
+```json
+"dev_f4d213de52568f52": {
+  "created_at": "…T23:53:21+00:00", "revoked": true,
+  "revoked_at": "…T23:53:21+00:00", "account_device_id": "ad3b6525",
+  "revoked_reason": "superseded", "superseded_by": "dev_3c62b5f865a2f530"
+},
+"dev_3c62b5f865a2f530": {
+  "created_at": "…T23:53:21+00:00", "revoked": false, "revoked_at": null,
+  "account_device_id": "ad3b6525"
+}
+```
+
+The revoked row's `revoked_at` equals its successor's `created_at` — the same
+write, which is the property that stops any reader from seeing two live rows.
+
+### Q-h.7 RL-23 — mutation record
+
+* Product file reverted to its pre-RL-23 state: the four reds above. Restored.
+* Boot prune call replaced with `pass`: the wiring test fails with
+  `assert ['dev_2a3391c…', 'dev_bfa9bb6e7411fd6d'] == ['dev_bfa9bb6e7411fd6d']`
+  — the ancient revoked row survives the boot. Restored.
+
+### Q-h.8 Deviations, and what is NOT proven
+
+* **`handler_exit` is unreachable in production today.** No shipped handler calls
+  `sys.exit()` (grep, recorded above), so the frame is proven by a parser
+  injected in the test and not by a hermes verb. That is the point of landing it
+  now: the launcher's fallback stops depending on a property of the handler set.
+* **No launcher fixture was captured.** `tool/hermes_serve_frames/generate.py`
+  captures `error_argv_parse_failed` from a real child and that frame is
+  byte-unchanged, so `--check` stays green. The two new words have no fixture
+  and no launcher decode yet; both are Q-l's, and the frames are pinned on this
+  side by `test_harness_serve.py` in the meantime.
+* **The supersession was never run against a real pairing over the wire.** Every
+  RL-23 test drives the store functions directly, which is what those functions
+  take a root for; the gateway handshake path is unchanged and is proven by its
+  own existing tests, not re-proven here.
+* **The five live rows on the operator's machine are still there.** Nothing in
+  this stage rewrites an existing store: supersession applies from the next
+  redeem, and the prune only removes rows something revoked. Collapsing the
+  existing five is an operator action (re-pair, or `harness gateway revoke`).

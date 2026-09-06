@@ -517,3 +517,40 @@ def test_the_ops_manifest_advertises_service_on_every_transport():
             serve_module.ops_manifest(transport=transport)["contract"]
             == serve_module.OPS_CONTRACT_VERSION
         )
+
+
+def test_a_boot_prunes_revoked_device_rows_past_their_retention(tmp_path):
+    """RL-23's floor, wired where the other two boot prunes are.
+
+    Supersession keeps the row it revokes — that is what makes a column of dead
+    credentials readable as one device's history — so something has to remove
+    them eventually or the store grows for the life of the machine. Seeded here
+    through the real ceremony rather than by writing JSON: the row a prune is
+    allowed to delete is exactly the row a redeem and a revoke produce.
+    """
+
+    import time as _time
+
+    from agent_runtime import paths
+    from agent_runtime.serve_gateway_auth import (
+        list_devices,
+        mint_pairing_code,
+        redeem_pairing_code,
+        revoke_device,
+    )
+
+    root = paths.store_root()
+    ancient = redeem_pairing_code(root, mint_pairing_code(root, now=0.0).code, now=1.0)
+    revoke_device(root, ancient.device_id, now=2.0)
+    now = _time.time()
+    live = redeem_pairing_code(root, mint_pairing_code(root, now=now).code, now=now)
+    assert {record.device_id for record in list_devices(root)} == {
+        ancient.device_id,
+        live.device_id,
+    }
+
+    with _serve() as handle:
+        assert handle.ready["event"] == "ready"
+        # The prune runs BEFORE the ready frame, beside the registry prunes, so
+        # reading the store here is reading what the boot left.
+        assert [record.device_id for record in list_devices(root)] == [live.device_id]

@@ -3633,6 +3633,30 @@ def serve_loop(
                 prune_serve_ended(store_root_path)
             except Exception:
                 pass
+
+        # ── RL-23: the floor under credential supersession ──────────────────
+        #
+        # Beside the two sidecar prunes and for the third version of the same
+        # reason: a redeem now REVOKES the rows it replaces rather than leaving
+        # them live, and a revoked row nobody ever deletes is growth with a
+        # different name. Thirty days is how long "why did my Mac stop
+        # connecting" stays a question worth answering.
+        #
+        # NOT gated on ``record_end_reason``: that flag says this runtime is a
+        # SERVICE and owes an end reason, while the device store is the root's
+        # regardless of how the runtime that opened it was started. Deleting
+        # only revoked rows past the retention is what makes running it on every
+        # boot safe — a live credential is never a candidate at any age.
+        #
+        # Silent and swallowed, like its neighbours: bookkeeping must never be
+        # the thing that fails a boot.
+        if store_root_path is not None:
+            try:
+                from agent_runtime.serve_gateway_auth import prune_revoked_devices
+
+                prune_revoked_devices(store_root_path)
+            except Exception:
+                pass
         timeline.mark("service_foundations_ms")
         # Orphaned-turn sweep BEFORE the ready frame: serve boot is the moment
         # a launcher restart replaces a dead runtime, and the first hydrate is
