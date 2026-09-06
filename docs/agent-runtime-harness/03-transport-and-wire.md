@@ -836,7 +836,7 @@ existed the log named none of them:
 |---|---|---|
 | socket/stdio op lane | `subscribe` / `stream_lane` | `serve.py:2986` |
 | RPC office lane | `runtime.office.subscribe` / `office_patch` | `serve_office_subscriptions.py:902` |
-| argv CLI | `harness_stream` / `cli_stream` | `runtime_commands.py:621-622` |
+| argv CLI | `harness_stream` / `cli_stream` | `runtime_commands.py:630-631` |
 
 `op` is the call as the client made it, `purpose` is what the attachment is FOR
 — neither implies the other. `pid` rides LAST here and on both build families
@@ -847,7 +847,7 @@ never raises — an instrument must not be why a subscribe fails.
 **Who paints the boot's one stale core is a property of the ROOM**, so
 `stream_frames(wants_stale_first=…)` is stated by the caller —
 `serve.py::_room_wants_stale_first` (`:3375`) reads the hub's two subscriber
-tables at producer-build time, `_cmd_stream` (`runtime_commands.py:611`) states
+tables at producer-build time, `_cmd_stream` (`runtime_commands.py:620`) states
 `True`, default `False`. It cannot be re-derived inside the producer: the
 subscriber attaching FIRST at boot is the RPC office lane, whose sink discards
 every non-`office_actor` row, and measured 2026-08-18 two boots in three handed
