@@ -577,6 +577,55 @@ def test_note_peer_seen_stamps_the_cache_and_never_raises(tmp_path):
     assert peer_cache_path(tmp_path).exists()
 
 
+def test_one_event_is_stamped_from_one_clock_read():
+    """The structural half of the assertion above, over the whole module.
+
+    ``_iso(None)`` reads the wall clock, so a writer that calls it twice stamps
+    two fields describing the SAME event from two different instants. That is
+    what made ``last_hello_at == last_seen`` red on every Linux CI runner (run
+    33969282189, slice 8: two stamps 7 microseconds apart) while Windows'
+    coarser clock returned the same value and hid it for months. The same scan
+    found two more writers with the identical shape — ``cache_peer_roster``
+    (the event's ``fetched_at`` and the row's) and ``apply_peer_announce``
+    (``last_announce_at`` and ``revoked_you_at``) — neither of which any test
+    covered, so a behavioural assertion alone would have left them.
+
+    A function here takes ``now`` precisely so its stamps are ONE decision;
+    resolving it once and reusing the string is the rule.
+    """
+
+    import ast
+    import pathlib
+
+    import agent_runtime.gateway_peers as module
+
+    tree = ast.parse(pathlib.Path(module.__file__).read_text(encoding="utf-8"))
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        reads = [
+            child
+            for child in ast.walk(node)
+            if isinstance(child, ast.Call)
+            and isinstance(child.func, ast.Name)
+            and child.func.id == "_iso"
+            and len(child.args) == 1
+            and isinstance(child.args[0], ast.Name)
+            and child.args[0].id == "now"
+        ]
+        if len(reads) > 1:
+            lines = ", ".join(str(call.lineno) for call in reads)
+            offenders.append(f"{node.name} (lines {lines}): {len(reads)} reads")
+
+    assert offenders == [], (
+        "these read the clock more than once for a single event, so the fields "
+        "they stamp can disagree by whatever the host's clock resolution "
+        "exposes:\n  " + "\n  ".join(offenders) + "\n\nResolve `_iso(now)` into "
+        "a local once and write every field from it."
+    )
+
+
 # ── endpoints ────────────────────────────────────────────────────────────────
 
 

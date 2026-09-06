@@ -673,13 +673,20 @@ def note_peer_seen(
     has authenticated whether or not this write lands.
     """
 
+    # ONE hello, ONE clock read. `_iso(None)` reads the wall clock, so calling
+    # it twice stamped two fields that describe the SAME event from two
+    # instants: on Linux they landed 7 microseconds apart and the contract test
+    # asserting `last_hello_at == last_seen` was red on every CI runner, while
+    # Windows' coarser clock made them equal and hid it. Resolve first, write
+    # both.
+    stamp = _iso(now)
     _touch_cache(
         store_root,
         peer_install_id,
         change="last_seen",
         now=now,
-        last_seen=_iso(now),
-        last_hello_at=_iso(now),
+        last_seen=stamp,
+        last_hello_at=stamp,
         reachability=REACHABILITY_REACHABLE,
         unreachable_since=None,
     )
@@ -1647,6 +1654,9 @@ def cache_peer_roster(
     for row in list(rows or ())[:PEER_CACHE_ROSTER_CAP]:
         if isinstance(row, dict):
             kept.append(dict(row))
+    # ONE fetch, ONE clock read — the event and the row report the same
+    # `fetched_at` because they report the same fetch. See `note_peer_seen`.
+    fetched_at = _iso(now)
     _touch_cache(
         store_root,
         peer_install_id,
@@ -1656,10 +1666,10 @@ def cache_peer_roster(
         event_payload={"count": len(kept)},
         event_detail={
             "workspace_id": str(workspace_id or "") or None,
-            "fetched_at": _iso(now),
+            "fetched_at": fetched_at,
         },
         roster={
-            "fetched_at": _iso(now),
+            "fetched_at": fetched_at,
             "workspace_id": str(workspace_id or "") or None,
             "rows": kept,
         },
@@ -1693,7 +1703,10 @@ def apply_peer_announce(
     if not caller or not isinstance(payload, dict):
         return []
 
-    changes: dict[str, Any] = {"last_announce_at": _iso(now)}
+    # ONE announce, ONE clock read: `revoked_you_at` below records the same
+    # message arriving, not a later one. See `note_peer_seen`.
+    announced_at = _iso(now)
+    changes: dict[str, Any] = {"last_announce_at": announced_at}
     written: list[str] = []
 
     name = clean_display_name(payload.get("display_name")) or None
@@ -1724,7 +1737,7 @@ def apply_peer_announce(
 
     if payload.get("revoked_you") is True:
         changes["revoked_you"] = True
-        changes["revoked_you_at"] = _iso(now)
+        changes["revoked_you_at"] = announced_at
         written.extend(["revoked_you", "revoked_you_at"])
 
     correlation = str(payload.get("correlation_id") or "").strip()[:64]
