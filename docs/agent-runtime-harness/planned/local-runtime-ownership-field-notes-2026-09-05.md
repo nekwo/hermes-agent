@@ -379,3 +379,200 @@ generator, which an idle serve is not. But the sentence is written down here
 because it is the assumption this stage rests on, and the proof is the
 launcher-side read the operator already has queued: attached and idle should now
 print nothing, and print `work: 1` the moment a turn starts.
+
+---
+
+# L-h-c — the runtime says why it ended (RL-16, 2026-09-05)
+
+Third hermes stage on the same plan (`local-runtime-ownership-and-retry-safety.md`
+§8.8b, ruling RL-16, hermes half). Worktree `wt/l-serve-service`, branch
+`feat/lh-ended-sidecar`, from main `28e502e286`. Two files of product code
+(`agent_runtime/serve_registry.py`, `hermes_cli/harness_parts/serve.py`), two new
+test modules, one existing test module corrected, three canon docs. Nothing
+touched the operator's live store or the live venv: every real serve this stage
+spawned ran under a temp root with `HERMES_AGENT_RUNTIME_ROOT`, `HERMES_HOME`,
+`HERMES_HEAD_HOME`, `HOME`, `USERPROFILE`, `LOCALAPPDATA` and `APPDATA` all
+pinned inside `tmp_path`.
+
+## 1. What was measured, before anything was changed
+
+Read at pickup, at `28e502e286`:
+
+| Claim | Verdict |
+|---|---|
+| every reader of `serve_instances/` funnels through `serve_registry.list_serve_instances` | true for PRODUCT code — `serve_socket.resolve_socket_target`, `runtime_commands._attach_runtime_service_blocks` and `prune_stale_serve_instances` all call it; `gateway_peers` only names the directory in prose |
+| …and nowhere else scans that directory | **false in tests.** `tests/agent_runtime/test_serve_socket_child_e2e.py` globs `serve_instances/*.json` in two places to mean "the registry row is gone" |
+| `list_serve_instances` globs `*.json` | true — so `<pid>.ended.json` would have matched it |
+| an ACL-safe atomic store writer already exists for this directory | `agent_runtime/serde.write_json_atomic`, whose docstring already argues why it must not be folded into upstream's `atomic_json_write`: this one pins `newline="\n"`, and every record in this directory is read back and compared as LF-canonical bytes |
+| the drain's exit runs `atexit` hooks | **no.** `_finish_drain` ends in `hard_exit`, which `_cmd_serve` wires to `os._exit`; the timeout path always takes it |
+| `_install_service_stop_signal` is the only thing that touches signal disposition | true — and it REPLACES whatever is installed, for the duration of the `--service` park, then restores it |
+| a serve child's pid is the pid of the process you spawned | **false on Windows.** `sys.executable` inside a venv is a redirector that launches the base interpreter as its own child: `Popen.pid` names the redirector, the runtime is one below it. The same two-process shape §8.8c measured on the live chain — and it made the first e2e run red on every pid assertion until they were re-keyed to the `ready` frame's own `pid` |
+
+## 2. The red, measured
+
+Both new modules were written first and run against `origin/main`'s code:
+
+| Test | Expected | Actual before the fix |
+|---|---|---|
+| `test_serve_ended_sidecar.py` (29 tests) | 29 pass | `ImportError: cannot import name 'SERVE_ENDED_RETENTION' from 'agent_runtime.serve_registry'` — collection error, 0 collected |
+| `test_serve_ended_sidecar_child_e2e.py::test_a_drain_says_drained` | a `drained` sidecar for the runtime's pid | `ImportError: cannot import name 'read_serve_ended'` — after the child had booted, drained and exited 0, so the boot half was never the missing part |
+
+A second red arrived after the writer landed and before the reader tests were
+satisfied, and it is the one worth keeping:
+`test_serve_socket_child_e2e.py::test_without_service_a_child_still_ends_when_its_stdin_closes`
+asserted `_registry_rows(env) == []` and got
+`[WindowsPath('…/serve_instances/38944.ended.json')]`, plus three siblings. A
+helper that meant *the row is gone* had been reading *the directory is empty* —
+and the new file exists precisely to survive the row's removal. Both call sites
+now filter `SERVE_ENDED_SUFFIX` and say why in place.
+
+## 3. What changed
+
+**`agent_runtime/serve_registry.py`.** `SERVE_ENDED_SUFFIX = ".ended.json"`,
+`SERVE_ENDED_RETENTION = 20`, and five functions: `serve_ended_path`,
+`write_serve_ended`, `read_serve_ended`, `list_serve_ended` (newest first, by the
+record's own `at` then filename — never mtime, which in a copied or restored
+store says when it was moved) and `prune_serve_ended`. One line of behaviour
+change in existing code: `list_serve_instances` filters the suffix out of its
+glob. The record, exactly as written by a real drained child:
+
+```json
+{
+  "reason": "drained",
+  "at": "2026-09-06T01:26:35.245Z",
+  "boot_id": "1cb3ba7986944cff9968e67f7124bb67",
+  "pid": 39584
+}
+```
+
+Four keys, no `schema_version`, LF-canonical — and the registry row for that pid
+is gone, so the directory holds the sidecar alone.
+
+**`hermes_cli/harness_parts/serve.py`.** `_ServeEndReason` (latch first-wins,
+write once, never raises), `CONSOLE_CTRL_END_REASONS`, `SIGNAL_END_REASONS`,
+`END_REASON_VOCABULARY`, `_console_ctrl_reason_callback` +
+`_install_console_ctrl_reason_handler`, `_install_signal_reason_handlers`,
+`_maybe_inject_boot_fault`, and a `record_end_reason` kwarg wired ON only from
+`_cmd_serve`. The recorder is armed immediately after the registry row and its
+prune — it writes into the directory that row just created, and from `ready`
+onward the runtime can be killed. Reasons latch at five sites: `_finish_drain`,
+the `drain_abandoned` branch, the shutdown/EOF path, `except KeyboardInterrupt`
+and `except Exception`. `_install_service_stop_signal` gained a `note=` callback
+for the same reason it exists at all: it owns the SIGTERM disposition while the
+park holds it, so without this a signalled service would have recorded the
+ordinary shutdown word.
+
+Three choices inside that are not obvious:
+
+* **The console handler returns FALSE for every event, including the ones it
+  recorded.** TRUE would mean this process had taken responsibility for the
+  event: Ctrl-C would stop raising `KeyboardInterrupt`, a close would stop
+  closing. The handler's only job is to leave a record inside the few seconds
+  Windows allows before it kills the process anyway.
+* **The signal handlers re-raise.** Record, `signal.signal(sig, SIG_DFL)`,
+  `os.kill(self, sig)`. A handler that merely latched would silently make a
+  serve immune to `kill` — a lifetime change nobody asked for.
+* **The ctypes callback is held at module scope.** Windows keeps only the
+  function pointer, so a garbage-collected trampoline is an access violation the
+  next time the operator presses Ctrl-C.
+
+## 4. Mutation record
+
+| Test | Mutation | Result |
+|---|---|---|
+| `the_registry_lister_ignores_the_sidecar` | restore the bare `glob("*.json")` | red — two rows, the second a pid-less ghost |
+| `removing_the_registry_row_leaves_the_sidecar` | name the sidecar `<pid>.json` | red — `unregister_serve_instance` deletes the reason it was written to preserve |
+| `socket_target_resolution_ignores_the_sidecar` | same restore, on the lane `serve connect` and `local_serve_attach` use | red — `allow_stale=True` surfaces a portless ghost |
+| `retention_keeps_the_newest_twenty_sidecars` | drop `prune_serve_ended` | red — all 25 survive |
+| `a_boot_prunes_the_sidecar_directory_to_the_newest_twenty` | drop the prune from serve boot | red — the 25 planted records survive a real boot |
+| `the_console_handler_writes_the_word_and_declines_to_handle` | return TRUE from the handler | red — and live, Ctrl-C silently stops working |
+| `the_serve_entry_point_turns_the_recorder_on` | drop `record_end_reason=True` from `_cmd_serve` | red — every reason ships dead with the whole unit suite still green (the `test_root_anchor` precedent) |
+| `a_drain_says_drained` | write the record from `atexit` only | red — `os._exit` runs no hook, and the drain is the launcher's restart verb |
+| `a_hard_exit_writes_nothing_and_the_absence_is_the_reading` | write `unknown_exit` anywhere earlier | red — the absence that means *hard kill* is erased |
+| `the_handler_installs_on_a_runtime_with_no_console_at_all` | let the install raise instead of report | red — the child never reaches `ready` |
+| `an_unknown_word_is_refused_rather_than_written` | pass the caller's string through | red — an unvetted word reaches the operator's sheet |
+| `the_boot_fault_seam_is_inert_without_its_environment_variable` | fire the seam unconditionally | red — and the production serve dies at boot |
+
+## 5. Deviations from RL-16, and why
+
+1. **A ninth word, `stdin_eof`.** RL-16's vocabulary has `shutdown_op` for "the
+   `{"op":"shutdown"}` path". In this loop that path is shared with stdin EOF on
+   a non-service serve — same finalization, same `shutdown` frame — but they are
+   two different facts, and service mode exists *because* they are (an ORDER vs
+   an OBSERVATION, canon `04`). Collapsing them would report an order nobody
+   gave; leaving EOF to the `atexit` fallback would report `unknown_exit` for the
+   most ordinary exit there is. The word is safe for the launcher's reader by
+   construction: under `--service` EOF parks instead of exiting, so a service
+   runtime can never write it.
+2. **`CTRL_BREAK_EVENT` shares `ctrl_c`'s word.** Both are "the operator
+   interrupted it from the console". Break is also the only one of the five that
+   `GenerateConsoleCtrlEvent` can aim at a single process group — Ctrl-C with a
+   non-zero group id succeeds and delivers nothing, and group 0 would have
+   Ctrl-C'd the test runner — so it is what makes the handler provable at all.
+3. **`SIGHUP` maps to `logoff`** rather than taking a sixth word. A hangup is the
+   session going away, which is what `logoff` already means on the other
+   platform; one vocabulary that reads the same on both is worth more than a word
+   that can only ever appear on one.
+4. **All three drain outcomes write `drained`** — complete, timed out, abandoned.
+   The sidecar answers *why did this runtime end*, and the answer is "somebody
+   drained it". HOW the drain went is already on the wire in the terminal frame,
+   with the counters that make it meaningful; a sidecar saying `drain_timeout`
+   would be a second, poorer copy of that.
+5. **The recorder is armed by an injected kwarg rather than unconditionally.**
+   RL-16 says "every serve unless you find a reason not to", and every serve does
+   get it — `_cmd_serve` is the only thing that runs one. The gate exists against
+   `serve_loop`'s in-process unit tests, where arming it would register an
+   `atexit` hook and take over pytest's own signal disposition. Same contract,
+   same reason, as `root_anchor`, `skill_install` and `hard_exit` beside it.
+6. **A new test seam, `HERMES_SERVE_BOOT_FAULT`.** There was no existing fault
+   seam to reuse. It is one line on the production path, read once after the
+   `ready` frame, inert without the variable (pinned by its own test), and it
+   buys the three endings a test cannot otherwise ask a real child for: an
+   uncaught exception, a plain `SystemExit`, and an `os._exit` that must write
+   nothing.
+
+Not a deviation but worth stating plainly: **nothing on the wire moved.** No
+frame, no op, no `rpc`/`ops` manifest key, no argparse flag. The CLI contract
+fixture and the launcher's serve-frame fixtures are untouched, and the launcher
+reads the FILE beside the stale row it has already found.
+
+## 6. Gates
+
+`scripts/run_tests.sh tests/agent_runtime tests/hermes_cli`, plus the six serve
+modules and every module touched, run individually first. Summary lines are
+recorded verbatim in the stage report; the reds carried in are the four already
+named in the L-h-b section above, one of which (`test_cli_contract_dump`) is
+still this plan's own two-repo debt, plus
+`test_serve_stream_lane_parity::test_the_advertisement_grew_and_no_contract_integer_moved`,
+which went red on main at `7ea3ac94ea` when `serve_rpc.manifest()` grew a
+`params` key that the pin had not learned. None of the five are on this branch's
+diff.
+
+## 7. What is NOT proven
+
+* **`ctrl_close`.** No Windows API generates `CTRL_CLOSE_EVENT` — it is what the
+  OS sends when a console window's X is clicked, and nothing else sends it. The
+  mapping is pinned as a table
+  (`test_the_console_control_mapping_table_is_the_closed_vocabulary`), and the
+  handler's installation and firing are proven by the `ctrl_c` arm through the
+  identical callback. The end-to-end claim — *close the black `cmd.exe` window,
+  get `ctrl_close`* — is an operator gesture and stays owed. RL-17 will make it
+  nearly unreachable anyway (`CREATE_NO_WINDOW`: no window to close), which is
+  why the no-console install arm sits beside it.
+* **`logoff`.** Same reason, one step worse: producing it means logging out of
+  Windows or shutting the machine down.
+* **`sigterm`.** The arm exists and is skip-marked on Windows with its reason.
+  It has never run — this is a Windows box — so the POSIX half of RL-16 is code
+  review plus a table, not a measurement.
+* **A real hard kill.** `os._exit` is the in-process stand-in for
+  `TerminateProcess`; a genuine `taskkill /F` against a real runtime was not
+  performed, because the arms that would need it are the operator's own machine.
+  What IS proven is that nothing in this runtime writes a placeholder on that
+  path, which is the property `ended=absent` rests on.
+* **The launcher half.** `ended=absent`, the `serve_attach outcome=staleOwner
+  ended=<reason>` receipt and the runtime sheet's *"the last runtime ended: …"*
+  line are L-l-d's. Until they land, the sidecar is written and read by nobody.
+* **The venv redirector's own death.** Every e2e here waits on the redirector
+  (`Popen.pid`) and asserts on the runtime (`ready["pid"]`). A kill that reached
+  only the redirector would leave the runtime up and write no sidecar —
+  correctly, but that arrangement was not exercised.
