@@ -193,6 +193,7 @@ import hmac
 import json
 import os
 import secrets
+import select
 import socket
 import threading
 import time
@@ -1220,6 +1221,18 @@ class ServeSocketServer:
         self._reject_penalty = float(reject_penalty_seconds)
 
         self._listener: socket.socket | None = None
+        #: The accept loop's wakeup, and the reason it exists: closing a
+        #: listening socket from another thread aborts a pending ``accept()``
+        #: on Windows and does NOT wake one on Linux. A loop parked in
+        #: ``accept()`` therefore outlived ``close()`` on every POSIX host and
+        #: ``accept_loop_exited`` — the field whose whole purpose is "the loop
+        #: never stops quietly" — was stamped by whichever platform happened to
+        #: be kind. The loop waits on this pair BESIDE the listener, so the
+        #: ending is the same everywhere and is caused, not raced for. The
+        #: write end is closed by ``_close_listener``; the read end is closed
+        #: by the only thread that ever selects on it.
+        self._wake_read: socket.socket | None = None
+        self._wake_write: socket.socket | None = None
         self._port: int | None = None
         self._accept_thread: threading.Thread | None = None
         self._connections: dict[str, SocketConnection] = {}
@@ -1276,6 +1289,14 @@ class ServeSocketServer:
         # No SO_REUSEADDR — see the module docstring.
         listener.bind((self._host, self._bind_port))
         listener.listen(max(8, self._max_connections))
+        # Non-blocking, because the accept loop now decides readiness with
+        # ``select`` and must never park in ``accept()`` — that is the one
+        # place ``close()`` cannot reach it on a POSIX host. The socket handed
+        # back by ``accept()`` gets its own explicit timeout in
+        # ``_serve_connection``, so nothing downstream inherits this.
+        listener.setblocking(False)
+        self._wake_read, self._wake_write = socket.socketpair()
+        self._wake_read.setblocking(False)
         self._listener = listener
         self._port = int(listener.getsockname()[1])
         self._started_at = _now_iso()
@@ -1365,7 +1386,11 @@ class ServeSocketServer:
         for connection in self.connections():
             self._drop_connection(connection, reason=reason)
         thread = self._accept_thread
-        if thread is not None and thread.is_alive():
+        if thread is None:
+            # Bound but never accepted: nobody is selecting on the read end, so
+            # nobody else will ever close it.
+            self._close_wake_read()
+        elif thread.is_alive():
             thread.join(2.0)
 
     # ── introspection ───────────────────────────────────────────────────────
@@ -1435,7 +1460,46 @@ class ServeSocketServer:
                     outcome = "listener_closed"
                     return
                 try:
+                    ready, _, _ = select.select([listener, self._wake_read], [], [])
+                except ValueError:
+                    # A closed socket answers ``fileno() == -1``, which select
+                    # refuses. That IS the listener being gone.
+                    outcome = "listener_closed"
+                    return
+                except OSError as exc:
+                    if self._stop.is_set() or self._listener is None:
+                        outcome = "listener_closed"
+                        return
+                    with self._lock:
+                        self._accept_errors += 1
+                    self._emit_log(
+                        {
+                            "event": "serve_socket_accept_error",
+                            "phase": "wait",
+                            "reason": type(exc).__name__,
+                        }
+                    )
+                    if _is_fatal_accept_error(exc):
+                        outcome = f"fatal_accept_error:{type(exc).__name__}"
+                        return
+                    time.sleep(0.05)
+                    continue
+                if self._stop.is_set() or self._listener is None:
+                    outcome = "listener_closed"
+                    return
+                if listener not in ready:
+                    # Only the wakeup spoke, and the check above already said
+                    # the lane is still open. Nothing was dialled; go back to
+                    # waiting rather than inventing an ending.
+                    continue
+                try:
                     sock, peer = listener.accept()
+                except BlockingIOError:
+                    # ``select`` promised a peer and the kernel no longer has
+                    # one (a connection aborted between the two calls). Not an
+                    # error, and — because the listener is non-blocking — not a
+                    # park either.
+                    continue
                 except OSError as exc:
                     if self._stop.is_set() or self._listener is None:
                         outcome = "listener_closed"
@@ -1491,6 +1555,10 @@ class ServeSocketServer:
             with self._lock:
                 self._accept_errors += 1
         finally:
+            # This thread is the only one that ever selects on the read end, so
+            # it is the only one that may close it: closing it from ``close()``
+            # would free a descriptor out from under a live ``select``.
+            self._close_wake_read()
             with self._lock:
                 self._accept_loop_exited = outcome
             self._emit_log(
@@ -1888,8 +1956,43 @@ class ServeSocketServer:
         listener, self._listener = self._listener, None
         if listener is None:
             return
+        # WAKE FIRST, then close. The wakeup is what actually ends the accept
+        # loop; ``listener.close()`` is only what stops the port answering.
+        # Ordering them the other way would leave a window where the loop woke
+        # on a listener it could still read ``self._listener`` as live.
+        self._signal_wakeup()
         try:
             listener.close()
+        except OSError:
+            pass
+
+    def _signal_wakeup(self) -> None:
+        """Tell the accept loop to look again, then hand it a permanent EOF.
+
+        One byte covers the loop already waiting; closing the write end covers
+        the loop that has not reached ``select`` yet, because a read end at EOF
+        stays readable forever. Both halves matter: without the second, a loop
+        that woke, read the byte and looped would park again.
+        """
+
+        wake, self._wake_write = self._wake_write, None
+        if wake is None:
+            return
+        try:
+            wake.send(b"\x00")
+        except OSError:
+            pass
+        try:
+            wake.close()
+        except OSError:
+            pass
+
+    def _close_wake_read(self) -> None:
+        wake, self._wake_read = self._wake_read, None
+        if wake is None:
+            return
+        try:
+            wake.close()
         except OSError:
             pass
 

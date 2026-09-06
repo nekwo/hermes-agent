@@ -91,10 +91,14 @@ def bare_server(**kwargs):
     policy exists, never that it admits and refuses the right peers. This binds
     the same class the loop binds, over the same loopback, with those knobs in
     the test's hands.
+
+    ``start_accepting=False`` binds without starting the accept thread, for the
+    one case below that has to substitute the listener between the two steps.
     """
 
     logs: list[dict] = []
     token = kwargs.pop("token", "the-shared-secret")
+    start_accepting = kwargs.pop("start_accepting", True)
     server = ServeSocketServer(
         _store_root(),
         boot_id=kwargs.pop("boot_id", "test-boot"),
@@ -114,7 +118,8 @@ def bare_server(**kwargs):
         **kwargs,
     )
     port = server.bind()
-    server.start_accepting()
+    if start_accepting:
+        server.start_accepting()
     try:
         yield server, port, logs
     finally:
@@ -1071,6 +1076,71 @@ def test_the_accept_loop_reports_how_it_ended_instead_of_dying_quietly():
             time.sleep(0.02)
         assert server.connections_payload()["accept_loop_exited"] == "listener_closed"
         assert [row for row in logs if row["event"] == "serve_socket_accept_loop_exit"]
+
+
+class _CloseDoesNotWakeAccept:
+    """A listener with POSIX ``close()`` semantics, from the accept loop's chair.
+
+    On Windows ``closesocket`` aborts a pending ``accept()`` in another thread;
+    on Linux and macOS it does not. The test above therefore passed on Windows
+    for a reason that has nothing to do with the product — and was FLAKY on
+    Linux CI (failed once, passed on retry), because the only thing that ever
+    ended the loop there was ``close()``'s bounded ``join``, arriving before or
+    after the assertion by luck.
+
+    This wraps the REAL bound listener, so a real ``select`` and a real
+    ``accept`` still work on its descriptor, and makes ``close()`` a no-op that
+    only records the call. Anything that ends the accept loop against this
+    listener ended it by an explicit wakeup, not by the platform being kind.
+    """
+
+    def __init__(self, inner: socket.socket) -> None:
+        self.inner = inner
+        self.close_calls = 0
+
+    def fileno(self) -> int:
+        return self.inner.fileno()
+
+    def accept(self):
+        return self.inner.accept()
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+def test_the_accept_loop_ends_on_a_host_where_close_does_not_wake_accept():
+    """``accept_loop_exited`` is caused, never raced for.
+
+    The sibling above asserts the field is stamped; this one asserts WHY. With
+    the listener's own ``close()`` neutered, the loop has exactly one way out,
+    and if that way is missing the field stays ``None`` until the process dies.
+    """
+
+    with bare_server(start_accepting=False) as (server, port, logs):
+        inner = server._listener
+        listener = _CloseDoesNotWakeAccept(inner)
+        server._listener = listener
+        server.start_accepting()
+        try:
+            # Parked, with nothing dialling the port: the loop is waiting, and
+            # the field is still open.
+            time.sleep(0.1)
+            assert server.connections_payload()["accept_loop_exited"] is None
+
+            server.close()
+            deadline = time.monotonic() + WAIT
+            while (
+                time.monotonic() < deadline
+                and server.connections_payload()["accept_loop_exited"] is None
+            ):
+                time.sleep(0.02)
+            assert server.connections_payload()["accept_loop_exited"] == "listener_closed"
+            assert [row for row in logs if row["event"] == "serve_socket_accept_loop_exit"]
+            # The listener really was the neutered one, so the ending above was
+            # not the platform closing the descriptor out from under accept().
+            assert listener.close_calls == 1
+        finally:
+            inner.close()
 
 
 def test_the_token_never_appears_in_any_frame_the_service_writes():
