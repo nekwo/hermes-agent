@@ -228,3 +228,154 @@ here so it cannot be lost between the two halves.
 on one machine with children this repo spawned. The proof that a launcher can
 close, leave the runtime up, and re-attach to the SAME pid is L-l step 7 and is
 the operator's.
+
+---
+
+# L-h-b — RL-13, standing subscriptions are not "busy" (2026-09-05)
+
+Second hermes stage on the same plan (`local-runtime-ownership-and-retry-safety.md`
+§8.8), written as the work happened. Worktree `wt/l-serve-service`, branch
+`feat/lh-busy-subscriptions`, from main `286a29db04`. One file of product code
+(`hermes_cli/harness_parts/serve.py`), one test module, one canon doc. Nothing
+touched the operator's live store or the live venv: the whole stage is held at
+the `serve_loop` seam with injected streams, so no child process and no real
+`HERMES_HOME` were involved at all.
+
+## 1. Revalidation, before anything was changed
+
+§8.8 item 4 describes the mechanism exactly. Read at pickup:
+
+| Claim | Verdict at `286a29db04` |
+|---|---|
+| `_ArgvRequest.is_runtime_stream` is `tail[0] == "stream"` | present |
+| `_report_quiet_requests` skips `is_runtime_stream`, and its docstring says why ("it is the infinite subscription, it is silent between events BY DESIGN") | present |
+| `_liveness_pump` guards on `if not pending: continue` and nothing else | present |
+| `_busy_frame` returns `event` / `chat_turns` / `long_runs` / `pending` only | present |
+| the launcher decodes `chat_turns` **and** `pending` off `busy` by NAME | confirmed in `EterniaLauncher/lib/features/mission_control/data/mission_control_serve_session_io.dart`, the `busy` case — and the switch reads no other key, so additive keys are ignored by construction |
+
+So the split had to be additive, and `pending` had to keep meaning *everything
+in flight* rather than quietly becoming the new `work`.
+
+## 2. The red, measured
+
+Three tests written first, as a new DEFECT D section of
+`tests/agent_runtime/test_serve_request_silence.py`. That module is the right
+home and not a convenient one: it exists because the pump was too QUIET, and
+this row is the same pump being too LOUD — same seam, same lane, opposite
+failure. The module docstring now pins four defects instead of three.
+
+| Test | Expected | Actual before the fix |
+|---|---|---|
+| `test_standing_subscriptions_alone_never_wake_the_liveness_pump` | no `busy` frame across three pump intervals, with two `harness stream` requests in flight and no work | **six** frames, every one `{'event': 'busy', 'chat_turns': 0, 'long_runs': 0, 'pending': 2}` — the operator's pasted terminal, reproduced verbatim at the seam |
+| `test_one_chat_turn_behind_two_subscriptions_pumps_work_one` | a pump frame with `work: 1`, `subscriptions: 2`, `pending: 3` | `KeyError: 'work'` |
+| `test_ping_on_an_idle_service_still_answers_with_every_count` | `ping` answers `work: 0`, `subscriptions: 2`, `pending: 2` | `KeyError: 'work'` |
+
+`3 failed, 5 passed` on the module before the fix; `8 passed` after.
+
+The first red is the one worth keeping. It is not a missing-key failure — it is
+the product defect printed six times in 350 ms. A launcher that stays attached
+for an hour reads 720 of them.
+
+## 3. The fix
+
+`_busy_frame` counts `subscriptions` in the same locked pass that already counts
+`chat_turns` and `long_runs` — one lock acquisition, not four — and returns
+`subscriptions` and `work` (`pending − subscriptions`) beside the three existing
+keys. `_liveness_pump` wraps its two emissions (stdout `frames` and
+`_broadcast_lanes`) in `if busy_frame["work"] > 0`. Three deliberate
+non-changes:
+
+- **`ping` is outside the guard.** The `ping` branch of `_handle_message` calls
+  `_busy_frame()` and always emits it. A supervisor that ASKS gets all five
+  counts, including the subscriptions it is holding itself; an answer that hid
+  them would make "attached" and "not attached" identical on the wire.
+- **`_report_quiet_requests(pending)` still gets the FULL pending list**, and
+  still runs on every lap, including a subscription-only one. It does its own
+  stream exclusion, and a lap with `work == 0` can still be the lap on which
+  some *other* argv request crosses the silence budget. Moving that call inside
+  the guard would have re-introduced DEFECT A for exactly the case DEFECT A is
+  about.
+- **`pending` keeps its meaning.** Redefining it as `work` would have been the
+  smaller diff and the larger break: the launcher reads it by name today.
+
+One behavioural footnote, stated because it is a real change and not a
+side-effect anybody would look for: the pump's `except Exception: return`
+("writer gone") now only runs on a lap that actually emits. A
+subscription-only service whose stdout writer has died therefore keeps its pump
+thread alive instead of returning early. It is a daemon thread on a process
+whose main loop is already on its way down, so this costs nothing, and a second
+guard to preserve the old exit would have been machinery in service of a
+thread's tidiness.
+
+## 4. The frame, for the launcher's fixture
+
+`{"op":"ping"}` on an idle serve with nothing attached now answers:
+
+    {"event":"busy","chat_turns":0,"long_runs":0,"pending":0,
+     "subscriptions":0,"work":0}
+
+`EterniaLauncher/tool/hermes_serve_frames/generate.py` captures that frame from
+a real spawned child (its `busy` case pings an idle serve) and
+`test/fixtures/hermes_serve_frames/busy.json` pins the body with sorted keys, so
+the fixture REGENERATES rather than being hand-edited — and `MANIFEST.sha256`
+with it. Not touched from this side: it is the launcher's gate and the
+launcher's regeneration.
+
+## 5. Gates
+
+| Gate | Result |
+|---|---|
+| `scripts/run_tests.sh` on the six serve modules (`test_serve_request_silence`, `test_harness_serve`, `test_serve_drain_accounting`, `test_serve_socket_lane`, `test_serve_service_mode`, `test_serve_stream_lane_parity`) | **150 passed, 0 failed** in 22.4 s |
+| `scripts/run_tests.sh tests/agent_runtime tests/hermes_cli` | **12,482 passed, 4 failed** (1,030 files, 1,798.7 s) — all four pre-existing on main, named below |
+| `ruff check` 0.15.10 (the version pinned in `pyproject.toml`'s dev extra) on `hermes_cli/harness_parts/serve.py` and the test module | **All checks passed** |
+
+**The four reds are not this stage's, and one of them is this PLAN's.** None of
+the four touch `serve.py`'s busy frame; the branch's whole diff is `serve.py`,
+`tests/agent_runtime/test_serve_request_silence.py` and
+`docs/agent-runtime-harness/03-transport-and-wire.md`.
+
+1. `tests/hermes_cli/test_cli_contract_dump.py::test_the_committed_dump_matches_the_live_parsers` —
+   **owed by L-h.** `harness.py:1767` declares `serve --service` (landed
+   `df4865679a`, the previous stage of this same plan) and
+   `tests/fixtures/hermes_cli_contract.json` was never regenerated:
+   `git show origin/main:tests/fixtures/hermes_cli_contract.json | grep -c -- '"--service"'` → `0`.
+   The fix is `python scripts/dump_cli_contract.py --write` **plus** the
+   launcher's mirrored fixture and the note in
+   `EterniaLauncher/tool/hermes_cli_contract/README.md`, per the failure's own
+   instructions — a two-repo move, deliberately not made silently here.
+2. `tests/agent_runtime/test_duplicate_helper_bodies.py` —
+   `agent_runtime/realm_sync.py::_ledger_time == agent_runtime/store.py::_stamp`,
+   from the realm-sync canvas lane. Neither file is on this branch.
+3. `tests/agent_runtime/test_no_midtest_monkeypatch_undo.py` —
+   `tests/scripts/test_changed_line_mutation_check.py:527` calls
+   `monkeypatched.undo()`. Not on this branch.
+4. `tests/hermes_cli/test_harness_json_root_observability.py::test_ledger_does_not_rot` —
+   the ledger entry `_cmd_persona_instance_open_chat` no longer emits JSON.
+   Not on this branch.
+
+Three files were FLAKY under 8-way contention and passed on retry
+(`test_serve_stream_lane_parity`, `test_serve_rpc_office_subscribe_live_hub`,
+`test_active_sessions`), and a fourth, `test_stream_stale_first_routing`,
+timed out inside its whole-tree `ast.parse` walk on both attempts and then
+passed alone: `8 passed in 32.4 s`. Contention, not content.
+
+`ruff` is not installed in this box's interpreter; it was run through
+`uvx ruff@0.15.10`, which first failed twice to install with `os error 32`
+("the process cannot access the file… being used by another process") while
+cleaning its own cache. Pointing `UV_CACHE_DIR` at a scratch directory fixed it.
+That is the same Defender-exclusion row the suite-perf program already owes the
+operator, showing up in a new place.
+
+## 6. Open item — the pump's silence is not the launcher's silence
+
+The pump going quiet on an idle service is the point of RL-13, and it is also a
+change in what an attached socket client READS: previously a `busy` frame every
+5 s, now nothing at all while idle. That is correct for a watchdog keyed on
+"working vs gone" only if the launcher's stream watchdog does not itself key on
+the pump. It does not — `childSilenceCeiling`'s own comment prices the pump at
+"~18 times inside this window" for a child *running our chat turn*, which is
+still true, and the DEFECT-B fix was about a BUSY serve starving the stream
+generator, which an idle serve is not. But the sentence is written down here
+because it is the assumption this stage rests on, and the proof is the
+launcher-side read the operator already has queued: attached and idle should now
+print nothing, and print `work: 1` the moment a turn starts.
