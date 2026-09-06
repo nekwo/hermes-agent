@@ -545,3 +545,218 @@ does not rediscover them as new.
 - **The two fixture flakes above** are pre-existing tight deadlines, not owed
   work of this stage — but they are the kind of thing that eventually costs a
   wave, and they are written down here for whoever decides to widen them.
+
+---
+
+# C6h — the method carries the whole surface, and the runtime says so
+
+Stage C6h of `remote-chat-parity.md` (§5, ruling **R-C8**), 2026-09-05. Worktree
+`wt/c1-open-chat`, branch `feat/c6-chat-params`, from main `286a29db04`. Same
+sandbox discipline as C1h: nothing touched the live store or venv.
+
+## 12. What the field run left for this stage
+
+The C5 run's whole finding is one log line, and it is a refusal by THIS
+launcher, not by the Mac:
+
+```
+[MissionChatTurn] chat_turn lane=argv capability=mission.chat.message
+    reason=methodUnavailable detail=args_not_carried:workspace_name
+```
+
+Two facts behind it, both measured in this repo before anything was written:
+
+1. `normalize_chat_message` read **eleven** param keys (`turn_request_id`,
+   `persona_id`, `message`, `session_id`, `persona_instance_id`, `workspace_id`,
+   `title`, `new_session`, `stream`, `max_seconds`, `correlation_id`) and
+   ignored the rest silently. The argv verb it lowers to declares many more
+   (`hermes_cli/harness.py:1365..1400`), of which seven are operator surface the
+   console actually sends.
+2. `serve_rpc.manifest()` returned `{contract, methods, tiers}`. A client could
+   learn that `runtime.chat.message` EXISTS and could not learn what it
+   HONOURS — so a launcher holding a key it could not prove would be carried had
+   exactly two choices: drop the operator's word silently, or refuse. C1l chose
+   refuse, correctly, and for a remote aim argv is a wall rather than a fallback
+   (R-C6). The refusal was the right behaviour on the wrong information.
+
+The plan's §5 says "the six new keys"; there are **seven**, because the bullet
+pairs `surface_prompt` / `intent_hint` on one line. Both are implemented.
+
+## 13. The reds, before the fix
+
+Written first as `tests/agent_runtime/test_serve_rpc_chat_params.py` (25 cases),
+run against untouched code:
+
+| Red | Expected | Actual |
+|---|---|---|
+| import of the module | `CHAT_TURN_METHOD_PARAMS` importable from `agent_runtime.chat_turn` | `ImportError: cannot import name 'CHAT_TURN_METHOD_PARAMS'` |
+| `...workspace_name_reaches_the_turn...` and six sibling per-key cases | base argv + `--workspace-name Eternia` (resp. `--provider`, `--model`, `--use-agent-default`, `--clarify-token`, `--surface-prompt`, `--intent-hint`) | base argv, unchanged — the key was read by nothing |
+| `...the_new_keys_lower_in_one_stable_order...` | the full 17-key send's argv literal | argv stopped after `--max-seconds` |
+| `...use_agent_default_with_an_override_is_refused_at_the_door` x2 | `ChatTurnInvalid("model_override_conflict")` / `ERR_INVALID_PARAMS` | no raise; an ACCEPTED turn that would have died inside the handler on `ValueError` |
+| `...a_malformed_new_key_is_refused...` x8 | `workspace_name_invalid`, `provider_invalid`, `model_invalid`, `use_agent_default_invalid`, `clarify_token_invalid`, `intent_hint_invalid`, `surface_prompt_invalid` | accepted, the bad value ignored |
+| `...the_advertised_params_are_exactly_the_keys_the_normalizer_reads[message]` | the 18 advertised keys | the 11 the normaliser asked for — *"Right contains 7 more items, first extra item: `stream`"* |
+
+Twenty of the twenty-five were red at that point (five advertisement cases went
+green as soon as the tuples existed). The last row is the guard rail rather than
+a feature test, and it was red for a deliberate intermediate state in which only
+the ADVERTISEMENT had been added: it is what makes it impossible to publish a
+`params` list the code does not honour. It works by driving each normaliser
+through a `dict` subclass that records every `params.get(...)` and comparing the
+recorded key set with the manifest's list.
+
+## 14. What was built
+
+**`agent_runtime/chat_turn.py`** — seven keys read, in the block before the argv
+is assembled, so the set of keys the function ASKS FOR is exactly
+`CHAT_MESSAGE_PARAMS`:
+
+| Param | Argv | Cap | Lowered when |
+|---|---|---|---|
+| `workspace_name` | `--workspace-name <v>` | 120 | non-blank |
+| `provider` | `--provider <v>` | 200 | non-blank |
+| `model` | `--model <v>` | 200 | non-blank |
+| `use_agent_default` | `--use-agent-default` | flag | true |
+| `clarify_token` | `--clarify-token <v>` | 240 | non-blank |
+| `surface_prompt` | `--surface-prompt <v>` | 4000 | non-blank and not the `""` default |
+| `intent_hint` | `--intent-hint <v>` | 120 | non-blank and not the `chat` default |
+
+The caps are the handler's own, not new opinions: `safe_assignment_text(...,
+limit=120)` for `workspace_name`, `limit=240` for `clarify_token`, `limit=4000`
+for `surface_prompt`, `safe_assignment_token`'s 120 for `intent_hint`, and
+`_CHAT_PROVIDER_MODEL_RE`'s `{1,200}` for the two overrides. A boundary that
+accepted more would hand the handler a string it silently truncates, and the
+operator would never learn which half arrived.
+
+The provider/model **charset** stays the handler's to enforce
+(`_safe_chat_model_override_value` refuses out loud with a sentence naming the
+allowed characters); duplicating that regex at the door would be a second place
+to keep correct.
+
+The two defaulted keys are lowered only off their default, and that is a
+no-divergence rule rather than a nicety: the console decorator sends
+`intent_hint: "chat"` and `surface_prompt: ""` on every ordinary message, so
+lowering them unconditionally would put two flags on every remote turn that a
+local turn does not carry.
+
+`use_agent_default` plus `provider` or `model` raises
+`ChatTurnInvalid("model_override_conflict")`, i.e. `ERR_INVALID_PARAMS` at the
+door. Over argv the same rule is a `ValueError` raised deep inside
+`persona_commands._requested_chat_model_override`; on this lane that would be an
+ACCEPTED turn — a client already holding an ack and a receipt keyed on its
+`turn_request_id` — that then dies as a handler failure. The boundary is where
+an unhonourable request should be refused.
+
+Unknown params are still ignored (`agents_file` among them — R-C8 makes it the
+launcher's `kMissionChatTurnLocalOnlyArgs`, dropped there because a path on the
+Windows box means nothing on the Mac). Pinned by a test, because it is the
+contract that makes the `params` block necessary rather than decorative.
+
+**`agent_runtime/serve_rpc.py::manifest()`** — the additive `params` key,
+derived from `CHAT_TURN_METHOD_PARAMS` (a local import, the module's existing
+style for the `chat_turn` direction). `contract` stays **1**: no existing
+request or result shape moved.
+
+`peer.agent_chat.execute` is deliberately NOT in the block. A device reads the
+greeting; a peer is admitted by the pairing ceremony, and the two surfaces are
+declared in different places on purpose.
+
+## 15. The exact block, for the C6l pin
+
+Emitted by `serve_rpc.manifest()["params"]` and asserted verbatim in four golden
+literals (two of them read off a REAL serve's `ready` and `version` frames, two
+off a real socket `hello_ok`):
+
+```json
+{
+  "runtime.chat.message": [
+    "clarify_token", "correlation_id", "intent_hint", "max_seconds",
+    "message", "model", "new_session", "persona_id", "persona_instance_id",
+    "provider", "session_id", "stream", "surface_prompt", "title",
+    "turn_request_id", "use_agent_default", "workspace_id", "workspace_name"
+  ],
+  "runtime.chat.steer": [
+    "correlation_id", "message", "persona_id", "persona_instance_id",
+    "session_id", "turn_request_id"
+  ]
+}
+```
+
+Both lists are sorted, both are JSON arrays of strings, and the block rides
+`rpc` on `ready`, on `version`, and on the socket's `hello_ok` — every greeting
+that already carried `methods` and `tiers`.
+
+Note for C6l: `runtime.chat.steer` advertises **six** keys and `title` is not
+one of them. C1l already drops a steer's defaulted `title` on both lanes; the
+manifest now says why that is correct rather than incidental.
+
+## 16. The goldens, and one test that was not a golden
+
+Six pinned tests learned the new shape. Five are goldens doing their job; the
+sixth was a genuine break this change caused and is worth naming.
+
+| Test | Why it went red |
+|---|---|
+| `test_serve_rpc_office.py::test_stdio_learns_the_method_set_from_ready_and_can_re_ask_version` | full-manifest literal; its sibling `test_the_method_surface_is_transport_agnostic_and_answers_on_the_socket` pins the same shape on the socket `hello_ok` |
+| `test_serve_rpc_office_upsert.py::test_the_method_set_grew_and_the_contract_integer_did_not_move` | same, with `test_the_write_method_is_transport_agnostic_and_answers_on_the_socket` for the socket half |
+| `test_serve_rpc_chat_turn.py::test_the_manifest_grew_by_two_names_and_the_integer_did_not_move` | `set(manifest) == {"contract","methods","tiers"}` |
+| `test_peer_authorization.py`, `test_peer_chat_execute.py`, `test_serve_rpc_media.py` | the same three-key shape pin, once each |
+
+Updating those IS their purpose: they exist so a manifest change cannot be made
+quietly. `test_serve_rpc_office_subscribe.py`'s pin is on `method_names()` and
+`manifest()["contract"]` only, so it never moved — the plan expected three
+manifest goldens and there are in fact **two** full-equality ones (four literal
+sites) plus **four** shape pins.
+
+**The one real break:**
+`test_serve_rpc_office.py::test_a_class_keyed_actor_sends_an_explicit_null_never_an_omitted_key`
+walked the serve's raw output for the first line containing
+`"persona_instance_id"` and asserted it carried an explicit `null`. That key is
+now also one of `runtime.chat.message`'s advertised PARAM NAMES, so the walk
+stopped on the `ready` greeting and asserted about a manifest instead of about
+an office item. The scan is now scoped to the reply frame (the line must also
+carry the request id `rpc-1`). Nothing was relaxed: the same assertion runs, on
+the frame it always meant.
+
+## 17. Gates
+
+- `tests/agent_runtime/test_serve_rpc_chat_params.py` — **25 passed** (the new
+  module).
+- `test_serve_rpc_chat_turn.py` + `test_serve_rpc_office.py` +
+  `test_serve_rpc_office_upsert.py` + `test_serve_rpc_office_subscribe.py` +
+  the new module — **176 passed, 0 failed**.
+- `python -m pytest tests/agent_runtime -q -k "chat_turn or serve_rpc or
+  manifest"` — **635 passed, 0 failed, 7246 deselected**. The first run of this
+  gate was 633 passed / 2 failed, which is how the two `peer`/`media` shape pins
+  were found; they were updated and the gate re-run.
+- The other manifest readers, run because they decode `tiers`:
+  `test_remote_cockpit_method_carriage`, `test_scope_use_methods`,
+  `test_serve_gateway_lane`, `test_serve_gateway_peers_rpc`,
+  `test_serve_gateway_peer_lane`, `test_serve_rpc_agent_create`,
+  `test_serve_rpc_agent_retire`, `test_serve_rpc_caller_identity`,
+  `test_gateway_media_fetch_e2e` — **233 passed**.
+- `ruff check` on the touched Python files — clean.
+- One flake, named rather than fixed: the gate's second run reported
+  `test_serve_rpc_office_subscribe_live_hub.py::test_a_re_baseline_makes_every_other_subscriber_pay_a_fresh_core`
+  red (a 5 s deadline on the hub's re-baselining hydrate). Its own module then
+  passed 25/25 alone. It is the same wall-clock flake §10 recorded for C1h-bis,
+  on a lane this stage does not touch.
+
+Real-serve coverage is not separate here: the two full-manifest goldens spawn a
+real serve child and read the block off its `ready`, `version` and socket
+`hello_ok` frames, which is exactly the frame C6l's launcher decoder will read.
+
+## 18. Open, and owed
+
+- **C6l has to be built against this block**, and its fallback arm is the part
+  that matters: a manifest with NO `params` key means "a runtime that predates
+  R-C8" — fall back to the eleven keys — never "no params".
+- **No two-machine proof in this stage.** C5 re-armed owns it, and it needs the
+  Mac's hermes rebuilt onto this commit; until then the Mac greets without the
+  block and the launcher's fallback arm is what runs.
+- **`agents_file` is untouched here** and remains uncarryable by design: it is
+  an absolute path on the sending machine. R-C8 gives it to the launcher as
+  `dropped_local_only`.
+- **The provider/model charset is asserted only by the handler.** A malformed
+  override is refused inside the turn rather than at the door, so a client sees
+  it as a handler failure and not as `ERR_INVALID_PARAMS`. Deliberate (one
+  regex, one owner), noted so a later reader does not read it as an oversight.

@@ -405,6 +405,26 @@ branches on nothing — a manifest says what a call WANTS, never what a connecti
 HOLDS. The enforcement is `serve_rpc.handle_request`'s gate; see
 [06 §authorization](06-office-and-board.md).
 
+**A third map rides beside them: `params`, which says which KEYS a method
+honours** (`"params": {"runtime.chat.message": [...], "runtime.chat.steer":
+[...]}`, R-C8). The method lane ignores an unknown param rather than refusing it
+— a client cannot be refused for a key a runtime has never heard of — and that
+kindness is exactly what made a client unable to trust the lane: on 2026-09-06 a
+console send from Windows to a Mac never left the launcher, because the
+launcher's lowering could see that `runtime.chat.message` EXISTS and not that it
+silently dropped `workspace_name`, so it fell back to argv and argv to a remote
+install is a designed wall. Publishing what is heard is what makes ignoring the
+rest safe. The block covers the two chat verbs and only those — they are the
+ones whose surface an operator types into, and a block claiming to be exhaustive
+over twenty-six methods would be a promise `manifest()` cannot keep. The lists
+are derived from `chat_turn`'s own `CHAT_MESSAGE_PARAMS` / `CHAT_STEER_PARAMS`
+tuples, which the normalisers read, and a test drives each normaliser through a
+recording mapping to assert the advertisement equals the keys actually asked
+for. Additive under the same rule as `tiers`: no existing request or result
+shape moved, so the integer holds, and a manifest with NO `params` block reads
+as "a runtime that predates R-C8" — the launcher falls back to the eleven keys
+it knew — rather than as "no params".
+
 **The tier is now a refusal, and what it refuses is a paired device** (Stage A5,
 landed with the gateway's Stage 1). `authorize_call` compares the tier a
 device's record HOLDS — read off `gateway/devices.json` by the transport, fixed
