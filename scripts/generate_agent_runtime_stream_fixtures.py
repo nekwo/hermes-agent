@@ -464,7 +464,23 @@ def _normalize(
         return 0
     if isinstance(value, str):
         root = str(isolated_root)
-        return value.replace(root, "<isolated-root>").replace(root.replace("\\", "/"), "<isolated-root>")
+        redacted = value.replace(root, "<isolated-root>").replace(
+            root.replace("\\", "/"), "<isolated-root>"
+        )
+        if redacted == value:
+            return value
+        # The ROOT is redacted; the TAIL after the placeholder was not, so it
+        # carried the separator of whichever host last regenerated —
+        # `<isolated-root>\\runtime` from Windows, `<isolated-root>/runtime`
+        # from Linux. That made these goldens regenerable only on the box that
+        # last wrote them: `test_committed_goldens_are_the_generators_bytes`
+        # was green on Windows and red on every Linux runner, and the
+        # launcher's byte-identical vendored copies inherited the same
+        # Windows-shaped bytes. A cross-repo, cross-OS byte pin cannot carry
+        # the generating machine's path syntax, so the redacted spelling is
+        # canonicalised to forward slashes. Only strings that actually held the
+        # isolated root are touched.
+        return redacted.replace("\\", "/")
     return value
 
 

@@ -12,6 +12,34 @@ and parses them through its real decode + read-model pipeline
 split is structural, not an oversight, and the script names both halves
 (`GENERATED_FRAME_FILES` / `PINNED_ONLY_FILES`).
 
+> **CROSS-STACK COPY STATUS (w18/hb, 2026-09-06) — OPEN, launcher mirror OWED,
+> and it is EIGHT files, not one.**
+> The generator redacted the temporary root to `<isolated-root>` and left the
+> TAIL of the path alone, so every committed golden carried the separator of
+> the Windows box that last regenerated it — `<isolated-root>\runtime`,
+> `<isolated-root>\hermes\profiles`, and so on. The bytes were therefore
+> reproducible only on Windows:
+> `test_committed_goldens_are_the_generators_bytes` was green there and red on
+> every Linux runner (run 33969282189, slice 7), which is the whole of that
+> red. The redaction now canonicalises the redacted spelling to `/`, and the
+> eight goldens that carry a redacted path were regenerated. **The diff is
+> separators and nothing else** — verified byte-for-byte: folding `\\` to `/`
+> in the old bytes reproduces the new ones exactly, in all eight.
+>
+> Affected: `delta.json`, `delta_agent_create_narrow_profile.json`,
+> `delta_batch.json`, `hydrate.json`, `hydrate_authoritative_same_offset.json`,
+> `hydrate_running_work_owner.json`, `hydrate_stale_first.json`,
+> `patch_agent_create.json`, plus `MANIFEST.sha256`.
+>
+> Runtime-safe on the launcher side — these values are opaque display paths —
+> so the OWED work is the byte mirror plus its manifest, not a Dart change.
+> **Note for whoever re-vendors:** the launcher wave-18 lane `la` was told to
+> copy `delta_agent_create_narrow_profile.json` alone; after this change ALL
+> EIGHT above move, and `patch_agent_create.json` is new to the list. Copy the
+> current bytes, not the ones that row named.
+> `test_no_golden_carries_the_generating_hosts_path_separator` is the
+> structural guard against this returning.
+
 > **CROSS-STACK COPY STATUS (C1h-bis, 2026-09-05) — OPEN, launcher mirror OWED.**
 > Seven generated goldens moved ONE value and nothing else:
 > `core.decision_contract_hash`, from `114a8576…` to `fc9ac589…`. Two event

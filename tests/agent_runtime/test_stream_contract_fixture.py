@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -251,6 +252,38 @@ def test_committed_goldens_are_the_generators_bytes(tmp_path, monkeypatch):
             "Launcher's test/fixtures/harness_stream/, and update BOTH "
             "manifests — stream goldens change only in a cross-stack landing."
         )
+
+
+def test_no_golden_carries_the_generating_hosts_path_separator():
+    """A cross-repo, cross-OS byte pin may not encode who generated it.
+
+    The generator redacted the temporary root to ``<isolated-root>`` and left
+    the TAIL alone, so every committed golden read ``<isolated-root>\\runtime``
+    — the separator of the Windows box that last regenerated. The bytes were
+    therefore reproducible only on Windows:
+    :func:`test_committed_goldens_are_the_generators_bytes` was green there and
+    red on every Linux CI runner (run 33969282189, slice 7), and the launcher's
+    byte-identical vendored copies inherited the same host-shaped bytes.
+
+    This is the structural half of that fix, so the drift cannot return
+    silently the next time someone regenerates on a different machine.
+    """
+
+    offenders: list[str] = []
+    for name in _generator_module().GENERATED_FRAME_FILES:
+        text = (FIXTURES / name).read_text(encoding="utf-8")
+        for spelling in sorted(set(re.findall(r"<isolated-root>[^\"]*", text))):
+            if "\\" in spelling:
+                offenders.append(f"{name}: {spelling}")
+
+    assert offenders == [], (
+        "these redacted paths carry a backslash, which means the golden was "
+        "written on Windows and cannot be reproduced anywhere else:\n  "
+        + "\n  ".join(offenders)
+        + f"\n\nRegenerate with `{REGENERATE}` (its redaction canonicalises "
+        "the redacted spelling to `/`) and mirror the bytes into the "
+        "Launcher's test/fixtures/harness_stream/."
+    )
 
 
 def test_manifest_pins_fixture_bytes():
