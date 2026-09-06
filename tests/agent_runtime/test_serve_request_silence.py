@@ -7,8 +7,11 @@ argv complete, exit 0, in ~6s. Same pid, same home, no restart in between. The
 client had no way to tell "queued behind four chat turns" from "the handler
 wedged" from "the service died" — all three are the same silence on the wire.
 
-THREE defects are pinned here. DEFECT C is the MECHANISM — what actually ate
+FOUR defects are pinned here. DEFECT C is the MECHANISM — what actually ate
 the pool's workers — and A and B are why it was undiagnosable from the wire.
+DEFECT D is the same lane's OPPOSITE failure, measured 2026-09-05 once the
+runtime became a durable service: the anti-silence pump learned to shout, and
+then never stopped.
 
 DEFECT A — an argv request emits its FIRST frame only when its handler writes
     one. ``_handle_message`` registers the request and calls ``pool.submit``;
@@ -29,7 +32,17 @@ DEFECT B — the anti-silence liveness pump never reached the socket lane. Its
     socket client attached to a serve that is busy for minutes therefore reads
     nothing at all, and cannot distinguish a working service from a dead one.
 
-Both are pinned at the ``serve_loop`` seam with injected streams — the same
+DEFECT D — a launcher attached to an IDLE runtime is told it is busy, forever.
+    The launcher holds TWO standing ``harness stream`` subscriptions; they are
+    infinite by design and never leave ``inflight``. ``_report_quiet_requests``
+    excludes them by name and says why. ``_liveness_pump`` does not: it wakes
+    every 5 s, finds ``pending`` non-empty, and emits
+    ``{"event":"busy","chat_turns":0,"long_runs":0,"pending":2}`` to stdout and
+    to every attached socket client — a healthy idle service, describing itself
+    as working, on a five-second cadence, for the life of the process. A count
+    that is never zero is a count nobody can act on.
+
+All four are pinned at the ``serve_loop`` seam with injected streams — the same
 seam the drain accounting tests use — because that is where they reproduce.
 """
 
@@ -363,3 +376,147 @@ def test_a_dropped_connection_releases_the_worker_its_stream_was_holding():
                 "the request that needed the reclaimed worker never ran; "
                 f"frames were {handle.sink.frames()!r}"
             )
+
+
+# ── DEFECT D — standing subscriptions are not "busy" ────────────────────────
+
+
+class _Parked:
+    """A dispatch that parks on EVERY argv until released.
+
+    ``_Hog`` above answers anything that is not ``harness block``; these tests
+    need the stream subscriptions to stay in flight the way the launcher's do,
+    so this one holds whatever it is handed.
+    """
+
+    def __init__(self) -> None:
+        self.release = threading.Event()
+        self.started = threading.Semaphore(0)
+
+    def __call__(self, argv: list[str]) -> int:
+        self.started.release()
+        self.release.wait(WAIT)
+        return 0
+
+    def wait_started(self, count: int) -> None:
+        for _ in range(count):
+            assert self.started.acquire(timeout=WAIT), "dispatch was never entered"
+
+
+def _busy_frames(sink: _Sink) -> list[dict]:
+    return [frame for frame in sink.frames() if frame.get("event") == "busy"]
+
+
+def test_standing_subscriptions_alone_never_wake_the_liveness_pump():
+    """The measured shape: an idle runtime with a launcher attached to it.
+
+    Two ``harness stream`` requests, no work, three pump intervals. Before the
+    fix this saw a ``busy`` frame per interval, forever, each one reading
+    ``chat_turns: 0, long_runs: 0, pending: 2`` — the pump counting the
+    launcher's own subscriptions as the thing that made the service busy.
+    """
+
+    parked = _Parked()
+    pipe, sink = _Pipe(), _Sink()
+    interval = 0.05
+    result = _serve(
+        pipe,
+        sink,
+        dispatch=parked,
+        pool_size=4,
+        liveness_pump_interval_seconds=interval,
+    )
+    sink.wait_for("ready")
+    pipe.send({"id": "watch-1", "argv": ["harness", "stream"]})
+    pipe.send({"id": "watch-2", "argv": ["harness", "stream"]})
+    parked.wait_started(2)
+
+    # Three full intervals plus slack: if the pump were going to speak about a
+    # subscription-only service, it would have spoken three times by here.
+    time.sleep(interval * 3 + 0.2)
+    assert _busy_frames(sink) == [], (
+        "the liveness pump described an idle service as busy; frames were "
+        f"{sink.frames()!r}"
+    )
+
+    parked.release.set()
+    pipe.send({"op": "shutdown"})
+    result["thread"].join(WAIT)
+
+
+def test_one_chat_turn_behind_two_subscriptions_pumps_work_one():
+    """Real work still wakes the pump, and the frame separates it from watchers.
+
+    ``pending`` keeps its old meaning — everything in flight, subscriptions
+    included — so the launcher's existing decode is unchanged. ``work`` is the
+    number the operator wanted all along.
+    """
+
+    parked = _Parked()
+    pipe, sink = _Pipe(), _Sink()
+    result = _serve(
+        pipe,
+        sink,
+        dispatch=parked,
+        pool_size=4,
+        liveness_pump_interval_seconds=0.05,
+    )
+    sink.wait_for("ready")
+    pipe.send({"id": "watch-1", "argv": ["harness", "stream"]})
+    pipe.send({"id": "watch-2", "argv": ["harness", "stream"]})
+    parked.wait_started(2)
+    pipe.send(
+        {
+            "id": "turn-1",
+            "argv": ["harness", "mission-chat", "message", "--text", "hi"],
+        }
+    )
+    parked.wait_started(1)
+
+    busy = sink.wait_for("busy")
+    assert busy["work"] == 1, busy
+    assert busy["subscriptions"] == 2, busy
+    assert busy["pending"] == 3, busy
+    assert busy["chat_turns"] == 1, busy
+    assert busy["long_runs"] == 0, busy
+
+    parked.release.set()
+    pipe.send({"op": "shutdown"})
+    result["thread"].join(WAIT)
+
+
+def test_ping_on_an_idle_service_still_answers_with_every_count():
+    """Silence is the PUMP's rule, not the frame's.
+
+    A supervisor that ASKS gets the whole picture — including the two standing
+    subscriptions it is holding itself — because an answer that omitted them
+    would make "attached" and "not attached" look identical. The pump interval
+    is a minute here on purpose: the only thing that can produce this frame is
+    the ping.
+    """
+
+    parked = _Parked()
+    pipe, sink = _Pipe(), _Sink()
+    result = _serve(
+        pipe,
+        sink,
+        dispatch=parked,
+        pool_size=4,
+        liveness_pump_interval_seconds=60.0,
+    )
+    sink.wait_for("ready")
+    pipe.send({"id": "watch-1", "argv": ["harness", "stream"]})
+    pipe.send({"id": "watch-2", "argv": ["harness", "stream"]})
+    parked.wait_started(2)
+
+    pipe.send({"op": "ping"})
+    busy = sink.wait_for("busy")
+    assert busy["work"] == 0, busy
+    assert busy["subscriptions"] == 2, busy
+    assert busy["pending"] == 2, busy
+    assert busy["chat_turns"] == 0, busy
+    assert busy["long_runs"] == 0, busy
+
+    parked.release.set()
+    pipe.send({"op": "shutdown"})
+    result["thread"].join(WAIT)

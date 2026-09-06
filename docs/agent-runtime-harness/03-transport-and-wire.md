@@ -54,6 +54,21 @@ answers `cancel_denied`, and a running `harness stream` request is still the sol
 exception to "running requests cannot be cancelled", cooperatively cancelled and
 releasing its pool worker (`is_runtime_stream`, `:835`, used `:2952`).
 
+**A standing subscription is not work, and the pump is silent about it**
+(RL-13, 2026-09-05). `busy` carries five counts: `chat_turns`, `long_runs`,
+`pending` (everything in flight — unchanged name, unchanged meaning), plus the
+additive `subscriptions` (the `is_runtime_stream` subset) and `work`
+(`pending − subscriptions`). The split exists because an attached launcher holds
+TWO infinite `harness stream` requests for the life of the attachment, so
+`pending` on an IDLE runtime is 2 and never 0 — measured on the live service,
+which announced `{"event":"busy","chat_turns":0,"long_runs":0,"pending":2}`
+every five seconds while doing nothing. `_liveness_pump` now emits (to stdout
+AND `_broadcast_lanes`) only when `work > 0`; `ping` always answers with all
+five, because a supervisor that ASKS needs to see the subscriptions it is
+holding. `_report_quiet_requests` still receives the whole pending list and
+does its own exclusion. Pinned in
+`tests/agent_runtime/test_serve_request_silence.py` (DEFECT D).
+
 **Two transports, one dispatcher.** `serve_loop` is transport-agnostic. One
 serve per root owns a localhost socket, decided by an OS-held exclusive lock
 (`agent_runtime/serve_socket.py`); the loser runs stdio-only and says so on

@@ -46,11 +46,18 @@ Protocol (NDJSON, one frame per line):
              whether a retry is free. Additive and never emitted on the normal
              path — a client that does not know the event ignores it and
              still reads its ``line``/``exit`` frames unchanged.
-- ping:      ``{"op":"ping"}`` → ``{"event":"busy","chat_turns":N,"pending":M}``
+- ping:      ``{"op":"ping"}`` → ``{"event":"busy","chat_turns":N,
+             "long_runs":N,"pending":M,"subscriptions":S,"work":M-S}``
              (the Launcher supervisor must NEVER recycle serve while
-             ``chat_turns`` > 0 — recording safety). The SAME frame is pushed
-             unsolicited by the liveness pump while work is in flight, to
-             stdout AND to every attached socket/gateway client.
+             ``chat_turns`` > 0 — recording safety). ``pending`` is EVERYTHING
+             in flight and keeps that meaning; ``subscriptions`` is the
+             standing-`harness stream` subset, which an attached launcher holds
+             two of forever, and ``work`` is the remainder — the count that
+             actually returns to zero on an idle service. The SAME frame is
+             pushed unsolicited by the liveness pump, to stdout AND to every
+             attached socket/gateway client, but ONLY while ``work`` > 0: a
+             `ping` always answers, an idle runtime with subscribers says
+             nothing.
 - shutdown:  ``{"op":"shutdown"}`` → drain in-flight requests, exit 0
 - version:   ``{"op":"version"}`` → ``{"event":"version","build":{…},
              "runtime_root":…,"boot_id":…,"transport":"stdio","auth":{…}}``
@@ -2402,17 +2409,32 @@ def serve_loop(
             pending = len(inflight)
             chat_turns = sum(1 for item in inflight.values() if item.is_chat_turn)
             long_runs = sum(1 for item in inflight.values() if item.is_long_run)
-        # ``long_runs`` is ADDITIVE. ``chat_turns`` keeps its exact meaning and
-        # its exact name because the launcher decodes it by that name
+            subscriptions = sum(
+                1 for item in inflight.values() if item.is_runtime_stream
+            )
+        # ``long_runs`` and ``subscriptions``/``work`` are ADDITIVE.
+        # ``chat_turns`` and ``pending`` keep their exact meanings and their
+        # exact names because the launcher decodes them by those names
         # (`mission_control_serve_session_io.dart`, the `busy` case →
         # `MissionServeBusySignal.chatTurns`), and a supervisor that learned to
         # read a renamed key would be a supervisor that stopped reading the old
         # one mid-upgrade.
+        #
+        # ``subscriptions`` counts the STANDING requests — `harness stream`,
+        # infinite by design, which the launcher holds two of for the life of
+        # the attachment. ``work`` is everything else. The distinction is not
+        # cosmetic: an attached launcher used to make an IDLE runtime answer
+        # `pending: 2` forever (measured 2026-09-05), so `pending > 0` — the
+        # only "is it working?" test the frame offered — was true on a service
+        # doing nothing at all. ``work`` is the number that goes back to zero,
+        # and it is what the liveness pump keys on.
         return {
             "event": "busy",
             "chat_turns": chat_turns,
             "long_runs": long_runs,
             "pending": pending,
+            "subscriptions": subscriptions,
+            "work": pending - subscriptions,
         }
 
     def _report_quiet_requests(pending: list[_ArgvRequest]) -> None:
@@ -3311,33 +3333,48 @@ def serve_loop(
                     pending = list(inflight.values())
                 if not pending:
                     continue
-                try:
-                    busy_frame = _busy_frame()
-                    frames.emit(busy_frame)
-                except Exception:
-                    # Writer gone — the main loop is on its way down too.
-                    return
-                # And to every SOCKET client, for the identical reason the
-                # comment above gives for stdout. This lane was left behind
-                # when the drain path learned the same lesson: "the socket
-                # client IS such a watchdog: it reads with a finite timeout and
-                # reports `transport_failed` on silence" (see the drain's
-                # `_broadcast_lanes(progress)`). Measured 2026-08-27: an
-                # authenticated socket connection waiting on a `characters
-                # list` read ZERO frames for >120s while this pump was emitting
-                # `busy` the whole time — to stdout, where that client could
-                # not see it.
-                #
-                # Best-effort and never fatal: `_broadcast_lanes` is a later
-                # local of this loop, so an early tick can find it unbound, and
-                # a broadcast failing must not stop the liveness the launcher
-                # keys on.
-                try:
-                    _broadcast_lanes(busy_frame)
-                except Exception:
-                    pass
+                busy_frame = _busy_frame()
+                # STANDING SUBSCRIPTIONS ARE NOT WORK. `harness stream` never
+                # ends by design, so an attached launcher keeps two of them in
+                # `inflight` for the life of the attachment — and this pump,
+                # which only ever asked "is anything pending?", therefore
+                # announced `busy` every 5s to a runtime that was doing
+                # NOTHING (measured 2026-09-05: `chat_turns: 0, long_runs: 0,
+                # pending: 2`, forever). `_report_quiet_requests` had already
+                # learned to exclude them, and says why; this is the same
+                # exclusion applied to the frame the launcher actually reads.
+                # `ping` is untouched — a supervisor that ASKS still gets every
+                # count, because silence is the pump's rule, not the frame's.
+                if busy_frame["work"] > 0:
+                    try:
+                        frames.emit(busy_frame)
+                    except Exception:
+                        # Writer gone — the main loop is on its way down too.
+                        return
+                    # And to every SOCKET client, for the identical reason the
+                    # comment above gives for stdout. This lane was left behind
+                    # when the drain path learned the same lesson: "the socket
+                    # client IS such a watchdog: it reads with a finite timeout
+                    # and reports `transport_failed` on silence" (see the
+                    # drain's `_broadcast_lanes(progress)`). Measured
+                    # 2026-08-27: an authenticated socket connection waiting on
+                    # a `characters list` read ZERO frames for >120s while this
+                    # pump was emitting `busy` the whole time — to stdout,
+                    # where that client could not see it.
+                    #
+                    # Best-effort and never fatal: `_broadcast_lanes` is a later
+                    # local of this loop, so an early tick can find it unbound,
+                    # and a broadcast failing must not stop the liveness the
+                    # launcher keys on.
+                    try:
+                        _broadcast_lanes(busy_frame)
+                    except Exception:
+                        pass
                 # The per-request half: `busy` is a count, and a client waiting
-                # on ONE id needs to know whether that id has started.
+                # on ONE id needs to know whether that id has started. It gets
+                # the FULL pending list — it does its own stream exclusion, and
+                # a subscription-only lap can still be the lap on which an
+                # argv request crosses the silence budget.
                 _report_quiet_requests(pending)
 
         threading.Thread(
