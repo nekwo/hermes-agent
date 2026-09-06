@@ -1,5 +1,10 @@
 # Planned — Remote Gateway (hermes half)
 
+**ARCHIVED 2026-09-06 at launcher `5299bf7c3` / hermes `60b94f848b` — shipped;
+the canon is [09 - multi-device runtime](../09-multi-device-runtime.md); what
+remains open (operator proofs, gated stages) is in that doc's § Open rows and
+the operator register. The status line below is history.**
+
 **Status correction 2026-09-01, mirroring the primary plan's own 2026-08-30
 correction: BUILT — every numbered stage shipped 2026-08-27/28.** The
 paragraph below is the pre-build gating history, kept as the record of how the

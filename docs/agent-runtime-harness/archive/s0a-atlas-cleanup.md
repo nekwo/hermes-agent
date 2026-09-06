@@ -1,5 +1,12 @@
 # Planned — S0a atlas cleanup: one harness toolset, one authority, a manual generated from the registry
 
+**ARCHIVED 2026-09-06 at hermes `e94e022fb6` (doc 09 § Ledger, the
+same-account pairing row; this build plan carries no ledger of its own) —
+shipped; the canon is [09 - multi-device
+runtime](../09-multi-device-runtime.md); what remains open (operator proofs,
+gated stages) is in that doc's § Open rows and the operator register. The
+status line below is history.**
+
 **Status: PLANNED — no code touched. Build plan for an Opus builder; written
 2026-09-03 against hermes `504953f6ad` (`origin/main`, worktree
 `X:/wt/s0a-atlas`, branch `feat/s0a-atlas-cleanup`) and the launcher's

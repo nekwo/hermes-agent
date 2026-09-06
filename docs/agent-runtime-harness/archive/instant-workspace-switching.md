@@ -1,5 +1,10 @@
 # Planned — Instant workspace switching (hermes half)
 
+**ARCHIVED 2026-09-06 at launcher `9aa0694a5` / hermes `ffd540bf73` — shipped;
+the canon is [09 - multi-device runtime](../09-multi-device-runtime.md); what
+remains open (operator proofs, gated stages) is in that doc's § Open rows and
+the operator register. The status line below is history.**
+
 **EXECUTED 2026-09-01 — WS1 landed `cf9abaac4b`, WS4's hermes half landed
 `ffd540bf73`; WS5 stays gated per R-W3 (its deletion clock starts when WS1
 has a quiet field week).** Canon carries the landed facts: 03 § the `scope`

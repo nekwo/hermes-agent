@@ -1,5 +1,12 @@
 # Planned — S2 / S2b / S2c: `introduce`, the read-only directory, and the peer push lane
 
+**ARCHIVED 2026-09-06 at hermes `dcba382f0a` (doc 09 § Ledger, the
+same-account pairing row; this build plan carries no ledger of its own) —
+shipped; the canon is [09 - multi-device
+runtime](../09-multi-device-runtime.md); what remains open (operator proofs,
+gated stages) is in that doc's § Open rows and the operator register. The
+status line below is history.**
+
 **Status: PLANNED — no code touched. Build plan for an Opus builder; written
 2026-09-03 against hermes `55fdc99148` (`origin/main`; worktree
 `X:/wt/s2-hermes`, branch `feat/s2-introduce-directory-push`), the launcher's
