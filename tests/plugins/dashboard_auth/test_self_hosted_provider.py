@@ -621,11 +621,23 @@ class TestPluginRegister:
 
     @pytest.fixture
     def patch_config(self, monkeypatch):
+        """Patch the loader `_load_config_oauth_section` actually calls.
+
+        It moved to `load_config_readonly` in `96cfc09a34` (a plugin module is
+        imported by `discover_plugins()` from read-only processes, where
+        `load_config()` would scaffold the home). This fixture kept patching
+        the retired name, so every config value below went nowhere: the
+        env-only cases stayed green on their env vars and the two config-only
+        cases red the first time anything ran them — CI slice 3 of run
+        33969282189, `'NoneType' object has no attribute 'args'` because
+        `register` skipped. Reproduces on Windows; not a platform fact.
+        """
+
         def _set(oauth_block):
             cfg = {}
             if oauth_block is not None:
                 cfg = {"dashboard": {"oauth": oauth_block}}
-            monkeypatch.setattr("hermes_cli.config.load_config", lambda: cfg)
+            monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: cfg)
 
         return _set
 
@@ -675,7 +687,7 @@ class TestPluginRegister:
         def _broken():
             raise OSError("unreadable")
 
-        monkeypatch.setattr("hermes_cli.config.load_config", _broken)
+        monkeypatch.setattr("hermes_cli.config.load_config_readonly", _broken)
         ctx = MagicMock()
         oidc_plugin.register(ctx)  # must not raise
         ctx.register_dashboard_auth_provider.assert_not_called()
