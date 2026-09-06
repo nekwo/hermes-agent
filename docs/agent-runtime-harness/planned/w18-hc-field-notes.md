@@ -141,7 +141,14 @@ re-anchor hint per row.
   not contain is reported by id (`test_a_needle_the_code_moved_past_is_reported_by_name`);
   a claim naming a deleted file is reported rather than crashing the walk.
 - Anti-vacuity floors (`MINIMUM_CLAIMS`, `MINIMUM_DISTINCT_PATHS`) are floors,
-  not counts, and were met at 298 claims across 111 files.
+  not counts (200 / 40), and were met at 298 claims across 60 files.
+
+The sweep re-parsed each claim's whole file per claim and took ~18 s against
+this repo's 30 s per-test cap — close enough that it timed out once in a
+four-file run. `bbc1caafb0` swaps the gate's own `ast` reference for a memo
+that parses each distinct source once (3.65 s for the sweep, 5.2 s for the
+file) and moves the sweep to a module-scoped fixture. The stdlib module is
+never touched.
 
 `derived_at` was deliberately NOT added to the four repaired rows: the honest
 sha would be this branch's head, and the landing session rebases, which would
@@ -232,3 +239,49 @@ through the hyphenated output name (the same shape `steps.ci-timings-html.output
 already uses in this file), and that the runner honours github-script v9's
 `node24`. If either is wrong the job fails visibly in the run — it cannot make
 a red run look green.
+
+---
+
+## Gates, with exit codes
+
+Venv `~/.venvs/hermes-test`, `HERMES_PYTHON=C:/Python312/python.exe`, run from
+the lane worktree.
+
+| Gate | Exit | Note |
+|---|---|---|
+| `ruff check .` | **0** | was 1 with 43 errors |
+| `scripts/doc_cite_adjacency.py --exclude archive --exclude planned` | **1** | PRE-EXISTING. 35 unwaived failures + 1 stale waiver at `af89448444` and the same 35 + 1 here, byte-identical lists. My branch briefly made it 37; `cf6469278c` re-anchored the two cites my import header moved. NOT baselined. |
+| `scripts/dump_cli_contract.py --check` | **0** | 191 command paths |
+| `scripts/dump_toolset_manifest.py --check` | **0** | 90 tools / 31 toolsets |
+| `scripts/emit_harness_tool_inventory.py --check` | **0** | 44 tools / 15 toolsets |
+| `scripts/dump_payload_contract.py --check` | **0** | 4 kinds, 152 keys |
+| `pytest tests/test_coverage_claims_resolve.py -q` | **1** | PRE-EXISTING and LOCAL-ONLY. Times out at the repo's 30 s per-test cap inside its own collection fixture, identically at `af89448444`. With `--timeout=600` it is **4 passed in 110 s**, so the gate's content is green and only this box's speed fires. It is not among the row's 33 CI reds, so it passes on the runner. |
+| `pytest tests/scripts/test_mutation_claims_still_anchor.py -q` | **0** | 4 passed in 5.2 s |
+| `pytest tests/scripts/` (four mutation suites) | **0** | 39 passed |
+| `pytest tests/hermes_cli/test_harness_parts_namespace.py -q` | **0** | 5 passed |
+| `pytest tests/agent_runtime/test_snapshot.py test_snapshot_build_logging.py -q` | **0** | 23 passed |
+| `pytest tests/hermes_cli/test_error_exit_code_producers.py -q` | **0** | 13 passed |
+| `scripts/changed_line_mutation_check.py --base HEAD~1 --list` | **0** | was 2 |
+
+The two pre-existing reds are reported, not repaired and not baselined. The
+doc-cite one is adjacent to lane ha's `tests/scripts/test_doc_cite_report.py`
+and may be the same subject.
+
+## Incident — a stash that was not mine
+
+`git stash push -q tests/mutation_claims.json` saved nothing (the file was
+already committed), so the `git stash pop` that followed popped ANOTHER
+session's `stash@{0}` — the one whose own message records it had already been
+mis-popped once, from `wt/c1-open-chat` on 2026-09-05. It applied 47 lines to
+`tests/hermes_cli/conftest.py` in this worktree.
+
+Recovered immediately: the patch was saved, re-pushed by pathspec with a
+message carrying the whole provenance chain, and `git stash show -p stash@{0}`
+verified byte-identical to what was popped. The stash list is three entries in
+its original order and `tests/hermes_cli/conftest.py` is unmodified here.
+
+The lesson is narrow and worth writing down: `git stash pop` in a shared clone
+is not a private operation, and a `push` that saves nothing leaves a `pop` that
+takes someone else's work. Isolate a temporary revert with
+`git checkout <sha> -- <path>` and `git checkout HEAD -- <path>` instead, which
+is what the rest of this lane's measurements used.
