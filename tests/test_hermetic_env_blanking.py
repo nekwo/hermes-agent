@@ -87,8 +87,13 @@ LEAK_PRONE_VARS: dict[str, tuple[str, str]] = {
         "and tools/kanban_tools.py:877 default the author name to it",
     ),
     "HERMES_AUTH_HOME": (
-        "hermes_cli/auth.py",
-        ":940 takes it as the explicit per-profile credential root",
+        "hermes_constants.py",
+        ":109 is the ONE reader of this authority — `get_hermes_auth_home()`, "
+        "context-local override first and this env var second. "
+        "`hermes_cli/auth.py::_global_auth_file_path` took it as the explicit "
+        "per-profile credential root out of raw `os.environ` until "
+        "`e567a9ff00` routed it through here, which is why the witness had to "
+        "be repointed rather than the name dropped",
     ),
     "HERMES_SHARED_AUTH_DIR": (
         "hermes_cli/auth.py",
