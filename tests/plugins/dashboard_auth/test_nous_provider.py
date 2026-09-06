@@ -229,19 +229,44 @@ class TestConfigYamlSource:
 
     @pytest.fixture
     def patch_config(self, monkeypatch):
-        """Yield a callable that replaces ``hermes_cli.config.load_config``
-        with a stub returning the given dict. Tests pass the intended
-        ``dashboard.oauth`` block; the stub returns the wrapping structure."""
+        """Yield a callable that replaces the config accessor the plugin
+        ACTUALLY calls with a stub returning the given dict. Tests pass the
+        intended ``dashboard.oauth`` block; the stub returns the wrapping
+        structure and the real ``cfg_get`` walks it.
+
+        That accessor is ``load_config_readonly``, not ``load_config``: hermes
+        ``96cfc09a34`` moved the plugin's read to the readonly variant so that
+        loading a plugin during ``discover_plugins()`` cannot scaffold the home
+        as an import side effect. This fixture went on stubbing ``load_config``
+        — a function nobody calls — so the "config.yaml is a source" test read
+        the real (hermetic, empty) config and was red on every runner from the
+        day the accessor moved. Its two siblings kept passing for the wrong
+        reason: "env beats config" and "neither source is set" are both
+        satisfied by a config that is simply unreachable.
+        :func:`test_the_stub_is_the_accessor_the_plugin_reads` is the guard
+        against the same drift happening silently a second time.
+        """
 
         def _set(oauth_block: Dict[str, Any] | None) -> None:
-            cfg = {}
+            cfg: Dict[str, Any] = {}
             if oauth_block is not None:
                 cfg = {"dashboard": {"oauth": oauth_block}}
             monkeypatch.setattr(
-                "hermes_cli.config.load_config", lambda: cfg
+                "hermes_cli.config.load_config_readonly", lambda: cfg
             )
 
         return _set
+
+    def test_the_stub_is_the_accessor_the_plugin_reads(self, patch_config):
+        """ANTI-VACUITY for this whole class: the stub has to reach the
+        plugin's own read path, or every "config.yaml" assertion below is
+        describing an empty config instead of the one the test wrote."""
+
+        patch_config({"client_id": "agent:probe", "portal_url": "https://probe"})
+        assert nous_plugin._load_config_oauth_section() == {
+            "client_id": "agent:probe",
+            "portal_url": "https://probe",
+        }
 
     def test_config_yaml_only_client_id_registers(self, patch_config, monkeypatch):
         """No env var, only config.yaml — plugin reads from config and
