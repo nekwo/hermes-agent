@@ -138,8 +138,7 @@ export function UninstallSection() {
             </p>
             {pendingOption.needsAgent && (
               <p className="mt-1 text-xs text-muted-foreground">
-                This deletes the agent&apos;s code checkout, including its git history — not backed up by this
-                tool.
+                This deletes the agent&apos;s code checkout, including its git history — not backed up by this tool.
               </p>
             )}
             {summary?.running_app_path && (

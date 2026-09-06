@@ -283,17 +283,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
 
       send(full)
     },
-    [
-      appendMessage,
-      composerActions,
-      composerRefs,
-      handleBusyInput,
-      interpolate,
-      send,
-      sendQueued,
-      shellExec,
-      slashRef
-    ]
+    [appendMessage, composerActions, composerRefs, handleBusyInput, interpolate, send, sendQueued, shellExec, slashRef]
   )
 
   const submit = useCallback(
