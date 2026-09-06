@@ -117,3 +117,59 @@ Reverting the product line reds it on Windows: `assert ['/Users/tony/My
 Projects/EterniaLauncher', '/opt/tools/thing'] == ['/opt/tools/thing']`.
 The pre-existing sibling needed no edit; it goes green on Linux from the product
 fix alone.
+
+## Row 2 — the ledger did not rot; the walk stopped following the emit
+
+**The row's platform premise does not hold.** `test_ledger_does_not_rot` is red
+on WINDOWS too, on unmodified `600ec5100f` — same assertion, same handler. So
+there is no path-case, `os.sep` or exec-assembled-part difference to find: the
+walk reads the same bytes on both hosts and gets the same answer. Whatever
+observation put "green on Windows" on the row was taken before
+`13c1d67178` (2026-09-05) landed.
+
+**What actually moved.** `13c1d67178` — the R-C5 open-chat lowering, "the verb
+gets a method, over the CLI handler's own row" — gave
+`_cmd_persona_instance_open_chat` a `_emit_persona_open_chat_payload` seam so a
+serve's in-process caller can take the row without `contextlib.redirect_stdout`
+rebinding the process's stdout under every other thread. Its `emit_json` call
+went with it. `_handlers()` only counted DIRECT calls, so it read a transport
+refactor as "this verb stopped emitting JSON" and asked for the exemption to be
+deleted from a verb that emits exactly as much as it ever did.
+
+So: follow the emit, not delete the entry. The walk now propagates
+`emits` / `attaches` / `chat_scope` from a handler's local `_emit_*` callees, to
+a fixpoint rather than one hop (a seam may delegate to another, and a cycle must
+not hang the scan).
+
+**Why `_emit_*` and not the whole call graph.** Measured both:
+
+| propagation | `_cmd_*` handlers newly seen to emit |
+|---|---|
+| direct calls only (before) | — |
+| via local `_emit_*` callees | 3 |
+| via every local callee | 30 |
+
+The three are `_cmd_persona_instance_open_chat`,
+`_cmd_persona_instance_open_new_chat` (both already carry ledger entries) and
+`_cmd_usage`. The full walk adds twenty more that were neither classified nor
+attaching; `_cmd_usage` is fixed below, leaving NINETEEN — seventeen
+`_cmd_characters_*`, `_cmd_mission_chat_message` and
+`_cmd_persona_instance_archive`. That is a real hole in this gate, and nineteen
+conscious classifications or routings is a workstream, not a line of this row. It is handed back as its own
+row rather than absorbed into `_BACKLOG_REASON`, which says in as many words not
+to grow that list.
+
+**`_cmd_usage`.** Surfacing it turned the first red into a second, and it is not
+a false positive: the verb emits a per-provider account-usage envelope through
+`_emit_usage_json` and states no root. An account whose credentials live under a
+different `HERMES_HOME` answers zero lanes in a perfectly well-formed envelope —
+the 2026-08-12 shape exactly. Routed through `attach_root_observability` on both
+JSON exits (the `--json` branch and the human-render fallback); the human
+renderer is untouched because the keys it prints are its own, and
+`attach_root_observability` never raises, so the verb's total-isolation contract
+is unchanged.
+
+Two reds, two fixes, each killed by reverting the other half: without the
+`_emit_*` follow, `test_ledger_does_not_rot` reds on
+`_cmd_persona_instance_open_chat`; without the `_cmd_usage` stamp,
+`test_every_json_verb_states_its_root_or_is_classified` reds naming it.

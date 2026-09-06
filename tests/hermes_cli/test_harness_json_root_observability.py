@@ -146,21 +146,44 @@ def _call_name(node: ast.Call) -> str | None:
 
 
 def _handlers() -> dict[str, dict]:
-    """Map handler name → {emits, attaches, chat_scope} for every ``_cmd_*``."""
+    """Map handler name → {emits, attaches, chat_scope} for every ``_cmd_*``.
 
-    found: dict[str, dict] = {}
+    A handler that hands its payload to a local ``_emit_*`` helper emits what
+    that helper emits. That indirection is not incidental: the R-C5 lowering
+    (``13c1d67178``) gave the open-chat and mission-chat verbs a
+    ``_emit_<verb>_payload`` seam so an in-process serve caller can take the row
+    without ``redirect_stdout`` rebinding the whole process's stdout, and the
+    usage verb has had ``_emit_usage_json`` since it was written. A scan that
+    only saw DIRECT ``emit_json`` calls read that refactor as "this verb stopped
+    emitting JSON" and asked for the ledger entry to be deleted — which would
+    have retired the exemption on a verb that emits as much as it ever did.
+
+    The follow is one named seam, not a general call-graph walk, and the
+    difference is measured: following ``_emit_*`` adds three handlers, while
+    following EVERY local callee adds thirty — twenty of which are neither
+    classified nor attaching. Those twenty are a real hole in this gate and a
+    workstream of their own; they are not silently absorbed here.
+    """
+
+    direct: dict[str, dict] = {}
+    calls: dict[str, set[str]] = {}
     for path in _scan_files():
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            if not node.name.startswith("_cmd_"):
+            if not (node.name.startswith("_cmd_") or node.name.startswith("_emit_")):
                 continue
             emits = attaches = chat_scope = False
+            called: set[str] = set()
             for sub in ast.walk(node):
                 if not isinstance(sub, ast.Call):
                     continue
                 name = _call_name(sub)
+                if name is None:
+                    continue
+                if name.startswith("_emit_"):
+                    called.add(name)
                 if name in _EMIT_CALLS:
                     emits = True
                 if name == _ATTACH_CALL:
@@ -172,16 +195,34 @@ def _handlers() -> dict[str, dict]:
                             and keyword.value.value is True
                         ):
                             chat_scope = True
-            assert node.name not in found or found[node.name]["emits"] == emits, (
+            assert node.name not in direct or direct[node.name]["emits"] == emits, (
                 f"duplicate handler name {node.name!r} with diverging shape — "
                 "the name-keyed ledger below can no longer address it"
             )
-            found[node.name] = {
+            direct[node.name] = {
                 "emits": emits,
                 "attaches": attaches,
                 "chat_scope": chat_scope,
             }
-    return found
+            calls[node.name] = called
+
+    # Fixpoint rather than one hop: an ``_emit_*`` seam is free to delegate to
+    # another one, and a cycle must not hang the scan.
+    changed = True
+    while changed:
+        changed = False
+        for name, called in calls.items():
+            for target in called:
+                if target == name or target not in direct:
+                    continue
+                for key in ("emits", "attaches", "chat_scope"):
+                    if direct[target][key] and not direct[name][key]:
+                        direct[name][key] = True
+                        changed = True
+
+    return {
+        name: info for name, info in direct.items() if name.startswith("_cmd_")
+    }
 
 
 def test_every_json_verb_states_its_root_or_is_classified():

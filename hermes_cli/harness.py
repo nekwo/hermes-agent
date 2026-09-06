@@ -6271,14 +6271,21 @@ def _cmd_usage(args) -> int:
         payload = build_account_usage(only_provider=only_provider, timeout=timeout)
     except Exception as exc:  # noqa: BLE001 — named on the fallback envelope
         payload = _empty_usage_envelope(("build", exc))
+    # Stamped on the JSON exits only, and the human render is left alone: the
+    # keys it prints are its own. An account whose credentials live under a
+    # different HERMES_HOME answers "zero lanes" in a perfectly well-formed
+    # envelope — the incident shape this stamp exists for — and until now this
+    # verb reached the gate through ``_emit_usage_json``, where a direct-call
+    # scan could not see it. ``attach_root_observability`` never raises, so the
+    # verb's total-isolation contract is unchanged.
     if getattr(args, "json", False):
-        _emit_usage_json(payload)
+        _emit_usage_json(attach_root_observability(payload))
         return 0
     try:
         _render_account_usage_human(payload)
     except Exception:
         # Human rendering must not crash the verb either.
-        _emit_usage_json(payload)
+        _emit_usage_json(attach_root_observability(payload))
     return 0
 
 
