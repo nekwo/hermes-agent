@@ -19,11 +19,21 @@ failing test here, not a silent non-fence.
 
 Two things are checked per row:
 
-  * the probe still reports the gap on this host — otherwise the environment
-    (or the code) moved and the row must be deleted;
+  * the probe still reports the gap on a host that HAS the gap — otherwise the
+    environment (or the code) moved and the row must be deleted;
   * the node id still exists in the file — an orphaned row marks nothing while
     still reading like a fence, which is exactly how 163 rows rotted through
     the 2026-07-31 upstream prune.
+
+The first of those said "on this host" until 2026-09-06, and it was a
+single-host reading of a two-host ledger. Every row in all four registries
+describes a gap measured on the Windows dev box; on the Linux CI runner every
+probe correctly answers "no gap here", and the gate read all 52 of them as
+rotted and instructed their deletion — which would have dropped the fence for
+the host that has the gap. CI run 33969282189 slice 3 is where that finally
+became visible, four parametrisations red. The verdict is now scoped to a host
+the registry describes, and the host where it does NOT apply gets the
+complementary assertion instead — see ``firing_skip_rows``.
 """
 
 from __future__ import annotations
@@ -34,7 +44,7 @@ from pathlib import Path
 
 import pytest
 
-from tests._env_gap_fence import EnvGapSkipRegistry, stale_skip_rows
+from tests._env_gap_fence import EnvGapSkipRegistry, firing_skip_rows, stale_skip_rows
 
 TESTS_ROOT = Path(__file__).resolve().parent
 
@@ -59,19 +69,67 @@ def _load_registry(directory: str) -> tuple[EnvGapSkipRegistry, Path] | None:
     return registry, conftest
 
 
+def _this_host_carries_the_gaps() -> bool:
+    """Does ANY row, in ANY of the four registries, report its gap here?
+
+    The scope test for the stale verdict, and deliberately asked across all
+    four registries rather than per-directory. Per-directory would leave a
+    one-row registry — ``tests/agent`` is one today — unjudgeable the moment
+    its single row went stale, because the registry would then look like one
+    that simply does not describe this host. The four are populated from one
+    developer host and describe one host class between them, so "is this that
+    host" is a question about the fleet, not about a directory.
+    """
+
+    for directory in _FENCED_DIRS:
+        loaded = _load_registry(directory)
+        if loaded is not None and firing_skip_rows(loaded[0]):
+            return True
+    return False
+
+
 @pytest.mark.parametrize("directory", _FENCED_DIRS)
 def test_every_skip_row_still_describes_a_real_gap(directory: str) -> None:
-    """A probe that no longer reports a gap means the row is dead — delete it."""
+    """On a host with the gaps: a probe gone quiet means the row is dead.
+
+    On a host WITHOUT them: the registry fenced nothing here, so every one of
+    its tests ran. Both branches assert; neither skips. Which branch applies is
+    read off the registries rather than off a platform name.
+    """
     loaded = _load_registry(directory)
     if loaded is None:
         pytest.skip(f"tests/{directory} carries no probe-backed registry")
     registry, conftest = loaded
+    location = conftest.relative_to(TESTS_ROOT.parent)
+
+    if not _this_host_carries_the_gaps():
+        # None of these registries describes this host, so the stale verdict
+        # has no standing: acting on it would delete a fence the host that DOES
+        # have the gap still needs. What IS assertable here is that the ledger
+        # is well formed — every probe answered a real ``bool``, on a host
+        # whose imports and syscalls differ from the one it was written on.
+        # Deliberately the weak half: the strong half is a claim about a host
+        # this is not, and there is no honest way to make it from here.
+        malformed = [
+            f"{file_name}::{probe.__name__} -> {type(verdict).__name__}"
+            for file_name, groups in registry.items()
+            for probe, _reason, _node_ids in groups
+            if not isinstance(verdict := probe(), bool)
+        ]
+        assert not malformed, (
+            f"These probes in _ENV_GAP_SKIPS ({location}) did not answer a "
+            "bool on this host. A probe is read for truthiness at collection, "
+            "so a non-bool is a row that fences by accident:\n  "
+            + "\n  ".join(sorted(malformed))
+        )
+        return
 
     stale = stale_skip_rows(registry)
     assert not stale, (
-        f"These rows in _ENV_GAP_SKIPS ({conftest.relative_to(TESTS_ROOT.parent)}) "
-        "have a probe that no longer reports a gap on this host. The environment "
-        "or the code moved — delete the row and let the test run:\n  "
+        f"These rows in _ENV_GAP_SKIPS ({location}) "
+        "have a probe that no longer reports a gap on this host, which DOES "
+        "carry the rest of this registry's gaps. The environment or the code "
+        "moved — delete the row and let the test run:\n  "
         + "\n  ".join(stale)
     )
 

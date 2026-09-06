@@ -218,6 +218,10 @@ def stale_skip_rows(registry: EnvGapSkipRegistry) -> list[str]:
     Used by ``tests/test_env_gap_registry.py`` to fail the run on a row that
     has stopped describing anything — the enforcement the print-only stale
     tracker never had.
+
+    A verdict about THIS HOST, and only meaningful on a host the registry
+    describes. See :func:`firing_skip_rows` for the scope, and the ledger test
+    for what is asserted where it does not hold.
     """
     stale: list[str] = []
     for file_name, groups in registry.items():
@@ -226,6 +230,38 @@ def stale_skip_rows(registry: EnvGapSkipRegistry) -> list[str]:
                 continue
             stale.extend(f"{file_name}::{node_id}" for node_id in sorted(node_ids))
     return stale
+
+
+def firing_skip_rows(registry: EnvGapSkipRegistry) -> list[str]:
+    """Return ``file::node`` ids whose probe DOES report the gap on this host.
+
+    The complement of :func:`stale_skip_rows`, and the scope test for it. These
+    registries hold gaps measured on a developer host, so a probe answering
+    False says "this gap is not present here" — which on a different host is
+    the probe working correctly, not a row that rotted. Acting on the stale
+    verdict there (delete the row) would drop the fence for the host that DOES
+    have the gap.
+
+    So "a host these registries describe" is one where at least one row fires,
+    and that is where the stale verdict is issued. The ledger asks it across
+    all four registries at once, not per directory — a one-row registry would
+    otherwise become unjudgeable the moment its single row went stale.
+
+    The limit, stated rather than discovered: registries holding rows for two
+    host classes at once cannot be judged this way, because one firing row puts
+    every row of the other class under a verdict it has no standing to receive.
+    Measured 2026-09-06 — all 52 rows across the four registries fire on the
+    Windows dev box and none fires on the Linux runner (CI run 33969282189
+    listed every one of the 52 as stale), so nothing is mixed today. Splitting
+    a registry that becomes mixed is the repair.
+    """
+    firing: list[str] = []
+    for file_name, groups in registry.items():
+        for probe, _reason, node_ids in groups:
+            if not probe():
+                continue
+            firing.extend(f"{file_name}::{node_id}" for node_id in sorted(node_ids))
+    return firing
 
 
 def apply_marks(items, registry: EnvGapRegistry, *, owner_dir) -> None:
