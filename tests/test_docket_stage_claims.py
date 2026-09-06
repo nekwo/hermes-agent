@@ -162,6 +162,32 @@ def _in_this_history(sha: str, _cache: dict[str, bool] = {}) -> bool:
     return _cache[sha]
 
 
+def _assert_the_clone_can_answer_ancestry() -> None:
+    """The precondition this whole gate rests on, checked rather than assumed.
+
+    ``merge-base --is-ancestor`` answers NO for every sha in a shallow clone,
+    and this gate reads a run of NOs as "these dockets claim a landing that
+    never happened". That is not a weaker gate, it is a FALSE ACCUSATION: in
+    run 33969282189 it named seven backed stages across two dockets, because
+    the CI slice job checked out at ``actions/checkout``'s default
+    ``fetch-depth: 1``. A gate that cannot tell "not an ancestor" from "this
+    clone has no ancestors" must say which one it is looking at.
+
+    Deliberately an assertion, not a skip: a hermes checkout that cannot answer
+    ancestry is a broken environment for this file, and a skip here is how the
+    gate goes quiet for a month again.
+    """
+
+    shallow = _git("rev-parse", "--is-shallow-repository").stdout.strip()
+    assert shallow == "false", (
+        "this clone is SHALLOW, so `git merge-base --is-ancestor` answers no "
+        "for every cited commit and this gate would accuse every backed docket "
+        "in the corpus. Check out with full history — the CI slice jobs pass "
+        "`fetch-depth: 0` with `filter: blob:none` for exactly this "
+        f"(`git rev-parse --is-shallow-repository` said {shallow!r})."
+    )
+
+
 def _dockets() -> list[str]:
     completed = _git("ls-files", "--", f"{DOCKET_ROOT}/*.md")
     if completed.returncode != 0:
@@ -237,6 +263,8 @@ def test_ancestry_is_the_question_asked_not_existence():
     hermes-side gate is entitled to ask.
     """
 
+    _assert_the_clone_can_answer_ancestry()
+
     head = _git("rev-parse", "HEAD").stdout.strip()
 
     assert _in_this_history(head)
@@ -244,6 +272,11 @@ def test_ancestry_is_the_question_asked_not_existence():
     # A well-formed sha that is not a commit here — the shape every cross-repo
     # cite in these docs has.
     assert not _in_this_history("0" * 40)
+    # ...and a real ancestor that is NOT head, which is the half a shallow
+    # clone silently loses: there, head is the only commit and the two
+    # assertions above still pass while the gate below sees nothing.
+    parent = _git("rev-parse", "HEAD~1").stdout.strip()
+    assert parent and _in_this_history(parent)
 
 
 def test_a_done_claim_whose_only_sha_is_foreign_is_unbacked():
@@ -275,6 +308,8 @@ def test_every_stage_that_says_it_shipped_names_a_commit_that_landed_here():
     """A verdict with no landing commit in THIS history is an unbacked claim —
     the shape a triage reads as settled and reschedules around."""
 
+    _assert_the_clone_can_answer_ancestry()
+
     unbacked = []
     for path in _dockets():
         for stage in stage_sections(_read(path)):
@@ -294,6 +329,8 @@ def test_no_docket_lists_a_stage_as_remaining_that_its_own_rows_record_as_landed
     """The eight-day defect. The `landed` side is validated against git, so the
     contradiction cannot be resolved by editing the stage row to agree with the
     header — which is the failure mode a two-document gate has."""
+
+    _assert_the_clone_can_answer_ancestry()
 
     stale = []
     for path in _dockets():
