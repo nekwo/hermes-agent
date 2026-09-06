@@ -4503,6 +4503,36 @@
         "-q",
         "tests/hermes_cli/test_harness_characters_draftsman_seam.py::test_every_line_of_the_autopilots_stream_says_it"
       ]
+    },
+    {
+      "id": "w18hd-a-blank-container-still-addresses-a-removed-agent",
+      "path": "agent_runtime/realm_revert.py",
+      "symbol": "parse_item_spec",
+      "operator": "refuse-a-blank-container-again",
+      "find": "    if len(parts) != 3 or not parts[0].strip() or not parts[2].strip():",
+      "replace": "    if len(parts) != 3 or not all(part.strip() for part in parts):",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_drift.py::test_a_removed_agent_is_addressable_by_item_and_restored"
+      ]
+    },
+    {
+      "id": "w18hd-a-blank-container-is-not-a-wildcard",
+      "path": "agent_runtime/realm_revert.py",
+      "symbol": "revert_realm_sync",
+      "operator": "let-a-blank-container-match-any-container",
+      "find": "            item = by_spec.get(f\"{family}:{container}:{item_key}\")",
+      "replace": "            item = by_spec.get(f\"{family}:{container}:{item_key}\") or next(\n                (d for d in drift if not container and d.family == family and d.item_key == item_key),\n                None,\n            )",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_drift.py::test_a_blank_container_is_not_a_wildcard"
+      ]
     }
   ]
 }

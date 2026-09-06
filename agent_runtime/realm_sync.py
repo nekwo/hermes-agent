@@ -1639,11 +1639,13 @@ def _flow_graph_store_drift_items(
     family's container is the thing that holds the row (a workspace, a board),
     and for a canvas that is the desk — whose identity in this family IS the
     owner instance id, since graph identity is derived from it
-    (``runtime_<instance id>``). Two properties follow, and the second is why
-    the workspace was rejected: it is derived from the graph id itself, so it is
-    never blank — and a blank container makes ``FAMILY:CONTAINER:KEY``
-    unparseable, which would leave exactly the ``removed`` rows (the desk is
-    gone, so its workspace cannot be looked up) addressable only by ``--all``.
+    (``runtime_<instance id>``). It is derived from the graph id itself, so it is
+    never blank — which is why the workspace was rejected: a ``removed`` row's
+    desk is gone, so its workspace cannot be looked up, and the container would
+    have gone blank on exactly the rows an operator most wants to revert.
+    (Until 2026-09-06 that also made the row unaddressable, because
+    ``parse_item_spec`` refused a blank container; it now accepts one — see that
+    function — so this is a naming property, no longer a reachability one.)
     """
 
     from .flow_graph import owner_instance_id_of
@@ -1750,6 +1752,9 @@ def _persona_instance_store_drift_items(
         # this realm's workspaces. ``container`` comes from the row when there
         # still is one, and is empty when there is not — a guess would be worse
         # than a blank, since the revert lane addresses this family by ID.
+        # The blank is ADDRESSABLE since 2026-09-06: ``parse_item_spec`` takes
+        # ``persona_instance::<id>``, this row's own ``spec`` echoed back, so a
+        # removal is no longer reachable only through ``--all`` (w17/hb's row).
         record = by_id.get(instance_id)
         items.append(
             StoreDriftItem(

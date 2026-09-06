@@ -35,6 +35,7 @@ from agent_runtime.realm_revert import (
     REFUSED_UNREADABLE_UPSTREAM,
     RevertAction,
     classify_revert,
+    parse_item_spec,
     revert_realm_sync,
 )
 from agent_runtime.realm_sync import (
@@ -433,6 +434,37 @@ def test_a_malformed_item_selector_is_a_request_fault(tmp_path):
     with pytest.raises(RealmSyncError) as excinfo:
         revert_realm_sync(realm_id, item_specs=["office_actor:missing_key"])
     assert excinfo.value.code == "invalid_request"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        ":ws_x:dev",  # no family
+        f"{DRIFT_FAMILY_OFFICE_ACTOR}:ws_x:",  # no key
+        f"{DRIFT_FAMILY_OFFICE_ACTOR}:ws_x: ",  # a key of whitespace is no key
+    ],
+)
+def test_the_family_and_the_key_are_still_required(raw):
+    """The container is the ONLY part a row may leave blank. A blank family has
+    no table to dispatch on and a blank key names nothing, so both stay request
+    faults — the relaxation is one field wide."""
+
+    with pytest.raises(RealmSyncError) as excinfo:
+        parse_item_spec(raw)
+    assert excinfo.value.code == "invalid_request"
+
+
+def test_a_blank_container_parses_to_the_empty_container():
+    """``FAMILY::KEY`` is the spelling of a row whose holder is gone — the
+    persona-instance family's ``removed`` rows, whose workspace died with the
+    record. It parses; whether it MATCHES is the drift set's answer, not the
+    parser's."""
+
+    assert parse_item_spec(f"{DRIFT_FAMILY_PERSONA_INSTANCE}::personainst_x") == (
+        DRIFT_FAMILY_PERSONA_INSTANCE,
+        "",
+        "personainst_x",
+    )
 
 
 def test_an_undecodable_subtree_artifact_is_refused_not_read_as_absence(tmp_path):

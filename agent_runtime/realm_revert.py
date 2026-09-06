@@ -241,14 +241,40 @@ class RevertRow:
 def parse_item_spec(raw: str) -> tuple[str, str, str]:
     """``FAMILY:CONTAINER:KEY`` → the triple. Raises ``RealmSyncError
     invalid_request`` for anything else: an unparseable selector is a fault in
-    the REQUEST, and guessing at one is how the wrong desk gets archived."""
+    the REQUEST, and guessing at one is how the wrong desk gets archived.
+
+    **The CONTAINER may be blank, and blank means blank** (w17/hb's row, fixed
+    2026-09-06). A drift row whose holder is gone has no container to name — the
+    persona-instance family's ``removed`` rows are exactly that: a baselined
+    agent with no live record, whose ``workspace_id`` died with the record it
+    was read from. The walk writes ``container=""`` there rather than guess one,
+    so ``FAMILY::KEY`` is that row's own ``spec`` echoed back and refusing it
+    left the family's removals reachable only through ``--all``.
+
+    The canvas family's trick — derive the container from the item key
+    (``owner_instance_id_of``) — is not available here and would not be honest
+    if it were: a graph id literally CONTAINS its owner's id, while an instance
+    id says nothing about the workspace that held it. And this family needs no
+    container at all: ``_Upstream.lookup`` reads the persona-instance projection
+    (one realm-wide document) by key and never touches the container, so the
+    blank is the accurate value rather than a missing one.
+
+    A blank container is never a WILDCARD. Selection stays an exact match
+    against the derived drift set (``by_spec`` in :func:`revert_realm_sync`), so
+    ``FAMILY::KEY`` reaches only a row that itself reported a blank; a row that
+    has a container is still addressed by it. Family and key stay required: a
+    blank family has no transition table to dispatch on, and a blank key names
+    nothing.
+    """
 
     text = str(raw or "").strip()
     parts = text.split(":", 2)
-    if len(parts) != 3 or not all(part.strip() for part in parts):
+    if len(parts) != 3 or not parts[0].strip() or not parts[2].strip():
         raise RealmSyncError(
             "invalid_request",
-            "--item takes FAMILY:CONTAINER:KEY (e.g. office_actor:ws_x:dev_agent_1234).",
+            "--item takes FAMILY:CONTAINER:KEY (e.g. office_actor:ws_x:dev_agent_1234); "
+            "the container — and only the container — may be empty, for a row whose "
+            "holder is gone (persona_instance::personainst_1234).",
             safe_details={"item": text},
         )
     family, container, item_key = (part.strip() for part in parts)

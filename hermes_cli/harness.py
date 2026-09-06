@@ -683,7 +683,7 @@ def build_parser(parent_subparsers) -> None:
         dest="items",
         action="append",
         default=None,
-        help="FAMILY:CONTAINER:KEY from `realm sync status` store_drift.items (e.g. office_actor:ws_x:dev_agent_1234); repeatable",
+        help="FAMILY:CONTAINER:KEY from `realm sync status` store_drift.items (e.g. office_actor:ws_x:dev_agent_1234); the container is empty when the row's holder is gone, and is passed back empty (persona_instance::personainst_1234); repeatable",
     )
     realm_sync_revert.add_argument(
         "--all",

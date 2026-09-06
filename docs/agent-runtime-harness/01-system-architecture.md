@@ -538,10 +538,20 @@ instance family's pattern rather than beside it:
   nodes bind, for the reason the pull runs after the mint door
   (`tests/agent_runtime/test_realm_revert.py`).
 - **The container of a canvas drift row is the OWNER INSTANCE id**, not the
-  workspace: graph identity is derived from it, so it is never blank — and a
-  blank container makes `FAMILY:CONTAINER:KEY` unparseable, which would leave
-  the `removed` rows (the desk is gone; its workspace cannot be looked up)
-  reachable only through `--all`.
+  workspace: graph identity is derived from it, so it is never blank, where a
+  workspace would have gone blank on exactly the `removed` rows (the desk is
+  gone; its workspace cannot be looked up).
+- **A blank container is a legal selector**, since 2026-09-06
+  (`parse_item_spec`, `agent_runtime/realm_revert.py`). The persona-instance
+  family cannot derive a container the way the canvas family does — an instance
+  id says nothing about the workspace that held it — so a baselined agent with
+  no live record reports `container=""`, and `FAMILY::KEY` is that row's own
+  `spec` echoed back. It is not a wildcard: selection stays an exact match
+  against the derived drift set, so the blank form reaches only a row that
+  itself reported a blank. The family and the key are still required. Before
+  that, the family's `removed` rows were counted, named in `store_drift.items`,
+  and reachable only through `--all`
+  (`tests/agent_runtime/test_persona_instance_drift.py`).
 - **Still separate rows:** the launcher's rendering of the held/conflict rows,
   and replication of `flow_graphs_stale/` — which the plan's §3 left undecided
   and which has no requester (see `planned/w13-h2-flow-graph-canvas-replication.md`).

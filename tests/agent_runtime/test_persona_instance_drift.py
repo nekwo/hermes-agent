@@ -33,7 +33,9 @@ from agent_runtime.persona_instance_sync import (
 )
 from agent_runtime.realm_revert import (
     OUTCOME_ARCHIVED_LOCAL_ONLY,
+    OUTCOME_RESTORED,
     OUTCOME_REVERTED,
+    REFUSED_UNKNOWN_ITEM,
     FAMILIES,
     classify_revert,
     revert_realm_sync,
@@ -293,6 +295,56 @@ def test_reverting_a_local_only_agent_archives_it_and_mints_no_tombstone(tmp_pat
     # one is the office half, and ``retire_replica`` does not run it.
     assert OfficeStore().get_surface(ws).archived_actor_keys == surface_before
     assert OfficeStore().actor_exists(ws, INSTANCE_ID)
+
+
+def test_a_removed_agent_is_addressable_by_item_and_restored(tmp_path):
+    """The blank-container spelling, and the row that needed it (w17/hb).
+
+    A baselined instance with no live record has no workspace to name — the
+    record that carried it is the thing that is gone — so the walk emits
+    ``container=""`` rather than guessing one. Until 2026-09-06
+    ``parse_item_spec`` refused that selector outright, which left the ONE kind
+    of row an operator most wants to revert (an agent that vanished locally)
+    reachable only through ``--all``.
+    """
+
+    realm_id, ws = _realm_workspace(tmp_path / "sync_repo")
+    subtree = _subtree(realm_id, tmp_path)
+    _write_remote(subtree, _body(ws))
+    apply_persona_instance_pull(realm_id, subtree)
+    paths.persona_instance_path(INSTANCE_ID).unlink()
+
+    (item,) = _drift(realm_id, ws)
+    assert (item.kind, item.container) == (DRIFT_KIND_REMOVED, "")
+    assert item.spec == f"{DRIFT_FAMILY_PERSONA_INSTANCE}::{INSTANCE_ID}"
+
+    result = revert_realm_sync(realm_id, item_specs=[item.spec])
+    assert [row["outcome"] for row in result["items"]] == [OUTCOME_RESTORED]
+    assert PersonaInstanceStore().get(INSTANCE_ID).display_name == "Neko"
+    # ... and the row stops counting: the baseline realigned from the restored
+    # record, so the removal is gone rather than merely written over.
+    assert _drift(realm_id, ws) == []
+
+
+def test_a_blank_container_is_not_a_wildcard(tmp_path):
+    """The empty container is a SPELLING, never a match-anything. Selection is
+    an exact match against the derived drift set, so the blank form reaches only
+    a row that itself reported a blank — an agent that is live in a workspace is
+    still addressed by that workspace."""
+
+    realm_id, ws = _realm_workspace(tmp_path / "sync_repo")
+    subtree = _subtree(realm_id, tmp_path)
+    _write_remote(subtree, _body(ws))
+    apply_persona_instance_pull(realm_id, subtree)
+    instance = PersonaInstanceStore().get(INSTANCE_ID)
+    instance.display_name = "Locally renamed"
+    PersonaInstanceStore()._write(instance)
+
+    result = revert_realm_sync(
+        realm_id, item_specs=[f"{DRIFT_FAMILY_PERSONA_INSTANCE}::{INSTANCE_ID}"]
+    )
+    assert [row["outcome"] for row in result["items"]] == [REFUSED_UNKNOWN_ITEM]
+    assert PersonaInstanceStore().get(INSTANCE_ID).display_name == "Locally renamed"
 
 
 # ── §5.2 retire-follows-the-desk ──────────────────────────────────────────
