@@ -19,9 +19,9 @@ key the way the canvas family does (`owner_instance_id_of`), or let
 would not be honest if it were: a graph id literally CONTAINS its owner instance
 id, which is why the canvas family can derive one, while an instance id says
 nothing about the workspace that held it — any derived container would be a
-guess printed as a fact. And this family needs no container at all: `_Upstream.
-lookup` reads the persona-instance projection (ONE realm-wide document) by key
-and never touches the container. So the blank is the accurate value, not a
+guess printed as a fact. And this family needs no container at all:
+`_Upstream.lookup` reads the persona-instance projection (ONE realm-wide
+document) by key and never touches the container. So the blank is the accurate value, not a
 missing one, and the fix belongs in the parser.
 
 The relaxation is one field wide. Family and key stay required — a blank family
@@ -95,6 +95,17 @@ guard rails and were green from the start). Green: 12 passed.
 | --- | --- |
 | delete the `except PermissionError` arm | `…answers_taken_on_both_hosts[PermissionError]`, and the unfaked host test |
 | widen it to an unconditional `return False` | `…nothing_at_the_lock_path_is_not_a_busy_draft` |
+
+**One measured residual, left as it is.** A directory at the lock path is never
+aged off, however old it is: `_read_holder` returns early when `read_text` fails
+(a directory raises `OSError` there), so the record never gains `age_seconds`
+and the refusal always reads `held it for 0s` and never reaches the stale-break
+arm. Measured after the fix — `DraftBusy` with `safe_details == {"lock": …}`,
+the directory untouched. That is the SAFE side of the edge (nothing tries to
+unlink a directory), and the refusal still names the path, which is the
+recovery; the only cost is a `0s` in a message about something that has been
+there for an hour. Not worth a second read of the holder file on a path that
+cannot be one.
 
 **The row's sibling note is not this lane and is left open.** COLD statements in
 `agent/charsheet` are untriaged — `draft.py` 25, `draft_lock.py` 6,
