@@ -4214,6 +4214,14 @@ def test_the_test_tree_walk_is_also_paid_at_import():
     )
 
 
+#: Set by :func:`_round4_uncovered_subjects` when git could not answer for the
+#: base commit — a shallow checkout, most often. Recorded rather than raised:
+#: the walk is warmed at module import, so raising here aborts collection of
+#: this whole file. The round-4 test names this instead, so the walk's empty
+#: result can never be read as "nothing uncovered".
+_ROUND4_HISTORY_ERROR: str | None = None
+
+
 @functools.lru_cache(maxsize=1)
 def _round4_uncovered_subjects() -> tuple[str, ...]:
     """Live production symbols whose last direct test reference a deletion took.
@@ -4234,9 +4242,11 @@ def _round4_uncovered_subjects() -> tuple[str, ...]:
     process kill for a later date.
     """
 
+    global _ROUND4_HISTORY_ERROR
+
     covered = _covered_production_subjects()
 
-    changed_tests = subprocess.run(
+    diff = subprocess.run(
         [
             "git",
             "diff",
@@ -4246,10 +4256,38 @@ def _round4_uncovered_subjects() -> tuple[str, ...]:
             "tests",
         ],
         cwd=HERMES_ROOT,
-        check=True,
+        # NOT check=True. This walk is warmed at MODULE IMPORT (see below), so
+        # a raised CalledProcessError here does not fail one test — it aborts
+        # COLLECTION of this entire 4,300-line gate file, and reports the loss
+        # as an unreadable `subprocess.CalledProce...`. That is what run
+        # 33969282189's slice 8 shows: the CI checkout was shallow, the base
+        # commit was not in it, git exited 128, and every unrelated tombstone
+        # gate in this file went unrun and unnoticed. The failure is recorded
+        # and named by `test_round4_deleted_tests_left_no_live_production_subject_uncovered`
+        # instead, so one broken precondition costs one red test with a
+        # readable reason.
+        check=False,
         capture_output=True,
         text=True,
-    ).stdout.splitlines()
+    )
+    if diff.returncode != 0:
+        shallow = subprocess.run(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            cwd=HERMES_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        _ROUND4_HISTORY_ERROR = (
+            f"`git diff --name-only {_ROUND4_COVERAGE_BASE}..HEAD -- tests` "
+            f"exited {diff.returncode}: {diff.stderr.strip()[:300]}\n"
+            f"(`git rev-parse --is-shallow-repository` says {shallow!r})\n"
+            "This walk needs the history that holds its base commit. A shallow "
+            "checkout does not have it — the CI slice jobs pass "
+            "`fetch-depth: 0` with `filter: blob:none` for exactly this."
+        )
+        return ()
+    changed_tests = diff.stdout.splitlines()
     uncovered: list[str] = []
     for relative in changed_tests:
         old = subprocess.run(
@@ -4305,6 +4343,10 @@ _ROUND4_CACHE_SIZE_AT_IMPORT = _round4_uncovered_subjects.cache_info().currsize
 
 def test_round4_deleted_tests_left_no_live_production_subject_uncovered():
     """A removed input vector may not silently erase a live symbol's coverage."""
+
+    # The walk returns () both when nothing is uncovered and when git could not
+    # answer at all, so the second case is named before the first is believed.
+    assert _ROUND4_HISTORY_ERROR is None, _ROUND4_HISTORY_ERROR
 
     uncovered = _round4_uncovered_subjects()
     assert uncovered == (), "\n".join(uncovered)
