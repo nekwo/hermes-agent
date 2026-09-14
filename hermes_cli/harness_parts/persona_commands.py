@@ -4404,6 +4404,7 @@ def _mission_chat_commit_turn(plan, deferred, presence) -> int:
                 chat_message,
                 session_id=active_session_id,
                 permission_session_id=session_id,
+                persona_instance_id=instance.id,
                 conversation_history=native_history,
                 reuse_current_user_message=(
                     journal_state == TURN_STATE_PENDING and bool(replay.get("operator"))
@@ -5966,6 +5967,10 @@ def _validated_set_model_request(args) -> dict:
         from providers import get_provider_profile, list_providers
 
         profile = get_provider_profile(provider_raw)
+        from agent_runtime.local_llama import PROVIDER_ID as LOCAL_LLAMA_PROVIDER_ID
+        if provider_raw == LOCAL_LLAMA_PROVIDER_ID:
+            from agent_runtime.local_llama.provider import provider_profile
+            profile = provider_profile()
         if profile is None:
             known = sorted({str(item.name) for item in list_providers()})
             raise _SetModelRequestError(

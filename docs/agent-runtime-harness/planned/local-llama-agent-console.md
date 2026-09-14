@@ -230,17 +230,23 @@ State result fields, required unless marked nullable:
 {
   "schema": "hermes.local_llama/v1", "install_id": "install-example",
   "epoch": "00000000-0000-4000-8000-000000000001",
-  "revision": 12, "config_revision": 3,
+  "revision": 12, "config_revision": 3, "configured": true,
   "capabilities": {"supported": true, "reason": null,
     "router_load_unload": true, "parameter_schema_version": 1},
   "server": {"state": "running", "error": null},
   "models": [{"model_id": "00000000-0000-4000-8000-000000000002",
-    "display_name": "Qwen 27B Q4_K_M", "preset_revision": 1,
+    "display_name": "Qwen 27B Q4_K_M", "preset_revision": 1, "context_length": 8192,
     "state": "unloaded", "selectable": true, "unavailable_reason": null,
     "active_parameters": null, "error": null}],
   "active_turns": [], "operation": null
 }
 ```
+
+`configured` reports whether this install has a saved executable; it is not a
+health assertion. `models[].context_length` is the saved preset context size.
+These additive read-tier fields let a remotely aimed provider menu discover the
+selected host's catalog while off, without reading paths or falling back to the
+Launcher's local provider probe.
 
 `active_turns` entries contain `turn_id`, `persona_instance_id`, and `model_id`
 (all strings). `active_parameters` is null when unloaded, otherwise the exact

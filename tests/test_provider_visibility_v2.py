@@ -220,7 +220,7 @@ def test_v2_consumers_see_an_unchanged_payload_minus_catalog(monkeypatch):
 
     payload = harness.build_provider_visibility()
     assert payload["schema"] == "hermes.provider_visibility/v2"
-    assert set(payload) - {"catalog"} == {
+    assert set(payload) - {"catalog", "local_llama"} == {
         "schema",
         "providers",
         "environment",

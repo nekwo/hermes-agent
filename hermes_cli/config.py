@@ -3147,7 +3147,8 @@ def load_config_readonly() -> Dict[str, Any]:
     ``load_config()`` — the mutate-then-``save_config`` path — still ensures
     the home, as do all write paths.
     """
-    return _load_config_impl(want_deepcopy=False, ensure_home=False)
+    from hermes_cli.config_read_scope import project_readonly_config
+    return project_readonly_config(_load_config_impl(want_deepcopy=False, ensure_home=False))
 
 
 def write_platform_config_field(

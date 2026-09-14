@@ -307,6 +307,15 @@ def _provider_issue_cache_clear() -> None:
 def _provider_issue(persona) -> tuple[str, str] | None:
     provider = getattr(persona, "provider", None)
     model = getattr(persona, "model", None)
+    from .local_llama import PROVIDER_ID
+    if provider == PROVIDER_ID:
+        # Saved local identity is not an API-key credential. Live readiness is
+        # checked at the model lease boundary; do not hide the configurable agent
+        # merely because its local server is off or this probe is out of process.
+        from .local_llama.provider import catalog_visibility
+        if any(row["model_id"] == model and row["selectable"] for row in catalog_visibility()["models"]):
+            return None
+        return (READINESS_CONFIG_ERROR, "Configure the selected local llama model on this installation")
     if not provider and not model:
         return None
     import time

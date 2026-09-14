@@ -3242,6 +3242,7 @@ def serve_loop(
             sink.emit(exit_frame)
 
     original_stdout, original_stderr = sys.stdout, sys.stderr
+    local_llama_bound_root = None
     sys.stdout, sys.stderr = stdout_proxy, stderr_proxy
     try:
         store_root_path: Any = None
@@ -3361,6 +3362,10 @@ def serve_loop(
                 socket_lock = SocketOwnerLock(store_root_path, log=_service_log)
                 lock_result = socket_lock.acquire()
                 if lock_result.acquired:
+                    from agent_runtime.local_llama.service import bind as bind_local_llama
+                    from agent_runtime.config import harness_root_config_path
+                    bind_local_llama(store_root_path, harness_root_config_path())
+                    local_llama_bound_root = store_root_path
                     socket_server = ServeSocketServer(
                         store_root_path,
                         boot_id=boot_id,
@@ -6229,6 +6234,9 @@ def serve_loop(
         raise
     finally:
         sys.stdout, sys.stderr = original_stdout, original_stderr
+        from agent_runtime.local_llama.service import shutdown as shutdown_local_llama
+        if local_llama_bound_root is not None:
+            shutdown_local_llama(root=local_llama_bound_root)
 
 
 def _raw_fd_lines(fd: int):

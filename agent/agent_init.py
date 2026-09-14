@@ -2595,7 +2595,19 @@ def init_agent(
         and not isinstance(agent._config_context_length, bool)
         and agent._config_context_length > 0
     )
-    if _ctx and _ctx < MINIMUM_CONTEXT_LENGTH and not _allow_lmstudio_explicit_below_floor:
+    # Managed local llama verifies this exact per-slot context against /props
+    # before admitting the turn. Preserve that budget on memory-limited hosts.
+    _allow_managed_local_context = (
+        agent.requested_provider == "local-llama-hermes"
+        and agent.provider == "custom"
+        and isinstance(agent._config_context_length, int)
+        and not isinstance(agent._config_context_length, bool)
+        and agent._config_context_length >= 4096
+        and _ctx == agent._config_context_length
+    )
+    if _ctx and _ctx < MINIMUM_CONTEXT_LENGTH and not (
+        _allow_lmstudio_explicit_below_floor or _allow_managed_local_context
+    ):
         raise ValueError(
             f"Model {agent.model} has a context window of {_ctx:,} tokens, "
             f"which is below the minimum {MINIMUM_CONTEXT_LENGTH:,} required "

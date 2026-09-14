@@ -135,6 +135,21 @@ def test_rejects_aux_below_minimum_context(mock_get_client, mock_ctx_len):
     assert "below the minimum" in err
 
 
+@patch("agent.model_metadata.get_model_context_length", return_value=8192)
+@patch("agent.auxiliary_client.get_text_auxiliary_client")
+def test_managed_local_compression_honors_verified_small_context(mock_get_client, mock_ctx_len):
+    agent = _make_agent(main_context=8192)
+    agent.requested_provider = "local-llama-hermes"
+    agent.provider = "custom"
+    agent._emit_status = lambda msg: None
+    mock_get_client.return_value = (MagicMock(), agent.model)
+    agent._check_compression_model_feasibility()
+    assert agent.context_compressor.threshold_tokens == 4096
+    mock_get_client.return_value = (MagicMock(), "different-auxiliary-model")
+    with pytest.raises(ValueError, match="below the minimum"):
+        agent._check_compression_model_feasibility()
+
+
 
 
 def test_feasibility_check_passes_live_main_runtime():
@@ -404,7 +419,6 @@ def test_threshold_suggestion_kept_for_large_context_main(mock_get_client, mock_
 
     assert len(messages) == 1
     assert "threshold: 0.30" in messages[0]
-
 
 
 

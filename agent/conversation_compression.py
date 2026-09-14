@@ -804,7 +804,14 @@ def check_compression_model_feasibility(agent: Any) -> None:
         # __init__), so the compression model must too — otherwise it
         # cannot summarise a full threshold-sized window of main-model
         # content.  Mirrors the main-model rejection pattern.
-        if aux_context and aux_context < MINIMUM_CONTEXT_LENGTH:
+        managed_local_same_model = (
+            getattr(agent, "requested_provider", None) == "local-llama-hermes"
+            and getattr(agent, "provider", None) == "custom"
+            and aux_model == agent.model
+            and aux_context == agent.context_compressor.context_length
+            and aux_context >= 4096
+        )
+        if aux_context and aux_context < MINIMUM_CONTEXT_LENGTH and not managed_local_same_model:
             raise ValueError(
                 f"Auxiliary compression model {aux_model} has a context "
                 f"window of {aux_context:,} tokens, which is below the "

@@ -289,6 +289,7 @@ class AgentRunRequest:
     persona_chat_user_finish_reason: str | None = None
     client_message_id: str | None = None
     turn_id: str | None = None
+    persona_instance_id: str | None = None
     root_chat_session_id: str | None = None
     persona_chat_runtime_registry: Any | None = None
     persona_chat_runtime_signature: str | None = None
@@ -706,7 +707,8 @@ class ProfileAgentRunner:
         # ``_counted_agent_run`` is OUTSIDE the deny scope and covers the whole
         # method: a background prewarm must see this run from its first
         # instruction, not from the point it reaches the workdir lock.
-        with _counted_agent_run(), deny_venv_installs(
+        from .local_llama.provider import turn_scope
+        with _counted_agent_run(), turn_scope(request), deny_venv_installs(
             f"an agent turn (profile={request.profile!r})"
         ):
             return self._run(request)
@@ -978,10 +980,12 @@ class ProfileAgentRunner:
         )
         from .terminal_envelope import terminal_envelope_scope
         from agent.skill_utils import skill_runtime_scope
+        from .local_llama.provider import prewarm_scope, construction_kwargs, actor_signature
 
         with (
             _WORKDIR_LOCK,
             persona_profile_context(binding, runtime_root=request.runtime_root),
+            prewarm_scope(request),
             _agent_workdir(request.workdir),
             tool_execution_scope(request.tool_execution_scope_id),
             # Same identity, second consumer: the container scope above keys
@@ -1132,6 +1136,7 @@ class ProfileAgentRunner:
                     api_mode=request.api_mode or runtime.get("api_mode"),
                     base_url=runtime.get("base_url"),
                     api_key=runtime.get("api_key"),
+                    **construction_kwargs(runtime),
                     **reasoning_kwargs,
                     enabled_toolsets=_enabled_toolsets_for_run(request, admitted_servers),
                     disabled_toolsets=request.disabled_toolsets,
@@ -1161,7 +1166,7 @@ class ProfileAgentRunner:
                     request.persona_chat_runtime_registry.acquire(
                         root_session_id=request.root_chat_session_id,
                         active_session_id=active_id,
-                        signature=request.persona_chat_runtime_signature or "default",
+                        signature=actor_signature(runtime, request.persona_chat_runtime_signature or "default"),
                         revision=request.persona_chat_native_revision or "unknown",
                         factory=_construct_agent,
                         signature_components=(
@@ -1887,6 +1892,10 @@ def _runtime_resolve_cache_key(request: AgentRunRequest) -> tuple:
 def _resolve_request_runtime(
     request: AgentRunRequest, timing: dict[str, Any] | None = None
 ) -> dict[str, Any]:
+    from .local_llama import PROVIDER_ID
+    if request.provider == PROVIDER_ID:
+        from .local_llama.provider import resolve
+        return resolve(request.model, root=request.runtime_root)
     if not request.provider:
         return {}
     key = _runtime_resolve_cache_key(request)

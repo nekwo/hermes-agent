@@ -390,6 +390,23 @@ def test_cli_instance_set_model_happy_path_derives_api_mode(monkeypatch, capsys)
     assert stored.api_mode == data["api_mode"]
 
 
+def test_cli_instance_can_select_local_model_while_server_is_off(monkeypatch, capsys):
+    import uuid
+    harness = _patched_harness(monkeypatch)
+    store = PersonaInstanceStore()
+    first, second = _two_instances(store, _persona())
+    model = str(uuid.uuid4())
+    code = harness._cmd_persona_instance_set_model(
+        _instance_args(second.id, provider="local-llama-hermes", model=model))
+    assert code == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["provider"] == "local-llama-hermes"
+    assert data["api_mode"] == "chat_completions"
+    assert store.get(second.id).model == model
+    assert store.get(first.id).model is None
+    assert not any(w["code"] == "provider_credentials_not_detected" for w in data["warnings"])
+
+
 def test_cli_instance_set_model_provider_alias_canonicalized(monkeypatch, capsys):
     harness = _patched_harness(monkeypatch)
     from providers import get_provider_profile
