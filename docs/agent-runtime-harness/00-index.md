@@ -29,6 +29,10 @@ Read in this order for a full picture; each stands alone for its own territory.
 
 ## planned/ — designed, not implemented
 
+- [Local llama Hermes — Agent Console implementation plan](planned/local-llama-agent-console.md)
+  — runtime-owned llama.cpp lifecycle, model presets, provider routing, and
+  Launcher controls over the existing RPC bridge; design only, not shipped.
+
 Everything in [planned/](planned/) is a design that has NOT shipped. One file
 per plan, each carrying its evidence and the gate that opens the work. The
 domain docs link into this folder from their `## Open rows`; nothing in a
