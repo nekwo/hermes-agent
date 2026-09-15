@@ -1,0 +1,88 @@
+{
+  "original": "c112a9347a4e14ce573cdbf3d154177a6f521843",
+  "upstream": "110baa095bc7135a0624557a9cc35df0f98ece0f",
+  "replacement": "0d5b7b8abccc07eb21d20d789fd0e14b68591aa4",
+  "original_tree": "b533fff1abaa2289abc90d4664c07f421e00de19",
+  "replacement_tree": "b533fff1abaa2289abc90d4664c07f421e00de19",
+  "changed_paths": 1737,
+  "original_commits": 1234,
+  "commit_order": [
+    "01-build-test-platform",
+    "02-runtime-storage",
+    "03-auth-config-provider",
+    "11-core-tool-seams",
+    "05-skills-tools-mcp",
+    "04-persona-lifecycle",
+    "10-conversation",
+    "14-local-llama",
+    "06-transport",
+    "07-projections-observability",
+    "08-office-board-graph",
+    "09-realm-sync",
+    "12-character-assets",
+    "13-mobile",
+    "15-documentation"
+  ],
+  "groups": {
+    "01-build-test-platform": {
+      "commit": "5a411b1657eb8373d4f719a117f6d0aacd2b9fd7",
+      "paths": 246
+    },
+    "02-runtime-storage": {
+      "commit": "ed9ac406be68aa4143481c86d37d2e18a948abf8",
+      "paths": 277
+    },
+    "03-auth-config-provider": {
+      "commit": "26fc8d68bbe92641eb9171c1a43c65f6f1cd7196",
+      "paths": 103
+    },
+    "04-persona-lifecycle": {
+      "commit": "df7d8dd560f27f5297412224431b8546e6ee7590",
+      "paths": 83
+    },
+    "05-skills-tools-mcp": {
+      "commit": "097b3c780c59b240a4bee6ccc9b716b9da151bba",
+      "paths": 78
+    },
+    "06-transport": {
+      "commit": "1b7eb98cb1ed4abd288ebcefce3be765eb914f4b",
+      "paths": 121
+    },
+    "07-projections-observability": {
+      "commit": "9a2e8c9dcd6ec68acc469fcde140a858d46d0363",
+      "paths": 91
+    },
+    "08-office-board-graph": {
+      "commit": "51ee01d954473097cdbe050c80c9e89211b17fed",
+      "paths": 60
+    },
+    "09-realm-sync": {
+      "commit": "55c4ceb1d91c6afb629421dcddb39f56c4900fa1",
+      "paths": 44
+    },
+    "10-conversation": {
+      "commit": "cad18295e1c777fe92c0eddc7b84c0201d161fe9",
+      "paths": 91
+    },
+    "11-core-tool-seams": {
+      "commit": "980f565d532e3394e8841a1fc2ef1e6b24722f94",
+      "paths": 118
+    },
+    "12-character-assets": {
+      "commit": "29964b1102c9add2bae32289c4e13c64e38ca132",
+      "paths": 43
+    },
+    "13-mobile": {
+      "commit": "113338da1b964cce3c63c5fed00e1b7f2332bb02",
+      "paths": 45
+    },
+    "14-local-llama": {
+      "commit": "3b0f3c9672f99a535a7edf54c6b16aa44f7f84ee",
+      "paths": 23
+    },
+    "15-documentation": {
+      "commit": "0d5b7b8abccc07eb21d20d789fd0e14b68591aa4",
+      "paths": 314
+    }
+  }
+}

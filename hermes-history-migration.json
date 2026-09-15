@@ -1,0 +1,7 @@
+{
+  "schema": "hermes.history-migration/1",
+  "branch": "main",
+  "oldCommit": "c112a9347a4e14ce573cdbf3d154177a6f521843",
+  "newCommit": "0d5b7b8abccc07eb21d20d789fd0e14b68591aa4",
+  "tree": "b533fff1abaa2289abc90d4664c07f421e00de19"
+}
