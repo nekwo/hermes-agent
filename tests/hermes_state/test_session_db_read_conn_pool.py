@@ -349,11 +349,11 @@ def test_permits_are_not_stranded_by_a_failed_open(db, monkeypatch):
     def boom(*a, **kw):
         raise _sqlite3.OperationalError("simulated open failure")
 
-    monkeypatch.setattr(_hs, "_connect_tracked_db", boom)
-    for _ in range(_READ_POOL_MAX * 3):
-        assert db._get_read_conn() is None
-        db._read_open_failed_at = 0.0    # defeat the backoff so every call opens
-    monkeypatch.undo()
+    with monkeypatch.context() as fault:
+        fault.setattr(_hs, "_connect_tracked_db", boom)
+        for _ in range(_READ_POOL_MAX * 3):
+            assert db._get_read_conn() is None
+            db._read_open_failed_at = 0.0    # defeat the backoff so every call opens
 
     db._read_open_failed_at = 0.0
     held = [db._checkout_read_conn() for _ in range(_READ_POOL_MAX)]

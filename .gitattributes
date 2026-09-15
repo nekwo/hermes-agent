@@ -1,6 +1,25 @@
 # Auto-generated files — collapse diffs and exclude from language stats
 web/package-lock.json linguist-generated=true
 
+# LF is this repo's line ending, everywhere, in the object store and on disk.
+# Stated as a rule on 2026-08-31, not introduced as one: it was already the
+# convention by 8862 blobs to 33, and the 38 blobs that carried CR were
+# normalized in the same commit as this line. None of them was deliberate —
+# each was a minority outlier in its own directory (2 CRLF against 64 LF in
+# `docs/.../archive/`, 2 against 125 at the root), and every Windows-only
+# script in the tree (`*.ps1`, `*.cmd`) was already LF and runs fine.
+#
+# `text=auto` leaves genuine binaries alone (git detects them), so the PNGs and
+# icons below are untouched; the `-text` pins later in this file override this
+# line, because a later rule wins.
+#
+# The enforcement is `tests/test_line_endings.py`, not this file: attributes
+# govern conversion on checkout and check-in, and say nothing about blobs that
+# are already committed. A deliberate CRLF file is declarable — add a `-text`
+# rule here AND the path to that gate's keeper set, with the reason. The set is
+# empty on purpose.
+* text=auto eol=lf
+
 # Enforce LF for scripts that run inside Linux containers.
 # Without this, Windows checkout converts to CRLF and breaks `exec` in the
 # container entrypoint with "no such file or directory".
@@ -32,3 +51,32 @@ docker/entrypoint.sh text eol=lf
 *.html  text eol=lf
 *.svg   text eol=lf
 *.ps1   text eol=crlf
+
+# Same reason, different shell: git runs hooks through sh, and a CRLF shebang
+# line fails as "bad interpreter". The hooks carry no extension, so the *.sh
+# rule above does not reach them.
+.githooks/* text eol=lf
+
+# Byte-pinned cross-repo goldens: `tests/fixtures/office_layout/cases.json` is
+# committed byte-identical to the launcher's
+# `test/fixtures/harness_office_layout/cases.json`, and both repos'
+# `MANIFEST.sha256` carry the same digest so a copy edited on one side reds
+# that side's manifest rather than leaving the two placement policies silently
+# disagreeing. `-text` disables ALL end-of-line conversion in both directions,
+# so the bytes on disk are the bytes in the object store are the bytes the
+# other repo committed.
+tests/fixtures/office_layout/** -text
+
+# The other two byte-pinned cross-repo families, pinned 2026-09-04 for the
+# reason `office_layout` was: each carries a `MANIFEST.sha256`, each README
+# states the launcher commits byte-identical copies
+# (`test/fixtures/hermes_responses/` and `test/fixtures/harness_stream/`), and
+# the launcher pinned both of those sides on the same date. A sha256 is a claim
+# about bytes; without `-text` the default `* text=auto` above lets a checkout
+# hand a contributor different bytes than the object store holds, and the digest
+# then reds for a file nobody edited. Enumerated — not listed — by
+# `tests/test_byte_pinned_fixture_families.py`, which walks
+# `git ls-files -- '*/MANIFEST.sha256'` so a fourth family cannot arrive
+# unpinned and quiet.
+tests/fixtures/response_envelopes/** -text
+tests/fixtures/stream_frames/** -text

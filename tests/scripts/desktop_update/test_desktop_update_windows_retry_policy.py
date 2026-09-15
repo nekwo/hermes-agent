@@ -14,6 +14,7 @@ RETRY_POLICY = REPO_ROOT / "scripts" / "desktop-update" / "retry-policy.ps1"
 
 
 @pytest.mark.windows_only
+@pytest.mark.timeout(45)  # Preserve the child PowerShell policy's 30s budget.
 def test_retry_policy_distinguishes_self_lock_deferral(tmp_path: Path) -> None:
     install_root = tmp_path / "hermes-agent"
     install_root.mkdir()
@@ -30,7 +31,8 @@ def test_retry_policy_distinguishes_self_lock_deferral(tmp_path: Path) -> None:
         )
         New-Item -ItemType File -Path (Join-Path '{root}' '.update-incomplete') | Out-Null
         $withMarker = Test-HermesUpdateShouldRetry -ExitCode 2 -InstallRoot '{root}'
-        @{{ withoutMarker = $withoutMarker; withMarker = $withMarker }} |
+        $historyRefusal = Test-HermesUpdateShouldRetry -ExitCode 1 -InstallRoot '{root}' -Output "HERMES_UPDATE_HISTORY_REVIEW_REQUIRED"
+        @{{ withoutMarker = $withoutMarker; withMarker = $withMarker; historyRefusal = $historyRefusal }} |
             ConvertTo-Json -Compress
     """
     result = subprocess.run(
@@ -52,5 +54,6 @@ def test_retry_policy_distinguishes_self_lock_deferral(tmp_path: Path) -> None:
     assert json.loads(result.stdout) == {
         "withoutMarker": [False, True, False],
         "withMarker": True,
+        "historyRefusal": False,
     }
     assert marker.exists()

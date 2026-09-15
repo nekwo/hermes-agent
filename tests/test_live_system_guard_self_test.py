@@ -276,21 +276,89 @@ def test_subprocess_killall_hermes_blocked():
         subprocess.run(["killall", "hermes"])
 
 
+# ──────────────────── backend spawn (ML-14 / B20(i)) ───────────
+#
+# The arms above stop a test SIGNALLING or SERVICE-MUTATING the live backend.
+# They did not stop a test STARTING one: `hermes gateway run`, `hermes serve`,
+# `hermes dashboard` (and the `python -m hermes_cli.main …` spelling the desktop
+# app uses) each boot a real backend against whatever root the environment
+# resolves to, publish the machine-global root anchor, bind a port and outlive
+# the test. Nothing here would have noticed. Every case below raises BEFORE the
+# spawn, so no test in this section ever starts a backend — the same contract
+# the systemctl cases above run under.
+
+
+def test_subprocess_run_hermes_gateway_run_blocked():
+    with pytest.raises(RuntimeError, match="live-system guard"):
+        subprocess.run(["hermes", "gateway", "run", "--profile", "x"])
+
+
+def test_subprocess_run_hermes_serve_blocked():
+    with pytest.raises(RuntimeError, match="live-system guard"):
+        subprocess.run(["hermes", "serve", "--port", "8090"])
+
+
+def test_subprocess_run_python_m_hermes_cli_dashboard_blocked():
+    """The argv an old desktop app shell sends."""
+    with pytest.raises(RuntimeError, match="live-system guard"):
+        subprocess.run(
+            [sys.executable, "-m", "hermes_cli.main", "dashboard", "--no-open"]
+        )
+
+
+def test_subprocess_popen_harness_serve_blocked():
+    """``harness serve`` puts the subcommand PAST position 1 — still caught."""
+    with pytest.raises(RuntimeError, match="live-system guard"):
+        subprocess.Popen(
+            [sys.executable, "-m", "hermes_cli.main", "harness", "serve", "--ndjson"]
+        )
+
+
+def test_subprocess_run_flag_before_subcommand_blocked():
+    """``hermes --profile work gateway run`` — a flag and its value first."""
+    with pytest.raises(RuntimeError, match="live-system guard"):
+        subprocess.run(["hermes", "--profile", "work", "gateway", "run"])
+
+
+def test_subprocess_run_absolute_path_hermes_serve_blocked():
+    """A venv's ``bin/hermes`` is the same entry point under another spelling."""
+    with pytest.raises(RuntimeError, match="live-system guard"):
+        subprocess.run(["/home/dev/.venv/bin/hermes", "serve"])
+
+
+def test_subprocess_run_bash_c_hermes_gateway_blocked():
+    """The wrapper shape: argv[0] is bash, the backend is in its argument."""
+    with pytest.raises(RuntimeError, match="live-system guard"):
+        subprocess.run(["bash", "-c", "hermes gateway run"])
+
+
+def test_os_system_hermes_dashboard_blocked():
+    with pytest.raises(RuntimeError, match="live-system guard"):
+        os.system("hermes dashboard --no-open")
+
+
 # ──────────────────── pass-through cases (must NOT raise) ──────
+#
+# Anti-vacuity for the arm above: a guard that refused every command carrying
+# the word "hermes" would pass all eight tests above while being useless, so the
+# two below drive the negative direction on argv the arm must NOT classify. They
+# spawn a real (instant, harmless) interpreter rather than asserting against the
+# classifier, because the classifier is a closure inside the fixture — the only
+# honest way to ask "would the guard have let this through?" is to let it.
 
 
+def test_non_backend_hermes_subcommand_passes_through():
+    """``hermes status``-shaped argv is not a backend spawn and must run."""
+    completed = subprocess.run([sys.executable, "-c", "pass", "hermes", "status"])
+    assert completed.returncode == 0
 
 
-
-
-
-
-
-
-
-
-
-
+def test_hermes_profile_verb_passes_through():
+    """Nor is ``hermes profile list`` — the arm is keyed to the subcommand."""
+    completed = subprocess.run(
+        [sys.executable, "-c", "pass", "hermes", "profile", "list"]
+    )
+    assert completed.returncode == 0
 
 
 # ──────────────────── real gateway runtime spawn ─────────────────
@@ -308,6 +376,7 @@ def test_subprocess_popen_real_gateway_restart_blocked():
         )
 
 
+@pytest.mark.spawns_gateway_lookalike
 def test_subprocess_run_gateway_status_passes_through():
     """Only lifecycle verbs are blocked: ``gateway status`` (and every other
     read-only subcommand) must still spawn — via the canonical matcher, not an
@@ -334,3 +403,13 @@ def test_bypass_marker_disables_guard():
     # so we get the real os.kill. Calling os.kill(os.getpid(), 0) just
     # checks that the PID exists — harmless.
     os.kill(os.getpid(), 0)  # No exception — guard is OFF.
+
+
+@pytest.mark.spawns_gateway_lookalike
+def test_gateway_lookalike_marker_allows_only_gateway_shape():
+    # A real interpreter executing pass; trailing words only exercise argv classification.
+    result = subprocess.run([sys.executable, "-c", "pass", "hermes", "gateway", "run"])
+    assert result.returncode == 0
+    for subcommand in ("serve", "dashboard"):
+        with pytest.raises(RuntimeError, match="live-system guard"):
+            subprocess.run([sys.executable, "-c", "pass", "hermes", subcommand])

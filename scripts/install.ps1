@@ -393,6 +393,8 @@ $PythonVersion = "3.11"
 $PythonFallbackVersions = @("3.12", "3.13", "3.10")
 $PythonFindTimeoutMs = 30000
 $NodeVersion = "22"
+$script:InstallDirExplicit = $PSBoundParameters.ContainsKey("InstallDir")
+$script:InstallDirResolved = $false
 # The npm range the root package.json pins in `engines.npm`.  A constant rather
 # than a manifest read like the POSIX side does: Test-Node runs BEFORE the repo
 # is cloned, so there is usually no package.json on disk yet (and none at all
@@ -645,6 +647,74 @@ function Find-SystemBrowser {
     if ([string]::IsNullOrWhiteSpace($override)) { return $null }
     if (Test-Path $override) { return $override }
     return $null
+}
+
+function Test-HermesCheckout {
+    param([string]$Path)
+    if (-not $Path) { return $false }
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return $false }
+    if (-not (Test-Path -LiteralPath (Join-Path $Path "scripts\install.ps1"))) { return $false }
+    if (-not (Test-Path -LiteralPath (Join-Path $Path "pyproject.toml"))) { return $false }
+    if (-not (Test-Path -LiteralPath (Join-Path $Path ".git"))) { return $false }
+
+    Push-Location $Path
+    try {
+        $global:LASTEXITCODE = 0
+        $inside = & git -c windows.appendAtomically=false rev-parse --is-inside-work-tree 2>$null
+        if (($LASTEXITCODE -ne 0) -or ($inside -notmatch "true")) { return $false }
+
+        $global:LASTEXITCODE = 0
+        $null = & git -c windows.appendAtomically=false rev-parse --verify HEAD 2>$null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    } finally {
+        Pop-Location
+    }
+}
+
+function Get-ExistingHermesCheckout {
+    $candidates = @()
+
+    if ($PSScriptRoot) {
+        $candidates += (Resolve-Path (Join-Path $PSScriptRoot "..") -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty ProviderPath -First 1)
+    }
+
+    try {
+        $currentPath = (Get-Location).ProviderPath
+        $currentRoot = (& git -c windows.appendAtomically=false -C $currentPath rev-parse --show-toplevel 2>$null)
+        if ($LASTEXITCODE -eq 0 -and $currentRoot) {
+            $candidates += $currentRoot
+        }
+    } catch {}
+
+    foreach ($candidate in $candidates) {
+        if (Test-HermesCheckout -Path $candidate) {
+            return (Resolve-Path -LiteralPath $candidate).ProviderPath
+        }
+    }
+    return $null
+}
+
+function Resolve-InstallDir {
+    if ($script:InstallDirResolved) { return }
+    $script:InstallDirResolved = $true
+
+    if ($script:InstallDirExplicit) {
+        Write-Info "Install directory: $InstallDir (explicit)"
+        return
+    }
+
+    if (Test-Path -LiteralPath $InstallDir) {
+        return
+    }
+
+    $checkout = Get-ExistingHermesCheckout
+    if ($checkout) {
+        $script:InstallDir = $checkout
+        Write-Info "Existing Hermes checkout detected at $InstallDir - using it"
+    }
 }
 
 function Write-BrowserEnv {
@@ -2132,6 +2202,7 @@ function Install-SystemPackages {
 # ============================================================================
 
 function Install-Repository {
+    Resolve-InstallDir
     Write-Info "Installing to $InstallDir..."
 
     $didUpdate = $false
@@ -3231,8 +3302,16 @@ function Set-PathVariable {
             Write-Info "Removed legacy launcher entries from user PATH (kept hermes via $hermesBin)"
         }
     }
-    
-    if ($currentPath -notlike "*$hermesBin*") {
+
+    # Segment-wise, case-insensitive, trailing-separator-tolerant dedup.
+    # A substring "-like" check mis-fires on prefix collisions (a different
+    # install whose path merely contains this one) and silently skips the add.
+    $target = $hermesBin.TrimEnd('\')
+    $segments = @()
+    if ($currentPath) {
+        $segments = $currentPath -split ';' | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') }
+    }
+    if ($segments -notcontains $target) {
         [Environment]::SetEnvironmentVariable(
             "Path",
             "$hermesBin;$currentPath",
@@ -4815,6 +4894,8 @@ function Get-InstallStage {
 }
 
 function Step-OutOfInstallDir {
+    Resolve-InstallDir
+
     # Windows refuses to delete a directory any shell is currently cd'd
     # inside -- and silently leaves orphan files behind, which then wedge
     # "is this a valid git repo" probes on re-install.  Harmless when the
@@ -4907,6 +4988,18 @@ function Invoke-EnsureMode {
     foreach ($dep in $depList) {
         $dep = $dep.Trim()
         switch ($dep) {
+            "git" {
+                if (-not (Install-Git)) {
+                    Write-Err "Git (with Git Bash) could not be installed"
+                    exit 1
+                }
+            }
+            "git-bash" {
+                if (-not (Install-Git)) {
+                    Write-Err "Git Bash could not be installed"
+                    exit 1
+                }
+            }
             "node" {
                 [void](Test-Node)
                 if (-not $script:HasNode) {

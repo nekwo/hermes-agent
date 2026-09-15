@@ -1,11 +1,19 @@
 """Tests for the central command registry and autocomplete."""
 
+import logging
+from types import SimpleNamespace
+
+import pytest
 from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
 
+from tests.hermes_cli import conftest as package_conftest
+import hermes_cli.commands_platforms as commands_module
 from hermes_cli.commands import COMMAND_REGISTRY, COMMANDS, COMMANDS_BY_CATEGORY, CommandDef, GATEWAY_KNOWN_COMMANDS, SUBCOMMANDS, command_desktop_meta, gateway_help_lines, infer_argument_mode, resolve_command
 from hermes_cli.commands_completion import SlashCommandAutoSuggest, SlashCommandCompleter
 from hermes_cli.commands_platforms import _CMD_NAME_LIMIT, _SLACK_RESERVED_COMMANDS, _SLACK_VIA_HERMES_ONLY, _clamp_command_names, _sanitize_telegram_name, slack_app_manifest, slack_native_slashes, slack_subcommand_map, telegram_bot_commands, telegram_menu_commands
+from hermes_cli.commands_platforms import discord_skill_commands
+from hermes_cli.commands_platforms import slack_clamped_slashes, telegram_menu_max_commands
 
 
 def _completions(completer: SlashCommandCompleter, text: str):
@@ -234,8 +242,87 @@ class TestSlackNativeSlashes:
                 assert ch.isalnum() or ch in "-_", f"invalid char {ch!r} in {name!r}"
 
 
+
+
+
+    def test_clamped_commands_are_named_not_silently_dropped(self, monkeypatch, caplog):
+        """Slack's app cap must never cost coverage silently.
+
+        The 50 is SLACK'S limit (an app may register at most 50 slash
+        commands), not a Hermes tuning knob — so the answer to a full registry
+        is curation, not a bigger number. But an unaccounted clamp made "which
+        commands keep a native slash" a function of how many plugins happen to
+        be installed, discoverable only by diffing generated manifests.
+
+        Driven off a forced small cap so the pin is deterministic rather than
+        a function of the installed plugin set.
+        """
+        monkeypatch.setattr(commands_module, "_SLACK_MAX_SLASH_COMMANDS", 5)
+
+        with caplog.at_level(logging.WARNING, logger="hermes_cli.commands"):
+            entries = slack_native_slashes()
+        clamped = slack_clamped_slashes()
+        names = {name for name, _d, _h in entries}
+
+        assert len(entries) == 5
+        assert clamped, "a cap of 5 must drop commands"
+        # Accounting agrees with the list it accounts for.
+        assert not (set(clamped) & names)
+
+        warnings = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno >= logging.WARNING
+            and record.name == "hermes_cli.commands"
+        ]
+        assert len(warnings) == 1, warnings
+        message = warnings[0]
+        assert str(len(clamped)) in message
+        for name in clamped:
+            assert f"/{name}" in message, f"{name!r} dropped without being named"
+
+    def test_no_clamp_report_when_everything_fits(self, monkeypatch, caplog):
+        """Control: the report is caused by the clamp, not emitted always."""
+        monkeypatch.setattr(commands_module, "_SLACK_MAX_SLASH_COMMANDS", 10_000)
+
+        with caplog.at_level(logging.WARNING, logger="hermes_cli.commands"):
+            slack_native_slashes()
+
+        assert slack_clamped_slashes() == []
+        assert not [
+            record for record in caplog.records
+            if record.levelno >= logging.WARNING
+            and record.name == "hermes_cli.commands"
+        ]
+
+    def test_clamp_report_excludes_deliberate_skips(self, monkeypatch):
+        """Curated omissions are not clamp casualties.
+
+        Slack built-ins and ``_SLACK_VIA_HERMES_ONLY`` entries are deliberate
+        decisions with their own comments; reporting them as cap casualties
+        would bury the names that really did lose a slot to the cap.
+        """
+        monkeypatch.setattr(commands_module, "_SLACK_MAX_SLASH_COMMANDS", 5)
+        clamped = set(slack_clamped_slashes())
+
+        assert not (clamped & set(_SLACK_RESERVED_COMMANDS))
+        assert not (clamped & set(_SLACK_VIA_HERMES_ONLY))
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=package_conftest.TELEGRAM_PARITY_DEFECT_REASON,
+    )
     def test_telegram_parity(self):
         """Every Telegram bot command must be registerable on Slack too.
+
+        FENCED, NOT FIXED (ML-16 / B20(iv)). This has been red since the
+        registry outgrew Slack's 50-slash cap; closing it is product curation
+        and an owner call, so the defect stays. What could not stay is the
+        permanent red: a file that can never be green has no red left to spend
+        on a regression, and the canonical per-file runner's red definition
+        could never be all-green while it stood. ``strict=True`` is the half
+        that keeps this honest — the day parity actually holds this XPASSes and
+        goes red, and someone must delete the mark and the conftest row.
 
         This catches the old behavior where Slack users couldn't invoke
         commands like /btw natively. If a future command surfaces on
@@ -263,6 +350,72 @@ class TestSlackNativeSlashes:
         assert not missing, (
             f"commands on Telegram but missing from Slack native slashes: {sorted(missing)}"
         )
+
+
+class TestKnownDefectFence:
+    """The fence around ``test_telegram_parity`` must not become a burial.
+
+    Two things have to hold together, and they fail in opposite directions:
+    the mark must be STRICT (or the defect could be silently fixed, or worse,
+    silently "fixed" by a mutant, with nobody told), and the conftest banner
+    must still fire for an XFAILED node (or fencing the defect would have
+    retired the only place it is explained).
+    """
+
+    def test_the_parity_defect_is_fenced_strict(self):
+        marks = [
+            mark
+            for mark in TestSlackNativeSlashes.test_telegram_parity.pytestmark
+            if mark.name == "xfail"
+        ]
+        assert len(marks) == 1
+        assert marks[0].kwargs["strict"] is True
+        # Single-sourced, not restated: the mark carries the conftest's text.
+        assert (
+            marks[0].kwargs["reason"]
+            is package_conftest.TELEGRAM_PARITY_DEFECT_REASON
+        )
+
+    def test_an_xfailed_known_defect_still_reaches_the_banner(self, monkeypatch):
+        """An xfail is reported as ``skipped`` + ``wasxfail``, never ``failed``.
+
+        The pre-ML-16 classifier matched ``failed`` only, so adding the mark
+        would have made the KNOWN DEFECTS section stop printing — the defect
+        fenced AND unexplained.
+        """
+        recorded: list[str] = []
+        monkeypatch.setattr(package_conftest, "_KNOWN_DEFECT_FAILURES", recorded)
+        node = (
+            "tests/hermes_cli/test_commands.py"
+            "::TestSlackNativeSlashes::test_telegram_parity"
+        )
+
+        package_conftest.pytest_runtest_logreport(
+            SimpleNamespace(
+                when="call", outcome="skipped", nodeid=node, wasxfail="reason"
+            )
+        )
+        assert recorded == [node]
+
+        # A strict XPASS arrives as `failed` with no `wasxfail` — the day the
+        # defect is really gone, the banner must name it so the row is deleted.
+        package_conftest.pytest_runtest_logreport(
+            SimpleNamespace(when="call", outcome="failed", nodeid=node)
+        )
+        assert recorded == [node, node]
+
+        # Control: an ordinary pass in the same file is not a defect report.
+        package_conftest.pytest_runtest_logreport(
+            SimpleNamespace(
+                when="call",
+                outcome="passed",
+                nodeid=(
+                    "tests/hermes_cli/test_commands.py"
+                    "::TestSlackAppManifest::test_btw_is_in_manifest"
+                ),
+            )
+        )
+        assert recorded == [node, node]
 
 
 class TestSlackAppManifest:

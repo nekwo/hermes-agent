@@ -29,9 +29,17 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import time
 
 import pytest
+
+pytestmark = pytest.mark.allow_claude_code_credentials_file
+
+
+@pytest.fixture(autouse=True)
+def isolated_home(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
 from agent import anthropic_credentials as AA
 from agent.auxiliary_client import _refresh_provider_credentials

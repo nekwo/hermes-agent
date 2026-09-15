@@ -24,6 +24,9 @@ from hermes_cli._subprocess_compat import suppress_platform_ver_console
 
 suppress_platform_ver_console()
 
+from hermes_cli import _boot_clock
+_boot_clock.mark_main_import_started()
+
 import os
 import re
 import sys
@@ -401,162 +404,27 @@ _startup_fast.ensure_project_root_on_path()
 _PROFILE_NAME_RE = r"^[a-z0-9][a-z0-9_-]{0,63}$"  # mirrors hermes_cli.profiles._PROFILE_ID_RE
 
 
-def _inside_mcp_add_args(argv: list, index: int) -> bool:
-    """True once argv reaches `hermes mcp add ... --args <command argv>`.
-
-    ``mcp add --args`` is command-argv passthrough. Flags after that point
-    belong to the child MCP command (for example Docker MCP Toolkit's
-    ``--profile``), not to Hermes' own profile selector.
-    """
-    try:
-        mcp_index = argv.index("mcp", 0, index)
-        argv.index("add", mcp_index + 1, index)
-    except ValueError:
-        return False
-    return True
+from hermes_cli._profile_bootstrap import _inside_mcp_add_args
 
 
-def _scan_profile_flag(argv: list) -> tuple:
-    """Find -p/--profile/--profile= in argv -> (name, tokens_consumed, index).
-
-    Historically the flag worked even after the subcommand (`hermes chat -p
-    coder`), so scan broadly; stop at ``--`` and at the `mcp add --args`
-    passthrough region. Values that can't be profile names (pytest's
-    ``-p no:xdist``) are rejected so resolve_profile_env never sys.exits on them.
-    """
-    from hermes_cli._parser import top_level_value_flag_sets
-
-    value_flags, optional_value_flags = top_level_value_flag_sets()
-    i = 0
-    while i < len(argv):
-        arg = argv[i]
-        if arg == "--" or (arg == "--args" and _inside_mcp_add_args(argv, i)):
-            break
-        if arg in {"--profile", "-p"} and i + 1 < len(argv):
-            if re.match(_PROFILE_NAME_RE, argv[i + 1]):
-                return argv[i + 1], 2, i
-            break
-        if arg.startswith("--profile="):
-            return arg.split("=", 1)[1], 1, i
-        takes_value = "=" not in arg and i + 1 < len(argv) and (
-            arg in value_flags
-            or (arg in optional_value_flags and not argv[i + 1].startswith("-"))
-        )
-        i += 2 if takes_value else 1
-    return None, 0, None
+from hermes_cli._profile_bootstrap import _scan_profile_flag
 
 
-def _resolve_sudo_user_profile_env(name: str) -> str | None:
-    """Resolve `sudo hermes -p <name>` against the invoking user's home.
-
-    This runs before argparse, so `--run-as-user` is not available yet. For
-    sudo invocations the best signal is SUDO_USER: root is only doing the
-    privileged install/start action; the profile store belongs to the user.
-    """
-    if name == "default":
-        return None
-    from hermes_constants import sudo_invoker_default_home
-
-    sudo_home = sudo_invoker_default_home()
-    if sudo_home is None:
-        return None
-    candidate = sudo_home / "profiles" / name
-    return str(candidate) if candidate.is_dir() else None
+from hermes_cli._profile_bootstrap import _resolve_sudo_user_profile_env
 
 
-def _under_gateway_supervisor(argv: list) -> bool:
-    """A supervisor-launched gateway child must NOT follow the sticky active_profile.
-
-    Each supervised slot has a fixed profile identity: named slots pass
-    ``-p <name>`` or pin HERMES_HOME to the profile dir; a bare invocation
-    means "the root HERMES_HOME profile". If a supervised default-profile
-    child read active_profile, switching the active profile (dashboard,
-    ``hermes profile use``) would silently redirect the default gateway into
-    that profile — adopting its credentials and double-polling a Telegram
-    token already owned by that profile's own gateway (#74872).
-
-    Markers (see gateway/restart.py ``is_gateway_supervisor_process``):
-    HERMES_SUPERVISED_CHILD (systemd unit / launchd plist / Windows task),
-    HERMES_S6_SUPERVISED_CHILD (legacy s6 container), INVOCATION_ID (systemd
-    service children only — consulted ONLY for gateway commands because it is
-    inherited by every descendant of a systemd-launched process, e.g.
-    self-hosted CI runners), HERMES_GATEWAY_EXTERNAL_SUPERVISOR (explicit
-    opt-in). XPC_SERVICE_NAME is deliberately NOT consulted: interactive macOS
-    terminals set it too.
-    """
-    if os.environ.get("HERMES_SUPERVISED_CHILD") or os.environ.get("HERMES_S6_SUPERVISED_CHILD"):
-        return True
-    is_gateway_cmd = next((a for a in argv if not a.startswith("-")), None) == "gateway"
-    if is_gateway_cmd and os.environ.get("INVOCATION_ID"):
-        return True
-    return os.environ.get(
-        "HERMES_GATEWAY_EXTERNAL_SUPERVISOR", ""
-    ).strip().lower() in {"1", "true", "yes", "on"}
+from hermes_cli._profile_bootstrap import _under_gateway_supervisor
 
 
-def _desktop_ssh_backend(argv: list) -> bool:
-    """A Desktop-owned ``serve --ssh-session-token-file`` child has a fixed identity too.
-
-    The Desktop client names the remote profile explicitly (``--profile <name>``, or none for
-    the root home). Following the remote host's sticky ``active_profile`` instead silently
-    re-homes the backend into a profile the UI never asked for, so Settings read one
-    ``config.yaml`` and the user edits another (KC's "nothing sticks over SSH").
-    """
-    return "--ssh-session-token-file" in argv
+from hermes_cli._profile_bootstrap import _desktop_ssh_backend
 
 
-def _apply_profile_override() -> None:
-    """Pre-parse --profile/-p and set HERMES_HOME before imports."""
-    argv = sys.argv[1:]
-    profile_name, consume, profile_index = _scan_profile_flag(argv)
-
-    # HERMES_HOME already set with no explicit flag: trust it only when it
-    # points at a specific profile dir ("profiles" as immediate parent). If it
-    # points at the hermes root (systemd hardcodes HERMES_HOME=/root/.hermes)
-    # we must still read active_profile — the user may have run
-    # `hermes profile use` and the gateway should honour it (#22502).
-    hermes_home_env = os.environ.get("HERMES_HOME", "")
-    if profile_name is None and hermes_home_env and Path(hermes_home_env).parent.name == "profiles":
-        return
-
-    if profile_name is None and not _under_gateway_supervisor(argv) and not _desktop_ssh_backend(argv):
-        try:
-            from hermes_constants import get_default_hermes_root
-
-            active_path = get_default_hermes_root() / "active_profile"
-            if active_path.exists():
-                name = active_path.read_text(encoding="utf-8").strip()
-                if name and name != "default":
-                    profile_name = name  # consume stays 0: nothing to strip
-        except (UnicodeDecodeError, OSError):
-            pass  # corrupted file, skip
-
-    if profile_name is None:
-        return
-    try:
-        from hermes_cli.profiles import resolve_profile_env
-
-        hermes_home = resolve_profile_env(profile_name)
-    except FileNotFoundError as exc:
-        hermes_home = _resolve_sudo_user_profile_env(profile_name)
-        if not hermes_home:
-            print(f"Error: {exc}", file=sys.stderr)
-            sys.exit(1)
-    except ValueError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        sys.exit(1)
-    except Exception as exc:
-        # A bug in profiles.py must NEVER prevent hermes from starting
-        print(f"Warning: profile override failed ({exc}), using default", file=sys.stderr)
-        return
-    os.environ["HERMES_HOME"] = hermes_home
-    # Strip the flag from argv so argparse doesn't choke
-    if consume > 0 and profile_index is not None:
-        start = profile_index + 1  # +1 because argv is sys.argv[1:]
-        sys.argv = sys.argv[:start] + sys.argv[start + consume :]
+from hermes_cli._profile_bootstrap import apply_profile_override as _apply_profile_override
 
 
-_apply_profile_override()
+from hermes_cli._profile_bootstrap import is_hermes_cli_entrypoint as _is_hermes_cli_entrypoint
+if _is_hermes_cli_entrypoint(__name__):
+    _apply_profile_override()
 
 # Windows launcher self-heal — the ``hermes`` command is a COPY of the venv
 # console script staged into the managed bin dir (outside the checkout, since
@@ -2636,7 +2504,7 @@ def cmd_console(args):
 _BUILTIN_SUBCOMMANDS = frozenset(
     {
         "acp", "approvals", "auth", "backup", "bundles", "checkpoints", "claw", "completion",
-        "computer-use",
+        "computer-use", "harness", "postinstall",
         "config", "console", "cron", "curator", "dashboard", "serve", "debug", "doctor",
         "dump", "egress", "fallback", "gateway", "hooks", "import", "import-agent", "insights",
         "gui", "desktop", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate", "moa",
@@ -2852,6 +2720,12 @@ def _prepare_agent_startup(args) -> None:
             "shell-hook registration failed at CLI startup",
             exc_info=True,
         )
+    try:
+        from tools.process_registry import process_registry
+        process_registry.restore_durable_completions()
+    except Exception:
+        logger.debug("Delegation completion restore failed at CLI startup", exc_info=True)
+
 
 
 def _apply_safe_mode(args) -> None:
@@ -3210,6 +3084,8 @@ def _build_cli_parser():
     parser, subparsers, chat_parser = build_top_level_parser()
     chat_parser.set_defaults(func=cmd_chat)
 
+    from hermes_cli._downstream_cli import build_downstream_parsers
+    build_downstream_parsers(subparsers)
     build_model_parser(subparsers, cmd_model=cmd_model)
     build_moa_parser(subparsers)
     build_fallback_parser(subparsers)
@@ -3357,6 +3233,7 @@ def _default_to_chat(args) -> None:
 
 def main():
     """Main entry point for hermes CLI."""
+    _boot_clock.mark_main_entered()
     _set_process_title()
     _advertise_agent_env()
 
@@ -3445,12 +3322,16 @@ def main():
 
     # A handler's int return code becomes the exit code (None = success).
     if hasattr(args, "func"):
-        rc = args.func(args)
+        from hermes_cli._downstream_cli import dispatch_command
+        rc = dispatch_command(args)
         if isinstance(rc, int) and rc != 0:
             sys.exit(rc)
     else:
         parser.print_help()
 
+
+from hermes_cli._downstream_cli import cmd_postinstall, _capture_core_cache_fingerprint_home
+_boot_clock.mark_main_import_completed()
 
 if __name__ == "__main__":
     main()
@@ -3482,3 +3363,5 @@ def __getattr__(name):  # PEP 562 — chained onto the module's own __getattr__
     warn_once(__name__, name, *target)
     return getattr(importlib.import_module(target[0]), target[1])
 # ---- END PLUGIN-COMPAT ----
+
+from hermes_cli.update_cmd_windows import _warn_legacy_console_gateway_task

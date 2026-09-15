@@ -198,7 +198,7 @@ class TestBrowserAvailableNpxRung:
 
     def _block_path_and_node_modules_checks(self, monkeypatch, tmp_path):
         monkeypatch.setattr("shutil.which", lambda *a, **k: None)
-        monkeypatch.setattr("hermes_cli.doctor.HERMES_HOME", tmp_path / "home")
+        monkeypatch.setattr("hermes_cli.config.get_hermes_home", lambda: tmp_path / "home")
         monkeypatch.setattr("hermes_cli.doctor.PROJECT_ROOT", tmp_path / "root")
 
     def test_true_when_npx_resolves_agent_browser(self, monkeypatch, tmp_path):

@@ -14,6 +14,10 @@ import json
 
 import pytest
 
+# NOTE (fork): the local ``sys.path`` insert that used to live here is gone —
+# inserting ``tests/`` shadowed the real ``hermes_cli`` package with this test
+# package for the whole process. ``tests/conftest.py`` puts PROJECT_ROOT on the
+# path before any test module imports, so do not reintroduce one.
 
 class TestPublicAPI:
     def test_gateway_symbols_importable(self):

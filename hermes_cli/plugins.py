@@ -21,6 +21,7 @@ import queue
 import re
 import sys
 import threading
+import time
 import types
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -1300,6 +1301,7 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
 
     def _discover_and_load_inner(self) -> None:
         """The actual discovery sweep — see :meth:`discover_and_load`."""
+        _started = time.monotonic()
         manifests: List[PluginManifest] = self._collect_directory_manifests()
         # Entry points are separate from the directory scan: the startup MCP probe must not import
         # or register them.
@@ -1323,8 +1325,9 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
             self._validate_plugin_config_schema(manifest)
             self._load_plugin(manifest)
         if manifests:
-            logger.info("Plugin discovery complete: %d found, %d enabled", len(self._plugins),
-                        sum(1 for p in self._plugins.values() if p.enabled))
+            logger.info("Plugin discovery complete: %d found, %d enabled, elapsed_ms=%d", len(self._plugins),
+                        sum(1 for p in self._plugins.values() if p.enabled),
+                        int(max(0.0, time.monotonic() - _started) * 1000))
         self._refresh_plugin_compat_report(list(to_load.values()))
 
     def _refresh_plugin_compat_report(self, manifests: List[PluginManifest]) -> None:

@@ -1,0 +1,4614 @@
+{
+  "claims": [
+    {
+      "id": "rdh6-cli-roster-read-unwrapped",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_cli_create_persona",
+      "operator": "remove-typed-fault-wrap",
+      "find": "    try:\n        return _persona_by_id(load_agent_runtime_config(), persona_id)\n    except Exception as exc:  # noqa: BLE001 — re-raised as the typed fault\n        raise PersonaRosterUnavailable(str(exc)) from exc",
+      "replace": "    return _persona_by_id(load_agent_runtime_config(), persona_id)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_agent_create_verb.py::test_an_unreadable_roster_is_a_typed_refusal_not_a_traceback"
+      ]
+    },
+    {
+      "id": "rdh6-cli-roster-fault-degrades-to-no-persona",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_cli_create_persona",
+      "operator": "degrade-fault-to-absence",
+      "find": "    except Exception as exc:  # noqa: BLE001 — re-raised as the typed fault\n        raise PersonaRosterUnavailable(str(exc)) from exc",
+      "replace": "    except Exception:  # noqa: BLE001 — re-raised as the typed fault\n        return None",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_agent_create_verb.py::test_a_roster_read_that_faults_once_refuses_instead_of_renaming_the_agent"
+      ]
+    },
+    {
+      "id": "rdh6-roster-fault-wears-a-bad-ids-costume",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "roster_unavailable_outcome",
+      "operator": "collapse-refusal-reason",
+      "find": "        {\"reason\": PERSONA_ROSTER_UNAVAILABLE_REASON, \"rolled_back\": True},",
+      "replace": "        {\"reason\": PERSONA_NOT_FOUND_REASON, \"rolled_back\": True},",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_agent_create_verb.py::test_both_create_lanes_name_the_same_roster_fault"
+      ]
+    },
+    {
+      "id": "rdh6-rpc-create-hands-over-a-synthesised-persona",
+      "path": "agent_runtime/serve_rpc.py",
+      "symbol": "_runtime_agent_create",
+      "operator": "bypass-roster-check-with-object",
+      "find": "    outcome = perform_agent_create(\n        params, caller=context.caller if context is not None else None\n    )",
+      "replace": "    outcome = perform_agent_create(\n        params, persona=object(), caller=context.caller if context is not None else None\n    )",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_roster_bypass_contract.py::test_every_persona_carrying_call_site_is_declared"
+      ]
+    },
+    {
+      "id": "stage42-work-list-refuses-cursor",
+      "path": "hermes_cli/harness.py",
+      "symbol": "build_parser/work_list",
+      "operator": "advertise-unread-control",
+      "find": "work_list, controls=frozenset({\"limit\", \"sort\"})",
+      "replace": "work_list, controls=frozenset({\"cursor\", \"limit\", \"sort\"})",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_cli.py::test_every_stage42_global_flag_is_honored"
+      ]
+    },
+    {
+      "id": "bw0-import-segment-becomes-a-constant",
+      "path": "hermes_cli/_boot_clock.py",
+      "symbol": "import_tax_segments/main_import_ms",
+      "operator": "stamp-a-plausible-constant",
+      "find": "        segments[\"main_import_ms\"] = _ms(MAIN_IMPORT_COMPLETED - MAIN_IMPORT_STARTED)",
+      "replace": "        segments[\"main_import_ms\"] = 0",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_boot_clock_segments.py"
+      ]
+    },
+    {
+      "id": "bw0-unmeasured-segment-fabricates-zero",
+      "path": "hermes_cli/_boot_clock.py",
+      "symbol": "import_tax_segments/absence",
+      "operator": "absence-becomes-zero",
+      "find": "    if BYTECODE_SWEEP_MS is not None:\n        segments[\"bytecode_sweep_ms\"] = int(BYTECODE_SWEEP_MS)",
+      "replace": "    segments[\"bytecode_sweep_ms\"] = int(BYTECODE_SWEEP_MS or 0)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_boot_clock_segments.py"
+      ]
+    },
+    {
+      "id": "bwh2-bytecode-sweep-loses-its-single-winner-lock",
+      "path": "hermes_cli/_bytecode_sweep.py",
+      "symbol": "_sweep_stale_bytecode_if_checkout_changed/claim",
+      "operator": "remove-mutual-exclusion",
+      "find": "        claim = _claim_bytecode_sweep_lock(lock_path)",
+      "replace": "        claim = _SWEEP_CLAIM_CLAIMED",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_bytecode_sweep_lock.py"
+      ]
+    },
+    {
+      "id": "bwh2-unlockable-checkout-loses-the-stale-bytecode-guard",
+      "path": "hermes_cli/_bytecode_sweep.py",
+      "symbol": "_claim_bytecode_sweep_lock/unavailable",
+      "operator": "collapse-unavailable-onto-contended",
+      "find": "    except OSError:\n        return _SWEEP_CLAIM_UNAVAILABLE\n    try:\n        os.write(fd, f\"{os.getpid()}\\n\".encode(\"utf-8\"))",
+      "replace": "    except OSError:\n        return _SWEEP_CLAIM_CONTENDED\n    try:\n        os.write(fd, f\"{os.getpid()}\\n\".encode(\"utf-8\"))",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_bytecode_sweep_lock.py"
+      ]
+    },
+    {
+      "id": "bwh3-deferred-model-tools-import-returns-to-module-scope",
+      "path": "agent_runtime/tool_visibility.py",
+      "symbol": "module scope/model_tools",
+      "operator": "restore-eager-import",
+      "find": "from tools.registry import registry\n\nfrom .chat_lane_toolsets import ChatLaneDrop, chat_lane_drop_rows",
+      "replace": "from model_tools import get_toolset_for_tool as _eager_lookup\nfrom tools.registry import registry\n\nfrom .chat_lane_toolsets import ChatLaneDrop, chat_lane_drop_rows",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_tool_visibility_import_deferral.py"
+      ]
+    },
+    {
+      "id": "r135-4-plugin-discovery-barrier-dropped-from-the-name-union",
+      "path": "agent_runtime/tool_visibility.py",
+      "symbol": "_cached_tool_names_for_toolsets/ordering",
+      "operator": "drop-the-plugin-discovery-barrier",
+      "find": "    _ensure_plugin_tools_registered()\n    toolset_for = registry.get_toolset_for_tool",
+      "replace": "    toolset_for = registry.get_toolset_for_tool",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_tool_visibility_import_deferral.py"
+      ],
+      "derived_at": "9ef1324634ebc803d2753af4ab58b8b6682eb865"
+    },
+    {
+      "id": "s4-skills-id-gate-lets-a-respelling-through",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "run_skills_phase",
+      "operator": "drop-id-sanitizer-gate",
+      "find": "        if (\n            safe_id(identifier) != identifier\n            or safe_assignment_token(identifier) != identifier\n        ):",
+      "replace": "        if False:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_a_traversal_shaped_skill_id_never_reaches_the_filesystem"
+      ]
+    },
+    {
+      "id": "s4-canonical-skill-is-assigned-without-being-installed",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "run_skills_phase",
+      "operator": "skip-install-gate",
+      "find": "        if identifier not in CANONICAL_SHARED_SKILL_IDS:",
+      "replace": "        if True or identifier not in CANONICAL_SHARED_SKILL_IDS:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_skill_policy.py::test_agent_create_installs_and_verifies_canonical_skill"
+      ]
+    },
+    {
+      "id": "s4-any-string-is-accepted-as-a-skill",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "run_skills_phase",
+      "operator": "skip-resolve-gate",
+      "find": "            if status != \"resolved\":",
+      "replace": "            if False and status != \"resolved\":",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_skill_policy.py::test_agent_create_refuses_unresolved_skill"
+      ]
+    },
+    {
+      "id": "s4-install-receipt-is-not-verified-after-the-copy",
+      "path": "agent_runtime/skill_install.py",
+      "symbol": "install_and_verify_harness_skill",
+      "operator": "drop-post-install-verification",
+      "find": "    result = install_harness_skill(skill)\n    states = harness_skill_hash_states([skill])\n    if result.ok and states and states[0].state == SKILL_HASH_MATCHES:\n        return result",
+      "replace": "    result = install_harness_skill(skill)\n    return result",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_skill_policy.py::test_an_install_that_REPORTS_success_is_still_re_read_before_it_is_trusted"
+      ]
+    },
+    {
+      "id": "s4-a-skills-refusal-compensates-the-placement-away",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "perform_agent_create",
+      "operator": "compensate-on-skills-refusal",
+      "find": "                except AgentCreateSkillsRefused as exc:\n                    return _skills_refusal(exc, instance_id=instance.id)",
+      "replace": "                except AgentCreateSkillsRefused as exc:\n                    compensate_failed_placement(\n                        reservation,\n                        instance_id=instance.id,\n                        failure={\"reason\": \"placement_failed\"},\n                    )\n                    return _skills_refusal(exc, instance_id=instance.id)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_skill_refusal_keeps_placement_and_resumes"
+      ]
+    },
+    {
+      "id": "s4-a-second-failed-retry-compensates-the-placement-away",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "perform_agent_create",
+      "operator": "compensate-on-resumed-skills-refusal",
+      "find": "                    except AgentCreateSkillsRefused as exc:\n                        return _skills_refusal(exc, instance_id=instance_id)",
+      "replace": "                    except AgentCreateSkillsRefused as exc:\n                        compensate_failed_placement(\n                            reservation,\n                            instance_id=instance_id,\n                            failure={\"reason\": \"placement_failed\"},\n                        )\n                        return _skills_refusal(exc, instance_id=instance_id)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_a_retry_that_is_still_wrong_refuses_again_and_still_keeps_the_agent"
+      ]
+    },
+    {
+      "id": "s4-a-pre-plan-done-receipt-re-enters-the-skills-phase",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "perform_agent_create",
+      "operator": "treat-legacy-done-as-resumable",
+      "find": "            if record.state == STATE_DONE:",
+      "replace": "            if record.state == STATE_DONE and record.skills is not None:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_reservations.py::test_legacy_done_receipt"
+      ]
+    },
+    {
+      "id": "s4-an-explicit-empty-skills-request-reads-back-as-absent",
+      "path": "agent_runtime/agent_create_reservations.py",
+      "symbol": "_read",
+      "operator": "collapse-empty-list-to-none",
+      "find": "            skills=(\n                [str(item) for item in raw[\"skills\"]]\n                if isinstance(raw.get(\"skills\"), list)\n                else None\n            ),",
+      "replace": "            skills=(raw.get(\"skills\") or None),",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_reservations.py::test_an_explicitly_empty_request_is_recorded_as_empty_not_absent"
+      ]
+    },
+    {
+      "id": "s4-an-absent-skills-param-becomes-an-explicit-empty-override",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "_skills",
+      "operator": "collapse-absence-to-empty-list",
+      "find": "    if value is None:\n        return None\n    if not isinstance(value, (list, tuple)):",
+      "replace": "    if value is None:\n        return ()\n    if not isinstance(value, (list, tuple)):",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_an_absent_skills_key_leaves_the_override_inheriting"
+      ]
+    },
+    {
+      "id": "s4-a-malformed-skills-container-is-normalised-instead-of-refused",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "_skills",
+      "operator": "accept-non-list-container",
+      "find": "    if not isinstance(value, (list, tuple)):\n        raise AgentCreateInvalid(\n            \"skills_invalid\", \"invalid params: skills must be a list of skill ids\"\n        )",
+      "replace": "    if False:\n        raise AgentCreateInvalid(\n            \"skills_invalid\", \"invalid params: skills must be a list of skill ids\"\n        )",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_invalid_arms_stamp_rolled_back"
+      ]
+    },
+    {
+      "id": "inherit-skills-is-just-another-clear",
+      "path": "agent_runtime/persona_assignments.py",
+      "symbol": "PersonaInstanceStore.update_profile",
+      "operator": "collapse-the-tri-state-third-value",
+      "find": "            value = None if inherit_skills else ([] if clear_skills else _safe_skill_overrides(skills or []))",
+      "replace": "            value = [] if (clear_skills or inherit_skills) else _safe_skill_overrides(skills or [])",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_persona_instance_update_profile_skills.py::test_inherit_is_not_the_same_write_as_clear"
+      ]
+    },
+    {
+      "id": "the-patch-snapshot-collapses-none-onto-empty",
+      "path": "agent_runtime/persona_assignments.py",
+      "symbol": "PersonaInstanceStore._profile_patch_snapshot",
+      "operator": "collapse-the-tri-state-third-value",
+      "find": "            \"skill_overrides\": (\n                list(instance.skill_overrides) if instance.skill_overrides is not None else None\n            ),",
+      "replace": "            \"skill_overrides\": list(instance.skill_overrides or []),",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_state_patches.py::test_flag_on_inherit_skills_ships_a_null_skill_overrides_field"
+      ]
+    },
+    {
+      "id": "s4-an-omitted-skill-flag-clears-every-instance-override",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_cmd_persona_instance_update_profile",
+      "operator": "collapse-absent-flag-to-empty-list",
+      "find": "            skills=requested_skills,",
+      "replace": "            skills=list(requested_skills or []),",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_persona_instance_update_profile_skills.py::test_a_display_name_edit_leaves_both_skill_overrides_in_place"
+      ]
+    },
+    {
+      "id": "s4-the-cli-create-door-drops-its-skill-flag",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_cmd_agent_create",
+      "operator": "drop-argv-param-passthrough",
+      "find": "    requested_skills = list_flag_or_absent(args, \"skills\")\n    if requested_skills is not None:\n        params[\"skills\"] = requested_skills",
+      "replace": "    requested_skills = list_flag_or_absent(args, \"skills\")",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_agent_create_verb.py::test_the_skill_flag_and_the_rpc_param_render_the_same_request"
+      ]
+    },
+    {
+      "id": "s4-the-rpc-create-door-drops-its-skills-param",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "normalize_agent_create",
+      "operator": "drop-wire-param-read",
+      "find": "    skills = _skills(params.get(\"skills\"))",
+      "replace": "    skills = None",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_agent_create_verb.py::test_the_skill_flag_and_the_rpc_param_render_the_same_request"
+      ]
+    },
+    {
+      "id": "s4-a-replay-echoes-the-receipts-frozen-actor",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "perform_agent_create",
+      "operator": "freeze-replay-actor",
+      "find": "                return AgentCreateOutcome(\n                    result={**_reply(record.result), \"idempotent_replay\": True}\n                )",
+      "replace": "                return AgentCreateOutcome(\n                    result={**record.result, \"idempotent_replay\": True}\n                )",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_an_idempotent_replay_re_reads_the_actor_instead_of_echoing_the_receipt"
+      ]
+    },
+    {
+      "id": "s4-an-unreadable-actor-is-reported-as-fresh",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "_reply",
+      "operator": "fabricate-freshness",
+      "find": "    actor = observed if observed is not None else _live_actor(result)\n    if actor is None:\n        result[\"actor_fresh\"] = False\n        return result",
+      "replace": "    actor = observed if observed is not None else _live_actor(result)\n    if actor is None:\n        result[\"actor_fresh\"] = True\n        return result",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_a_replay_whose_actor_is_gone_says_so_instead_of_inventing_one"
+      ]
+    },
+    {
+      "id": "s5-retire-drops-the-office-half",
+      "path": "agent_runtime/persona_assignments.py",
+      "symbol": "PersonaInstanceStore.retire",
+      "operator": "drop-the-office-half",
+      "find": "        office = self._archive_office_placements(\n            instance, correlation_id=correlation_id\n        )",
+      "replace": "        office = {\"archived\": 0, \"failed\": 0, \"archived_actor_keys\": [], \"failures\": []}",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_retiring_a_placed_agent_archives_the_row_and_names_every_actor"
+      ]
+    },
+    {
+      "id": "s5-prune-archives-without-naming-what-left",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "OfficeStore.archive_actors_for_instance",
+      "operator": "drop-the-identity-keep-the-count",
+      "find": "                outcomes.append(OfficeActorOutcome.archived(wsid, actor.actor_key))",
+      "replace": "                pass",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_retiring_a_placed_agent_archives_the_row_and_names_every_actor"
+      ]
+    },
+    {
+      "id": "s5-office-prune-swallows-its-failures",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "OfficeStore.archive_actors_for_instance",
+      "operator": "restore-the-swallow",
+      "find": "            \"failures\": failures,",
+      "replace": "            \"failures\": [],",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_an_office_archive_fault_lands_on_the_ack_instead_of_being_swallowed"
+      ]
+    },
+    {
+      "id": "s5-second-retire-refuses-instead-of-replaying",
+      "path": "agent_runtime/agent_retire.py",
+      "symbol": "perform_agent_retire",
+      "operator": "delete-the-tombstone-probe",
+      "find": "            tombstone = store.retired_instance_archive_path(instance_id)",
+      "replace": "            tombstone = None",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_a_second_retire_replays_the_ack_rather_than_refusing"
+      ]
+    },
+    {
+      "id": "s5-replay-reconstructs-no-actor-keys",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "OfficeStore.archived_actor_keys_for_instance",
+      "operator": "empty-the-archive-read",
+      "find": "            keys.append(actor.actor_key)",
+      "replace": "            pass",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_a_second_retire_replays_the_ack_rather_than_refusing"
+      ]
+    },
+    {
+      "id": "s9-occupancy-predicate-is-strict",
+      "path": "agent_runtime/office_layout_policy.py",
+      "symbol": "_is_blocked",
+      "operator": "relax-strict-inequality",
+      "find": "        if (dx * dx + dy * dy) ** 0.5 < OCCUPANCY_RADIUS:",
+      "replace": "        if (dx * dx + dy * dy) ** 0.5 <= OCCUPANCY_RADIUS:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_layout_policy.py::test_an_item_exactly_at_the_occupancy_radius_does_not_block"
+      ]
+    },
+    {
+      "id": "s4b-a-resumed-placed-create-freezes-the-receipts-actor",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "perform_agent_create",
+      "operator": "freeze-resume-actor",
+      "find": "                result = _reply(record.result)",
+      "replace": "                result = dict(record.result)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_a_resumed_placed_create_reports_the_actor_as_it_is"
+      ]
+    },
+    {
+      "id": "s4b-an-overridden-agent-reports-itself-as-inheriting",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "run_skills_phase",
+      "operator": "flip-inherited",
+      "find": "        \"inherited\": False,",
+      "replace": "        \"inherited\": True,",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_the_skills_block_says_whether_the_agent_inherits_or_was_overridden"
+      ]
+    },
+    {
+      "id": "s4b-an-inheriting-agent-reports-itself-as-overridden",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "_inherited_skills_ack",
+      "operator": "flip-inherited",
+      "find": "    return {\"assigned\": [], \"installed\": [], \"inherited\": True}",
+      "replace": "    return {\"assigned\": [], \"installed\": [], \"inherited\": False}",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_the_skills_block_says_whether_the_agent_inherits_or_was_overridden"
+      ]
+    },
+    {
+      "id": "s4b-the-inventory-drops-the-claims-it-did-not-select",
+      "path": "scripts/changed_line_mutation_check.py",
+      "symbol": "run",
+      "operator": "empty-the-unselected-report",
+      "find": "        for claim in unselected:",
+      "replace": "        for claim in []:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/scripts/test_changed_line_mutation_check.py::test_a_resolving_claim_the_diff_never_touched_is_listed_as_unselected"
+      ]
+    },
+    {
+      "id": "s8b-retire-office-removal-loses-the-gesture-token",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "OfficeStore.archive_actors_for_instance",
+      "operator": "drop-correlation-thread",
+      "find": "                    self.remove_actor(\n                        wsid,\n                        actor.actor_key,\n                        reason=reason,\n                        updated_by=\"harness\",\n                        correlation_id=correlation_id,\n                    )",
+      "replace": "                    self.remove_actor(\n                        wsid,\n                        actor.actor_key,\n                        reason=reason,\n                        updated_by=\"harness\",\n                    )",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_the_gesture_token_rides_the_office_removal_event_and_its_patch_row"
+      ]
+    },
+    {
+      "id": "s8b-retire-store-drops-the-token-before-the-office-half",
+      "path": "agent_runtime/persona_assignments.py",
+      "symbol": "PersonaInstanceStore.retire",
+      "operator": "drop-correlation-thread",
+      "find": "        office = self._archive_office_placements(\n            instance, correlation_id=correlation_id\n        )",
+      "replace": "        office = self._archive_office_placements(instance)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_the_gesture_token_rides_the_office_removal_event_and_its_patch_row"
+      ]
+    },
+    {
+      "id": "s8b-retire-ack-mints-a-token-nobody-sent",
+      "path": "agent_runtime/agent_retire.py",
+      "symbol": "_with_correlation",
+      "operator": "stamp-unconditionally",
+      "find": "    if not correlation_id:\n        return result\n    return {**result, \"correlation_id\": correlation_id}",
+      "replace": "    return {**result, \"correlation_id\": correlation_id}",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_a_retire_with_no_token_leaves_the_wire_exactly_as_it_was"
+      ]
+    },
+    {
+      "id": "s8b-retire-cli-flag-parses-and-goes-nowhere",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_agent_retire_outcome",
+      "operator": "drop-param-from-service-call",
+      "find": "            \"correlation_id\": getattr(args, \"correlation_id\", None),\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_agent_retire_verb.py::test_the_correlation_flag_reaches_the_office_removal_and_the_ack"
+      ]
+    },
+    {
+      "id": "s8b-b-persona-instance-retire-door-has-no-token",
+      "path": "hermes_cli/harness.py",
+      "symbol": "build_parser/persona_instance_retire",
+      "operator": "withhold-flag-from-second-door",
+      "find": "    persona_instance_retire.add_argument(\"--correlation-id\", dest=\"correlation_id\", default=None)\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_agent_retire_verb.py::test_the_persona_instance_door_carries_the_token_too"
+      ]
+    },
+    {
+      "id": "pts-s1-absent-becomes-clear",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_validated_set_skills_request",
+      "operator": "collapse-absent-into-clear",
+      "find": "    if raw_skills is None and not clear:\n        raise _SetModelRequestError(\n            \"nothing_to_write\",\n            \"pass --skill (repeatable) to replace the persona's default skill set, or --clear-skills to empty it\",\n        )",
+      "replace": "    if raw_skills is None and not clear:\n        clear = True",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "tests/hermes_cli/test_persona_set_skills.py::test_omitted_skill_flag_is_a_refusal_not_a_clear"
+      ]
+    },
+    {
+      "id": "pts-s1-store-write-dropped",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_cmd_persona_set_skills",
+      "operator": "drop-store-persist",
+      "find": "            target.skills_override_issued_at = issued_at or datetime.now(timezone.utc)\n            store.save(target)",
+      "replace": "            target.skills_override_issued_at = issued_at or datetime.now(timezone.utc)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "tests/hermes_cli/test_persona_set_skills.py::test_the_write_lands_on_the_store_row_and_stamps_its_own_clock"
+      ]
+    },
+    {
+      "id": "pts-s1-stale-write-applies",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_cmd_persona_set_skills",
+      "operator": "invert-supersede-comparison",
+      "find": "        applied_at = target.skills_override_issued_at\n        applied_at = applied_at if applied_at.tzinfo is not None else applied_at.replace(tzinfo=timezone.utc)\n        if issued <= applied_at:",
+      "replace": "        applied_at = target.skills_override_issued_at\n        applied_at = applied_at if applied_at.tzinfo is not None else applied_at.replace(tzinfo=timezone.utc)\n        if issued > applied_at:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "tests/hermes_cli/test_persona_set_skills.py::test_a_stale_issued_at_is_superseded_not_applied"
+      ]
+    },
+    {
+      "id": "r1-mint-loses-the-agent-marker",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "mint_placement_id",
+      "operator": "drop-discriminator-marker",
+      "find": "    return f\"{token}_agent_{uuid.uuid4().hex[:8]}\"",
+      "replace": "    return f\"{token}_{uuid.uuid4().hex[:8]}\"",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_placement_id_discriminability.py::test_the_server_mint_clears_the_fence_it_installs"
+      ]
+    },
+    {
+      "id": "r1-create-stops-fencing-the-supplied-placement",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "normalize_agent_create",
+      "operator": "remove-guard",
+      "find": "        if not looks_like_deliberate_placement(placement_id):\n            raise AgentCreateInvalid(\n                PLACEMENT_ID_NOT_DISCRIMINABLE_REASON,\n                placement_id_not_discriminable_message(placement_id),\n            )",
+      "replace": "        pass",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_placement_id_discriminability.py::test_agent_create_refuses_the_incident_id"
+      ]
+    },
+    {
+      "id": "r1-discriminator-weakened-to-a-bare-marker",
+      "path": "agent_runtime/models.py",
+      "symbol": "DELIBERATE_PLACEMENT_SUFFIX",
+      "operator": "widen-pattern",
+      "find": "DELIBERATE_PLACEMENT_SUFFIX = re.compile(r\"_agent_(\\d+|[0-9a-f]{8})$\")",
+      "replace": "DELIBERATE_PLACEMENT_SUFFIX = re.compile(r\"_agent_\")",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_placement_id_discriminability.py::test_near_misses_are_refused_by_the_predicate"
+      ]
+    },
+    {
+      "id": "r1-persona-instance-doors-stop-refusing",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_placement_discriminability_refusal",
+      "operator": "collapse-refusal-to-accept",
+      "find": "    if looks_like_deliberate_placement(placement_id):\n        return None",
+      "replace": "    return None",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_placement_id_discriminability.py::test_the_refusal_is_the_same_reason_on_all_three_doors"
+      ]
+    },
+    {
+      "id": "d1-tombstone-fence-never-fires",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "_guard_archived_actor",
+      "operator": "remove-guard",
+      "find": "        if not archived_path.exists() and actor_key not in archived_keys:\n            return",
+      "replace": "        return",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_actor_tombstone_fence.py::test_a_mechanical_re_add_of_a_deleted_key_is_refused"
+      ]
+    },
+    {
+      "id": "d1-tombstone-fence-forgets-the-ledger-witness",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "_guard_archived_actor",
+      "operator": "drop-evidence-source",
+      "find": "        if not archived_path.exists() and actor_key not in archived_keys:",
+      "replace": "        if not archived_path.exists():",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_actor_tombstone_fence.py::test_a_ledger_entry_alone_is_enough_to_refuse"
+      ]
+    },
+    {
+      "id": "d1-tombstone-fence-refuses-live-rows-too",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "upsert_actor",
+      "operator": "widen-guard-condition",
+      "find": "            if existing is None:\n                self._guard_archived_actor(",
+      "replace": "            if True:\n                self._guard_archived_actor(",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_actor_tombstone_fence.py::test_a_live_row_whose_key_is_still_in_the_ledger_is_not_refused"
+      ]
+    },
+    {
+      "id": "d1-cli-resurrect-flag-is-ignored",
+      "path": "hermes_cli/harness_parts/office.py",
+      "symbol": "_cmd_office_actor_upsert",
+      "operator": "ignore-operator-consent",
+      "find": "    resurrect = bool(getattr(args, \"resurrect\", False))",
+      "replace": "    resurrect = False",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_actor_tombstone_fence.py::test_the_cli_refuses_without_the_flag_and_re_adds_with_it"
+      ]
+    },
+    {
+      "id": "d1-wire-refusal-loses-its-pinned-reason",
+      "path": "agent_runtime/serve_rpc.py",
+      "symbol": "_runtime_office_upsert",
+      "operator": "collapse-refusal-reason",
+      "find": "                \"reason\": \"actor_archived\",\n                \"workspace_id\": workspace_id,\n                \"actor_key\": details[\"actor_key\"],",
+      "replace": "                \"reason\": \"class_key_collision\",\n                \"workspace_id\": workspace_id,\n                \"actor_key\": details[\"actor_key\"],",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_actor_tombstone_fence.py::test_the_wire_refuses_with_the_pinned_code_and_reason"
+      ]
+    },
+    {
+      "id": "d2-replay-goes-back-to-archiving-nothing",
+      "path": "agent_runtime/agent_retire.py",
+      "symbol": "_already_retired_ack",
+      "operator": "remove-self-heal",
+      "find": "    sweep = _sweep_live_placements(\n        instance_id, reason=\"instance_reaped\", correlation_id=correlation_id\n    )",
+      "replace": "    sweep = {\"failures\": []}",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_a_replay_re_archives_an_actor_that_came_back"
+      ]
+    },
+    {
+      "id": "d2-replay-hides-the-failures-it-can-now-have",
+      "path": "agent_runtime/agent_retire.py",
+      "symbol": "_already_retired_ack",
+      "operator": "swallow-reported-fault",
+      "find": "        \"office_archive_failures\": office_archive_failures,",
+      "replace": "        \"office_archive_failures\": [],",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_a_replay_sweep_that_fails_reports_the_actor_instead_of_lying"
+      ]
+    },
+    {
+      "id": "d2-replay-blames-one-actor-for-a-projection-fault",
+      "path": "agent_runtime/agent_retire.py",
+      "symbol": "_sweep_live_placements",
+      "operator": "guess-fault-attribution",
+      "find": "                {\n                    \"actor_key\": None,\n                    \"workspace_id\": None,",
+      "replace": "                {\n                    \"actor_key\": instance_id,\n                    \"workspace_id\": None,",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_a_projection_fault_on_the_replay_is_not_blamed_on_an_actor"
+      ]
+    },
+    {
+      "id": "c1-pull-adopts-the-peer-ledger-wholesale",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "OfficeStore.adopt_remote_surface",
+      "operator": "drop-archived-ledger-union",
+      "find": "                surface.archived_actor_keys = merge_archived_ledgers(\n                    surface.archived_actor_keys,\n                    self.get_surface(wsid).archived_actor_keys,\n                )",
+      "replace": "                surface.archived_actor_keys = list(surface.archived_actor_keys)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_sync.py::test_a_local_tombstone_survives_a_pull_from_a_peer_that_never_heard_of_it"
+      ]
+    },
+    {
+      "id": "c1-board-pull-adopts-the-peer-ledger-wholesale",
+      "path": "agent_runtime/board_store.py",
+      "symbol": "BoardStore.adopt_remote_board",
+      "operator": "drop-archived-ledger-union",
+      "find": "                board.archived_card_ids = merge_archived_ledgers(\n                    board.archived_card_ids,\n                    self.get(bid).archived_card_ids,\n                    cap=ARCHIVED_LEDGER_CAP,\n                )",
+      "replace": "                board.archived_card_ids = list(board.archived_card_ids)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_board_sync.py::test_pull_that_adopts_a_board_def_keeps_a_locally_archived_card_id"
+      ]
+    },
+    {
+      "id": "c1-ledger-union-leads-with-the-local-list",
+      "path": "agent_runtime/sync_merge.py",
+      "symbol": "merge_archived_ledgers",
+      "operator": "reverse-union-order",
+      "find": "    for key in (*(peer_keys or ()), *(local_keys or ())):",
+      "replace": "    for key in (*(local_keys or ()), *(peer_keys or ())):",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_ledger_union_leads_with_the_peer_so_a_subset_rehashes_identically"
+      ]
+    },
+    {
+      "id": "c2-a-failed-archive-wears-the-success-word",
+      "path": "agent_runtime/office_sync.py",
+      "symbol": "OfficeArchiveOutcome.failed",
+      "operator": "collapse-outcome-vocabulary",
+      "find": "            outcome=f\"archive_failed:{type(exc).__name__}\",",
+      "replace": "            outcome=ARCHIVE_OUTCOME_ARCHIVED,",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_sync.py::test_a_failed_archive_keeps_its_baseline_so_the_next_pull_retries"
+      ]
+    },
+    {
+      "id": "c2-pull-pops-the-baseline-for-a-delete-that-failed",
+      "path": "agent_runtime/office_sync.py",
+      "symbol": "_reconcile_actors",
+      "operator": "pop-baseline-on-failed-archive",
+      "find": "                summary.archive_outcomes.append(\n                    OfficeArchiveOutcome.failed(workspace_id, actor_key, exc).as_dict()\n                )\n                continue",
+      "replace": "                summary.archive_outcomes.append(\n                    OfficeArchiveOutcome.failed(workspace_id, actor_key, exc).as_dict()\n                )\n                baseline.pop(key, None)\n                continue",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_sync.py::test_a_failed_archive_keeps_its_baseline_so_the_next_pull_retries"
+      ]
+    },
+    {
+      "id": "c2-a-successful-archive-goes-unnamed",
+      "path": "agent_runtime/office_sync.py",
+      "symbol": "_reconcile_actors",
+      "operator": "drop-success-outcome-row",
+      "find": "            summary.archive_outcomes.append(\n                OfficeArchiveOutcome.archived(workspace_id, actor_key).as_dict()\n            )",
+      "replace": "            summary.archived += 0",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_sync.py::test_a_successful_archive_names_itself_beside_the_fenced_ones"
+      ]
+    },
+    {
+      "id": "c3-publish-re-walks-the-directory-instead-of-the-scan",
+      "path": "agent_runtime/realm_sync.py",
+      "symbol": "_office_publish_scan",
+      "operator": "restore-second-authority-glob",
+      "find": "            actor_path = paths.office_actor_path(workspace_token, actor.actor_key)",
+      "replace": "            actor_path = sorted(paths.office_actors_dir(workspace_token).glob(\"*.json\"))[0]",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_sync.py::test_publish_names_exactly_the_scans_rows_and_nothing_else"
+      ]
+    },
+    {
+      "id": "c4-prune-swallows-its-directory-shortfall",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "OfficeStore.archive_actors_for_instance",
+      "operator": "drop-scan-shortfall-row",
+      "find": "            scan = self.scan_actors(wsid)\n            if scan.unreadable:\n                outcomes.append(OfficeActorOutcome.scan_unreadable(wsid, scan))",
+      "replace": "            scan = self.scan_actors(wsid)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_a_prune_over_an_unreadable_directory_reports_the_shortfall"
+      ]
+    },
+    {
+      "id": "c4-replay-evidence-answers-over-a-short-world",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "OfficeStore.archived_actor_keys_for_instance",
+      "operator": "drop-completeness-refusal",
+      "find": "            if scan.unreadable:\n                raise ActorsUnreadable(\n                    f\"office actors unreadable in {wsid}: {scan.unreadable}\"\n                )",
+      "replace": "            pass",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_replays_evidence_read_refuses_a_short_answer"
+      ]
+    },
+    {
+      "id": "c4-replay-evidence-fault-never-reaches-the-ack",
+      "path": "agent_runtime/agent_retire.py",
+      "symbol": "_already_retired_ack",
+      "operator": "restore-silent-evidence-swallow",
+      "find": "        office_archive_failures.append(\n            {\n                \"actor_key\": None,\n                \"workspace_id\": None,\n                \"error\": f\"{type(exc).__name__}: {exc}\",\n            }\n        )",
+      "replace": "        pass",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_an_unreadable_evidence_read_on_the_replay_reaches_the_ack"
+      ]
+    },
+    {
+      "id": "a4-doctor-prescribes-retire-for-an-orphan-retire-cannot-reach",
+      "path": "agent_runtime/harness_doctor.py",
+      "symbol": "_placement_census_report",
+      "operator": "drop-pulled-orphan-repair",
+      "find": "            \"re-creating its agent still clears it, and the retire's replay \"\n            \"sweeps live placements — or evict the desk from this install with \"\n            \"`harness office actor-remove --workspace <ws> --actor <key> \"\n            \"--local-only`; one reading instance_retired is cleared the same \"\n            \"two ways; one reading instance_unknown — a realm-pulled placement \"\n            \"this install never held, whose instance stayed on the peer — has \"\n            \"nothing to retire and is cleared with actor-remove --local-only \"\n            \"or `runtime.office.remove` alone (drop --local-only only if you \"\n            \"mean to delete the placement realm-wide, which is what the \"\n            \"launcher's own delete does); an unplaced row is either awaiting a \"",
+      "replace": "            \"re-creating its agent still clears it; an unplaced row is either awaiting a \"",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_harness_doctor.py::test_the_orphan_remediation_names_the_verb_that_works_for_a_pulled_orphan",
+        "--timeout=180"
+      ]
+    },
+    {
+      "id": "hh7-an-absent-package-goes-back-to-being-skipped",
+      "path": "agent_runtime/skill_install.py",
+      "symbol": "harness_skill_hash_states",
+      "operator": "skip-the-absent-case",
+      "find": "        if not source.exists():\n            states.append(HarnessSkillHashState(name, SKILL_HASH_NO_SOURCE))\n        elif not destination.exists():\n            states.append(HarnessSkillHashState(name, SKILL_HASH_NOT_INSTALLED))",
+      "replace": "        if not source.exists() or not destination.exists():\n            continue",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_harness_skill_hash_states.py::test_a_package_that_was_never_installed_is_absent_and_not_matching",
+        "tests/agent_runtime/test_harness_skill_hash_states.py::test_a_canonical_id_with_no_repo_package_is_named_rather_than_skipped"
+      ]
+    },
+    {
+      "id": "hh7-readiness-drops-the-half-that-makes-the-other-a-claim",
+      "path": "agent_runtime/profile_readiness.py",
+      "symbol": "_skill_hash_split",
+      "operator": "empty-the-absent-projection",
+      "find": "        [state.skill for state in states if not state.compared],",
+      "replace": "        [],",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_harness_skill_hash_states.py::test_readiness_carries_the_absent_half_beside_the_mismatch_half",
+        "tests/agent_runtime/test_harness_skill_hash_states.py::test_readiness_reports_no_absence_once_the_package_is_installed"
+      ]
+    },
+    {
+      "id": "hh14-the-anchor-escapes-the-symbol-it-names",
+      "path": "scripts/changed_line_mutation_check.py",
+      "symbol": "_symbol_span",
+      "operator": "widen-span-to-whole-file",
+      "find": "    return offsets[node.lineno - 1], offsets[min(end_lineno, len(offsets) - 1)]",
+      "replace": "    return 0, len(text)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/scripts/test_mutation_claim_anchoring.py::test_the_anchor_is_scoped_to_the_symbol_the_claim_names",
+        "tests/scripts/test_mutation_claim_anchoring.py::test_the_decoy_copy_is_anchored_when_the_claim_names_the_decoy"
+      ]
+    },
+    {
+      "id": "hh14-a-stale-symbol-goes-back-to-passing-in-silence",
+      "path": "scripts/changed_line_mutation_check.py",
+      "symbol": "_symbol_span",
+      "operator": "degrade-missing-symbol-to-whole-file",
+      "find": "    if not nodes:\n        raise RuntimeError(f\"symbol not found in {path}: {head}\")",
+      "replace": "    if not nodes:\n        return 0, len(text)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/scripts/test_mutation_claim_anchoring.py::test_a_symbol_that_no_longer_exists_fails_and_names_the_one_that_holds_it"
+      ]
+    },
+    {
+      "id": "hh14-a-re-indented-block-goes-unanchored",
+      "path": "scripts/changed_line_mutation_check.py",
+      "symbol": "_candidate_offsets",
+      "operator": "drop-the-reindent-lane",
+      "find": "    if found:\n        return found",
+      "replace": "    return found",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/scripts/test_mutation_claim_anchoring.py::test_a_claim_registered_against_the_dedented_shape_still_anchors",
+        "tests/scripts/test_mutation_claim_anchoring.py::test_a_re_indented_claim_still_anchors_when_the_block_gains_levels"
+      ]
+    },
+    {
+      "id": "hh14-the-mutant-is-spliced-at-the-first-occurrence-again",
+      "path": "scripts/changed_line_mutation_check.py",
+      "symbol": "run",
+      "operator": "splice-by-first-occurrence",
+      "find": "        mutated = text[: anchor.offset] + anchor.replace + text[anchor.offset + len(anchor.find) :]",
+      "replace": "        mutated = text.replace(anchor.find, anchor.replace, 1)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/scripts/test_mutation_claim_anchoring.py::test_the_mutation_is_spliced_at_the_anchor_not_at_the_first_occurrence"
+      ]
+    },
+    {
+      "id": "ax7-a-diagnostic-repair-mints-a-realm-wide-tombstone",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "_archive_actor_locked",
+      "operator": "ignore-the-eviction-mode",
+      "find": "        if record_tombstone and actor.actor_key not in surface.archived_actor_keys:",
+      "replace": "        if actor.actor_key not in surface.archived_actor_keys:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_actor_local_eviction.py::test_a_local_eviction_archives_the_actor_and_mints_no_realm_intent",
+        "tests/agent_runtime/test_office_actor_local_eviction.py::test_the_cli_flag_reaches_the_store_and_says_so_on_the_ack"
+      ]
+    },
+    {
+      "id": "ax7-the-cli-flag-parses-and-goes-nowhere",
+      "path": "hermes_cli/harness_parts/office.py",
+      "symbol": "_cmd_office_actor_remove",
+      "operator": "drop-the-flag-on-the-floor",
+      "find": "        record_tombstone=not local_only,",
+      "replace": "        record_tombstone=True,",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_actor_local_eviction.py::test_the_cli_flag_reaches_the_store_and_says_so_on_the_ack"
+      ]
+    },
+    {
+      "id": "ax7-the-doctor-goes-back-to-prescribing-the-tombstoning-form",
+      "path": "agent_runtime/harness_doctor.py",
+      "symbol": "_placement_census_report",
+      "operator": "drop-the-diagnostic-qualifier",
+      "find": "            \"nothing to retire and is cleared with actor-remove --local-only \"\n            \"or `runtime.office.remove` alone (drop --local-only only if you \"\n            \"mean to delete the placement realm-wide, which is what the \"\n            \"launcher's own delete does); an unplaced row is either awaiting a \"",
+      "replace": "            \"nothing to retire and is cleared with actor-remove \"\n            \"or `runtime.office.remove` alone; an unplaced row is either awaiting a \"",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_harness_doctor.py::test_the_orphan_remediation_names_the_verb_that_works_for_a_pulled_orphan"
+      ]
+    },
+    {
+      "id": "hh1-doctor-counts-are-none-when-a-section-was-not-examined",
+      "path": "agent_runtime/harness_doctor.py",
+      "symbol": "run_harness_doctor",
+      "operator": "count-an-unobserved-class-as-zero",
+      "find": "            finding_counts[count_name] = (\n                None\n                if unexamined_section\n                else len(reports[section.name].get(list_key) or [])\n            )",
+      "replace": "            finding_counts[count_name] = len(reports[section.name].get(list_key) or [])",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_harness_doctor.py::test_an_unexamined_section_counts_none_from_the_same_table_row",
+        "--timeout=180"
+      ]
+    },
+    {
+      "id": "hh1-a-section-publishes-every-payload-key-its-row-declares",
+      "path": "agent_runtime/harness_doctor.py",
+      "symbol": "run_harness_doctor",
+      "operator": "publish-only-the-first-declared-key",
+      "find": "        for destination, key in section.publish:\n            _publish_at(payload, destination, report if key is None else report.get(key))",
+      "replace": "        for destination, key in section.publish[:1]:\n            _publish_at(payload, destination, report if key is None else report.get(key))",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_harness_doctor.py::test_a_section_may_publish_two_payload_keys_from_one_probe",
+        "--timeout=180"
+      ]
+    },
+    {
+      "id": "hh1-the-cli-detail-roster-derives-from-the-section-table",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_cmd_doctor",
+      "operator": "re-type-the-detail-roster-by-hand",
+      "find": "        detail_sources = doctor_detail_sources(hygiene)",
+      "replace": "        detail_sources = {\n            \"orphan_worktrees\": hygiene.get(\"findings\", {}).get(\"orphan_worktrees\"),\n        }",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_cli.py::test_the_doctor_detail_line_derives_from_the_section_table",
+        "--timeout=180"
+      ]
+    },
+    {
+      "id": "hh8-the-census-opens-actor-items-for-duplicate-holders",
+      "path": "agent_runtime/harness_doctor.py",
+      "symbol": "_placement_census_report",
+      "operator": "drop-the-duplicate-placement-sweep",
+      "find": "        duplicate_placements.extend(ws_duplicates)\n",
+      "replace": "        ws_duplicates = []\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_harness_doctor.py::test_two_live_actors_holding_one_desk_id_are_seen",
+        "--timeout=180"
+      ]
+    },
+    {
+      "id": "hh8-a-same-instance-duplicate-moves-the-verdict",
+      "path": "agent_runtime/harness_doctor.py",
+      "symbol": "_placement_census_report",
+      "operator": "demote-the-same-instance-duplicate-to-a-notice",
+      "find": "    if orphan_actors or same_instance_duplicates:",
+      "replace": "    if orphan_actors:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_harness_doctor.py::test_a_same_instance_duplicate_is_a_defect",
+        "--timeout=180"
+      ]
+    },
+    {
+      "id": "hh8-the-duplicate-classifier-asks-the-unbound-arm-first",
+      "path": "agent_runtime/harness_doctor.py",
+      "symbol": "_duplicate_placement_reason",
+      "operator": "swap-the-unbound-and-same-instance-arms",
+      "find": "    if any(not binding for binding in bindings):\n        return DUPLICATE_PLACEMENT_UNBOUND_HOLDER\n    if len(set(bindings)) == 1:\n        return DUPLICATE_PLACEMENT_SAME_INSTANCE",
+      "replace": "    if len(set(bindings)) == 1:\n        return DUPLICATE_PLACEMENT_SAME_INSTANCE\n    if any(not binding for binding in bindings):\n        return DUPLICATE_PLACEMENT_UNBOUND_HOLDER",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_harness_doctor.py::test_the_duplicate_reason_classifier_is_total_over_its_bindings",
+        "--timeout=180"
+      ]
+    },
+    {
+      "id": "hh11-the-census-canonicalizes-the-actor-side-of-the-join",
+      "path": "agent_runtime/harness_doctor.py",
+      "symbol": "_census_live_actor_bindings",
+      "operator": "read-the-actor-binding-raw",
+      "find": "        (actor, _census_instance_key(actor.persona_instance_id, persona_id=actor.persona_id))",
+      "replace": "        (actor, str(actor.persona_instance_id or \"\").strip())",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_harness_doctor.py::test_a_pulled_actor_with_a_legacy_id_spelling_is_not_an_orphan",
+        "--timeout=180"
+      ]
+    },
+    {
+      "id": "hh11-a-short-office-scan-forces-the-census-unknown",
+      "path": "agent_runtime/harness_doctor.py",
+      "symbol": "_placement_census_report",
+      "operator": "drop-the-office-side-unreadable-arm",
+      "find": "        if scan.unreadable:\n            unreadable.append(f\"office:{workspace_id}:{scan.unreadable}\")\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_harness_doctor.py::test_an_unreadable_office_actor_file_is_named_in_the_unreadable_list",
+        "--timeout=180"
+      ]
+    },
+    {
+      "id": "hh11-the-cli-prints-no-census-block-for-an-unobserved-census",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_cmd_doctor",
+      "operator": "render-the-census-block-unconditionally",
+      "find": "        if census.get(\"observed\"):",
+      "replace": "        if True:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_cli.py::test_harness_doctor_human_branch_says_nothing_about_an_unexamined_census",
+        "--timeout=180"
+      ]
+    },
+    {
+      "id": "hh2-the-one-reply-builder-stops-observing-the-revision",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "_reply",
+      "operator": "drop-observed-revision",
+      "find": "    result[\"actor\"] = office_actor_wire_row(actor)\n    result[\"revision\"] = actor.revision",
+      "replace": "    result[\"actor\"] = office_actor_wire_row(actor)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_every_ok_exit_answers_one_observation_of_the_live_row"
+      ]
+    },
+    {
+      "id": "hh5-the-retire-receipt-is-never-written",
+      "path": "agent_runtime/persona_assignments.py",
+      "symbol": "PersonaInstanceStore._write_retire_receipt",
+      "operator": "skip-receipt-write",
+      "find": "        path = retire_receipt_path(archive_dir, result[\"persona_instance_id\"])\n        try:",
+      "replace": "        path = retire_receipt_path(archive_dir, result[\"persona_instance_id\"])\n        return {\"retire_receipt_path\": None}\n        try:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_a_replay_reports_the_failures_the_lost_ack_carried"
+      ]
+    },
+    {
+      "id": "hh5-a-missing-receipt-is-read-as-an-empty-one",
+      "path": "agent_runtime/persona_assignments.py",
+      "symbol": "PersonaInstanceStore.read_retire_receipt",
+      "operator": "degrade-absence-to-empty",
+      "find": "        except Exception:  # noqa: BLE001 - absent, unreadable, or not JSON\n            return None",
+      "replace": "        except Exception:  # noqa: BLE001 - absent, unreadable, or not JSON\n            return {}",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_a_replay_with_no_receipt_says_so_instead_of_inventing_an_empty_first_attempt"
+      ]
+    },
+    {
+      "id": "hh5-the-receipt-lands-where-tombstones-are-counted",
+      "path": "agent_runtime/persona_assignments.py",
+      "symbol": "retire_receipt_path",
+      "operator": "flatten-receipt-into-the-batch",
+      "find": "    return archive_dir / RETIRE_RECEIPTS_DIRNAME / f\"{persona_instance_id}.json\"",
+      "replace": "    return archive_dir / f\"{persona_instance_id}.receipt.json\"",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_the_receipt_is_not_read_as_a_retirement_tombstone"
+      ]
+    },
+    {
+      "id": "hh4-the-orphan-reason-stops-reading-the-receipt",
+      "path": "agent_runtime/harness_doctor.py",
+      "symbol": "_orphan_actor_reason",
+      "operator": "drop-receipt-evidence",
+      "find": "    failures = (receipt or {}).get(\"office_archive_failures\") or []",
+      "replace": "    failures = []",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_harness_doctor.py::test_the_census_names_a_retire_that_left_its_desk_standing"
+      ]
+    },
+    {
+      "id": "hh12-the-minted-kind-echoes-the-write-instead-of-sticking",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "_stamp_minted_kinds",
+      "operator": "echo-current-kind",
+      "find": "        replace(item, minted_kind=on_record.get(item.item_id) or item.kind)",
+      "replace": "        replace(item, minted_kind=item.kind)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_minted_kind_is_stamped_once_and_never_moves_again"
+      ]
+    },
+    {
+      "id": "hh12-the-mis-kinded-test-over-claims-on-a-silent-item",
+      "path": "agent_runtime/harness_doctor.py",
+      "symbol": "_desk_litter_reason",
+      "operator": "widen-agent-test-to-not-desk",
+      "find": "    if on_live_instance_actor or minted_kind == \"agent\":",
+      "replace": "    if on_live_instance_actor or minted_kind != \"desk\":",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_harness_doctor.py::test_the_minted_kind_is_what_the_store_recorded_not_what_the_id_looks_like"
+      ]
+    },
+    {
+      "id": "hh13-the-dispatcher-stops-handing-over-the-proven-caller",
+      "path": "agent_runtime/serve_rpc.py",
+      "symbol": "_runtime_agent_retire",
+      "operator": "drop-caller-from-service-call",
+      "find": "    outcome = perform_agent_retire(\n        params, caller=context.caller if context is not None else None\n    )",
+      "replace": "    outcome = perform_agent_retire(params)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_serve_rpc_authorization.py::test_the_handlers_hand_the_proven_caller_to_the_service"
+      ]
+    },
+    {
+      "id": "hh13-the-retire-service-loses-its-backstop",
+      "path": "agent_runtime/agent_retire.py",
+      "symbol": "perform_agent_retire",
+      "operator": "skip-service-backstop",
+      "find": "    denied = service_backstop(caller, method=\"runtime.agent.retire\")",
+      "replace": "    denied = None",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_serve_rpc_authorization.py::test_the_service_refuses_a_read_tier_caller_with_no_dispatcher_involved"
+      ]
+    },
+    {
+      "id": "hh13-the-create-service-loses-its-backstop",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "perform_agent_create",
+      "operator": "skip-service-backstop",
+      "find": "    denied = service_backstop(caller, method=\"runtime.agent.create\")",
+      "replace": "    denied = None",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_serve_rpc_authorization.py::test_the_service_refuses_a_read_tier_caller_with_no_dispatcher_involved"
+      ]
+    },
+    {
+      "id": "hh12-the-recorded-mint-rides-the-sync-hash",
+      "path": "agent_runtime/office_models.py",
+      "symbol": "office_content_hash",
+      "operator": "hash-the-nested-provenance",
+      "find": "        items = payload.get(\"items\")\n        if isinstance(items, list):\n            payload[\"items\"] = [\n                {k: v for k, v in item.items() if k not in _ITEM_HASH_EXCLUDE}\n                if isinstance(item, dict)\n                else item\n                for item in items\n            ]",
+      "replace": "        items = payload.get(\"items\")\n        if isinstance(items, list):\n            payload[\"items\"] = list(items)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_recorded_mint_is_not_content_and_never_moves_the_sync_hash"
+      ]
+    },
+    {
+      "id": "hh6-posix-file-lock-ignores-its-deadline",
+      "path": "agent_runtime/locks.py",
+      "symbol": "module/_try_acquire (POSIX arm)",
+      "platforms": [
+        "posix"
+      ],
+      "operator": "restore-blocking-flock",
+      "find": "        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)",
+      "replace": "        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_locks.py::test_a_contended_lock_refuses_at_its_deadline_instead_of_blocking"
+      ]
+    },
+    {
+      "id": "hh6-the-deadline-is-a-budget-not-a-single-attempt",
+      "path": "agent_runtime/locks.py",
+      "symbol": "_file_lock",
+      "operator": "refuse-on-first-contended-attempt",
+      "find": "                if time.monotonic() >= deadline:",
+      "replace": "                if True:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_locks.py::test_the_deadline_is_a_budget_and_not_a_single_attempt"
+      ]
+    },
+    {
+      "id": "hh6-a-real-fault-is-not-reported-as-contention",
+      "path": "agent_runtime/locks.py",
+      "symbol": "_file_lock",
+      "operator": "drop-non-contended-errno-reraise",
+      "find": "                if exc.errno not in _CONTENDED_ERRNOS:\n                    raise\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_locks.py::test_a_fault_that_is_not_contention_is_raised_unwrapped"
+      ]
+    },
+    {
+      "id": "hh10-a-positionless-item-defaults-to-the-origin",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "_item_point",
+      "operator": "default-missing-point-to-origin",
+      "find": "    if not isinstance(value, (list, tuple)) or len(value) < 2:\n        raise ValueError(\"invalid_request: item position must be [x, y]\")",
+      "replace": "    if not isinstance(value, (list, tuple)) or len(value) < 2:\n        return (0.0, 0.0)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_a_positionless_item_is_refused_when_no_policy_came_with_it"
+      ]
+    },
+    {
+      "id": "hh10-the-policys-answer-is-discarded",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "upsert_actor",
+      "operator": "discard-resolved-slot",
+      "find": "                        position=position_policy(self.scan_actors(wsid)),",
+      "replace": "                        position=(position_policy(self.scan_actors(wsid)) and (0.0, 0.0)),",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_policy_answers_from_inside_the_lock_and_its_point_is_what_is_written"
+      ]
+    },
+    {
+      "id": "hh10-the-policy-is-handed-a-bare-list",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "upsert_actor",
+      "operator": "unwrap-scan-at-the-seam",
+      "find": "position=position_policy(self.scan_actors(wsid)),",
+      "replace": "position=position_policy(self.scan_actors(wsid).actors),",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_policy_is_handed_the_scan_and_not_a_bare_list"
+      ]
+    },
+    {
+      "id": "hh10-a-multi-item-payload-is-guessed-at",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "upsert_actor",
+      "operator": "drop-multi-item-refusal",
+      "find": "            if len(raw_items) != 1:\n                raise ValueError(\n                    \"invalid_request: position_policy resolves ONE item's slot; \"\n                    f\"payload carries {len(raw_items)}\"\n                )\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_a_multi_item_payload_is_refused_rather_than_guessed_at"
+      ]
+    },
+    {
+      "id": "hh10-the-placement-read-leaves-the-lock-again",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "upsert_actor",
+      "operator": "resolve-slot-outside-office-lock",
+      "find": "            items = []\n\n        if not dry_run:",
+      "replace": "            items = [\n                _normalize_item(\n                    raw_items[0],\n                    persona_id=persona_id,\n                    position=position_policy(self.scan_actors(wsid)),\n                )\n            ]\n            position_policy = None\n\n        if not dry_run:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_policy_sees_the_actor_set_the_write_lands_beside"
+      ]
+    },
+    {
+      "id": "hh3-an-unreadable-conflict-sidecar-passes-for-a-read-key",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "scan_conflicts",
+      "operator": "mint-read-outcome-in-the-except-arm",
+      "find": "                outcomes.append(\n                    OfficeActorOutcome.conflict_key_from_filename(\n                        workspace_id, path.stem, exc\n                    )\n                )\n                keys.append(path.stem)",
+      "replace": "                outcomes.append(OfficeActorOutcome.conflict_read(workspace_id, path.stem))\n                keys.append(path.stem)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_a_conflict_sidecar_that_would_not_decode_is_named_as_a_guess"
+      ]
+    },
+    {
+      "id": "hh3-a-sidecar-with-no-actor-key-passes-for-a-read-key",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "scan_conflicts",
+      "operator": "drop-the-empty-key-guess-arm",
+      "find": "            if not key:\n                outcomes.append(\n                    OfficeActorOutcome.conflict_key_from_filename(\n                        workspace_id, path.stem, ValueError(\"actor_key missing\")\n                    )\n                )\n                keys.append(path.stem)\n                continue\n",
+      "replace": "            key = key or path.stem\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_a_readable_sidecar_with_no_actor_key_is_the_same_guess"
+      ]
+    },
+    {
+      "id": "hh3-a-resolved-sidecar-reads-as-a-live-conflict",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "scan_conflicts",
+      "operator": "drop-resolved-sidecar-skip",
+      "find": "            if path.name.endswith(\".resolved.json\"):\n                continue\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_a_resolved_sidecar_is_not_a_conflict_and_is_never_read"
+      ]
+    },
+    {
+      "id": "hh3-the-prune-ack-keeps-its-own-tally-again",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "archive_actors_for_instance",
+      "operator": "hand-keep-the-archived-count",
+      "find": "            \"archived\": len(archived_keys),",
+      "replace": "            \"archived\": len(outcomes),",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_prunes_ack_is_derived_from_its_outcomes_and_cannot_disagree"
+      ]
+    },
+    {
+      "id": "hh9-a-blank-folder-is-persisted-as-blank-again",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "_normalize_item",
+      "operator": "drop-the-kind-default-fallback",
+      "find": "    folder = _safe_folder(raw.get(\"folder\")) or office_layout_policy.folder_for_kind(kind)",
+      "replace": "    folder = _safe_folder(raw.get(\"folder\"))",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_a_blank_folder_is_filled_with_the_kinds_default_when_it_is_written"
+      ]
+    },
+    {
+      "id": "hh9-an-explicit-folder-is-refiled-under-the-default",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "_normalize_item",
+      "operator": "fill-the-folder-unconditionally",
+      "find": "    folder = _safe_folder(raw.get(\"folder\")) or office_layout_policy.folder_for_kind(kind)",
+      "replace": "    folder = office_layout_policy.folder_for_kind(kind)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_an_explicit_folder_is_never_overwritten_by_the_default"
+      ]
+    },
+    {
+      "id": "hh9-the-filled-folder-stops-asking-the-items-kind",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "_normalize_item",
+      "operator": "ignore-the-kind-when-filling",
+      "find": "    folder = _safe_folder(raw.get(\"folder\")) or office_layout_policy.folder_for_kind(kind)",
+      "replace": "    folder = _safe_folder(raw.get(\"folder\")) or office_layout_policy.folder_for_kind(\"agent\")",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_written_folder_is_the_one_the_layout_policy_would_have_inferred"
+      ]
+    },
+    {
+      "id": "ax5-the-projection-guard-goes-blind-to-a-short-read",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "_emit_actor_patch",
+      "operator": "demote-only-on-truncation",
+      "find": "            if scan.unreadable or len(scan.actors) > MAX_OFFICE_ACTORS_PROJECTED:",
+      "replace": "            if len(scan.actors) > MAX_OFFICE_ACTORS_PROJECTED:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_state_patches.py::test_a_workspace_that_reads_SHORT_keeps_the_honest_refresh_too"
+      ]
+    },
+    {
+      "id": "ax6-an-unkeyed-remote-payload-leaves-no-trace",
+      "path": "agent_runtime/office_sync.py",
+      "symbol": "_read_remote_office",
+      "operator": "count-only-parse-failures",
+      "find": "        unreadable=scan.unreadable + unkeyed,",
+      "replace": "        unreadable=scan.unreadable,",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_sync.py::test_a_pulled_actor_that_decodes_with_NO_key_is_the_same_absence"
+      ]
+    },
+    {
+      "id": "ax2-the-conflict-vocabulary-regrows-a-retired-guard",
+      "path": "agent_runtime/agent_retire.py",
+      "symbol": "CONFLICT_REASONS",
+      "operator": "readd-retired-refusal-reason",
+      "find": "    \"instance_active\",\n)",
+      "replace": "    \"instance_active\",\n    \"assignment_active\",\n)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_retire_service.py::test_the_conflict_vocabulary_is_the_stores_own_raise_sites"
+      ]
+    },
+    {
+      "id": "dcw-h1-the-conflict-scan-calls-every-key-a-guess",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "ConflictScan.guessed_keys",
+      "operator": "return-the-whole-key-list",
+      "find": "        return [key for key, outcome in zip(self.keys, self.outcomes) if not outcome.succeeded]",
+      "replace": "        return list(self.keys)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_scan_separates_guessed_conflict_keys_from_read_ones"
+      ]
+    },
+    {
+      "id": "dcw-h1-the-snapshot-drops-the-conflict-provenance-again",
+      "path": "agent_runtime/snapshot.py",
+      "symbol": "_offices_summary",
+      "operator": "pass-an-empty-guess-list",
+      "find": "                conflict_guessed_keys=conflicts.guessed_keys,",
+      "replace": "                conflict_guessed_keys=(),",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_snapshot_office_row_and_its_warning_mark_a_guessed_conflict_key"
+      ]
+    },
+    {
+      "id": "dcw-h1-the-conflict-warning-goes-blind-to-the-guess-list",
+      "path": "agent_runtime/snapshot.py",
+      "symbol": "_office_parity_warnings",
+      "operator": "never-read-the-rows-guess-list",
+      "find": "        guessed = set(office.get(\"conflict_guessed_keys\") or ())",
+      "replace": "        guessed = set()",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_snapshot_office_row_and_its_warning_mark_a_guessed_conflict_key"
+      ]
+    },
+    {
+      "id": "dcw-h1-an-older-office-row-takes-the-parity-section-down",
+      "path": "agent_runtime/snapshot.py",
+      "symbol": "_office_parity_warnings",
+      "operator": "index-the-additive-key",
+      "find": "        guessed = set(office.get(\"conflict_guessed_keys\") or ())",
+      "replace": "        guessed = set(office[\"conflict_guessed_keys\"])",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_an_office_row_with_no_guess_list_still_warns_and_claims_nothing"
+      ]
+    },
+    {
+      "id": "dcw-h1-the-row-builder-defaults-the-guess-list",
+      "path": "agent_runtime/snapshot.py",
+      "symbol": "office_summary_row",
+      "operator": "default-the-required-keyword",
+      "find": "    conflict_guessed_keys,\n",
+      "replace": "    conflict_guessed_keys=(),\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_row_builder_refuses_to_default_the_guess_list"
+      ]
+    },
+    {
+      "id": "dcw-h1-the-cli-full-row-drops-the-guess-list",
+      "path": "hermes_cli/harness_parts/office.py",
+      "symbol": "_office_surface_row",
+      "operator": "print-the-conflict-keys-without-their-provenance",
+      "find": "        row[\"conflict_guessed_keys\"] = summary[\"conflict_guessed_keys\"]\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_entity_row_characterization.py::test_office_surface_row_marks_which_conflict_keys_are_filename_guesses"
+      ]
+    },
+    {
+      "id": "dcw-h1-a-template-clone-drops-unreadable-actors-in-silence",
+      "path": "agent_runtime/workspace_template.py",
+      "symbol": "_copy_office",
+      "operator": "drop-the-unreadable-warning-arm",
+      "find": "    if scan.unreadable:\n        warnings.append(\n            {\n                \"code\": \"office_actors_unreadable\",\n                \"workspace_id\": source_workspace_id,\n                \"unreadable\": scan.unreadable,\n                \"message\": (\n                    f\"{scan.unreadable} office actor file(s) in source workspace \"\n                    f\"'{source_workspace_id}' would not decode and were not copied\"\n                ),\n            }\n        )\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_workspace_lifecycle.py::test_a_source_actor_that_will_not_decode_is_a_named_warning_not_a_short_count"
+      ]
+    },
+    {
+      "id": "dcw-h1-every-template-clone-reports-an-unreadable-actor",
+      "path": "agent_runtime/workspace_template.py",
+      "symbol": "_copy_office",
+      "operator": "append-the-row-unconditionally",
+      "find": "    if scan.unreadable:\n",
+      "replace": "    if True:\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_workspace_lifecycle.py::test_a_fully_readable_source_adds_no_unreadable_warning"
+      ]
+    },
+    {
+      "id": "s4-the-tombstone-union-keeps-the-local-only-entry",
+      "path": "agent_runtime/realm_sync.py",
+      "symbol": "merge_skill_tombstone_ledgers",
+      "operator": "adopt-incoming-instead-of-union",
+      "find": "    for rows in (local, incoming):\n",
+      "replace": "    for rows in (incoming,):\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_realm_sync_ledger_union.py::test_local_only_entry_survives_an_incoming_ledger_that_lacks_it"
+      ]
+    },
+    {
+      "id": "s4-the-merge-ranks-by-the-later-of-the-two-stamps",
+      "path": "agent_runtime/realm_sync.py",
+      "symbol": "_tombstone_transition_at",
+      "operator": "rank-by-the-delete-stamp-only",
+      "find": "        for stamp in (_ledger_time(row.get(\"restored_at\")), _ledger_time(row.get(\"deleted_at\")))\n",
+      "replace": "        for stamp in (_ledger_time(row.get(\"deleted_at\")),)\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_realm_sync_ledger_union.py::test_a_restore_beats_a_stale_delete_from_either_side"
+      ]
+    },
+    {
+      "id": "s4-an-equal-stamp-tie-resolves-to-the-delete",
+      "path": "agent_runtime/realm_sync.py",
+      "symbol": "_newer_tombstone_row",
+      "operator": "resolve-the-tie-to-the-local-side",
+      "find": "    if candidate_blocks and not held_blocks:\n        return candidate\n    return held",
+      "replace": "    return held",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_realm_sync_ledger_union.py::test_an_equal_stamp_tie_resolves_to_the_delete"
+      ]
+    },
+    {
+      "id": "s4-the-workspace-ledger-is-unioned-not-adopted",
+      "path": "agent_runtime/realm_sync.py",
+      "symbol": "merge_deleted_workspace_ledgers",
+      "operator": "adopt-incoming-instead-of-union",
+      "find": "    for rows in (local, incoming):\n",
+      "replace": "    for rows in (incoming,):\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_realm_sync_ledger_union.py::test_a_pull_unions_the_deleted_workspace_ledger"
+      ]
+    },
+    {
+      "id": "s4-the-ledger-union-is-not-gated-on-server-id",
+      "path": "agent_runtime/realm_sync.py",
+      "symbol": "_pulled_artifact_bytes",
+      "operator": "re-gate-the-union-behind-a-server-binding",
+      "find": "    if artifact.kind != \"realm\" or not artifact.destination.exists():\n",
+      "replace": "    if artifact.kind != \"realm\" or not realm.server_id or not artifact.destination.exists():\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_realm_sync_ledger_union.py::test_a_pull_keeps_this_members_tombstone_the_publisher_never_had"
+      ]
+    },
+    {
+      "id": "s4-a-restored-entry-blocks-nothing",
+      "path": "agent_runtime/store.py",
+      "symbol": "active_skill_tombstones",
+      "operator": "count-restored-entries-as-live-blocks",
+      "find": "    return [\n        entry\n        for entry in (getattr(realm, \"skill_tombstones\", None) or [])\n        if getattr(entry, \"restored_at\", None) is None\n    ]",
+      "replace": "    return list(getattr(realm, \"skill_tombstones\", None) or [])",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_realm_skill_tombstones.py::test_restore_lifts_the_entry_and_is_idempotent"
+      ]
+    },
+    {
+      "id": "s4-the-cap-evicts-settled-history-before-a-live-block",
+      "path": "agent_runtime/store.py",
+      "symbol": "prune_settled_ledger",
+      "operator": "bound-oldest-first-ignoring-settled",
+      "find": "    over = len(items) - cap\n    dropped: set[int] = set()\n    for index, item in enumerate(items):\n        if len(dropped) >= over:\n            break\n        if settled(item):\n            dropped.add(index)\n    kept = [item for index, item in enumerate(items) if index not in dropped]\n    return kept[-cap:]",
+      "replace": "    return list(items)[-cap:]",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_realm_skill_tombstones.py::test_the_ledger_cap_evicts_settled_history_before_a_live_block"
+      ]
+    },
+    {
+      "id": "dcw-h4-the-autopilot-regenerates-rows-that-already-landed",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_characters_auto_plan",
+      "operator": "drop-the-pending-rows-skip",
+      "find": "        elif step == \"rows\" and not status[\"pending\"][\"rows\"]:\n            reason = \"every authored row already has an approved strip\"\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_characters_cli.py::test_the_autopilot_resumes_a_reopened_draft_instead_of_regenerating_it"
+      ]
+    },
+    {
+      "id": "dcw-h4-the-autopilot-skips-a-turnaround-it-has-not-generated",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_characters_auto_plan",
+      "operator": "invert-the-missing-turnaround-test",
+      "find": "        elif step == \"turnaround\" and not status[\"missing\"][\"turnaround\"]:\n",
+      "replace": "        elif step == \"turnaround\" and status[\"missing\"][\"turnaround\"]:\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_characters_cli.py::test_the_autopilot_drives_the_whole_pipeline_and_receipts_every_stage"
+      ]
+    },
+    {
+      "id": "dcw-h4-a-stopped-autopilot-never-writes-its-summary",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_characters_auto_steps",
+      "operator": "return-instead-of-breaking",
+      "find": "            stopped_at, error = step, str(exc)\n            break\n",
+      "replace": "            return 2\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_characters_cli.py::test_a_stage_that_refuses_stops_the_autopilot_and_still_summarizes"
+      ]
+    },
+    {
+      "id": "dcw-h4-an-autopilot-with-nothing-to-do-reports-success",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_characters_auto_steps",
+      "operator": "swallow-the-empty-plan-refusal",
+      "find": "        stopped_at, error = \"plan\", message\n",
+      "replace": "        pass\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_characters_cli.py::test_the_autopilot_refuses_a_composed_draft_and_names_reopen"
+      ]
+    },
+    {
+      "id": "dcw-h4-the-autopilot-receipts-arrive-only-at-exit",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_characters_auto_write",
+      "operator": "drop-the-flush",
+      "find": "    sys.stdout.flush()\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_characters_cli.py::test_the_autopilot_flushes_each_receipt_as_its_stage_lands"
+      ]
+    },
+    {
+      "id": "dcw-h4-the-autopilot-stream-is-framed-in-indented-blocks",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_characters_auto_write",
+      "operator": "use-the-indenting-encoder",
+      "find": "emit_json_line({**data, **_characters_draftsman()})",
+      "replace": "emit_json({**data, **_characters_draftsman()})",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_characters_cli.py::test_every_autopilot_receipt_is_exactly_one_line"
+      ]
+    },
+    {
+      "id": "dcw-h4-concurrent-tool-elements-pair-by-arrival-again",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_ChatProtocolV2Emitter._match_started_tool",
+      "operator": "drop-the-identity-match",
+      "find": "        for field, value in identities:\n            if not value:\n                continue\n            for index, candidate in enumerate(pending):\n                if candidate.get(field) == value:\n                    return pending.pop(index)\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_chat_element_pairing.py::test_a_finish_out_of_start_order_still_finds_its_own_element"
+      ]
+    },
+    {
+      "id": "dcw-h4-an-identity-free-finish-settles-the-newest-start",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_ChatProtocolV2Emitter._match_started_tool",
+      "operator": "restore-the-lifo-fallback",
+      "find": "        return pending.pop(0)\n",
+      "replace": "        return pending.pop()\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_chat_element_pairing.py::test_identity_free_calls_pair_in_arrival_order"
+      ]
+    },
+    {
+      "id": "dcw-h4-a-matched-start-stays-pending-and-can-be-settled-twice",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_ChatProtocolV2Emitter._match_started_tool",
+      "operator": "read-the-match-without-removing-it",
+      "find": "                    return pending.pop(index)\n",
+      "replace": "                    return pending[index]\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_chat_element_pairing.py::test_a_matched_element_leaves_the_pending_set[tool_input]"
+      ]
+    },
+    {
+      "id": "dcw-h4-a-terminal-finish-has-no-identity-to-match-on",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_ChatProtocolV2Emitter._match_started_tool",
+      "operator": "drop-the-command-identity",
+      "find": "            (\"command\", finished_command),\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_chat_element_pairing.py::test_a_terminal_call_is_matched_on_its_command"
+      ]
+    },
+    {
+      "id": "realm-revert-never-mints-an-office-tombstone",
+      "path": "agent_runtime/realm_revert.py",
+      "symbol": "_archive_local_only",
+      "operator": "record-the-realm-visible-tombstone-anyway",
+      "find": "            reason=\"revert_local_only\",\n            updated_by=REVERT_ACTOR_REF,\n            record_tombstone=False,\n",
+      "replace": "            reason=\"revert_local_only\",\n            updated_by=REVERT_ACTOR_REF,\n            record_tombstone=True,\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_realm_revert.py::test_reverting_a_local_only_actor_archives_without_a_tombstone"
+      ]
+    },
+    {
+      "id": "board-archive-card-honours-the-diagnostic-lane",
+      "path": "agent_runtime/board_store.py",
+      "symbol": "BoardStore._archive_card_locked",
+      "operator": "ignore-record-tombstone",
+      "find": "        if record_tombstone and card.card_id not in board.archived_card_ids:\n",
+      "replace": "        if card.card_id not in board.archived_card_ids:\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_realm_revert.py::test_reverting_a_local_only_card_archives_without_a_tombstone"
+      ]
+    },
+    {
+      "id": "ir-h1-record-split-loses-a-field",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "PERSONA_INSTANCE_LOCAL_ONLY_KEYS",
+      "operator": "reclassify-a-local-only-field-as-travelling",
+      "find": "        \"current_chat_goal\",\n        \"current_task_id\",\n",
+      "replace": "        \"current_task_id\",\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_sync.py::test_the_fields_the_ruling_named_are_on_the_side_it_named"
+      ]
+    },
+    {
+      "id": "ir-h1-door-admits-a-canonical-row-from-a-peer",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "refuse_persona_instance",
+      "operator": "drop-the-canonical-channel-refusal",
+      "find": "    if instance_id == persona_instance_id_for(persona_id):\n",
+      "replace": "    if False:\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_sync.py::test_the_door_refuses_a_canonical_channel_id_from_a_peer"
+      ]
+    },
+    {
+      "id": "ir-h1-door-admits-session-and-run-state",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "refuse_persona_instance",
+      "operator": "empty-the-unexpected-key-rule",
+      "find": "    unexpected = sorted(str(key) for key in body if str(key) not in PERSONA_INSTANCE_ALLOWED_KEYS)\n",
+      "replace": "    unexpected = []\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_sync.py::test_the_door_refuses_session_and_run_state_as_unexpected_keys"
+      ]
+    },
+    {
+      "id": "ir-h1-id-safety-stops-asking-the-real-sanitizer",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "valid_persona_instance_id",
+      "operator": "drop-the-safe-path-token-round-trip",
+      "find": "    if paths.safe_path_token(text) != text:\n        return False\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_sync.py::test_the_door_refuses_traversal_and_non_instance_shaped_ids"
+      ]
+    },
+    {
+      "id": "ir-h1-portability-walk-exempts-the-authored-name",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "refuse_persona_instance",
+      "operator": "restore-the-shared-prose-key-default",
+      "find": "        prose_keys=frozenset(),\n    )\n    if refusal is not None:\n        return refusal",
+      "replace": "    )\n    if refusal is not None:\n        return refusal",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_sync.py::test_the_door_scans_display_name_because_an_instance_body_is_all_wiring"
+      ]
+    },
+    {
+      "id": "ir-h1-publish-projects-a-machine-shaped-body",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "project_persona_instances",
+      "operator": "drop-the-publish-side-portability-scan",
+      "find": "        offenders = find_nonportable_values(body, prefix=f\"instances.{instance_id}\")\n",
+      "replace": "        offenders = []\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_sync.py::test_a_machine_shaped_display_name_refuses_the_record_rather_than_shipping_it"
+      ]
+    },
+    {
+      "id": "ir-h2-instance-ids-re-walk-the-directory-instead-of-the-scan",
+      "path": "agent_runtime/realm_sync.py",
+      "symbol": "_office_publish_scan",
+      "operator": "restore-second-authority-glob-for-instances",
+      "find": "            if actor.persona_instance_id and actor.persona_instance_id not in instance_ids:\n                instance_ids.append(actor.persona_instance_id)\n",
+      "replace": "            for _p in sorted(paths.office_actors_dir(workspace_token).glob('*.json')):\n                import json as _j\n                try:\n                    _iid = _j.loads(_p.read_text(encoding='utf-8')).get('persona_instance_id')\n                except Exception:\n                    continue\n                if _iid and _iid not in instance_ids:\n                    instance_ids.append(_iid)\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_publish.py::test_the_instance_ids_come_off_the_gated_scan_never_a_second_directory_walk"
+      ]
+    },
+    {
+      "id": "ir-h2-projection-stops-pruning-to-the-referenced-set",
+      "path": "agent_runtime/realm_sync.py",
+      "symbol": "_resolve_artifacts_with_projection",
+      "operator": "publish-every-local-instance",
+      "find": "    instance_projection, instance_rows_unreadable = _persona_instance_projection(\n        office_scan.instance_ids\n    )\n",
+      "replace": "    from .persona_assignments import PersonaInstanceStore as _S\n    instance_projection, instance_rows_unreadable = _persona_instance_projection(\n        [i.id for i in _S().scan_all().instances]\n    )\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_publish.py::test_the_projection_carries_exactly_the_instances_the_desks_reference"
+      ]
+    },
+    {
+      "id": "ir-h2-publish-baseline-is-never-recorded",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "update_persona_instance_baseline_after_publish",
+      "operator": "skip-the-baseline-write",
+      "find": "    for instance_id, body_hash in projection.hashes().items():\n        baseline[instance_baseline_key(instance_id)] = body_hash\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_publish.py::test_the_publish_baseline_leaves_the_publisher_with_nothing_to_hold"
+      ]
+    },
+    {
+      "id": "ir-h2-publish-row-swallows-the-store-shortfall",
+      "path": "agent_runtime/realm_sync.py",
+      "symbol": "_persona_instance_projection",
+      "operator": "zero-the-unreadable-row-count",
+      "find": "        unreadable = scan.unreadable\n",
+      "replace": "        unreadable = 0\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_publish.py::test_the_publish_row_carries_the_projections_accounting_and_the_store_shortfall"
+      ]
+    },
+    {
+      "id": "ir-h3-baseline-re-derived-from-the-local-write",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "apply_persona_instance_pull",
+      "operator": "align-the-baseline-to-local-instead-of-remote",
+      "find": "        written.append((instance_id, remote_body))\n        # THE baseline-alignment property",
+      "replace": "        written.append((instance_id, remote_body))\n        remote_hash = persona_instance_def_hash(project_persona_instance(store.get(instance_id))) + 'x'\n        # THE baseline-alignment property",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_a_fresh_replica_reads_zero_drift_immediately"
+      ]
+    },
+    {
+      "id": "ir-h3-a-short-remote-answer-deletes-the-replica",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "apply_persona_instance_pull",
+      "operator": "treat-upstream-absent-as-a-delete",
+      "find": "            if local_hash is not None:\n                summary.upstream_absent.append(instance_id)\n            else:\n                baseline.pop(key, None)\n            continue",
+      "replace": "            baseline.pop(key, None)\n            __import__('agent_runtime.paths', fromlist=['x']).persona_instance_path(instance_id).unlink(missing_ok=True)\n            continue",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_a_row_the_realm_stopped_publishing_is_not_a_delete"
+      ]
+    },
+    {
+      "id": "ir-h3-hold-clobbers-the-locally-edited-replica",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "apply_persona_instance_pull",
+      "operator": "adopt-on-conflict",
+      "find": "        if decision.action == PullAction.CONFLICT:\n            summary.held.append(instance_id)\n",
+      "replace": "        if decision.action == PullAction.CONFLICT:\n            summary.held.append(instance_id)\n            store.replicate_instance(remote_body, realm_id=realm_id, adopt_existing=local_record)\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_a_locally_edited_replica_is_held_and_never_clobbered"
+      ]
+    },
+    {
+      "id": "ir-h3-a-replication-mint-poses-as-an-authored-create",
+      "path": "agent_runtime/persona_assignments.py",
+      "symbol": "PersonaInstanceStore.replicate_instance",
+      "operator": "reuse-the-authored-create-event",
+      "find": "            \"persona_instance.replicated\",\n            instance,\n            {\n                \"source\": \"realm_sync\",",
+      "replace": "            \"persona_instance.created\",\n            instance,\n            {\n                \"source\": \"realm_sync\",",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_the_mint_emits_a_delta_patch_on_the_event_log"
+      ]
+    },
+    {
+      "id": "ir-h3-the-mint-reaches-no-live-consumer",
+      "path": "agent_runtime/persona_assignments.py",
+      "symbol": "PersonaInstanceStore.replicate_instance",
+      "operator": "drop-the-delta-patch",
+      "find": "        if created:\n            emit_persona_instance_create(self.event_log, instance)\n        else:\n            emit_persona_instance_patch(",
+      "replace": "        if False:\n            emit_persona_instance_create(self.event_log, instance)\n        elif False:\n            emit_persona_instance_patch(",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_the_mint_emits_a_delta_patch_on_the_event_log"
+      ]
+    },
+    {
+      "id": "ir-h3-the-store-door-writes-the-whole-remote-body",
+      "path": "agent_runtime/persona_assignments.py",
+      "symbol": "PersonaInstanceStore.replicate_instance",
+      "operator": "ignore-the-travel-allowlist",
+      "find": "        for name in sorted(PERSONA_INSTANCE_ALLOWED_KEYS - {\"id\", \"persona_id\", \"steered_by\"}):",
+      "replace": "        for name in sorted(set(body) - {\"id\", \"persona_id\", \"steered_by\"}):",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_the_store_door_cannot_express_importing_a_live_binding"
+      ]
+    },
+    {
+      "id": "ir-h3-steering-collapses-to-a-single-phase",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "apply_persona_instance_pull",
+      "operator": "never-run-phase-two",
+      "find": "    for instance_id, remote_body in written:\n        parents = [str(item) for item in (remote_body.get(\"steered_by\") or [])]",
+      "replace": "    for instance_id, remote_body in written[:0]:\n        parents = [str(item) for item in (remote_body.get(\"steered_by\") or [])]",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_a_steering_edge_naming_a_row_minted_later_in_the_same_pass_still_lands"
+      ]
+    },
+    {
+      "id": "ir-h3-a-remote-graph-installs-a-cycle",
+      "path": "agent_runtime/persona_assignments.py",
+      "symbol": "PersonaInstanceStore.apply_replicated_steering",
+      "operator": "skip-the-cycle-validator",
+      "find": "                self._validate_no_steering_cycle(persona_instance_id, parent)\n",
+      "replace": "                pass\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_a_remote_graph_carrying_a_cycle_cannot_install_one"
+      ]
+    },
+    {
+      "id": "ir-h3-an-unreadable-projection-reads-as-absence",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "read_remote_persona_instances",
+      "operator": "fold-a-parse-error-into-absence",
+      "find": "        return {}, \"unreadable\"",
+      "replace": "        return {}, None",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_a_projection_that_will_not_decode_is_refused_never_read_as_absence"
+      ]
+    },
+    {
+      "id": "ir-h3-an-unreadable-local-row-is-minted-over",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "_local_projection_hash",
+      "operator": "fold-a-local-parse-error-into-absence",
+      "find": "        if path.exists():\n            return None, None, \"local_row_unreadable\"",
+      "replace": "        if False:\n            return None, None, 'local_row_unreadable'",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_a_local_row_that_will_not_decode_is_refused_never_minted_over"
+      ]
+    },
+    {
+      "id": "ir-h4-canonical-rows-enter-the-drift-walk",
+      "path": "agent_runtime/realm_sync.py",
+      "symbol": "_persona_instance_store_drift_items",
+      "operator": "stop-excluding-canonical-channels",
+      "find": "        if is_canonical_persona_channel(instance):\n            continue",
+      "replace": "        if False:\n            continue",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_drift.py::test_a_canonical_channel_is_never_reported_as_drift"
+      ]
+    },
+    {
+      "id": "ir-h4-a-short-instance-read-reports-removals",
+      "path": "agent_runtime/realm_sync.py",
+      "symbol": "_persona_instance_store_drift_items",
+      "operator": "spend-only-the-rows",
+      "find": "    if scan.unreadable:\n        return []\n\n    workspace_ids",
+      "replace": "    if False:\n        return []\n\n    workspace_ids",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_drift.py::test_an_unreadable_store_contributes_no_accounting_rather_than_removals"
+      ]
+    },
+    {
+      "id": "ir-h4-a-removed-desk-leaves-its-agent-behind",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "_retire_replicas_for_removed_desks",
+      "operator": "never-retire-the-replica",
+      "find": "        try:\n            store.retire_replica(actor_key, reason=\"remote_removed\", realm_id=realm_id)",
+      "replace": "        try:\n            pass",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_drift.py::test_the_replica_follows_the_desk"
+      ]
+    },
+    {
+      "id": "ir-h4-a-working-agent-is-archived",
+      "path": "agent_runtime/persona_assignments.py",
+      "symbol": "PersonaInstanceStore.retire_replica",
+      "operator": "drop-the-live-binding-guard",
+      "find": "        if self._has_live_binding(instance):\n            raise PersonaInstanceRetireError(\n                \"instance_active\",",
+      "replace": "        if False:\n            raise PersonaInstanceRetireError(\n                \"instance_active\",",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_drift.py::test_a_live_replica_is_never_archived_and_says_so"
+      ]
+    },
+    {
+      "id": "ir-h4-a-failed-archive-comes-back-as-something-to-publish",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "_retire_replicas_for_removed_desks",
+      "operator": "drop-the-baseline-of-a-held-retire",
+      "find": "            summary.retire_held.append({\"key\": actor_key, \"code\": str(code)})",
+      "replace": "            summary.retire_held.append({\"key\": actor_key, \"code\": str(code)})\n            baseline.pop(instance_baseline_key(actor_key), None)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_drift.py::test_a_held_retire_keeps_its_baseline_entry"
+      ]
+    },
+    {
+      "id": "ir-h4-the-next-pull-revives-a-deleted-desks-agent",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "apply_persona_instance_pull",
+      "operator": "drop-the-resurrection-guard",
+      "find": "    archived_keys = _locally_archived_actor_keys() | set(summary.retired)",
+      "replace": "    archived_keys = set()",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_drift.py::test_an_archived_desk_blocks_the_next_pull_from_reviving_its_agent"
+      ]
+    },
+    {
+      "id": "ir-h4-the-replica-retire-mints-a-realm-visible-ledger-entry",
+      "path": "agent_runtime/persona_assignments.py",
+      "symbol": "PersonaInstanceStore.retire_replica",
+      "operator": "run-the-office-half",
+      "find": "        self._event(\"persona_instance.retired\", instance, payload)\n        emit_persona_instance_remove(self.event_log, instance)\n        return {\n            \"persona_instance_id\": instance.id,\n            \"persona_id\": instance.persona_id,\n            \"archive_path\": str(archived_path),",
+      "replace": "        self._event(\"persona_instance.retired\", instance, payload)\n        emit_persona_instance_remove(self.event_log, instance)\n        self._archive_office_placements(instance)\n        return {\n            \"persona_instance_id\": instance.id,\n            \"persona_id\": instance.persona_id,\n            \"archive_path\": str(archived_path),",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_drift.py::test_reverting_a_local_only_agent_archives_it_and_mints_no_tombstone"
+      ]
+    },
+    {
+      "id": "ir-h4-the-instance-family-is-not-addressable-by-revert",
+      "path": "agent_runtime/realm_revert.py",
+      "symbol": "FAMILIES",
+      "operator": "drop-the-family-from-the-revert-selector",
+      "find": "        DRIFT_FAMILY_PERSONA_INSTANCE,\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_drift.py::test_the_revert_table_is_total_over_the_new_family"
+      ]
+    },
+    {
+      "id": "iws-ws1-the-scope-patch-carries-only-the-pointer-that-moved",
+      "path": "agent_runtime/state_patches.py",
+      "symbol": "emit_scope_patch",
+      "operator": "drop-the-unmoved-pointer-from-the-row",
+      "find": "    changed: dict[str, Any] = {\n        \"active_workspace_id\": safe_id(active_workspace_id),\n        \"active_realm_id\": safe_id(active_realm_id),\n    }",
+      "replace": "    changed: dict[str, Any] = {\n        \"active_workspace_id\": safe_id(active_workspace_id),\n    }",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_patch_coverage.py::test_set_active_emits_the_scope_row_beside_its_domain_event"
+      ]
+    },
+    {
+      "id": "iws-ws1-a-cleared-pointer-leaves-the-row-as-an-absent-key",
+      "path": "agent_runtime/state_patches.py",
+      "symbol": "emit_scope_patch",
+      "operator": "drop-null-pointers-from-the-payload",
+      "find": "        \"active_realm_id\": safe_id(active_realm_id),\n    }\n    return emit_state_patch(",
+      "replace": "        \"active_realm_id\": safe_id(active_realm_id),\n    }\n    changed = {k: v for k, v in changed.items() if v is not None}\n    return emit_state_patch(",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_patch_coverage.py::test_a_cleared_pointer_is_a_null_on_the_wire_not_an_absent_key"
+      ]
+    },
+    {
+      "id": "iws-ws1-the-activate-events-free-ride-at-an-undeclaring-client",
+      "path": "agent_runtime/patch_coverage.py",
+      "symbol": "module",
+      "operator": "un-gate-the-paired-domain-events",
+      "find": "    \"workspace.activated\": SCOPE_ENTITY,\n    \"realm.activated\": SCOPE_ENTITY,\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_patch_coverage.py::test_the_two_activate_events_are_covered_and_gated_on_the_scope_entity"
+      ]
+    },
+    {
+      "id": "iws-ws1-the-activation-write-emits-no-row-to-express-it",
+      "path": "agent_runtime/store.py",
+      "symbol": "WorkspaceStore.set_active",
+      "operator": "drop-the-paired-patch-from-the-chokepoint",
+      "find": "        _emit_active_scope_patch(self.event_log)\n        if value:\n            _append_store_event(self.event_log, \"workspace.activated\", workspace_id=value, name=name)",
+      "replace": "        if value:\n            _append_store_event(self.event_log, \"workspace.activated\", workspace_id=value, name=name)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_patch_coverage.py::test_set_active_emits_the_scope_row_beside_its_domain_event"
+      ]
+    },
+    {
+      "id": "ws4-local-console-arm-runs-before-the-device-equality",
+      "path": "agent_runtime/call_authorization.py",
+      "symbol": "authorize_call",
+      "operator": "drop-the-kind-restriction",
+      "find": "    if name and name in LOCAL_CONSOLE_METHODS and resolved.kind not in _CONSOLE_KINDS:",
+      "replace": "    if False and name in LOCAL_CONSOLE_METHODS and resolved.kind not in _CONSOLE_KINDS:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_use_methods.py::test_a_device_is_refused_at_every_tier_it_can_hold"
+      ]
+    },
+    {
+      "id": "ws4-the-restriction-is-a-membership-not-a-blanket",
+      "path": "agent_runtime/call_authorization.py",
+      "symbol": "authorize_call",
+      "operator": "widen-the-restriction-to-every-method",
+      "find": "    if name and name in LOCAL_CONSOLE_METHODS and resolved.kind not in _CONSOLE_KINDS:",
+      "replace": "    if name and resolved.kind not in _CONSOLE_KINDS:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_use_methods.py::test_the_restriction_does_not_leak_onto_other_console_verbs"
+      ]
+    },
+    {
+      "id": "ws4-a-declined-activation-is-a-result-not-a-refusal",
+      "path": "agent_runtime/scope_activation.py",
+      "symbol": "activate_workspace",
+      "operator": "collapse-the-declined-arm",
+      "find": "    if not outcome.get(\"applied\", True):\n        return activation_outcome_row(store, workspace_row, outcome, \"workspace_id\")\n    active_id = outcome.get(\"workspace_id\")",
+      "replace": "    active_id = outcome.get(\"workspace_id\")",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_use_methods.py::test_a_duplicate_send_is_an_idempotent_RESULT_not_an_error",
+        "tests/agent_runtime/test_scope_use_methods.py::test_a_stale_intent_is_superseded_and_the_newer_pointer_stands"
+      ]
+    },
+    {
+      "id": "ws4-a-realm-switch-reconciles-the-workspace",
+      "path": "agent_runtime/scope_activation.py",
+      "symbol": "activate_realm",
+      "operator": "drop-the-reconcile",
+      "find": "    item = store.get(realm_id)\n    reconciled = reconcile_active_workspace_to_realm(item, issued_at=issued_at)\n    if reconciled.get(\"reason\") == \"superseded\":",
+      "replace": "    item = store.get(realm_id)\n    reconciled = {}\n    if reconciled.get(\"reason\") == \"superseded\":",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_use_methods.py::test_a_realm_switch_reconciles_the_workspace_under_it"
+      ]
+    },
+    {
+      "id": "ws4-the-supersede-basis-reaches-the-store",
+      "path": "agent_runtime/scope_activation.py",
+      "symbol": "perform_scope_activation",
+      "operator": "drop-the-issued-at",
+      "find": "        row = perform(scope_id, issued_at=issued_at)",
+      "replace": "        row = perform(scope_id, issued_at=None)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_use_methods.py::test_a_stale_intent_is_superseded_and_the_newer_pointer_stands"
+      ]
+    },
+    {
+      "id": "ws4-the-method-result-goes-through-one-serializer",
+      "path": "agent_runtime/scope_activation.py",
+      "symbol": "perform_scope_activation",
+      "operator": "skip-the-serialization",
+      "find": "    result = dict(to_jsonable(row))",
+      "replace": "    result = dict(row)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_use_methods.py::test_the_result_is_json_serializable"
+      ]
+    },
+    {
+      "id": "ctp5-demote-deferral-fires-on-every-lane",
+      "path": "agent_runtime/stream.py",
+      "symbol": "_defer_demote_build_for_active_turns",
+      "operator": "drop-lane-guard",
+      "find": "    if reason != BATCH_REASON_DEMOTE:\n        return 0\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_snapshot_demote_deferral.py::test_a_non_demote_lane_never_defers"
+      ]
+    },
+    {
+      "id": "ctp5-deferral-bound-widened-to-a-starvation",
+      "path": "agent_runtime/stream.py",
+      "symbol": "SNAPSHOT_DEMOTE_DEFERRAL_MAX_MS",
+      "operator": "widen-bound",
+      "find": "SNAPSHOT_DEMOTE_DEFERRAL_MAX_MS = 3500",
+      "replace": "SNAPSHOT_DEMOTE_DEFERRAL_MAX_MS = 5000",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_snapshot_demote_deferral.py::test_demote_bound_covers_two_seconds_but_releases_at_3500"
+      ]
+    },
+    {
+      "id": "ctp5-deferral-ignores-a-cancelled-consumer",
+      "path": "agent_runtime/stream.py",
+      "symbol": "_defer_demote_build_for_active_turns",
+      "operator": "drop-cancellation-break",
+      "find": "        if request_cancelled():\n            break\n        now_s = _now()",
+      "replace": "        now_s = _now()",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_snapshot_demote_deferral.py::test_a_cancelled_request_abandons_the_wait_immediately"
+      ]
+    },
+    {
+      "id": "ctp5-deferral-decided-after-the-build-worker-starts",
+      "path": "agent_runtime/stream.py",
+      "symbol": "_full_core_batch_frames",
+      "operator": "reorder-yield-after-job",
+      "find": "    _defer_demote_build_for_active_turns(reason=reason, caller=caller)\n    if request_cancelled():\n        return\n\n    job = _SnapshotBuildJob(caller=caller)",
+      "replace": "    job = _SnapshotBuildJob(caller=caller)\n    _defer_demote_build_for_active_turns(reason=reason, caller=caller)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_snapshot_demote_deferral.py::test_the_demote_lane_actually_calls_the_deferral_before_it_builds"
+      ]
+    },
+    {
+      "id": "ctp5-a-zero-wait-still-logs-a-deferral",
+      "path": "agent_runtime/stream.py",
+      "symbol": "_defer_demote_build_for_active_turns",
+      "operator": "loosen-receipt-guard",
+      "find": "    if waited_ms > 0:\n        # Closed vocabulary",
+      "replace": "    if waited_ms >= 0:\n        # Closed vocabulary",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_snapshot_demote_deferral.py::test_a_wait_that_resolves_to_zero_ms_logs_nothing"
+      ]
+    },
+    {
+      "id": "ctp3-restored-prompt-does-not-report-itself",
+      "path": "agent/conversation_loop.py",
+      "symbol": "_restore_or_build_system_prompt",
+      "operator": "drop-restore-flag",
+      "find": "        agent._system_prompt_restored_from_session = True\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_prologue_timing_receipts.py::TestSystemPromptReceipt::test_a_restored_prompt_reports_a_restore_and_never_a_build"
+      ]
+    },
+    {
+      "id": "ctp3-restore-receipt-never-emitted",
+      "path": "agent/conversation_loop.py",
+      "symbol": "_restore_or_build_system_prompt",
+      "operator": "drop-restore-receipt",
+      "find": "        _emit_conversation_timing(agent, \"system_prompt_restore\", _prompt_started, stored_state=stored_state)\n        return",
+      "replace": "        return",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_prologue_timing_receipts.py::TestSystemPromptReceipt::test_a_restored_prompt_reports_a_restore_and_never_a_build",
+        "tests/agent/test_prologue_timing_receipts.py::TestTheReceiptsReachTheDurableRecord::test_the_system_prompt_pair_survives_collector_and_sanitizer"
+      ]
+    },
+    {
+      "id": "ctp3-prompt-rebuild-never-reported",
+      "path": "agent/conversation_loop.py",
+      "symbol": "_restore_or_build_system_prompt",
+      "operator": "drop-build-receipt",
+      "find": "    _emit_conversation_timing(agent, \"system_prompt_build\", _prompt_started, stored_state=stored_state)",
+      "replace": "    pass",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_prologue_timing_receipts.py::TestSystemPromptReceipt"
+      ]
+    },
+    {
+      "id": "ctp3-stale-restore-flag-survives-into-the-next-turn",
+      "path": "agent/conversation_loop.py",
+      "symbol": "_restore_or_build_system_prompt",
+      "operator": "drop-per-turn-reset",
+      "find": "    _prompt_started = time.perf_counter()\n    agent._system_prompt_restored_from_session = False",
+      "replace": "    _prompt_started = time.perf_counter()",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_prologue_timing_receipts.py::TestSystemPromptReceipt::test_a_stale_restored_flag_from_a_previous_turn_cannot_survive"
+      ]
+    },
+    {
+      "id": "ctp3-turn-context-is-not-timed-by-the-loop",
+      "path": "agent/conversation_loop.py",
+      "symbol": "_run_conversation_turn",
+      "operator": "unwire-call-site-timing",
+      "find": "    _emit_conversation_timing(agent, \"turn_context\", _turn_context_started,",
+      "replace": "    _noop_conversation_timing(agent, \"turn_context\", _turn_context_started,",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_prologue_timing_receipts.py::test_run_conversation_times_build_turn_context_at_the_call_site"
+      ]
+    },
+    {
+      "id": "ctp3-tool-schema-memo-hit-is-not-counted",
+      "path": "model_tools.py",
+      "symbol": "get_tool_definitions",
+      "operator": "drop-hit-counter",
+      "find": "        _bump_tool_defs_counter(\"hits\")\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_prologue_timing_receipts.py::TestToolSchemaMemoReceipt::test_the_serializer_runs_once_across_two_builds_of_one_toolset_tuple"
+      ]
+    },
+    {
+      "id": "ctp3-tool-schema-rebuild-is-not-counted",
+      "path": "model_tools.py",
+      "symbol": "get_tool_definitions.compute",
+      "operator": "drop-miss-counter",
+      "find": "        _bump_tool_defs_counter(\"misses\")\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_prologue_timing_receipts.py::TestToolSchemaMemoReceipt::test_a_registry_epoch_change_rebuilds_rather_than_pinning_a_stale_surface"
+      ]
+    },
+    {
+      "id": "ctp3-invalidation-erases-work-that-was-already-paid",
+      "path": "model_tools.py",
+      "symbol": "_clear_tool_defs_cache",
+      "operator": "reset-cumulative-receipt",
+      "find": "    _tool_defs_cache.clear()",
+      "replace": "    _tool_defs_cache.clear()\n    _tool_defs_counters.hits = 0\n    _tool_defs_counters.misses = 0",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_prologue_timing_receipts.py::TestToolSchemaMemoReceipt::test_the_hatch_drops_the_memo_and_keeps_the_receipt"
+      ]
+    },
+    {
+      "id": "ctp3-unreadable-counter-is-reported-as-a-cache-hit",
+      "path": "agent_runtime/init_observability.py",
+      "symbol": "_emit_tool_defs_receipt",
+      "operator": "collapse-unknown-into-hit",
+      "find": "    if misses_before is None or misses_after is None:\n        return\n    step = (",
+      "replace": "    if False:\n        return\n    step = (",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_prologue_timing_receipts.py::TestToolSchemaMemoReceipt::test_an_unreadable_counter_reports_NOTHING_rather_than_a_hit"
+      ]
+    },
+    {
+      "id": "ctp3-a-memo-hit-is-reported-as-a-schema-build",
+      "path": "agent_runtime/init_observability.py",
+      "symbol": "_emit_tool_defs_receipt",
+      "operator": "weaken-miss-discriminator",
+      "find": "        \"tool_defs_build\" if misses_after > misses_before else \"tool_defs_cached\"",
+      "replace": "        \"tool_defs_build\" if misses_after >= misses_before else \"tool_defs_cached\"",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_prologue_timing_receipts.py::TestToolSchemaMemoReceipt::test_a_miss_reports_a_build_and_a_hit_reports_a_cached_read"
+      ]
+    },
+    {
+      "id": "ctp4-plan-drops-the-session-db-measurement",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_cmd_mission_chat_message",
+      "operator": "drop-plan-field",
+      "find": "        session_db_open_ms=_session_db_open_ms,\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_mission_chat_turn_phases.py::test_the_handlers_session_db_open_reaches_the_durable_record"
+      ]
+    },
+    {
+      "id": "ctp4-unmeasured-session-db-open-becomes-a-zero",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_mission_chat_commit_turn",
+      "operator": "fabricate-zero-for-absent",
+      "find": "        if isinstance(_session_db_open_ms, int) and not isinstance(\n            _session_db_open_ms, bool\n        ):\n            _profile_timing[\"session_db_open_ms\"] = _session_db_open_ms",
+      "replace": "        _profile_timing[\"session_db_open_ms\"] = int(_session_db_open_ms or 0)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_mission_chat_turn_phases.py::test_a_plan_that_measured_nothing_leaves_session_db_open_ms_ABSENT"
+      ]
+    },
+    {
+      "id": "ctp4-the-session-db-open-is-never-timed",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_cmd_mission_chat_message",
+      "operator": "drop-measurement",
+      "find": "    _session_db_open_ms = max(\n        0, int((time.monotonic() - _session_db_open_started) * 1000)\n    )\n    instance_store = PersonaInstanceStore()",
+      "replace": "    instance_store = PersonaInstanceStore()",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_mission_chat_turn_phases.py::test_the_handlers_session_db_open_reaches_the_durable_record",
+        "tests/hermes_cli/test_mission_chat_turn_phases.py::test_a_runner_that_reported_no_timing_leaves_only_what_the_HANDLER_measured"
+      ]
+    },
+    {
+      "id": "iws-straddle-the-realm-heal-fires-on-a-refused-reconcile",
+      "path": "agent_runtime/scope_activation.py",
+      "symbol": "activate_realm",
+      "operator": "never-heal",
+      "find": "    if reconciled.get(\"reason\") == \"superseded\":",
+      "replace": "    if False:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_straddle_invariant.py::test_order_a_a_late_realm_switch_loses_the_scope_to_a_newer_workspace_selection"
+      ]
+    },
+    {
+      "id": "iws-straddle-the-heal-uses-the-winning-workspaces-basis",
+      "path": "agent_runtime/scope_activation.py",
+      "symbol": "_heal_realm_pointer_to_winning_workspace",
+      "operator": "drop-the-winning-basis",
+      "find": "        realms.set_active(winning_realm_id, issued_at=workspaces.active_intent_issued_at())",
+      "replace": "        realms.set_active(winning_realm_id, issued_at=None)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_straddle_invariant.py::test_the_healed_realm_pointer_carries_the_winning_gestures_basis"
+      ]
+    },
+    {
+      "id": "iws-straddle-the-kept-arm-still-returns-early",
+      "path": "agent_runtime/scope_activation.py",
+      "symbol": "reconcile_active_workspace_to_realm",
+      "operator": "fall-through-the-kept-arm",
+      "find": "            return {\"workspace_id\": active_id, \"applied\": False, \"reason\": RECONCILE_KEPT}",
+      "replace": "            pass",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_straddle_invariant.py::test_the_reconcile_keeps_a_workspace_that_already_belongs_and_says_so"
+      ]
+    },
+    {
+      "id": "iws-straddle-a-workspace-selection-pulls-the-realm-pointer",
+      "path": "agent_runtime/scope_activation.py",
+      "symbol": "activate_workspace",
+      "operator": "drop-the-follow",
+      "find": "    _follow_realm_of_selected_workspace(workspace, issued_at=issued_at)",
+      "replace": "    pass",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_straddle_invariant.py::test_order_b_a_workspace_selection_after_a_realm_switch_pulls_the_realm_with_it"
+      ]
+    },
+    {
+      "id": "iws-straddle-the-follow-arm-skips-an-already-parked-realm",
+      "path": "agent_runtime/scope_activation.py",
+      "symbol": "_follow_realm_of_selected_workspace",
+      "operator": "drop-the-already-parked-guard",
+      "find": "    if realms.active_id() == realm_id:\n        return",
+      "replace": "    if False:\n        return",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_scope_straddle_invariant.py::test_an_ordinary_switch_inside_one_realm_leaves_the_realm_pointer_alone"
+      ]
+    },
+    {
+      "id": "p4-reply-media-mint-loses-its-peer-gate",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_stamp_reply_media",
+      "operator": "drop-origin-gate",
+      "find": "        if not requested_by.startswith(PEER_REQUESTED_BY_PREFIX):\n            return data\n",
+      "replace": "        if False:\n            return data\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_cross_install_media.py::test_a_peer_executed_reply_carries_the_map_and_a_local_one_carries_nothing"
+      ]
+    },
+    {
+      "id": "p4-remote-leg-drops-the-far-installs-map",
+      "path": "tools/agent_chat_dispatch.py",
+      "symbol": "_run_remote_dispatch",
+      "operator": "drop-argument",
+      "find": "            media=payload.get(\"media\"),\n",
+      "replace": "            media=None,\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_cross_install_media.py::test_the_remote_leg_puts_the_far_installs_map_on_the_row"
+      ]
+    },
+    {
+      "id": "p4-peer-media-type-is-taken-on-trust",
+      "path": "agent_runtime/media_handles.py",
+      "symbol": "_remote_artifact_for",
+      "operator": "trust-remote-field",
+      "find": "    media_type = MEDIA_TYPES.get(_extension(reference))\n",
+      "replace": "    media_type = entry.get(\"media_type\") or MEDIA_TYPES.get(_extension(reference))\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_cross_install_media.py::test_the_media_type_is_re_derived_and_never_read_off_the_peers_row"
+      ]
+    },
+    {
+      "id": "p4-remote-fold-admits-a-row-with-no-peer-to-ask",
+      "path": "agent_runtime/media_handles.py",
+      "symbol": "remote_artifacts_from_completions",
+      "operator": "drop-guard",
+      "find": "        if not peer_install_id:\n",
+      "replace": "        if False:\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_cross_install_media.py::test_a_map_with_no_peer_to_ask_contributes_nothing"
+      ]
+    },
+    {
+      "id": "p4-scope-prefers-the-peer-over-this-disk",
+      "path": "agent_runtime/media_handles.py",
+      "symbol": "MediaScope.get",
+      "operator": "invert-resolution-order",
+      "find": "        local = self.artifacts.get(handle)\n        if local is not None:\n            return local\n        return self.remote.get(handle)\n",
+      "replace": "        remote = self.remote.get(handle)\n        if remote is not None:\n            return remote\n        return self.artifacts.get(handle)\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_cross_install_media.py::test_a_scope_reports_both_halves_and_prefers_the_local_row"
+      ]
+    },
+    {
+      "id": "p4-proxy-serves-whatever-the-peer-returned",
+      "path": "agent_runtime/media_proxy.py",
+      "symbol": "fetch_remote_artifact",
+      "operator": "drop-content-verification",
+      "find": "    if media_handles.handle_for_bytes(answer) != artifact.handle:\n",
+      "replace": "    if False:\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_cross_install_media.py::test_bytes_that_do_not_hash_to_the_handle_are_refused_and_never_cached"
+      ]
+    },
+    {
+      "id": "p4-proxy-dials-even-when-it-holds-the-bytes",
+      "path": "agent_runtime/media_proxy.py",
+      "symbol": "fetch_remote_artifact",
+      "operator": "drop-cache-read",
+      "find": "    cached = media_handles.read_cached_bytes(artifact.handle, root=store_root)\n",
+      "replace": "    cached = None\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_cross_install_media.py::test_a_first_fetch_dials_once_and_a_second_dials_never"
+      ]
+    },
+    {
+      "id": "p4-cache-serves-a-tampered-entry",
+      "path": "agent_runtime/media_handles.py",
+      "symbol": "read_cached_bytes",
+      "operator": "drop-content-verification",
+      "find": "    if handle_for_bytes(data) != handle.strip():\n",
+      "replace": "    if False:\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_cross_install_media.py::test_a_tampered_cache_entry_is_deleted_rather_than_served"
+      ]
+    },
+    {
+      "id": "p4-completion-event-carries-the-whole-map",
+      "path": "agent_runtime/dispatch_store.py",
+      "symbol": "record_completion",
+      "operator": "widen-event-payload",
+      "find": "            media_count=len(media_rows) or None,\n",
+      "replace": "            media_count=len(media_rows) or None,\n            media=media_rows or None,\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_cross_install_media.py::test_the_completion_event_carries_a_count_and_never_the_map"
+      ]
+    },
+    {
+      "id": "p4-store-takes-the-peers-map-unbounded",
+      "path": "agent_runtime/dispatch_store.py",
+      "symbol": "_media_rows",
+      "operator": "drop-bound",
+      "find": "        if len(rows) >= MEDIA_MAP_LIMIT:\n            break\n",
+      "replace": "        if False:\n            break\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_cross_install_media.py::test_the_store_bounds_a_map_the_far_install_chose"
+      ]
+    },
+    {
+      "id": "p4-peer-keyhole-would-proxy-a-third-install",
+      "path": "agent_runtime/serve_rpc.py",
+      "symbol": "_peer_media_get",
+      "operator": "widen-resolution-scope",
+      "find": "    scope = media_handles.build_media_scope(remote_completions=())\n",
+      "replace": "    scope = media_handles.build_media_scope()\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_serve_rpc_media.py::test_the_peer_keyhole_resolves_no_remote_row_so_the_lane_cannot_chain"
+      ]
+    },
+    {
+      "id": "p4-media-get-never-reaches-the-proxy-arm",
+      "path": "agent_runtime/serve_rpc.py",
+      "symbol": "_runtime_media_get",
+      "operator": "drop-branch",
+      "find": "    if isinstance(resolved, media_handles.RemoteMediaArtifact):\n",
+      "replace": "    if False:\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_serve_rpc_media.py::test_a_console_client_fetching_a_remote_handle_is_answered_by_the_proxy"
+      ]
+    },
+    {
+      "id": "p4-peer-keyhole-answers-a-caller-that-proved-nothing",
+      "path": "agent_runtime/serve_rpc.py",
+      "symbol": "_peer_media_get",
+      "operator": "drop-provenance-guard",
+      "find": "    if not peer_install_id:\n",
+      "replace": "    if False:\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_serve_rpc_media.py::test_the_peer_keyhole_refuses_a_caller_that_proved_no_install"
+      ]
+    },
+    {
+      "id": "uaf-surface-authored-before-the-fences-again",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "OfficeStore.upsert_actor",
+      "operator": "restore-ensure-surface-above-the-lock",
+      "find": "            self._refuse_unresolvable_workspace(wsid)\n        with office_lock(wsid):",
+      "replace": "            self.ensure_surface(wsid, created_by=updated_by)\n        with office_lock(wsid):",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_a_refused_upsert_leaves_no_office_behind_on_a_surfaceless_workspace"
+      ]
+    },
+    {
+      "id": "uaf-fence-refusal-still-authors-the-office",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "OfficeStore.upsert_actor",
+      "operator": "restore-ensure-surface-above-the-lock",
+      "find": "            self._refuse_unresolvable_workspace(wsid)\n        with office_lock(wsid):",
+      "replace": "            self.ensure_surface(wsid, created_by=updated_by)\n        with office_lock(wsid):",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_a_fence_refusal_authors_no_office_either"
+      ]
+    },
+    {
+      "id": "uaf-scan-drops-the-names-it-is-standing-on",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "read_actor_dir",
+      "operator": "degrade-named-shortfall-to-a-count",
+      "find": "    unreadable = UnreadableActorFiles.of(unreadable_names)",
+      "replace": "    unreadable = UnreadableActorFiles(names=(), total=len(unreadable_names))",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_scan_names_the_files_it_could_not_read_and_bounds_the_list"
+      ]
+    },
+    {
+      "id": "uaf-unreadable-name-list-loses-its-bound",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "UnreadableActorFiles.of",
+      "operator": "unbound-the-name-list",
+      "find": "        return cls(names=ordered[:MAX_UNREADABLE_ACTOR_FILE_NAMES], total=len(ordered))",
+      "replace": "        return cls(names=ordered, total=len(ordered))",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_office_store.py::test_the_scan_names_the_files_it_could_not_read_and_bounds_the_list"
+      ]
+    },
+    {
+      "id": "uaf-degraded-component-collapses-to-a-bare-flag",
+      "path": "agent_runtime/chat_lane_bundle.py",
+      "symbol": "_build_bundle",
+      "operator": "collapse-degradation-reason",
+      "find": "        degraded.append(f\"capability_account:{type(exc).__name__}\")",
+      "replace": "        degraded.append(\"degraded\")",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_chat_lane_bundle.py::test_a_degraded_bundle_is_served_to_this_turn_and_then_thrown_away"
+      ]
+    },
+    {
+      "id": "bipv-the-receipt-records-the-verb-that-wrote-it",
+      "path": "agent_runtime/board_store.py",
+      "symbol": "BoardStore._record_idempotency",
+      "operator": "blank-the-recorded-verb",
+      "find": "                \"verb\": str(verb),",
+      "replace": "                \"verb\": \"\",",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_board_store.py::test_the_receipt_records_the_verb_that_wrote_it"
+      ]
+    },
+    {
+      "id": "bipv-a-key-crossing-verbs-is-refused-not-replayed",
+      "path": "agent_runtime/board_store.py",
+      "symbol": "BoardStore._idempotent_replay",
+      "operator": "drop-the-recorded-verb",
+      "find": "        recorded_verb = str(record.get(\"verb\") or \"\").strip()",
+      "replace": "        recorded_verb = \"\"",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_board_store.py::test_a_key_reused_across_verbs_refuses_instead_of_silently_skipping_the_write"
+      ]
+    },
+    {
+      "id": "bipv-the-crossing-refusal-carries-its-own-code",
+      "path": "agent_runtime/errors.py",
+      "symbol": "IdempotencyKeyVerbMismatch",
+      "operator": "share-the-unresolved-code",
+      "find": "    code = \"idempotency_key_verb_mismatch\"",
+      "replace": "    code = \"idempotent_replay_unresolved\"",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_board_store.py::test_the_cross_verb_refusal_is_its_own_exit_family_not_the_unresolved_one"
+      ]
+    },
+    {
+      "id": "bipv-the-crossing-refusal-is-exit-family-two",
+      "path": "hermes_cli/harness_support.py",
+      "symbol": "module",
+      "operator": "move-to-the-retryable-family",
+      "find": "    \"idempotency_key_verb_mismatch\": 2,",
+      "replace": "    \"idempotency_key_verb_mismatch\": 7,",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_board_store.py::test_the_cross_verb_refusal_is_its_own_exit_family_not_the_unresolved_one"
+      ]
+    },
+    {
+      "id": "ctr-a-settled-replay-reports-the-records-state",
+      "path": "agent_runtime/chat_turn_reservations.py",
+      "symbol": "ChatTurnReservation.replay_ack",
+      "operator": "freeze-the-state-at-accepted",
+      "find": "            payload[\"state\"] = self.record.state",
+      "replace": "            payload[\"state\"] = STATE_ACCEPTED",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_serve_rpc_chat_turn.py::test_a_settled_replay_does_not_report_state_accepted"
+      ]
+    },
+    {
+      "id": "mcpsdk-an-absent-client-is-its-own-denial",
+      "path": "agent_runtime/mcp_admission.py",
+      "symbol": "admit_mcp_servers",
+      "operator": "never-blame-the-runtime",
+      "find": "    sdk_missing = bool(missed) and register is None and not mcp_sdk_available()",
+      "replace": "    sdk_missing = False",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_mcp_admission.py::test_a_runtime_with_no_mcp_client_says_so_instead_of_blaming_the_server"
+      ]
+    },
+    {
+      "id": "mcpsdk-the-probe-reads-the-flag",
+      "path": "agent_runtime/mcp_admission.py",
+      "symbol": "mcp_sdk_available",
+      "operator": "assume-the-sdk-is-there",
+      "find": "    return bool(_MCP_AVAILABLE)",
+      "replace": "    return True",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_mcp_admission.py::test_the_sdk_probe_reads_the_flag_and_fails_pessimistically"
+      ]
+    },
+    {
+      "id": "bipv-the-crossing-refusal-escapes-the-catch-all",
+      "path": "hermes_cli/harness_support.py",
+      "symbol": "_error_code_for_exception",
+      "operator": "fall-through-to-internal-error",
+      "find": "        declared = getattr(exc, \"code\", None)\n        if isinstance(declared, str) and declared:\n            return declared",
+      "replace": "        declared = getattr(exc, \"code\", None)\n        if False:\n            return declared",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_board_store.py::test_the_cross_verb_refusal_is_its_own_exit_family_not_the_unresolved_one"
+      ]
+    },
+    {
+      "id": "bipv-the-crossing-hint-does-not-say-repair-the-file",
+      "path": "hermes_cli/harness_support.py",
+      "symbol": "_error_hint",
+      "operator": "reuse-the-unresolved-hint",
+      "find": "        \"idempotency_key_verb_mismatch\": \"That --idempotency-key already belongs to a different board verb on this board (the message names both). One key names one gesture: re-run with a key of its own. Retrying this command unchanged will be refused identically.\",",
+      "replace": "        \"idempotency_key_verb_mismatch\": \"The idempotency receipt named in the message records a write whose row cannot be found. Repair or remove that receipt file under boards/<board-id>/idempotency/, or retry with a fresh --idempotency-key, then run the same command again.\",",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_board_store.py::test_the_cross_verb_refusal_is_its_own_exit_family_not_the_unresolved_one"
+      ]
+    },
+    {
+      "id": "longrun-draft-lock-admits-the-second-writer",
+      "path": "agent/charsheet/draft_lock.py",
+      "symbol": "_claim",
+      "operator": "admit-a-taken-lock",
+      "find": "    except FileExistsError:\n        return False",
+      "replace": "    except FileExistsError:\n        return True",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_charsheet_draft_lock.py::test_a_second_writer_on_one_draft_is_refused_and_told_who_holds_it"
+      ]
+    },
+    {
+      "id": "longrun-a-reentrant-acquire-contends-with-itself",
+      "path": "agent/charsheet/draft_lock.py",
+      "symbol": "draft_generation_lock",
+      "operator": "deny-same-thread-reentry",
+      "find": "        if entry is not None and entry[0] == ident:",
+      "replace": "        if False:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_charsheet_draft_lock.py::test_the_same_thread_re_enters_and_the_nested_exit_does_not_release"
+      ]
+    },
+    {
+      "id": "longrun-rows-generates-without-the-draft-lock",
+      "path": "agent/charsheet/draft.py",
+      "symbol": "CharacterDraft.run_rows",
+      "operator": "drop-the-generation-lock",
+      "find": "        with self.generation_lock(\"rows\"):",
+      "replace": "        with contextlib.nullcontext():",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_charsheet_draft.py::test_a_second_generation_on_one_draft_is_refused_rather_than_interleaved"
+      ]
+    },
+    {
+      "id": "longrun-drain-terminates-over-a-live-generation",
+      "path": "hermes_cli/harness_parts/serve.py",
+      "symbol": "serve_loop._drain_monitor/terminal",
+      "operator": "hold-only-for-chat-turns",
+      "find": "                        \"terminal\": not (chat_turn_ids or long_run_ids),",
+      "replace": "                        \"terminal\": not chat_turn_ids,",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_serve_socket_lane.py::test_a_live_character_generation_survives_a_drain_the_way_a_chat_turn_does"
+      ]
+    },
+    {
+      "id": "longrun-busy-frame-drops-the-long-run-count",
+      "path": "hermes_cli/harness_parts/serve.py",
+      "symbol": "_busy_frame",
+      "operator": "zero-the-long-run-count",
+      "find": "            long_runs = sum(1 for item in inflight.values() if item.is_long_run)",
+      "replace": "            long_runs = 0",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_serve_socket_lane.py::test_a_live_character_generation_survives_a_drain_the_way_a_chat_turn_does"
+      ]
+    },
+    {
+      "id": "longrun-provider-deadline-never-refuses",
+      "path": "agent/charsheet/pipeline.py",
+      "symbol": "_within_deadline",
+      "operator": "never-notice-the-abandoned-call",
+      "find": "    if worker.is_alive():",
+      "replace": "    if False:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_charsheet_provider_deadline.py::test_a_provider_that_never_answers_is_refused_within_the_deadline"
+      ]
+    },
+    {
+      "id": "longrun-busy-refusal-loses-its-typed-code",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_characters_refusal_extra",
+      "operator": "drop-the-refusal-code",
+      "find": "    extra: dict = {\"code\": code}",
+      "replace": "    extra: dict = {}",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_characters_cli.py::test_a_busy_draft_refuses_the_generate_verb_and_names_who_holds_it"
+      ]
+    },
+    {
+      "id": "longrun-autopilot-runs-without-holding-the-draft",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_cmd_characters_auto",
+      "operator": "drop-the-plan-wide-lock",
+      "find": "        holding.enter_context(draft.generation_lock(\"auto\"))",
+      "replace": "        pass",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_characters_cli.py::test_the_autopilot_refuses_a_busy_draft_before_it_runs_one_step"
+      ]
+    },
+    {
+      "id": "sh-status-swallows-the-denial-it-degraded-on",
+      "path": "agent_runtime/realm_sync.py",
+      "symbol": "realm_sync_status",
+      "operator": "report-the-degraded-read-as-a-verified-one",
+      "find": "        remote_check = {\"checked\": False, \"error\": auth_error.code}",
+      "replace": "        remote_check = {\"checked\": True, \"error\": None}",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_realm_sync.py::test_status_answers_local_facts_when_the_remote_half_is_denied"
+      ]
+    },
+    {
+      "id": "sh-status-degrades-with-no-local-repo-to-degrade-to",
+      "path": "agent_runtime/realm_sync.py",
+      "symbol": "realm_sync_status",
+      "operator": "drop-the-floor-of-the-degrade",
+      "find": "        if not (repo / \".git\").exists():\n            raise auth_error",
+      "replace": "        if False:\n            raise auth_error",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_realm_sync.py::test_status_still_refuses_when_the_denial_leaves_no_local_facts"
+      ]
+    },
+    {
+      "id": "sh-resolve-adopt-arm-writes-past-the-patch-lane",
+      "path": "agent_runtime/office_store.py",
+      "symbol": "OfficeStore.resolve_conflict",
+      "operator": "drop-the-adopted-rows-patch",
+      "find": "                        self._emit_actor_patch(\n                            actor, created=created, correlation_id=correlation_id\n                        )",
+      "replace": "                        pass",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_serve_rpc_office_resolve.py::test_the_adopt_arm_emits_the_actor_patch_its_archive_sibling_always_did"
+      ]
+    },
+    {
+      "id": "sh-board-pull-card-arm-writes-past-the-store",
+      "path": "agent_runtime/board_sync.py",
+      "symbol": "apply_board_pull",
+      "operator": "restore-the-raw-atomic-write",
+      "find": "                store.adopt_remote_card(remote_card, board_id=board_id)",
+      "replace": "                atomic_json_write(paths.board_card_path(board_id, card_id), to_jsonable(remote_card), indent=2, sort_keys=True)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_board_sync.py::test_pull_that_adopts_a_card_emits_what_a_local_add_emits"
+      ]
+    },
+    {
+      "id": "sh-board-pull-def-arm-writes-past-the-store",
+      "path": "agent_runtime/board_sync.py",
+      "symbol": "apply_board_pull",
+      "operator": "restore-the-raw-atomic-write",
+      "find": "            store.adopt_remote_board(remote_board)",
+      "replace": "            atomic_json_write(paths.board_def_path(board_id), to_jsonable(remote_board), indent=2, sort_keys=True)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_board_sync.py::test_pull_that_adopts_a_board_def_emits_the_board_event"
+      ]
+    },
+    {
+      "id": "sh-card-adopt-calls-every-arrival-an-edit",
+      "path": "agent_runtime/board_store.py",
+      "symbol": "BoardStore.adopt_remote_card",
+      "operator": "assume-the-row-was-already-here",
+      "find": "            existed = self._card_path_active(bid, cid)",
+      "replace": "            existed = True",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_board_sync.py::test_pull_that_adopts_a_card_emits_what_a_local_add_emits"
+      ]
+    },
+    {
+      "id": "sh-board-adopt-calls-every-rewrite-a-create",
+      "path": "agent_runtime/board_store.py",
+      "symbol": "BoardStore.adopt_remote_board",
+      "operator": "assume-the-board-is-new",
+      "find": "            existed = self.exists(bid)",
+      "replace": "            existed = False",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_board_sync.py::test_pull_that_adopts_a_board_def_emits_the_board_event"
+      ]
+    },
+    {
+      "id": "sh-revert-card-arm-writes-past-the-store",
+      "path": "agent_runtime/realm_revert.py",
+      "symbol": "_adopt_from_upstream",
+      "operator": "restore-the-raw-atomic-write",
+      "find": "    board_store.adopt_remote_card(\n        entity, board_id=item.container, updated_by=REVERT_ACTOR_REF\n    )",
+      "replace": "    from utils import atomic_json_write\n\n    entity.board_id = item.container\n    atomic_json_write(paths.board_card_path(item.container, item.item_key), to_jsonable(entity), indent=2, sort_keys=True)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_realm_revert.py::test_reverting_an_edited_card_writes_through_the_stores_evented_door"
+      ]
+    },
+    {
+      "id": "sh-loader-registers-without-binding-the-parent",
+      "path": "plugins/plugin_loader.py",
+      "symbol": "load_plugin_module",
+      "operator": "stop-one-step-short-of-an-import",
+      "find": "        setattr(parent_mod, child_name, mod)",
+      "replace": "        pass",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/plugins/memory/test_provider_loader_import_identity.py::test_loaded_provider_is_bound_on_its_parent_package"
+      ]
+    },
+    {
+      "id": "sh-loader-failed-exec-leaves-module-published",
+      "path": "plugins/plugin_loader.py",
+      "symbol": "load_plugin_module",
+      "operator": "retain-failed-module-registration",
+      "find": "    if not _exec(mod, logger):\n        sys.modules.pop(module_name, None)\n        return None",
+      "replace": "    if not _exec(mod, logger):\n        return None",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/plugins/memory/test_provider_loader_import_identity.py::test_a_provider_that_fails_to_exec_leaves_neither_half_behind"
+      ]
+    },
+    {
+      "id": "doctor-home-is-read-at-call-time-not-at-import",
+      "path": "hermes_cli/doctor_state.py",
+      "symbol": "_check_skills_hub/HERMES_HOME",
+      "operator": "re-freeze-the-home",
+      "find": "    HERMES_HOME = get_hermes_home()",
+      "replace": "    HERMES_HOME = Path.home() / \".hermes\"",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_doctor.py::TestDoctorResolvesTheHomeAtCallTime::test_the_env_var_alone_redirects_every_profile_relative_read"
+      ]
+    },
+    {
+      "id": "cli-persona-refusal-drops-the-choices",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "persona_not_found_message",
+      "operator": "refuse-without-naming-the-choices",
+      "find": "    choices = _placeable_persona_choice_text()\n    return f\"{base}. Placeable now: {choices}\" if choices else base",
+      "replace": "    return base",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_agent_create_verb.py::test_the_unknown_persona_refusal_spells_out_what_is_placeable"
+      ]
+    },
+    {
+      "id": "cli-persona-spelling-offered-for-a-shared-profile",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "accepted_persona_spellings",
+      "operator": "offer-the-profile-spelling-without-checking-ownership",
+      "find": "    if owners == [persona_id] and profile_spelling not in spellings:",
+      "replace": "    if profile_spelling not in spellings:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_agent_create_verb.py::test_a_profile_two_personas_share_is_not_offered_as_a_spelling"
+      ]
+    },
+    {
+      "id": "cli-agent-list-row-loses-the-accepted-spellings",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_agent_definition_row",
+      "operator": "reprint-the-binding-instead-of-the-spellings",
+      "find": "        \"persona_spellings\": accepted_persona_spellings(persona, list(roster or [persona])),",
+      "replace": "        \"persona_spellings\": [persona.hermes_profile],",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_profile_binding.py::test_agent_list_row_names_both_spellings_agent_create_accepts"
+      ]
+    },
+    {
+      "id": "charsheet-no-sheet-still-reads-and-inlines-the-bytes",
+      "path": "agent/charsheet/draft.py",
+      "symbol": "sprite_payload",
+      "operator": "ignore-the-metadata-only-mode",
+      "find": "            if include_sheet\n            else {\"sheet\": str(sheet_path)}",
+      "replace": "            if True\n            else {\"sheet\": str(sheet_path)}",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_charsheet_draft.py::test_the_metadata_only_payload_drops_the_bytes_and_names_the_file"
+      ]
+    },
+    {
+      "id": "charsheet-sprite-verb-ignores-the-no-sheet-flag",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_cmd_characters_sprite",
+      "operator": "drop-the-flag-on-the-way-through",
+      "find": "            slug, include_sheet=not bool(getattr(args, \"no_sheet\", False))",
+      "replace": "            slug, include_sheet=True",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_characters_cli.py::test_no_sheet_hands_back_the_path_instead_of_half_a_megabyte_of_base64"
+      ]
+    },
+    {
+      "id": "shim-target-resolves-from-path-before-the-venv",
+      "path": "hermes_cli/path_setup.py",
+      "symbol": "_hermes_exe_dirs",
+      "operator": "hoist-path-rung-above-the-interpreter",
+      "find": "    _add(os.path.dirname(sys.executable) if sys.executable else \"\")\n\n    argv0 = sys.argv[0] if sys.argv else \"\"",
+      "replace": "    which = shutil.which(\"hermes\")\n    if which:\n        _add(os.path.dirname(which))\n\n    _add(os.path.dirname(sys.executable) if sys.executable else \"\")\n\n    argv0 = sys.argv[0] if sys.argv else \"\"",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_path_setup.py::TestResolveHermesExe::test_the_venv_console_script_beats_whatever_path_answers"
+      ]
+    },
+    {
+      "id": "shim-target-accepts-a-relative-rung",
+      "path": "hermes_cli/path_setup.py",
+      "symbol": "_hermes_exe_dirs/_add",
+      "operator": "drop-absolute-path-guard",
+      "find": "        if (\n            directory\n            and os.path.isabs(directory)\n            and directory not in dirs\n            and os.path.isdir(directory)\n        ):",
+      "replace": "        if directory and directory not in dirs and os.path.isdir(directory):",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_path_setup.py::TestResolveHermesExe::test_a_relative_hit_from_the_current_directory_is_not_a_target"
+      ]
+    },
+    {
+      "id": "shim-is-written-even-when-it-would-exec-itself",
+      "path": "hermes_cli/path_setup.py",
+      "symbol": "register_hermes_command",
+      "operator": "drop-self-exec-refusal",
+      "find": "    if _same_path(hermes_exe, shim):",
+      "replace": "    if False:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_path_setup.py::TestRefusesToWriteAShimThatExecsItself::test_the_shim_is_not_written_and_the_refusal_is_typed"
+      ]
+    },
+    {
+      "id": "shim-refusal-is-untyped-prose-only",
+      "path": "hermes_cli/path_setup.py",
+      "symbol": "register_hermes_command",
+      "operator": "blank-refusal-code",
+      "find": "        result.error = \"shim_target_is_shim\"",
+      "replace": "        result.error = None",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_path_setup.py::TestRefusesToWriteAShimThatExecsItself::test_an_existing_shim_is_left_exactly_as_it_was"
+      ]
+    },
+    {
+      "id": "shim-is-written-past-the-isolated-install-dir",
+      "path": "hermes_cli/path_setup.py",
+      "symbol": "register_hermes_command",
+      "operator": "write-beside-the-resolved-install-dir",
+      "find": "    bin_dir = _shim_install_dir()",
+      "replace": "    bin_dir = os.path.join(_shim_install_dir() or \"\", \"nested\")",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_postinstall_noninteractive.py::test_postinstall_writes_its_shim_inside_the_sandbox_and_nowhere_else"
+      ]
+    },
+    {
+      "id": "postinstall-swallows-the-shim-refusal",
+      "path": "hermes_cli/_downstream_cli.py",
+      "symbol": "cmd_postinstall",
+      "operator": "silence-the-shim-report",
+      "find": "    if path_result.error:\n        print()\n        print(f\"⚠ PATH shim not written [{path_result.error}]: {path_result.note}\")",
+      "replace": "    if False:\n        print()\n        print(f\"⚠ PATH shim not written [{path_result.error}]: {path_result.note}\")",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_postinstall_noninteractive.py::test_postinstall_says_out_loud_when_it_refuses_to_write_the_shim"
+      ]
+    },
+    {
+      "id": "postinstall-summary-drops-the-refusal-code",
+      "path": "hermes_cli/_downstream_cli.py",
+      "symbol": "cmd_postinstall",
+      "operator": "blank-summary-error",
+      "find": "            \"error\": path_result.error,",
+      "replace": "            \"error\": \"\",",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_postinstall_noninteractive.py::test_postinstall_json_emits_summary_as_final_line"
+      ]
+    },
+    {
+      "id": "backfill-skipped-row-loses-its-directory",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_cmd_characters_backfill_home",
+      "operator": "drop-directory-from-the-skipped-line",
+      "find": "    lines += [\n        f\"  skipped {row['id']}  {row['directory']}  already {row['hermesHome']}\"\n        for row in skipped\n    ]",
+      "replace": "    lines += [f\"  skipped {row['id']}  already {row['hermesHome']}\" for row in skipped]",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_characters_cli.py::test_the_human_receipt_names_the_directory_on_the_skipped_arm_too"
+      ]
+    },
+    {
+      "id": "w2-a-preload-over-its-ceiling-stops-being-over",
+      "path": "agent_runtime/skill_install.py",
+      "symbol": "SkillSizeState.over",
+      "operator": "nothing-is-ever-over-budget",
+      "find": "        return self.ceiling == SKILL_SIZE_NO_CEILING or self.size > self.ceiling",
+      "replace": "        return False",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_skill_policy.py::test_a_preload_over_its_declared_ceiling_fails_the_install_verifier"
+      ]
+    },
+    {
+      "id": "w2-the-size-lane-drops-out-of-the-install-gates-verdict",
+      "path": "scripts/verify_harness_skill_install.py",
+      "symbol": "main",
+      "operator": "measure-it-then-ignore-it",
+      "find": "    if mismatches or missing or sourceless or overages:",
+      "replace": "    if mismatches or missing or sourceless:",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_skill_policy.py::test_a_preload_over_its_declared_ceiling_fails_the_install_verifier"
+      ]
+    },
+    {
+      "id": "w2-the-turn-receipt-stops-saying-what-the-preload-cost",
+      "path": "agent_runtime/prompt_observability.py",
+      "symbol": "_skill_md_bytes",
+      "operator": "answer-absent-for-a-resolved-skill",
+      "find": "        return int(Path(candidate.skill_md).stat().st_size)",
+      "replace": "        return None",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_prompt_observability.py::test_a_used_skill_receipt_reports_what_its_preload_cost"
+      ]
+    },
+    {
+      "id": "ir-heal-a-dropped-edge-never-re-enters-phase-two",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "apply_persona_instance_pull",
+      "operator": "never-heal-a-kept-local-row",
+      "find": "            if healable:\n                heal_pending[instance_id] = healable\n                written.append((instance_id, remote_body))",
+      "replace": "            if False:\n                heal_pending[instance_id] = healable\n                written.append((instance_id, remote_body))",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_a_dropped_steering_edge_re_applies_itself_once_its_parent_arrives"
+      ]
+    },
+    {
+      "id": "ir-heal-clobbers-an-authored-re-steer",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "_healable_dropped_parents",
+      "operator": "heal-on-the-ledger-alone",
+      "find": "    expected = persona_instance_def_hash(_remote_body_without_edges(remote_body, parents))\n    return parents if expected == local_hash else []",
+      "replace": "    return parents",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_an_operator_re_steer_is_left_alone_by_the_heal"
+      ]
+    },
+    {
+      "id": "ir-heal-ignores-that-the-realm-moved-the-body",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "_healable_dropped_parents",
+      "operator": "drop-the-remote-hash-guard",
+      "find": "    if entry.get(\"remote_hash\") != remote_hash:\n        return []\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_a_ledger_entry_taken_against_a_body_the_realm_has_since_moved_heals_nothing"
+      ]
+    },
+    {
+      "id": "ir-heal-records-drops-no-parent-can-repair",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "apply_persona_instance_pull",
+      "operator": "record-every-drop-not-just-parent-absent",
+      "find": "            {str(row.get(\"parent\") or \"\") for row in dropped if row.get(\"reason\") == \"parent_absent\"}",
+      "replace": "            {str(row.get(\"parent\") or \"\") for row in dropped}",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_a_self_edge_is_not_a_heal_candidate"
+      ]
+    },
+    {
+      "id": "ir-heal-ledger-cleared-by-an-older-peer",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "apply_persona_instance_pull",
+      "operator": "clear-the-ledger-on-an-absent-projection",
+      "find": "    if source is None:\n        # Not published. Never a removal",
+      "replace": "    if source is None:\n        write_dropped_steering_ledger(realm_id, {})\n        # Not published. Never a removal",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_an_older_publisher_never_clears_the_heal_ledger"
+      ]
+    },
+    {
+      "id": "ir-heal-reports-a-healed-row-as-still-local",
+      "path": "agent_runtime/persona_instance_sync.py",
+      "symbol": "apply_persona_instance_pull",
+      "operator": "account-a-heal-as-kept-local",
+      "find": "            # ``adopted`` and not ``converged``: a travelling field DID move\n            # forward onto an existing row, and ``converged`` promises no write.\n            summary.adopted.append(instance_id)",
+      "replace": "            summary.kept_local.append(instance_id)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_pull.py::test_a_dropped_steering_edge_re_applies_itself_once_its_parent_arrives"
+      ]
+    },
+    {
+      "id": "ac-skills-replay-echoes-the-recorded-assignment",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "_observed_skills",
+      "operator": "echo-assigned-from-the-receipt",
+      "find": "        refreshed[\"assigned\"] = list(instance.skill_overrides or [])",
+      "replace": "        refreshed[\"assigned\"] = list(recorded.get(\"assigned\") or [])",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_an_idempotent_replay_re_reads_the_skills_block_instead_of_echoing_the_receipt"
+      ]
+    },
+    {
+      "id": "ac-skills-replay-echoes-the-recorded-installed-hash",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "_observed_skills",
+      "operator": "echo-installed-hash-from-the-receipt",
+      "find": "\"installed_hash\": installed_harness_skill_hash(str(entry.get(\"skill\") or \"\"))",
+      "replace": "\"installed_hash\": entry.get(\"installed_hash\")",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_an_idempotent_replay_re_reads_the_skills_block_instead_of_echoing_the_receipt"
+      ]
+    },
+    {
+      "id": "ac-skills-replay-re-derives-the-recorded-decision",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "_observed_skills",
+      "operator": "re-derive-changed-instead-of-keeping-it",
+      "find": "            {**dict(entry), \"installed_hash\": installed_harness_skill_hash(str(entry.get(\"skill\") or \"\"))}",
+      "replace": "            {**dict(entry), \"changed\": False, \"installed_hash\": installed_harness_skill_hash(str(entry.get(\"skill\") or \"\"))}",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_an_idempotent_replay_re_reads_the_skills_block_instead_of_echoing_the_receipt"
+      ]
+    },
+    {
+      "id": "ac-skills-fresh-is-claimed-on-a-read-that-failed",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "_observed_skills",
+      "operator": "stamp-skills-fresh-unconditionally",
+      "find": "    except Exception:  # noqa: BLE001 - a retired row, a decode fault, a gone root\n        return recorded, False",
+      "replace": "    except Exception:  # noqa: BLE001 - a retired row, a decode fault, a gone root\n        return recorded, True",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_agent_create_service.py::test_a_replay_whose_instance_is_gone_returns_the_recorded_skills_unchanged"
+      ]
+    },
+    {
+      "id": "w5-media-get-dials-on-the-reader-again",
+      "path": "agent_runtime/serve_rpc.py",
+      "symbol": "_runtime_media_get",
+      "operator": "drop-deferral",
+      "find": "        if spawn is not None and spawn(\n",
+      "replace": "        if False and spawn(\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_serve_rpc_media.py::test_a_peer_that_never_answers_no_longer_delays_the_next_request"
+      ]
+    },
+    {
+      "id": "w5-the-reply-seam-is-not-wired-to-the-pool",
+      "path": "hermes_cli/harness_parts/serve.py",
+      "symbol": "serve_loop/_handle_message spawn_reply wiring",
+      "operator": "unwire-seam",
+      "find": "                        spawn_reply=_spawn_reply,\n",
+      "replace": "                        spawn_reply=None,\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_serve_rpc_media.py::test_a_peer_that_never_answers_no_longer_delays_the_next_request"
+      ]
+    },
+    {
+      "id": "w5-the-deferred-sentinel-is-written-to-the-wire",
+      "path": "agent_runtime/serve_rpc.py",
+      "symbol": "is_deferred",
+      "operator": "break-identity-check",
+      "find": "    return frame is DEFERRED\n",
+      "replace": "    return False\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_serve_rpc_media.py::test_a_peer_that_never_answers_no_longer_delays_the_next_request"
+      ]
+    },
+    {
+      "id": "w5-a-deferred-fault-escapes-instead-of-answering",
+      "path": "agent_runtime/serve_rpc.py",
+      "symbol": "deferred_reply",
+      "operator": "drop-worker-boundary",
+      "find": "            return err(\n                rid,\n                ERR_HANDLER_FAILED,\n                f\"handler error: {exc}\",\n                {\"reason\": \"handler_failed\", \"method\": method_name},\n            )\n",
+      "replace": "            raise\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_serve_rpc_media.py::test_a_deferred_handler_fault_is_the_typed_frame_it_would_be_inline"
+      ]
+    },
+    {
+      "id": "w5-toolset-names-probe-every-check-fn-again",
+      "path": "agent_runtime/personas.py",
+      "symbol": "all_registered_toolsets",
+      "operator": "restore-availability-probe",
+      "find": "    from model_tools import get_registered_toolset_names\n\n    return [str(name) for name in get_registered_toolset_names()]\n",
+      "replace": "    from model_tools import get_available_toolsets\n\n    return sorted(str(name) for name in get_available_toolsets().keys())\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_tool_visibility_import_deferral.py::test_the_registered_toolset_names_cost_no_availability_probe"
+      ]
+    },
+    {
+      "id": "w5-the-names-accessor-answers-through-the-verdict",
+      "path": "model_tools.py",
+      "symbol": "get_registered_toolset_names",
+      "operator": "restore-availability-probe",
+      "find": "    return registry.get_registered_toolset_names()\n",
+      "replace": "    return sorted(registry.get_available_toolsets().keys())\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_tool_visibility_import_deferral.py::test_the_registered_toolset_names_cost_no_availability_probe"
+      ]
+    },
+    {
+      "id": "w5-the-join-sweep-claims-a-class-keyed-actor",
+      "path": "agent_runtime/harness_doctor.py",
+      "symbol": "_census_join_workspace",
+      "operator": "drop-class-keyed-skip",
+      "find": "        if not instance_id:\n",
+      "replace": "        if False:\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_harness_doctor.py::test_the_join_sweep_reads_a_receipt_only_for_an_orphan",
+        "--timeout=180"
+      ]
+    },
+    {
+      "id": "w7-the-backtick-span-pairs-across-the-line-again",
+      "path": "scripts/doc_cite_adjacency.py",
+      "symbol": "_spans",
+      "operator": "pair-across-line-boundaries",
+      "find": "    return [span for line in text.split(\"\\n\") for span in BACKTICKED.findall(line)]",
+      "replace": "    return BACKTICKED.findall(text)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/scripts/test_doc_cite_adjacency.py::test_a_backtick_span_never_pairs_across_a_line_boundary"
+      ]
+    },
+    {
+      "id": "w7-the-definition-walk-stops-descending-into-blocks",
+      "path": "scripts/changed_line_mutation_check.py",
+      "symbol": "_qualified_definitions",
+      "operator": "skip-block-bodies",
+      "find": "            elif isinstance(child, BLOCK_STATEMENTS):",
+      "replace": "            elif isinstance(child, ()):",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/scripts/test_mutation_claim_anchoring.py::test_a_def_nested_in_a_try_is_anchorable_by_its_own_symbol",
+        "tests/scripts/test_mutation_claim_anchoring.py::test_a_bare_nested_name_resolves_when_it_is_unambiguous"
+      ]
+    },
+    {
+      "id": "w7-the-straggler-retry-bills-no-collection",
+      "path": "scripts/run_tests_parallel.py",
+      "symbol": "main/the straggler pass",
+      "operator": "zero-the-straggler-collection",
+      "find": "        tests_collected += sum(\n            summary.get(key, 0)\n            for key in (\"passed\", \"failed\", \"skipped\", \"errors\", \"xfailed\", \"xpassed\")\n        )",
+      "replace": "        tests_collected += 0",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/scripts/test_run_tests_parallel.py::test_a_straggler_retry_that_passes_is_not_reported_as_zero_collected",
+        "tests/scripts/test_run_tests_parallel.py::test_a_straggler_that_recovers_only_skips_still_counts_as_collection"
+      ]
+    },
+    {
+      "id": "w7-the-migrate-refusal-names-the-directory-it-left-the-entry-in",
+      "path": "agent/charsheet/draft.py",
+      "symbol": "migrate_characters_home/_relocate",
+      "operator": "drop-source-directory-from-the-refusal",
+      "find": "        left_where_it_is = {**row, \"directory\": str(child)}\n",
+      "replace": "        left_where_it_is = dict(row)\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_charsheet_draft.py::test_every_skipped_row_names_the_directory_the_entry_was_left_in"
+      ]
+    },
+    {
+      "id": "w7-the-migrate-home-skipped-line-prints-the-directory",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_cmd_characters_migrate_home",
+      "operator": "drop-directory-from-the-skipped-line",
+      "find": "        f\"  skipped {row['kind']} {row.get('id') or row.get('slug')}  \"\n        f\"{row['directory']}  {row['reason']}\"\n",
+      "replace": "        f\"  skipped {row['kind']} {row.get('id') or row.get('slug')}  \"\n        f\"{row['reason']}\"\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_characters_cli.py::test_the_skipped_line_names_the_directory_its_own_comment_promises"
+      ]
+    },
+    {
+      "id": "w7-an-unset-home-is-no-shim-not-somebody-elses-home",
+      "path": "hermes_cli/path_setup.py",
+      "symbol": "_shim_install_dir",
+      "operator": "restore-the-password-database-fallback",
+      "find": "    variable = \"LOCALAPPDATA\" if _IS_WINDOWS else \"HOME\"\n    root = os.environ.get(variable)\n    if not root:\n        return None\n",
+      "replace": "    variable = \"LOCALAPPDATA\" if _IS_WINDOWS else \"HOME\"\n    root = os.environ.get(variable) or (None if _IS_WINDOWS else str(Path.home()))\n    if not root:\n        return None\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_path_setup.py::TestShimInstallDir::test_posix_without_home_resolves_to_nothing",
+        "tests/hermes_cli/test_path_setup.py::TestShimInstallDir::test_posix_reads_home_from_the_env_not_the_password_database"
+      ]
+    },
+    {
+      "id": "ph-draftsman-seam-never-honoured",
+      "path": "agent/charsheet/pipeline.py",
+      "symbol": "_draftsman",
+      "operator": "ignore-the-declared-seam",
+      "find": "    fake = draftsman_from_env()\n    return _generate_image if fake is None else fake",
+      "replace": "    draftsman_from_env()\n    return _generate_image",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_charsheet_fake_draftsman.py::test_with_the_seam_armed_the_resolution_is_the_fake",
+        "tests/agent/test_charsheet_fake_draftsman.py::test_a_full_offline_flow_under_the_seam_calls_no_provider"
+      ]
+    },
+    {
+      "id": "ph-draftsman-resolved-once-per-process",
+      "path": "agent/charsheet/pipeline.py",
+      "symbol": "_draftsman",
+      "operator": "resolve-at-import-time",
+      "find": "def _draftsman():",
+      "replace": "@__import__('functools').lru_cache(maxsize=None)\ndef _draftsman():",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_charsheet_fake_draftsman.py::test_the_environment_is_read_at_call_time_not_at_import"
+      ]
+    },
+    {
+      "id": "ph-any-value-arms-the-fake",
+      "path": "agent/charsheet/fake_draftsman.py",
+      "symbol": "draftsman_from_env",
+      "operator": "drop-the-exact-word-refusal",
+      "find": "    if raw != FAKE_DRAFTSMAN:\n        _refuse(raw)\n        return None",
+      "replace": "    if False:\n        _refuse(raw)\n        return None",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_charsheet_fake_draftsman.py::test_any_other_value_is_ignored_and_the_real_door_stands"
+      ]
+    },
+    {
+      "id": "ph-refusal-line-per-generation",
+      "path": "agent/charsheet/fake_draftsman.py",
+      "symbol": "_refuse",
+      "operator": "report-every-time",
+      "find": "    if value in _REPORTED:\n        return\n    _REPORTED.add(value)",
+      "replace": "    _REPORTED.add(value)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_charsheet_fake_draftsman.py::test_an_ignored_value_is_reported_once_per_process"
+      ]
+    },
+    {
+      "id": "ph-fake-bytes-vary-per-call",
+      "path": "agent/charsheet/fake_draftsman.py",
+      "symbol": "FakeDraftsman.__call__",
+      "operator": "leak-the-call-index-into-the-picture",
+      "find": "        image = self.draw(prompt, prefix)",
+      "replace": "        image = self.draw(prompt, prefix)\n        image.putpixel((0, 0), (index % 255, 0, 0, 255))",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_charsheet_fake_draftsman.py::test_the_same_request_answers_the_same_bytes"
+      ]
+    },
+    {
+      "id": "ph-row-frames-not-read-from-the-request",
+      "path": "agent/charsheet/fake_draftsman.py",
+      "symbol": "slots_for",
+      "operator": "hardcode-the-frame-count",
+      "find": "        frames = _layout_count(prompt, prefix)\n        facing = _ROW_FACING.search(prompt)",
+      "replace": "        frames = 2\n        facing = _ROW_FACING.search(prompt)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_charsheet_fake_draftsman.py::test_a_row_carries_every_frame_the_request_asked_for"
+      ]
+    },
+    {
+      "id": "ph-payload-hides-the-fake-door",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_characters_emit",
+      "operator": "drop-the-draftsman-stamp",
+      "find": "    print(emit_json({**data, **_characters_draftsman()}) if getattr(args, \"json\", False) else human)",
+      "replace": "    print(emit_json(data) if getattr(args, \"json\", False) else human)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_characters_draftsman_seam.py::test_with_the_seam_armed_every_verb_says_which_draftsman_drew",
+        "tests/agent_runtime/test_serve_charsheet_fake_draftsman_child_e2e.py"
+      ]
+    },
+    {
+      "id": "ph-payload-stamps-the-provider-door-too",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_characters_draftsman",
+      "operator": "name-the-real-door-as-well",
+      "find": "    name = active_draftsman_name()\n    return {\"draftsman\": name} if name else {}",
+      "replace": "    name = active_draftsman_name()\n    return {\"draftsman\": name or \"real\"}",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_characters_draftsman_seam.py::test_with_the_seam_unset_no_payload_carries_a_draftsman_key"
+      ]
+    },
+    {
+      "id": "ph-autopilot-stream-hides-the-fake-door",
+      "path": "hermes_cli/harness.py",
+      "symbol": "_characters_auto_write",
+      "operator": "drop-the-draftsman-stamp",
+      "find": "        (emit_json_line({**data, **_characters_draftsman()}) if getattr(args, \"json\", False) else human) + \"\\n\"",
+      "replace": "        (emit_json_line(data) if getattr(args, \"json\", False) else human) + \"\\n\"",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_characters_draftsman_seam.py::test_every_line_of_the_autopilots_stream_says_it"
+      ]
+    },
+    {
+      "id": "w18hd-a-blank-container-still-addresses-a-removed-agent",
+      "path": "agent_runtime/realm_revert.py",
+      "symbol": "parse_item_spec",
+      "operator": "refuse-a-blank-container-again",
+      "find": "    if len(parts) != 3 or not parts[0].strip() or not parts[2].strip():",
+      "replace": "    if len(parts) != 3 or not all(part.strip() for part in parts):",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_drift.py::test_a_removed_agent_is_addressable_by_item_and_restored"
+      ]
+    },
+    {
+      "id": "w18hd-a-blank-container-is-not-a-wildcard",
+      "path": "agent_runtime/realm_revert.py",
+      "symbol": "revert_realm_sync",
+      "operator": "let-a-blank-container-match-any-container",
+      "find": "            item = by_spec.get(f\"{family}:{container}:{item_key}\")",
+      "replace": "            item = by_spec.get(f\"{family}:{container}:{item_key}\") or next(\n                (d for d in drift if not container and d.family == family and d.item_key == item_key),\n                None,\n            )",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_instance_drift.py::test_a_blank_container_is_not_a_wildcard"
+      ]
+    },
+    {
+      "id": "w18hd-an-occupied-lock-path-is-taken-on-both-hosts",
+      "path": "agent/charsheet/draft_lock.py",
+      "symbol": "_claim",
+      "operator": "drop-the-eacces-arm",
+      "find": "    except PermissionError:\n        if path.exists():\n            return False\n        raise\n",
+      "replace": "",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_charsheet_draft_lock.py::test_an_occupied_lock_path_answers_taken_on_both_hosts"
+      ]
+    },
+    {
+      "id": "w18hd-an-unwritable-draft-is-not-a-busy-one",
+      "path": "agent/charsheet/draft_lock.py",
+      "symbol": "_claim",
+      "operator": "read-every-eacces-as-a-held-lock",
+      "find": "    except PermissionError:\n        if path.exists():\n            return False\n        raise\n",
+      "replace": "    except PermissionError:\n        return False\n",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent/test_charsheet_draft_lock.py::test_a_permission_error_with_nothing_at_the_lock_path_is_not_a_busy_draft"
+      ]
+    },
+    {
+      "id": "cxr1-codex-readiness-asks-the-pool-alone",
+      "path": "agent_runtime/profile_readiness.py",
+      "symbol": "_codex_provider_issue",
+      "operator": "narrow-authority-to-one-source",
+      "find": "        from hermes_cli.runtime_provider import (\n            codex_credentials_resolvable_read_only,\n        )\n\n        resolvable = codex_credentials_resolvable_read_only()",
+      "replace": "        from agent.credential_pool import load_pool\n\n        _entry = load_pool(\"openai-codex\").peek()\n        resolvable = bool(\n            _entry is not None\n            and (\n                getattr(_entry, \"runtime_api_key\", None)\n                or getattr(_entry, \"access_token\", None)\n            )\n        )",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_codex_readiness_matches_run_path.py::test_a_cooling_pool_entry_does_not_flag_an_agent_whose_singleton_can_serve"
+      ]
+    },
+    {
+      "id": "cxr2-codex-auth-store-lane-always-says-present",
+      "path": "agent_runtime/auth_extensions.py",
+      "symbol": "codex_auth_store_credentials_present",
+      "operator": "assume-the-credential-exists",
+      "find": "    try:\n        auth._read_codex_tokens()\n        return True",
+      "replace": "    try:\n        return True",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_codex_readiness_matches_run_path.py::test_the_same_fixture_without_a_singleton_still_reports_attention",
+        "tests/agent_runtime/test_codex_readiness_matches_run_path.py::test_a_lane_with_no_credential_anywhere_still_reports_attention"
+      ]
+    },
+    {
+      "id": "cxr3-codex-readiness-asks-the-store-before-the-pool",
+      "path": "agent_runtime/provider_probes.py",
+      "symbol": "codex_credentials_resolvable_read_only",
+      "operator": "invert-source-order",
+      "find": "    entry = _load_pool(\"openai-codex\").peek()\n    if entry is not None and (\n        getattr(entry, \"runtime_api_key\", None)\n        or getattr(entry, \"access_token\", None)\n    ):\n        return True\n    return auth_mod.codex_auth_store_credentials_present()",
+      "replace": "    if auth_mod.codex_auth_store_credentials_present():\n        return True\n    entry = _load_pool(\"openai-codex\").peek()\n    return bool(\n        entry is not None\n        and (\n            getattr(entry, \"runtime_api_key\", None)\n            or getattr(entry, \"access_token\", None)\n        )\n    )",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_codex_readiness_matches_run_path.py::test_a_servable_pool_entry_answers_alone"
+      ]
+    }
+  ]
+}

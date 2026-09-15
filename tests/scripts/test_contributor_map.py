@@ -32,6 +32,24 @@ def test_loader_reads_login_from_first_noncomment_line(tmp_path):
     assert mapping == {"jane@example.com": "janedoe"}
 
 
+def test_case_variant_directory_preserves_both_exact_identities(tmp_path, monkeypatch):
+    import audit_pr_attribution
+
+    directory = tmp_path / "contributors" / "emails"
+    variants = directory / "case-variants"
+    variants.mkdir(parents=True)
+    (directory / "agent@agents-Mac-mini.local").write_text("momomojo\n")
+    (variants / "agent@Agents-Mac-mini.local").write_text("skip-agent\n")
+    assert release._load_contributor_dir(directory) == {
+        "agent@agents-Mac-mini.local": "momomojo",
+        "agent@Agents-Mac-mini.local": "skip-agent",
+    }
+    monkeypatch.setattr(audit_pr_attribution, "REPO_ROOT", tmp_path)
+    assert audit_pr_attribution.is_mapped("agent@agents-Mac-mini.local")
+    assert audit_pr_attribution.is_mapped("agent@Agents-Mac-mini.local")
+    assert not audit_pr_attribution.is_mapped("agent@AGENTS-Mac-mini.local")
+
+
 
 
 
@@ -157,7 +175,8 @@ def test_add_contributor_refuses_a_case_collision(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "EMAILS_DIR", d)
 
     assert mod.add_contributor("agent@example-host.local", "otherperson") == 1
-    assert not (d / "agent@example-host.local").exists()
+    assert [entry.name for entry in d.iterdir()] == ["agent@Example-Host.local"]
+    assert (d / "agent@Example-Host.local").read_text() == "someone\n"
 
 
 def test_add_contributor_refuses_case_collision_even_for_same_login(emails_dir, capsys):

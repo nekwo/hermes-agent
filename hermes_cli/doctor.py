@@ -12,12 +12,7 @@ from hermes_cli.env_loader import load_hermes_dotenv
 from hermes_constants import display_hermes_home
 
 PROJECT_ROOT = get_project_root()
-HERMES_HOME = get_hermes_home()
 _DHH = display_hermes_home()  # user-facing display path (e.g. ~/.hermes or ~/.hermes/profiles/coder)
-
-# Load environment variables from ~/.hermes/.env so API key checks work
-_env_path = get_env_path()
-load_hermes_dotenv(hermes_home=_env_path.parent, project_env=PROJECT_ROOT / ".env")
 
 from hermes_cli.colors import Colors, color
 from hermes_cli.doctor_report import Finding, _section, check_bool, check_info, doctor_check, warn_on_error
@@ -106,7 +101,10 @@ def _check_api_connectivity(should_fix: bool, f: Finding) -> None:
 
 
 # Ordered (section title, check). None title = check prints its own header (or none); order is user-visible.
+from agent_runtime.doctor_extensions import check_gateway_launcher, _check_gateway_launcher_interpreter
+
 DOCTOR_CHECKS = (
+    (None, check_gateway_launcher),
     ('Security Advisories', _check_security_advisories), ('MCP Server Security', _check_mcp_security),
     ('Python Environment', _check_python_environment), ('SSL / CA Certificates', _check_certificates),
     ('Required Packages', _check_required_packages), ('Configuration Files', _check_env_file),
@@ -160,8 +158,10 @@ def _print_summary(should_fix: bool, total: Finding) -> None:
     print()
 
 
-def run_doctor(args):
+def _run_doctor(args):
     """Run diagnostic checks."""
+    env_path = get_env_path()
+    load_hermes_dotenv(hermes_home=env_path.parent, project_env=PROJECT_ROOT / ".env")
     should_fix = getattr(args, 'fix', False)
     # Doctor runs from the interactive CLI, so CLI-gated tool checks (e.g. cronjob) see the same context.
     os.environ.setdefault("HERMES_INTERACTIVE", "1")
@@ -234,3 +234,10 @@ def __getattr__(name):  # PEP 562 — lazy so no import cycles
     warn_once(__name__, name, *target)
     return getattr(importlib.import_module(target[0]), target[1])
 # ---- END PLUGIN-COMPAT ----
+
+
+def run_doctor(args, *, agent_browser_runnable_override=None):
+    """Resolve the selected home when invoked and scope optional test probes to this call."""
+    from agent_runtime.doctor_extensions import browser_probe_scope
+    with browser_probe_scope(agent_browser_runnable_override):
+        return _run_doctor(args)

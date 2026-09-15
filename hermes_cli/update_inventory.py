@@ -41,6 +41,7 @@ class UpdatePlan:
     expected_version: Optional[str] = None
     profiles: list = field(default_factory=list)
     runtimes: list = field(default_factory=list)  # list[RuntimeRecord]
+    history: dict = field(default_factory=dict)  # cached refs only; never a network fetch
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)  # recursive: RuntimeRecord entries become dicts
@@ -251,6 +252,13 @@ def collect_runtime_inventory() -> UpdatePlan:
     seen: set[int] = set()
     _collect_gateway_runtimes(plan, profile_homes, seen)
     _collect_ledger_runtimes(plan, seen)
+    if plan.install_method == "git":
+        with _probe("Fork history assessment"):
+            from hermes_cli.main import PROJECT_ROOT
+            from hermes_cli.update_cmd_git import _get_origin_url, _is_fork
+            from hermes_cli.update_history import assess_history
+            if _is_fork(_get_origin_url(["git"], PROJECT_ROOT)):
+                plan.history = assess_history(["git"], PROJECT_ROOT, "origin/main").to_dict()
     return plan
 
 
@@ -261,6 +269,13 @@ def print_update_plan(plan: UpdatePlan) -> None:
     if plan.expected_version:
         install += f" (v{plan.expected_version}" + (f" @ {plan.expected_sha[:8]}" if plan.expected_sha else "") + ")"
     print(install)
+    if plan.history:
+        history = plan.history
+        print(f"  Fork history (cached {history['target']}): {history['relationship']}")
+        if history.get("same_tree") and history["relationship"] not in {"equal", "fast_forward", "local_ahead"}:
+            print("  Matching trees with different ancestry: possible fold; review required, never automatic reset.")
+        if history["relationship"] not in {"equal", "fast_forward", "local_ahead"}:
+            print("  Update will preserve recovery refs and stop before stashing or switching this checkout.")
     if not plan.updatable_in_place:
         print("  ⚠ This install is NOT updatable in place.")
         print(f"    Update via: {plan.update_mechanism}")

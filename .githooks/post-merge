@@ -1,0 +1,71 @@
+#!/bin/sh
+# Post-merge repair: after a pull, the runtime's copy of every canonical shared
+# skill is made this repo's copy again.
+#
+# Install this once per clone:
+#
+#     git config core.hooksPath .githooks
+#
+# (git config is per-clone and shared by every worktree of it, so one command
+# covers the primary checkout and every `git worktree add` under it.)
+#
+# WHY HERE, AND WHY NOT pre-push. This ran from `.githooks/pre-push` until
+# 2026-08-30. That is the moment the PRODUCER publishes, and it repaired the one
+# machine that least needed repairing — the machine whose repo copy is the
+# newest thing in the realm. The drift this exists to close is acquired by a
+# CONSUMER: `git pull` brings in an edited `docs/agent-runtime-harness/
+# harness-skills/<id>/SKILL.md`, and nothing on that machine copies it to
+# `<hermes root>/shared/skills/<id>/SKILL.md`, which is the only copy a chat
+# turn ever loads (the resolver refuses any non-`shared_core` candidate for a
+# canonical id). So the trigger moved to the two moments a consumer acquires it:
+# this hook, and `harness serve` boot.
+#
+# WHY A HOOK AND NOT CI — and NOT because CI skips on this fork; most of it does
+# not. The destination is `get_shared_skills_dir()` under the MACHINE's hermes
+# root, and a GitHub-hosted runner has no such root. CI could only install into
+# a throwaway filesystem and then verify the copy it had just written — the same
+# false all-clear a wrong root produces locally. The join is observable only
+# where both halves exist, which is an operator's machine.
+#
+# KNOWN HOLE, stated rather than papered over: `git pull --rebase` does NOT fire
+# post-merge (git runs no merge, so there is no post-merge). Neither does
+# `git fetch` alone, nor a `git checkout` between branches. Serve start covers
+# every one of those — `hermes_cli/harness_parts/serve.py`
+# `install_harness_skills_at_boot` runs the same repair at every boot — so this
+# hook is the early half of a two-place answer, not the whole of it.
+#
+# THIS HOOK CANNOT BLOCK. The merge already happened by the time it runs, so a
+# nonzero exit only prints. That is acceptable and is the difference in posture
+# from the push gate it replaces: this is a repair-and-report lane, and serve
+# boot backstops it. What it must never do is fail SILENTLY.
+#
+# The script's exit-2-without-a-pinned-home behaviour stays as is. A hook
+# inherits an arbitrary shell, usually one with no `HERMES_HOME`, and the script
+# refuses to guess rather than repairing into the `%LOCALAPPDATA%` shadow
+# runtime and reporting "ok" about a tree no persona reads. Exit 2 names exactly
+# what to export.
+#
+# Cost when nothing drifted: one Python start plus a small file hash per
+# canonical package. `install_harness_skill` writes nothing when they match.
+
+repo_root=$(git rev-parse --show-toplevel)
+script="$repo_root/scripts/verify_harness_skill_install.py"
+
+if [ ! -f "$script" ]; then
+    echo "post-merge: $script is missing — the installed skill packages were NOT verified." >&2
+    exit 1
+fi
+
+# Fail loud on a missing interpreter rather than skipping the repair: a check
+# that quietly does not run is worse than no check (the launcher's Stage C tier
+# sat red for twelve days behind exactly that shape).
+if command -v python >/dev/null 2>&1; then
+    py=python
+elif command -v python3 >/dev/null 2>&1; then
+    py=python3
+else
+    echo "post-merge: no python on PATH — the installed skill packages were NOT verified." >&2
+    exit 1
+fi
+
+"$py" "$script"

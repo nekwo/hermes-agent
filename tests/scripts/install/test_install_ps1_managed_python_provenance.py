@@ -209,6 +209,7 @@ def test_python_find_drains_large_stderr_without_deadlock(tmp_path: Path) -> Non
     assert "Creating virtual environment with Python 3.11" in run.stdout
 
 
+@pytest.mark.timeout(60)  # Exercise the real 30s deadline plus compilation/cleanup.
 def test_python_find_timeout_kills_uv_and_fails_stage(tmp_path: Path) -> None:
     powershell = shutil.which("powershell")
     if not powershell:

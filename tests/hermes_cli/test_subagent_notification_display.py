@@ -11,6 +11,8 @@ from tui_gateway import server
 
 
 def test_completion_display_keeps_payload_separate_across_surfaces(monkeypatch, capsys, tmp_path):
+    # This witness exercises the optional parent follow-up turn as well as display.
+    monkeypatch.setenv("HERMES_BACKGROUND_AGENT_TURNS", "true")
     for status, truncated, label in [("completed", False, "Completed"), ("failed", False, "Failed"),
                                       ("cancelled", False, "Cancelled"), ("completed", True, "Incomplete"),
                                       ("stalled", False, "Stalled"), ("unknown", False, "Unknown"),

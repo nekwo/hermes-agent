@@ -395,3 +395,7 @@ def __getattr__(name):  # PEP 562 — lazy so no import cycles
     warn_once(__name__, name, *target)
     return getattr(importlib.import_module(target[0]), target[1])
 # ---- END PLUGIN-COMPAT ----
+
+# Shared inventory for the downstream provider report and status renderer.
+from hermes_cli.status_auth import _API_KEYS as STATUS_API_KEYS
+resolve_status_env = _first_env_value

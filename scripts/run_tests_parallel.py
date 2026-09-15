@@ -4,7 +4,7 @@
 The minimum-viable replacement for pytest-xdist + a subprocess-isolation
 plugin. Discovers test files under ``tests/`` (excluding integration/e2e
 unless explicitly requested), then runs one ``python -m pytest <file>``
-subprocess per file, with bounded parallelism (default: ``os.cpu_count()``).
+subprocess per file, with bounded parallelism (default: ``min(os.cpu_count(), 8)``).
 
 Why per-file rather than per-test?
     Per-test spawn overhead (~250ms × 17k tests = 70min CPU minimum)
@@ -31,7 +31,7 @@ Usage:
     a literal ``--`` is also passed through, and stacks with bare flags.
 
 Environment:
-    HERMES_TEST_WORKERS  Override worker count (default: os.cpu_count())
+    HERMES_TEST_WORKERS  Override worker count (default: min(os.cpu_count(), 8))
     HERMES_TEST_PATHS    Override discovery roots (colon-sep; on Windows
                          ';' also works and drive letters are handled;
                          default: 'tests')
@@ -106,38 +106,8 @@ _DURATIONS_FILE = "test_durations.json"
 
 
 def _split_pathspec(value: str) -> List[str]:
-    """Split a separator-joined path list (``--paths``/``--files``/
-    ``HERMES_TEST_PATHS``) into individual paths.
-
-    POSIX: ``:``-separated, as documented.
-
-    Windows: ``;`` (``os.pathsep``) and ``:`` are both accepted as
-    separators, but a ``:`` that forms a drive letter (``C:\\...`` or
-    ``C:/...``) stays glued to its path — a naive ``split(":")`` turns
-    ``C:\\repo\\tests`` into ``['C', '\\repo\\tests']``, where the bogus
-    ``C`` becomes a phantom discovery root and the rooted remainder only
-    resolves by accident of ``Path.__truediv__`` re-anchoring it onto
-    ``repo_root``'s drive.
-    """
-    if sys.platform != "win32":
-        return [p for p in value.split(":") if p.strip()]
-    parts: List[str] = []
-    for chunk in value.split(";"):
-        raw = chunk.split(":")
-        i = 0
-        while i < len(raw):
-            part = raw[i]
-            if (
-                len(part) == 1
-                and part.isalpha()
-                and i + 1 < len(raw)
-                and raw[i + 1][:1] in ("\\", "/")
-            ):
-                part = f"{part}:{raw[i + 1]}"
-                i += 1
-            parts.append(part)
-            i += 1
-    return [p for p in parts if p.strip()]
+    chunks = value.split(";") if sys.platform == "win32" else [value]
+    return [part for chunk in chunks for part in _split_path_list(chunk)]
 
 # Host-OS gating (see the ``_OS_MARKS`` block in tests/conftest.py): tests
 # marked for another host are collected and SKIPPED by the conftest hook —
@@ -347,6 +317,8 @@ def _run_one_file(
     )
     attempt = 0
     while rc != 0 and attempt < retries:
+        if _is_retryable_timeout_result(rc, output, summary):
+            break
         attempt += 1
         first_output = output
         file, rc, output, summary, subproc_wall2 = _run_one_file_once(
@@ -380,7 +352,7 @@ def _run_one_file_once(
     file_timeout: float,
 ) -> Tuple[Path, int, str, dict[str, int], float]:
     """Single attempt of a per-file pytest subprocess (see _run_one_file)."""
-    cmd = [sys.executable, "-m", "pytest", str(file), *pytest_args]
+    cmd = _pytest_argv(file, pytest_args)
 
     # Give this subprocess its own pytest temp root.
     #
@@ -439,10 +411,7 @@ def _run_one_file_once(
         except subprocess.TimeoutExpired:
             output = "(file timeout exceeded; output unavailable)"
         rc = 124  # de facto convention for "killed by timeout".
-        output = (
-            f"({file_timeout:.0f}s exceeded; "
-            f"process tree SIGKILL'd)\n{output}"
-        )
+        output = _format_timeout_output(output, file_timeout)
     except BaseException:
         # KeyboardInterrupt / runner crash — make sure no zombie
         # grandchildren outlive us.
@@ -453,7 +422,7 @@ def _run_one_file_once(
         # case it left grandchildren behind; already-dead is a no-op.
         _kill_tree(proc, pgid=pgid)
 
-        output +=  "\n"
+        output = (output or "") + "\n"
     finally:
         # Delete the temp root for this attempt. Nothing reads it after the
         # subprocess exits. More than 3000 of them fill the disk of the
@@ -771,6 +740,102 @@ def _make_stdio_glyph_safe() -> None:
                 pass
 
 
+
+_DEFAULT_MAX_WORKERS = 8
+_COVERAGE_RC_ENV = "HERMES_TEST_COVERAGE_RC"
+
+
+def _adaptive_default_jobs(cpu_count: int | None) -> int:
+    """Choose a conservative automatic worker count for import-heavy tests."""
+    return min(cpu_count or 4, _DEFAULT_MAX_WORKERS)
+
+
+def _format_timeout_output(output: str | None, file_timeout: float) -> str:
+    """Render a timeout result even when ``communicate()`` returned ``None``."""
+    captured = output or "(captured output unavailable)"
+    return (
+        f"(timed out after {file_timeout:.0f}s; process tree terminated)\n"
+        f"{captured}"
+    )
+
+
+def _is_retryable_timeout_result(
+    rc: int,
+    output: str,
+    summary: dict[str, int],
+) -> bool:
+    """Return true only for a nonzero, timeout-shaped result without failures."""
+    if rc == 0 or summary.get("failed", 0) > 0:
+        return False
+    lowered = output.lower()
+    return rc == 124 or bool(re.search(r"(?m)^\++ Timeout \++$", output)) or lowered.startswith("(timed out after")
+
+
+def _split_path_list(raw: str) -> list[str]:
+    """Split a colon-joined path list without cutting Windows drive letters.
+
+    ``C:\\repo\\tests\\test_a.py`` naively ``split(":")``-ed becomes
+    ``["C", "\\repo\\tests\\test_a.py"]`` and the runner then tries to open a
+    file literally named ``C`` under the repo root. Re-join any single ASCII
+    letter that is immediately followed by a path separator — that is a drive
+    qualifier, not a list delimiter.
+
+    The ``exists()`` probe is a fast path for "the argument IS one path that
+    happens to contain a colon", and its failure has to be swallowed: a joined
+    LIST is not a path, and asking the OS whether one exists is not a question
+    every OS answers with False. On Linux a list past ``PATH_MAX`` makes
+    ``stat()`` return ``ENAMETOOLONG``, which ``pathlib`` does not ignore, so
+    the probe RAISES — while Windows folds the same overflow into its ignored
+    winerror set and answers False. That asymmetry is the whole bug: every CI
+    ``--files`` slice (8 slices × ~380 files ≈ 30 KB of argument) died here
+    before collecting a single test, on every push from 2026-08-04 on, while
+    the identical call was green on every developer's Windows box.
+    """
+    try:
+        if Path(raw).exists():
+            return [raw]
+    except OSError:
+        pass
+    parts = raw.split(":")
+    out: list[str] = []
+    index = 0
+    while index < len(parts):
+        piece = parts[index]
+        following = parts[index + 1] if index + 1 < len(parts) else ""
+        if len(piece) == 1 and piece.isalpha() and following[:1] in ("\\", "/"):
+            out.append(f"{piece}:{following}")
+            index += 2
+            continue
+        out.append(piece)
+        index += 1
+    return [value for value in out if value.strip()]
+
+
+def _split_discovery_roots(raw: str) -> list[str]:
+    """Split configured roots without cutting an absolute Windows drive path."""
+    return _split_path_list(raw)
+
+
+def _pytest_argv(file: Path, pytest_args: List[str]) -> List[str]:
+    """``python -m pytest <file> …``, wrapped in ``coverage run`` when asked.
+
+    The wrap is the seam ``scripts/unreachable_branch_report.py`` measures
+    through. Without it the report would have to re-implement ``run_tests.sh``'s
+    hermetic environment to trace anything, and a second spelling of that
+    environment is a second thing to keep in sync — the report would then be
+    measuring branches under pins and env the suite never runs with.
+
+    Absent-safe by construction: with the variable unset the argv is
+    byte-identical to what this runner has always spawned, so an ordinary run
+    pays nothing and cannot be traced by accident. Every other decision
+    (``branch``, ``parallel``, ``data_file``, ``source``) lives in the config
+    file the report writes, so this seam carries ONE path and no policy.
+    """
+    rcfile = os.environ.get(_COVERAGE_RC_ENV, "").strip()
+    prefix = ["-m", "coverage", "run", f"--rcfile={rcfile}"] if rcfile else []
+    return [sys.executable, *prefix, "-m", "pytest", str(file), *pytest_args]
+
+
 def main() -> int:
     _make_stdio_glyph_safe()
     parser = argparse.ArgumentParser(
@@ -781,8 +846,8 @@ def main() -> int:
         "-j",
         "--jobs",
         type=int,
-        default=int(os.environ.get("HERMES_TEST_WORKERS") or (os.cpu_count() or 4) * 2),
-        help="Parallel worker count (default: $HERMES_TEST_WORKERS or cpu_count*2)",
+        default=int(os.environ.get("HERMES_TEST_WORKERS") or _adaptive_default_jobs(os.cpu_count())),
+        help="Parallel worker count (default: $HERMES_TEST_WORKERS or min(cpu_count, 8))",
     )
     parser.add_argument(
         "--paths",
@@ -1041,6 +1106,21 @@ def main() -> int:
         test_counts = {f: test_counts[f] for f in files if f in test_counts}
         approx_total_tests = sum(test_counts.values())
 
+    jobs_was_explicit = any(
+        token == "-j"
+        or token.startswith("-j")
+        or token == "--jobs"
+        or token.startswith("--jobs=")
+        for token in our_args
+    )
+    if not jobs_was_explicit and not os.environ.get("HERMES_TEST_WORKERS"):
+        print(
+            "Adaptive worker default: "
+            f"cpu_count={os.cpu_count() or 4}, "
+            f"cap={_DEFAULT_MAX_WORKERS}, selected={args.jobs}",
+            flush=True,
+        )
+
     if roots:
         roots_str = [str(r.relative_to(repo_root)) if r.is_relative_to(repo_root) else str(r) for r in roots]
         print(
@@ -1137,6 +1217,67 @@ def main() -> int:
         # control flow obvious.
         for fut in futures:
             fut.result() if fut.exception() is None else None
+
+    # A file can trip pytest-timeout only because eight import-heavy subprocesses
+    # are contending at once. Retry timeout-shaped nonzero results exactly once,
+    # serially, after the pool drains. Assertion failures are never retried.
+    retryable = [
+        (file, output, summary)
+        for file, output, summary in failures
+        if _is_retryable_timeout_result(1, output, summary)
+    ]
+    if retryable:
+        print()
+        print(
+            f"Retrying {len(retryable)} timeout-affected file"
+            f"{'s' if len(retryable) != 1 else ''} at 1-worker isolation "
+            "(single bounded retry):",
+            flush=True,
+        )
+    for file, original_output, original_summary in retryable:
+        print(f"  RETRY {_format_file(file, repo_root)}", flush=True)
+        fpath, rc, output, summary, subproc_wall = _run_one_file(
+            file,
+            pytest_passthrough,
+            repo_root,
+            args.file_timeout,
+            # retries=0 on purpose: this IS the retry. The in-pool flake retry
+            # must not stack on top of the isolation re-run.
+            0,
+        )
+        file_times.append((fpath, subproc_wall))
+        failures.remove((file, original_output, original_summary))
+        fail_count -= 1
+        tests_passed += summary.get("passed", 0)
+        tests_failed += summary.get("failed", 0)
+        # The straggler's outcomes count toward collection exactly as the
+        # pool's do. Without this the nothing-ran guard below can only ever see
+        # the KILLED first attempt, which by definition collected nothing:
+        # measured 2026-09-02 on tests/hermes_cli/test_harness_characters_cli.py,
+        # a file that timed out at 8 workers and passed at 1-worker isolation
+        # printed "RETRY PASS … (95 tests)", "95 tests passed, 0 failed" and
+        # then "✗ NO TESTS RAN — 0 collected" over the same run. Same key set
+        # as _on_done, for the same reason: an all-skipped platform-gated file
+        # DID collect.
+        tests_collected += sum(
+            summary.get(key, 0)
+            for key in ("passed", "failed", "skipped", "errors", "xfailed", "xpassed")
+        )
+        if rc == 0:
+            pass_count += 1
+            print(
+                f"  RETRY PASS {_format_file(fpath, repo_root)} "
+                f"({subproc_wall:.1f}s at 1 worker)",
+                flush=True,
+            )
+        else:
+            fail_count += 1
+            failures.append((fpath, output, summary))
+            print(
+                f"  RETRY FAIL {_format_file(fpath, repo_root)} "
+                f"(exit {rc}, {subproc_wall:.1f}s at 1 worker)",
+                flush=True,
+            )
 
     elapsed = time.monotonic() - started
     print()

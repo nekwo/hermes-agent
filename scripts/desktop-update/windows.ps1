@@ -1607,13 +1607,13 @@ try {
     $retryPolicyPath = Join-Path $PSScriptRoot "retry-policy.ps1"
     if (Test-Path -LiteralPath $retryPolicyPath) {
         . $retryPolicyPath
-        $shouldRetry = Test-HermesUpdateShouldRetry -ExitCode $res.Code -InstallRoot $InstallRoot
+        $shouldRetry = Test-HermesUpdateShouldRetry -ExitCode $res.Code -InstallRoot $InstallRoot -Output $res.Output
     } else {
         # The child may have swapped to a checkout without the companion policy
         # while this older script is still running in memory. Preserve the
         # previous fail-closed behavior instead of calling an undefined function.
         Write-HandoffLog "retry policy is unavailable after checkout swap; using legacy retry rules"
-        $shouldRetry = $res.Code -ne 0 -and $res.Code -ne 2
+        $shouldRetry = $res.Code -ne 0 -and $res.Code -ne 2 -and $res.Output -notmatch "(?m)^HERMES_UPDATE_HISTORY_REVIEW_REQUIRED\r?$"
     }
     if ($shouldRetry) {
         # One retry for update-boundary failures. Most exit-2 safety refusals
@@ -1660,6 +1660,9 @@ try {
     } elseif ($desktopBuildFailed) {
         $finalCode = 6
         $finalMsg = "Code and dependencies updated, but the Desktop app REBUILD FAILED - you are running the previous build. Run `hermes desktop --force-build` from a terminal to retry."
+    } elseif ($res.Output -match "(?m)^HERMES_UPDATE_HISTORY_REVIEW_REQUIRED\r?$") {
+        $finalCode = $res.Code
+        $finalMsg = "Update paused: this installation and the update have different commit histories. Your checkout was preserved. The fork maintainer must review the history before updating. See the update log for recovery details."
     } else {
         $finalCode = $res.Code
         $finalMsg = "Update failed (exit $($res.Code)). Run `hermes debug share` in a terminal to send a report."

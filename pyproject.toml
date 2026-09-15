@@ -204,7 +204,7 @@ modal = ["modal==1.3.4"]
 daytona = ["daytona==0.155.0"]
 vercel = ["vercel==0.7.2"]
 hindsight = ["hindsight-client==0.6.1"]
-dev = ["debugpy==1.8.20", "pytest==9.1.1", "pytest-asyncio==1.3.0", "mcp==2.0.0", "httpx2==2.7.0", "starlette==1.3.1", "ty==0.0.21", "ruff==0.15.10", "setuptools==83.0.0"]  # starlette: CVE-2026-48710; setuptools: 83 (torch >=2.13 requires setuptools 83)
+dev = ["debugpy==1.8.20", "coverage==7.16.0", "pytest-timeout==2.4.0", "pytest==9.1.1", "pytest-asyncio==1.3.0", "mcp==2.0.0", "httpx2==2.7.0", "starlette==1.3.1", "ty==0.0.21", "ruff==0.15.10", "setuptools==83.0.0"]  # starlette: CVE-2026-48710; setuptools: 83 (torch >=2.13 requires setuptools 83)
 messaging = ["python-telegram-bot[webhooks]==22.8", "discord.py[voice]==2.7.1", "aiohttp==3.14.3", "brotlicffi==1.2.0.2", "slack-bolt==1.30.0", "slack-sdk==3.44.1", "qrcode==7.4.2"]  # aiohttp 3.14.3: prior CVEs + GHSA-cq5v-8q36-5273/GHSA-mfx4-hv73-q22v/GHSA-mq44-7p77-q5h7
 cron = []  # croniter is now a core dependency; this extra kept for back-compat
 slack = ["slack-bolt==1.30.0", "slack-sdk==3.44.1", "aiohttp==3.14.3"]
@@ -478,6 +478,8 @@ exclude-newer = "14 days"
 # environment resolves under the same cutoff ("Failed to resolve
 # requirements from build-system.requires ... maturin>=1.9,<2").
 [tool.uv.exclude-newer-package]
+coverage = false
+pytest-timeout = false
 agent-client-protocol = false
 ai-edge-litert = false
 aiohttp = false
@@ -586,7 +588,7 @@ youtube-transcript-api = false
 # and the drift broke installed wheels. Do not add the list back.
 
 [tool.setuptools.packages.find]
-include = ["agent", "agent.*", "tools", "tools.*", "hermes_cli", "hermes_cli.*", "gateway", "gateway.*", "tui_gateway", "tui_gateway.*", "cron", "cron.*", "acp_adapter", "plugins", "plugins.*", "providers", "providers.*"]
+include = ["agent_runtime", "agent_runtime.*", "agent", "agent.*", "tools", "tools.*", "hermes_cli", "hermes_cli.*", "gateway", "gateway.*", "tui_gateway", "tui_gateway.*", "cron", "cron.*", "acp_adapter", "plugins", "plugins.*", "providers", "providers.*"]
 
 [tool.setuptools.package-data]
 hermes_cli = ["observability/schemas/*.json", "data/*.json", "local_runtime/*.json"]
@@ -604,6 +606,9 @@ plugins = ["**/plugin.yaml", "**/plugin.yml"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
+    "real_venv_pip: opt out of the autouse stub that replaces lazy_deps._venv_pip_install (for the one test that probes that function itself)",
+    "real_agent_browser_probe: opt out of the autouse stub that stops hermes_constants.agent_browser_runnable from EXECUTING an agent-browser off the operator PATH",
+
     "integration: marks tests requiring external services (API keys, Modal, etc.)",
     "real_concurrent_gate: opt out of the autouse stub that disables _detect_concurrent_hermes_instances",
     "real_agent_prewarm: opt out of the autouse stub that disables the tui_gateway deferred agent pre-warm timer",
@@ -616,7 +621,7 @@ markers = [
     "windows_only: exercises native-Windows behaviour; skipped on other hosts",
 ]
 # integration tests take way too long to run in the normal CI environments
-addopts = "-m 'not integration'"
+addopts = "-m 'not integration' --timeout=30 --timeout-method=thread"
 
 [tool.ty.environment]
 python-version = "3.13"
@@ -651,17 +656,17 @@ preview = true  # required for PLW1514 (unspecified-encoding) — preview rule
 # ASYNC230 (blocking open()) and ASYNC240 (blocking path methods) are real
 # but ~180 legacy sites deep; they graduate to this list once the backlog
 # is burned down (see per-file-ignores below for the frozen baseline).
-select = ["PLW1514", "ASYNC210", "ASYNC220", "ASYNC221", "ASYNC251"]
+select = ["PLW1514", "F821", "ASYNC210", "ASYNC220", "ASYNC221", "ASYNC251"]
 
 [tool.ruff.lint.per-file-ignores]
 # Tests can intentionally exercise locale-encoding edge cases.
-"tests/**" = ["PLW1514", "ASYNC210", "ASYNC220", "ASYNC221", "ASYNC251"]
+"tests/**" = ["PLW1514", "ASYNC210", "ASYNC220", "ASYNC221", "ASYNC251", "F821"]
 # Skills and plugins are partially user-authored — their own conventions.
 "skills/**" = ["PLW1514"]
-"optional-skills/**" = ["PLW1514"]
+"optional-skills/**" = ["PLW1514", "F821"]
 # Plugin platform adapters run ON the gateway event loop — the ASYNC gate
 # applies to them with full force; only PLW1514 stays relaxed.
-"plugins/**" = ["PLW1514"]
+"plugins/**" = ["PLW1514", "F821"]
 # ---------------------------------------------------------------------------
 # ASYNC ratchet baseline — legacy blocking sites that predate the gate.
 # Each entry is an EXISTING violation being fixed in its own PR; do NOT add
@@ -678,3 +683,10 @@ select = ["PLW1514", "ASYNC210", "ASYNC220", "ASYNC221", "ASYNC251"]
 # Legacy blocking spawn sites in platform adapters, pending their own fixes.
 "plugins/platforms/whatsapp/adapter.py" = ["ASYNC220", "ASYNC221"]
 "plugins/platforms/photon/adapter.py" = ["ASYNC220"]
+
+"agent/**" = ["F821"]
+"gateway/**" = ["F821"]
+"tools/**" = ["F821"]
+"tui_gateway/**" = ["F821"]
+"hermes_cli/web_server.py" = ["F821"]
+"hermes_cli/harness.py" = ["F821"]

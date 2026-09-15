@@ -84,6 +84,11 @@ class _StubHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length)) if length else {}
             type(self).unloaded.append(body.get("model"))
+            # Real /models changes after an unload. Leaving the stub resident
+            # makes production's unload confirmation wait out its full deadline.
+            for model in (self.models or {}).get("data", []):
+                if model.get("id") == body.get("model"):
+                    model["status"] = {"value": "unloaded"}
             self._send(200, {"success": True})
         else:
             self._send(404, {})

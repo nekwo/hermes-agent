@@ -39,10 +39,12 @@ def test_env_wrapped_killer_command_is_still_blocked():
         subprocess.run(["env", "GUARD_TEST=1", "pkill", "-f", "hermes-guard-regression-nomatch"])
 
 
-def test_gateway_start_inside_a_container_exec_is_not_blocked():
-    """``docker exec <ctr> hermes gateway start`` launches the gateway INSIDE the container,
-    where it cannot reach the host's systemd unit or webhook port; tests/docker/ depends on it.
-    The binary is a stub so the argv stays exact without needing a Docker daemon."""
+def test_gateway_looking_container_command_requires_explicit_test_ownership():
+    """The fork's conservative backend fence also covers container-shaped argv.
+
+    A temporary exit-zero stub makes a guard regression harmless. Real isolated
+    container integration tests must declare their ownership with the marker.
+    """
     import os
     import stat
 
@@ -52,14 +54,15 @@ def test_gateway_start_inside_a_container_exec_is_not_blocked():
     with open(stub, "w") as fh:
         fh.write("#!/bin/sh\nexit 0\n")
     os.chmod(stub, os.stat(stub).st_mode | stat.S_IXUSR)
-    result = subprocess.run(
-        [stub, "exec", "-u", "hermes", "ctr", "sh", "-c", "hermes -p prof gateway start"],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0
+    with pytest.raises(RuntimeError, match="START a hermes backend"):
+        subprocess.run(
+            [stub, "exec", "-u", "hermes", "ctr", "sh", "-c", "hermes -p prof gateway start"],
+            capture_output=True,
+            text=True,
+        )
+
 
 
 def test_gateway_start_on_the_host_is_still_blocked():
-    with pytest.raises(RuntimeError, match="REAL.*gateway runtime"):
+    with pytest.raises(RuntimeError, match="START a hermes backend"):
         subprocess.run(["python", "-m", "hermes_cli.main", "gateway", "start"])

@@ -713,6 +713,12 @@ def _repair_current_checkout(
 def _reconcile_diverged_checkout(git_cmd, branch: str, pre_pull_sha) -> None:
     """Fast-forward failed: merge on a custom branch (local commits survive) or reset --hard on the
     same branch (rescue ref first when histories share no ancestor). ``sys.exit(1)`` on failure."""
+    if _is_fork(_get_origin_url(git_cmd, _m().PROJECT_ROOT)):
+        from hermes_cli.update_history import guard_fork_history
+        guard_fork_history(git_cmd, _m().PROJECT_ROOT, f"origin/{branch}")
+        # Even a failed FF on an unchanged/local-ahead fork is not a reset permit.
+        print("Fork fast-forward failed; checkout preserved. Inspect the Git failure before retrying.")
+        sys.exit(1)
     # A custom branch (local commits atop origin/<branch>) also can't ff, and reset --hard
     # would discard that work: merge instead, stop on conflict.
     _cur_branch = (_git_run(git_cmd, ["branch", "--show-current"]).stdout or "").strip()
@@ -892,6 +898,9 @@ def _prepare_checkout_for_update(
     """Parked-branch guard, land on the target, stash, count new commits. Exits when the
     checkout is unsafe to move or the target is missing. ``commit_count`` is 0 when up to
     date, -1 when tips differ but the shallow count is unrecoverable."""
+    if is_fork:
+        from hermes_cli.update_history import guard_fork_history
+        guard_fork_history(git_cmd, _m().PROJECT_ROOT, f"origin/{branch}")
     parked_branch_switched, in_place_update, switch_block_reason = _apply_parked_branch_guard(
         git_cmd, branch, current_branch, switch_branch=switch_branch,
         _windows_gateway_resume=_windows_gateway_resume)
@@ -1416,3 +1425,5 @@ from datetime import datetime  # noqa: F401,E402
 import hashlib  # noqa: F401,E402
 import json  # noqa: F401,E402
 # ---- END PLUGIN-COMPAT ----
+
+from hermes_cli.update_cmd_windows import _warn_legacy_console_gateway_task

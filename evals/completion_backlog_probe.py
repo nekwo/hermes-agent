@@ -75,6 +75,8 @@ def probe(surface, scenario, directory):
     processes = []
     try:
         with contextlib.ExitStack() as stack:
+            # This probe measures the explicit autonomous completion-turn mode.
+            stack.enter_context(patch.dict(os.environ, {"HERMES_BACKGROUND_AGENT_TURNS": "true"}))
             stack.enter_context(patch.object(pr, 'process_registry', registry))
             stack.enter_context(patch.object(pr, 'CHECKPOINT_PATH', directory / 'processes.json'))
             stack.enter_context(patch.object(server, '_sessions', {'ui-owner': session}))

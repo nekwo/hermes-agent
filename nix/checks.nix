@@ -1094,7 +1094,7 @@ json.dump(sorted(leaf_paths(DEFAULT_CONFIG)), sys.stdout, indent=2)
           echo "PASS: HERMES_OPTIONAL_MCPS set in wrapper"
 
           export HOME=$(mktemp -d)
-          CATALOG=$(cd "$HOME" && ${hermes-agent}/bin/hermes mcp catalog 2>/dev/null || true)
+          CATALOG=$(cd "$HOME" && ${hermes-agent}/bin/hermes mcp catalog)
           echo "catalog output: $CATALOG"
           test -n "$CATALOG" || (echo "FAIL: hermes mcp catalog returned empty"; exit 1)
           echo "PASS: mcp catalog resolves entries"

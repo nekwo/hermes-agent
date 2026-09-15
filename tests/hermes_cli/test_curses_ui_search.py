@@ -33,3 +33,9 @@ def test_active_search_consumes_query_editing_and_confirm_keys():
         True,
         False,
     )
+
+
+def test_radio_item_plain_preserves_segment_text():
+    from hermes_cli.curses_ui import radio_item_plain
+    assert radio_item_plain("plain") == "plain"
+    assert radio_item_plain([("Local ", "dim"), ("model", "yellow")]) == "Local model"

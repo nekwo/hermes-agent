@@ -44,12 +44,15 @@ class TestNoninteractiveGitEnv:
 
     def test_defaults_to_process_environ_copy(self, monkeypatch):
         monkeypatch.setenv("HERMES_TEST_SENTINEL", "xyz")
+        monkeypatch.setenv("GIT_TERMINAL_PROMPT", "1")
+        monkeypatch.setenv("GCM_INTERACTIVE", "Full")
         env = noninteractive_git_env()
         assert env["HERMES_TEST_SENTINEL"] == "xyz"
         assert env["GIT_TERMINAL_PROMPT"] == "0"
+        assert env["GCM_INTERACTIVE"] == "Never"
         # Never mutates the live process environment.
-        assert os.environ.get("GIT_TERMINAL_PROMPT") != "0" or True
-        assert "GCM_INTERACTIVE" not in os.environ or os.environ["GCM_INTERACTIVE"] == env["GCM_INTERACTIVE"]
+        assert os.environ["GIT_TERMINAL_PROMPT"] == "1"
+        assert os.environ["GCM_INTERACTIVE"] == "Full"
 
 
     def test_overrides_explicit_prompt_enable(self):

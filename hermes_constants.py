@@ -16,6 +16,29 @@ _profile_fallback_warned: bool = False
 _UNSET = object()
 _HERMES_HOME_OVERRIDE: ContextVar[str | object] = ContextVar("_HERMES_HOME_OVERRIDE", default=_UNSET)
 
+CANONICAL_SHARED_SKILL_IDS = frozenset(
+    {
+        "harness-dev-delivery",
+        "harness-qa-verdict",
+        "harness-runtime-model",
+        "harness-charsheet-authoring",
+    }
+)
+
+_HERMES_HEAD_HOME: ContextVar[str | object] = ContextVar(
+    "_HERMES_HEAD_HOME", default=_UNSET
+)
+
+_HERMES_AUTH_HOME_OVERRIDE: ContextVar[str | object] = ContextVar(
+    "_HERMES_AUTH_HOME_OVERRIDE", default=_UNSET
+)
+
+_DEFAULT_HERMES_ROOT_CACHE: dict[tuple[str, str], Path] = {}
+
+_AGENT_BROWSER_PROBE_CACHE: dict[str, bool] = {}
+
+CONVERSATION_REQUEST_ASSEMBLED_STEP = "conversation_request_assembled"
+
 # TUI busy-indicator styles (CLI /indicator, TUI gateway config, /help registry).
 # Keep in sync with INDICATOR_STYLES / DEFAULT_INDICATOR_STYLE in ui-tui/src/app/interfaces.ts.
 INDICATOR_STYLES: tuple[str, ...] = ("ascii", "emoji", "kaomoji", "unicode")
@@ -163,22 +186,38 @@ _default_hermes_root_memo: "tuple[str, str, Path] | None" = None
 
 
 def get_default_hermes_root() -> Path:
-    """Root Hermes dir for profile-level ops: ``<root>`` when ``HERMES_HOME=<root>/profiles/<name>``."""
-    global _default_hermes_root_memo
+    """Return the root Hermes directory for profile-level operations.
+
+    In standard deployments this is the platform-native Hermes home
+    (``~/.hermes`` on POSIX, ``%LOCALAPPDATA%\\hermes`` on native Windows).
+
+    In Docker or custom deployments where ``HERMES_HOME`` points outside
+    ``~/.hermes`` (e.g. ``/opt/data``), returns ``HERMES_HOME`` directly
+    — that IS the root.
+
+    In profile mode where ``HERMES_HOME`` is ``<root>/profiles/<name>``,
+    returns ``<root>`` so that ``profile list`` can see all profiles.
+    Works both for standard (``~/.hermes/profiles/coder``) and Docker
+    (``/opt/data/profiles/coder``) layouts.
+
+    Import-safe — no dependencies beyond stdlib.
+
+    Memoised on ``(HERMES_HOME, platform default)``; the reasoning, the
+    measurement that motivates it and the one staleness window it admits are at
+    :data:`_DEFAULT_HERMES_ROOT_CACHE`.
+    """
     native_home = _get_platform_default_hermes_home()
     env_home = os.environ.get("HERMES_HOME", "")
-    memo = _default_hermes_root_memo
-    if memo is not None and memo[:2] == (str(native_home), env_home):
-        return memo[2]
-    result = native_home
-    if env_home:
-        env_path = Path(env_home)
-        try:
-            env_path.resolve().relative_to(native_home.resolve())  # under ~/.hermes (normal or profile mode)
-        except ValueError:  # Docker/custom root: <root>/profiles/<name> -> <root>, else HERMES_HOME itself
-            result = env_path.parent.parent if env_path.parent.name == "profiles" else env_path
-    _default_hermes_root_memo = (str(native_home), env_home, result)
-    return result
+    if not env_home:
+        return native_home
+    key = (env_home, str(native_home))
+    cached = _DEFAULT_HERMES_ROOT_CACHE.get(key)
+    if cached is not None:
+        return cached
+    _DEFAULT_HERMES_ROOT_CACHE[key] = resolved = _resolve_default_hermes_root(
+        env_home, native_home
+    )
+    return resolved
 
 
 # Tombstone lives beside the profile dir (not inside) so a stale mkdir or rmtree cannot erase it.
@@ -753,7 +792,12 @@ def agent_browser_runnable(path: str | None) -> bool:
     # The npx fallback is a two-token command string, not a path; npx validates at run time.
     if " " in path and path.split()[0].endswith("npx"):
         return True
-    return _is_executable_file(path) and _version_probe_ok(path)
+    if not _is_executable_file(path):
+        return False
+    cached = _AGENT_BROWSER_PROBE_CACHE.get(path)
+    if cached is None:
+        cached = _AGENT_BROWSER_PROBE_CACHE[path] = _version_probe_ok(path)
+    return cached
 
 
 def _legacy_path_has_content(path: Path) -> bool:
@@ -1291,3 +1335,230 @@ def emit_partial_update_hint(exc: BaseException, *, file=None) -> bool:
     for line in (f"Error: {exc}", *lines):
         print(line, file=sys.stderr if file is None else file)
     return True
+
+
+# Downstream shared-home authorities and probe-cache resets.
+def set_hermes_auth_home_override(path: str | Path | None) -> Token:
+    """Set a context-local shared-auth home override and return its reset token."""
+    value: str | object = _UNSET if path is None else str(path)
+    return _HERMES_AUTH_HOME_OVERRIDE.set(value)
+
+def reset_hermes_auth_home_override(token: Token) -> None:
+    """Restore the previous context-local shared-auth home override."""
+    _HERMES_AUTH_HOME_OVERRIDE.reset(token)
+
+def get_hermes_auth_home() -> str:
+    """The explicit shared-auth home: context-local override first, env second.
+
+    Returns ``""`` when neither authority answers, which is the caller's signal
+    to fall back to the historical global root. This is the ONE reader of the
+    ``HERMES_AUTH_HOME`` authority that every in-process consumer should use;
+    reading the env var raw sees only half of it.
+    """
+    override = _HERMES_AUTH_HOME_OVERRIDE.get()
+    if override is not _UNSET and override:
+        return str(override).strip()
+    return os.environ.get("HERMES_AUTH_HOME", "").strip()
+
+def record_hermes_head_home_if_unset(path: str | Path | None) -> Token | None:
+    """Record the OUTERMOST (operator/head) Hermes home for this context, once.
+
+    Returns a reset token when THIS call recorded the head (the caller owns the
+    reset), or ``None`` when an enclosing scope already recorded it — a nested
+    relay hop must NOT overwrite the outermost home. ``None``/empty is ignored.
+    """
+    if path is None or not str(path):
+        return None
+    current = _HERMES_HEAD_HOME.get()
+    if current is not _UNSET and current:
+        return None
+    return _HERMES_HEAD_HOME.set(str(path))
+
+def reset_hermes_head_home(token: Token | None) -> None:
+    """Restore the previous head-home recording (no-op when token is ``None``)."""
+    if token is not None:
+        _HERMES_HEAD_HOME.reset(token)
+
+def get_hermes_head_home() -> Path:
+    """Return the operator/head Hermes home — the home the Mission Control
+    projection reads — IGNORING any active persona profile-home override.
+
+    The launcher may provide ``HERMES_HEAD_HOME`` to keep the Mission Control
+    transcript store stable while ``HERMES_HOME`` selects a different runtime
+    profile. A context-local relay head still wins so nested persona execution
+    cannot escape the operator that started it. With neither authority present,
+    behavior falls back to the ordinary resolved home.
+    """
+    head = _HERMES_HEAD_HOME.get()
+    if head is not _UNSET and head:
+        return Path(head)
+    configured = os.environ.get("HERMES_HEAD_HOME", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return get_hermes_home()
+
+def hermes_head_home_is_authoritative() -> bool:
+    """True when :func:`get_hermes_head_home` answers from an explicit head
+    authority — the context-recorded outermost home (relay nesting) or the
+    operator-supplied ``HERMES_HEAD_HOME`` environment value.
+
+    False means the head has degenerated to the ambient :func:`get_hermes_home`
+    resolution, so under an active profile-home override the "head" IS the
+    override and the real operator home is unknown. Operator-visible stores
+    must fail closed in that state instead of writing a transcript into a
+    profile-local DB the Mission Control projection never reads. When the head
+    is authoritative, it may legitimately EQUAL the active override (a persona
+    bound to the operator's own head profile, e.g. the seeded base agent) —
+    that is the same database, not a divergence.
+    """
+    head = _HERMES_HEAD_HOME.get()
+    if head is not _UNSET and head:
+        return True
+    return bool(os.environ.get("HERMES_HEAD_HOME", "").strip())
+
+def get_hermes_background_work_home() -> Path:
+    """The home the OPERATOR-VISIBLE background-work stores live under.
+
+    ``processes.json`` (the terminal checkpoint) and ``state.db``'s
+    ``async_delegations`` table are written by one process and READ by another:
+    an agent spawns a build inside a serve-hosted persona turn, and the
+    operator's Activity HUD reads it from a snapshot built on a different lane.
+    Writer and reader therefore have to agree on the directory, and until this
+    function existed they did not — the writers resolved ambient
+    ``get_hermes_home()`` while the projection resolved the head-home scope. On
+    the launcher's own layout (``HERMES_HOME=profiles/<profile>`` with
+    ``HERMES_HEAD_HOME=profiles/base``) those are DIFFERENT directories, so the
+    writers wrote to the profile home while the reader watched base and reported
+    "nothing running" through an entire build.
+
+    The precedence is deliberately the one :func:`get_hermes_head_home` already
+    implements, and this function is a NAME for that decision rather than a
+    second resolver:
+
+    * An explicit head — the ``HERMES_HEAD_HOME`` env value, or the outermost
+      home recorded in the contextvar by ``persona_profile_context`` — wins.
+      That is what makes a turn running under a profile-home override still
+      register its background work where the operator can see it.
+    * With neither present the answer is the ambient home, byte-identical to
+      the historical behaviour. The gateway, the TUI and plain CLI runs set
+      neither, so nothing on those lanes moves.
+    """
+
+    return get_hermes_head_home()
+
+def reset_default_hermes_root_cache() -> None:
+    """Forget every memoised default-root resolution.
+
+    Clearing is always safe: the next call simply pays the two ``resolve()``
+    calls again. Exposed for tests that re-point the Hermes root under a live
+    process, which production never does.
+    """
+
+    _DEFAULT_HERMES_ROOT_CACHE.clear()
+
+def _resolve_default_hermes_root(env_home: str, native_home: Path) -> Path:
+    """The uncached body of :func:`get_default_hermes_root`.
+
+    Its own function so the memo above wraps a NAMED computation rather than an
+    inlined branch — the two ``resolve()`` calls it makes are the whole reason
+    the memo exists, and they must stay findable from the constant that explains
+    them.
+    """
+
+    env_path = Path(env_home)
+    try:
+        env_path.resolve().relative_to(native_home.resolve())
+        # HERMES_HOME is under ~/.hermes (normal or profile mode)
+        return native_home
+    except ValueError:
+        pass
+
+    # Docker / custom deployment.
+    # Check if this is a profile path: <root>/profiles/<name>
+    # If the immediate parent dir is named "profiles", the root is
+    # the grandparent — this covers Docker profiles correctly.
+    if env_path.parent.name == "profiles":
+        return env_path.parent.parent
+
+    # Not a profile path — HERMES_HOME itself is the root
+    return env_path
+
+def get_shared_skills_dir(default: Path | None = None) -> Path:
+    """Return the canonical shared skills root every persona references.
+
+    This is the single physical skills directory that all persona-profiles
+    read/write and that realm sync publishes. It lives under the Hermes
+    *root* (beside ``profiles/``), not inside any one profile — so it is
+    shared across every persona AND addressed relative to the root, which
+    makes it portable across machines/OSes (no hard-coded ``~/.claude`` or
+    per-machine home path).
+
+    The default resolves the same way for every profile: because
+    ``get_default_hermes_root()`` maps ``<root>/profiles/<name>`` back to
+    ``<root>``, ``alice``, ``neko``, ``base``, … all compute the *same*
+    ``<root>/shared/skills`` from their own ``HERMES_HOME`` with no env
+    injection or per-profile config. Cross-machine, each host resolves its
+    own root and realm sync git-carries the contents between them.
+
+    Resolution order:
+        1. ``HERMES_SHARED_SKILLS`` env var (explicit override / MC-injected)
+        2. Caller-supplied ``default``
+        3. ``<hermes_root>/shared/skills``  (default — the canon path)
+    """
+    override = os.getenv("HERMES_SHARED_SKILLS", "").strip()
+    if override:
+        return Path(override).expanduser()
+    if default is not None:
+        return default
+    return get_default_hermes_root() / "shared" / "skills"
+
+def get_shared_characters_dir(default: Path | None = None) -> Path:
+    """Return the ONE install-wide character library every persona authors into.
+
+    The sibling of :func:`get_shared_skills_dir`, and it exists for the same
+    reason: the library lives under the Hermes *root* (beside ``profiles/``),
+    not inside any one profile, so ``alice``, ``base``, ``neko``, … all compute
+    the SAME directory from their own home with no env injection and no
+    per-profile config. That convergence is the whole point — a character draft
+    is addressed install-wide by its id, and a turn that resolved a home nobody
+    selected still reads and writes the library the operator meant.
+
+    **Why this does NOT reuse** :func:`get_default_hermes_root` **, despite
+    computing the same mapping.** That function reads bare
+    ``os.environ["HERMES_HOME"]`` and never consults the context-local override
+    (:func:`get_hermes_home_override`). A resolver built on it answers the
+    PROCESS home while an in-process persona binding is scoped to another one —
+    which is precisely the cross-persona bleed the serve lane retired, re-imported
+    one directory later. So the derivation rides :func:`get_hermes_home` (the
+    override → env → platform-default ladder) and maps the profile shell off it
+    here.
+
+    Resolution order:
+        1. ``HERMES_SHARED_CHARACTERS`` env var (explicit operator/test
+           override). A bare env read is sound for THIS authority and not for
+           the derivation below it: an install-wide library named explicitly is
+           named for the whole install, so there is no persona-scoped answer a
+           ContextVar could carry.
+        2. Caller-supplied ``default``
+        3. ``<hermes_root>/shared/characters`` — where ``<hermes_root>`` is the
+           resolved home's grandparent when the home is ``<root>/profiles/<name>``,
+           and the home itself otherwise (a bare or Docker-style home IS the root).
+    """
+    override = os.getenv("HERMES_SHARED_CHARACTERS", "").strip()
+    if override:
+        return Path(override).expanduser()
+    if default is not None:
+        return default
+    home = get_hermes_home()
+    root = home.parent.parent if home.parent.name == "profiles" else home
+    return root / "shared" / "characters"
+
+def reset_agent_browser_probe_cache() -> None:
+    """Forget every memoised ``--version`` verdict.
+
+    Call this after anything that could change whether an agent-browser
+    candidate RUNS — an install, a heal, a node-tree repair. Clearing is always
+    safe: the next probe simply pays the subprocess again.
+    """
+
+    _AGENT_BROWSER_PROBE_CACHE.clear()

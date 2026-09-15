@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from typing import List
+from hermes_cli.flag_binding import list_flag_or_empty
 
 from rich.console import Console
 from rich.table import Table
@@ -69,7 +70,7 @@ def _cmd_show(args) -> None:
 def _cmd_create(args) -> None:
     c = _console()
     name = args.name
-    skills: List[str] = list(args.skill or [])
+    skills: List[str] = list_flag_or_empty(args, "skill")
     if not skills:
         # Interactive prompt for skills if none were passed on the CLI.
         c.print(

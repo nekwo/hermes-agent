@@ -58,6 +58,7 @@ def test_process_completion_display_keeps_payload_separate_across_surfaces(monke
     assert entries == [("event", expected)]
 
     # TUI gateway: the status line and the persisted turn carry the same compact title.
+    monkeypatch.setenv("HERMES_BACKGROUND_AGENT_TURNS", "1")
     emitted, submitted = [], []
     monkeypatch.setattr(server, "_emit", lambda *args: emitted.append(args))
     monkeypatch.setattr(server, "_notif_submit", lambda *args, **kw: submitted.append((args, kw)))

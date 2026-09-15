@@ -33,6 +33,7 @@ class CommandDef:
     # while busy (normal handler or the ``busy_handler`` variant); "reject" = refuse mid-run
     # (generic "Agent is running" unless ``busy_handler`` names a reject message);
     # "interrupt_then_dispatch" = interrupt first (/stop, /new, /reset; Guard 1, platforms/base.py).
+    deprecated_aliases: tuple[str, ...] = ()
     busy_policy: str = "reject"
     busy_handler: str | None = None  # key of a special mid-run handler in Guard-2 table
     # Key in ``hermes_cli.slash_exec.EXECUTORS`` (a string, not a callable: keeps this module
@@ -48,6 +49,8 @@ VALID_BUSY_POLICIES: frozenset[str] = frozenset({"dispatch", "reject", "interrup
 
 COMMAND_REGISTRY: list[CommandDef] = [
     # Session
+    CommandDef("queue-status", "Show gateway active-run and queue visibility", "Session",
+               aliases=("qstatus",), gateway_only=True, busy_policy="dispatch"),
     CommandDef("start", "Acknowledge platform start pings without a reply", "Session",
                gateway_only=True, busy_policy="dispatch", busy_handler="start"),
     CommandDef("new", "Start a new session (fresh session ID + history)", "Session",
@@ -102,7 +105,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("btw", "Ask a side question about the current conversation without interrupting it", "Session",
                args_hint="<question>", busy_policy="dispatch"),
     CommandDef("agents", "Show active agents and running tasks", "Session",
-               aliases=("tasks",), busy_policy="dispatch"),
+               aliases=("tasks",), deprecated_aliases=("tasks",), busy_policy="dispatch"),
     CommandDef("journey", "Open the learning journey timeline",
                "Session", aliases=("learning", "memory-graph"), cli_only=True,
                args_hint="[list|delete <id>|edit <id>]", subcommands=("list", "delete", "edit")),
@@ -372,7 +375,10 @@ for _cmd in COMMAND_REGISTRY:
         continue
     _entries = {f"/{_cmd.name}": _build_description(_cmd)}
     for _alias in _cmd.aliases:
-        _entries[f"/{_alias}"] = f"{_cmd.description} (alias for /{_cmd.name})"
+        _entries[f"/{_alias}"] = (
+            f"{_cmd.description} (deprecated alias for /{_cmd.name}; use /{_cmd.name})"
+            if _alias in _cmd.deprecated_aliases else f"{_cmd.description} (alias for /{_cmd.name})"
+        )
     COMMANDS.update(_entries)
     COMMANDS_BY_CATEGORY.setdefault(_cmd.category, {}).update(_entries)
 
@@ -469,7 +475,7 @@ def gateway_help_lines() -> list[str]:
             continue
         args = f" {cmd.args_hint}" if cmd.args_hint else ""
         # Skip internal aliases like reload_mcp (underscore variant of the name).
-        alias_parts = [f"`/{a}`" for a in cmd.aliases
+        alias_parts = [f"`/{a}`" + (" deprecated" if a in cmd.deprecated_aliases else "") for a in cmd.aliases
                        if not (a.replace("-", "_") == cmd.name.replace("-", "_") and a != cmd.name)]
         alias_note = f" (alias: {', '.join(alias_parts)})" if alias_parts else ""
         lines.append(f"`/{cmd.name}{args}` -- {cmd.description}{alias_note}")
@@ -744,3 +750,12 @@ def __getattr__(name):  # PEP 562 — lazy so no import cycles
     warn_once(__name__, name, *target)
     return getattr(importlib.import_module(target[0]), target[1])
 # ---- END PLUGIN-COMPAT ----
+
+
+def alias_deprecation_warning(name: str) -> str | None:
+    """Return the operator-facing warning for a deprecated slash alias."""
+    key = name.lower().lstrip("/")
+    cmd = resolve_command(key)
+    if cmd is not None and key in cmd.deprecated_aliases:
+        return f"/{key} is deprecated and will be removed after Stage 44; use /{cmd.name}."
+    return None

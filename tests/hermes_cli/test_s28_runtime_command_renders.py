@@ -1,0 +1,108 @@
+"""S28: the CLI half of the S21 hollow-seam cut.
+
+Two human-readable renders in ``hermes_cli/harness_parts/runtime_commands.py``
+were out of step with what the runtime can actually report:
+
+* ``_cmd_status`` opened its line with ``open_tasks=`` / ``running_runs=``, two
+  fields ``build_status`` could only ever compute as ``0`` (S21 named both and
+  had to leave them because this module was owned by another lane).
+* ``_cmd_observe`` passed ``tasks=[]`` / ``proofs=[]`` / ``daemon_status=None``
+  keywords into ``build_observability`` -- the literals that kept three dead
+  parameters alive on the other side of the call.
+
+The rule these share: the human line must mention exactly what the verb can
+still measure -- no constant dressed as a count. The third render fixed in this
+wave, ``_cmd_persona_instance_reconcile``'s silent graph-prune phase, is a
+separate concern and lives in ``test_s28_reconcile_graph_render.py``.
+"""
+
+from __future__ import annotations
+
+import argparse
+
+from hermes_cli.harness import build_parser
+
+
+def _parser():
+    parser = argparse.ArgumentParser()
+    build_parser(parser.add_subparsers(dest="command"))
+    return parser
+
+
+def _status_payload() -> dict:
+    """A status dict shaped like the post-S28 payload: no constant task/run
+    fields at all, so a render that still indexes them raises ``KeyError``."""
+
+    return {
+        "open_incidents": 3,
+        "dirty_summary": "runtime=clean",
+        "runtime_health": {"ok": True},
+    }
+
+
+def test_status_human_line_reports_only_measurable_fields(monkeypatch, tmp_path, capsys):
+    # The line gained two REAL measurements in the durable-runtime-root service
+    # slice — `build=` (which code answered) and `serves=<live>/<entries>` — so
+    # the exact-equality pin becomes a prefix + suffix pin. S28's rule is
+    # unchanged and still what is under test: no constant dressed as a count.
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "agent-runtime"))
+    monkeypatch.setattr("hermes_cli.harness.build_status", _status_payload)
+    args = _parser().parse_args(["harness", "status"])
+
+    assert args.func(args) == 0
+
+    line = capsys.readouterr().out.strip()
+    assert line.startswith("open_incidents=3 dirty=runtime=clean runtime_health=True")
+    assert line.endswith("serves=0/0")
+    assert "open_tasks=" not in line
+    assert "running_runs=" not in line
+
+
+def test_status_says_unavailable_when_the_serve_registry_could_not_be_read(
+    monkeypatch, tmp_path, capsys
+):
+    """S28's rule, applied to the field that arrived after it.
+
+    When the registry read throws, ``_attach_runtime_service_blocks`` sets
+    ``serve_instances = []`` plus a typed ``serve_instances_error``. The human
+    line rendered ``serves=0/0`` off that empty list — not a degraded
+    measurement but a measurement that never happened, reporting the most
+    reassuring value it could ("no serves, all accounted for"). An operator
+    chasing a serve that will not appear would read the failure as an empty
+    registry.
+    """
+
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "agent-runtime"))
+    monkeypatch.setattr("hermes_cli.harness.build_status", _status_payload)
+
+    def exploding_list(*args, **kwargs):
+        raise PermissionError("registry unreadable")
+
+    monkeypatch.setattr(
+        "agent_runtime.serve_registry.list_serve_instances", exploding_list
+    )
+    args = _parser().parse_args(["harness", "status"])
+
+    assert args.func(args) == 0
+
+    line = capsys.readouterr().out.strip()
+    assert line.endswith("serves=unavailable(PermissionError)")
+    assert "serves=0/0" not in line
+
+
+def test_observe_passes_no_literal_fed_parameters(monkeypatch, capsys):
+    observed: dict = {}
+
+    def fake_build_observability(**kwargs):
+        observed.update(kwargs)
+        return {"health": {"status": "healthy"}, "interventions": []}
+
+    monkeypatch.setattr("hermes_cli.harness.build_observability", fake_build_observability)
+    args = _parser().parse_args(["harness", "observe"])
+
+    assert args.func(args) == 0
+
+    # S56 removed the `worker_sessions=` keyword with the store it fed.
+    assert set(observed) == {"runs", "incidents", "events", "execution_mode"}
+    assert capsys.readouterr().out.strip() == "observability=healthy interventions=0"
+

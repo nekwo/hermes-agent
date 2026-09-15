@@ -139,10 +139,10 @@ class TestAppendMessagesBatch:
             finally:
                 conn.execute = real_conn_execute
 
-        monkeypatch.setattr(SessionDB, "_insert_message_rows", failing_insert)
-        with pytest.raises(sqlite3.OperationalError):
-            db.append_messages_batch("sess-batch", _turn_messages())
-        monkeypatch.undo()
+        with monkeypatch.context() as fault:
+            fault.setattr(SessionDB, "_insert_message_rows", failing_insert)
+            with pytest.raises(sqlite3.OperationalError):
+                db.append_messages_batch("sess-batch", _turn_messages())
 
         count = db._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
         assert count == 0

@@ -91,7 +91,8 @@ def _format_db_size(db_path: Path) -> str:
 
 def _report_database_journal_modes(hermes_home: Path | None = None, version_info: tuple[int, ...] | None = None) -> None:
     """List each database's journal mode; warn on WAL under a vulnerable SQLite."""
-    from hermes_cli.doctor import HERMES_HOME
+    from hermes_cli.config import get_hermes_home
+    HERMES_HOME = get_hermes_home()
     from hermes_state_wal import _wal_reset_repair_hint, is_sqlite_wal_reset_vulnerable
     vulnerable = is_sqlite_wal_reset_vulnerable(version_info)
     try:

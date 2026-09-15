@@ -90,12 +90,11 @@ def test_failed_swap_rolls_back_every_earlier_swap(tmp_path, monkeypatch):
             raise OSError("simulated AV interference")
         return real_rename(src, dst)
 
-    monkeypatch.setattr(update_cmd.os, "rename", flaky_rename)
+    with monkeypatch.context() as fault:
+        fault.setattr(update_cmd.os, "rename", flaky_rename)
 
-    with pytest.raises(OSError):
-        update_cmd._commit_staged_replacements(staged)
-
-    monkeypatch.undo()
+        with pytest.raises(OSError):
+            update_cmd._commit_staged_replacements(staged)
     # Both entries must be back at the OLD version -- not one new, one old.
     versions = {
         n: (live / n / "version.txt").read_text() for n in ("agent", "tools")
@@ -245,10 +244,10 @@ def test_file_swap_failure_restores_the_original_file(tmp_path, monkeypatch):
             raise OSError("simulated AV interference")
         return real_rename(src, dst)
 
-    monkeypatch.setattr(update_cmd.os, "rename", flaky_rename)
-    with pytest.raises(OSError):
-        update_cmd._commit_staged_replacements(staged)
-    monkeypatch.undo()
+    with monkeypatch.context() as fault:
+        fault.setattr(update_cmd.os, "rename", flaky_rename)
+        with pytest.raises(OSError):
+            update_cmd._commit_staged_replacements(staged)
 
     versions = {n: (live / n).read_text() for n in ("cli.py", "run_agent.py")}
     assert versions == {"cli.py": "old", "run_agent.py": "old"}, (
@@ -272,24 +271,24 @@ def test_failed_staging_leaves_no_orphaned_copies(tmp_path, monkeypatch):
             raise OSError(28, "No space left on device")
         return real_copytree(src, dst, *a, **kw)
 
-    monkeypatch.setattr(update_cmd.shutil, "copytree", flaky_copytree)
+    with monkeypatch.context() as fault:
+        fault.setattr(update_cmd.shutil, "copytree", flaky_copytree)
 
-    staged: list[tuple[str, str]] = []
-    with pytest.raises(OSError):
-        try:
-            for n in ("agent", "tools", "gateway"):
-                staged.append(
-                    (
-                        update_cmd._stage_replacement(
-                            str(new / n), str(live / n)
-                        ),
-                        str(live / n),
+        staged: list[tuple[str, str]] = []
+        with pytest.raises(OSError):
+            try:
+                for n in ("agent", "tools", "gateway"):
+                    staged.append(
+                        (
+                            update_cmd._stage_replacement(
+                                str(new / n), str(live / n)
+                            ),
+                            str(live / n),
+                        )
                     )
-                )
-        except Exception:
-            update_cmd._discard_staged(staged)
-            raise
-    monkeypatch.undo()
+            except Exception:
+                update_cmd._discard_staged(staged)
+                raise
 
     leftovers = [p for p in os.listdir(live) if "hermes-update" in p]
     assert leftovers == [], f"orphaned staging copies: {leftovers}"
@@ -373,10 +372,10 @@ def test_staging_restores_backup_when_dst_is_missing(tmp_path, monkeypatch):
     def boom(src, dst, *a, **kw):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(update_cmd.shutil, "copytree", boom)
-    with pytest.raises(OSError):
-        update_cmd._stage_replacement(str(new / "agent"), str(live / "agent"))
-    monkeypatch.undo()
+    with monkeypatch.context() as fault:
+        fault.setattr(update_cmd.shutil, "copytree", boom)
+        with pytest.raises(OSError):
+            update_cmd._stage_replacement(str(new / "agent"), str(live / "agent"))
 
     # The old tree must have been restored to dst before the failure.
     assert (live / "agent" / "version.txt").read_text() == "old"
@@ -413,15 +412,15 @@ def test_commit_failure_plus_discard_leaves_no_staging_litter(tmp_path, monkeypa
             raise OSError("simulated AV interference")
         return real_rename(src, dst)
 
-    monkeypatch.setattr(update_cmd.os, "rename", flaky_rename)
-    with pytest.raises(OSError):
-        try:
-            update_cmd._commit_staged_replacements(staged)
-        except OSError:
-            # Mirrors the _update_via_zip wiring.
-            update_cmd._discard_staged(staged)
-            raise
-    monkeypatch.undo()
+    with monkeypatch.context() as fault:
+        fault.setattr(update_cmd.os, "rename", flaky_rename)
+        with pytest.raises(OSError):
+            try:
+                update_cmd._commit_staged_replacements(staged)
+            except OSError:
+                # Mirrors the _update_via_zip wiring.
+                update_cmd._discard_staged(staged)
+                raise
 
     # Old tree intact...
     for n in ("agent", "tools", "gateway"):

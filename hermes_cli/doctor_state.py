@@ -25,7 +25,8 @@ def _honcho_is_configured_for_doctor() -> bool:
 
 def _doctor_memory_config(hermes_home: Path | None = None) -> dict:
     """Return the effective memory section used by doctor diagnostics."""
-    from hermes_cli.doctor import HERMES_HOME
+    from hermes_cli.config import get_hermes_home
+    HERMES_HOME = get_hermes_home()
     try:
         from hermes_cli.config_effective import load_user_config_effective
         config_path = (hermes_home if hermes_home is not None else HERMES_HOME) / "config.yaml"
@@ -108,7 +109,9 @@ def _memory_store_flags(hermes_home: Path) -> tuple:
 @doctor_check()
 def _check_directory_structure(should_fix: bool, f: Finding) -> None:
     """HERMES_HOME, expected subdirs, SOUL.md, and the enabled built-in memory files."""
-    from hermes_cli.doctor import HERMES_HOME, _DHH
+    from hermes_cli.doctor import _DHH
+    from hermes_cli.config import get_hermes_home
+    HERMES_HOME = get_hermes_home()
     hermes_home = HERMES_HOME
     ensure_dir(f, should_fix, hermes_home, f"{_DHH} directory exists", f"Created {_DHH} directory", f"{_DHH} not found")
     _memory_enabled, _user_profile_enabled = _memory_store_flags(hermes_home)
@@ -288,7 +291,9 @@ def _state_db_wal(f: Finding, should_fix: bool, state_db_path: Path) -> None:
 @doctor_check()
 def _check_state_db(should_fix: bool, f: Finding) -> None:
     """state.db session count, FTS write health, schema repair, stats snapshot, WAL size."""
-    from hermes_cli.doctor import HERMES_HOME, _DHH
+    from hermes_cli.doctor import _DHH
+    from hermes_cli.config import get_hermes_home
+    HERMES_HOME = get_hermes_home()
     state_db_path = HERMES_HOME / "state.db"
     if state_db_path.exists():
         _state_db_health(f, should_fix, state_db_path, _DHH)
@@ -314,7 +319,9 @@ def _gh_authenticated() -> bool:
 
 @doctor_check()
 def _check_skills_hub(should_fix: bool, f: Finding) -> None:
-    from hermes_cli.doctor import HERMES_HOME, _DHH
+    from hermes_cli.doctor import _DHH
+    from hermes_cli.config import get_hermes_home
+    HERMES_HOME = get_hermes_home()
     hub_dir = HERMES_HOME / "skills" / ".hub"
     if check_bool(hub_dir.exists(), "Skills Hub directory exists", ("Skills Hub directory not initialized", "(run: hermes skills list)")):
         lock_file = hub_dir / "lock.json"
@@ -393,7 +400,8 @@ def _memory_provider_generic(name: str) -> None:
 
 @doctor_check()
 def _check_memory_provider(should_fix: bool, f: Finding) -> None:
-    from hermes_cli.doctor import HERMES_HOME
+    from hermes_cli.config import get_hermes_home
+    HERMES_HOME = get_hermes_home()
     name = _doctor_memory_config(HERMES_HOME).get("provider", "")
     if not name:
         check_ok("Built-in memory active", "(no external provider configured — this is fine)")

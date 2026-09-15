@@ -221,18 +221,18 @@ class TestComplexityProof:
 
         # OLD: quadratic — K(K+1)/2 loads over a K-iteration session
         old_counter = [0]
-        monkeypatch.setattr(json, "loads", counting_loads(old_counter))
-        for k in range(1, n + 1):
-            canonicalize_pass_OLD(copy.deepcopy(history[: 2 * k]))
-        monkeypatch.undo()
+        with monkeypatch.context() as counting:
+            counting.setattr(json, "loads", counting_loads(old_counter))
+            for k in range(1, n + 1):
+                canonicalize_pass_OLD(copy.deepcopy(history[: 2 * k]))
         assert old_counter[0] == n * (n + 1) // 2
 
         # NEW: linear — each unique string loaded exactly once, ever
         new_counter = [0]
-        monkeypatch.setattr(json, "loads", counting_loads(new_counter))
-        for k in range(1, n + 1):
-            cl._canonicalize_api_tool_calls(copy.deepcopy(history[: 2 * k]))
-        monkeypatch.undo()
+        with monkeypatch.context() as counting:
+            counting.setattr(json, "loads", counting_loads(new_counter))
+            for k in range(1, n + 1):
+                cl._canonicalize_api_tool_calls(copy.deepcopy(history[: 2 * k]))
         assert new_counter[0] == n
 
         # quadratic -> linear, by exact call count

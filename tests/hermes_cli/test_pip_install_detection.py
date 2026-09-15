@@ -53,3 +53,14 @@ def test_container_without_stamp_is_not_docker(tmp_path):
 
 
 
+
+
+def test_stamp_install_method_writes_code_scoped(tmp_path, monkeypatch):
+    from hermes_cli.install_method import stamp_install_method
+    home = tmp_path / "profile"
+    code = tmp_path / "code"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    stamp_install_method("git", project_root=code)
+    assert (code / ".install_method").read_text(encoding="utf-8") == "git\n"
+    assert not (home / ".install_method").exists()

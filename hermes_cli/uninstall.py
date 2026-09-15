@@ -146,7 +146,7 @@ def remove_node_symlinks(hermes_home: Path) -> list:
     """Remove the node/npm/npx symlinks the installer placed on PATH. Every candidate dir is
     checked (``/usr/local/bin`` root FHS, ``$PREFIX/bin`` Termux, ``~/.local/bin`` otherwise / older
     installs) so uninstall works regardless of how the install was done."""
-    node_dir = (hermes_home / "node").resolve()
+    node_dir = _comparable_path(hermes_home / "node")
 
     def _unlink_ours(link: Path) -> bool:
         # Only act on symlinks — never delete a real binary the user put here.
@@ -154,7 +154,7 @@ def remove_node_symlinks(hermes_home: Path) -> list:
             return False
         # os.readlink + manual join handles dangling links too (Path.resolve() on a dangling
         # link still returns the target path); the link must point into OUR node dir.
-        target = (link.parent / os.readlink(link)).resolve()
+        target = _comparable_path(link.parent / os.readlink(link))
         return _unlink_if(target == node_dir or node_dir in target.parents, link)
 
     candidates = (bin_dir / name for name in ("node", "npm", "npx") for bin_dir in _node_symlink_candidate_dirs())
@@ -328,7 +328,7 @@ def _edit_user_environment(edit, *, warn_label: str) -> list[str]:
 def remove_portable_tooling_windows(hermes_home: Path) -> list[Path]:
     """Delete the PortableGit / Node / gateway-service dirs the Windows installer created under
     ``hermes_home`` (isolated from any system Git / Node, so nothing else breaks)."""
-    targets = (hermes_home / sub for sub in ("git", "node", "gateway-service"))
+    targets = (hermes_home / sub for sub in ("git", "node", "gateway-service", "bin"))
     return _remove_each((t for t in targets if t.exists()), lambda t: shutil.rmtree(t) or True)
 
 
@@ -498,6 +498,7 @@ def run_uninstall(args):
     print(f"  Config:  {hermes_home / 'config.yaml'}")
     print(f"  Secrets: {hermes_home / '.env'}")
     print(f"  Data:    {hermes_home / 'cron/'}, {hermes_home / 'sessions/'}, {hermes_home / 'logs/'}")
+    print("  The code checkout and its git history are deleted, without backup.")
     print()
 
     if named_profiles:
@@ -573,6 +574,7 @@ def _print_uninstall_dry_run(*, project_root: Path, hermes_home: Path, full_unin
     print("  • Hermes wrapper scripts and Hermes-managed node/npm/npx symlinks")
     print("  • Desktop Chat GUI artifacts")
     print(f"  • Code checkout: {project_root}")
+    print("    (includes its git history — not backed up by this tool)")
     if not full_uninstall:
         print(f"  • Keep Hermes config/data: {hermes_home}")
     else:
@@ -763,3 +765,24 @@ def find_shell_configs() -> list:
 
     return configs
 # ---- END PLUGIN-COMPAT ----
+
+
+_WIN_EXTENDED_PREFIX = "\\\\?\\"
+_WIN_EXTENDED_UNC_PREFIX = "\\\\?\\UNC\\"
+
+def _comparable_path(path: Path) -> Path:
+    """Return *path* fully resolved and spelled so it compares against peers.
+
+    ``os.readlink()`` on Windows hands back the extended-length spelling
+    (``\\\\?\\C:\\...``), and ``Path.resolve()`` preserves that prefix — so a
+    resolved link target and a resolved ordinary path have different anchors
+    and never compare equal, even when they name the same file. Strip the
+    prefix before resolving so both sides of a containment test are spelled
+    the same way. A no-op on POSIX.
+    """
+    raw = str(path)
+    if raw.startswith(_WIN_EXTENDED_UNC_PREFIX):
+        raw = "\\\\" + raw[len(_WIN_EXTENDED_UNC_PREFIX):]
+    elif raw.startswith(_WIN_EXTENDED_PREFIX):
+        raw = raw[len(_WIN_EXTENDED_PREFIX):]
+    return Path(raw).resolve()

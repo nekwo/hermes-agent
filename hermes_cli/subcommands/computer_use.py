@@ -72,9 +72,10 @@ def _cu_status(args) -> int:
 
 def _cu_doctor(args) -> None:
     from tools.computer_use.doctor import run_doctor
+    from hermes_cli.flag_binding import list_flag_or_empty
     sys.exit(run_doctor(
-        include=list(getattr(args, "include", []) or []),
-        skip=list(getattr(args, "skip", []) or []),
+        include=list_flag_or_empty(args, "include"),
+        skip=list_flag_or_empty(args, "skip"),
         json_output=bool(getattr(args, "json", False))))
 
 

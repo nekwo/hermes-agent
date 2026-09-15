@@ -43,6 +43,7 @@ def test_importing_main_does_not_import_command_modules():
 
 
 @pytest.mark.real_concurrent_gate  # conftest autouse stub would shadow one frozen name
+@pytest.mark.real_windows_gateway_pause  # Inspect identity only; never invoke the helpers.
 def test_frozen_updater_surface_resolves_to_real_objects():
     for module, names in hermes_cli.main._FROZEN_UPDATER_SURFACE.items():
         mod = sys.modules[module] if module in sys.modules else __import__(module, fromlist=["_"])

@@ -52,7 +52,9 @@ def _browser_available() -> bool:
     if shutil.which("agent-browser"):
         return True
     try:
-        from hermes_cli.doctor import HERMES_HOME, PROJECT_ROOT
+        from hermes_cli.doctor import PROJECT_ROOT
+        from hermes_cli.config import get_hermes_home
+        HERMES_HOME = get_hermes_home()
         if (PROJECT_ROOT / "node_modules" / "agent-browser").exists():
             return True
         for candidate in (HERMES_HOME / "node" / "bin", HERMES_HOME / "node", HERMES_HOME / "node_modules" / ".bin"):

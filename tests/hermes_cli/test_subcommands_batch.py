@@ -27,7 +27,7 @@ from hermes_cli.subcommands.login import build_login_parser
 from hermes_cli.subcommands.logout import build_logout_parser
 from hermes_cli.subcommands.logs import build_logs_parser
 from hermes_cli.subcommands.model import build_model_parser
-
+from hermes_cli.subcommands.postinstall import build_postinstall_parser
 from hermes_cli.subcommands.prompt_size import build_prompt_size_parser
 from hermes_cli.subcommands.security import build_security_parser
 from hermes_cli.subcommands.setup import build_setup_parser
@@ -95,6 +95,21 @@ def test_config_get_unset_subcommands_parse():
     assert ns.key == "terminal.backend"
 
 
+# Fork-retained: `hermes postinstall` survives the upstream removal (Windows
+# Git-Bash provisioning), so its parser contract stays covered here.
+def test_postinstall_parser_accepts_non_interactive_aliases():
+    parser = argparse.ArgumentParser(prog="hermes")
+    sub = parser.add_subparsers(dest="command")
+    handler = _h("postinstall")
+    build_postinstall_parser(sub, cmd_postinstall=handler)
+
+    yes = parser.parse_args(["postinstall", "--yes"])
+    non_interactive = parser.parse_args(["postinstall", "--non-interactive"])
+
+    assert yes.func is handler
+    assert yes.yes is True
+    assert non_interactive.func is handler
+    assert non_interactive.non_interactive is True
 
 
 # ── deprecated `hermes login` fails gracefully, not with argparse error ────

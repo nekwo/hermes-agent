@@ -997,8 +997,15 @@ def _refresh_windows_gateway_launchers() -> None:
     with _best_effort('Could not refresh Windows gateway launchers after update: %s'):
         from hermes_cli import gateway_windows
         if gateway_windows.is_installed():
-            gateway_windows._write_task_script()
+            from hermes_cli.gateway import ManagedPythonUnavailable
+            try:
+                gateway_windows._write_task_script()
+            except ManagedPythonUnavailable as exc:
+                print(f"  ⚠ Left the Windows gateway launcher unchanged: {exc}")
+                print("    Re-run from the Hermes environment: hermes gateway install")
+                return
             print("  ✓ Refreshed Windows gateway launcher scripts")
+            _warn_legacy_console_gateway_task()
 
 
 def _refresh_bootstrap_cache_scripts(branch: str = "main") -> None:
@@ -1293,3 +1300,25 @@ def _clear_windows_venv_holders_or_exit(args, gateway_mode: bool, _windows_gatew
     if holders:
         print(_format_venv_python_holders_message(holders))
         _resume_and_exit()
+
+
+def _warn_legacy_console_gateway_task() -> None:
+    """Tell the operator when the registered task still runs a visible console.
+
+    Re-registering the action requires ``schtasks /Create`` (elevation), which
+    the update path deliberately avoids — so a pre-#45610 install cannot heal
+    itself here. What it *can* do is stop being silent: a gateway launched
+    through the ``.cmd`` dies with ``STATUS_CONTROL_C_EXIT`` (0xC000013A) the
+    moment its console window is closed, and the ONLOGON-only trigger means it
+    stays down until the next login.
+    """
+    from hermes_cli import gateway_windows
+
+    if gateway_windows.task_action_is_console_less() is not False:
+        return
+    task_name = gateway_windows.get_task_name()
+    print(f"  ⚠ Scheduled Task {task_name!r} still launches the gateway in a VISIBLE console window.")
+    print("    Closing that window (or a stray console-control broadcast) kills the")
+    print("    gateway outright, and nothing restarts it until the next login.")
+    print("    Re-register it on the console-less launcher — approve the UAC prompt:")
+    print("      hermes gateway install")

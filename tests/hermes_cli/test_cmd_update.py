@@ -16,12 +16,20 @@ from hermes_cli import update_cmd
 def _make_run_side_effect(branch="main", verify_ok=True, commit_count="0"):
     """Build a side_effect function for subprocess.run that simulates git commands."""
 
-    def side_effect(cmd, **kwargs):
+    def simulate(cmd, **kwargs):
         joined = " ".join(str(c) for c in cmd)
 
         # git rev-parse --abbrev-ref HEAD  (get current branch)
         if "rev-parse" in joined and "--abbrev-ref" in joined:
             return subprocess.CompletedProcess(cmd, 0, stdout=f"{branch}\n", stderr="")
+
+        # The history guard requests exact object IDs, independently of the
+        # branch-existence probe below. Model a normal fast-forward checkout.
+        if "rev-parse" in joined and "^{commit}" in joined:
+            sha = "1" * 40 if "HEAD^{commit}" in cmd or commit_count == "0" else "2" * 40
+            return subprocess.CompletedProcess(cmd, 0, stdout=sha + "\n", stderr="")
+        if "--is-shallow-repository" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="false\n", stderr="")
 
         # git rev-parse --verify origin/{branch}  (check remote branch exists)
         if "rev-parse" in joined and "--verify" in joined:
@@ -34,6 +42,13 @@ def _make_run_side_effect(branch="main", verify_ok=True, commit_count="0"):
 
         # Fallback: return a successful CompletedProcess with empty stdout
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    def side_effect(cmd, **kwargs):
+        result = simulate(cmd, **kwargs)
+        if not (kwargs.get("text") or kwargs.get("encoding") or kwargs.get("universal_newlines")):
+            result.stdout = result.stdout.encode("utf-8")
+            result.stderr = result.stderr.encode("utf-8")
+        return result
 
     return side_effect
 

@@ -192,6 +192,13 @@ def test_quarantine_reports_a_lock_it_cannot_break(_winp, tmp_path, capsys, monk
 # ---------------------------------------------------------------------------
 
 
+# The one test in this directory that is ABOUT _pause_windows_gateways_for_update
+# rather than merely downstream of it, so it opts out of the conftest default
+# that returns None. Safe to run for real: find_gateway_pids,
+# find_profile_gateway_processes, _capture_gateway_argv and terminate_pid are
+# all replaced below, so nothing here reads or signals this machine — and the
+# process-wide gateway fence still stands behind it either way.
+@pytest.mark.real_windows_gateway_pause
 @patch.object(cli_main, "_is_windows", return_value=True)
 def test_pause_windows_gateways_for_update_stops_profile_and_unmapped_pids(
     _winp,
@@ -269,6 +276,7 @@ def test_pause_windows_gateways_for_update_stops_profile_and_unmapped_pids(
 
 
 @patch.object(cli_main, "_is_windows", return_value=True)
+@pytest.mark.real_windows_gateway_pause  # Service/process transports are mocked below.
 def test_pause_and_resume_windows_gateway_service(
     _winp,
     monkeypatch,
@@ -356,6 +364,7 @@ def test_pause_and_resume_windows_gateway_service(
 
 
 @patch.object(cli_main, "_is_windows", return_value=True)
+@pytest.mark.real_windows_gateway_pause  # Service/process transports are mocked below.
 def test_pause_windows_gateway_service_failure_restores_every_attempted_service(
     _winp,
     monkeypatch,
@@ -401,6 +410,7 @@ def test_pause_windows_gateway_service_failure_restores_every_attempted_service(
 
 
 @patch.object(cli_main, "_is_windows", return_value=True)
+@pytest.mark.real_windows_gateway_pause  # Service/process transports are mocked below.
 def test_pause_windows_gateway_service_surfaces_rollback_start_failure(
     _winp,
     monkeypatch,
@@ -472,6 +482,7 @@ def test_restore_windows_gateway_service_waits_out_stop_pending(monkeypatch):
 
 
 @patch.object(cli_main, "_is_windows", return_value=True)
+@pytest.mark.real_windows_gateway_pause  # Service/process transports are mocked below.
 def test_pause_windows_gateways_aborts_when_service_discovery_is_indeterminate(
     _winp,
     monkeypatch,
@@ -496,6 +507,7 @@ def test_pause_windows_gateways_aborts_when_service_discovery_is_indeterminate(
 
 
 @patch.object(cli_main, "_is_windows", return_value=True)
+@pytest.mark.real_windows_gateway_pause  # Service/process transports are mocked below.
 def test_pause_windows_gateways_aborts_when_gateway_pid_discovery_is_indeterminate(
     _winp,
     monkeypatch,
@@ -676,6 +688,7 @@ def test_venv_launcher_ancestors_is_empty_without_pids(_winp):
 
 
 @patch.object(cli_main, "_is_windows", return_value=True)
+@pytest.mark.real_windows_gateway_pause  # Service/process transports are mocked below.
 def test_pause_kill_set_covers_venv_guard_abort_set(
     _winp,
     monkeypatch,

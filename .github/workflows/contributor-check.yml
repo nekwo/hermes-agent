@@ -52,7 +52,7 @@ jobs:
               continue  # GitHub id+login noreply emails auto-resolve
             fi
 
-            if [ -f "contributors/emails/${email}" ]; then
+            if [ -f "contributors/emails/${email}" ] || [ -f "contributors/emails/case-variants/${email}" ]; then
               continue  # mapped via the contributors directory
             fi
 

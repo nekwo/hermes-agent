@@ -777,6 +777,13 @@ OUT="$("${UPDATE_INVOKE[@]}" update --yes --gateway $KEEP_STASH --branch "$BRANC
 printf '%s\n' "$OUT" >> "$LOG" 2>/dev/null
 log "hermes update exit code: $CODE"
 
+if [ "$CODE" -ne 0 ] && printf '%s\n' "$OUT" | grep -q '^HERMES_UPDATE_HISTORY_REVIEW_REQUIRED$'; then
+  FINAL_CODE="$CODE"
+  FINAL_MSG="Update paused: this installation and the update have different commit histories. Your checkout was preserved. The fork maintainer must review the history before updating. See the update log for recovery details."
+  log "$FINAL_MSG"
+  exit "$FINAL_CODE"
+fi
+
 if [ "$CODE" -ne 0 ] && [ "$CODE" -ne 2 ]; then
   # Retry once: update-boundary class (fresh code on disk, stale in memory).
   # Exit 2 ("close all Hermes windows") is not retryable.

@@ -1,0 +1,57 @@
+{
+  "argv": [
+    "harness",
+    "work",
+    "list",
+    "--json"
+  ],
+  "exit_code": 0,
+  "stdout": {
+    "ambient": {
+      "home_name": "hermes",
+      "home_provenance": "head_home"
+    },
+    "completeness": {
+      "by_design": [],
+      "considered": 0,
+      "dropped": 0,
+      "included": 0,
+      "reasons": {},
+      "truncated": false
+    },
+    "count": 0,
+    "counts": {
+      "total": 0,
+      "unavailable_sources": 1
+    },
+    "cursor": null,
+    "item_kind": "running_work",
+    "items": [],
+    "kind": "list",
+    "schema_version": 1,
+    "sources": {
+      "chat_turn": {
+        "lane": "durable",
+        "status": "ok"
+      },
+      "cron_job": {
+        "lane": "live",
+        "reason": "not_in_process",
+        "status": "unavailable"
+      },
+      "delegation": {
+        "lane": "durable",
+        "status": "ok"
+      },
+      "dispatch": {
+        "lane": "durable",
+        "status": "ok"
+      },
+      "terminal": {
+        "lane": "durable",
+        "status": "ok"
+      }
+    },
+    "truncated": false
+  }
+}

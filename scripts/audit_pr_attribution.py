@@ -66,7 +66,10 @@ def is_mapped(email: str) -> bool:
         return True
     if ID_NOREPLY_RE.search(email):
         return True
-    if (REPO_ROOT / "contributors" / "emails" / email).is_file():
+    # Compare actual filenames, not case-insensitive filesystem lookup: the
+    # historical Agent/agent host pair belongs to two different contributors.
+    directory = REPO_ROOT / "contributors" / "emails"
+    if any(path.name == email and path.is_file() for path in directory.rglob("*")):
         return True
     release_py = REPO_ROOT / "scripts" / "release.py"
     try:

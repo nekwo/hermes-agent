@@ -125,6 +125,7 @@ class TestIdleWatchdogCountsUpdateLogGrowth:
 
 
 @pytest.mark.windows_only
+@pytest.mark.timeout(330)  # Preserve the subprocess's 300s diagnostic budget.
 def test_update_step_survives_pipe_leak_flood_and_live_child_stall(
     tmp_path: Path,
 ) -> None:

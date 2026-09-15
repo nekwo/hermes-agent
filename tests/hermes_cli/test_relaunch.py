@@ -7,6 +7,23 @@ import pytest
 from hermes_cli import relaunch as relaunch_mod
 
 
+@pytest.fixture(autouse=True)
+def _isolate_argv_from_the_pytest_command_line(monkeypatch):
+    """Pin ``sys.argv`` to the program name for every test in this module.
+
+    ``build_relaunch_argv`` defaults ``original_argv`` to ``sys.argv[1:]`` and
+    copies through every flag tagged ``inherit_on_relaunch``. Under pytest that
+    argv is the *pytest* command line, so any invocation flag that collides
+    with a hermes flag leaks into the produced argv and breaks the tests that
+    assert an exact list — e.g. ``pytest -m <expr>`` is read by the hermes
+    parser as ``--model <expr>``, and ``pytest -p <plugin>`` as ``--profile``.
+    The result of a test must describe the code, not how the suite was
+    invoked. Tests that need a specific argv still set it themselves; this
+    fixture runs first, so their own monkeypatch wins.
+    """
+    monkeypatch.setattr(sys, "argv", sys.argv[:1])
+
+
 class TestResolveHermesBin:
     def test_prefers_absolute_argv0_when_executable(self, monkeypatch):
         fake = "/nix/store/abc/bin/hermes"
@@ -106,6 +123,13 @@ class TestRelaunch:
             calls.append((path, argv))
             raise SystemExit(0)
 
+        # relaunch() branches on sys.platform: only the POSIX side reaches
+        # os.execvp (the win32 side spawns a subprocess — see
+        # test_windows_uses_subprocess_not_execvp, which pins the mirror
+        # image of this by forcing "win32"). Pin the POSIX branch so this
+        # test exercises execvp on every host instead of silently testing
+        # the Windows path when run from Windows.
+        monkeypatch.setattr(relaunch_mod.sys, "platform", "linux")
         monkeypatch.setattr(relaunch_mod.os, "execvp", fake_execvp)
         monkeypatch.setattr(relaunch_mod, "resolve_hermes_bin", lambda: "/usr/bin/hermes")
 

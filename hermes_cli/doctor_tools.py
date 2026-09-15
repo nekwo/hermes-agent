@@ -280,7 +280,8 @@ def _check_agent_browser(should_fix: bool) -> bool:
             check_info("  Warmed npx cache for agent-browser" if warm_agent_browser_npx_cache()
                        else "  Could not warm npx cache (offline or npx unavailable)")
         return True
-    if resolved and agent_browser_runnable(resolved):
+    from agent_runtime.doctor_extensions import browser_runnable
+    if resolved and browser_runnable(resolved, agent_browser_runnable):
         check_ok("agent-browser", "(browser automation)")
         return True
     if resolved:

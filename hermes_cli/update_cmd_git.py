@@ -229,7 +229,9 @@ def _mark_skip_upstream_prompt():
 
 def _sync_fork_with_upstream(git_cmd: list[str], cwd: Path) -> bool:
     """Push updated main to origin (sync fork); True on success."""
-    return _git_ok(git_cmd, ["push", "origin", "main", "--force-with-lease"], cwd, network=True)
+    # Another contributor may publish while the updater fetches upstream. A
+    # rejected normal push preserves their history; an updater must never force it.
+    return _git_ok(git_cmd, ["push", "origin", "main"], cwd, network=True)
 
 
 def _offer_upstream_remote(git_cmd: list[str], cwd: Path, *, assume_yes: bool, input_fn) -> bool:
@@ -293,7 +295,8 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path, *, assume_yes: 
         print(
             f"\nℹ Your fork has {origin_ahead} commit(s) not on upstream.\n"
             "  Skipping upstream sync to preserve your changes.\n"
-            "  If you want to merge upstream changes, run:\n    git pull upstream main"
+            "  Review merge ancestry, contributors and equivalent patches in a dedicated codex/ worktree.\n"
+            "  Folded review commits are not a fast-forward update. Preserve published main history."
         )
         return True
     if upstream_ahead == 0:

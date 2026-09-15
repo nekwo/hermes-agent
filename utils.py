@@ -151,6 +151,46 @@ def _copy_fallback(tmp_str: str, real_path: str) -> None:
     os.unlink(tmp_str)
 
 
+_WINDOWS_REPLACE_RETRY_ERRNOS = frozenset({errno.EACCES})
+
+_WINDOWS_REPLACE_RETRY_WINERRORS = frozenset({5, 32})
+
+_WINDOWS_REPLACE_ATTEMPTS = 20
+
+_WINDOWS_REPLACE_BACKOFF_SECONDS = 0.01
+
+def _is_windows_replace_contention(exc: OSError) -> bool:
+    """True for the transient Win32 rename-over collisions worth retrying."""
+    if os.name != "nt":
+        return False
+    winerror = getattr(exc, "winerror", None)
+    if winerror is not None:
+        return winerror in _WINDOWS_REPLACE_RETRY_WINERRORS
+    return exc.errno in _WINDOWS_REPLACE_RETRY_ERRNOS
+
+def _replace_with_windows_contention_retry(src: str, dst: str) -> None:
+    """``os.replace`` plus a bounded retry for Windows rename contention.
+
+    A no-op wrapper on POSIX (the first attempt either succeeds or raises a
+    real error). On Windows a transient ERROR_ACCESS_DENIED /
+    ERROR_SHARING_VIOLATION is retried for up to ~200ms before the original
+    exception is re-raised unchanged, so a genuinely unwritable destination
+    still fails, and fails with its real error.
+    """
+    import time
+
+    for attempt in range(_WINDOWS_REPLACE_ATTEMPTS):
+        try:
+            os.replace(src, dst)
+            return
+        except OSError as exc:
+            if (
+                attempt == _WINDOWS_REPLACE_ATTEMPTS - 1
+                or not _is_windows_replace_contention(exc)
+            ):
+                raise
+            time.sleep(_WINDOWS_REPLACE_BACKOFF_SECONDS)
+
 def atomic_replace(tmp_path: Union[str, Path], target: Union[str, Path]) -> str:
     """Atomically move *tmp_path* onto *target*, preserving symlinks.
 
@@ -164,7 +204,7 @@ def atomic_replace(tmp_path: Union[str, Path], target: Union[str, Path]) -> str:
     real_path = os.path.realpath(target_str) if os.path.islink(target_str) else target_str
     tmp_str = str(tmp_path)
     try:
-        os.replace(tmp_str, real_path)
+        _replace_with_windows_contention_retry(tmp_str, real_path)
         return real_path
     except OSError as exc:
         contended = _is_contended_windows_replace_error(exc)
@@ -176,7 +216,7 @@ def atomic_replace(tmp_path: Union[str, Path], target: Union[str, Path]) -> str:
             for attempt in range(1, _REPLACE_RETRY_ATTEMPTS + 1):
                 time.sleep(jittered_backoff(attempt, base_delay=_REPLACE_RETRY_BASE_DELAY_S, max_delay=_REPLACE_RETRY_MAX_DELAY_S))
                 try:
-                    os.replace(tmp_str, real_path)
+                    _replace_with_windows_contention_retry(tmp_str, real_path)
                     return real_path
                 except OSError as retry_exc:
                     exc = retry_exc
@@ -214,7 +254,7 @@ def fsync_directory(path: Union[str, Path]) -> None:
 
 
 def _atomic_write(path: Path, write, *, prefix: str, encoding: str = "utf-8", mode: "int | None" = None,
-                  preserve_owner: bool = True, binary: bool = False, fsync_dir: bool = False) -> None:
+                  preserve_owner: bool = True, binary: bool = False, fsync_dir: bool = False, newline: str | None = None) -> None:
     """Temp file + fsync + :func:`atomic_replace`, then re-apply owner/mode.
 
     *write(f)* emits the payload into the open handle (text, or bytes when *binary*). The temp file
@@ -234,7 +274,7 @@ def _atomic_write(path: Path, write, *, prefix: str, encoding: str = "utf-8", mo
     original_owner = _preserve_file_owner(path) if preserve_owner else None
     fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), prefix=prefix, suffix=".tmp")
     try:
-        with os.fdopen(fd, "wb" if binary else "w", encoding=None if binary else encoding) as f:
+        with os.fdopen(fd, "wb" if binary else "w", encoding=None if binary else encoding, newline=None if binary else newline) as f:
             if mode is not None and hasattr(os, "fchmod"):
                 os.fchmod(f.fileno(), mode)
             write(f)
@@ -257,7 +297,7 @@ def _mode_for_write(path: Path, create_mode: "int | None", preserve: bool = True
 
 def atomic_write_text(path: Union[str, Path], content: str, *, encoding: str = "utf-8", tmp_prefix: str = ".tmp_",
                       preserve_mode: bool = False, create_mode: "int | None" = None, mode: "int | None" = None,
-                      fsync_dir: bool = False) -> None:
+                      fsync_dir: bool = False, newline: str | None = None) -> None:
     """Write *content* to *path* via temp file + fsync + atomic rename.
 
     The target is never left partially written on crash/interrupt. Shared by every destructive
@@ -268,7 +308,7 @@ def atomic_write_text(path: Union[str, Path], content: str, *, encoding: str = "
     path = Path(path)
     _atomic_write(path, lambda f: f.write(content), prefix=tmp_prefix, encoding=encoding,
                   mode=mode if mode is not None else _mode_for_write(path, create_mode, preserve=preserve_mode),
-                  preserve_owner=preserve_mode, fsync_dir=fsync_dir)
+                  preserve_owner=preserve_mode, fsync_dir=fsync_dir, newline=newline)
 
 
 def atomic_write_bytes(path: Union[str, Path], content: bytes, *, tmp_prefix: str = ".tmp_",

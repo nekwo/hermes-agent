@@ -629,60 +629,7 @@ def _try_redownload_electron_dist(project_root: Path, env: dict) -> bool:
     return _redownload_electron_dist(project_root, env, mirror=_ELECTRON_FALLBACK_MIRROR)
 
 
-def _stop_desktop_processes_locking_build(desktop_dir: Path) -> list[int]:
-    """Terminate a running desktop app whose exe lives INSIDE this build's ``release`` tree (Windows
-    only — its lock makes the pack die with ``Access is denied``; POSIX can unlink a running
-    binary). Never raises; returns the PIDs asked to stop."""
-    if sys.platform != "win32":
-        return []
-    try:
-        import psutil
-        release_dir = (desktop_dir / "release").resolve()
-    except Exception:
-        return []
-    if not release_dir.is_dir():
-        return []
-
-    me = os.getpid()
-    victims = []
-    try:
-        proc_iter = psutil.process_iter(["pid", "exe"])
-    except Exception:
-        return []
-    for proc in proc_iter:
-        try:
-            info = proc.info
-            pid = info.get("pid")
-            exe = info.get("exe")
-            if not exe or pid is None or pid == me:
-                continue
-            exe_path = Path(exe).resolve()
-        except Exception:
-            continue
-        if release_dir in exe_path.parents:
-            victims.append(proc)
-
-    stopped: list[int] = []
-    for proc in victims:
-        try:
-            proc.terminate()
-            stopped.append(int(proc.pid))
-        except Exception:
-            continue
-    if stopped:
-        # Wait for the handles (and thus the file locks) to actually release.
-        with contextlib.suppress(Exception):
-            _, alive = psutil.wait_procs(victims, timeout=5)
-            killed = []
-            for proc in alive:
-                try:
-                    proc.kill()
-                    killed.append(proc)
-                except Exception:
-                    continue
-            if killed:
-                psutil.wait_procs(killed, timeout=5)
-    return stopped
+from hermes_cli._desktop_processes import _stop_desktop_processes_locking_build
 
 
 def _desktop_macos_bundle_id(bundle: Path) -> Optional[str]:

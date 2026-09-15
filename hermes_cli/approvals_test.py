@@ -13,6 +13,7 @@ rules (fire before yolo/off), 5. yolo / ``approvals.mode: off`` bypass, 6. perma
 from __future__ import annotations
 
 import json
+from hermes_cli.flag_binding import list_flag_or_empty
 
 EXIT_ALLOW = 0
 EXIT_USAGE = 1
@@ -131,7 +132,7 @@ def _render_text(verdict: dict) -> None:
 
 def approvals_test_command(args) -> int:
     """Handle ``hermes approvals test <command...>``. Returns the exit code."""
-    words = list(getattr(args, "command_words", None) or [])
+    words = list_flag_or_empty(args, "command_words")
     # argparse REMAINDER keeps a leading "--" separator; it is not part of the command.
     if words and words[0] == "--":
         words = words[1:]

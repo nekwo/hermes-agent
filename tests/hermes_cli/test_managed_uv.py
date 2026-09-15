@@ -162,6 +162,14 @@ class TestMacOSManagedPythonSigning:
 # ---------------------------------------------------------------------------
 
 class TestResolveUv:
+    """The managed uv lives at ``bin/uv`` on POSIX and ``bin/uv.exe`` on
+    Windows (see ``TestManagedUvPath``). These fixtures write the POSIX
+    spelling, so they pin ``platform.system`` to a POSIX value the way
+    ``TestManagedUvPath::test_posix`` and ``TestEnsureUvUpdateBoundary``
+    already do. Without the pin, a Windows run looked for ``bin/uv.exe``,
+    never saw the fixture at all, and
+    ``test_non_executable_file_returns_none`` passed for the wrong reason —
+    "no uv.exe" rather than "found it, but it is not executable"."""
 
     def test_existing_executable(self, tmp_path):
         uv = tmp_path / "bin" / _UV_BINARY_NAME
@@ -171,13 +179,24 @@ class TestResolveUv:
             result = resolve_uv()
             assert result == str(uv)
 
+    @pytest.mark.skipif(
+        os.name == "nt",
+        reason=(
+            "resolve_uv() rejects on os.access(p, os.X_OK), and Windows has no "
+            "execute bit: os.access(..., X_OK) is True for every existing file "
+            "(verified — even one chmod'd 0o644). The guarantee cannot be "
+            "observed here, and without the skip this passed only because the "
+            "Windows lookup is for bin/uv.exe and never saw the fixture."
+        ),
+    )
     def test_non_executable_file_returns_none(self, tmp_path):
         uv = tmp_path / "bin" / "uv"
         uv.parent.mkdir(parents=True)
         uv.write_text("not a binary")
         # Ensure no execute bit
         uv.chmod(0o644)
-        with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path):
+        with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path), \
+             patch("hermes_cli.managed_uv.platform.system", return_value="Linux"):
             from hermes_cli.managed_uv import resolve_uv
             assert resolve_uv() is None
 
@@ -187,10 +206,21 @@ class TestResolveUv:
 # ---------------------------------------------------------------------------
 
 class TestEnsureUv:
+    """POSIX layout (``bin/uv``), pinned — see ``TestResolveUv``.
+
+    The post-install verification step shells out to ``<uv> --version`` purely
+    to print the version. ``_make_executable`` writes a ``#!/bin/sh`` text
+    file, which only *runs* where the kernel honours shebangs; elsewhere the
+    probe raises ``OSError(WinError 216)`` straight out of ``ensure_uv``. The
+    probe is stubbed so these tests pin what they are named for — that the
+    install ran once and the managed path came back — instead of the host's
+    ability to execute a fake binary."""
 
     def test_installs_if_missing(self, tmp_path):
         uv = tmp_path / "bin" / _UV_BINARY_NAME
         with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path), \
+             patch("hermes_cli.managed_uv.subprocess.run",
+                   return_value=MagicMock(returncode=0, stdout="uv 0.1.2")), \
              patch("hermes_cli.managed_uv.repair_vulnerable_runtime", return_value=_RRR("not-applicable")), \
              patch("hermes_cli.managed_uv._uv_version", return_value="uv 0.1.2"), \
              patch("hermes_cli.managed_uv._install_uv") as mock_install:
@@ -224,6 +254,9 @@ class TestEnsureUv:
         with patch(
             "hermes_cli.managed_uv.get_hermes_home",
             return_value=tmp_path,
+        ), patch(
+            "hermes_cli.managed_uv.subprocess.run",
+            return_value=MagicMock(returncode=0, stdout="uv 0.1.2"),
         ), patch(
             "hermes_cli.managed_uv._install_uv",
             side_effect=fake_install,
@@ -1542,3 +1575,19 @@ class TestWindowsRuntimeSelfLock:
 
         assert locked
         assert "999" in detail
+
+
+class TestExplicitPosixInstaller:
+    def test_posix_sets_uv_unmanaged_install(self, tmp_path):
+        target = tmp_path / "bin" / "uv"
+        # _install_uv() dispatches on platform.system(): _install_uv_windows on
+        # Windows, _install_uv_posix everywhere else. Pin the branch this test
+        # is named for instead of asserting it from whichever host runs.
+        with patch("hermes_cli.managed_uv.platform.system", return_value="Linux"), \
+             patch("hermes_cli.managed_uv._install_uv_posix") as mock_posix:
+            from hermes_cli.managed_uv import _install_uv
+            _install_uv(target)
+            mock_posix.assert_called_once()
+            call_env = mock_posix.call_args[0][0]
+            assert call_env["UV_UNMANAGED_INSTALL"] == str(tmp_path / "bin")
+
