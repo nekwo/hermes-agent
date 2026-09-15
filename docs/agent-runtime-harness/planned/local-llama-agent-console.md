@@ -1,5 +1,10 @@
 # Local llama Hermes — Agent Console implementation plan
 
+> Current status (2026-09-14): the v1 implementation has landed; see
+> [checkpoint](local-llama-checkpoint.md) for actual proof and remaining acceptance.
+> The [installation extension](local-llama-installation-contract.md) is proposed.
+> The original design status below is historical.
+
 Status: implementation-ready design; NOT IMPLEMENTED. Contract status: proposed,
 not fixture-frozen or tested. Written 2026-09-14. Runtime owner: Hermes;
 consumer: EterniaLauncher Agent Console. Implementation order: H0 → H1 → H2 → L1 → Q1.
@@ -482,3 +487,10 @@ Fold implemented runtime facts into domain docs 03/04/05 and Launcher chat/trans
 canon; archive this plan with shipping SHAs/evidence and remove its queue pointer.
 Until then the phase checklist is entirely open. Planning ran no product tests and
 provides no claim that the local provider, toolbar, or RPC methods already exist.
+
+## Installation wizard extension (2026-09-14)
+
+See the source-reviewed [installation contract](local-llama-installation-contract.md)
+for Launcher B-00–B-13 decisions and HS-0–HS-5. New setup RPCs are **proposed, not
+implemented or fixture-frozen**. Keep the implemented v1 manual flow until producer
+tests admit each capability. Historical design above is not new runtime evidence.
