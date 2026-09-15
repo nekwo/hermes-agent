@@ -1,0 +1,103 @@
+"""S32 — ``decision_contract.parity`` retirement, the follow-on to S27.
+
+5c16417f6 cut the simplified-contract PROJECTION half out of
+``agent_runtime/simplified_contract.py``: ``DecisionProjection``,
+``project_decision_for_execution``, the ``legacy_*_decision_from_*`` shims, the
+three config predicates — and ``_record_parity``, which was the ONLY writer that
+ever produced ``decision_contract.parity``. It recorded whether the public and
+execution decision types agreed for the deterministic executor deleted in S5, and
+had no caller after it.
+
+Left registered it would be exactly the debt S15 spent a stage clearing: a shape
+the prompt contract advertises, the manifest publishes, and ``EventLog.append``
+accepts, that no production writer can ever produce. A text grep over the tree
+(excluding the ``.claude/worktrees`` copies) finds no emitter left — only the
+registry entry retired here and the retirement note in ``simplified_contract.py``
+that names the deleted recorder, which the S19/S29 mention-vs-code-form rule
+allows.
+
+Unlike ``run.opened`` and ``repo_bundle.delivered``, this type never carried an
+operator-summary row: ``OPERATOR_SUMMARY_EVENT_TYPES`` names six types and
+``decision_contract.parity`` was never one of them, so no formatter arm and no
+private helper go with it. That absence is pinned below rather than assumed.
+
+Historical rows are untouched — ``append`` type-checks on WRITE only, so the ~580
+``decision_contract.parity`` rows already in live event logs still read back
+fine. The Launcher's historical-row suppressor
+(``mission_agent_chat_adapter.dart``) reads those ROWS, not this registry, and is
+deliberately kept.
+"""
+
+from __future__ import annotations
+
+from hermes_time import now
+
+from agent_runtime.events import (
+    ALLOWED_EVENT_TYPES,
+    OPERATOR_SUMMARY_EVENT_TYPES,
+    Event,
+    operator_event_summary,
+)
+
+RETIRED = "decision_contract.parity"
+
+
+
+
+
+
+def test_the_type_never_had_an_operator_summary_row_to_retire():
+    """The delta this retirement does NOT have: no row, no formatter arm, no
+    orphaned private helper — unlike run.opened and repo_bundle.delivered."""
+
+    assert RETIRED not in OPERATOR_SUMMARY_EVENT_TYPES
+    # S52 removed the two repo_bundle.* rows from this frozenset when the
+    # RepoBundleStore write lane (their only emitter) was deleted. The pin still
+    # holds S32's point -- decision_contract.parity was never in here -- over the
+    # set as it now stands.
+    assert OPERATOR_SUMMARY_EVENT_TYPES == frozenset(
+        {
+            "run.closed",
+            "run.progress",
+            "run.tool.started",
+            "run.tool.finished",
+        }
+    )
+    evt = Event(
+        ts=now(),
+        type=RETIRED,
+        task_id=None,
+        run_id=None,
+        persona_id="dev",
+        payload={"mode": "shadow", "status": "match"},
+    )
+    assert operator_event_summary(evt) is None
+
+
+def test_the_recorder_and_its_projection_half_stay_gone():
+    from importlib.util import find_spec
+
+    assert find_spec("agent_runtime.simplified_contract") is None
+
+
+def test_the_decision_lane_is_not_collateral():
+    """``parity`` was the only decision-flavoured contract without a writer; the
+    live decision/run types around it stay registered and emittable.
+
+    S44 retarget: the four ``role_envelope.*`` types were pinned here as live
+    collateral to protect. That was true at S32 — ``RoleEnvelopeStore.save`` was
+    still their emitter. S44 deleted that store under the operator's ruling, so
+    they moved to the retired side and are asserted below as gone. The run types
+    they sat beside are untouched, which is exactly what this test exists to
+    prove."""
+
+    live = {"run.progress", "run.tool.started", "run.tool.finished"}
+    assert live <= ALLOWED_EVENT_TYPES
+
+    retired_at_s44 = {
+        "role_envelope.opened",
+        "role_envelope.continued",
+        "role_envelope.paused",
+        "role_envelope.closed",
+    }
+    assert retired_at_s44 & ALLOWED_EVENT_TYPES == set()

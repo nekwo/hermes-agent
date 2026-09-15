@@ -1,0 +1,4076 @@
+"""The persisted read-model core, validated by a stat fingerprint (Plan EG-3.1).
+
+=============================================================================
+WHY THIS EXISTS
+=============================================================================
+
+A serve child's first read-model core costs ~20 s of filesystem metadata work,
+on EVERY boot — the build is per-process, so a warm machine pays it too
+(measured 24.2 s warm, 2026-08-17). Doc 14's own numbers say the cost is not
+bandwidth: serializing the core is ~5 ms. The 20 s IS validation, done by
+reconstruction.
+
+So make validation cost what validation costs. The core is persisted after
+every successful default-store build, together with a sidecar carrying the
+**fingerprint of every input the build read**. The next process stats those
+inputs again: match → load the core and serve it authoritative in ~2 s;
+mismatch → serve the persisted core immediately, LABELED STALE, while the full
+build runs, then replace it and write back.
+
+=============================================================================
+WHY A STAT FINGERPRINT AND NOT AN EVENT OFFSET
+=============================================================================
+
+The refused design (Plan G BW-H1) keyed validity on the event log's offset plus
+a tail replay. It stays refused, for cause:
+
+* the events section is 3 ms of a 5,485 ms build — an offset-keyed cache buys
+  almost nothing and can only go stale undetectably;
+* two shipped incidents came from writers that mutate durable state with NO
+  EventLog event (``running_work.py``'s checkpoint, ``board_sync``'s
+  materialization), so an offset key cannot see them at all;
+* a tail replay would be a SECOND validity authority beside the key, and the
+  two would drift. Property 6 (one lane per question), applied to the cache
+  itself.
+
+**The fingerprint decides validity, full stop.** There is no event-tail replay
+here and there must never be one. ``event_offset`` IS recorded in the sidecar —
+as a diagnostic, so a divergence receipt can name the log position the core was
+built at — and it is never read as an input to the match decision.
+
+=============================================================================
+THE SOUNDNESS GROUND
+=============================================================================
+
+A (path, mtime_ns, size) triple is only a change signal if every writer moves
+mtime. In this runtime every durable write goes through
+:func:`utils.atomic_json_write`, which stages a temp file and ``os.replace``s
+it into position — a rename ALWAYS moves the target's mtime, including for a
+rewrite that produces byte-identical content. That is what makes the cheap
+signal sound here specifically, and it is why the enumeration is
+DIRECTORY-LEVEL rather than a list of names: a file that did not exist at the
+last build has no previous triple to compare, so the walk has to find it.
+
+Two mtime-blind cases are covered explicitly rather than assumed:
+
+* **SQLite.** A WAL commit that has not checkpointed leaves ``state.db``'s
+  mtime untouched, so the ``-wal`` and ``-journal`` siblings are fingerprinted
+  beside it — the WAL under a mask that stops READING the database from looking
+  like writing it. See :data:`_DB_SIBLINGS` for the mask, its ground, and what
+  it deliberately does not cover.
+* **In-place rewrites inside a directory.** Replacing an existing entry does
+  not move the CONTAINING directory's mtime on NTFS, which is why every file
+  is stat'd individually instead of trusting its parent (the same reasoning as
+  the boards-tree per-card stat pattern in ``harness_parts/serve.py``).
+
+=============================================================================
+THE INPUT CLOSURE — THE ONE THING THIS STAGE CAN GET WRONG
+=============================================================================
+
+Plan EG §6.1 names this the plan's single biggest bet: a MISSED input serves
+unlabeled stale as authoritative, which is the failure class the plan exists to
+end, inverted. Three mitigations are load-bearing, not decorative:
+
+1. **The closure is derived from the build's own readers** — every class below
+   resolves through the SAME path authority the projection reads through
+   (``paths.store_root``, ``running_work_store_paths``,
+   ``chat_session_db_path``, ``_get_profiles_root``, ``get_all_skills_dirs``).
+   No second list free to drift. Those authorities are asked under a home this
+   process resolved ONCE (:func:`resolved_fingerprint_home`) rather than under
+   the ambient ``HERMES_HOME`` the build itself exports per persona — see that
+   constant for why "one resolution" and not merely "the head home" is what
+   makes the closure a function of the store.
+2. **The equivalence golden** (``test_core_fingerprint_cache.py`` test 7) reds
+   a gap inside the fixture matrix: for one fingerprint the cache-served core
+   must equal the rebuilt core field-for-field.
+3. **The shadow-validation window** reds it in the field: a cache-hit boot ALSO
+   runs the full build in the background and compares; a divergence is a loud
+   receipt naming the section AND the rebuilt core is adopted.
+
+If a shadow receipt ever shows divergence, the fix is WIDENING the stat set —
+never trusting the cache harder.
+
+Two more receipts (ML-10) cover the ways this lane can fail QUIETLY rather than
+wrongly, both on the same channel and countable by the same census:
+
+* ``fingerprint_refused`` — a walk hit its entry bound, so the fingerprint is
+  refused and the cache is off for this install. Unchanged as a decision; it was
+  previously a WARNING sentence that did not even name the tree.
+* ``never_converged`` — this process's consecutive write-backs never agreed, so
+  no later process can be served the cache at all. It names the oscillating
+  input paths, because the sanctioned response is again to widen the closure
+  over a NAMED input.
+
+=============================================================================
+ONE AUTHORITY
+=============================================================================
+
+The store decides; the projection serves. A cached or stale-labeled core never
+deletes, never refuses a write, and never wins a conflict on its own say-so —
+the 2026-08-15 mass archive was a projection that had acquired store powers. A
+stale-labeled core is marked ``parity.freshness.state = "stale"``, which is the
+signal the launcher's existing stale-banner lane already reads
+(``mission_control_snapshot.dart``: ``freshnessState == 'stale'`` →
+``MissionSnapshotHealth.stale``), so a stale frame is never ``live`` and
+therefore never authoritative. No write-lane predicate is reachable from
+either field.
+
+=============================================================================
+A WRITE-BACK IS ONE UNIT (MCF-21)
+=============================================================================
+
+The cache is three files — the core, the sidecar that binds to its bytes, and
+the stat set that makes a later miss diffable. They landed through three
+independent ``os.replace`` calls: each atomic alone, the TRIO not. The property
+"these three describe one build" was held up by two ad-hoc binding guards
+(``core_sha256`` between core and sidecar, ``entries.fingerprint`` between
+entries and sidecar) rather than by one rule, and a fourth file would have made
+a third guard.
+
+So the unit is now the GENERATION. Every write-back mints ``gen-<stamp>/`` under
+:data:`CORE_CACHE_DIRNAME`, writes all three files into it while nothing points
+at it, and lands by replacing ONE small pointer file naming it. Atomicity rides
+that single replace. A crash or a disk failure at any earlier point leaves a
+directory the pointer never named — invisible to every reader, reaped by the
+next successful write-back.
+
+Two consequences are worth stating where they can be read rather than derived:
+
+* **The recorded target shape was not implementable and this is not it.** MC-3
+  said "``os.replace`` the directory"; ``os.replace`` cannot replace a non-empty
+  directory anywhere, and on Windows cannot replace a directory at all. The full
+  argument, including why rename-away-then-rename-in is REFUSED, is at
+  :func:`_live_generation_dir`.
+* **The guards were re-aimed, not deleted.** A swap makes a TORN trio
+  impossible. It does nothing about a tampered or hand-restored file inside a
+  generation that is already published, which is what ``core_sha256`` convicts
+  and what ``entries_unbound`` now convicts. Both stay, documented to their new
+  reason. What DID retire is the partial-landing arm: a published pair with no
+  entries file, and its ``entries=false reason=entries_io`` receipt, are
+  unrepresentable and are gone from the table below.
+
+=============================================================================
+THE RECEIPT CHANNEL TABLE (ML-14 / C22)
+=============================================================================
+
+Every receipt this lane emits rides ONE channel — this module's logger,
+``agent_runtime.core_cache`` — and each line leads with a FAMILY token, then an
+event token or ``key=value`` field. That is what makes a receipt countable: a
+census greps the tokens, never the prose after them, and the prose is then free
+to say whatever an operator needs to read.
+
+**What this table retires is not a missing receipt, it is a missing index.**
+Three vocabularies word themselves ``reason=`` on this one logger — the demote
+reasons (``DEMOTE_*``), the write refusals, and ML-10's typed bound refusal —
+and two spellings COLLIDE ACROSS TWO EVENTS: ``reason=fingerprint_unavailable``
+and ``reason=build_stamp_unknown`` are emitted by the WRITE lane
+(``snapshot_core_cache_write ok=false``) and by the READ lane's demote
+(``snapshot_core_cache core_source=rebuilt``) alike. Grepping a reason without
+its family token counts two different facts as one — the launcher-side class
+ML-6 retired, where one refusal was worded ``patch_gap:`` on one channel and
+``REFUSED gap:`` on the other and a census MEASURED a false zero. The family
+token is the discriminator, which is why it leads every row below.
+
+A "second channel" here means a surface OTHER than this logger that carries the
+same fact. There is exactly one: the snapshot's own ``parity`` envelope, which
+:func:`label_core` stamps. It is named per row rather than assumed.
+
+| receipt (grep this) | second channel | what to grep there |
+|---|---|---|
+| ``snapshot_core_cache fingerprint_refused`` (WARNING) | none | fields ``reason=entries_exceeded`` ``scope=store_root``/``skill_root`` ``bound=`` ``root=``. The scope is load-bearing: the two bounds are different numbers over different trees |
+| ``snapshot_core_cache never_converged`` (WARNING) | none | ``builds=`` then ``diff_scope=`` ``changed=`` ``diff=`` LAST (paths may contain spaces). **CENSUS RULE (C22(i)): read ``diff_scope=`` or the count over-reports.** ``every_pass`` = the inputs oscillate, i.e. self-perturbation, the A2 defect worth acting on; ``last_pair`` = a store that is simply moving, where the receipt is true (the cache IS buying nothing) but names no defect; ``none`` with ``diff=diff_unavailable`` and ``diff_reason=no_entries``/``digest_without_entry_delta`` = the diff could not be computed and says so in its own words |
+| ``snapshot_core_cache generation_residue`` (WARNING) | none | ``present=`` ``bound=`` ``live=`` ``leftover=`` then ``generations=`` LAST (a variable-length list, so nothing after it can be field-parsed). **CENSUS RULE (MCF-54(ii)/MCF-59): this line is NOT a failed write-back.** It rides a write-back that already logged ``ok=true``, and reports that the best-effort reap left superseded generation directories on disk - a reader holding one open, or a permission the writer lacks. ``present=`` counts the live generation too; ``leftover=`` does not, and the names in ``generations=`` are leftovers only, oldest first, capped at eight with the true total always in ``leftover=``. The same name across consecutive builds is a permanently held handle; a different name each time is transient contention, and only the first is worth acting on |
+| ``snapshot_core_cache core_source=cache`` (INFO) | the snapshot payload | ``parity.core_source == "cache"`` — SAME spelling, no split. The line also carries ``caller=`` ``inputs=`` ``fingerprint=`` ``offset=``, none of which reach the payload |
+| ``snapshot_core_cache core_source=cache stale=true`` (INFO) | the snapshot payload | ``parity.core_stale == true`` AND ``parity.freshness.state == "stale"`` — the field the launcher's ``MissionSnapshotEnvelope`` already maps to ``MissionSnapshotHealth.stale``. RESIDUAL SPLIT, named rather than fixed: the log says ``stale=true``, the payload says ``parity.core_stale``/``parity.freshness.state``, and the payload spelling is a consumer contract that predates this lane |
+| ``snapshot_core_cache core_source=rebuilt`` (INFO, ``_log_demote``) | the snapshot payload, PARTIALLY | ``parity.core_source == "rebuilt"`` carries THAT the cache was demoted; the ``reason=`` never leaves this logger, and ``CoreDecision.reason`` is read by no caller today. So a field census of WHY a cache demoted has exactly one source: this line. **AND IT NOW HAS A READER (BO-4, 2026-08-21):** ``agent_runtime.core_cache_census`` executes every census rule in this row — the reason histogram, the runtime-authored/store bucketing, the diff-unavailable arms, and the refusal to read a silent window as a clean one — as code rather than as prose, run by ``scripts/core_cache_demote_census.py``. Amending a rule here means amending that module and its tests; a rule that lives only in this sentence is a rule nothing executes, which is how the self-invalidating cache below ran unnoticed for months. Reasons ``unreadable`` ``core_digest_mismatch`` ``fingerprint_unavailable`` ``fingerprint_mismatch`` ``build_stamp_unknown`` ``build_stamp_mismatch`` ``contract_mismatch`` ``runtime_root_mismatch`` ``home_mismatch``. **CENSUS RULE (MC-2): ``home_mismatch`` is not an ordinary miss.** The other reasons say the STORE moved, the install changed, or the pair is unbound — all facts about the thing being cached. This one says the persisted pair was keyed under a different Hermes home than the reading process resolved, i.e. the two runs asked different QUESTIONS, and it is emitted INSTEAD of ``fingerprint_mismatch`` so the distinction is countable rather than inferred. On a multi-home install (an operator who really does run two roots) it is ordinary. On a SINGLE-PROFILE operator boot it is evidence that a persona scope was live while a build stat'd — the capture in ``core_cache.resolved_fingerprint_home`` was taken too late — which is a defect to go fix, not noise to tune out. A pair carrying no ``sidecar.fingerprint_home`` at all (every one written before MC-2) is skipped rather than demoted, so this reason can never fire for an install that simply predates the field. ``absent`` is deliberately NOT logged (the ordinary cold start would print a line on every build in every process), so its only trace is the ABSENCE of a line and a census must not read "no demote line" as "no demote". **CENSUS RULE (MC-3): ``fingerprint_mismatch`` ALONE grows a tail**, and the tail is ``changed=`` then ``diff=`` LAST (paths may contain spaces, so nothing can be field-parsed after it; the tail is additive, so an existing ``reason=`` grep is unaffected). No other reason carries one, deliberately: a diff on a ``build_stamp_mismatch`` would name every file the operator's upgrade touched and read as store churn. **The scope is ``last_pair`` BY CONSTRUCTION and that caveat is the row's most important sentence:** a demote diff is the delta since the LAST WRITE-BACK, so on a busy store it legitimately names files that are simply moving, and the receipt is TRUE without naming a defect. It is self-perturbation evidence — the A1-b/A2 class worth acting on — ONLY when the named paths are ones the runtime itself writes (``dispatch_delivery_drain.json``, ``serve_socket.owner.json``, ``state.db-wal``, ``serve_socket.lock``); when they are store paths the operator's own writes touched, the miss is legitimate and the cache is working as designed. An arm that could not compute the diff says so in its own words rather than emitting an empty list, which would read as "we looked and nothing moved": ``diff_scope=none changed=0 diff_reason=`` ``no_entries`` (nothing persisted yet, or an install predating MC-3) / ``entries_unbound`` (the entries file in the live generation is not the one that write-back put there — MCF-21 made a torn trio unrepresentable, so this now reads as tampering or corruption rather than as a failed diagnostic write) / ``digest_without_entry_delta`` (the digests disagreed and no triple did), then ``diff=diff_unavailable`` |
+| ``snapshot_core_cache fingerprint_home_lazy_capture`` (WARNING) | none | ``site=`` ``home=`` ``authoritative=``. **CENSUS RULE (HC-1): this is the row above's defect CAUGHT IN THE ACT, one boot earlier.** ``reason=home_mismatch`` is read off the process that JUDGES a pair; this line is emitted by the process that PRODUCES one, at the moment its home is captured lazily — on whichever build or consult happened to be first — inside a process that had already named the boot instant which owed that capture (``site=`` is that instant, e.g. ``serve_loop:booting_frame_emitted``). A process that never declared an instant (an ordinary short-lived tool, a test) emits nothing here, so a nonzero count is never a cold start: it is a serve whose eager capture did not run, and therefore a serve free to write a sidecar keyed under a persona scope's home. ``authoritative=`` restates :func:`hermes_constants.hermes_head_home_is_authoritative` AT CAPTURE TIME — ``authoritative=false`` means the head had already degenerated to the ambient resolution, which is the state in which a live persona override IS the captured home. **NO CENSUS COUNTS THIS LINE TODAY, and that is stated here rather than left to be discovered:** ``agent_runtime.core_cache_census`` reads the demote family and is keyed on ``reason=home_mismatch``, so this receipt is an operator grep on the serve's own log. It is not a rule executed as code, which is the standard the row above is held to, and teaching the census this family is the honest way to retire that gap |
+| ``snapshot_core_cache_write ok=true`` (INFO) | none | ``inputs=`` ``fingerprint=`` ``offset=`` ``restat=`` ``self_perturbed_refreshed=`` ``foreign_moved=``. **CENSUS RULE (IC-2): the last three describe the KEY, not the write.** ``restat=`` is one of refreshed / clean / skipped / unavailable — deliberately NOT worded ``reason=``, because this line is a success and a fourth ``reason=`` vocabulary on this logger is the exact defect this table exists to have retired. ``self_perturbed_refreshed=`` counts the entries the build's OWN writes moved and the persisted key therefore adopted fresh (see :func:`_restat_on_post_build_reality`); a healthy store settles to a small steady number and a zero on every build with ``never_converged`` still firing means the oscillating input is NOT in the audited set and the set is what needs widening. ``foreign_moved=`` counts entries that moved during the build and were NOT in that set, i.e. a concurrent writer — those keep their pre-build triple, so a nonzero count predicts the next process's ``fingerprint_mismatch`` and is the honest measure of how much the store is moving under its own builds. a ``restat=`` reading "unavailable" means the re-stat could not be taken at all and the pre-build key was persisted unchanged: not a failure of the write, but a build whose key is knowingly stale |
+| ``snapshot_core_cache_write ok=false`` (INFO/WARNING) | none | reasons ``serialize`` ``build_stamp_unknown`` ``fingerprint_unavailable`` ``io``. **COLLISION:** ``build_stamp_unknown`` and ``fingerprint_unavailable`` are ALSO demote reasons on the row above. Grep the family token with them, never the reason alone |
+| ``snapshot_core_shadow ok=true`` (INFO) | none | ``caller=`` ``divergence=none`` — the shadow build agreed with the cache. **CENSUS RULE (MCF-Q1): this line ALSO closes the armed window**, exactly as the divergence row below does. It used to be the one full build in the process that changed nothing, and that is what made the memo's boot bound vacuous on a cache-hit boot; counting this line is counting boots whose cache was confirmed, never boots that kept serving it |
+| ``snapshot_core_shadow ok=false`` (WARNING) | none | ``caller=`` ``reason=build`` — the shadow build itself raised. Closes the armed window too: a validation that could not run is not a licence to keep serving the core it failed to validate |
+| ``snapshot_core_cache_lane_closed`` (WARNING) | none | ``caller=`` ``reason=`` then a free-form detail span LAST. One reason today, ``core_behind_frame``, whose detail is ``core_offset=`` ``frame_offset=``. **CENSUS RULE (MCF-Q1): this line is not a cache miss and must not be counted with the demotes.** A demote is the fingerprint deciding a persisted pair is not current; this is a CONSUMER reporting that a core the lane already served reaches an earlier offset than the frame about to carry it — the "authoritative-for-an-offset-it-predates" shape that erased a just-created agent from Mission Control on 2026-08-21. Its presence means the lane was still armed when a store change raced it, which is expected only inside a boot's shadow-validation window; a nonzero count OUTSIDE that window says the window is not closing and is worth acting on |
+| ``snapshot_core_shadow_divergence`` (WARNING) | none | ``caller=`` ``section=`` (the first section that disagreed). Its own family token rather than a field on the row above, because retiring the shadow lane is keyed on counting exactly this |
+| ``snapshot_core_shadow adopt failed`` (WARNING) | none | **NO EVENT TOKEN — the one uncountable line in this lane.** It is prose after the family token, so a census can only grep the sentence. Named here rather than quietly renamed: the rename is a one-line change with a consumer question attached, and this row is the record that it is owed |
+
+Adding a receipt here means adding a ROW here.
+``tests/agent_runtime/test_core_cache_channel_table.py`` drives both directions
+— a token no row names, and a row naming a token no writer emits, each turn it
+red — and separately drives the writers to prove the rendered line really
+carries the spelling this table tells a census to grep.
+
+**Scope.** This table covers the core-cache lane, which is the vocabulary C22
+names. Three other things in ``agent_runtime`` are called receipts and are NOT
+in it, deliberately, because they are different artifacts on different channels
+rather than log lines: ``persona_chat_mints``' mint receipts (durable JSON files
+under ``persona_chat_mint_receipt_path``), ``profile_runner``'s
+``CHAT_COMPACTION_RECEIPT_KIND`` (a structured event payload) and
+``snapshot.build_receipt_facts`` (a facts dict folded into the frame). Each
+would need its own table keyed on its own channel; naming them here is what
+stops this one from being read as the whole census.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+import shutil
+import stat
+import threading
+import time
+import uuid
+from contextlib import contextmanager
+from pathlib import Path
+from types import MappingProxyType
+from typing import Any, Callable, Iterable, Iterator, Mapping, NamedTuple
+
+from utils import atomic_json_write
+
+from .dispatch_delivery import DRAIN_STATE_FILENAME
+from .parity import events_position
+from .paths import DELETED_ARCHIVE_DIRNAME, OFFICE_ARCHIVE_DIRNAME, REALM_SYNC_DIRNAME
+from .serve_auth import SERVE_AUTH_TOKEN_FILENAME
+from .serve_registry import SERVE_INSTANCES_DIRNAME
+from .serve_socket import SOCKET_LOCK_FILENAME, SOCKET_OWNER_FILENAME
+
+logger = logging.getLogger(__name__)
+
+#: The cache's own home under the agent-runtime store root. A DEDICATED
+#: directory rather than the existing ``snapshot.json``: that file is
+#: ``write_snapshot``'s boot cache and the launcher's cold-paint lane reads it,
+#: so two writers with different provenance would share one path and neither
+#: could say which one produced the bytes. It is also excluded from the
+#: fingerprint below — a cache whose own writes flipped its key would
+#: invalidate itself on every build.
+CORE_CACHE_DIRNAME = "serve_read_model"
+CORE_FILENAME = "core.json"
+SIDECAR_FILENAME = "sidecar.json"
+#: The stat set the sidecar's digest SUMMARISES, kept beside it so a divergence
+#: is diffable at all. Its own file rather than a field on the sidecar: the
+#: sidecar is read on the boot path by every consult, and folding megabytes of
+#: triples into it would make the cheap half of the judgement pay for the
+#: diagnostic half. See :func:`entries_path` for the measured size.
+ENTRIES_FILENAME = "entries.json"
+
+#: The ONE file whose replacement publishes a write-back (MCF-21). It names the
+#: generation directory holding the trio above; nothing else decides which trio
+#: is live. See :func:`_live_generation_dir` for why a pointer and not a
+#: directory rename.
+POINTER_FILENAME = "live.json"
+
+#: Every generation directory is named with this prefix, and :func:`_is_generation_name`
+#: is the only reader of that fact. The prefix is what lets the reaper tell a
+#: directory this module owns from anything else that ever lands beside it, and
+#: it is what CONTAINS a pointer: a name that does not match is refused rather
+#: than joined onto :func:`_cache_dir`, so a corrupt or hostile pointer cannot
+#: resolve the live trio outside the cache's own directory.
+_GENERATION_PREFIX = "gen-"
+
+#: What :func:`core_path` / :func:`sidecar_path` / :func:`entries_path` resolve
+#: to when NO generation is published — a cold store, or the first consult after
+#: MCF-21 landed on a store still holding the flat trio.
+#:
+#: A stable placeholder rather than ``None`` or a raise, because those helpers
+#: have dozens of callers that legitimately ask "where would it be" before
+#: anything is there (``unlink(missing_ok=True)``, ``_stat_entry``'s
+#: absent-is-a-fact triple). Nothing ever WRITES here: a write-back always mints
+#: a fresh generation, so a read through this path is an ``OSError`` and the
+#: judgement demotes ``absent``, which is the honest answer.
+_NO_GENERATION_DIRNAME = f"{_GENERATION_PREFIX}none"
+
+#: The flat trio this module wrote before MCF-21. Read by NOTHING — see
+#: :func:`_live_generation_dir` for why a pointerless store demotes rather than
+#: adopting these — and reaped by the first successful write-back after landing.
+_LEGACY_FLAT_FILENAMES = (CORE_FILENAME, SIDECAR_FILENAME, ENTRIES_FILENAME)
+
+#: ``parity.core_source`` values.
+CORE_SOURCE_CACHE = "cache"
+CORE_SOURCE_REBUILT = "rebuilt"
+
+#: Why a persisted core was NOT served. Every one of these rides the demote
+#: receipt: "the cache did not answer" must never be a silent outcome.
+DEMOTE_ABSENT = "absent"
+DEMOTE_UNREADABLE = "unreadable"
+DEMOTE_CORE_DIGEST_MISMATCH = "core_digest_mismatch"
+DEMOTE_FINGERPRINT_UNAVAILABLE = "fingerprint_unavailable"
+DEMOTE_FINGERPRINT_MISMATCH = "fingerprint_mismatch"
+DEMOTE_BUILD_STAMP_UNKNOWN = "build_stamp_unknown"
+DEMOTE_BUILD_STAMP_MISMATCH = "build_stamp_mismatch"
+DEMOTE_CONTRACT_MISMATCH = "contract_mismatch"
+DEMOTE_RUNTIME_ROOT_MISMATCH = "runtime_root_mismatch"
+#: The persisted pair was keyed under a DIFFERENT home than this process
+#: resolved, so its digest answers a different QUESTION — it is not evidence that
+#: the store moved. Its own reason because the two demand opposite responses: an
+#: ordinary ``fingerprint_mismatch`` says go look at the store, and this says go
+#: look at who asked. See the channel table row for what it means to a census.
+DEMOTE_HOME_MISMATCH = "home_mismatch"
+
+# --------------------------------------------------------------------------- #
+# The receipt vocabulary (ML-10)
+# --------------------------------------------------------------------------- #
+#: Every receipt this module emits rides ONE channel — this module's logger, in
+#: the ``snapshot_core_cache`` / ``snapshot_core_shadow`` family — and each one
+#: leads with an EVENT TOKEN in the first field after that prefix, exactly as
+#: ``snapshot_core_shadow_divergence`` already does. That is what makes a receipt
+#: countable: a census greps the token, never the prose after it, and the prose
+#: is then free to say whatever an operator needs to read.
+#:
+#: The two tokens below are ML-10's. They exist because the facts they carry used
+#: to be either a bare WARNING sentence (the bound refusal, which never named
+#: WHICH root blew the bound) or nothing at all (a cache that never converges,
+#: which was silent by construction — the process just kept buying nothing).
+RECEIPT_FINGERPRINT_REFUSED = "fingerprint_refused"
+RECEIPT_NEVER_CONVERGED = "never_converged"
+
+#: MCF-54(ii), ruled by MCF-59. The generation reap is BEST EFFORT and stays
+#: that way - a reader holding files open on Windows makes a removal fail, and a
+#: landed write-back must never report failure because its housekeeping did not.
+#: What was missing was never strictness, it was ACCOUNTING: a store that kept
+#: failing to reap grew generations with nothing counting them, so the failure
+#: mode had no observable at all. This receipt is that observable, and per the
+#: operator refinement it NAMES the leftover directories rather than merely
+#: counting them - a count says a problem exists, the names say WHICH one, and
+#: whether it is the same directory every time (a permanently held handle) or a
+#: different one each time (transient contention).
+RECEIPT_GENERATION_RESIDUE = "generation_residue"
+
+#: HC-1. The fingerprint home was captured LAZILY — on whichever build or
+#: consult happened to be first — inside a process that had already NAMED the
+#: boot instant which owed that capture (see
+#: :func:`declare_fingerprint_home_boot_site`). In a serve that is the
+#: `home_mismatch` defect recurring rather than an ordinary cold start: the
+#: instant exists precisely so the capture cannot land inside a persona scope,
+#: and a lazy capture means it did not run. Its own receipt because the
+#: alternative — inferring it from the NEXT boot's ``reason=home_mismatch`` — is
+#: a diagnosis that arrives one boot late and only after a write-back.
+RECEIPT_FINGERPRINT_HOME_LAZY_CAPTURE = "fingerprint_home_lazy_capture"
+
+#: The typed reason on a bound refusal, plus which walk refused. ``scope``
+#: matters because the two bounds are different numbers over different trees, and
+#: an operator handed only a count cannot tell which tree to go look at.
+REFUSAL_ENTRIES_EXCEEDED = "entries_exceeded"
+REFUSAL_SCOPE_STORE_ROOT = "store_root"
+REFUSAL_SCOPE_SKILL_ROOT = "skill_root"
+
+#: The never-converged receipt's diff arms. ``every_pass`` names the paths that
+#: differed on EVERY pass of the streak — the oscillating inputs, which is the
+#: fact worth acting on; ``last_pair`` is the honest fallback when no path
+#: differed on all of them (a store that is simply moving, which reads
+#: differently and must not borrow the oscillation sentence).
+#:
+#: The two ``diff_unavailable`` reasons are C16's lesson applied here: an arm that
+#: could not compute the diff says SO, in its own words. Silently reusing another
+#: arm's sentence is how a fail-quiet default gets read as a measurement.
+DIFF_SCOPE_EVERY_PASS = "every_pass"
+DIFF_SCOPE_LAST_PAIR = "last_pair"
+DIFF_SCOPE_NONE = "none"
+DIFF_UNAVAILABLE = "diff_unavailable"
+DIFF_UNAVAILABLE_NO_ENTRIES = "no_entries"
+DIFF_UNAVAILABLE_NO_ENTRY_DELTA = "digest_without_entry_delta"
+#: The persisted entries exist but belong to a DIFFERENT write-back than the
+#: sidecar being judged — see :func:`entries_path` for the binding rule. Its own
+#: reason rather than ``no_entries`` because the two ask for opposite responses:
+#: ``no_entries`` says the diagnostic has not been written yet (an install that
+#: predates this stage, or a cold pair) and resolves itself on the next
+#: write-back, while this one says the THREE files in the cache directory
+#: disagree about which generation they describe, which is the shape a failed
+#: entries write (``reason=entries_io``) leaves behind. Diffing across that
+#: boundary would name paths from a generation nobody asked about, so it refuses.
+DIFF_UNAVAILABLE_ENTRIES_UNBOUND = "entries_unbound"
+
+#: Hard bound on the store-root walk. Reaching it is NOT a partial answer: the
+#: fingerprint becomes ``None`` and the caller must treat that as "never
+#: cache". A truncated stat set is exactly a missed input.
+MAX_FINGERPRINT_ENTRIES = 200_000
+
+#: Per-root bound on the skill-registry walk. Skill packages are small trees
+#: (``<root>/<slug>/SKILL.md`` plus package files); a root that blows past this
+#: is not a skill registry, and the same refusal applies.
+MAX_SKILL_ENTRIES_PER_ROOT = 20_000
+
+#: Store-root entries that are DELIBERATELY not fingerprinted, each because it
+#: moves for reasons a read-model core does not depend on. Anything not named
+#: here is fingerprinted, so the default posture is inclusion.
+#:
+#: **A name its writer owns as a constant is IMPORTED here, never spelled.**
+#: That is not a style tightening; hand-spelling is the defect this set shipped
+#: with. ``"drain_state.json"`` sat in it annotated "per
+#: ``dispatch_delivery.DRAIN_STATE_FILENAME``" while that constant read
+#: ``dispatch_delivery_drain.json`` — so the exclusion named a file that has
+#: never existed, and the real drain mirror, rewritten every
+#: ``dispatch_delivery.DRAIN_MIRROR_HEARTBEAT_SECONDS`` for the life of a serve,
+#: stayed INSIDE the key. A comment naming a constant is not a reference to it;
+#: an import is, and it is the only form the compiler checks.
+#:
+#: ``serve_socket``'s own module doctrine (its "Fingerprint exclusion" section)
+#: already required both socket files to be out of every freshness fingerprint,
+#: and cited the same standing precedent this set is built on. It enumerated the
+#: ALLOWLIST fingerprints — serve's ``_FINGERPRINT_ROOT_FILES`` /
+#: ``_FINGERPRINT_STORE_DIRS`` and ``stream._scope_fingerprint`` — and this walk
+#: is a DENYLIST, so "not added" was true there and violated here. Two
+#: fingerprint designs with opposite defaults need the doctrine written on both;
+#: that paragraph now names this constant too.
+#:
+#: Measured consequence of the two holes together (2026-08-18): every serve boot
+#: rewrote ``serve_socket.owner.json`` and the drain rewrote its mirror within
+#: seconds of boot, so no boot's key could describe the store the NEXT boot
+#: stat'd. The lane demoted ``fingerprint_mismatch`` on every same-commit boot
+#: from the day it shipped.
+#:
+#: RESIDUAL, stated rather than discovered later. FIVE names below are still
+#: literals because no writer module owns them as a constant: ``locks`` and
+#: ``snapshot.json`` are spelled inline inside their own path helpers in
+#: ``agent_runtime.paths``, and the ``read_model.db`` trio was a CONFIGURABLE
+#: default (``runtime_config``'s ``read_model.db_filename``) — an install that
+#: renamed it re-opened exactly the hole this comment block is about, one config
+#: key away. Both are the same class as the drain defect and neither is fixed
+#: here; the gate below can only prove the names a WRITER produces, so it cannot
+#: see them either.
+#:
+#: STAGE 6 (2026-08-22) narrowed the read-model half of that residual without
+#: closing it. The lane that WROTE ``read_model.db`` is retired, so no install
+#: can produce the file any more and the config key that renamed it is dead —
+#: but the three literals stay in the set below, because a root that ran
+#: ``harness rebuild-read-model`` before the cut still has the trio on disk, and
+#: dropping the exclusion would fold those leftovers into the fingerprint of
+#: every such store. They are excluded as LEGACY ARTIFACTS now rather than as
+#: live outputs; the count is unchanged at five.
+#:
+#: (That count read "Four" until MC-8 and was simply wrong — ``locks`` plus
+#: ``snapshot.json`` plus a trio is five. Corrected in passing rather than left,
+#: because a residual paragraph exists to be counted against the set and one that
+#: miscounts invites the reader to conclude a name has already been dealt with.)
+#:
+#: MC-8's ``deleted_archive`` addition did NOT extend that residual: it was the
+#: same class — a name spelled inline in ``agent_runtime.paths`` — and was
+#: promoted to ``paths.DELETED_ARCHIVE_DIRNAME`` and imported, rather than
+#: re-typed here. That is the precedent for the two that remain; they were left
+#: deliberately (out of MC-8's ruled scope), not overlooked.
+#:
+#: H2's ``office_archive`` addition did not extend it either, and was RE-COUNTED
+#: rather than assumed: same class again, promoted to
+#: ``paths.OFFICE_ARCHIVE_DIRNAME`` and imported, so the literals below are still
+#: ``locks`` + ``snapshot.json`` + the ``read_model.db`` trio — FIVE, unchanged.
+#: The count is restated on every addition because this paragraph exists to be
+#: counted against the set, and it has been wrong once already.
+_EXCLUDED_STORE_ENTRIES = frozenset(
+    {
+        # The cache's own home (see CORE_CACHE_DIRNAME).
+        CORE_CACHE_DIRNAME,
+        # Entries appear and vanish at every serve boot/exit, and the auth token
+        # appears at first boot. The standing precedent is already recorded at
+        # ``agent_runtime/serve_registry.py`` and ``agent_runtime/serve_auth.py``
+        # and in the read-cache fingerprint's own comment block.
+        SERVE_INSTANCES_DIRNAME,
+        SERVE_AUTH_TOKEN_FILENAME,
+        # The socket owner sidecar and the lock that elects it. Rewritten at
+        # every socket boot and removed on every clean exit — the serve
+        # registry's shape exactly, refused for the same reason, and required to
+        # be refused by ``serve_socket``'s own doctrine.
+        SOCKET_LOCK_FILENAME,
+        SOCKET_OWNER_FILENAME,
+        # Lock files are created and removed INSIDE a build; a lock in the stat
+        # set would make a build's own locking flip the key it just wrote.
+        "locks",
+        # ``write_snapshot``'s boot cache and the projector's read model were
+        # OUTPUTS of the projection, never inputs to it. Stage 6 (2026-08-22)
+        # deleted both writers; the names stay excluded because a store written
+        # before that cut still holds the files (see the residual paragraph
+        # above), and an excluded name that nothing produces costs nothing.
+        "snapshot.json",
+        "read_model.db",
+        "read_model.db-wal",
+        "read_model.db-shm",
+        # The delivery drain's telemetry mirror: a 60-second oscillator that no
+        # projection reads. Same rule as the serve registry.
+        DRAIN_STATE_FILENAME,
+        # The per-task compaction graveyard. NOT justified by "the runtime
+        # rewrites it" — see the first block below, which is the argument rather
+        # than a note about it.
+        DELETED_ARCHIVE_DIRNAME,
+        # The orphaned-office-surface graveyard. The runtime DOES write this one,
+        # which is why its argument is a different (and easier) one — see the
+        # second block below.
+        OFFICE_ARCHIVE_DIRNAME,
+    }
+)
+
+#: WHY ``deleted_archive/`` IS EXCLUDED, WRITTEN WHERE THE EXCLUSION LIVES.
+#:
+#: Every other name above earns its place the same way: the RUNTIME rewrites it
+#: on a boot or a timer, so keeping it would guarantee a mismatch. This one is
+#: different in kind and therefore has to carry its own argument — it is excluded
+#: because **the projection does not read it**, which is a claim about the reader
+#: set, and a claim about a reader set rots the moment someone adds a reader.
+#: Stating it here, at the constant, is the whole of the P12 ruling; the audit
+#: that comes after this one is meant to find this paragraph and be able to
+#: re-run it.
+#:
+#: **THE GREP THAT ESTABLISHES IT** (re-run it; do not trust this transcript)::
+#:
+#:     grep -rn "deleted_archive" agent_runtime/ hermes_cli/ | grep -v tests
+#:
+#: 2026-08-18, five hits, and every one is accounted for:
+#:   * ``paths.DELETED_ARCHIVE_DIRNAME`` / ``paths.deleted_archive_dir`` — the
+#:     name and its helper;
+#:   * ``paths.events_archive_dir``'s docstring — distinguishing prose only;
+#:   * ``event_rotation``'s module docstring — prose only;
+#:   * ``migrations.py``'s ``archive_batches`` counter — counts batch dirs for a
+#:     migration STATUS payload; a reader, and not the projection;
+#:   * ``events.py::_archived_event_slices`` — a genuine READER of
+#:     ``deleted_archive/*/manifest.json``. See the exception below.
+#:
+#: **THE CLAIM IS REPO-SCOPED** (C14: a dead-symbol/no-reader claim from a
+#: narrower grep is a claim about that scope and nothing more). It covers
+#: ``agent_runtime/`` and ``hermes_cli/`` — this repo's own runtime and CLI. It
+#: says nothing about a consumer outside this repo, and does not need to: the
+#: fingerprint is an input closure for a build that lives HERE.
+#:
+#: **THE EXCEPTION, NAMED RATHER THAN OMITTED** (MCF-12 — the correction that had
+#: to be made before this landed, because P12 was first written as "zero
+#: readers" and that is false). The chain is::
+#:
+#:     harness_doctor.py::_event_log_report
+#:         -> events.py::event_log_health
+#:             -> events.py::_archived_event_slices
+#:                 -> reads deleted_archive/*/manifest.json
+#:
+#: So the harness doctor DOES read these manifests, and a comment claiming "no
+#: readers" would be found false by the next audit, which would then reasonably
+#: conclude this exclusion is wrong. **It is not wrong, and the reason is the
+#: word "projection".** This walk is the input closure of the READ-MODEL BUILD
+#: (``snapshot.py``) — it exists to answer "may a previously-built core be served
+#: as authoritative". ``harness_doctor`` is a separate, operator-invoked
+#: diagnostic that builds no core and consults no cache; a file it reads is not
+#: thereby an input to the projection, any more than a log file is. Fingerprinting
+#: a tree because SOME code in the repo reads it would grow the closure without
+#: bound and is exactly the "denylist by hand" instinct this module already paid
+#: for once.
+#:
+#: **NO CURRENT CODE WRITES IT** — stronger than the ruling required, so it is
+#: recorded. ``deleted_archive_dir()`` has exactly ONE non-doc caller in the
+#: repo, and it is the reader above; the two archivers that used to fill the tree
+#: (``archive_task_events`` / ``compact_archived_task_events``) were retired at
+#: S54 along with their private helpers, as the tombstone comment above
+#: ``_archived_event_slices`` records. What sits under ``deleted_archive/`` on a
+#: live root is therefore a graveyard of a retired feature: immutable, and not
+#: merely unread but unwritten. An immutable tree contributes a constant to every
+#: key it appears in, which is the clearest possible statement that its 18,804
+#: stat calls buy nothing.
+#:
+#: **WHAT IT COSTS TODAY, MEASURED** (2026-08-18, the operator's live root):
+#: 18,804 of the store's 23,107 fingerprint entries — 81 % — are under this one
+#: directory. That is ~250 ms of every ~300 ms warm walk, paid 4-5 times per boot
+#: (once per rider consult plus the leader's pre-build key), and since MC-3 it is
+#: also ~81 % of every ``entries.json`` write-back (~3.4 MiB -> ~0.7 MiB). It is
+#: additionally the only part of the closure that GROWS without bound against
+#: ``MAX_FINGERPRINT_ENTRIES``, which would eventually turn a cost into a refusal.
+#:
+#: **WHAT WOULD MAKE THIS WRONG, AND THE OBLIGATION THAT FOLLOWS.** If a future
+#: projection section reads compaction batches — a snapshot block that surfaces
+#: archived-task history, say — then this tree becomes a build input and a stale
+#: core could be served across a change to it. **Whoever adds that reader must
+#: remove this exclusion in the SAME commit**, and take the walk cost knowingly.
+#: The reverse obligation is lighter but real: a new NON-projection reader (a
+#: second doctor section, a census) changes nothing here and should not be read
+#: as re-admitting the tree.
+
+#: WHY ``office_archive/`` IS EXCLUDED — A DIFFERENT, AND EASIER, ARGUMENT.
+#:
+#: ``deleted_archive/`` above needed a reader-set claim because nothing writes it
+#: any more. This one is the opposite shape and is settled by the ordinary rule
+#: the rest of the set runs on: **the runtime WRITES this tree, and the projection
+#: does not read it.** ``paths.office_surface_archive_root()`` is
+#: ``store_root()/office_archive`` — the destination
+#: ``office_store.archive_orphaned_surface`` RENAMES a whole orphaned office
+#: surface into, via ``office_store._free_surface_archive_dir``, driven by the
+#: operator verb ``harness office archive-surface``
+#: (``hermes_cli/harness_parts/office.py::_cmd_office_archive_surface``). It grows
+#: without bound against :data:`MAX_FINGERPRINT_ENTRIES` — the destination helper
+#: appends ``-2``, ``-3`` … suffixes so a re-archived orphan lands beside the
+#: previous one rather than refusing — which is the same unbounded-growth
+#: objection the graveyard block raises, on a tree that is still being written.
+#:
+#: **THE NEAR-NAME TRAP, FIRST, because getting it wrong inverts the argument.**
+#: ``paths.office_archive_dir(workspace_id)`` is ``office/<ws>/archive/``: a
+#: DIFFERENT tree, per-workspace, holding archived ACTOR placements, and READ by
+#: ``OfficeStore`` — ``read_actor_dir`` on the actor-listing seam
+#: (``scan_actors(include_archived=True)``), and ``office_archived_actor_path`` on
+#: the archived-actor lookups that ``upsert_actor`` / ``remove_actor`` /
+#: ``restore_actor`` and the class-key fence depend on. That tree is a projection
+#: INPUT and **stays in the walk**. Only the store root's own ``office_archive``
+#: entry is excluded, which is exactly what ``exclude_top`` filters and what the
+#: nesting note below pins.
+#:
+#: **THE GREP THAT ESTABLISHES IT** (re-run it; do not trust this transcript)::
+#:
+#:     grep -rn "office_archive" agent_runtime/ hermes_cli/ | grep -v tests
+#:     grep -rn "office_surface_archive_root\|office_archived_surface_dir" \
+#:         agent_runtime/ hermes_cli/ | grep -v tests
+#:
+#: 2026-08-18. Every hit, and which of the two trees it names:
+#:
+#: THIS tree (``store/office_archive/``) — one writer chain and no reader:
+#:   * ``paths.OFFICE_ARCHIVE_DIRNAME`` / ``paths.office_surface_archive_root`` /
+#:     ``paths.office_archived_surface_dir`` — the name and its two helpers;
+#:   * ``office_store._free_surface_archive_dir`` — the ONLY code that touches the
+#:     tree at all: it ``.exists()``-probes for a free slot and returns the
+#:     destination. A probe belonging to the writer, not a reader of content;
+#:   * ``office_store.archive_orphaned_surface`` — the WRITER
+#:     (``paths.office_dir(wsid).rename(destination)``), plus its docstring naming
+#:     the helper, plus its ``AlreadyExists("office_archive:<ws>")`` — an error
+#:     TOKEN, not a path;
+#:   * ``hermes_cli/harness.py``'s four ``office_archive_surface`` lines — an
+#:     argparse local variable holding the ``archive-surface`` subparser; no path;
+#:   * ``hermes_cli/harness_parts/office.py`` — ``_cmd_office_archive_surface``
+#:     (the verb), its docstring, and the ``"office_archived"`` envelope kind, a
+#:     wire event name;
+#:   * this comment.
+#: THE NEAR NAME (``office/<ws>/archive/``), all genuine readers/writers of the
+#: per-workspace actor archive, none of them this tree:
+#:   * ``paths.office_archive_dir`` / ``paths.office_archived_actor_path``;
+#:   * ``office_store`` at the actor-listing scan, the two archived-actor
+#:     existence+revision lookups, ``remove_actor``'s archived read-back,
+#:     ``restore_actor``'s source path, and ``_archive_actor_locked``'s write.
+#:
+#: **NOTHING PROJECTS IT.** ``snapshot._offices_summary`` reads through
+#: ``OfficeStore.list_workspaces()``, which enumerates ``office_root()``'s
+#: children by the presence of ``office.json`` — and
+#: ``office_surface_archive_root()`` is deliberately a SIBLING of ``office_root()``
+#: rather than a child, precisely so an archived surface stops being projected
+#: (its own docstring records that as the load-bearing reason). A tree the
+#: projection is designed not to see is not an input to it. There is no restore
+#: verb either: recovery is an operator moving the directory back by hand, which
+#: is a store change the walk sees on the ``office/`` side when it happens.
+#:
+#: **THE CLAIM IS REPO-SCOPED** (C14), covering ``agent_runtime/`` and
+#: ``hermes_cli/`` — the same scope, and the same reasoning, as the block above.
+#:
+#: **THE HALF THIS DOES NOT RETIRE, STATED SO NOBODY READS IT AS A BUG.** The
+#: archive gesture MOVES the surface OUT of ``office/<ws>/``, which IS
+#: fingerprinted, so the gesture itself still flips the key exactly once. That is
+#: a real input change and it should flip the key. What leaves the closure here is
+#: the graveyard's CONTINUING contribution: its size, its walk cost, its unbounded
+#: growth, and any churn inside it after the move.
+#:
+#: **WHAT WOULD MAKE THIS WRONG, AND THE OBLIGATION THAT FOLLOWS.** If a future
+#: projection section reads archived surfaces — an "archived offices" block, an
+#: operator restore lane that projects what is recoverable — this tree becomes a
+#: build input and a stale core could be served across a change to it. **Whoever
+#: adds that reader must remove this exclusion in the SAME commit.**
+
+#: :data:`_EXCLUDED_STORE_ENTRIES` is keyed to TOP-LEVEL names only —
+#: ``_walk_tree``'s ``exclude_top`` filters the store root's own entries and
+#: nothing deeper — so a directory that happens to be called ``deleted_archive``
+#: or ``office_archive`` NESTED inside another store subtree still contributes in
+#: full. That is the correct reading of every argument above (they are all about
+#: the one graveyard each at the store root, which is the only place
+#: ``paths.deleted_archive_dir()`` and ``paths.office_surface_archive_root()`` can
+#: put theirs) and both are pinned by test, so the comment cannot quietly grow
+#: into a claim about the names everywhere.
+#:
+#: **AMENDED BY IC-1 (2026-08-22): "top-level only" is now a property of THAT
+#: SET, not of the walk.** ``_walk_tree`` gained a SECOND, separately-argued
+#: mechanism — ``exclude_nested`` / :data:`_EXCLUDED_NESTED_STORE_NAMES` — which
+#: skips a named child ANYWHERE below one named top-level subtree. The two are
+#: deliberately different shapes and must not be merged: a name filter applied at
+#: every depth over the whole store is the mutant the two cases above exist to
+#: kill (it drops unrelated data out of the closure — a missed input, the failure
+#: direction this module calls the worst one), whereas a nested exclusion that
+#: must name BOTH the top-level subtree it applies inside AND the child name it
+#: skips cannot reach a tree its author did not audit. Every entry in the nested
+#: mapping carries its own reader audit and its own removal obligation, exactly
+#: like every entry in the top-level set.
+
+#: The NESTED exclusions: ``{top-level store entry: names skipped anywhere below
+#: it}``. Read the amendment above first — this is a different mechanism from
+#: :data:`_EXCLUDED_STORE_ENTRIES` and it is deliberately harder to widen.
+#:
+#: ONE ENTRY TODAY: ``realm_sync/**/.git``.
+#:
+#: **WHY IT IS AN EXCLUSION AND NOT A NARROWING.** ``realm_sync/<server>/`` is a
+#: git WORKTREE the runtime syncs into, under the store root. Its ``.git``
+#: subtree — index, reflog, packfiles — is git's own bookkeeping, rewritten by
+#: every fetch/checkout the sync verbs run, and the PROJECTION has no reader for
+#: any of it. Every section builder resolves realm-sync state to
+#: ``realm_sync_state/<realm>.json`` instead (``realm_sync.realm_sync_sidecar_path``
+#: -> ``read_realm_sync_sidecar``), and ``snapshot.py``'s own design note at the
+#: realm row states the rule the whole tree rests on: ``build_snapshot`` "must
+#: never shell out to git or resolve artifacts" (Stage 43, Decision 7). A tree the
+#: build is FORBIDDEN to read is not an input to it.
+#:
+#: **WHAT IT COSTS TODAY, MEASURED.** The ``never_converged`` firing of 2026-08-20
+#: 18:21 named 60 changed entries in one pass, every one of them under
+#: ``realm_sync/<realm>/.git/`` (``index``, ``logs/HEAD``, ``objects/pack/*.pack``).
+#: That is the single largest oscillating class in the whole receipt series, and
+#: it is oscillating because the walk is DIRECTORY-LEVEL over the store root, not
+#: because anything wanted those triples.
+#:
+#: **WHAT STAYS IN, AND WHY THE KEY IS THE LITERAL NAME ``.git``.** The build DOES
+#: read two files one directory up from the worktree's ``.git``:
+#: ``realm_sync/<realm>/board_baseline.json`` (``snapshot.py`` ->
+#: ``board_sync.read_board_baseline`` -> ``paths.board_baseline_path``) and
+#: ``realm_sync/<realm>/office_baseline.json`` (``snapshot.py`` ->
+#: ``office_sync.read_office_baseline`` -> ``paths.office_baseline_path``), plus
+#: their two siblings ``persona_config_baseline.json`` and
+#: ``profile_artifact_baseline.json``. Those ARE projection inputs and a
+#: fingerprint that ignored a baseline change would serve a stale publication
+#: verdict as authoritative — the exact failure class this lane exists to end, so
+#: it is pinned by its own test rather than left to this paragraph.
+#:
+#: The trap that makes the literal name the only safe key: ``_sync_repo_path``
+#: keys a worktree directory by the realm's SERVER token, while the four baseline
+#: helpers key their sidecars by the REALM ID. The two vocabularies are not the
+#: same and neither is a prefix of the other, so "skip the realm's directory" and
+#: "skip everything but the baselines" are both unimplementable without a second
+#: name authority that could drift. Skipping the one literal child name ``.git``
+#: needs no such authority: nothing this runtime writes under ``realm_sync/`` is
+#: called ``.git`` except a git worktree's own bookkeeping.
+#:
+#: **SCOPE, stated so it cannot be read wider than it is.** ``.git`` is skipped
+#: ONLY below ``realm_sync/``. A ``.git`` at the store root, or under any other
+#: store subtree, is stat'd in full — it is not this tree and it carries no
+#: audit.
+#:
+#: **WHAT WOULD MAKE THIS WRONG, AND THE OBLIGATION THAT FOLLOWS** (the same
+#: obligation the two graveyard blocks above carry). If a future projection
+#: section reads a synced worktree's git internals — a snapshot block surfacing
+#: the realm's real HEAD, an in-build ``git status`` replacing the sidecar — then
+#: this subtree becomes a build input and a stale core could be served across a
+#: change to it. **Whoever adds that reader must remove this exclusion in the SAME
+#: commit**, and take the walk cost knowingly. A non-projection reader (an
+#: operator verb, a doctor section, a census) changes nothing here and must not be
+#: read as re-admitting the tree.
+_EXCLUDED_NESTED_STORE_NAMES: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        REALM_SYNC_DIRNAME: frozenset({".git"}),
+    }
+)
+
+#: ``atomic_json_write`` stages ``.<stem>_*.tmp`` beside its target. A staged
+#: temp file that a crash stranded is not an input; a live one belongs to a
+#: write that will move the real file anyway.
+_TMP_SUFFIX = ".tmp"
+
+#: SQLite's mtime-blind siblings. A WAL commit that has not checkpointed leaves
+#: the main database file untouched, so the journal files are stat'd beside it.
+#:
+#: ``-shm`` IS NOT HERE, and the ``-wal`` entry wears a mask. Both are the same
+#: correction: the build OPENS these databases, and an open is not a write.
+#:
+#: What was measured (2026-08-18, live root and reproduced in the fixture): with
+#: a connection held, opening the SessionDB a second time moves ``-wal``'s mtime
+#: while leaving it at SIZE 0 — the closing connection checkpoints, so the file
+#: is re-created empty at open time — and rewrites ``-shm``. Both moved DURING
+#: the boot build that was reading them. The key is taken pre-build by design, so
+#: the build's own read guaranteed the next process a ``fingerprint_mismatch``:
+#: the cache could not converge inside one process, let alone across two.
+#:
+#: THE MASK, and why each half is sound:
+#:
+#: * ``-shm`` carries no content signal at all. SQLite documents it as a
+#:   non-persistent shared-memory index, rebuilt from the WAL by whichever
+#:   process opens the database, and deleted when the last connection closes. Its
+#:   mtime is an open-time artefact of a READER. Anything it could indicate is
+#:   already carried by ``-wal`` (the frames it indexes) or by the main file (the
+#:   checkpoint that retired them). ``stream._scope_fingerprint`` — the other
+#:   fingerprint in this runtime that stats these siblings — has always used
+#:   ``("", "-wal", "-journal")``, so dropping it here CONVERGES the two
+#:   conventions rather than forking them.
+#: * ``-wal`` is keyed on ``(path, 0, 0)`` in EVERY state that holds no frames —
+#:   absent and present-at-zero-length alike — and on its full stat'd triple the
+#:   instant a frame lands. A frameless WAL holds nothing for the projection to
+#:   read, and neither its mtime nor its existence says anything about content:
+#:   both are artefacts of when some process last opened or closed the database.
+#:   The instant an uncheckpointed commit lands the file is non-empty and the
+#:   full triple counts again, so the WAL-commit signal EG-3.1 requires is
+#:   untouched for every state the signal can actually be in. See
+#:   :func:`_wal_without_frames_is_content_free` for why absence and emptiness
+#:   are ONE fact rather than two — the half that took a second field
+#:   investigation to see, after the first mask deliberately kept them apart.
+#:
+#: WHAT THE MASK DOES NOT COVER, stated rather than discovered later. A
+#: checkpoint that truncates the WAL to zero AFTER writing its frames into
+#: ``state.db`` leaves a zero-length WAL whose mtime this ignores — and a clean
+#: last-close, which checkpoints and then UNLINKS the file, leaves no WAL at all.
+#: Both are invisible here and both are carried anyway: the checkpoint moved
+#: ``state.db``'s own mtime and size, and the main file is the FIRST entry in
+#: this tuple. The uncovered case would be a commit that is invisible in the main
+#: file AND invisible in the WAL's size, which SQLite's own durability rules do
+#: not admit.
+_DB_SIBLINGS = ("", "-wal", "-journal")
+
+#: The sibling that is masked while it holds no frames. Named rather than
+#: spelled at the call site so the mask and the enumeration cannot drift, and
+#: named for the SIBLING rather than for the state so that widening the mask to
+#: another suffix takes a deliberate edit here — the main file's absence and
+#: ``-journal``'s absence are real information and must stay keyed.
+_WAL_SIBLING = "-wal"
+
+#: A DIRECTORY contributes its PATH and nothing else — never a timestamp, never
+#: a present/absent distinction.
+#:
+#: Not an optimization; a correctness requirement, and it cost a false demote to
+#: learn. Two independent reasons, both measured on this runtime's platform:
+#:
+#: 1. **A directory's own signal is perturbed by the children this fingerprint
+#:    deliberately excludes.** The cache writes ``serve_read_model/`` INTO the
+#:    store root, so a root whose existence-or-mtime counted made the very write
+#:    that persisted a core invalidate the key it had just persisted — a
+#:    guaranteed miss on every boot. Same hole for ``locks/``, the serve
+#:    registry, and ``atomic_json_write``'s staged temp files.
+#: 2. **A directory's mtime is not a reliable add signal anyway.** Measured on
+#:    NTFS: creating a FILE inside a directory left the directory's ``mtime_ns``
+#:    unchanged, while a later ``mkdir`` moved it. So it is noise in one
+#:    direction and silence in the other — the worst combination for a change
+#:    key.
+#:
+#: Nothing is lost. The enumeration is directory-LEVEL: an added file arrives as
+#: its own new triple and a removed one takes its triple with it, so the parent's
+#: timestamp is strictly redundant with the walk that produced it. That is the
+#: same reasoning as the boards-tree per-card stat pattern in
+#: ``harness_parts/serve.py``, taken one step further.
+_DIR_MARK = -2
+
+
+class FingerprintEntry(NamedTuple):
+    path: str
+    mtime_ns: int
+    size: int
+
+
+class CoreFingerprint(NamedTuple):
+    """The sorted stat set over every build input, plus its own digest.
+
+    ``entries`` is kept (not just the digest) so a divergence investigation can
+    diff two fingerprints and name the file that moved. ``digest`` is what the
+    sidecar stores: the entry list on the live store is tens of thousands of
+    triples and the sidecar is read on the boot path.
+    """
+
+    entries: tuple[FingerprintEntry, ...]
+    digest: str
+
+    @property
+    def count(self) -> int:
+        return len(self.entries)
+
+
+def _stat_entry(path: Any) -> FingerprintEntry:
+    """One (path, mtime_ns, size) triple. An ABSENT path is a stable signal.
+
+    A missing file records ``-1/-1`` rather than being skipped: "this input does
+    not exist" is a fact the next build must be able to disagree with. Skipping
+    it would make an appearing file indistinguishable from an unchanged one.
+
+    A DIRECTORY records ``_DIR_MARK`` for both numbers — see that constant for
+    why its mtime is poison rather than signal.
+    """
+
+    text = str(path)
+    try:
+        st = os.stat(path)
+    except OSError:
+        return FingerprintEntry(text, -1, -1)
+    if stat.S_ISDIR(st.st_mode):
+        return FingerprintEntry(text, _DIR_MARK, _DIR_MARK)
+    return FingerprintEntry(text, int(st.st_mtime_ns), int(st.st_size))
+
+
+def _entry_triple(entry: os.DirEntry, is_dir: bool) -> FingerprintEntry:
+    if is_dir:
+        return FingerprintEntry(entry.path, _DIR_MARK, _DIR_MARK)
+    try:
+        st = entry.stat()
+    except OSError:
+        return FingerprintEntry(entry.path, -1, -1)
+    return FingerprintEntry(entry.path, int(st.st_mtime_ns), int(st.st_size))
+
+
+def _walk_tree(
+    root: Path,
+    out: list[FingerprintEntry],
+    *,
+    limit: int,
+    exclude_top: frozenset[str] = frozenset(),
+    exclude_nested: Mapping[str, frozenset[str]] = MappingProxyType({}),
+) -> bool:
+    """Enumerate ``root`` and every descendant, bounded by ``limit``.
+
+    Returns False when the bound was reached — the caller must then refuse to
+    fingerprint at all rather than serve a truncated stat set.
+
+    TWO EXCLUSION SHAPES, and they are not interchangeable:
+
+    * ``exclude_top`` filters ``root``'s OWN entries by name and nothing deeper.
+      That is what makes it safe to name a directory the store root can only hold
+      one of (see :data:`_EXCLUDED_STORE_ENTRIES`);
+    * ``exclude_nested`` maps a top-level entry name to the child names skipped
+      anywhere INSIDE that entry's subtree. It exists for the one case where the
+      unread tree sits at depth >= 2 (``realm_sync/<server>/.git`` — see
+      :data:`_EXCLUDED_NESTED_STORE_NAMES` for the reader audit and the removal
+      obligation). The skip-set travels DOWN with the subtree it was declared
+      for, so it can never reach a sibling: a nested exclusion must name both the
+      subtree it applies inside and the child it skips, which is exactly what a
+      blanket name filter at every depth would not.
+
+    Every FILE contributes (path, mtime_ns, size); every DIRECTORY contributes
+    its path alone. Files individually rather than by their parent's mtime
+    because replacing an existing entry does not move the containing directory
+    on NTFS (the in-place-rewrite case the boards-tree per-card stat pattern
+    already exists for); directories by path alone for the reason at
+    :data:`_DIR_MARK`.
+
+    Symlinked directories ARE followed, and the choice is deliberate: treating
+    one as a leaf would leave everything under it outside the closure, which is
+    the failure mode that matters here. A symlink LOOP is therefore possible and
+    is handled by the bound rather than by loop detection — hitting ``limit``
+    refuses the whole fingerprint, and refusing means "never cache", which is
+    safe. Detecting the loop and continuing would not be: it would produce a
+    plausible key over an incomplete walk.
+
+    That doctrine is UNCHANGED by ML-10 and is kept deliberately (A5). What
+    changed is only that the caller's refusal now leaves a countable receipt
+    naming the tree — :func:`_receipt_fingerprint_refused` — so a loop that
+    disables the cache for a whole install is a census row rather than one
+    WARNING sentence somebody has to already be reading.
+    """
+
+    # The tree root records its PATH only, never its existence-or-not: a root
+    # that appears because the cache wrote its own directory into it (the store
+    # root's first-ever write on a virgin install) must not flip the key, and a
+    # root that genuinely gains content flips it through the content's own
+    # triples.
+    out.append(FingerprintEntry(str(root), _DIR_MARK, _DIR_MARK))
+    try:
+        top_level = sorted(os.scandir(root), key=lambda entry: entry.name)
+    except OSError:
+        # An unreadable root is itself a stable signal (recorded above). It is
+        # NOT a bound failure: a store root that does not exist yet is the
+        # ordinary cold-start shape.
+        return True
+    # Each pending item carries the nested skip-set of the top-level subtree it
+    # came from — an empty set for the top-level entries themselves, so a subtree
+    # can never be filtered by its own declaration, and the declared set for
+    # everything below one. Carrying it on the item rather than re-deriving it
+    # from the path is what keeps the rule "inside THIS subtree" instead of
+    # "anywhere whose path happens to contain that name".
+    # Each pending item carries the nested skip-set of the top-level subtree it
+    # belongs to. ``exclude_nested`` is consulted HERE and only here — over
+    # ``root``'s own entry names — so a directory that merely shares a declared
+    # top-level name while nested somewhere else can never activate the rule.
+    # The set then travels DOWN with the subtree and filters its descendants at
+    # push time, which is also why a subtree is never filtered by its own
+    # declaration: ``realm_sync`` is not inside ``realm_sync``.
+    pending: list[tuple[os.DirEntry, frozenset[str]]] = []
+    for entry in top_level:
+        if entry.name in exclude_top:
+            continue
+        pending.append((entry, exclude_nested.get(entry.name, frozenset())))
+    while pending:
+        if len(out) >= limit:
+            return False
+        entry, skip_nested = pending.pop()
+        name = entry.name
+        if name.endswith(_TMP_SUFFIX) and name.startswith("."):
+            continue
+        try:
+            is_dir = entry.is_dir()
+        except OSError:
+            is_dir = False
+        out.append(_entry_triple(entry, is_dir))
+        if not is_dir:
+            continue
+        try:
+            children = sorted(os.scandir(entry.path), key=lambda item: item.name)
+        except OSError:
+            continue
+        pending.extend(
+            (item, skip_nested) for item in children if item.name not in skip_nested
+        )
+    return len(out) < limit
+
+
+def _wal_without_frames_is_content_free(entry: FingerprintEntry) -> FingerprintEntry:
+    """A WAL with no frames keys as ``(path, 0, 0)`` — ABSENT OR EMPTY, one triple.
+
+    The one line where "the build reads this database" stops being spelled the
+    same way as "somebody wrote to this database". See :data:`_DB_SIBLINGS` for
+    the ground under the mask.
+
+    WHY ABSENT AND EMPTY ARE ONE FACT
+    =================================
+
+    SQLite deletes the WAL when the last connection closes cleanly, and
+    re-creates it at zero length on the next open. So a quiescent database
+    alternates between "no ``-wal`` on disk" and "a zero-length ``-wal`` on
+    disk" for reasons that are entirely about CONNECTION LIFETIME and never
+    about content: both states say *no uncheckpointed frames*, which is the only
+    thing this sibling is stat'd to tell us. Keying them apart records the
+    lifecycle of a reader as if it were a write.
+
+    This does NOT generalise, and the distinction it drops is real everywhere
+    else. :func:`_stat_entry` records a missing input as ``-1/-1`` precisely so
+    that a file which APPEARS is not indistinguishable from one that never
+    moved — an appearing config, an appearing store row, an appearing skill
+    package are all content events. The WAL is the one input whose appearance is
+    definitionally content-free, because it appears EMPTY: the appearance and
+    the emptiness are the same open() call. The moment it carries a frame its
+    size is non-zero and it is keyed like anything else, so the general rule is
+    suspended only over the exact state in which it says nothing.
+
+    (A DIRECTORY at this path — ``_DIR_MARK``, not a state SQLite can produce —
+    collapses here too. A database whose WAL path is a directory cannot be
+    opened at all, and would fail loudly at the open long before a stale key
+    could matter.)
+
+    WHAT THE FIELD SHOWED, AND THE CONSEQUENCE THAT WILL BE FORGOTTEN
+    ================================================================
+
+    Measured on the operator's machine, 2026-08-18: two boots recorded the SAME
+    events offset and the SAME entry count, and the second demoted
+    ``fingerprint_mismatch`` anyway. ``state.db-wal``'s NTFS creation time was
+    4.15 s AFTER the consult that missed — boot A's clean exit had deleted it,
+    boot B had not yet opened the database — while the sidecar, written
+    mid-session by a later build, held it present-and-empty. One entry flipped;
+    nothing else in the closure moved.
+
+    The structural consequence is worse than the flip: **which of the two states
+    the sidecar records depends on which build in the process wrote LAST.** A
+    boot whose only build is the boot build writes a consult-time key (WAL
+    absent, because the database has not been opened yet) and the next boot can
+    match. Any later led build — the launcher's hydrate, any ``forceFresh``
+    gesture — writes a mid-session key (WAL present) and the next boot is a
+    GUARANTEED miss. That is deterministic given the build history, not a race.
+
+    Perverse corollary, stated because it will mislead the first person who
+    tests this: **a hard-killed serve leaves the WAL behind and converges; a
+    clean exit deletes it and misses.** Under this mask neither shape is keyed
+    differently from the other, which is the point.
+    """
+
+    if entry.size > 0:
+        return entry
+    return FingerprintEntry(entry.path, 0, 0)
+
+
+#: Ceiling on a config input this module is willing to READ rather than stat.
+#:
+#: Every path routed through :func:`_config_input_entry` is hand-authored YAML —
+#: the operator's live one is 23 KB, the base seed 8 KB — so a megabyte is three
+#: orders of magnitude of headroom and still a hard stop. Over it the entry
+#: keeps its ordinary mtime triple: a config that large is not the class this
+#: mask was measured against, and reading an unbounded file on the boot path to
+#: decide a cache key would trade one demote for a worse cost.
+_CONFIG_CONTENT_MAX_BYTES = 1 << 20
+
+
+def _config_input_is_content_keyed(entry: FingerprintEntry) -> FingerprintEntry:
+    """A hand-authored YAML config keys on its CONTENT, never on its mtime.
+
+    Second member of the same family as
+    :func:`_wal_without_frames_is_content_free`, and the same shape: one input
+    class whose stat triple moves for reasons that are NOT content, masked at
+    the one line where it enters the closure, with the measurement written down
+    so the next person does not have to re-earn it.
+
+    WHAT WAS MEASURED (operator's runtime, 2026-08-21)
+    =================================================
+
+    Every Mission Control boot demoted with::
+
+        reason=fingerprint_mismatch inputs=2225 changed=1
+        diff=X:\\Eternia\\.hermes\\profiles\\alice\\config.yaml
+
+    and paid a full rebuild — 6,467 ms on the 13:17 boot, of which
+    ``agents_readiness`` was 3,266 ms. The named file's mtime was minutes old on
+    each miss and its NTFS creation time moved with it, i.e. the file is
+    ATOMICALLY REPLACED (temp + ``os.replace``), not appended to.
+
+    The convicting measurement is not the mtime. It is that
+    ``profiles/alice/config.yaml`` was, at the moment of the miss, **byte-for-byte
+    identical to a copy taken two days earlier** — same 23,255 bytes, same
+    SHA-256 — while its mtime had moved repeatedly in between. So the writer
+    re-serialises the document and lands the same bytes; the mtime triple
+    reports a change that does not exist, and the persisted core is thrown away
+    for it.
+
+    WHY THIS IS THE LAYER, AND NOT "STOP THE WRITE"
+    ==============================================
+
+    Stopping the needless write is the narrower fix and would be preferable IF
+    the writer were on this repo's boot path. It is not, and that was
+    established by instrumentation rather than by reading: a tracer on
+    ``os.replace`` / ``os.rename`` / ``open(w)`` / ``Path.write_*`` / ``os.utime``
+    / ``shutil.copyfile`` around a real ``build_snapshot()`` — and around
+    ``harness snapshot|status|agents|personas|doctor|chats|board|office``,
+    ``profile list``, ``auth status``, ``config get`` and ``doctor``, each in a
+    sandboxed home seeded with a structural copy of the operator's own config —
+    recorded ZERO writes to any ``config.yaml``. On the live machine the 13:51
+    boot demoted naming the same file while that file's mtime did not move
+    during the boot at all. The rewrite is real, repeated, and OUTSIDE the
+    snapshot build.
+
+    A cache that can be invalidated by any writer anywhere re-writing a byte
+    for byte identical document is a cache with no floor. Keying the class on
+    content gives it one, and does so for every future writer of these four
+    files rather than for the one that happened to be caught.
+
+    WHAT IS DELIBERATELY NOT WEAKENED
+    =================================
+
+    * **A genuine edit still invalidates.** The digest is over the bytes, so any
+      content change flips the key — including one that leaves ``size``
+      unchanged, which the mtime triple could only catch by timestamp.
+    * **Appearance and disappearance still count.** An absent path keeps
+      :func:`_stat_entry`'s ``-1/-1`` and a directory keeps ``_DIR_MARK``;
+      neither is read, so the "an appearing config is a content event" rule that
+      :func:`_wal_without_frames_is_content_free` explicitly refuses to
+      generalise away is untouched here too.
+    * **The class is four CALL SITES, named where they enter the closure.** Per
+      profile ``config.yaml`` and ``profile.yaml`` (class 4), plus the pinned
+      ambient config authority and the harness root config (class 5). Nothing
+      else in this module reaches the mask. NOT the ``active_profile`` pointer (written
+      only by an explicit profile switch, and its whole content is the switch),
+      NOT the store subtree, NOT the skill roots — those are walked, unbounded,
+      and hashing them would be the expensive shape this mask is careful not to
+      become.
+
+    COST, MEASURED rather than asserted: one bounded read per entry, so
+    ``2 * <profiles> + 2`` reads — 22 files on the operator's ten-profile home.
+    Benchmarked at the live file size (23,255 B), 20 warm passes: the same 22
+    paths cost a median **1.3 ms** stat-only and **9.9 ms** content-keyed, i.e.
+    **+8.6 ms** per fingerprint. That buys back a 6,467 ms rebuild on every boot
+    that would otherwise demote, and it is small beside the 2,225-entry stat
+    closure the same pass already walks. If a home ever grows profiles by an
+    order of magnitude this is the number to re-measure.
+
+    A read that fails (permissions, a mount that went away mid-pass) falls back
+    to the stat triple rather than refusing: degrading to today's behaviour for
+    one entry is strictly better than refusing to fingerprint the whole install.
+    """
+
+    if entry.size < 0 or entry.mtime_ns == _DIR_MARK:
+        # Absent, or a directory. Both are already content-free and stable.
+        return entry
+    if entry.size > _CONFIG_CONTENT_MAX_BYTES:
+        return entry
+    try:
+        with open(entry.path, "rb") as handle:
+            body = handle.read(_CONFIG_CONTENT_MAX_BYTES + 1)
+    except OSError:
+        return entry
+    if len(body) > _CONFIG_CONTENT_MAX_BYTES:
+        return entry
+    # The leading bits of the same digest the fingerprint itself is built from,
+    # taken as a NON-NEGATIVE, SIGNED-64-REPRESENTABLE int. Two constraints, both
+    # deliberate:
+    #
+    # * non-negative, so it can never collide with ``-1`` (absent) or
+    #   ``_DIR_MARK`` (-2) — the two sentinels this field already carries;
+    # * 63 bits and no more, because this value is persisted verbatim into
+    #   ``entries.json`` (:func:`_entries_payload`) as a JSON number. Nothing
+    #   outside Python reads that file today, and a bignum would be correct if
+    #   one never did — but a fingerprint entry is not the place to plant a
+    #   value the next consumer's integer type cannot hold. 63 bits over a
+    #   two-dozen-entry class is collision-free for every practical purpose;
+    #   a collision would cost one stale serve of one config, not corruption.
+    keyed = int.from_bytes(hashlib.sha256(body).digest()[:8], "big") >> 1
+    return FingerprintEntry(entry.path, keyed, entry.size)
+
+
+def _config_input_entry(path: Any) -> FingerprintEntry:
+    """:func:`_stat_entry` for a config input, under the content mask above."""
+
+    return _config_input_is_content_keyed(_stat_entry(path))
+
+
+def sqlite_fingerprint_triples(db_path: Any) -> tuple[tuple[str, int, int], ...]:
+    """``(suffix, mtime_ns, size)`` per journal sibling, under the WAL mask.
+
+    THE one authority for "how does a poll lane key a SQLite database", promoted
+    out of this module on 2026-08-21 because it had exactly one caller and three
+    lanes needed it. The other two keyed the same database by a raw stat triple
+    over the same three siblings, so the connection-lifetime flip
+    :func:`_wal_without_frames_is_content_free` was written to absorb — WAL
+    absent after a clean last-close, WAL present-and-empty the moment anything
+    opens the file — reached them undiminished:
+
+    * ``stream._scope_fingerprint`` (the Stage 12 watchdog, ~5 s cadence). Each
+      flip appended a synthetic ``state.reconciled``, which ``patch_coverage``
+      classifies UNCOVERED, which demotes the batch to a full core rebuild.
+      Measured on the operator's runtime over 22.16 h to 2026-08-21 09:06:
+      **2 433 ``snapshot_build reason=demote`` against 35 hydrates, median
+      build_ms 3 083, max 37 266 — 2.29 h of CPU**, while the event log took
+      1 239 ``state.reconciled`` (96.9 % of all events in the window) at a
+      median 9.0 s spacing. 3 338 DISTINCT fingerprints over 4 597 reconciles,
+      against a recurring at-rest anchor: the signature of one entry alternating
+      between a stable "absent" string and a fresh ``mtime_ns`` on every open.
+    * ``harness_parts.serve._runtime_state_fingerprint`` (the read-model cache),
+      where the same flip keeps the cache permanently cold — the defect a
+      2026-08-09 analysis named and nobody propagated the mask to.
+
+    Returned keyed by SUFFIX rather than by path so a caller can spell its own
+    label (the stream lane keys by basename, the cache lane by full path)
+    without a second stat list free to drift from :data:`_DB_SIBLINGS`.
+    """
+
+    text = str(db_path)
+    triples: list[tuple[str, int, int]] = []
+    for suffix in _DB_SIBLINGS:
+        entry = _stat_entry(text + suffix)
+        if suffix == _WAL_SIBLING:
+            entry = _wal_without_frames_is_content_free(entry)
+        triples.append((suffix, entry.mtime_ns, entry.size))
+    return tuple(triples)
+
+
+def _db_entries(db_path: Any, out: list[FingerprintEntry]) -> None:
+    text = str(db_path)
+    for suffix, mtime_ns, size in sqlite_fingerprint_triples(db_path):
+        out.append(FingerprintEntry(text + suffix, mtime_ns, size))
+
+
+def _receipt_fingerprint_refused(*, scope: str, root: Any, bound: int) -> None:
+    """The countable artifact for a walk that hit its entry bound (A4).
+
+    A bound refusal disables the cache for the whole install — every boot pays
+    the full build, forever, and the only thing that said so was a WARNING
+    sentence that did not even name which store root blew the bound. This is the
+    same fact on the same channel the shadow lane reports divergence on, in the
+    shape a census can count: ``reason`` types it, ``scope`` says WHICH walk
+    refused (the two bounds are different numbers over different trees),
+    ``root`` names the tree to go look at, ``bound`` says what it was measured
+    against.
+
+    **The refusal itself is untouched and stays untouched.** Reaching a bound
+    still makes the fingerprint ``None``, and ``None`` still means never cache —
+    see :func:`build_input_fingerprint`. This function adds a receipt and decides
+    nothing.
+    """
+
+    logger.warning(
+        "snapshot_core_cache %s reason=%s scope=%s bound=%d root=%s — the walk "
+        "hit its bound, so the stat set would have been truncated; the "
+        "fingerprint is refused outright and nothing may be served from the "
+        "cache until the tree named here shrinks or the bound is re-measured. A "
+        "truncated stat set is exactly a missed input.",
+        RECEIPT_FINGERPRINT_REFUSED,
+        REFUSAL_ENTRIES_EXCEEDED,
+        scope,
+        bound,
+        root,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# The home this process fingerprints through (MC-2 / P3)
+# --------------------------------------------------------------------------- #
+#: Resolved ONCE per process, then pinned for the length of every walk.
+#:
+#: WHAT IT FIXES. Four of the seven classes below bottom out in
+#: ``hermes_constants.get_hermes_home()``, whose ladder is the context-local
+#: override → ``os.environ["HERMES_HOME"]`` → the platform default. The BUILD
+#: ITSELF exports that variable: the ``agents_readiness`` section runs
+#: ``profile_readiness.profile_readiness_for_persona`` inside
+#: ``profile_context.persona_profile_context``, which sets the context-local
+#: override AND writes ``os.environ["HERMES_HOME"]`` process-globally for the
+#: length of a per-persona scope. A consult on ANOTHER THREAD — a one-shot
+#: hydrate, a status probe, the hub — therefore computed its closure over
+#: whichever profile happened to be exported at that instant. Measured in the
+#: field 2026-08-18: ``inputs=24344`` and ``inputs=23107`` from ONE process, over
+#: ONE store, thirteen seconds apart. A non-filesystem input inside the closure,
+#: which is the thing §6.1's bet says must not exist.
+#:
+#: WHY "RESOLVE THROUGH THE HEAD" IS NOT ON ITS OWN THE FIX. This is the whole
+#: soundness argument, so it lives here rather than in a commit message.
+#: :func:`hermes_constants.get_hermes_head_home` FALLS BACK to
+#: ``get_hermes_home()`` whenever no head authority is present — and under an
+#: active persona override that fallback IS the override. Worse, the authority it
+#: consults first is a ContextVar, and ContextVars do not cross a thread
+#: boundary: the head ``persona_profile_context`` records is invisible to the
+#: very thread the divergence was measured on, so there the head degenerates to
+#: the flipped ambient home. Resolving through the head is NECESSARY and NOT
+#: SUFFICIENT. What makes the closure pure is taking that resolution ONCE — at
+#: the first fingerprint of the process, which on every real lane is the boot
+#: consult, before any persona scope in this process can have run — and pinning
+#: it for every walk afterwards.
+#:
+#: THE RESIDUAL, named rather than discovered later. A process whose FIRST
+#: fingerprint is taken while a persona scope is already live captures that
+#: scope's home and pins it. That is not silent: ``write_back`` records
+#: ``fingerprint_home`` in the sidecar and a later boot judging against it
+#: demotes ``home_mismatch`` (see the channel table), which is exactly the field
+#: signal that a capture was taken too late.
+#:
+#: HC-1 (2026-08-22) NARROWS THAT RESIDUAL RATHER THAN RE-ARGUING IT. "The first
+#: fingerprint of the process is the boot consult" was an ARGUMENT, and the field
+#: falsified it twice on a SINGLE-PROFILE install (2026-08-21 16:04:32 and
+#: 2026-08-22 13:36, one boot / three callers demoting ``home_mismatch`` each
+#: time — there is no second root for two runs to legitimately disagree about).
+#: A long-lived process now DECLARES the boot instant that owes the capture and
+#: TAKES it there, so "first use" is a defined point in the lifecycle instead of
+#: whichever build or consult won a race. The lazy path below is kept — a plain
+#: tool, a test, a subprocess that never boots a serve still has to work — but it
+#: is no longer SILENT in a process that declared an instant: see
+#: :data:`RECEIPT_FINGERPRINT_HOME_LAZY_CAPTURE`.
+_fingerprint_home_lock = threading.Lock()
+_fingerprint_home: tuple[Path, bool] | None = None
+#: ``True`` when the capture came from :func:`capture_fingerprint_home` — an
+#: explicit, named boot instant — and ``False`` when the lazy path took it.
+_fingerprint_home_eager: bool = False
+#: The boot instant a long-lived process declared it would capture at, or
+#: ``None`` in a process that never declared one. This is what makes the lazy
+#: receipt below distinguish "a defect recurring" from "an ordinary short-lived
+#: process doing the only thing it can".
+_fingerprint_home_boot_site: str | None = None
+
+
+class FingerprintHomeCapture(NamedTuple):
+    """What this process captured, and WHERE it came from.
+
+    ``home`` is ``None`` until something has captured — which is a state worth
+    being able to observe rather than a gap: a process that declared a boot
+    instant and then reached a request with ``home is None`` is a process whose
+    eager capture did not run.
+    """
+
+    home: Path | None
+    authoritative: bool
+    eager: bool
+    boot_site: str | None
+
+
+def _capture_fingerprint_home_locked(*, eager: bool) -> tuple[Path, bool]:
+    """Take the capture. The caller holds :data:`_fingerprint_home_lock`."""
+
+    global _fingerprint_home, _fingerprint_home_eager
+    from hermes_constants import (
+        get_hermes_head_home,
+        hermes_head_home_is_authoritative,
+    )
+
+    _fingerprint_home = (
+        Path(get_hermes_head_home()),
+        bool(hermes_head_home_is_authoritative()),
+    )
+    _fingerprint_home_eager = eager
+    return _fingerprint_home
+
+
+def _receipt_fingerprint_home_lazy_capture(
+    *, home: Path, authoritative: bool, site: str
+) -> None:
+    """The countable artifact for a capture that was NOT taken where it was owed.
+
+    Emitted only in a process that declared a boot instant, so it can never fire
+    for an ordinary short-lived caller. See the channel table row for the census
+    rule; the short version is that this line and ``reason=home_mismatch`` are
+    the same defect seen from the producing and the judging side, and this one
+    arrives a boot earlier.
+    """
+
+    logger.warning(
+        "snapshot_core_cache %s site=%s home=%s authoritative=%s — the "
+        "fingerprint home was captured on first use rather than at the boot "
+        "instant that owes it, so whatever scope was live at that moment is now "
+        "pinned for the life of this process. A sidecar written from here is "
+        "keyed under that home and the next boot will demote it "
+        "reason=home_mismatch.",
+        RECEIPT_FINGERPRINT_HOME_LAZY_CAPTURE,
+        site,
+        home,
+        "true" if authoritative else "false",
+    )
+
+
+def declare_fingerprint_home_boot_site(site: str) -> None:
+    """Name the boot instant at which THIS process owes its capture.
+
+    Deliberately a SEPARATE call from :func:`capture_fingerprint_home`, and the
+    separation is the whole mechanism rather than ceremony: the declaration is
+    the process saying what it IS (a long-lived runtime with a defined boot
+    sequence), the capture is the ACT. Fused into one call, deleting the act
+    would delete the ability to notice that it is missing — which is precisely
+    how a capture taken too late stayed unattributed until a census rule went
+    looking for it. Kept apart, a boot that declares and then does not capture
+    reports itself on the first fingerprint it takes.
+
+    A later declaration wins: the CLI's dispatch names the coarse instant, and a
+    serve that starts underneath it names its own, more specific one.
+    """
+
+    global _fingerprint_home_boot_site
+    with _fingerprint_home_lock:
+        _fingerprint_home_boot_site = site
+
+
+def capture_fingerprint_home() -> tuple[Path, bool]:
+    """Capture the fingerprint home NOW, at the caller's defined boot instant.
+
+    The eager half of HC-1. Call it from a boot sequence at a point that provably
+    precedes any persona scope; everything afterwards — every build, every
+    consult, on every thread — then resolves through what was captured here.
+
+    Idempotent, and capture-once still wins: if something already captured
+    (lazily, before this call), that capture stands and the lazy receipt has
+    already named it. Re-capturing here would silently replace a home some
+    fingerprint has already been taken under, which is a worse fault than the one
+    being fixed.
+    """
+
+    with _fingerprint_home_lock:
+        if _fingerprint_home is None:
+            return _capture_fingerprint_home_locked(eager=True)
+        return _fingerprint_home
+
+
+def fingerprint_home_capture() -> FingerprintHomeCapture:
+    """Observe the capture WITHOUT taking one.
+
+    Its own function rather than exposing the globals, and pointedly not a call
+    to :func:`resolved_fingerprint_home`: an observer that captured would destroy
+    the very thing it is being asked about — "was this captured eagerly?" cannot
+    be answered by a function whose answer is "it is now".
+    """
+
+    with _fingerprint_home_lock:
+        if _fingerprint_home is None:
+            return FingerprintHomeCapture(
+                home=None,
+                authoritative=False,
+                eager=False,
+                boot_site=_fingerprint_home_boot_site,
+            )
+        return FingerprintHomeCapture(
+            home=_fingerprint_home[0],
+            authoritative=_fingerprint_home[1],
+            eager=_fingerprint_home_eager,
+            boot_site=_fingerprint_home_boot_site,
+        )
+
+
+def resolved_fingerprint_home() -> tuple[Path, bool]:
+    """``(home, authoritative)`` for this process — captured once, then frozen.
+
+    ``authoritative`` is :func:`hermes_constants.hermes_head_home_is_authoritative`
+    as it read AT CAPTURE TIME. ``False`` means the head had degenerated to the
+    ambient resolution, so the recorded home is only as good as the moment it was
+    taken. That is a fact a demote should be able to name, which is why it is
+    persisted beside the home instead of dropped.
+
+    The lazy capture here is the FALLBACK, not the design: a process that
+    declared a boot instant and still lands in this branch is reporting the
+    defect HC-1 exists to retire, and says so on the log rather than quietly
+    pinning whatever home the winning caller happened to be running under.
+    """
+
+    lazy_site: str | None = None
+    with _fingerprint_home_lock:
+        if _fingerprint_home is None:
+            captured = _capture_fingerprint_home_locked(eager=False)
+            lazy_site = _fingerprint_home_boot_site
+        else:
+            captured = _fingerprint_home
+    # OUTSIDE the lock. A logging handler is arbitrary third-party code and this
+    # lock is taken on every fingerprint walk; emitting under it would put a
+    # handler's I/O in front of every stat in the process.
+    if lazy_site is not None:
+        _receipt_fingerprint_home_lazy_capture(
+            home=captured[0], authoritative=captured[1], site=lazy_site
+        )
+    return captured
+
+
+def reset_fingerprint_home() -> None:
+    """Forget the captured home, as a fresh process would. Tests only.
+
+    Its own function rather than only a line inside
+    :func:`reset_process_state` because the per-test environment sandbox moves
+    ``HERMES_HOME`` between cases, and a capture frozen from case 1 would answer
+    case 2 with a directory pytest has already deleted — a fingerprint that is
+    stable for the wrong reason. The ``tests/agent_runtime`` conftest drops it
+    autouse, the same way it drops the profile-runner resolve memo.
+
+    Drops the boot-site declaration too, and that is load-bearing rather than
+    tidy: a case that drove a serve boot would otherwise leave every LATER case
+    in the session claiming to be a serve, and each one's ordinary lazy capture
+    would emit the receipt that means a defect recurred.
+    """
+
+    global _fingerprint_home, _fingerprint_home_eager, _fingerprint_home_boot_site
+    with _fingerprint_home_lock:
+        _fingerprint_home = None
+        _fingerprint_home_eager = False
+        _fingerprint_home_boot_site = None
+
+
+@contextmanager
+def _pinned_to_fingerprint_home() -> Iterator[None]:
+    """Resolve inside this block through the captured home, not the ambient one.
+
+    The mechanism is :func:`hermes_constants.set_hermes_home_override` — the same
+    context-local override ``persona_profile_context`` installs, applied in the
+    opposite direction and only for the length of a stat. Deliberately NOT a
+    hand-composed ``home / "config.yaml"`` at each site: every class below keeps
+    resolving through its OWN path authority, which is §6.1's first mitigation
+    ("no second list free to drift") and is precisely the property a second copy
+    of a path rule would give up. The override is context-local by construction,
+    so pinning the walking thread cannot perturb a persona turn running beside
+    it.
+
+    Applied PER CLASS rather than around the whole walk, so each class states why
+    it needs the pin and each is independently falsifiable: dropping the pin from
+    one class reds that class's witness alone.
+    """
+
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    home, _authoritative = resolved_fingerprint_home()
+    token = set_hermes_home_override(home)
+    try:
+        yield
+    finally:
+        reset_hermes_home_override(token)
+
+
+def build_input_fingerprint() -> CoreFingerprint | None:
+    """The stat set over EVERY input the read-model build reads.
+
+    ``None`` means "I could not fingerprint the inputs" and every caller must
+    read it as **never cache** — not as "nothing changed". A missing answer is a
+    loud refusal here, because the alternative is serving unlabeled stale as
+    authoritative.
+
+    The seven input classes, each resolved through the authority the BUILD
+    reads through (§6.1's first mitigation — one authority, no second list).
+    Four of them resolve HOME-RELATIVE and are therefore taken under
+    :func:`_pinned_to_fingerprint_home`, so the answer is a function of the
+    store and of the home this process resolved once, never of the
+    ``HERMES_HOME`` the build itself exports mid-walk. Which classes are pinned
+    and which are not is part of the specification, so it is stated per class
+    rather than left to be re-derived:
+
+    1. the agent-runtime store root subtree — ``paths.store_root()``, walked
+       recursively so an ADDED file flips the key (offices, boards, personas,
+       assignments, the event log and its rotation manifest, prompt
+       observability, realm-sync baselines: everything the projection reads
+       from the store, without a name list to fall behind). That "without a name
+       list" is the class's design and it now has TWO stated exceptions, which is
+       why the sentence no longer stands alone: ``deleted_archive/`` is excluded
+       because the PROJECTION has no reader for it (the full argument — including
+       the ``harness_doctor`` reader that does exist and why it does not re-admit
+       the tree — is written at ``_EXCLUDED_STORE_ENTRIES``), and the orphaned-
+       surface graveyard ``office_archive/`` is excluded because the runtime
+       writes it, without bound, and the projection is deliberately built not to
+       see it. Both arguments live at that constant. A THIRD exception is nested
+       rather than top-level and carries its own argument at its own constant:
+       ``realm_sync/**/.git`` — a synced worktree's git bookkeeping, which
+       ``build_snapshot`` is forbidden to read (Decision 7) and reads through
+       ``realm_sync_state/<realm>.json`` instead, while the four
+       ``realm_sync/<realm>/*_baseline.json`` sidecars beside it STAY in the
+       closure (see :data:`_EXCLUDED_NESTED_STORE_NAMES`). An exception with a
+       reason at the constant is not the failure mode the sentence warns about;
+       an unargued name list is. NOT pinned:
+       ``resolve_runtime`` reads ``HERMES_AGENT_RUNTIME_ROOT`` and then the ROOT
+       config, neither of which follows the profile home — measured unchanged
+       across a persona flip on both the same thread and another one;
+    2. the ``running_work`` durable stores — ``running_work_store_paths()``, the
+       ONE authority for them (they hang off the HERMES home, not the store
+       root, and both mutate with NO event). PINNED;
+    3. the chat SessionDB — ``chat_session_db_path()``, the database the CHAT
+       LANE writes, plus its WAL siblings. PINNED;
+    4. the profile inputs ``agents_readiness`` reads — the profiles root and,
+       per profile, ``profile.yaml`` + ``config.yaml``, plus the sticky
+       ``active_profile`` pointer that decides which one a bare invocation
+       resolves. NOT pinned: ``_get_profiles_root`` anchors to
+       ``get_default_hermes_root()``, which maps ``<root>/profiles/<name>`` back
+       to ``<root>``, so a profile flip resolves the SAME directory — measured.
+       The two YAML files are CONTENT-KEYED
+       (:func:`_config_input_is_content_keyed`); the profiles root and the
+       ``active_profile`` pointer are not;
+    5. the config inputs — ``get_config_path()``, taken PINNED (it is literally
+       ``get_hermes_home() / "config.yaml"``, so a persona scope swaps the file
+       being stat'd), and the ROOT ``harness_root_config_path()`` left ambient
+       because it anchors to the hermes root like class 4. Two authorities in
+       production because the CLI profile redirect makes them genuinely
+       different files. Both CONTENT-KEYED, with class 4's two: these four are
+       the whole of that mask's class;
+    6. the skill registries — ``get_all_skills_dirs()`` (local profile skills,
+       the shared canonical root, configured external roots) walked per root,
+       plus the in-repo harness-skill source root the hash comparison reads.
+       PINNED, and this is the class the measured 1,237-entry divergence came
+       from: index 0 is the AMBIENT home's ``skills/``;
+    7. the event-rotation lane — the manifest and the resolved LIVE slice.
+       Under the store root today, so class 1 covers them; stat'd explicitly
+       anyway because the resolution is free to move the live slice elsewhere
+       and a frozen ``events.jsonl`` entry after a rotation is exactly the
+       silent-staleness shape this whole module is against. NOT pinned: both
+       resolve off the store root.
+    """
+
+    entries: list[FingerprintEntry] = []
+
+    # 1 — the agent-runtime store root subtree.
+    try:
+        from . import paths as _paths
+
+        root = _paths.store_root()
+    except Exception:
+        return None
+    if not _walk_tree(
+        root,
+        entries,
+        limit=MAX_FINGERPRINT_ENTRIES,
+        exclude_top=_EXCLUDED_STORE_ENTRIES,
+        exclude_nested=_EXCLUDED_NESTED_STORE_NAMES,
+    ):
+        _receipt_fingerprint_refused(
+            scope=REFUSAL_SCOPE_STORE_ROOT,
+            root=root,
+            bound=MAX_FINGERPRINT_ENTRIES,
+        )
+        return None
+
+    # 2 — the running_work durable stores.
+    try:
+        from .running_work import running_work_store_paths
+
+        # PINNED. ``running_work._head_home`` already asks the head authority,
+        # and its docstring names this very incident class ("ambient
+        # get_hermes_home() is not an option either: it is flipped
+        # process-globally for the duration of a persona turn"). That is true and
+        # still not enough HERE: the authority it consults is a ContextVar, so on
+        # a thread that is not the one running the persona scope the recording is
+        # invisible and the head degenerates to the flipped ambient home.
+        # Measured with a scope held on another thread: the stores resolved to
+        # the OTHER profile's ``processes.json`` and ``state.db``.
+        with _pinned_to_fingerprint_home():
+            store_paths = running_work_store_paths()
+    except Exception:
+        return None
+    if not store_paths:
+        # The authority could not resolve a home. "I cannot fingerprint these"
+        # is not "there is nothing to watch" — refuse.
+        return None
+    for path in store_paths:
+        _db_entries(path, entries)
+
+    # 3 — the chat SessionDB.
+    try:
+        from .chat_session_scope import chat_session_db_path
+
+        # PINNED, for the same cross-thread reason as class 2: the scope ladder
+        # asks ``hermes_head_home_is_authoritative()`` first — a ContextVar read
+        # — and when no rung answers it bottoms out in the ambient home. Measured
+        # with a scope held on another thread: the SessionDB resolved to the
+        # OTHER profile's ``state.db``, which is a whole different chat history
+        # inside the key.
+        with _pinned_to_fingerprint_home():
+            chat_db = chat_session_db_path()
+        _db_entries(chat_db, entries)
+    except Exception:
+        return None
+
+    # 4 — profile inputs + the sticky active-profile pointer.
+    try:
+        from hermes_cli.profiles import _get_default_hermes_home, _get_profiles_root
+
+        profiles_root = _get_profiles_root()
+        entries.append(_stat_entry(profiles_root))
+        entries.append(_stat_entry(_get_default_hermes_home() / "active_profile"))
+        try:
+            profile_dirs = sorted(os.scandir(profiles_root), key=lambda item: item.name)
+        except OSError:
+            profile_dirs = []
+        for entry in profile_dirs:
+            try:
+                if not entry.is_dir():
+                    continue
+            except OSError:
+                continue
+            entries.append(_stat_entry(entry.path))
+            # CONTENT-KEYED, not mtime-keyed — see _config_input_is_content_keyed.
+            # These two are re-serialised in place by writers outside this build,
+            # landing identical bytes under a fresh mtime; keying them on the
+            # timestamp made the persisted core unreachable on every boot.
+            entries.append(_config_input_entry(Path(entry.path) / "profile.yaml"))
+            entries.append(_config_input_entry(Path(entry.path) / "config.yaml"))
+    except Exception:
+        return None
+
+    # 5 — the two config authorities.
+    try:
+        from hermes_constants import get_config_path
+
+        from .config import harness_root_config_path
+
+        # PINNED: ``get_config_path()`` is ``get_hermes_home() / "config.yaml"``,
+        # so a persona scope swaps the file being stat'd.
+        #
+        # NAMED RESIDUAL, measured rather than assumed. In the standard profile
+        # layout this stat is REDUNDANT with class 4, which already enumerates
+        # every ``<profiles>/<name>/config.yaml``, so unpinning it alone does not
+        # move the digest there and no witness in this repo can kill it on its
+        # own. It is pinned anyway, because a closure's specification must not
+        # rest on one class accidentally covering another. The digest-visible
+        # half of this class's exposure is SECOND-ORDER and lands in class 6:
+        # ``agent.skill_utils.get_external_skills_dirs()`` reads this very file
+        # to decide which external skill roots exist.
+        # CONTENT-KEYED, like class 4's two — same writers, same file class.
+        with _pinned_to_fingerprint_home():
+            entries.append(_config_input_entry(get_config_path()))
+        # NOT pinned: anchored to the hermes ROOT, like class 4.
+        entries.append(_config_input_entry(harness_root_config_path()))
+    except Exception:
+        return None
+
+    # 6 — the skill registries.
+    try:
+        from agent.skill_utils import get_all_skills_dirs
+
+        from .skill_install import harness_skill_source_root
+
+        # PINNED, and this is the class the measured 1,237-entry divergence came
+        # from. ``get_all_skills_dirs()`` puts ``get_skills_dir()`` — the AMBIENT
+        # home's ``skills/`` — at index 0, so a walk taken while a persona scope
+        # is exported enumerates ANOTHER PROFILE'S ENTIRE SKILLS TREE. The
+        # external roots behind it are read out of the ambient ``config.yaml``
+        # (class 5's file), so they flip with it.
+        #
+        # The pin is what keeps ``agent/skill_utils.py`` — upstream-owned — out
+        # of this change: the resolver stays byte-identical and answers for the
+        # home this process resolved, instead of core_cache growing a second copy
+        # of its "local, then shared, then external, deduped" rule.
+        with _pinned_to_fingerprint_home():
+            roots = [*get_all_skills_dirs(), harness_skill_source_root()]
+    except Exception:
+        return None
+    seen_roots: set[str] = set()
+    for skill_root in roots:
+        key = str(skill_root)
+        if key in seen_roots:
+            continue
+        seen_roots.add(key)
+        if not _walk_tree(Path(skill_root), entries, limit=len(entries) + MAX_SKILL_ENTRIES_PER_ROOT):
+            _receipt_fingerprint_refused(
+                scope=REFUSAL_SCOPE_SKILL_ROOT,
+                root=key,
+                bound=MAX_SKILL_ENTRIES_PER_ROOT,
+            )
+            return None
+
+    # 7 — the event-rotation lane.
+    try:
+        from . import event_rotation as _event_rotation
+
+        entries.append(_stat_entry(_event_rotation.manifest_path()))
+        entries.append(_stat_entry(_event_rotation.live_path()))
+    except Exception:
+        return None
+
+    return _fingerprint_over(entries)
+
+
+def _fingerprint_over(entries: Iterable[FingerprintEntry]) -> CoreFingerprint:
+    """Order a stat set and digest it — the ONE definition of the key's shape.
+
+    Its own function since IC-2, which needs to re-key a stat set that was
+    ASSEMBLED rather than walked (:func:`_restat_on_post_build_reality`). Two
+    sites computing "sorted, deduped, sha256 of path|mtime|size" would be two
+    rules for one question, and the second one to drift would produce a digest
+    that compares unequal to itself.
+    """
+
+    ordered = tuple(sorted(set(entries)))
+    digest = hashlib.sha256(
+        "\n".join(f"{item.path}|{item.mtime_ns}|{item.size}" for item in ordered).encode(
+            "utf-8", "surrogatepass"
+        )
+    ).hexdigest()
+    return CoreFingerprint(ordered, digest)
+
+
+def contract_versions() -> dict[str, int]:
+    """The wire versions a persisted core was produced under.
+
+    A core written by a build whose contract has since moved is a core a
+    consumer would decode against the wrong shape. Compared as a whole dict, so
+    ADDING a version to this set is itself a demote signal for every core
+    written before it — which is the safe direction.
+    """
+
+    from .parity import PARITY_ENVELOPE_VERSION
+    from .snapshot import SNAPSHOT_CONTRACT_VERSION
+    from .stream import STREAM_SCHEMA_VERSION
+
+    return {
+        "snapshot_contract": int(SNAPSHOT_CONTRACT_VERSION),
+        "parity_envelope": int(PARITY_ENVELOPE_VERSION),
+        "stream_schema": int(STREAM_SCHEMA_VERSION),
+    }
+
+
+def build_stamp_token() -> str | None:
+    """WHICH CODE built the persisted core, or ``None`` when unmeasurable.
+
+    ``None`` refuses the cache. An install whose build cannot be measured — no
+    repo, no baked sha, a hung ``git`` — cannot prove the persisted core was
+    produced by the code now running, and property 5 says an upgrade must never
+    be able to serve the old install's core. Refusing is loud (the demote
+    receipt names ``build_stamp_unknown``) and it is the safe direction.
+
+    ``dirty`` rides the token, so a clean → dirty transition demotes. The
+    residual is stated rather than hidden: two different EDITS that both leave
+    the checkout dirty produce the same token, so on a dirty tree the stamp
+    cannot distinguish them. That window is exactly what the shadow-validation
+    comparison covers in the field, and it does not exist on any install the
+    operator ships from.
+    """
+
+    try:
+        from .build_stamp import build_stamp
+
+        stamp = build_stamp()
+    except Exception:
+        return None
+    if stamp.commit is None:
+        return None
+    return f"{stamp.source}:{stamp.commit}:{'dirty' if stamp.dirty else 'clean' if stamp.dirty is not None else 'unknown'}"
+
+
+def _cache_dir() -> Path:
+    from . import paths as _paths
+
+    return _paths.store_root() / CORE_CACHE_DIRNAME
+
+
+def pointer_path() -> Path:
+    """The file whose replacement IS the write-back (MCF-21)."""
+
+    return _cache_dir() / POINTER_FILENAME
+
+
+def _is_generation_name(name: Any) -> bool:
+    """Whether ``name`` is a generation directory this module could have minted.
+
+    CONTAINMENT, not tidiness. The name comes off disk, out of a file any process
+    on the machine can write, and it is about to be joined onto
+    :func:`_cache_dir`. ``..`` or a separator would resolve the "live trio"
+    anywhere on the filesystem, and the judgement downstream would then be asked
+    to bless bytes this module never wrote. The charset admits exactly what
+    :func:`_new_generation_name` mints and nothing else — no dots, no separators,
+    no drive letters — so escaping is unrepresentable rather than filtered.
+    """
+
+    if not isinstance(name, str) or not name.startswith(_GENERATION_PREFIX):
+        return False
+    body = name[len(_GENERATION_PREFIX) :]
+    return bool(body) and all(char in "0123456789abcdef-" for char in body)
+
+
+def _new_generation_name() -> str:
+    """A generation name no other write-back can collide with.
+
+    The timestamp is for the OPERATOR — a directory listing of the cache sorts
+    into the order the write-backs happened, which is what makes a stranded
+    staging directory legible. It is NOT how the live generation is chosen: the
+    pointer is the only authority, and a reader that preferred the newest name or
+    mtime would resurrect a generation whose publish never completed. The random
+    tail is what makes the name unique across two processes writing back inside
+    the same nanosecond.
+    """
+
+    return f"{_GENERATION_PREFIX}{time.time_ns():x}-{uuid.uuid4().hex[:8]}"
+
+
+def _live_generation_dir() -> Path:
+    """The directory holding the trio the pointer names.
+
+    =========================================================================
+    WHY A POINTER AND NOT A DIRECTORY SWAP
+    =========================================================================
+
+    MC-3 recorded the target shape as "write ``serve_read_model.next/``,
+    ``os.replace`` the directory". That is not implementable, and the reason is a
+    platform fact rather than a preference: ``os.replace`` cannot replace a
+    NON-EMPTY directory anywhere (POSIX ``rename`` answers ``ENOTEMPTY``), and on
+    Windows — the primary platform — it cannot replace a directory AT ALL, empty
+    or not (measured 2026-08-18: ``PermissionError`` / ``WinError 5`` for both).
+    A directory can only be renamed onto a name that does not exist.
+
+    The shape that follows from that is rename-away-then-rename-in, and it is
+    REFUSED: between the two renames there is no live generation at all, so a
+    concurrent consult is served ``absent`` — a window strictly worse than the
+    torn trio the swap exists to retire.
+
+    So the atomicity rides ONE small file instead. The complete trio is written
+    into a fresh generation directory that nothing points at, and the write-back
+    lands when — and only when — the pointer naming it is replaced through
+    :func:`utils.atomic_json_write`, the same single atomic-write authority the
+    rest of this module already uses. A crash before that leaves a directory the
+    pointer never named, which serves nobody and is reaped by the next successful
+    write-back.
+
+    =========================================================================
+    A POINTERLESS STORE DEMOTES — IT DOES NOT ADOPT THE FLAT TRIO
+    =========================================================================
+
+    Every store that held a cache before MCF-21 has ``core.json`` /
+    ``sidecar.json`` / ``entries.json`` sitting flat in :func:`_cache_dir`, and
+    adopting them as generation zero was the alternative on offer. It is refused,
+    and NOT because the judgement could not vet them — it could; the full
+    conjunction in :func:`_judge_persisted_pair` is exactly what a torn legacy
+    trio fails. It is refused because keeping a second resolution alive forever
+    means a pointer that is ever LOST — deleted, truncated, unparseable — silently
+    falls back to whatever flat trio is on disk. That path can serve an arbitrarily
+    old core as authoritative, which is the missed-input direction this module
+    calls its worst failure, reached through the one code path nobody exercises.
+
+    The cost of refusing is exactly one demote, on the first boot after this
+    lands, on each store. A cache's cold start is its designed-for state.
+    """
+
+    name = _live_generation_name()
+    return _cache_dir() / (name if name is not None else _NO_GENERATION_DIRNAME)
+
+
+def _live_generation_name() -> str | None:
+    """What the pointer says, or ``None`` when nothing usable does.
+
+    Never raises, and every unusable shape answers the SAME way — no pointer, an
+    unreadable one, a non-object, a missing field, a name that is not one this
+    module mints. They are one fact ("no generation is published") and giving
+    them one answer is what keeps the caller from growing a second judgement.
+    """
+
+    try:
+        payload = json.loads(pointer_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    name = payload.get("generation")
+    return name if _is_generation_name(name) else None
+
+
+def core_path() -> Path:
+    return _live_generation_dir() / CORE_FILENAME
+
+
+def sidecar_path() -> Path:
+    return _live_generation_dir() / SIDECAR_FILENAME
+
+
+def entries_path() -> Path:
+    """The stat set behind the sidecar's digest, so a miss can name a path.
+
+    **The binding rule, RE-AIMED by MCF-21.** The payload is
+    ``{"fingerprint": <digest>, "entries": [[path, mtime_ns, size], …]}`` and a
+    reader compares ``entries.fingerprint`` against the sidecar's, refusing
+    ``diff_reason=entries_unbound`` when they differ.
+
+    The reason it was written is GONE, and saying so is the point. It used to
+    guard POSITIONAL MIXING: three files landed through three independent
+    ``os.replace`` calls, so any one of them failing left three separate
+    generations in one directory, and a reader trusting position over provenance
+    would diff the current store against some earlier one and name paths from a
+    generation nobody asked about. The generation swap makes that unrepresentable
+    — the three files are written into one directory that becomes live in a
+    single pointer replace, so the entries file beside a sidecar is always that
+    sidecar's own.
+
+    **What it still defends, which is why it stays.** Provenance is not proved by
+    position even inside a published generation: a hand-restored, truncated or
+    tampered ``entries.json`` still reaches this reader, and the alternative to
+    refusing is a diff computed against a stat set that is not this pair's — a
+    receipt that NAMES FILES an operator will go and investigate. A diagnostic
+    that cannot prove which store it is describing must refuse and say so, never
+    pass on partial knowledge. That is the same rule as ``core_sha256`` one file
+    further out, and it now has the same shape of reason: both convict bytes that
+    are not the ones this module wrote, rather than binding files the swap
+    already binds.
+
+    **SIZE, PRICED RATHER THAN DISCOVERED** (the C-7 class). Measured
+    2026-08-18 by walking the operator's live ``agent-runtime`` tree read-only
+    and serialising this exact payload: **22,286 entries → 3,539,812 bytes
+    (3.38 MiB)**, i.e. **159 bytes per entry** against a mean path of 127
+    characters. Projected at the 23,107-entry key the field logs: **~3.5 MiB**.
+
+    That measurement also settles the format question P4 left open, in the
+    opposite direction to the guess. JSON is not the cost: a compact
+    ``path|mtime|size`` text form would spend ~153 bytes per entry against JSON's
+    159 — a ~4 % saving — because the PATHS dominate and backslash escaping adds
+    only ~10 bytes to each. A second, text-shaped atomic writer (which does not
+    exist today) would therefore buy nothing worth its own authority. The lever
+    that actually moves this number is the SIZE OF THE CLOSURE, not its encoding:
+    18,804 of the field's 23,107 entries were ``deleted_archive/``, which no
+    projection reads.
+
+    **That is now done** (MC-8 / P12): the graveyard is excluded from the walk at
+    ``_EXCLUDED_STORE_ENTRIES``, where the reader argument is written. The
+    measurement above was taken BEFORE it, and is left standing because it is what
+    justified the exclusion; read it as the pre-P12 number. Expected after: ~4,300
+    entries and ~0.7 MiB here, with the same ~159 bytes per entry — the per-entry
+    cost was never the lever and did not move.
+    """
+
+    return _live_generation_dir() / ENTRIES_FILENAME
+
+
+def _core_digest(payload: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+# --------------------------------------------------------------------------- #
+# IC-2 — keying the write-back on POST-BUILD reality
+# --------------------------------------------------------------------------- #
+#: THE DESIGN NOTE IC-2 OWES THE MODULE HEADER, written where the code is.
+#:
+#: The header's standing rule is that a persisted key must be stat'd BEFORE the
+#: build, because a key stat'd after would absorb a write that landed WHILE the
+#: build ran — the core would not contain that write, the key would say the
+#: inputs are unchanged, and the next process would serve a core missing a write
+#: as authoritative. That rule is not repealed here. What IC-2 says is narrower
+#: and, on the evidence, unavoidable:
+#:
+#: **The build is not a pure reader, so "the inputs as they were before the
+#: build" is not a state any later process can ever observe.** Five writes are
+#: proven (2026-08-22 reader audit): ``ensure_for_personas`` materializing or
+#: re-minting persona-instance rows (``persona_assignments.py``), its drift
+#: rewrites and stale-binding resets, the build's OWN SessionDB close draining
+#: token deltas and running a TRUNCATE WAL checkpoint
+#: (``snapshot.py::_projection_chat_session_db`` -> ``hermes_state.SessionDB.close``),
+#: and the stream scope fingerprint appending ``state.reconciled`` to the live
+#: events slice when a DB is opened during a build (``stream.py``). Each moves an
+#: input the pre-build key already recorded. So the persisted key disagrees with
+#: the next consult's stat BY CONSTRUCTION, on every build, forever — which is
+#: exactly the ``never_converged`` receipt the operator's log has been emitting:
+#: the lane pays a write per build and no later process can ever be served.
+#:
+#: **THE ANSWER, and why it does not widen what a consult accepts.** At
+#: write-back time — after the build, after the SessionDB close — the inputs are
+#: re-stat'd and the persisted key is keyed on THAT, for the entries the build
+#: itself moved and for no others. Three properties make it sound:
+#:
+#: 1. **It is on the WRITE path only.** The consult path is untouched: validity is
+#:    still "stat the closure now, compare to the persisted key", the fingerprint
+#:    is still the only validity authority, and no consult accepts anything it
+#:    would have refused yesterday. This changes which key a build PUBLISHES, not
+#:    what a reader will believe.
+#: 2. **Only the build's own perturbations may adopt a fresh triple.** Everything
+#:    else keeps its PRE-build triple even when the re-stat shows it moved — see
+#:    :func:`_restat_on_post_build_reality`. An input a CONCURRENT writer moved
+#:    while the build ran therefore still carries the old triple into the sidecar,
+#:    the next consult still sees a mismatch, and it still demotes. That is the
+#:    conservative direction the header demands, kept intact for every input
+#:    outside the audited set.
+#: 3. **The equivalence golden stays the authority.**
+#:    ``test_the_cache_served_core_equals_the_rebuilt_core_field_for_field`` reds
+#:    if a cache-served core ever differs from a rebuilt one, and the
+#:    shadow-validation window reds it in the field. Neither is weakened here;
+#:    both are what this change is checked against rather than argued past.
+#:
+#: **THE RESIDUAL, stated rather than discovered later.** Inside the audited set
+#: the re-stat cannot tell the build's own write from a concurrent one — an
+#: operator event appended to the live slice while the build ran adopts a fresh
+#: triple exactly as the build's own ``state.reconciled`` append would. So this
+#: accepts a bounded staleness window over THREE named input classes, in exchange
+#: for a lane that can converge at all. The bound is what makes it acceptable:
+#: the set is closed and enumerated below rather than open-ended, every member is
+#: an input the build provably moves on every pass, the shadow-validation window
+#: still compares a served core against a rebuilt one, and the alternative is not
+#: a safer cache — it is no cache, plus a megabyte write per build.
+SELF_PERTURBED_SESSION_DB = "session_db"
+SELF_PERTURBED_PERSONA_INSTANCES = "persona_instances"
+SELF_PERTURBED_LIVE_EVENTS = "live_events_slice"
+
+#: The three classes, in one tuple, so a census and a test can enumerate them
+#: without re-typing the strings. ADDING A MEMBER IS A CHANGE TO THE ARGUMENT
+#: ABOVE, not a configuration tweak: each one is a claim that the BUILD ITSELF
+#: moves that input on every pass, and it needs the same kind of citation the
+#: three below carry.
+BUILD_SELF_PERTURBED_CLASSES = (
+    SELF_PERTURBED_SESSION_DB,
+    SELF_PERTURBED_PERSONA_INSTANCES,
+    SELF_PERTURBED_LIVE_EVENTS,
+)
+
+
+class _SelfPerturbedInputs(NamedTuple):
+    """Which paths the build itself moves, resolved through the SAME authorities.
+
+    ``files`` is exact paths; ``trees`` is directory prefixes (a class whose
+    members APPEAR — a newly minted persona-instance row has no pre-build triple
+    to compare, so membership cannot be a fixed list of names).
+
+    Resolved rather than spelled, for the reason the closure itself is resolved
+    (§6.1's first mitigation): a second hand-written list of store paths is free
+    to drift from the one the walk enumerates, and a drifted member here would
+    either fail to converge (harmless) or adopt a fresh triple for something the
+    build does NOT write (not harmless).
+    """
+
+    files: frozenset[str]
+    trees: tuple[str, ...]
+
+    def covers(self, path: str) -> bool:
+        return path in self.files or self.under_tree(path)
+
+    def under_tree(self, path: str) -> bool:
+        """Inside a self-perturbed DIRECTORY — the class whose members appear."""
+
+        return any(path.startswith(prefix) for prefix in self.trees)
+
+
+def _self_perturbed_inputs() -> _SelfPerturbedInputs | None:
+    """The audited self-perturbation set, or ``None`` when it cannot be resolved.
+
+    ``None`` means "refuse to refresh anything" — the pre-build key is persisted
+    unchanged, i.e. exactly today's behaviour. A set this function could not
+    resolve must never degrade into an EMPTY one silently: an empty set would
+    read as "the build perturbs nothing", which is the fail-quiet default the
+    whole module is against.
+
+    THE THREE CLASSES AND THEIR CITATIONS:
+
+    * :data:`SELF_PERTURBED_SESSION_DB` — the databases the build OPENS and
+      CLOSES. ``snapshot._projection_chat_session_db`` closes the chat SessionDB
+      inside the build, and ``hermes_state.SessionDB.close`` drains queued token
+      deltas and then attempts a TRUNCATE WAL checkpoint, which moves
+      ``state.db``'s own triple with zero logical change (the 2026-08-21 17:18
+      and 2026-08-22 13:42 ``every_pass`` firings). Resolved through
+      ``chat_session_scope.chat_session_db_path`` and
+      ``running_work.running_work_store_paths`` — the same two authorities
+      classes 2 and 3 of the closure ask, under the same pin — and narrowed to
+      the SQLite databases among them by ``running_work``'s own filename
+      constant. ``processes.json`` is deliberately NOT here: a background process
+      starting or exiting rewrites it, and that is a FOREIGN write the next
+      consult must still demote on.
+    * :data:`SELF_PERTURBED_PERSONA_INSTANCES` — ``snapshot`` calls
+      ``PersonaInstanceStore.ensure_for_personas`` on every build, which
+      materializes a missing row, re-mints an unreadable one (IC-3 narrowed that
+      arm), rewrites a drifted display name/profile, and resets a stale execution
+      binding with a fresh ``updated_at``. Every one of those is an
+      ``atomic_json_write`` into ``paths.persona_instances_dir()``, so the class
+      is the TREE: rows appear as well as move.
+    * :data:`SELF_PERTURBED_LIVE_EVENTS` — a DB opened during the build flips the
+      stream's scope fingerprint and appends a synthetic ``state.reconciled``
+      event (``stream.py``), which grows the live slice the build already stat'd.
+      The slice is resolved through ``event_rotation.live_path()``, the same
+      authority class 7 of the closure uses, so a rotation moves both together.
+      (The stream half of that loop is out of IC-2's scope by ruling; this makes
+      the write-back stop RE-TRIGGERING on it.)
+    """
+
+    files: set[str] = set()
+    trees: list[str] = []
+    try:
+        from . import event_rotation as _event_rotation
+        from . import paths as _paths
+        from .chat_session_scope import chat_session_db_path
+        from .running_work import _STATE_DB_FILENAME, running_work_store_paths
+
+        # PINNED exactly as closure classes 2 and 3 are — an unpinned resolution
+        # here would name ANOTHER profile's database and the set would cover a
+        # file the walk never stat'd while missing the one it did.
+        with _pinned_to_fingerprint_home():
+            db_paths = [chat_session_db_path()]
+            db_paths.extend(
+                path
+                for path in running_work_store_paths()
+                if Path(path).name == _STATE_DB_FILENAME
+            )
+        for db_path in db_paths:
+            for suffix in _DB_SIBLINGS:
+                files.add(f"{db_path}{suffix}")
+        # NOT pinned, like closure classes 1 and 7: both resolve off the store
+        # root rather than following the profile home.
+        trees.append(f"{_paths.persona_instances_dir()}{os.sep}")
+        files.add(str(_event_rotation.live_path()))
+    except Exception:
+        logger.debug("the self-perturbation set could not be resolved", exc_info=True)
+        return None
+    return _SelfPerturbedInputs(frozenset(files), tuple(trees))
+
+
+#: What :func:`_restat_on_post_build_reality` did, as a countable field on the
+#: write-back's own ``ok=true`` line (``restat=``). Not a fourth ``reason=``
+#: vocabulary — see the channel table's own warning about those — just the four
+#: states the re-stat can end in, so a census can tell "the build's writes were
+#: absorbed" from "we could not look" without reading prose.
+_RESTAT_REFRESHED = "refreshed"
+_RESTAT_CLEAN = "clean"
+_RESTAT_SKIPPED = "skipped"
+_RESTAT_UNAVAILABLE = "unavailable"
+
+
+class _RestatOutcome(NamedTuple):
+    key: CoreFingerprint
+    refreshed: int
+    foreign: int
+    state: str
+
+
+def _restat_on_post_build_reality(key: CoreFingerprint) -> _RestatOutcome:
+    """Re-key the pre-build stat set on what the store looks like NOW.
+
+    Read the design note at :data:`SELF_PERTURBED_SESSION_DB` first — this
+    function is that argument in code.
+
+    THE RULE, in one sentence: an entry that moved AND is in the audited
+    self-perturbation set adopts its fresh triple; every other entry keeps the
+    triple the pre-build walk recorded, whatever the re-stat says about it.
+
+    That asymmetry is the whole safety property. Between the build finishing and
+    this re-stat, a CONCURRENT writer may have moved an input too — and a key
+    that adopted its fresh triple would describe a store the persisted CORE does
+    not reflect, which is the "missed input serves unlabeled stale" hazard the
+    module header calls the worst one. Keeping the pre-build triple for those
+    entries means the next consult stats the store, sees a disagreement, and
+    demotes. Same outcome as before IC-2, for exactly the inputs IC-2 has no
+    audit for.
+
+    An entry that APPEARED is adopted only when it lands under a self-perturbed
+    TREE — a persona-instance row the build just minted, which is the ordinary
+    cold-store shape and has no pre-build triple to compare. An entry that
+    VANISHED is never adopted, in or out of the set: no build DELETES an input
+    (retirement is an operator verb), so a disappearance is somebody else's write
+    however self-perturbed the path looks, and it keeps its pre-build triple so
+    the next consult demotes on it. That asymmetry is deliberate and is the
+    narrower reading of the audit — the audit proved five WRITES, not one
+    removal.
+
+    ``refuse`` arms, each keeping the pre-build key unchanged:
+
+    * the re-stat itself refused (``build_input_fingerprint`` returned ``None`` —
+      a bound blown, an unresolvable authority). "I could not look" is never
+      "nothing moved";
+    * the self-perturbation set could not be resolved;
+    * either stat set records the SAME path twice under different triples. The
+      closure stats a few paths through two classes (the live slice is in the
+      store walk AND in class 7), and a duplicate means a path-keyed diff would
+      have to pick one — so it declines rather than picking. Rare by
+      construction and safe by refusal.
+    """
+
+    fresh = build_input_fingerprint()
+    if fresh is None:
+        return _RestatOutcome(key, 0, 0, _RESTAT_UNAVAILABLE)
+    perturbed = _self_perturbed_inputs()
+    if perturbed is None:
+        return _RestatOutcome(key, 0, 0, _RESTAT_UNAVAILABLE)
+    before = {entry.path: entry for entry in key.entries}
+    after = {entry.path: entry for entry in fresh.entries}
+    if len(before) != len(key.entries) or len(after) != len(fresh.entries):
+        return _RestatOutcome(key, 0, 0, _RESTAT_SKIPPED)
+
+    adopted = dict(before)
+    refreshed = 0
+    foreign = 0
+    for path in before.keys() | after.keys():
+        was = before.get(path)
+        now_entry = after.get(path)
+        if was == now_entry:
+            continue
+        if now_entry is None:
+            # VANISHED. Never adopted — see the docstring: a build writes, it
+            # does not delete, so this is a foreign change whatever the path is.
+            foreign += 1
+            continue
+        if was is None and not perturbed.under_tree(path):
+            # APPEARED outside a self-perturbed tree. The exact-path members of
+            # the set (the databases, the live slice) are always ALREADY in a
+            # real pre-build key — ``_stat_entry`` records an absent input as its
+            # own triple rather than omitting it — so an appearance there is not
+            # a state a build produces, and adopting it would let this function
+            # invent entries the caller's closure never had.
+            foreign += 1
+            continue
+        if not perturbed.covers(path):
+            foreign += 1
+            continue
+        refreshed += 1
+        adopted[path] = now_entry
+    if not refreshed:
+        return _RestatOutcome(key, 0, foreign, _RESTAT_CLEAN)
+    return _RestatOutcome(
+        _fingerprint_over(adopted.values()), refreshed, foreign, _RESTAT_REFRESHED
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Write-back
+# --------------------------------------------------------------------------- #
+def write_back(core: dict, *, fingerprint: CoreFingerprint | None = None) -> bool:
+    """Persist the core, its sidecar and its stat set as ONE generation.
+
+    A failed write logs and changes NOTHING about the build that produced the
+    core — the build path is byte-identical whether this succeeds or fails,
+    which is what makes the cache safe to add to a hot path (test 9's second
+    half is the pin). That outer contract is unchanged by MCF-21.
+
+    **ALL THREE FILES OR NONE (MCF-21).** This used to land three files through
+    three independent ``os.replace`` calls: each was atomic alone and the TRIO
+    was not, so the property "these three describe one build" was held up by two
+    ad-hoc binding guards rather than by one rule — and a fourth file would have
+    made a third guard. Now the trio is written into a fresh generation directory
+    nothing points at, and the write-back LANDS when the pointer naming it is
+    replaced. One atomic act publishes three files; a failure anywhere before it
+    publishes nothing at all. See :func:`_live_generation_dir` for why a pointer
+    rather than the directory swap MC-3 recorded, and why a store with no pointer
+    demotes instead of adopting the flat trio it finds.
+
+    **The arm that retires with it.** The entries write used to sit deliberately
+    OUTSIDE the pair's ``try``, so a failed diagnostic left a usable cache behind
+    and receipted itself as ``entries=false reason=entries_io``. A published
+    generation missing one of its three files is now unrepresentable, so that
+    state — and its receipt — are gone from the vocabulary and from the channel
+    table. An entries failure aborts the generation and the write-back reports
+    the one failure it had: ``ok=false reason=io``. The trade is named rather
+    than discovered: the lane loses the ability to keep a cache whose diagnostic
+    could not be written, and gains the property that anything published is
+    whole. It is the right way round because the diagnostic exists to explain the
+    cache, and a cache nobody can explain is the state MCF-14 spent a whole
+    investigation in.
+
+    The sidecar still binds to the core BYTES via ``core_sha256``, and that check
+    is NOT retired with the torn pair. It convicts a different thing now: a
+    hand-edited core, a rollback that dropped an older ``core.json`` into the
+    live generation, or bytes that did not come from this module at all — none of
+    which a swap can prevent, because they happen to a generation that is already
+    published.
+
+    **``fingerprint`` must be the caller's PRE-build stat set.** The direction of
+    the error matters and only one direction is safe. A key stat'd AFTER the
+    build would absorb any write that landed WHILE the build ran: the core does
+    not contain that write, the key says the inputs are unchanged, and the next
+    process serves a core missing a write as authoritative — precisely the
+    failure this stage exists to prevent. A key stat'd BEFORE the build is at
+    worst OLDER than the core, which demotes the next process to a rebuild it
+    did not strictly need. ``build_snapshot`` therefore takes the stat
+    immediately before ``_build_snapshot_uncoalesced`` and threads it here;
+    computing one locally (the ``None`` default) is for callers that hold no
+    build, and it accepts that same conservative loss.
+
+    **AND IT IS RE-KEYED ON THE BUILD'S OWN WRITES BEFORE IT IS PERSISTED
+    (IC-2).** The paragraph above is still the rule for every input this module
+    has no audit for. It could not be the whole rule, because the build is not a
+    pure reader: five proven writes (persona-instance rows, the SessionDB close's
+    TRUNCATE checkpoint, the ``state.reconciled`` append) move inputs the
+    pre-build key already recorded, so the persisted key disagreed with the next
+    consult's stat BY CONSTRUCTION — the ``never_converged`` mechanism, measured
+    on the operator's store. So the audited self-perturbation set is re-stat'd
+    here, after the build and after the SessionDB close, and only those entries
+    adopt a fresh triple. Everything else keeps its pre-build triple even when it
+    moved, so a concurrent writer still costs the next process a demote. The full
+    argument — including why this never widens what a CONSULT accepts, and the
+    residual it deliberately takes — is the design note at
+    :data:`SELF_PERTURBED_SESSION_DB`; the mechanism is
+    :func:`_restat_on_post_build_reality`.
+
+    **Named consequence, AMENDED: a cold store converged in two builds, not
+    one.** The build is not a pure reader —
+    ``PersonaInstanceStore.ensure_for_personas`` materializes missing instance
+    rows, and the chat SessionDB is CREATED by the first process that opens it.
+    On a store where neither had happened yet, the pre-build key described inputs
+    the build itself then changed, so the next process demoted once and rebuilt.
+    That was a property of the conservative direction, not a defect. IC-2 closes
+    exactly that gap for exactly those inputs: the mint and the close are inside
+    the audited set, so their triples are re-stat'd before the key is persisted
+    and a cold store now converges on the FIRST build. What is unchanged is the
+    reason a store may still take two: any input outside the audited set that
+    moved during the build.
+
+    **Cost, named with the rest below, INCLUDING who pays it.** The re-stat is a
+    second full walk (~300 ms on the operator's live root, less since the
+    ``deleted_archive`` and ``realm_sync/**/.git`` exclusions) on a path that
+    only runs after a build measured in seconds — 11,235 ms for the cold-boot
+    re-projection this lane exists to replace. It is skipped entirely when the
+    caller passed no fingerprint, because that key was already walked after the
+    build. The part not to discover later: ``build_snapshot`` calls this INSIDE
+    its coalescing window, so the riders waiting on the leader wait for the walk
+    too, exactly as they already wait for the megabyte serialize and the fsync
+    beside it. The trade is ~300 ms once per LED build against a next process
+    that can be served at all; if receipts show the rider wait matters, the
+    refinement is to narrow the re-stat to the audited paths (which is all it
+    reads) rather than to drop it — that loses only the ``foreign_moved=``
+    observable.
+
+    **Cost, named rather than discovered.** EVERY successful default-store build
+    writes here, and a live-store core is megabytes, so a serve process that
+    demotes several delta batches in a minute writes that many times. Priced and
+    accepted for this landing: the write is ~5 ms of serialize plus one fsync
+    against a build that costs seconds, and the alternative — skipping the write
+    when the persisted pair would already match — needs the FULL judgement (a
+    sidecar-only check leaves a tampered core permanently unhealed, because the
+    read path refuses it while the write path keeps declining to replace it). If
+    receipts show the churn matters, that is the refinement, gated on
+    :func:`read_persisted_core`, not a narrowing of which builds write.
+    """
+
+    from .serde import to_jsonable
+
+    try:
+        payload = to_jsonable(core)
+    except Exception:
+        logger.warning("snapshot_core_cache_write ok=false reason=serialize", exc_info=True)
+        return False
+    stamp = build_stamp_token()
+    if stamp is None:
+        logger.info("snapshot_core_cache_write ok=false reason=build_stamp_unknown")
+        return False
+    key = fingerprint if fingerprint is not None else build_input_fingerprint()
+    if key is None:
+        logger.info("snapshot_core_cache_write ok=false reason=fingerprint_unavailable")
+        return False
+    # IC-2. A caller that handed us a PRE-build key gets it re-keyed on what the
+    # build left behind, for the audited self-perturbation set and nothing else —
+    # the design note is at :data:`SELF_PERTURBED_SESSION_DB`. A caller that
+    # handed us NOTHING already has a post-build key (the walk two lines up ran
+    # after the build), so there is nothing to refresh and a second walk would be
+    # pure cost.
+    restat = (
+        _restat_on_post_build_reality(key)
+        if fingerprint is not None
+        else _RestatOutcome(key, 0, 0, _RESTAT_SKIPPED)
+    )
+    key = restat.key
+    parity = payload.get("parity") if isinstance(payload.get("parity"), dict) else {}
+    watermark = parity.get("watermark") if isinstance(parity.get("watermark"), dict) else {}
+    fingerprint_home, home_authoritative = resolved_fingerprint_home()
+    sidecar = {
+        "fingerprint": key.digest,
+        "fingerprint_entries": key.count,
+        # WHICH QUESTION this key answers, not just what it answered. A digest is
+        # only comparable between two processes that resolved the same home; a
+        # pair written under one and judged under another is a DIFFERENT closure,
+        # and ``_judge_persisted_pair`` demotes it as ``home_mismatch`` rather
+        # than letting it wear the generic ``fingerprint_mismatch``. The
+        # authoritative flag rides beside it because an unauthoritative head is a
+        # fact a demote should be able to name — it means the home was the
+        # ambient resolution at capture time, so it is only as good as the moment
+        # it was taken.
+        "fingerprint_home": str(fingerprint_home),
+        "fingerprint_home_authoritative": home_authoritative,
+        "build_stamp": stamp,
+        "contract_versions": contract_versions(),
+        # DIAGNOSTIC ONLY. Recorded so a divergence receipt can name the log
+        # position the core was built at. It is NEVER an input to the match
+        # decision below — see the module header on why an offset key is
+        # refused.
+        "event_offset": watermark.get("event_offset"),
+        "core_sha256": _core_digest(payload),
+        "runtime_root": str(_runtime_root_for_sidecar(parity)),
+        "generated_at": payload.get("generated_at"),
+    }
+    # BEFORE the writes, because the pair on disk is about to become this
+    # process's own and the previous boot's answer would be unrecoverable after.
+    # A process boundary is not a convergence event — see
+    # :func:`_capture_boot_streak_seed`.
+    _capture_boot_streak_seed(key)
+    generation = _new_generation_name()
+    staged = _cache_dir() / generation
+    try:
+        # The SAME atomic writer as everything else this module lands
+        # (``utils.atomic_json_write``, compact separators for the two large
+        # payloads), because one atomic-write authority is this module's rule. It
+        # is not what makes the trio atomic — the pointer replace below is — but a
+        # second staging convention inside one directory is how a half-written
+        # file gets read as a whole one.
+        atomic_json_write(
+            staged / CORE_FILENAME, payload, indent=None, separators=(",", ":"), sort_keys=True
+        )
+        atomic_json_write(staged / SIDECAR_FILENAME, sidecar, indent=None, sort_keys=True)
+        # The convergence authority runs BEFORE the entries write and hands it
+        # the number, rather than the entries write deriving one of its own: the
+        # streak is ``_note_written_key``'s to decide, and a second site computing
+        # it from the same seed would be two rules for one question (property 6).
+        # It sits INSIDE the staging block, after the two files that make a cache
+        # exist — see that function's docstring for the one window in which it can
+        # now advance for a generation that does not publish, and why that window
+        # is narrower than it looks.
+        streak = _note_written_key(key)
+        atomic_json_write(
+            staged / ENTRIES_FILENAME,
+            _entries_payload(key, streak),
+            indent=None,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        # THE LANDING. Everything above wrote into a directory nothing points at;
+        # this one replace is the write-back.
+        atomic_json_write(
+            pointer_path(), {"generation": generation}, indent=None, sort_keys=True
+        )
+    except Exception:
+        logger.warning("snapshot_core_cache_write ok=false reason=io", exc_info=True)
+        # The pointer never named it, so this is housekeeping and not a retraction
+        # — the previous generation is still live and still whole. Best effort by
+        # construction: if it fails, the directory is inert residue and the next
+        # successful write-back reaps it.
+        shutil.rmtree(staged, ignore_errors=True)
+        return False
+    logger.info(
+        "snapshot_core_cache_write ok=true inputs=%d fingerprint=%s offset=%s "
+        "restat=%s self_perturbed_refreshed=%d foreign_moved=%d",
+        key.count,
+        key.digest[:12],
+        "unknown" if sidecar["event_offset"] is None else sidecar["event_offset"],
+        restat.state,
+        restat.refreshed,
+        restat.foreign,
+    )
+    # AFTER the reap, and after the ok=true line above: housekeeping accounting
+    # on a write-back that has already landed and already reported success.
+    _receipt_generation_residue(_reap_superseded_generations(generation), generation)
+    return True
+
+
+def _entries_payload(key: CoreFingerprint, streak: int) -> dict:
+    """The stat set behind the digest, bound to the digest — see :func:`entries_path`."""
+
+    return {
+        "fingerprint": key.digest,
+        # The convergence streak this write-back left standing, so the NEXT
+        # process can carry it instead of restarting from zero. It rides here
+        # rather than on the sidecar for two reasons: the sidecar is read by every
+        # consult on the boot path and must stay the cheap half of the judgement,
+        # and this file already IS "what this write-back knew" — the streak is
+        # that, not a property of the cached core. See
+        # :func:`_capture_boot_streak_seed`.
+        "streak": int(streak),
+        "entries": [[entry.path, entry.mtime_ns, entry.size] for entry in key.entries],
+    }
+
+
+#: How many generation directories may sit in the cache before the reap says so.
+#: THREE, counting the live one - so the healthy steady state (one live
+#: generation, plus at most a couple a concurrent reader briefly held open) is
+#: silent, and a store that is actually accumulating is not. Deliberately a
+#: bound on the OBSERVATION and not on the removal: nothing here deletes harder
+#: because the number is exceeded.
+GENERATION_RESIDUE_BOUND = 3
+
+#: How many leftover directories the receipt names. ``leftover=`` carries the
+#: full count beside them, so the cap can never make a large residue read as a
+#: small one. Oldest first: a generation name leads with a hex nanosecond stamp,
+#: so sorting is chronological, and the oldest survivor is the one that has been
+#: failing to reap the longest.
+_GENERATION_RESIDUE_NAMES = 8
+
+
+def _reap_superseded_generations(live: str) -> tuple[str, ...]:
+    """Drop what the pointer no longer names. BEST EFFORT, and it must stay that way.
+
+    Three things accumulate in :func:`_cache_dir` and all three are reaped by one
+    rule — "keep the pointer and the generation it names":
+
+    * the generations this write-back superseded;
+    * staging directories stranded by a crash or a failed landing, which never
+      served anybody because the pointer never named them;
+    * the FLAT trio written before MCF-21, which :func:`_live_generation_dir`
+      deliberately refuses to read. This is the only thing that ever removes it,
+      and it is a one-time cleanup per store rather than a migration.
+
+    **Why an individual failure is swallowed - and why the ACCUMULATION is not.**
+    A reader in another process can be mid-read of a generation this call is
+    removing; on Windows that makes the removal fail outright, which is exactly
+    the right outcome. The cost of losing one reap is one directory the next
+    write-back tries again on; the cost of letting it raise would be a landed
+    write-back reporting failure. So the failure stays swallowed and
+    ``ignore_errors`` stays on.
+
+    What did NOT follow from that, and used to be claimed here, is that the
+    outcome is not an event worth a line in a log an operator reads. A store that
+    keeps failing to reap accumulates generations with NOTHING counting them - a
+    silent drop with no accounting, which is the one thing this module refuses
+    everywhere else (MCF-54(ii), ruled by MCF-59). This function therefore
+    RETURNS what it left behind and :func:`write_back` hands that to
+    :func:`_receipt_generation_residue`. Counting is not enforcement: the return
+    value changes nothing about what was removed, and a write-back that has
+    landed still reports success.
+
+    A file it does not recognise is LEFT ALONE — including ``atomic_json_write``'s
+    own ``.tmp`` staging files, which live in this directory while the pointer is
+    being replaced. Reaping one of those would break a concurrent write-back for
+    the sake of tidiness.
+    """
+
+    cache_dir = _cache_dir()
+    try:
+        names = os.listdir(cache_dir)
+    except OSError:
+        return ()
+    for name in names:
+        if name == live:
+            continue
+        if _is_generation_name(name):
+            shutil.rmtree(cache_dir / name, ignore_errors=True)
+        elif name in _LEGACY_FLAT_FILENAMES:
+            try:
+                (cache_dir / name).unlink()
+            except OSError:
+                pass
+    # RE-LISTED, not derived from the loop above: ``ignore_errors=True`` makes a
+    # removal that failed indistinguishable from one that worked, so the only
+    # honest survivor count is the one taken from disk AFTER the pass. A second
+    # listdir is the price of the answer being true.
+    try:
+        survivors = os.listdir(cache_dir)
+    except OSError:
+        return ()
+    return tuple(
+        sorted(name for name in survivors if _is_generation_name(name) and name != live)
+    )
+
+
+def _receipt_generation_residue(leftover: tuple[str, ...], live: str) -> None:
+    """Say, once per write-back, that the cache directory is not draining.
+
+    NAMES the directories (the operator refinement recorded at MCF-59): a count
+    sends them hunting, the names tell them exactly which directory to unlock or
+    remove, and reading the same name across two builds is what separates a
+    permanently held handle from transient contention.
+
+    ``generations=`` goes LAST, matching :func:`_receipt_never_converged`'s
+    ``diff=``, because it is a variable-length list and nothing after a
+    variable-length list can be field-parsed.
+
+    Reports, never enforces: this is accounting on a write-back that has already
+    landed and already logged ``ok=true``.
+    """
+
+    if len(leftover) + 1 <= GENERATION_RESIDUE_BOUND:
+        return
+    logger.warning(
+        "snapshot_core_cache %s present=%d bound=%d live=%s leftover=%d "
+        "generations=%s - the reap left superseded generations behind (a reader "
+        "holding one open, or a permission the writer does not have), so this "
+        "store is accumulating whole cached cores on disk. The write-back "
+        "itself SUCCEEDED and nothing was retracted. Unlock or remove the "
+        "directories named here under the cache dir - never the live one.",
+        RECEIPT_GENERATION_RESIDUE,
+        len(leftover) + 1,
+        GENERATION_RESIDUE_BOUND,
+        live,
+        len(leftover),
+        ",".join(leftover[:_GENERATION_RESIDUE_NAMES]),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Convergence — whether this process's cache is buying anything (ML-10 / A2)
+# --------------------------------------------------------------------------- #
+# The cache can fail in a way that costs nothing and says nothing: if some input
+# moves on EVERY build, no key a build writes can ever describe the store the
+# next build stats, so every process demotes, every process rebuilds, and the
+# whole lane silently buys nothing forever. Nothing above detects that — a
+# demote is individually legitimate, and the write-back that follows it looks
+# exactly like a healthy one.
+#
+# The measurement is free, because both halves already exist: every build hands
+# ``write_back`` the key it would persist, so a process can simply notice that
+# its own consecutive write-backs never agree. Past ``NEVER_CONVERGED_BUILDS``
+# it says so and NAMES the paths, because the sanctioned response to this — the
+# same one the shadow lane's divergence receipt asks for — is to widen the stat
+# set's closure over a named input, never to trust the cache harder.
+#
+# WHAT IS RETAINED, AND WHY IT IS NOT A STAT SET PER PROCESS. The digest of the
+# last key written is kept always (a string). The last key's ENTRIES are kept
+# only while a streak is live and dropped the moment two write-backs agree, so a
+# settled process — which is every healthy one — holds no second stat set for a
+# diagnostic that is not going to fire. On a live store an entry list is tens of
+# thousands of triples; that is worth one branch to not retain.
+#
+# This block decides NOTHING. It reads the key the build already computed, and
+# every write-back returns exactly what it returned before.
+
+#: How many consecutive write-backs may disagree with the one before them before
+#: the cache says out loud that it is buying nothing.
+#:
+#: THREE, and it is the measured virgin-root convergence rather than a round
+#: number. A cold store legitimately fails to settle for a build or two — the
+#: build is not a pure reader (``PersonaInstanceStore.ensure_for_personas``
+#: materializes instance rows; the chat SessionDB is CREATED by the first process
+#: that opens it), and the key is taken pre-build on purpose, so the first
+#: write-back describes inputs the build then moved. ``write_back``'s own
+#: docstring names that consequence, and the test helper
+#: ``converge_persisted_core`` measures it. A bound at the measured convergence
+#: is the one number that cannot fire on the healthy shape and does fire on the
+#: pathological one, where the disagreement never ends.
+NEVER_CONVERGED_BUILDS = 3
+
+#: How many oscillating paths the receipt names. ``changed=`` carries the full
+#: count beside them, so the cap can never make a large drift read as a small one.
+_NEVER_CONVERGED_DIFF_PATHS = 5
+
+class _StreakSeed(NamedTuple):
+    """The previous write-back's answer, carried across a process boundary."""
+
+    digest: str
+    entries: tuple[FingerprintEntry, ...]
+    streak: int
+
+
+_convergence_lock = threading.Lock()
+_last_written_digest: str | None = None
+_streak_entries: tuple[FingerprintEntry, ...] = ()
+_streak_length = 0
+_streak_last_diff: tuple[str, ...] | None = None
+_streak_common_diff: frozenset[str] | None = None
+_never_converged_reported = False
+_boot_streak_seed: _StreakSeed | None = None
+_boot_streak_seed_taken = False
+#: True when the streak this process is continuing began in an EARLIER one, so
+#: some of its passes were never observed here. It exists to stop the receipt
+#: over-claiming — see :func:`_note_written_key`.
+_streak_seeded = False
+
+
+def _reset_convergence_state() -> None:
+    """Forget this process's convergence history, as a fresh process would.
+
+    The seed is forgotten too, and it must be: a capture surviving into the next
+    case would seed that case's streak from a store pytest has already deleted.
+    """
+
+    global _last_written_digest, _streak_entries, _streak_length
+    global _streak_last_diff, _streak_common_diff, _never_converged_reported
+    global _boot_streak_seed, _boot_streak_seed_taken, _streak_seeded
+    with _convergence_lock:
+        _last_written_digest = None
+        _streak_entries = ()
+        _streak_length = 0
+        _streak_last_diff = None
+        _streak_common_diff = None
+        _never_converged_reported = False
+        _boot_streak_seed = None
+        _boot_streak_seed_taken = False
+        _streak_seeded = False
+
+
+def _changed_paths(
+    before: tuple[FingerprintEntry, ...], after: tuple[FingerprintEntry, ...]
+) -> tuple[str, ...]:
+    """Every PATH whose triple differs between two stat sets.
+
+    By path rather than by triple: a file whose mtime moved would otherwise be
+    named twice (its old triple and its new one) and read as two inputs. An added
+    or removed path differs too — its triple is absent on one side — which is the
+    same rule ``_stat_entry`` follows for a missing file.
+    """
+
+    left = {entry.path: (entry.mtime_ns, entry.size) for entry in before}
+    right = {entry.path: (entry.mtime_ns, entry.size) for entry in after}
+    return tuple(
+        sorted(path for path in set(left) | set(right) if left.get(path) != right.get(path))
+    )
+
+
+def _capture_boot_streak_seed(key: CoreFingerprint) -> None:
+    """Carry the PREVIOUS write-back's answer across the process boundary (A2).
+
+    WHY THIS EXISTS, measured. ``_note_written_key`` used to return early on the
+    first write-back of a process, so the receipt fired on the FOURTH consecutive
+    disagreeing write-back of ONE process. Boots write back once or twice: the
+    receipt was unreachable on every boot shape there is, and the 2026-08-18
+    05:33 pair (``9772c7720bef`` → ``d525e554be44``) — which IS the
+    self-perturbation the receipt was written to expose — could never be
+    reported. A process boundary is not a convergence event, and treating it as
+    one is what made the diagnostic dead on arrival.
+
+    **SEED ONLY ON A FINGERPRINT DISAGREEMENT.** This is the correctness point,
+    and it is not optional. A ``build_stamp_mismatch`` (the operator upgraded), a
+    ``contract_mismatch`` (the schema moved), a ``runtime_root_mismatch`` (a
+    different store) and a ``home_mismatch`` (a different question) are all
+    LEGITIMATE non-agreements that say nothing whatever about convergence.
+    Seeding on those would make a routine upgrade look like an oscillating store
+    and fire a WARNING receipt at an operator with a healthy install — the
+    expensive direction of error for a diagnostic whose whole value is that it
+    only speaks when something is wrong. The judgement is asked of
+    :func:`_sidecar_answers_a_different_question`, the read lane's own authority,
+    so the two can never drift.
+
+    **Cost, priced.** The sidecar is tiny and is always read. The entries file is
+    megabytes and is read ONLY when the digests actually disagree — a converged
+    boot, which is every healthy one, pays one small read and stops.
+    """
+
+    global _boot_streak_seed, _boot_streak_seed_taken
+
+    with _convergence_lock:
+        if _boot_streak_seed_taken or _last_written_digest is not None:
+            return
+        _boot_streak_seed_taken = True
+    seed = _persisted_streak_seed(key)
+    with _convergence_lock:
+        _boot_streak_seed = seed
+
+
+def _persisted_streak_seed(key: CoreFingerprint) -> _StreakSeed | None:
+    """The persisted pair read as "what the last write-back concluded"."""
+
+    try:
+        sidecar = json.loads(sidecar_path().read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(sidecar, dict):
+        return None
+    recorded_digest = sidecar.get("fingerprint")
+    if not isinstance(recorded_digest, str) or not recorded_digest:
+        return None
+    if recorded_digest == key.digest:
+        # The boots AGREE. Seeded with no entries and no streak on purpose: the
+        # agreement branch below drops both anyway, and reading megabytes of
+        # triples to discard them is exactly the cost a healthy boot must not pay.
+        return _StreakSeed(recorded_digest, (), 0)
+    if _sidecar_answers_a_different_question(sidecar):
+        return None
+    persisted, _unavailable = _persisted_entries(expect_digest=recorded_digest)
+    if persisted is None:
+        # The disagreement is real and seeds the streak; only the PATHS are
+        # missing, and the receipt says so in its own words rather than
+        # pretending the streak did not happen.
+        return _StreakSeed(recorded_digest, (), 0)
+    return _StreakSeed(recorded_digest, persisted.entries, persisted.streak)
+
+
+def _note_written_key(key: CoreFingerprint) -> int:
+    """Record what this write-back persisted, and report a lane that never settles.
+
+    Returns the streak length this write-back leaves standing (``0`` when the
+    lane settled), which ``write_back`` hands to the entries file so the NEXT
+    process can continue it. This function stays the ONE authority for that
+    number; the file only records what it decided.
+
+    **When it is called, and the one window MCF-21 opened.** It runs once the core
+    and sidecar have staged — i.e. once the write-back is going to land unless the
+    disk fails twice — and before the entries file that RECORDS its answer, because
+    the entries file is now inside the published unit and cannot be written after
+    the landing. So the old sentence "called on successful write-backs only" is no
+    longer exactly true and is not left standing as if it were: an entries-write or
+    pointer-publish failure now advances this process's streak for a generation
+    that did not publish.
+
+    That window is narrower than the change makes it sound. Under the OLD ordering
+    an entries failure already fired this, so the genuinely new case is a pointer
+    replace that fails immediately after three files were written successfully into
+    the same directory. And the consequence is bounded by what the streak MEASURES:
+    whether consecutive BUILDS produce keys that agree — a property of the store's
+    stability, not of what reached the disk. A write-back that failed leaves that
+    answer just as true as one that landed.
+    """
+
+    global _last_written_digest, _streak_entries, _streak_length
+    global _streak_last_diff, _streak_common_diff, _never_converged_reported
+    global _streak_seeded
+
+    with _convergence_lock:
+        previous_digest = _last_written_digest
+        previous_entries = _streak_entries
+        if previous_digest is None:
+            seed = _boot_streak_seed
+            if seed is not None:
+                # The first write-back of a process has nothing IN MEMORY to
+                # agree with — but the previous boot left its answer on disk, and
+                # that is what a store which never converges ACROSS boots
+                # disagrees with. Continuing the count is the whole of A2's fix.
+                previous_digest = seed.digest
+                previous_entries = seed.entries
+                _streak_length = seed.streak
+                _streak_seeded = seed.streak > 0
+        _last_written_digest = key.digest
+        if previous_digest is None:
+            # Nothing persisted and nothing in memory: "one build" is never
+            # evidence of non-convergence.
+            return 0
+        if previous_digest == key.digest:
+            # Settled: two consecutive write-backs wrote the same key, so the
+            # store the next process stats is the store this one described.
+            _streak_entries = ()
+            _streak_length = 0
+            _streak_last_diff = None
+            _streak_common_diff = None
+            _streak_seeded = False
+            return 0
+        _streak_length += 1
+        _streak_entries = key.entries
+        if previous_entries and key.entries:
+            changed = _changed_paths(previous_entries, key.entries)
+            _streak_last_diff = changed
+            _streak_common_diff = (
+                frozenset(changed)
+                if _streak_common_diff is None
+                else _streak_common_diff & frozenset(changed)
+            )
+        streak = _streak_length
+        if _streak_length < NEVER_CONVERGED_BUILDS or _never_converged_reported:
+            return streak
+        # Once per process. The receipt names an input to go widen the closure
+        # over; repeating it every build afterwards would bury that under its own
+        # noise without adding a fact.
+        _never_converged_reported = True
+        builds = _streak_length
+        # ``every_pass`` claims a path differed on EVERY pass of the streak, and
+        # a SEEDED streak began before this process did — the intersection here
+        # spans only the passes observed here. Claiming it anyway would push a
+        # cross-boot streak into the arm C22(i) reserves for self-perturbation,
+        # inflating exactly the count an operator is meant to act on. A seeded
+        # streak reports ``last_pair``, which is the strongest true thing it can
+        # say about a diff it did not watch accumulate.
+        common = None if _streak_seeded else _streak_common_diff
+        last = _streak_last_diff
+    _receipt_never_converged(builds=builds, common=common, last=last)
+    return streak
+
+
+def _receipt_never_converged(
+    *, builds: int, common: frozenset[str] | None, last: tuple[str, ...] | None
+) -> None:
+    """The A2 receipt: this process's cache has never agreed with itself.
+
+    Rides the same channel and the same ``snapshot_core_cache`` family as the
+    shadow lane's divergence receipt, and asks for the same response: widen the
+    input closure over the paths named here.
+
+    ``diff=`` goes LAST on purpose — it is a variable-length list and a path may
+    contain spaces, so anything after it could not be field-parsed.
+    """
+
+    if last is None:
+        detail = _diff_unavailable_detail(DIFF_UNAVAILABLE_NO_ENTRIES)
+    elif common:
+        detail = _diff_detail(DIFF_SCOPE_EVERY_PASS, sorted(common))
+    elif last:
+        detail = _diff_detail(DIFF_SCOPE_LAST_PAIR, list(last))
+    else:
+        detail = _diff_unavailable_detail(DIFF_UNAVAILABLE_NO_ENTRY_DELTA)
+    logger.warning(
+        "snapshot_core_cache %s builds=%d %s — %d consecutive write-backs each "
+        "wrote a key that disagreed with the one before it, so no process can "
+        "ever be served this cache: it is costing a write per build and buying "
+        "nothing. Widen the fingerprint's input closure over the paths named "
+        "here (agent_runtime/core_cache.py), never trust the cache harder.",
+        RECEIPT_NEVER_CONVERGED,
+        builds,
+        detail,
+        builds,
+    )
+
+
+def _diff_detail(scope: str, paths: list[str]) -> str:
+    return "diff_scope={} changed={} diff={}".format(
+        scope, len(paths), ",".join(paths[:_NEVER_CONVERGED_DIFF_PATHS])
+    )
+
+
+def _diff_unavailable_detail(reason: str) -> str:
+    """The one spelling for "a diff was owed here and could not be computed".
+
+    Its own function so the two receipts that can owe a diff — the never-converged
+    warning and the fingerprint demote — word the refusal IDENTICALLY. Two
+    hand-written copies of a census instruction is the C22 defect itself, one
+    level down: a census greps ``diff_reason=`` and a second spelling measures a
+    false zero on whichever copy it did not know about.
+
+    ``changed=0`` rides along rather than being omitted, so the field set is the
+    same on every arm and a parser never has to branch on presence. ``diff=`` is
+    LAST here for the same reason it is last on a computed diff.
+    """
+
+    return (
+        f"diff_scope={DIFF_SCOPE_NONE} changed=0 "
+        f"diff_reason={reason} diff={DIFF_UNAVAILABLE}"
+    )
+
+
+class PersistedEntries(NamedTuple):
+    """What a write-back recorded beside its digest: the stat set, and the streak.
+
+    Both are read together because they are read from one file in one parse. The
+    streak is what lets a never-converged run survive a process boundary — see
+    :func:`_capture_boot_streak_seed` — and it is recorded by the write-back
+    rather than recomputed by the reader, so there is exactly one rule for the
+    number.
+    """
+
+    entries: tuple[FingerprintEntry, ...]
+    streak: int
+
+
+def _persisted_entries(*, expect_digest: Any) -> tuple[PersistedEntries | None, str]:
+    """The stat set behind a persisted digest, or a TYPED reason it is unusable.
+
+    Returns ``(record, "")`` on success and ``(None, <diff_reason>)`` otherwise.
+    Never raises: a diagnostic that could take down the lane it explains is worse
+    than no diagnostic.
+
+    ``expect_digest`` is the SIDECAR's fingerprint, and the comparison is the
+    binding rule :func:`entries_path` documents — which MCF-21 re-aimed rather
+    than retired: the swap makes cross-generation mixing unrepresentable, and this
+    check now convicts an entries file inside the LIVE generation whose contents
+    are not the ones the write-back put there. It is a required keyword rather
+    than an optional check, because "read the entries" and "read the entries that
+    belong to this pair" are different operations and only one of them is sound —
+    an optional check is one call site away from being the unsound one.
+    """
+
+    try:
+        raw = entries_path().read_text(encoding="utf-8")
+    except OSError:
+        return None, DIFF_UNAVAILABLE_NO_ENTRIES
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return None, DIFF_UNAVAILABLE_NO_ENTRIES
+    if not isinstance(payload, dict):
+        return None, DIFF_UNAVAILABLE_NO_ENTRIES
+    rows = payload.get("entries")
+    if not isinstance(rows, list):
+        return None, DIFF_UNAVAILABLE_NO_ENTRIES
+    if not expect_digest or payload.get("fingerprint") != expect_digest:
+        return None, DIFF_UNAVAILABLE_ENTRIES_UNBOUND
+    entries: list[FingerprintEntry] = []
+    for row in rows:
+        if not isinstance(row, list) or len(row) != 3:
+            return None, DIFF_UNAVAILABLE_NO_ENTRIES
+        path, mtime_ns, size = row
+        try:
+            entries.append(FingerprintEntry(str(path), int(mtime_ns), int(size)))
+        except (TypeError, ValueError):
+            return None, DIFF_UNAVAILABLE_NO_ENTRIES
+    try:
+        # Absent on every entries file written before the streak was persisted,
+        # which is a legitimate shape and not a refusal: it means "this
+        # write-back recorded no streak", i.e. zero.
+        streak = int(payload.get("streak") or 0)
+    except (TypeError, ValueError):
+        streak = 0
+    return PersistedEntries(tuple(entries), streak), ""
+
+
+def _runtime_root_for_sidecar(parity: dict) -> Any:
+    identity = parity.get("runtime_root") if isinstance(parity.get("runtime_root"), dict) else {}
+    resolved = identity.get("resolved") or identity.get("path")
+    if resolved:
+        return resolved
+    try:
+        from . import paths as _paths
+
+        return _paths.store_root()
+    except Exception:
+        return ""
+
+
+# --------------------------------------------------------------------------- #
+# Read
+# --------------------------------------------------------------------------- #
+class CacheRead(NamedTuple):
+    """What the persisted pair said, and why it was or was not usable.
+
+    ``core`` is present whenever a decodable core was on disk — INCLUDING the
+    mismatch cases, because a mismatch still has something honest to serve while
+    the rebuild runs, provided it wears the stale label. ``matched`` is the only
+    field that authorizes serving it as authoritative.
+    """
+
+    core: dict | None
+    matched: bool
+    reason: str
+    fingerprint: CoreFingerprint | None
+    sidecar: dict
+
+
+def read_persisted_core(*, fingerprint: CoreFingerprint | None = None) -> CacheRead:
+    """Load the persisted pair and judge it. Never raises.
+
+    The judgement is a conjunction and each clause has its own demote reason on
+    the receipt, because "the cache did not answer" is useless to an operator
+    without WHY: bytes that do not match the sidecar, a fingerprint that moved,
+    an install that changed, a contract that moved, a root that is not this one.
+
+    The clauses are ordered CHEAPEST-FIRST, deliberately. The stat set is a walk
+    of every build input; a process with no persisted core to judge — every cold
+    CLI invocation, every test with a fresh root — must not pay for one to be
+    told there is nothing to compare it against.
+
+    **This primitive is never memoised.** Every call reads the pair and, unless
+    handed a key, walks the store. The boot lane's shared answer lives behind
+    :func:`_armed_window_read`, reached only through :func:`consult` and
+    :func:`take_stale_first_core`; a caller that asks this function directly is
+    asking for a fresh judgement and gets one.
+    """
+
+    pair = _read_pair()
+    if pair is None:
+        return CacheRead(None, False, DEMOTE_ABSENT, None, {})
+    return _judge_persisted_pair(pair[0], pair[1], fingerprint=fingerprint)
+
+
+def _read_pair() -> tuple[str, str] | None:
+    """The persisted BYTES, or ``None`` when there is no pair to judge.
+
+    Its own function so the boot lane can count and memoise the READ separately
+    from the judgement — and so a witness can prove one read happened rather than
+    inferring it from a duration.
+
+    The generation is resolved ONCE and both files are read out of it, rather than
+    asking :func:`sidecar_path` and :func:`core_path` in turn. Two resolutions
+    could straddle a publish and read one file from each of two generations, which
+    is precisely the torn read MCF-21 exists to end — reintroduced by the reader
+    instead of the writer.
+    """
+
+    generation = _live_generation_dir()
+    try:
+        return (
+            (generation / SIDECAR_FILENAME).read_text(encoding="utf-8"),
+            (generation / CORE_FILENAME).read_text(encoding="utf-8"),
+        )
+    except OSError:
+        return None
+
+
+def _judge_persisted_pair(
+    raw_sidecar: str, raw_core: str, *, fingerprint: CoreFingerprint | None
+) -> CacheRead:
+    """The conjunction above, over bytes that have already been read."""
+
+    try:
+        sidecar = json.loads(raw_sidecar)
+        core = json.loads(raw_core)
+    except Exception:
+        return CacheRead(None, False, DEMOTE_UNREADABLE, None, {})
+    if not isinstance(sidecar, dict) or not isinstance(core, dict):
+        return CacheRead(None, False, DEMOTE_UNREADABLE, None, {})
+    if _core_digest(core) != sidecar.get("core_sha256"):
+        # The sidecar does not describe these bytes. Refuse the core outright
+        # rather than serving it stale: an unbound core is not a projection this
+        # module produced, so nothing here can say what it contains.
+        return CacheRead(None, False, DEMOTE_CORE_DIGEST_MISMATCH, None, sidecar)
+    key = fingerprint if fingerprint is not None else build_input_fingerprint()
+    if key is None:
+        return CacheRead(core, False, DEMOTE_FINGERPRINT_UNAVAILABLE, key, sidecar)
+    different_question = _sidecar_answers_a_different_question(sidecar)
+    if different_question:
+        return CacheRead(core, False, different_question, key, sidecar)
+    if sidecar.get("fingerprint") != key.digest:
+        return CacheRead(core, False, DEMOTE_FINGERPRINT_MISMATCH, key, sidecar)
+    return CacheRead(core, True, "", key, sidecar)
+
+
+def _sidecar_answers_a_different_question(sidecar: dict) -> str:
+    """The demote reason for "this pair is not comparable", or ``""``.
+
+    Every clause here asks the same thing in a different dimension: is the
+    persisted pair about the same CODE, the same CONTRACT, the same ROOT and the
+    same HOME as the process judging it? None of them is about whether the store
+    moved — that is the digest compare, and it is the only clause left outside.
+
+    **Its own function because it has two callers and must never grow a second
+    rule.** :func:`_judge_persisted_pair` asks it to demote; the cross-process
+    convergence seed (:func:`_capture_boot_streak_seed`) asks it to decide whether
+    a disagreement is EVIDENCE of non-convergence or an ordinary upgrade. A
+    hand-copied second cascade there would drift from this one and the drift
+    would surface as a WARNING receipt fired at an operator with a healthy
+    install — the expensive direction.
+
+    Clause ORDER is preserved from the conjunction it was lifted out of, and the
+    ordering is load-bearing rather than incidental: each is a string compare
+    against something already in hand, and the home clause sits BEFORE the digest
+    compare (at the call site) because behind it the case it exists for is
+    unreachable — a pair written under another home has a different digest by
+    construction, so it would be swallowed as a generic ``fingerprint_mismatch``
+    and the operator would read "the store moved" for something that is not about
+    the store at all.
+    """
+
+    stamp = build_stamp_token()
+    if stamp is None:
+        return DEMOTE_BUILD_STAMP_UNKNOWN
+    if sidecar.get("build_stamp") != stamp:
+        return DEMOTE_BUILD_STAMP_MISMATCH
+    if sidecar.get("contract_versions") != contract_versions():
+        return DEMOTE_CONTRACT_MISMATCH
+    try:
+        from . import paths as _paths
+
+        current_root = str(_paths.store_root())
+    except Exception:
+        current_root = None
+    recorded_root = sidecar.get("runtime_root")
+    if current_root is not None and recorded_root and str(recorded_root) != current_root:
+        return DEMOTE_RUNTIME_ROOT_MISMATCH
+    # ABSENT MUST NOT DEMOTE. Every sidecar written before MC-2 carries no
+    # ``fingerprint_home``, and treating absent as mismatch would demote every
+    # install a SECOND time for no information — once for the closure change that
+    # stage already forced, then again for a field it could not have written.
+    recorded_home = sidecar.get("fingerprint_home")
+    if recorded_home and str(recorded_home) != str(resolved_fingerprint_home()[0]):
+        return DEMOTE_HOME_MISMATCH
+    return ""
+
+
+# --------------------------------------------------------------------------- #
+# Labelling
+# --------------------------------------------------------------------------- #
+def label_core(core: dict, *, source: str, stale: bool) -> dict:
+    """Stamp provenance onto the core's parity envelope, in place.
+
+    ``parity`` is the frame's self-describing provenance block, and
+    ``frame_source`` is already stamped there for exactly this reason — one
+    location, additive, no contract bump. (The stamp used to live in
+    ``read_model._resolved``; Stage 6 retired that module and moved the one-line
+    stamp into ``runtime_commands._cmd_snapshot``, where the CLI frame is built.)
+
+    ``core_source`` is emitted ONLY when a persisted core was available to
+    decide between, which is why the committed fixtures do not move: a build in
+    a root that has never held a persisted core answers no such question, and
+    stamping ``rebuilt`` there would be answering a question nobody asked, on
+    every golden. Same rule as the ``delta_patches`` hydrate marker, which is
+    absent when the lane is off precisely so the flag-off golden stays
+    byte-identical.
+
+    A stale core additionally sets ``parity.freshness.state = "stale"``. That is
+    the field the launcher's ``MissionSnapshotEnvelope`` already parses and maps
+    to ``MissionSnapshotHealth.stale``, so a stale-labeled frame can never read
+    ``live`` — it is non-authoritative by the consumer's existing predicate, not
+    by a new one.
+    """
+
+    parity = core.get("parity")
+    if not isinstance(parity, dict):
+        parity = {}
+        core["parity"] = parity
+    parity["core_source"] = str(source)
+    if stale:
+        parity["core_stale"] = True
+        freshness = parity.get("freshness")
+        if not isinstance(freshness, dict):
+            freshness = {}
+            parity["freshness"] = freshness
+        freshness["state"] = "stale"
+    else:
+        parity.pop("core_stale", None)
+        freshness = parity.get("freshness")
+        if isinstance(freshness, dict) and source == CORE_SOURCE_CACHE:
+            # The fingerprint matched, so this projection is confirmed CURRENT
+            # as of now — that, and not the original build's clock, is when its
+            # freshness window starts. The build's own time stays on the core's
+            # top-level ``generated_at``; nothing is overwritten, one anchor is
+            # refreshed. Without this a cache hit would serve a core whose
+            # 30-second freshness window expired before it was loaded.
+            from hermes_time import now as _now
+
+            from .serde import to_jsonable
+
+            freshness["generated_at"] = to_jsonable(_now())
+    return core
+
+
+# --------------------------------------------------------------------------- #
+# The process-level lane
+# --------------------------------------------------------------------------- #
+#: The cache lane is ARMED until this process has completed a full default-store
+#: build of its own. That is the honest generalization of the plan's "first build
+#: of a process": a serve boot issues several builds (prewarm, hydrate, status
+#: polls) within seconds of each other, and gating on the literal first
+#: CONSULTATION would have served the prewarm from the cache and then made the
+#: hydrate — the one the launcher is actually waiting on — pay the full build
+#: anyway, buying nothing the operator can see.
+#:
+#: An armed lane is never a stale-serve window: it is "this process has not yet
+#: built its own truth, and the store says the persisted one is still current".
+#: The fingerprint behind that answer is computed ONCE per armed window rather
+#: than once per asker — see :data:`_consult_memo` for the window, its
+#: invalidation, and what the sharing does and does not widen.
+#:
+#: Disarming on the first completed build also means no test can accidentally be
+#: served from a cache: a fresh isolated root has no persisted core, so the
+#: first consult always demotes, and the build that follows it disarms the lane.
+_LANE = threading.local()
+_lane_lock = threading.Lock()
+_lane_armed = True
+_shadow_done = False
+
+
+# --------------------------------------------------------------------------- #
+# One consult per boot, not one per rider (MC-1 / P5)
+# --------------------------------------------------------------------------- #
+#: A serve boot asks this lane the SAME question four times within about a
+#: second: the stream's stale-first read, then the prewarm, hub and cli riders'
+#: consults, and then the build leader's pre-build key — five full store walks
+#: (measured ~300–355 ms each warm on the operator's drive), four core reads and
+#: four digests, all describing one moment. The count is identical on the HIT
+#: path, where the answer is by definition the same for every asker.
+#:
+#: They are one question, so they get one answer. The memo holds the
+#: ``CacheRead`` the first asker computed, keyed on the STAT TRIPLES of the
+#: persisted pair itself PLUS the event log's logical tail (:class:`_ConsultStamp`),
+#: and is dropped when the lane disarms — that is, the moment this process owns
+#: its own truth.
+#:
+#: WHAT THIS DOES NOT CHANGE. A hit still means the fingerprint matched the
+#: sidecar; a demote still carries its own reason and its own receipt per caller.
+#: Only the number of times the identical computation runs moves.
+#:
+#: WHAT IT DOES WIDEN, said plainly. The validity of one asker's answer now
+#: extends to the other askers in the same window instead of each re-deciding.
+#: If a write lands mid-window, a later rider is served the answer computed
+#: before it, where today it would have walked again and demoted. Three things
+#: bound that, and they are the reason this is sound rather than merely cheap:
+#:
+#: 1. the window is a BOOT — it ends at the first completed full build of the
+#:    process, which is the same instant the lane closes. **That bound is only
+#:    true because every full build closes the lane, INCLUDING the shadow
+#:    validation's** (:func:`shadow_validate`). While only a DIVERGENT shadow
+#:    closed it, this clause was vacuous on precisely the boots this memo
+#:    optimizes — a cache-HIT boot completes no build through ``build_snapshot``,
+#:    so the window never ended and the memo answered every later build in the
+#:    process with the boot-time core. See :func:`shadow_validate` for the
+#:    incident and the numbers;
+#: 2. the askers were already disagreeing, which is worse. Today rider 1 can be
+#:    served the cache while rider 2 walks, misses and pays a full build, on one
+#:    store, in one process, seconds apart — the divergence the 2026-08-18
+#:    investigation recorded as A1-c. One answer per window retires it;
+#: 3. the shadow-validation window is UNTOUCHED. A cache-hit boot still runs the
+#:    full build in the background and compares field-for-field, so a write this
+#:    memo absorbed surfaces as a divergence receipt and the rebuilt core is
+#:    adopted. That mitigation is load-bearing here, not decorative.
+#:
+#: The stat pair is re-taken on every ask (two stats), so a write-back — this
+#: lane's own or another process's — invalidates the memo immediately: the pair
+#: is written through ``atomic_json_write``, and a rename always moves mtime.
+#:
+#: **AND THE STORE'S POSITION IS RE-TAKEN WITH IT (R1, 2026-08-21).** Bound 1
+#: above is now true by code, but it bounds the WINDOW, not what may be said
+#: inside it: an append that lands between the boot's stale-first read and its
+#: riders' consults is still inside the armed window, and a memo keyed on the
+#: cached artifact's own stat cannot see it. Keying on the artifact rather than
+#: on the source is the mtime anti-pattern one step worse than the classic one,
+#: and it is what let a 14:56 core answer "current" at 15:33 while the store had
+#: moved 8,000 bytes past it. So the log's logical tail rides in the stamp and
+#: any append drops the memo. What the next asker then does is WALK, not
+#: rebuild: the fingerprint is still the only validity authority and an append
+#: that changed no build input is still a cache hit — see :func:`_store_position`
+#: for why this is not the refused event-offset cache key.
+#:
+#: The lock is held ACROSS the computation, deliberately. Riders arrive within
+#: milliseconds of each other; a lock released before the walk would let all of
+#: them start their own and the memo would record the last one to finish, buying
+#: nothing. Blocking is the mechanism, not a side effect. Nothing inside the
+#: computed region takes :data:`_lane_lock`, and no holder of the lane lock takes
+#: this one — the two never nest.
+class _ConsultStamp(NamedTuple):
+    """What the memo was taken against: the cached ARTIFACT and the STORE.
+
+    Two halves because they answer two different questions, and the memo needs
+    both. ``pair`` says "the thing I memoised has not been republished under me";
+    ``event_offset`` says "the source of truth has not moved since I looked".
+    A memo missing the second half answers "current" about a store it never
+    consulted — the 2026-08-21 15:33 mechanism, and R1's whole subject.
+    """
+
+    pair: tuple[FingerprintEntry, ...]
+    event_offset: int | None
+
+
+class _ConsultMemo(NamedTuple):
+    stamp: _ConsultStamp
+    raw_core: str
+    read: CacheRead
+
+
+_memo_lock = threading.Lock()
+_consult_memo: _ConsultMemo | None = None
+
+
+def _pair_stamp() -> tuple[FingerprintEntry, ...]:
+    """The pointer and the pair it names — half of the memo's invalidation rule.
+
+    The POINTER is in the stamp, and it is the load-bearing third stat. A
+    generation flip is already visible in the other two — a
+    :class:`FingerprintEntry` carries its path and the generation name is in it —
+    but that leaves the memo's invalidation depending on a naming convention. The
+    pointer's own mtime moves on every publish by the same ``os.replace`` argument
+    the whole module rests on, so the memo drops on a republish whatever the
+    generations are called.
+
+    The OTHER half is :func:`_store_position`; the two are taken together by
+    :func:`_consult_stamp`, which is what every memo comparison uses.
+    """
+
+    generation = _live_generation_dir()
+    return (
+        _stat_entry(pointer_path()),
+        _stat_entry(generation / SIDECAR_FILENAME),
+        _stat_entry(generation / CORE_FILENAME),
+    )
+
+
+def _store_position() -> int | None:
+    """The event log's LOGICAL tail — the store's own position, right now.
+
+    =========================================================================
+    THIS IS NOT AN EVENT-OFFSET CACHE KEY (read the module header first)
+    =========================================================================
+
+    The header's standing rule is absolute and unchanged: **the fingerprint
+    decides validity, full stop** — ``event_offset`` is never an input to the
+    MATCH decision, there is no event-tail replay, and there must never be a
+    second validity authority beside the walk. Nothing here decides that a
+    persisted pair matches or does not.
+
+    What this decides is narrower by one whole layer: whether a judgement
+    computed for an EARLIER ask may be reused to answer THIS one without looking
+    again. That is a memoisation question, not a validity question, and the two
+    have opposite failure directions — a dropped memo costs a walk (~300–355 ms
+    measured, and only on a boot whose store is moving under it), while a memo
+    kept too long serves an answer about a store that has since changed. The
+    fingerprint walk still runs and still decides; this only stops the memo from
+    speaking for a walk that was never taken.
+
+    **Why the store's position and not the pair's stat.** The pair's stat can
+    only see the cache writing itself back. It is blind by construction to the
+    thing the cache is a projection OF, so a memo keyed on it alone answers
+    ``matched=True`` for as long as nobody republishes — measured 2026-08-21: a
+    cache-hit boot filled the memo at 15:24 with a 14:56 core, an agent was
+    created at 15:33, and the memo answered "current" four more times because
+    the pair had not moved. Appends move the log; the log is in the stamp; the
+    memo drops.
+
+    **Cost, stated precisely because the audit bounded it at "one stat per
+    ask".** ``event_rotation.log_end_offset`` reads no EVENT bytes and scans no
+    log: on a pristine store it is one ``exists`` probe of the absent rotation
+    manifest plus one ``stat`` of the live slice. On a ROTATED store it also
+    reads and parses the manifest — a few KB of JSON listing the sealed slices,
+    not the log — so the honest bound is "two stats, plus a small JSON read once
+    the store has rotated", per ask, on a path that already pays three stats and
+    (on a miss) a full store walk.
+
+    ``None`` is the typed unknown, exactly as ``parity.events_watermark``
+    defines it, and :func:`_stamp_still_stands` refuses to answer from a memo on
+    either side of one: a position that could not be read cannot vouch that the
+    store stood still. That is the same direction the whole module takes — a
+    missing answer is "never cache", never "nothing changed".
+    """
+
+    return events_position().get("event_offset")
+
+
+def _consult_stamp() -> _ConsultStamp:
+    """Both halves, taken together — the only stamp a memo is ever compared on."""
+
+    return _ConsultStamp(_pair_stamp(), _store_position())
+
+
+def _stamp_still_stands(memo_stamp: _ConsultStamp, now_stamp: _ConsultStamp) -> bool:
+    """May a memo taken at ``memo_stamp`` answer an ask at ``now_stamp``?
+
+    Equality of both halves is required. The store half additionally refuses an
+    UNKNOWN position on either side rather than letting two unknowns compare
+    equal: ``None == None`` would read as "the log did not move" when what it
+    actually says is "nobody could tell", which is the fail-quiet default
+    ``events_watermark``'s own docstring exists to forbid. An install whose log
+    cannot be stat'd re-walks per ask — the expensive direction, deliberately.
+    """
+
+    if memo_stamp.event_offset is None or now_stamp.event_offset is None:
+        return False
+    return memo_stamp == now_stamp
+
+
+def _drop_consult_memo() -> None:
+    global _consult_memo
+    with _memo_lock:
+        _consult_memo = None
+
+
+def _armed_window_read() -> CacheRead:
+    """The boot lane's shared judgement: computed once, answered many times.
+
+    Every caller gets its OWN decoded core, re-parsed from the memoised bytes.
+    The build coalescer already deep-copies its result for exactly this reason:
+    :func:`label_core` stamps provenance IN PLACE, so one shared dict would let
+    the third rider's label land on the first rider's already-emitted frame.
+
+    The stamp is taken OUTSIDE the memo lock and both halves come from
+    :func:`_consult_stamp`, so an append that lands between the boot's stale-read
+    and its riders' consults drops the memo and the next asker walks the store
+    again. It re-CONSULTS; it does not force a rebuild. The walk it pays for is
+    the content check, and if the fingerprint still matches the answer is still a
+    cache hit — the append simply no longer gets to be answered by a judgement
+    taken before it.
+    """
+
+    global _consult_memo
+    stamp = _consult_stamp()
+    with _memo_lock:
+        memo = _consult_memo
+        if memo is not None and _stamp_still_stands(memo.stamp, stamp):
+            return memo.read._replace(core=json.loads(memo.raw_core))
+        pair = _read_pair()
+        if pair is None:
+            _consult_memo = None
+            return CacheRead(None, False, DEMOTE_ABSENT, None, {})
+        read = _judge_persisted_pair(pair[0], pair[1], fingerprint=None)
+        # A judgement that produced no core has nothing to re-parse and nothing
+        # worth holding: the pair is unreadable or unbound, and the next asker
+        # should see that for itself rather than inherit a refusal.
+        _consult_memo = (
+            _ConsultMemo(stamp, pair[1], read) if read.core is not None else None
+        )
+        return read
+
+
+def pre_build_fingerprint() -> CoreFingerprint | None:
+    """The key a build persists — the consult's, when the consult still stands.
+
+    The leader used to take a SECOND full walk here, milliseconds after its own
+    consult had taken one over the same store. Reusing the consult's key keeps
+    the direction ``write_back`` requires: a key stat'd BEFORE the build is at
+    worst OLDER than the core it describes, which can only cost the next process
+    a rebuild it did not strictly need. The unsafe direction — a key stat'd after
+    the build, absorbing a write the core does not contain — is not reachable
+    from here, because the memo is filled before the build starts and dropped
+    when it completes.
+
+    Falls through to a full walk whenever there is no standing consult: a cold
+    store (nothing to consult), a disarmed lane (every later build in the
+    process), a pair that moved since, or a STORE that moved since. The last one
+    is new with R1 and costs this caller a walk it used to skip — which is the
+    direction this function's own rule already demanded: a key that predates the
+    build is safe, and a key inherited from a judgement taken before an append
+    would describe a store the build is no longer reading.
+    """
+
+    with _memo_lock:
+        memo = _consult_memo
+    if (
+        memo is not None
+        and memo.read.fingerprint is not None
+        and _stamp_still_stands(memo.stamp, _consult_stamp())
+    ):
+        return memo.read.fingerprint
+    return build_input_fingerprint()
+
+
+def reset_process_state() -> None:
+    """Re-arm the lane, as a fresh process would. Tests only.
+
+    Same shape and same reason as ``build_stamp.reset_build_stamp_cache``: a
+    property of the PROCESS has to be resettable for a test to be able to
+    exercise a second process's behaviour without spawning one.
+
+    The convergence history (ML-10) is process state by the same definition and
+    is reset here too — a case that left a streak behind would hand the next case
+    a process that had already half-declared non-convergence. So is the boot
+    lane's shared consult: a memo surviving into the next case would answer it
+    with the previous case's store. So is the captured fingerprint home (MC-2):
+    a capture surviving into the next case would resolve its closure through the
+    previous case's home, which the sandbox has already deleted.
+    """
+
+    global _lane_armed, _shadow_done
+    with _lane_lock:
+        _lane_armed = True
+        _shadow_done = False
+    _reset_convergence_state()
+    _drop_consult_memo()
+    reset_fingerprint_home()
+
+
+def lane_armed() -> bool:
+    with _lane_lock:
+        return _lane_armed
+
+
+def note_full_build_completed() -> None:
+    """The process now owns its own truth — the cache lane closes.
+
+    A no-op inside a shadow build: that build is a VALIDATION of the cache, not
+    the process's answer, and letting it disarm the lane would make the next
+    boot caller pay a full build for the privilege of having validated the one
+    it just avoided.
+
+    The armed window's shared consult ends here with the lane. Dropped OUTSIDE
+    the lane lock on purpose: the memo lock is taken while judging, and judging
+    never takes the lane lock, so the two locks must never nest in the other
+    order either.
+    """
+
+    if getattr(_LANE, "shadow", False):
+        return
+    global _lane_armed
+    with _lane_lock:
+        _lane_armed = False
+    _drop_consult_memo()
+
+
+#: The one reason :func:`close_cache_lane` is called with today: a core this
+#: lane served reaches an offset EARLIER than the one a frame was about to stamp
+#: it with. Its own constant so the channel table can name it and a census can
+#: count it, rather than a sentence assembled at the call site.
+REFUSAL_CORE_BEHIND_FRAME = "core_behind_frame"
+
+
+def close_cache_lane(*, reason: str, caller: str, detail: str = "") -> None:
+    """Stop serving the persisted core in this process, with a reason on the log.
+
+    :func:`note_full_build_completed` says "this process now owns its own truth".
+    This says something different and rarer: **a core this lane served has been
+    shown to be unusable by the consumer that asked for it**, so the lane stops,
+    whatever the fingerprint thinks. It exists for exactly one caller — the
+    stream's full-core batch lane, which is the one place that holds a core AND
+    the offset that core is about to be stamped with, and can therefore see a
+    content-vs-position violation the cache cannot see from the inside.
+
+    Not a second validity authority (the module header's standing rule): nothing
+    here decides that a persisted pair MATCHES. It can only refuse, and only
+    after a core has already been served and found wanting.
+
+    Idempotent, and the receipt is emitted whether or not the lane was still
+    armed — "we asked for this to stop" is the fact worth reading, and gating the
+    line on the lane's state would make the second of two racing frames silent.
+
+    ``reason`` is a TYPED token, and ``detail`` carries the numbers behind it, so
+    the line is countable by family+reason exactly like every other receipt on
+    this logger (C22). Free text in the reason field would put a fourth
+    vocabulary on one logger, which is the defect the channel table exists to
+    have retired.
+    """
+
+    logger.warning(
+        "snapshot_core_cache_lane_closed caller=%s reason=%s %s — a served core "
+        "could not answer for the offset it was about to be stamped with; this "
+        "process will rebuild from here.",
+        caller,
+        reason,
+        detail or "-",
+    )
+    global _lane_armed
+    with _lane_lock:
+        _lane_armed = False
+    _drop_consult_memo()
+
+
+class shadow_build_scope:
+    """Marks the calling thread's build as the shadow validation build."""
+
+    def __enter__(self) -> None:
+        _LANE.shadow = True
+
+    def __exit__(self, *exc: Any) -> None:
+        _LANE.shadow = False
+
+
+def _demote_diff_detail(key: CoreFingerprint | None, sidecar: dict | None) -> str:
+    """WHICH inputs moved between the persisted write-back and this walk.
+
+    **The scope is ``last_pair`` by construction, and that is a census caveat, not
+    a detail.** This is the delta since the LAST WRITE-BACK, so on a store that is
+    simply busy it legitimately names files that are simply moving. It is
+    self-perturbation evidence — the A1-b/A2 defect worth acting on — only when
+    the named paths are ones the RUNTIME ITSELF writes. The channel table row
+    carries the reading rule; the token on the line is the honest scope rather
+    than a new one invented to flatter the diagnostic.
+
+    Every arm that cannot answer says so in its OWN words through
+    :func:`_diff_unavailable_detail`, never by returning an empty diff — an empty
+    ``diff=`` reads to a census exactly like "we looked and nothing moved", which
+    is C16's lesson and is the one way this receipt could mislead.
+    """
+
+    if key is None or not key.entries:
+        return _diff_unavailable_detail(DIFF_UNAVAILABLE_NO_ENTRIES)
+    persisted, unavailable = _persisted_entries(
+        expect_digest=(sidecar or {}).get("fingerprint")
+    )
+    if persisted is None:
+        return _diff_unavailable_detail(unavailable)
+    changed = _changed_paths(persisted.entries, key.entries)
+    if not changed:
+        # The digests disagreed and no triple did. Nothing here can be named, and
+        # borrowing the ``last_pair`` sentence for it would report a measurement
+        # that was never taken.
+        return _diff_unavailable_detail(DIFF_UNAVAILABLE_NO_ENTRY_DELTA)
+    return _diff_detail(DIFF_SCOPE_LAST_PAIR, list(changed))
+
+
+def _log_demote(
+    *, caller: str, reason: str, key: CoreFingerprint | None, sidecar: dict | None = None
+) -> None:
+    """The demote receipt — and, on a fingerprint miss ONLY, what moved (A1-b).
+
+    Before this, a read-miss said ``reason=fingerprint_mismatch inputs=23107``
+    and nothing else, so the operator saw the same line on every same-commit boot
+    with nothing to act on, and no process — not the serve, not a read-only
+    investigation — could name the file that moved. The absence was the finding.
+
+    TWO things keep the tail honest, and both are load-bearing:
+
+    * **It is computed LAZILY and only for ``fingerprint_mismatch``.** The hit
+      path pays nothing — it never reaches here — and the other demote reasons
+      are not "an input moved": a diff on a ``build_stamp_mismatch`` would name
+      every file the operator's upgrade touched and read to a census as store
+      churn, which is a measurement that would be true of the wrong thing.
+    * **``diff=`` goes LAST on the line**, after ``changed=``, for the reason
+      already written at :func:`_receipt_never_converged`: it is a
+      variable-length list and a path may contain spaces, so nothing can be
+      field-parsed after it. The tail is purely ADDITIVE — an existing
+      ``reason=`` grep is unaffected, which is what made this approvable as a
+      change to production log text.
+
+    The diff is worded by :func:`_changed_paths` and :func:`_diff_detail`, the
+    never-converged receipt's own helpers, so the two receipts spell ONE
+    vocabulary and are told apart by their family/event token exactly as the C22
+    table teaches — never by two spellings of one fact.
+    """
+
+    detail = (
+        " " + _demote_diff_detail(key, sidecar)
+        if reason == DEMOTE_FINGERPRINT_MISMATCH
+        else ""
+    )
+    logger.info(
+        "snapshot_core_cache core_source=%s caller=%s reason=%s inputs=%s%s",
+        CORE_SOURCE_REBUILT,
+        caller,
+        reason,
+        "unknown" if key is None else key.count,
+        detail,
+    )
+
+
+class CoreDecision(NamedTuple):
+    """What the cache lane decided, and whether there was a question at all.
+
+    ``demoted`` is the distinction that keeps the committed producer fixtures
+    byte-identical. A build in a root that has never held a persisted core
+    answers no question about provenance, so nothing is stamped; a build that
+    ran BECAUSE a persisted core was rejected answers one, and stamps
+    ``core_source=rebuilt``. See :func:`label_core`.
+    """
+
+    core: dict | None
+    demoted: bool
+    reason: str
+
+
+def consult(*, caller: str, fingerprint: CoreFingerprint | None = None) -> CoreDecision:
+    """The read half of the stage: serve the persisted core, or say why not.
+
+    Runs on the default-store path only, while the lane is armed. On a match it
+    emits its OWN receipt (``snapshot_core_cache core_source=cache``) and
+    deliberately does NOT emit ``snapshot_build_core role=led``: there was no
+    build, and a receipt claiming one would put the log back in the state EG-2.1
+    just took it out of, where a wait and a build are indistinguishable.
+
+    Every demote is logged with its reason — except ``absent``, which is the
+    ordinary cold-start shape and would otherwise print a line on every build in
+    every process that has no cache to consult.
+
+    The riders of one boot share ONE judgement (:data:`_consult_memo`) and each
+    still emits its OWN receipt: the log stays a per-caller account of what each
+    asker was told, while the store is walked once. A caller that hands in its
+    own ``fingerprint`` is answered from that key alone and never touches the
+    shared window.
+    """
+
+    if not lane_armed():
+        return CoreDecision(None, False, "")
+    read = (
+        _armed_window_read()
+        if fingerprint is None
+        else read_persisted_core(fingerprint=fingerprint)
+    )
+    if not read.matched or read.core is None:
+        if read.reason != DEMOTE_ABSENT:
+            # The sidecar rides along so a fingerprint miss can be diffed against
+            # the entries THAT pair persisted — the binding rule at
+            # ``entries_path``. Handing the judgement's own sidecar rather than
+            # re-reading one is what keeps the diff about the generation that was
+            # actually judged.
+            _log_demote(
+                caller=caller,
+                reason=read.reason,
+                key=read.fingerprint,
+                sidecar=read.sidecar,
+            )
+        return CoreDecision(None, read.reason != DEMOTE_ABSENT, read.reason)
+    core = label_core(read.core, source=CORE_SOURCE_CACHE, stale=False)
+    logger.info(
+        "snapshot_core_cache core_source=%s caller=%s inputs=%d fingerprint=%s offset=%s",
+        CORE_SOURCE_CACHE,
+        caller,
+        read.fingerprint.count if read.fingerprint else -1,
+        read.fingerprint.digest[:12] if read.fingerprint else "unknown",
+        read.sidecar.get("event_offset", "unknown"),
+    )
+    return CoreDecision(core, False, "")
+
+
+def take_stale_first_core(*, caller: str) -> dict | None:
+    """A persisted core to paint IMMEDIATELY, LABELED stale — or ``None``.
+
+    The mismatch half of the design: rather than showing the operator nothing
+    for the length of a full build, serve what the store last projected and say
+    out loud that it is not validated. The replacement arrives on the next frame
+    when the build completes.
+
+    **The one-shot is the SUBSCRIBER's, not the process's (MC-4 / P6).** It used
+    to be a module-global ``_stale_served``, and that made the stale paint a race
+    rather than a delivery: a boot starts TWO ``stream_frames`` generators — the
+    hub producer, which the office ``runtime.office.subscribe`` attaches 0.1–0.2s
+    before the launcher asks for anything, and the launcher's own argv stream —
+    and whichever reached this function first consumed the process's single
+    allowance. Measured 2026-08-18: it went to ``caller=hub`` on two of three
+    boots, where ``serve_office_subscriptions.office_patch_sink`` discards every
+    row that is not an ``office_actor`` — i.e. the one stale paint the design
+    exists to deliver was thrown away, and the operator watched an empty canvas
+    for the length of a full build. The rule is now stated where the room is
+    known (``stream_frames``' ``wants_stale_first``, derived at producer-build
+    time by ``serve.py::_room_wants_stale_first``), and the one-shot is
+    structural: :func:`agent_runtime.stream.stream_frames` asks this ONCE, at its
+    head, before its tail loop.
+
+    **What still bounds it, and why that bound is the sound one.** Only while the
+    lane is armed. The lane disarms at :func:`note_full_build_completed`, so the
+    window is the BOOT — the span in which this process has not yet built its own
+    truth — not the session. A resubscribe long after that can never re-paint an
+    old projection, which is the property the process-global flag was reaching
+    for and got by over-tightening: it also refused the SECOND generator of a
+    boot, which is the one the launcher is usually on.
+    """
+
+    with _lane_lock:
+        if not _lane_armed:
+            return None
+    # The same shared judgement the riders will get. This read is FIRST in the
+    # boot, so on the ordinary shape it is the one that pays for the walk and
+    # every consult behind it is answered for free.
+    read = _armed_window_read()
+    if read.core is None or read.matched:
+        # Nothing to paint, or the core MATCHES — in which case the ordinary
+        # cache-hit path above will serve it authoritative and painting a stale
+        # copy first would be a lie in the pessimistic direction.
+        return None
+    logger.info(
+        "snapshot_core_cache core_source=%s stale=true caller=%s reason=%s",
+        CORE_SOURCE_CACHE,
+        caller,
+        read.reason,
+    )
+    return label_core(read.core, source=CORE_SOURCE_CACHE, stale=True)
+
+
+# --------------------------------------------------------------------------- #
+# Shadow validation
+# --------------------------------------------------------------------------- #
+#: The comparison ignores exactly the fields that describe THIS build rather
+#: than the state it projected. Everything else — every section, every row,
+#: every count — must agree, because a difference in any of them is the
+#: input-closure gap §6.1 is about.
+_SHADOW_IGNORED_PARITY_KEYS = frozenset(
+    {
+        "build_ms",
+        "sections_ms",
+        "generated_at",
+        "projection_age_ms",
+        "core_source",
+        "core_stale",
+        "freshness",
+        "snapshot_bytes",
+    }
+)
+_SHADOW_IGNORED_TOP_KEYS = frozenset({"generated_at", "parity", "runtime_paths_diagnostic"})
+
+#: ``parity.watermark`` is compared, minus the clock that says WHEN it was
+#: measured. The reason to compare it at all is ``event_offset``: two cores at
+#: different log positions ARE a divergence, and one of the most informative
+#: kinds. ``captured_at`` is the measurement's own timestamp — it moves on every
+#: read by construction, so leaving it in would make every comparison diverge and
+#: the whole window would report noise until somebody switched it off.
+_SHADOW_IGNORED_WATERMARK_KEYS = frozenset({"captured_at"})
+
+
+def compare_cores(cached: dict, rebuilt: dict) -> str | None:
+    """The first section on which a cache-served core and a rebuild disagree.
+
+    ``None`` means they agree. The NAME is the whole point of the return value:
+    a boolean divergence receipt would tell an operator the cache is wrong
+    without telling them which input class to widen.
+    """
+
+    from .serde import to_jsonable
+
+    left = to_jsonable(cached)
+    right = to_jsonable(rebuilt)
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return "core"
+    keys = sorted(set(left) | set(right))
+    for key in keys:
+        if key in _SHADOW_IGNORED_TOP_KEYS:
+            continue
+        if left.get(key) != right.get(key):
+            return key
+    left_parity = left.get("parity") if isinstance(left.get("parity"), dict) else {}
+    right_parity = right.get("parity") if isinstance(right.get("parity"), dict) else {}
+    for key in sorted(set(left_parity) | set(right_parity)):
+        if key in _SHADOW_IGNORED_PARITY_KEYS:
+            continue
+        if key == "watermark":
+            if _stripped(left_parity.get(key), _SHADOW_IGNORED_WATERMARK_KEYS) != _stripped(
+                right_parity.get(key), _SHADOW_IGNORED_WATERMARK_KEYS
+            ):
+                return "parity.watermark"
+            continue
+        if left_parity.get(key) != right_parity.get(key):
+            return f"parity.{key}"
+    return None
+
+
+def _stripped(value: Any, drop: frozenset[str]) -> Any:
+    if not isinstance(value, dict):
+        return value
+    return {key: item for key, item in value.items() if key not in drop}
+
+
+def shadow_validate(cached: dict, *, caller: str, build: Callable[[], dict], adopt: Callable[[dict], None] | None = None) -> str | None:
+    """Rebuild in full, compare against the core we just served, report.
+
+    The UP-4 pattern applied to this cache, and the mitigation that converts
+    §6.1's input-closure risk into receipts. A divergence is LOUD (a warning
+    naming the section) and the rebuilt core is ADOPTED — written back, so the
+    next boot cannot be served the divergent copy, and handed to ``adopt`` so
+    the lane that already painted can replace what it painted.
+
+    Retirement is receipts-based and is NOT this stage's call: zero divergence
+    receipts across the agreed window (TC-3's shape).
+
+    **THE WINDOW CLOSES HERE, ON EVERY VERDICT (MCF-Q1).** This build IS the
+    process's own full build — the one the lane's whole docstring says the armed
+    window ends at. It was excluded from that rule while only the DIVERGENT
+    verdict closed the lane, and the exclusion made the memo's stated safety
+    bound ("the window is a BOOT — it ends at the first completed full build")
+    vacuously false on exactly the boots the memo optimizes: on a cache-HIT boot
+    no build ever completes through :func:`agent_runtime.snapshot.build_snapshot`,
+    so nothing ever called :func:`note_full_build_completed` and every later
+    ``build_snapshot()`` in that serve process was answered with the boot-time
+    core — for the rest of the process's life. Measured on the operator's runtime
+    2026-08-21: a second QA agent dropped onto the canvas at 15:33 was erased by
+    four ``role=cache reason=demote`` frames stamped 89,849,656 / 89,849,871 /
+    89,851,071 / 89,851,462, every one of them carrying a core whose OWN
+    ``offset=89843335`` the ``core_source=cache`` receipt prints beside them.
+
+    **WHAT TODAY'S CONFIG CONTENT-KEY FIX DID AND DID NOT DO.** It did not arm
+    this trap; the trap was already live. The same log carries the same shape on
+    2026-08-20 — a cache hit at ``offset=89567980`` at 18:30:05, then
+    ``reason=demote role=cache offset=89568195`` at 18:30:11, and the pair again
+    at 18:38 — a day before ``2f98eef3ee``. What that commit changed is the
+    VERDICT. Those 2026-08-20 boots ended in ``snapshot_core_shadow_divergence
+    section=parity.event_log_bytes`` about ten seconds in, and a divergence
+    already closed the lane, so the exposure was ~10 s per boot and an erasing
+    frame had to land inside it. With the flapping input content-keyed the shadow
+    now says ``ok=true`` (15:24:11, 15:25:22) — and an agreeing verdict closed
+    nothing, so the window went from ten seconds to the life of the process. The
+    log only reaches back to 2026-08-20 10:56, so the honest bound is "at least a
+    day older than the report, and structurally as old as the lane (EG-3.1,
+    2026-08-17)".
+
+    That history is also why this is not the whole fix. Closing the window on
+    agreement retires the 2026-08-21 shape; the 2026-08-20 shape landed INSIDE a
+    window that was going to close anyway, and only the frame-level guard in
+    ``stream._full_core_batch_frames`` refuses that one — the frame-level half of
+    this invariant, and the reason both halves shipped together.
+
+    Closing here costs the boot NOTHING and that is why it is the right place:
+    the riders this cache exists for (prewarm, hydrate, hub, cli) all arrive
+    within about a second of each other and are answered from the shared consult
+    long before this background build finishes (measured 6.5–7.6 s). What ends is
+    the part that was never a saving — serving a boot-time core to builds issued
+    minutes later.
+
+    An ok=true verdict closes it, a divergence closes it, and a build that RAISED
+    closes it too: a validation that could not run is not a licence to keep
+    serving the thing it failed to validate.
+    """
+
+    try:
+        with shadow_build_scope():
+            rebuilt = build()
+    except Exception:
+        logger.warning("snapshot_core_shadow ok=false caller=%s reason=build", caller, exc_info=True)
+        note_full_build_completed()
+        return None
+    section = compare_cores(cached, rebuilt)
+    if section is None:
+        logger.info("snapshot_core_shadow ok=true caller=%s divergence=none", caller)
+        note_full_build_completed()
+        return None
+    # ADOPTION, in the order that matters: the divergent copy stops being
+    # servable to the NEXT process first (the write-back), then this process
+    # stops serving it (the lane closes), then whoever already painted is told
+    # to replace what it painted. A receipt without adoption would leave the
+    # operator reading about a canvas that is still wrong.
+    write_back(rebuilt)
+    logger.warning(
+        "snapshot_core_shadow_divergence caller=%s section=%s — the persisted core "
+        "disagreed with a full rebuild; the rebuilt core is adopted. Widen the "
+        "fingerprint's input closure (agent_runtime/core_cache.py), never trust "
+        "the cache harder.",
+        caller,
+        section,
+    )
+    note_full_build_completed()
+    if adopt is not None:
+        try:
+            adopt(rebuilt)
+        except Exception:  # pragma: no cover - an instrument must not fail a lane
+            logger.warning("snapshot_core_shadow adopt failed", exc_info=True)
+    return section
+
+
+def claim_shadow_slot() -> bool:
+    """Take the process's ONE shadow-validation slot, or report it taken.
+
+    Once, not per cache hit: a boot issues several builds and spawning a full
+    build behind each of them would cost the process more than the cache saved —
+    four boot hits would buy four rebuilds.
+
+    Separated from the thread start so the claim is testable as a claim. A gate
+    whose only witness has to observe a background thread is a gate tested
+    through a race.
+    """
+
+    global _shadow_done
+    with _lane_lock:
+        if _shadow_done:
+            return False
+        _shadow_done = True
+    return True
+
+
+def maybe_start_shadow_validation(cached: dict, *, caller: str, build: Callable[[], dict], adopt: Callable[[dict], None] | None = None) -> bool:
+    """Start the shadow build on a daemon thread, if this process's slot is free."""
+
+    if not claim_shadow_slot():
+        return False
+    thread = threading.Thread(
+        target=lambda: shadow_validate(cached, caller=caller, build=build, adopt=adopt),
+        name="harness-core-shadow",
+        daemon=True,
+    )
+    thread.start()
+    return True
+
+
+def iter_fingerprint_paths(fingerprint: CoreFingerprint) -> Iterator[str]:
+    """Every path in a fingerprint — the §6.1 audit surface, enumerable."""
+
+    for entry in fingerprint.entries:
+        yield entry.path

@@ -1,0 +1,659 @@
+from __future__ import annotations
+
+from typing import Any, Callable
+import re
+
+from hermes_time import now
+
+from .errors import EventPayloadTooLarge
+from .events import EventLog
+from .models import Event
+from .redaction_mode import redaction_observe_enabled
+
+_SAFE_PROGRESS_KEYS = {
+    "type", "event_id", "phase", "severity", "step", "state", "tool", "tool_name", "status",
+    "summary", "detail", "elapsed_seconds", "duration_ms", "api_calls", "iteration",
+    "max_iterations", "compact_count", "exit_code", "total_tokens", "proof_id", "stage_id",
+    "proof_count", "decision_type", "validation_status", "error_class", "next_expected",
+    "repo_label", "context_loaded", "patch_summary", "code_summary", "file_summary",
+    "changed_files", "files_touched", "reasoning_summary", "tool_call_count",
+    "read_search_count", "patch_count", "test_count", "loop_warning",
+    "has_patch_progress", "has_test_progress", "has_proof_progress",
+    "envelope_id", "decision_count", "continuation_count", "model_invocation_count",
+    "close_reason", "next_action_before", "next_action_after", "proof_ids_added_count",
+    "incident_ids_opened_count", "session_id_present", "api_calls_total",
+    "input_tokens_total", "output_tokens_total", "total_tokens_total", "tool_turns_total",
+    "would_continue", "watchdog_warnings",
+    "autonomy_packet_id", "context_receipt_id", "selected_skill_count",
+    "assignment_id", "persona_instance_id", "assignment_kind",
+    "rejected_skill_count", "read_search_limit", "proof_retry_limit",
+    "proof_command_limit", "skill_load_limit", "context_event_count",
+    "context_proof_count", "context_incident_count", "context_size_estimate",
+    "proof_intent", "environment_fingerprint", "environment_fingerprint_status",
+    "last_failed_proof_ids", "self_heal_applied", "failed_proof_reused",
+    "failed_proof_ignored", "dev_read_search_after_failed_proof", "timing_key",
+    "command_label",
+    # Operator-console detail lane (Mission Control only — the Telegram-safe
+    # field stays the path-stripped command_label). These carry real commands,
+    # tool targets, changed paths, and bounded output tails so a goal run reads
+    # as streamed work, not turn overviews. Secrets are scrubbed per-line;
+    # sizes are bounded below to respect the 4KB event payload cap.
+    "command_full", "output", "target_label", "changed_paths", "skill_name",
+    # First-class agent-to-agent dispatch (agent_chat_send): the target persona
+    # and the FULL order, so the operator console shows exactly what each
+    # teammate was told without parsing the 90-char-excerpted target_label prose.
+    "dispatch_target", "dispatch_order",
+    # ...and WHERE it landed: the target's chat THREAD (never the target's
+    # instance id — a mutable binding pointer), from the RESULT of a waiting
+    # relay, so the console can open the other half of the exchange instead of
+    # only naming it. A detached (wait=false) dispatch cannot answer this.
+    "dispatch_target_session_id",
+    # ...and the ANSWER: the teammate's reply on a WAITING relay plus the display
+    # name of the agent who sent it, so the console renders the exchange instead
+    # of only the order. A detached (wait=false) dispatch carries neither.
+    "dispatch_reply", "dispatch_reply_from",
+    # Patch observability: the local artifact's PATH plus the +/− line counts
+    # and which patch grammar was used. Never the diff CONTENT — the body stays
+    # on the machine that produced it and is read locally at view time, which is
+    # the whole reason the path is what travels.
+    "patch_artifact", "patch_adds", "patch_dels", "patch_mode",
+    # Generic tool-call input/result record for tools with no dedicated field
+    # (non-terminal, non-dev-work): a bounded key-per-line rendering of the raw
+    # invocation and result, produced by profile_runner._attach_tool_io. This is
+    # what lets the operator console expand ANY tool row instead of showing
+    # "no input or result detail was emitted".
+    "tool_input", "tool_result",
+}
+
+# Bounds for the operator-detail fields (event payload cap is 4096 bytes).
+_OPERATOR_COMMAND_FULL_MAX = 500
+_OPERATOR_TARGET_MAX = 300
+_OPERATOR_OUTPUT_TAIL_MAX = 1200
+_OPERATOR_PATHS_MAX = 12
+_OPERATOR_DISPATCH_TARGET_MAX = 120
+_OPERATOR_DISPATCH_ORDER_MAX = 1500
+# The reply half of the exchange: same block grade and same bound as the order,
+# and the replying agent's display name at the target bound (it IS a name, so
+# the one-line target scrub is the right shape for it).
+_OPERATOR_DISPATCH_REPLY_MAX = 1500
+_OPERATOR_DISPATCH_REPLY_FROM_MAX = 120
+# The patch diff artifact's path. It IS a path, so it needs the operator-line
+# grade (paths allowed, secret-bearing values still dropped) — the default
+# scalar arm's `_looks_sensitive_or_pathish` would eat it, which is correct for
+# an undeclared string and wrong for this one. Same bound and same shape as
+# `command_full`, the other declared path-bearing operator field.
+_OPERATOR_PATCH_ARTIFACT_MAX = 500
+# Relay thread pointers: opaque runtime ids, never prose. Re-asserted at the
+# sink (the producer already checked) because this is the redaction boundary —
+# a caller that hand-built the payload gets the same contract. Truncation would
+# yield a WRONG id rather than a short one, so an over-long value is dropped.
+_OPERATOR_DISPATCH_ID_MAX = 240
+_DISPATCH_ID_KEYS = ("dispatch_target_session_id",)
+_DISPATCH_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,%d}" % _OPERATOR_DISPATCH_ID_MAX)
+# Producer bounds are 1000/1600 (profile_runner) plus a one-line truncation
+# marker; these re-scrub bounds sit just above so the marker itself is never
+# re-truncated into garbage.
+_OPERATOR_TOOL_INPUT_MAX = 1100
+_OPERATOR_TOOL_RESULT_MAX = 1700
+
+_CHAT_TRACE_EVENT_TYPES = {"run.tool.started", "run.tool.finished", "run.progress"}
+# run.progress payloads that carry one of these keys are real signal (a tool
+# step, a command, dev work, or a reasoning summary). Bare "Run progress update"
+# rows are dropped so the operator-channel Trace lane stays meaningful, not noisy.
+_CHAT_PROGRESS_SIGNAL_KEYS = (
+    "tool_name", "tool", "command_label", "reasoning_summary",
+    "changed_files", "patch_summary", "code_summary", "file_summary",
+)
+# A phase-timing marker's status is a bare state token ("reached"), never
+# prose. Anything else is dropped rather than truncated — see
+# ChatProgressSink._forward_phase_timing_marker.
+_MARKER_STATUS_RE = re.compile(r"[a-z_]{1,32}")
+
+
+class ChatProgressSink:
+    """Record redaction-safe tool/progress trace events for a conversational
+    (non-task) persona chat turn.
+
+    There is no backing :class:`AgentRun`: an operator chat turn runs free of
+    the retired task/decision pipeline, so there is no
+    run row to update and no ``task_id`` to key on. Events are appended to the
+    :class:`EventLog` keyed on ``session_id`` + ``persona_id`` instead, which is
+    exactly what :func:`persona_chat_trace_summary` scans to surface chat-turn
+    tool calls in the Mission Control operator channel's Trace lane.
+
+    Payloads are sanitized through the same :func:`_safe_progress_payload`
+    redaction boundary the task lane uses, and every emit is best-effort: a
+    telemetry failure must never break the operator's chat reply.
+    """
+
+    def __init__(
+        self,
+        *,
+        session_id: str,
+        persona_id: str | None,
+        run_id: str | None = None,
+        turn_id: str | None = None,
+        event_log: EventLog | None = None,
+        before_first_trace: Callable[[dict[str, Any]], None] | None = None,
+        on_trace: Callable[[dict[str, Any]], None] | None = None,
+    ):
+        self.session_id = session_id
+        self.persona_id = persona_id
+        self.run_id = run_id
+        # Turn key (the operator's client_message_id token): stamped on every
+        # event so downstream projections carry ONE reconciliation identity for
+        # the whole turn instead of clients matching rows by content.
+        self.turn_id = turn_id
+        self.event_log = event_log or EventLog()
+        self.before_first_trace = before_first_trace
+        self.on_trace = on_trace
+        self._did_emit_first_trace = False
+
+    def emit(self, event_type: str, payload: dict[str, Any] | None = None) -> None:
+        try:
+            if event_type not in _CHAT_TRACE_EVENT_TYPES:
+                return None
+            payload = payload or {}
+            if event_type == "run.progress" and self._forward_phase_timing_marker(payload):
+                return None
+            if event_type == "run.progress" and not _chat_progress_has_signal(payload):
+                return None
+            safe_payload = _safe_progress_payload(event_type, payload)
+            if not self.session_id:
+                if self.on_trace is not None:
+                    self.on_trace(safe_payload)
+                return None
+            # before_first_trace is the operator-channel "agent started tool
+            # work" hook (the mission-chat handler persists an acknowledgment
+            # row from it). Latch it on the first REAL tool start only: a
+            # reasoning-summary run.progress event also reaches this sink (it
+            # belongs in the Trace lane), and latching on it persisted a
+            # canned "I'll check that now…" row on every tool-less chat turn —
+            # a phantom transcript row with no client_message_id that popped
+            # in above the streamed reply at snapshot reconcile and made the
+            # console order jump.
+            if not self._did_emit_first_trace and event_type == "run.tool.started":
+                self._did_emit_first_trace = True
+                if self.before_first_trace is not None:
+                    self.before_first_trace(safe_payload)
+            if self.on_trace is not None:
+                self.on_trace(safe_payload)
+            self._mirror_tool_line(event_type, safe_payload)
+            _append_bounded_event(
+                self.event_log,
+                Event(
+                    ts=now(),
+                    type=event_type,
+                    task_id=None,
+                    run_id=self.run_id,
+                    persona_id=self.persona_id,
+                    payload=safe_payload,
+                    session_id=self.session_id,
+                    turn_id=self.turn_id,
+                ),
+            )
+        except Exception:
+            return None
+
+    def _forward_phase_timing_marker(self, payload: dict[str, Any]) -> bool:
+        """Pass a turn's phase-timing marker through to the trace OBSERVER only.
+
+        Returns True when the payload was a marker and this sink has finished
+        with it (the caller must then stop), False for every ordinary payload.
+
+        **Why this bypass exists.** The mission-chat handler's phase marks
+        (``agent_runtime/mission_chat_phases.py``) include one — the
+        conversation loop's ``request_assembled`` dispatch instant — that the
+        loop cannot take itself: it lives a layer below the harness and has no
+        access to the turn's ``TurnPhaseMarks``. It announces the instant on the
+        progress callback instead, and on this lane that callback IS this sink.
+        A timing marker names an instant; it carries no ``tool_name``, no
+        ``command_label``, no summary of work, so ``_chat_progress_has_signal``
+        below correctly judged it Trace-lane noise and dropped it — which also
+        dropped the mark. Live proof: every mission-chat turn record written
+        through 2026-08-23 lacks ``request_assembled`` while the marker fired on
+        every turn.
+
+        **What it deliberately does NOT do.** The marker is an instrument, not
+        an event: it is not appended to the :class:`EventLog`, does not latch
+        ``before_first_trace``, and is not mirrored into the live chat log. The
+        Trace-lane rule stated at :data:`_CHAT_PROGRESS_SIGNAL_KEYS` therefore
+        stays exactly true — no operator-visible row is added by this path.
+
+        **Redaction.** Nothing from the payload is forwarded verbatim except a
+        ``step`` that has just been matched against the closed set of marker
+        steps, and a ``status`` that must be a short bare token. There are no
+        free-text fields on the forwarded shape at all (the producer's fixed
+        ``summary`` is dropped rather than carried), so this bypass cannot
+        become a hole in the redaction boundary the rest of ``emit`` enforces.
+        """
+
+        from .mission_chat_phases import PHASE_TIMING_PHASE, phase_timing_marker_step
+
+        step = phase_timing_marker_step(payload)
+        if step is None:
+            return False
+        if self.on_trace is None:
+            return True
+        marker: dict[str, Any] = {
+            "type": "run.progress",
+            "phase": PHASE_TIMING_PHASE,
+            "step": step,
+        }
+        status = payload.get("status")
+        if isinstance(status, str) and _MARKER_STATUS_RE.fullmatch(status):
+            marker["status"] = status
+        self.on_trace(marker)
+        return True
+
+    def _mirror_tool_line(self, event_type: str, safe_payload: dict[str, Any]) -> None:
+        """Mirror tool starts/finishes into the session's live chat log.
+
+        The EventLog rows above are the authority; this is the greppable
+        companion. A head agent tailing
+        ``<head-home>/chat_live_logs/<session_id>.jsonl`` needs "what is this
+        teammate doing right now" in the SAME stream as the messages — otherwise
+        a long mid-task turn reads as silence. Compact by design (tool + status,
+        no payload) so the mirror stays a transcript, not a second event log.
+
+        Best effort, and deliberately ahead of the EventLog append so a mirror
+        problem can never be mistaken for — or caused by — an event problem.
+        """
+
+        if event_type not in {"run.tool.started", "run.tool.finished"}:
+            return None
+        try:
+            from .chat_live_log import record_chat_tool
+
+            record_chat_tool(
+                session_id=self.session_id,
+                tool=safe_payload.get("tool_name") or safe_payload.get("tool"),
+                status=safe_payload.get("status")
+                or ("started" if event_type.endswith("started") else "finished"),
+                turn_id=self.turn_id,
+            )
+        except Exception:
+            return None
+        return None
+
+    def callback(self) -> "Callable[[dict[str, Any]], None]":
+        """Adapter matching the runner's ``progress_callback`` contract."""
+
+        def _emit(payload: dict[str, Any]) -> None:
+            self.emit(str(payload.get("type", "run.progress")), payload)
+
+        return _emit
+
+
+def _chat_progress_has_signal(payload: dict[str, Any]) -> bool:
+    return any(payload.get(key) for key in _CHAT_PROGRESS_SIGNAL_KEYS)
+
+
+def _append_bounded_event(event_log: EventLog, event: Event) -> None:
+    """Append, degrading oversized payloads instead of silently dropping them.
+
+    The operator detail fields (``tool_result`` / ``output`` / ``tool_input`` /
+    ``dispatch_reply`` / ``dispatch_order``) are the variable-size fields that
+    can push a payload past the 4KB event cap; a too-large event previously
+    vanished into the sink's bare except. Shed them largest-and-least-critical
+    first so the tool row itself (command, target, status, files, the
+    ``→ target`` chip) always survives. If the row is still too large after all
+    five, the final append re-raises to the sink's best-effort boundary
+    (unchanged terminal behavior).
+
+    ``dispatch_reply`` sheds second-to-last on purpose. On a finished
+    ``agent_chat_send`` event its co-resident heavy field is ``tool_result``
+    (≤1700 — the raw JSON that CONTAINS the same reply), so shedding that first
+    usually frees the room and costs the operator nothing they can't read in the
+    bubble. The reply is the operator-facing signal; ``dispatch_order`` stays
+    last so the started event's shed ladder keeps its shape.
+    """
+
+    try:
+        event_log.append(event)
+        return
+    except EventPayloadTooLarge:
+        payload = dict(event.payload or {})
+    for drop_key, marker in (
+        ("tool_result", "tool_result_truncated"),
+        ("output", "output_truncated"),
+        ("tool_input", "tool_input_truncated"),
+        ("dispatch_reply", "dispatch_reply_truncated"),
+        ("dispatch_order", "dispatch_order_truncated"),
+    ):
+        if drop_key not in payload:
+            continue
+        payload.pop(drop_key, None)
+        payload[marker] = True
+        try:
+            event_log.append(_rebuild_event_payload(event, payload))
+            return
+        except EventPayloadTooLarge:
+            continue
+    event_log.append(_rebuild_event_payload(event, payload))
+
+
+def _rebuild_event_payload(event: Event, payload: dict[str, Any]) -> Event:
+    return Event(
+        ts=event.ts,
+        type=event.type,
+        task_id=event.task_id,
+        run_id=event.run_id,
+        persona_id=event.persona_id,
+        payload=payload,
+        session_id=event.session_id,
+        turn_id=event.turn_id,
+    )
+
+
+def _safe_progress_payload(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+    safe: dict[str, Any] = {"type": event_type}
+    observe = redaction_observe_enabled()
+    for key, value in payload.items():
+        if key not in _SAFE_PROGRESS_KEYS:
+            if observe:
+                safe[key] = _observe_value(value)
+                _mark_would_redact(safe, key, "unsupported_progress_key")
+            continue
+        if isinstance(value, list) and key == "changed_files":
+            labels = _safe_file_labels(value)
+            if labels:
+                safe[key] = labels
+            continue
+        if isinstance(value, list) and key == "changed_paths":
+            paths = _safe_operator_path_list(value)
+            if paths:
+                safe[key] = paths
+            continue
+        if isinstance(value, str) and key == "command_full":
+            text = _safe_operator_line(value, limit=_OPERATOR_COMMAND_FULL_MAX)
+            if text:
+                safe[key] = text
+            elif observe:
+                safe[key] = _observe_text(value, limit=_OPERATOR_COMMAND_FULL_MAX)
+                _mark_would_redact(safe, key, "operator_command")
+            continue
+        if isinstance(value, str) and key == "patch_artifact":
+            text = _safe_operator_line(value, limit=_OPERATOR_PATCH_ARTIFACT_MAX)
+            if text:
+                safe[key] = text
+            elif observe:
+                safe[key] = _observe_text(value, limit=_OPERATOR_PATCH_ARTIFACT_MAX)
+                _mark_would_redact(safe, key, "patch_artifact")
+            continue
+        if isinstance(value, str) and key == "target_label":
+            text = _safe_operator_line(value, limit=_OPERATOR_TARGET_MAX)
+            if text:
+                safe[key] = text
+            elif observe:
+                safe[key] = _observe_text(value, limit=_OPERATOR_TARGET_MAX)
+                _mark_would_redact(safe, key, "operator_target")
+            continue
+        if isinstance(value, str) and key == "dispatch_target":
+            text = " ".join(value.strip().split())
+            if text and not _looks_sensitive(text):
+                safe[key] = text[:_OPERATOR_DISPATCH_TARGET_MAX]
+            elif observe and text:
+                safe[key] = _observe_text(value, limit=_OPERATOR_DISPATCH_TARGET_MAX)
+                _mark_would_redact(safe, key, "dispatch_target")
+            continue
+        if isinstance(value, str) and key == "dispatch_order":
+            text = _safe_dispatch_order(value)
+            if text:
+                safe[key] = text
+            elif observe:
+                safe[key] = _observe_text(value, limit=_OPERATOR_DISPATCH_ORDER_MAX)
+                _mark_would_redact(safe, key, "dispatch_order")
+            continue
+        if isinstance(value, str) and key == "dispatch_reply":
+            text = _safe_dispatch_order(value, limit=_OPERATOR_DISPATCH_REPLY_MAX)
+            if text:
+                safe[key] = text
+            elif observe:
+                safe[key] = _observe_text(value, limit=_OPERATOR_DISPATCH_REPLY_MAX)
+                _mark_would_redact(safe, key, "dispatch_reply")
+            continue
+        if isinstance(value, str) and key == "dispatch_reply_from":
+            text = " ".join(value.strip().split())
+            if text and not _looks_sensitive(text):
+                safe[key] = text[:_OPERATOR_DISPATCH_REPLY_FROM_MAX]
+            elif observe and text:
+                safe[key] = _observe_text(value, limit=_OPERATOR_DISPATCH_REPLY_FROM_MAX)
+                _mark_would_redact(safe, key, "dispatch_reply_from")
+            continue
+        if isinstance(value, str) and key == "output":
+            text = _safe_operator_output_tail(value)
+            if text:
+                safe[key] = text
+            continue
+        if isinstance(value, str) and key in ("tool_input", "tool_result"):
+            limit = _OPERATOR_TOOL_INPUT_MAX if key == "tool_input" else _OPERATOR_TOOL_RESULT_MAX
+            text = _safe_operator_block_head(value, limit=limit)
+            if text:
+                safe[key] = text
+            continue
+        if isinstance(value, str) and key == "skill_name":
+            text = " ".join(value.strip().split())
+            if text and not _looks_sensitive(text) and len(text) <= 120:
+                safe[key] = text
+            elif observe:
+                safe[key] = _observe_text(value, limit=120)
+                _mark_would_redact(safe, key, "skill_name")
+            continue
+        if isinstance(value, list) and key == "last_failed_proof_ids":
+            labels = _safe_token_labels(value)
+            if labels:
+                safe[key] = labels
+            continue
+        if isinstance(value, str) and key == "reasoning_summary":
+            text = " ".join(value.strip().split())
+            if not text or _looks_sensitive_or_pathish(text):
+                if observe and text:
+                    safe[key] = _observe_text(text, limit=500)
+                    _mark_would_redact(safe, key, "reasoning_summary")
+                continue
+            safe[key] = f"{text[:497]}…" if len(text) > 500 else text
+            continue
+        if isinstance(value, str) and key in _DISPATCH_ID_KEYS:
+            text = value.strip()
+            if text and not _looks_sensitive(text) and _DISPATCH_ID_RE.fullmatch(text):
+                safe[key] = text
+            elif observe and text:
+                safe[key] = _observe_text(text, limit=_OPERATOR_DISPATCH_ID_MAX)
+                _mark_would_redact(safe, key, key)
+            continue
+        if isinstance(value, str) and key == "command_label":
+            text = " ".join(value.strip().replace("\\", "/").split())
+            if not text or _looks_sensitive(text):
+                if observe and text:
+                    safe[key] = _observe_text(text, limit=240)
+                    _mark_would_redact(safe, key, "command_label")
+                continue
+            safe[key] = f"{text[:237]}..." if len(text) > 240 else text
+            continue
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            text = str(value) if isinstance(value, str) else value
+            if isinstance(text, str) and _looks_sensitive_or_pathish(text):
+                if observe:
+                    safe[key] = _observe_text(text, limit=500)
+                    _mark_would_redact(safe, key, "scalar_progress_value")
+                continue
+            safe[key] = text
+    return safe
+
+
+def _mark_would_redact(payload: dict[str, Any], key: str, reason: str) -> None:
+    markers = payload.setdefault("would_redact", {})
+    if isinstance(markers, dict):
+        markers[str(key)] = reason
+
+
+def _observe_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _observe_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_observe_value(item) for item in value[:200]]
+    if isinstance(value, tuple):
+        return [_observe_value(item) for item in value[:200]]
+    if isinstance(value, str):
+        return _observe_text(value, limit=1600)
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return _observe_text(str(value), limit=500)
+
+
+def _observe_text(value: str, *, limit: int) -> str:
+    lines = [
+        "[redacted line — contained a secret]" if _looks_sensitive(line) else line
+        for line in str(value or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    ]
+    text = "\n".join(lines).strip()
+    if len(text) > limit:
+        return f"{text[: max(0, limit - 1)]}…"
+    return text
+
+
+def _safe_operator_line(value: str, *, limit: int) -> str | None:
+    """One-line operator-console text: paths allowed, secrets blocked, bounded."""
+
+    text = " ".join(value.strip().split())
+    if not text or _looks_sensitive(text):
+        return None
+    return f"{text[: limit - 1]}…" if len(text) > limit else text
+
+
+def _safe_dispatch_order(value: str, *, limit: int = _OPERATOR_DISPATCH_ORDER_MAX) -> str | None:
+    """Redaction boundary for the full agent-to-agent order: drop any secret-
+    bearing line, keep the rest with newline structure intact (never whitespace-
+    collapsed), bounded at ``limit``. Consistent with the profile-runner scrub
+    that produces the field; idempotent when re-applied.
+
+    ``limit`` lets the exchange's REPLY half reuse this exact grade under its own
+    bound — one scrub for both directions of the relay, never two that could
+    drift apart.
+    """
+
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    kept = [line for line in text.split("\n") if not _looks_sensitive(line)]
+    order = "\n".join(kept).strip()
+    if not order:
+        return None
+    if len(order) > limit:
+        order = f"{order[: limit - 1]}…"
+    return order
+
+
+def _safe_operator_output_tail(value: str) -> str | None:
+    """Bounded output tail with line structure kept and secret lines redacted.
+
+    The 4KB event payload cap is the hard ceiling; this keeps the newest
+    ~1.2KB, which is the part of a command's output the operator acts on.
+    """
+
+    text = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return None
+    lines = [
+        "[redacted line — contained a secret]" if _looks_sensitive(line) else line
+        for line in text.split("\n")
+    ]
+    text = "\n".join(lines)
+    if len(text) > _OPERATOR_OUTPUT_TAIL_MAX:
+        text = f"…(earlier output truncated)…\n{text[-_OPERATOR_OUTPUT_TAIL_MAX:]}"
+    return text
+
+
+def _safe_operator_block_head(value: str, *, limit: int) -> str | None:
+    """Bounded HEAD of a key-per-line tool input/result block, line structure
+    kept and secret-bearing lines redacted. Head-biased (unlike the output
+    tail): the leading keys are what the operator reads first. A block whose
+    EVERY line was redacted carries zero signal — dropped whole."""
+
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return None
+    kept_any = False
+    lines: list[str] = []
+    for line in text.split("\n"):
+        if _looks_sensitive(line):
+            lines.append("[redacted line — contained a secret]")
+        else:
+            lines.append(line)
+            if line.strip():
+                kept_any = True
+    if not kept_any:
+        return None
+    text = "\n".join(lines).strip()
+    if not text:
+        return None
+    if len(text) > limit:
+        text = f"{text[:limit]}\n…(rest truncated)…"
+    return text
+
+
+def _safe_operator_path_list(value: list[Any]) -> list[str]:
+    """Operator-grade changed-path list: RELATIVE paths only, bounded."""
+
+    paths: list[str] = []
+    for item in value:
+        text = " ".join(str(item or "").strip().split()).replace("\\", "/")
+        if not text or _looks_sensitive(text):
+            continue
+        if re.match(r"^([A-Za-z]:/|//|/|~)", text):
+            continue
+        if len(text) > 200:
+            text = f"…{text[-199:]}"
+        if text not in paths:
+            paths.append(text)
+        if len(paths) >= _OPERATOR_PATHS_MAX:
+            break
+    return paths
+
+
+def _safe_file_labels(value: list[Any]) -> list[str]:
+    labels: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if not text or _looks_sensitive_or_pathish(text):
+            continue
+        label = text.replace("\\", "/").rsplit("/", 1)[-1]
+        if not label or _looks_sensitive_or_pathish(label):
+            continue
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,96}", label):
+            continue
+        labels.append(label)
+    return labels[:12]
+
+
+def _safe_token_labels(value: list[Any]) -> list[str]:
+    labels: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if not text or _looks_sensitive_or_pathish(text):
+            continue
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", text):
+            continue
+        labels.append(text)
+    return labels[:12]
+
+
+def _looks_sensitive_or_pathish(value: str) -> bool:
+    lowered = value.lower()
+    if _looks_sensitive(value):
+        return True
+    if ":/" in value or "\\" in value:
+        return True
+    if value.startswith(("/", "~")):
+        return True
+    if re.search(r"(^|\s)([A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+", value):
+        return True
+    return False
+
+
+def _looks_sensitive(value: str) -> bool:
+    lowered = value.lower()
+    sensitive_markers = (
+        "secret", "token", "password", "api_key", "apikey", "authorization",
+        "bearer", "credential", "cookie", "private_key", "sk-", "passwd",
+    )
+    return any(marker in lowered for marker in sensitive_markers)
