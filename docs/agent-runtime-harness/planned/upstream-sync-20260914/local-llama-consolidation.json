@@ -1,0 +1,42 @@
+{
+  "branch": "refs/heads/codex/local-llama-review-20260914",
+  "tip": "5104732788a545579aa8498f211467a55679b9e8",
+  "original": "34ad8ba33f2508ab10bb24a26f0377ddb62660cb",
+  "tree": "5f5a34ad214d695f5c889a0798e220d175cc91ad",
+  "tree_equivalence": true,
+  "unchanged_ancestry_through": "5430b7840aa14b1243c2e178358dfe4df9dc816c",
+  "groups": [
+    {
+      "consolidated": "1445fa9d69f9173d85ca4b4f23b0bc441143f375",
+      "original_commits": [
+        "9015185e4eb5a3a6d0ad4261c33ecf221bd507c2"
+      ],
+      "original_tip": "9015185e4eb5a3a6d0ad4261c33ecf221bd507c2",
+      "tree": "1f06655e6204c8f12cad42f500a8059a7893ca8b",
+      "title": "docs(local-llama): define Hermes-owned console lifecycle contract"
+    },
+    {
+      "consolidated": "595b775ea0185464b8084f6bc2a7fac0c070eb3a",
+      "original_commits": [
+        "0ca257114119797c8206cd4503cc91a93d5d2a63",
+        "5a46bf18d63ed05ff2579890da3c10b175fd88b1",
+        "6b3106f2a5891f88f70946d02583e85df5653c19",
+        "9e5b306b946c1c75a56a98ea8e337fa7ce22e471",
+        "9ec37ba8baa9fa59b689a17085e292bc397e7327",
+        "31bf01536a20609e5db0eb508ffcf55c4e7b10df"
+      ],
+      "original_tip": "31bf01536a20609e5db0eb508ffcf55c4e7b10df",
+      "tree": "74d074e98edda0ae995db3e8530cce16a55bbdd0",
+      "title": "feat(local-llama): implement owned runtime, guarded RPC and isolated inference"
+    },
+    {
+      "consolidated": "5104732788a545579aa8498f211467a55679b9e8",
+      "original_commits": [
+        "34ad8ba33f2508ab10bb24a26f0377ddb62660cb"
+      ],
+      "original_tip": "34ad8ba33f2508ab10bb24a26f0377ddb62660cb",
+      "tree": "5f5a34ad214d695f5c889a0798e220d175cc91ad",
+      "title": "docs(local-llama): propose installer contracts and crash recovery"
+    }
+  ]
+}
