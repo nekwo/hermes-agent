@@ -24,3 +24,19 @@ Focused proof through `scripts/run_tests.sh`:
 ## Delivery decision
 
 Use the completed broad run plus focused proof of every remaining failure and the previously uncompleted audit for delivery. Do not wait another roughly 48 minutes for an automatic full rerun of these narrow repairs. Do not claim exact-final-head full CI is green: fresh CI may still be pending. The operator's already-approved Hermes-only stop/FF/dependency refresh/start is next; Launcher remains untouched. Main has not moved at this pre-maintenance checkpoint.
+
+## Exact final focused invocations
+
+Linux, from the isolated clone with its Python 3.11 venv on PATH:
+
+```sh
+bash scripts/run_tests.sh tests/agent_runtime/test_tombstone_registry.py tests/agent_runtime/test_harness_tool_inventory.py tests/tools/test_process_schema_diet.py tests/tools/test_t6b_brief_descriptions.py -j 2 -- -q
+```
+
+Windows used the same four targets through Git Bash, with `HERMES_TEST_VENV=X:/wt/hermes-upstream-audit-20260914/qa-artifacts/patched-runtime-venv`. The three description/inventory files passed (20 checks). After correcting only the new temporary-Git fixture's line endings, the final Windows audit invocation was:
+
+```sh
+scripts/run_tests.sh tests/agent_runtime/test_tombstone_registry.py -j 1 -- -q
+```
+
+It passed all 1,157 checks. Raw intermediate failed logs remain preserved; they are not presented as final passes. The final Python lint invocation was `python -m ruff check tools/process_registry.py tests/agent_runtime/test_tombstone_registry.py` (exit 0).
