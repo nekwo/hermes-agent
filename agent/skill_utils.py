@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from hermes_constants import (
     get_config_path,
+    get_shared_skills_dir,
     get_skills_dir,
     get_subprocess_home,
     is_termux,
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 PLATFORM_MAP = {"macos": "darwin", "linux": "linux", "windows": "win32"}
 
 EXCLUDED_SKILL_DIRS = frozenset((
-    ".git", ".github", ".hub", ".archive", ".curator_backups",
+    ".git", ".github", ".hub", ".archive", ".curator_backups", ".realm_inbox", ".provenance",
     ".venv", "venv", "node_modules", "site-packages", "__pycache__",
     ".tox", ".nox", ".pytest_cache", ".mypy_cache", ".ruff_cache",
 ))
@@ -399,8 +400,11 @@ def get_all_skills_dirs() -> List[Path]:
     """Skill dirs: local ``~/.hermes/skills/`` first, then create_dir, then external.
     Trusted project dirs are NOT included (higher precedence; see get_project_skills_dirs)."""
     dirs = [get_skills_dir()]
+    shared = get_shared_skills_dir()
+    if shared.expanduser() != dirs[0].expanduser():
+        dirs.append(shared)
     create_dir = get_skill_create_dir()
-    if create_dir is not None and create_dir.is_dir():
+    if create_dir is not None and create_dir.is_dir() and create_dir not in dirs:
         dirs.append(create_dir)
     dirs.extend(d for d in get_external_skills_dirs() if d not in dirs)
     return dirs
@@ -583,7 +587,7 @@ def normalize_skill_lookup_name(identifier: str) -> str:
     except Exception:
         primary_root = get_skills_dir()
     trusted_roots = [primary_root]
-    for getter in (get_project_skills_dirs, get_external_skills_dirs):
+    for getter in (get_project_skills_dirs, get_all_skills_dirs):
         try:
             trusted_roots.extend(getter())
         except Exception:
@@ -593,9 +597,9 @@ def normalize_skill_lookup_name(identifier: str) -> str:
     # resolving first would turn that trusted path into one skill_view rejects.
     for root in trusted_roots:
         if identifier_path.is_relative_to(root):
-            return str(identifier_path.relative_to(root))
+            return identifier_path.relative_to(root).as_posix()
     try:
-        return str(identifier_path.resolve().relative_to(primary_root.resolve()))
+        return identifier_path.resolve().relative_to(primary_root.resolve()).as_posix()
     except Exception:
         logger.debug("Skill identifier %r is an absolute path outside trusted skills "
                      "roots — passing through unchanged (skill_view will reject it)", raw_identifier)
@@ -809,3 +813,35 @@ def get_scan_ordered_skills_dirs() -> List[Path]:
     dirs.extend(get_all_skills_dirs())
     return dirs
 # ---- END PLUGIN-COMPAT ----
+
+# Downstream ownership and policy; aliases preserve existing consumers.
+from agent_runtime.skill_resolution import (
+    _SKILL_RUNTIME_SURFACE,
+    _SKILL_RUNTIME_ROOT_NODE_MODE,
+    skill_runtime_scope,
+    current_skill_runtime_context,
+    SkillResolutionCandidate,
+    SkillResolution,
+    _SkillRootRegistry,
+    _SKILL_ROOT_REGISTRY_CACHE,
+    _SKILL_ROOT_REGISTRY_LOCK,
+    _walk_state,
+    skill_root_walks_this_thread,
+    reset_skill_root_walks_for_tests,
+    _note_skill_root_walk,
+    _skill_root_registry_cache_clear,
+    _skill_root_registry,
+    _resolved_path,
+    skill_source_kind,
+    resolve_skill,
+    resolve_skills,
+    _skill_resolution_status,
+    _CONTENT_HASH_CACHE,
+    _CONTENT_HASH_CACHE_MAX,
+    _content_hash_cache_clear,
+    skill_package_content_hash,
+    skill_frontmatter_runtime_compatibility,
+    _cached_skill_frontmatter,
+    skill_runtime_compatibility,
+    required_preload_skill_ids,
+)

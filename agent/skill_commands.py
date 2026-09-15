@@ -545,7 +545,7 @@ def _disabled_skill_names(platform: str | None = None) -> set:
 
 def _load_skill_blocks(
     identifiers: list[str], load, activation_note, task_id: str | None, *,
-    missing_label=lambda ident: ident, disabled_names: set | None = None, disabled_as_missing: bool = False,
+    missing_label=lambda ident: ident, disabled_names: set | None = None, disabled_as_missing: bool = False, required_skill_names: set[str] | None = None,
 ) -> tuple[list[str], list[str], list[str], list[str]]:
     """Load each distinct identifier via *load* and render its block; returns
     ``(loaded_names, missing, disabled, blocks)``. With *disabled_names*, members
@@ -571,12 +571,16 @@ def _load_skill_blocks(
             else:
                 disabled.append(skill_name or identifier)
             continue
-        blocks.append(_render_skill_block(loaded, activation_note(skill_name), task_id))
+        note = activation_note(skill_name)
+        if required_skill_names and (skill_name in required_skill_names or identifier in required_skill_names):
+            note = (f'[IMPORTANT: Runtime policy requires the "{skill_name}" skill on this '
+                    "surface. Its instructions are active for this turn.]")
+        blocks.append(_render_skill_block(loaded, note, task_id))
         loaded_names.append(skill_name)
     return loaded_names, missing, disabled, blocks
 
 
-def build_preloaded_skills_prompt(skill_identifiers: list[str], task_id: str | None = None) -> tuple[str, list[str], list[str]]:
+def build_preloaded_skills_prompt(skill_identifiers: list[str], task_id: str | None = None, *, required_skill_names: set[str] | None = None) -> tuple[str, list[str], list[str]]:
     """Load skills for session-wide CLI/TUI preloading; returns (prompt_text,
     loaded_skill_names, missing_identifiers). Disabled skills count as missing:
     this path bypasses the scan-time filter, and ``hermes -s <skill>`` must not
@@ -593,5 +597,6 @@ def build_preloaded_skills_prompt(skill_identifiers: list[str], task_id: str | N
                       "preloaded. Treat its instructions as active guidance for the duration of this "
                       "session unless the user overrides them.]"),
         task_id, disabled_names=_disabled_skill_names(), disabled_as_missing=True,
+        required_skill_names=required_skill_names,
     )
     return "\n\n".join(prompt_parts), loaded_names, missing

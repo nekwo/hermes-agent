@@ -93,7 +93,7 @@ _CONTEXT_VAR_RESOLVERS = {
     "workspaceFolderBasename": _workspace_basename, "pathSeparator": lambda: os.sep, "/": lambda: os.sep}
 
 
-def _build_safe_env(user_env: Optional[dict]) -> dict:
+def _build_safe_env(user_env: Optional[dict], *, server_name: Optional[str] = None, runtime_env: Optional[dict] = None) -> dict:
     """Filtered env for stdio subprocesses so API keys/tokens don't leak: the safe baseline
     keys, ``XDG_*``, vars injected by an external secret source (users configured that backend
     precisely so subprocesses can consume them), plus the server config's own ``env``."""
@@ -114,6 +114,11 @@ def _build_safe_env(user_env: Optional[dict]) -> dict:
             env[key] = os.environ[key]
     if user_env:
         env.update(user_env)
+    if server_name:
+        from agent_runtime.mcp_environment import _get_process_mcp_env_overrides
+        env.update(_get_process_mcp_env_overrides(server_name))
+    if runtime_env:
+        env.update(runtime_env)
     from agent.delegation_context import delegated_child_subprocess_env
     return delegated_child_subprocess_env(env)
 
@@ -327,6 +332,8 @@ def _load_mcp_config() -> Dict[str, dict]:
         if _env_enabled("HERMES_SAFE_MODE"):
             return {}
         servers = load_config().get("mcp_servers")
+        from agent_runtime.mcp_environment import _resolve_machine_root_tokens
+        servers = _resolve_machine_root_tokens(servers) if isinstance(servers, dict) else {}
         try:  # ensure .env vars are available for interpolation
             from hermes_cli.env_loader import load_hermes_dotenv
             load_hermes_dotenv()

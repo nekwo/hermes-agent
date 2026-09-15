@@ -27,6 +27,13 @@ from tools.skills_tool_plugin import (  # noqa: F401
 from tools.skills_tool_dedup import (  # noqa: F401
     _check_skill_view_dedup, _record_skill_view, reset_skill_view_dedup)
 
+from agent.skill_utils import (
+    current_skill_runtime_context, get_all_skills_dirs, resolve_skill,
+    skill_package_content_hash, skill_frontmatter_runtime_compatibility,
+)
+from agent_runtime.skill_resolution import skill_source_kind
+from agent_runtime.skill_search import skill_search
+
 logger = logging.getLogger(__name__)
 
 # Per-session discovery cache: {cache_key: (signature, timestamp, skills_list)}. Signature =
@@ -111,7 +118,20 @@ def _skill_utils_delegate(attr: str):
 
 skill_matches_platform = _skill_utils_delegate("skill_matches_platform")
 # Offer-time relevance gate (kanban/docker/s6), NOT hard compatibility; explicit loads bypass it.
-skill_matches_environment = _skill_utils_delegate("skill_matches_environment")
+def skill_matches_environment(frontmatter: Dict[str, Any]) -> bool:
+    """Check if a skill is relevant to the current runtime environment.
+
+    Delegates to ``agent.skill_utils.skill_matches_environment`` — kept here
+    as a public re-export so existing callers don't need updating. This is an
+    offer-time relevance gate (kanban/docker/s6), NOT a hard-compatibility gate;
+    explicit skill loads bypass it.
+    """
+    try:
+        from agent.skill_utils import skill_matches_environment as _impl
+        return _impl(frontmatter)
+    except ImportError:
+        environments = frontmatter.get("environments") if isinstance(frontmatter, dict) else None
+        return not environments
 _parse_frontmatter = _skill_utils_delegate("parse_frontmatter")
 _get_disabled_skill_names = _skill_utils_delegate("get_disabled_skill_names")
 
@@ -121,16 +141,25 @@ def check_skills_requirements() -> bool:
 
 
 def _get_category_from_path(skill_path: Path) -> Optional[str]:
-    """``~/.hermes/skills/mlops/axolotl/SKILL.md`` -> ``"mlops"``; active profile dir first
-    (respects test monkeypatching), then skills.external_dirs."""
-    dirs_to_check = [_skills_dir()]
-    with suppress(Exception):
-        from agent.skill_utils import get_external_skills_dirs
-        dirs_to_check.extend(get_external_skills_dirs())
+    """
+    Extract category from skill path based on directory structure.
+
+    For paths like: ~/.hermes/skills/mlops/axolotl/SKILL.md -> "mlops"
+    and ~/.hermes/skills/foundations/runtime/foo/SKILL.md ->
+    "foundations/runtime".
+    Also works for external skill dirs configured via skills.external_dirs.
+    """
+    # Try the active profile skills dir first (respects monkeypatching in tests),
+    # then fall back to external dirs from config.
+    dirs_to_check = _runtime_skill_dirs()
     for skills_dir in dirs_to_check:
-        with suppress(ValueError):
-            if len(parts := skill_path.relative_to(skills_dir).parts) >= 3:
-                return parts[0]
+        try:
+            rel_path = skill_path.relative_to(skills_dir)
+            parts = rel_path.parts
+            if len(parts) >= 3:
+                return "/".join(parts[:-2])
+        except ValueError:
+            continue
     return None
 
 
@@ -173,8 +202,7 @@ def _skill_search_dirs() -> Tuple[list, list, Path]:
     from agent.skill_utils import get_external_skills_dirs, get_project_skills_dirs
     project_dirs = list(get_project_skills_dirs())
     active_skills_dir = _skills_dir()
-    all_dirs = project_dirs + ([active_skills_dir] if active_skills_dir.exists() else [])
-    all_dirs += get_external_skills_dirs()
+    all_dirs = project_dirs + [d for d in _runtime_skill_dirs() if d.exists()]
     return project_dirs, all_dirs, active_skills_dir
 
 
@@ -185,7 +213,8 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
     cache_key = "with_disabled" if skip_disabled else "filtered"
     disabled = set() if skip_disabled else _get_disabled_skill_names()
     project_dirs, dirs_to_scan, _ = _skill_search_dirs()
-    signature = _skills_scan_signature(dirs_to_scan, disabled)
+    active_surface, root_node_mode = current_skill_runtime_context()
+    signature = (_skills_scan_signature(dirs_to_scan, disabled), active_surface, root_node_mode)
     now = time.monotonic()
     cached = _SKILLS_CACHE.get(cache_key)
     if cached is not None and cached[0] == signature and (now - cached[1]) < _SKILLS_CACHE_TTL_SECONDS:
@@ -203,6 +232,9 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
                 frontmatter, body = _parse_frontmatter(_read_skill_text(skill_md)[:4000])
                 if not skill_matches_platform(frontmatter) or not skill_matches_environment(frontmatter):
                     continue
+                if active_surface and not skill_frontmatter_runtime_compatibility(
+                    frontmatter, surface=active_surface, root_node_mode=root_node_mode).get("compatible"):
+                    continue
                 name = frontmatter.get("name", skill_md.parent.name)[:MAX_NAME_LENGTH]
                 if name in seen_names or name in disabled:
                     continue
@@ -211,7 +243,9 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
                     description = next((ln for ln in map(str.strip, body.strip().split("\n"))
                                         if ln and not ln.startswith("#")), description)
                 seen_names.add(name)
-                skills.append({"name": name, "description": _truncate_description(description),
+                category = _get_category_from_path(skill_md)
+                skills.append({"identifier": f"{category}/{name}" if category else name,
+                               "tags": _parse_tags(frontmatter.get("tags")), "name": name, "description": _truncate_description(description),
                                "category": _get_category_from_path(skill_md)})
             except (UnicodeDecodeError, PermissionError) as e:
                 logger.debug("Failed to read skill file %s: %s", skill_md, e)
@@ -311,44 +345,8 @@ def _under_any(path: Path, dirs) -> bool:
 
 
 def _collect_skill_candidates(name, local_category_name, all_dirs):
-    """ALL (skill_dir, skill_md) candidates across every dir and lookup strategy (direct path,
-    recursive by dir / frontmatter name, legacy flat <name>.md), deduped by resolved path.
-    Collision detection is the point: silent shadowing of a local skill by a same-named
-    external one is a real bug class, so the caller refuses >1."""
-    from agent.skill_utils import iter_skill_index_files
-    candidates: List[Tuple[Optional[Path], Path]] = []
-    seen_md: set = set()
-
-    def _record(sd: Optional[Path], smd: Path) -> None:
-        key = smd
-        with suppress(Exception):
-            key = smd.resolve()
-        if key not in seen_md:
-            seen_md.add(key)
-            candidates.append((sd, smd))
-
-    def _record_direct(direct_path: Path) -> None:  # "mlops/axolotl" / "axolotl" or its flat .md sibling
-        flat = direct_path.with_suffix(".md")
-        if not _is_skill_support_path(direct_path) and direct_path.is_dir() and (direct_path / "SKILL.md").exists():
-            _record(direct_path, direct_path / "SKILL.md")
-        elif flat.exists() and not _is_skill_support_path(flat):
-            _record(None, flat)
-
-    for search_dir in all_dirs:
-        for direct in filter(None, (name, local_category_name)):  # "p:x" with no plugin p → "p/x"
-            _record_direct(search_dir / direct)
-        # Recursive by directory name plus frontmatter `name:` — skills_list()
-        # exposes the frontmatter name, so skill_view(name) must accept it too.
-        for found_skill_md in iter_skill_index_files(search_dir, "SKILL.md"):
-            if (found_skill_md.parent.name == name
-                    or _safe_frontmatter(found_skill_md).get("name") == name):
-                _record(found_skill_md.parent, found_skill_md)
-        # Legacy flat <name>.md anywhere under the dir; support docs are excluded
-        # (they load via file_path and must not shadow real skills sharing the basename).
-        for found_md in search_dir.rglob(f"{name}.md"):
-            if found_md.name != "SKILL.md" and not _is_skill_support_path(found_md):
-                _record(None, found_md)
-    return candidates
+    resolution = resolve_skill(name, roots=all_dirs, categorized_identifier=local_category_name)
+    return [(candidate.skill_dir, candidate.skill_md) for candidate in resolution.candidates]
 
 
 # (support dir, globs, recursive, files only) — order is the linked_files key order.
@@ -365,7 +363,7 @@ def _skill_linked_files(skill_dir: Optional[Path]) -> dict:
     for sub, globs, recursive, files_only in _LINKED_FILE_SPECS if skill_dir else ():
         base = skill_dir / sub
         found = [
-            str(f.relative_to(skill_dir)) for g in globs if base.exists()
+            f.relative_to(skill_dir).as_posix() for g in globs if base.exists()
             for f in (base.rglob(g) if recursive else base.glob(g))
             if not files_only or f.is_file()]
         if found:
@@ -470,7 +468,7 @@ def _locate_skill(name: str, local_category_name: Optional[str], project_dirs: l
         # ambiguity WITHIN the project tier still refuses.
         candidates = [c for c in candidates if _under_any(c[1], project_dirs)] or candidates
     if len(candidates) > 1:
-        paths = [str(smd) for _, smd in candidates]
+        paths = [smd.as_posix() for _, smd in candidates]
         logger.warning("Skill name collision for '%s': %d candidates — %s", name, len(candidates), "; ".join(paths))
         return _fail(
             f"Ambiguous skill name '{name}': {len(candidates)} skills match across your local skills dir "
@@ -542,6 +540,15 @@ def skill_view(
             return _fail(f"Failed to read skill '{name}': {e}")
         _log_security_warnings(name, skill_md, content, all_dirs, active_skills_dir)
         frontmatter = _safe_frontmatter(content=content)
+        active_surface, root_node_mode = current_skill_runtime_context()
+        if active_surface:
+            compatibility = skill_frontmatter_runtime_compatibility(
+                frontmatter, surface=active_surface, root_node_mode=root_node_mode)
+            if not compatibility.get("compatible"):
+                return _fail(f"Skill '{name}' is not available on the active {active_surface} surface.",
+                             reason=compatibility.get("reason"), surface=active_surface,
+                             mode="root_node" if root_node_mode else "standard",
+                             readiness_status=SkillReadinessStatus.UNSUPPORTED.value)
         if not skill_matches_platform(frontmatter):
             return _fail(f"Skill '{name}' is not supported on this platform.", readiness_status=SkillReadinessStatus.UNSUPPORTED.value)
         resolved_name = frontmatter.get("name", skill_md.parent.name)
@@ -558,7 +565,7 @@ def skill_view(
             _parse_tags(hermes_meta.get(k) or frontmatter.get(k, "")) for k in ("tags", "related_skills"))
         linked_files = _skill_linked_files(skill_dir)
         try:
-            rel_path = str(skill_md.relative_to(active_skills_dir))
+            rel_path = skill_md.relative_to(active_skills_dir).as_posix()
         except ValueError:  # external skill — relative to its own parent dir
             rel_path = str(skill_md.relative_to(skill_md.parent.parent)) if skill_md.parent.parent else skill_md.name
         skill_name = frontmatter.get("name", skill_md.stem if not skill_dir else skill_dir.name)
@@ -572,6 +579,9 @@ def skill_view(
             except Exception:
                 logger.debug("Could not resolve org provenance for %s", skill_name, exc_info=True)
         result = {
+            "resolution_status": "resolved",
+            "source_kind": next((skill_source_kind(root) for root in all_dirs if _under_any(skill_md, [root])), None),
+            "content_hash": skill_package_content_hash(skill_dir, skill_md),
             "success": True, "name": skill_name, "description": frontmatter.get("description", ""),
             "tags": tags, "related_skills": related_skills, "content": header + rendered_content,
             "path": rel_path, "skill_dir": str(skill_dir) if skill_dir else None,
@@ -684,3 +694,72 @@ def __getattr__(name):  # PEP 562 — lazy so no import cycles
     warn_once(__name__, name, *target)
     return getattr(importlib.import_module(target[0]), target[1])
 # ---- END PLUGIN-COMPAT ----
+
+
+def _runtime_skill_dirs() -> List[Path]:
+    """Canonical registry with the patchable active profile root first."""
+
+    dirs = [_skills_dir(), *get_all_skills_dirs()[1:]]
+    result: List[Path] = []
+    seen: set[Path] = set()
+    for path in dirs:
+        key = path.expanduser().absolute()
+        if key not in seen:
+            seen.add(key)
+            result.append(path)
+    return result
+
+SKILL_SEARCH_SCHEMA = {
+    "name": "skill_search",
+    "description": "Search installed skills + the Hermes Skills Hub by query without loading SKILL.md bodies (compact ids/descriptions). Disambiguator: skill_view loads an installed match; `hermes skills install` fetches an external one.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Search query, e.g. 'flutter qa', 'github review', or 'kubernetes'.",
+            },
+            "source": {
+                "type": "string",
+                "enum": [
+                    "all",
+                    "installed",
+                    "official",
+                    "hermes-index",
+                    "skills-sh",
+                    "well-known",
+                    "github",
+                    "clawhub",
+                    "claude-marketplace",
+                    "lobehub",
+                    "browse-sh",
+                ],
+                "description": "Optional source filter. Default 'all'. Use 'installed' to avoid remote hub search.",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum results to return; capped at 50.",
+            },
+            "include_installed": {
+                "type": "boolean",
+                "description": "When true, include installed local/profile skills before hub results. Default true.",
+            },
+        },
+        "required": ["query"],
+    },
+}
+
+registry.register(
+    name="skill_search",
+    toolset="skills",
+    schema=SKILL_SEARCH_SCHEMA,
+    handler=lambda args, **kw: skill_search(
+        query=args.get("query", ""),
+        source=args.get("source", "all"),
+        limit=args.get("limit", 10),
+        include_installed=args.get("include_installed", True),
+        task_id=kw.get("task_id"),
+    ),
+    check_fn=check_skills_requirements,
+    emoji="🔎",
+)

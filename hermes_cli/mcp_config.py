@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import time
+from hermes_cli.flag_binding import list_flag_or_empty
 from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_cli.config import (
@@ -23,7 +24,7 @@ from tools.mcp_tool_common import _env_ref_name
 
 logger = logging.getLogger(__name__)
 
-_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+from agent_runtime.mcp_environment import _ENV_VAR_NAME_RE
 
 
 # MCP test/dashboard surfaces must not fingerprint credential header values
@@ -408,7 +409,9 @@ def _resolve_mcp_server_config(config: dict) -> dict:
             load_hermes_dotenv()
         except Exception:  # pragma: no cover — defensive
             pass
-    return _interpolate_env_vars(config)
+    from agent_runtime.machine_roots import contains_path_tokens, expand_config_paths
+    resolved = expand_config_paths(config) if contains_path_tokens(config) else config
+    return _interpolate_env_vars(resolved)
 
 
 def _probe_single_server(
@@ -590,7 +593,7 @@ def cmd_mcp_add(args):
     url = getattr(args, "url", None)
     # --command uses dest="mcp_command" (see hermes_cli/main.py for why the dest is renamed).
     command = getattr(args, "mcp_command", None)
-    cmd_args = getattr(args, "args", None) or []
+    cmd_args = list_flag_or_empty(args, "args")
     if cmd_args and cmd_args[0] == "--":
         cmd_args = cmd_args[1:]
     auth_type = getattr(args, "auth", None)
@@ -744,8 +747,21 @@ def cmd_mcp_test(args):
     cfg = _lookup_server(name, _get_mcp_servers(), "Available")
     if cfg is None:
         return
+    cfg = dict(cfg)
+    try:
+        runtime_env = _parse_env_assignments(list_flag_or_empty(args, "env"))
+    except ValueError as exc:
+        _error(str(exc))
+        return
+    if runtime_env:
+        if "url" in cfg and "command" not in cfg:
+            _error("--env is only supported for stdio MCP servers")
+            return
+        cfg["runtime_env"] = runtime_env
     print()
     print(color(f"  Testing '{name}'...", Colors.CYAN))
+    if runtime_env:
+        _info(f"Applied {len(runtime_env)} one-shot env override(s): {', '.join(sorted(runtime_env))}")
     if "url" in cfg:
         _info(f"Transport: HTTP → {cfg['url']}")
     else:

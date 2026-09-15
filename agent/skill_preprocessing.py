@@ -3,6 +3,7 @@ inline ``!`cmd``` shell expansion."""
 
 import logging
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -49,8 +50,17 @@ def run_inline_shell(command: str, cwd: Path | None, timeout: int) -> str:
     _popen_kwargs = {"creationflags": windows_hide_flags()} if IS_WINDOWS else {}
     from agent.delegation_context import delegated_child_subprocess_env
     try:
+        bash_exe = shutil.which("bash")
+        if IS_WINDOWS and bash_exe and "\\windows\\system32\\bash.exe" in bash_exe.lower():
+            # System32 bash.exe is the WSL launcher and can block forever when
+            # no distro is initialized. Prefer Git Bash for the POSIX snippets
+            # this feature promises to execute.
+            git_bash = Path(r"C:\Program Files\Git\bin\bash.exe")
+            bash_exe = str(git_bash) if git_bash.is_file() else bash_exe
+        if not bash_exe:
+            return "[inline-shell error: bash not found]"
         completed = subprocess.run(
-            ["bash", "-c", command],
+            [bash_exe, "-c", command],
             cwd=str(cwd) if cwd else None,
             capture_output=True,
             text=True, encoding='utf-8', errors='replace',
