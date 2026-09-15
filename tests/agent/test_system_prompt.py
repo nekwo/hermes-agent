@@ -187,6 +187,79 @@ class TestCodingContextBlock:
         assert "coding agent" not in _stable_prompt(agent)
 
 
+class TestT6bToolGuidance:
+    """T6b: the tool schemas ship brief descriptions; the details-on-demand
+    pointer and the policy moves ride the byte-stable, tool-gated system prompt.
+    These extend the byte-stability coverage to the new lines (static, gated on
+    the fixed-per-conversation tool set → no per-turn churn)."""
+
+    def test_tool_describe_pointer_present_with_tools_absent_without(self):
+        from agent.prompt_builder import TOOL_DESCRIBE_GUIDANCE
+
+        with_tools = _stable_prompt(_make_agent(valid_tool_names=["read_file"]))
+        assert TOOL_DESCRIBE_GUIDANCE in with_tools
+        no_tools = _stable_prompt(_make_agent(valid_tool_names=[]))
+        assert TOOL_DESCRIBE_GUIDANCE not in no_tools
+
+    def test_shell_preference_gated_on_terminal(self):
+        from agent.prompt_builder import SHELL_TOOL_PREFERENCE_GUIDANCE
+
+        assert SHELL_TOOL_PREFERENCE_GUIDANCE in _stable_prompt(
+            _make_agent(valid_tool_names=["terminal"])
+        )
+        assert SHELL_TOOL_PREFERENCE_GUIDANCE not in _stable_prompt(
+            _make_agent(valid_tool_names=["clarify"])
+        )
+
+    def test_clarify_choices_gated_on_clarify(self):
+        from agent.prompt_builder import CLARIFY_CHOICES_GUIDANCE
+
+        assert CLARIFY_CHOICES_GUIDANCE in _stable_prompt(
+            _make_agent(valid_tool_names=["clarify"])
+        )
+        assert CLARIFY_CHOICES_GUIDANCE not in _stable_prompt(
+            _make_agent(valid_tool_names=["terminal"])
+        )
+
+    def test_browser_precondition_gated_on_browser(self):
+        from agent.prompt_builder import BROWSER_PRECONDITION_GUIDANCE
+
+        assert BROWSER_PRECONDITION_GUIDANCE in _stable_prompt(
+            _make_agent(valid_tool_names=["browser_navigate"])
+        )
+        assert BROWSER_PRECONDITION_GUIDANCE not in _stable_prompt(
+            _make_agent(valid_tool_names=["terminal"])
+        )
+
+    def test_skill_confirm_before_delete_gated_on_skill_manage(self):
+        confirm = "Confirm with the user before creating or deleting a skill."
+        assert confirm in _stable_prompt(_make_agent(valid_tool_names=["skill_manage"]))
+        assert confirm not in _stable_prompt(_make_agent(valid_tool_names=["read_file"]))
+
+    def test_guidance_is_byte_stable_across_builds(self):
+        """Byte-stability guard (extends T5): the stable tier carrying the T6b
+        lines is byte-identical across repeated builds — the additions are
+        static and introduce no per-turn volatility."""
+        tools = ["terminal", "clarify", "browser_navigate", "skill_manage", "read_file"]
+        first = _stable_prompt(_make_agent(valid_tool_names=tools))
+        second = _stable_prompt(_make_agent(valid_tool_names=tools))
+        assert first == second
+        # All four moves + the pointer are present in the one build.
+        from agent.prompt_builder import (
+            BROWSER_PRECONDITION_GUIDANCE,
+            CLARIFY_CHOICES_GUIDANCE,
+            SHELL_TOOL_PREFERENCE_GUIDANCE,
+            TOOL_DESCRIBE_GUIDANCE,
+        )
+        for line in (
+            TOOL_DESCRIBE_GUIDANCE,
+            SHELL_TOOL_PREFERENCE_GUIDANCE,
+            CLARIFY_CHOICES_GUIDANCE,
+            BROWSER_PRECONDITION_GUIDANCE,
+        ):
+            assert line in first
+
+
 def test_shared_project_context_precedes_worktree_bytes(monkeypatch, tmp_path):
     import os
 
@@ -396,16 +469,18 @@ def test_build_system_prompt_records_stable_prefix():
 def test_coding_prompt_orders_shared_context_before_workspace(monkeypatch):
     """Keep workspace guidance intact after the shared context."""
     import agent.system_prompt as system_prompt
+    from agent.prompt_builder import TOOL_DESCRIBE_GUIDANCE
 
     agent = _make_agent(
         valid_tool_names=["read_file"],
         _parallel_tool_call_guidance=False,
     )
+    hermes_home = Path("/hermes")
     monkeypatch.setattr(system_prompt, "DEFAULT_AGENT_IDENTITY", "IDENTITY")
     monkeypatch.setattr(system_prompt, "HERMES_AGENT_HELP_GUIDANCE", "HELP")
     monkeypatch.setattr(system_prompt, "HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS", "HELP")
     monkeypatch.setattr(system_prompt, "STEER_CHANNEL_NOTE", "STEER")
-    monkeypatch.setattr(system_prompt, "get_hermes_home", lambda: Path("/hermes"))
+    monkeypatch.setattr(system_prompt, "get_hermes_home", lambda: hermes_home)
 
     # Production renders this as str(get_hermes_home()) + "/profiles/<name>/",
     # and str(Path("/hermes")) is platform-dependent (backslash on Windows) —
@@ -413,16 +488,23 @@ def test_coding_prompt_orders_shared_context_before_workspace(monkeypatch):
     _home_str = str(Path("/hermes"))
     expected_profile = (
         "Active Hermes profile: default. Other profiles (if any) live "
-        f"under {_home_str}/profiles/<name>/. Each profile has its own skills/, "
+        f"under {hermes_home}/profiles/<name>/. Each profile has its own skills/, "
         "plugins/, cron/, and memories/ that affect a different session than "
         "this one. Do not modify another profile's skills/plugins/cron/memories "
         "unless the user explicitly directs you to."
     )
-    expected = "\n\n".join((
+    # Fork: the T6b details-on-demand pointer is a static, tool-gated stable-tier
+    # line that sits between the help guidance and the steer note (see
+    # TestT6bToolGuidance above). It is part of the byte-stable prefix.
+    stable_blocks = (
         "IDENTITY",
         "HELP",
+        TOOL_DESCRIBE_GUIDANCE,
         "STEER",
         "CODING_STABLE",
+    )
+    expected = "\n\n".join((
+        *stable_blocks,
         "SYSTEM_MESSAGE",
         "CONTEXT_FILES",
         "WORKSPACE",
@@ -449,7 +531,7 @@ def test_coding_prompt_orders_shared_context_before_workspace(monkeypatch):
         prompt = build_system_prompt(agent, system_message="SYSTEM_MESSAGE")
 
     assert prompt == expected
-    assert agent._cached_system_prompt_static == "\n\n".join(expected.split("\n\n")[:4])
+    assert agent._cached_system_prompt_static == "\n\n".join(stable_blocks)
 
 
 class TestTelegramRichMessagesHint:

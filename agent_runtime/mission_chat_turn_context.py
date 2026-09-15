@@ -1,0 +1,1160 @@
+"""Everything one mission-chat turn must KNOW, assembled in one testable place.
+
+Why this module exists
+----------------------
+A mission-chat turn carries far more than the operator's sentence. Before the
+model is called the harness must resolve, in order: this turn's wall budget, the
+skills to preload (and their delivery envelope), the workspace ``AGENTS.md``, the
+resident-actor runtime signature, this lane's capability account, the situational
+HUD and its snapshot/unchanged delivery, and the volatile tail the agent reads
+every single turn.
+
+All of that lived inside ``_cmd_mission_chat_message`` in
+``hermes_cli/harness_parts/persona_commands.py`` — a command part that is
+``exec``-loaded into ``harness.py``'s globals (``harness._load_command_parts``)
+rather than imported. That has a specific, expensive consequence: the assembly
+was not reachable by a unit test. Everything guarding it had to be an AST
+source-shape assertion ("this function calls ``render_capability_block`` and
+puts the result in a list named ``volatile_lines``"), which pins the SHAPE of the
+code and says nothing about the BYTES the agent receives. A refactor that kept
+the shape and broke the output would pass; a refactor that changed the shape and
+kept the output would fail. Both are the wrong answer.
+
+This module is the extraction. :func:`build_mission_chat_turn_context` performs
+the whole per-turn assembly and returns one frozen
+:class:`MissionChatTurnContext`; the CLI body keeps only composition — gather
+inputs, call the builder, feed the result to the runtime, send. The assembly is
+now unit-testable end to end, and the AST guards that duplicated it are replaced
+by tests that assert the composed OUTPUT.
+
+Pinned semantics (do not "tidy" these)
+--------------------------------------
+* **The MCP admission line is a SEPARATE voice from the capability block.** Its
+  denials are resolved at a different lifecycle point (execution-time
+  degradations reach the agent through ``agent.steer``, after this envelope is
+  sealed) and it is gated on the admission kill switch. Folding it into the
+  capability account would give one fact two voices, which is how an agent
+  learns to discount both.
+* **Wall-budget visibility rides the volatile tail** (``8e7a37d6d``) — never the
+  hashed HUD body, which a cached ``unchanged`` delivery would serve stale.
+* **Capability drops and envelope grants/refusals ride the volatile tail too**
+  (``ddc5af110``), and simultaneously the HUD dict, so the operator's CONTEXT
+  peek shows the SAME account the agent was told.
+* **An admitted MCP surface arrives WITH its operating manual.** A turn that
+  is handed tools but not the document describing what to do when they refuse
+  will improvise — the 2026-07-29 ``helper_low_information_capture`` burn. The
+  manuals (``mcp_admission.MCP_OPERATING_SKILLS``) join the SAME required-preload
+  set as ``load_policy: required_preload``, because everything downstream asks
+  one question and a second list would be a second answer to it.
+* **One resolve, one object.** The wall budget the agent is told about is the
+  same object the runner's clamp enforces; the capability account recorded for
+  the operator is the same object rendered for the agent. Resolving either twice
+  is how the two views drift.
+* **The chat lane's visibility is resolved ONCE per turn**
+  (``chat_lane_bundle``). Four of the resolvers below — the capability account,
+  the admission line, the admitted operating manuals, the tool contract and the
+  permission state — used to walk ``permission_options_for_chat`` →
+  ``effective_toolsets``/``all_registered_toolsets`` → the registry's
+  ``check_fn`` sweep INDEPENDENTLY, and ``mission_chat_reply`` then walked it a
+  fourth time for the request it assembles. Live receipt for the cost:
+  ``registry_probe_rounds=27`` inside one 1,313 ms context build. They now read
+  one bundle, memoized on the lane's own identity; the AUTHORITIES are
+  unchanged and are exactly the functions the bundle calls. See
+  :mod:`agent_runtime.chat_lane_bundle` for the key and its staleness surface. That
+  receipt is HISTORICAL since 2026-09-02: ``all_registered_toolsets`` stopped
+  asking for an availability verdict it discarded, so this walk resolves no
+  probe at all; the once-per-turn resolution stands on the composition it saves.
+* **The reuse key is a function of actor IDENTITY, never of row liveness — and
+  never of ambient process state.** :func:`mission_chat_runtime_signature` folds
+  the persona, the instance, the permission answer and the runtime config
+  through explicit field allowlists (:data:`PERSONA_IDENTITY_FIELDS`,
+  :data:`INSTANCE_IDENTITY_FIELDS`, :data:`_ACTOR_PERMISSION_FIELDS`,
+  :data:`ACTOR_CONFIG_IDENTITY_FIELDS`) rather than hashing the whole record or
+  the whole document. See those constants for the live receipt that forced each.
+  It is PUBLIC because
+  :mod:`agent_runtime.persona_chat_actor_prewarm` must compute the SAME key
+  (not an equal one) when it builds a chat's resident actor ahead of the first
+  turn — see its docstring.
+* **A rebuild NAMES the input that moved.** The signature is composed once as a
+  flat dict (:func:`mission_chat_runtime_signature_components`) and folded two
+  ways: ``sha256`` of the whole thing is the reuse key, and one digest per
+  component (:func:`mission_chat_runtime_signature_digests`) rides with it to
+  ``PersonaChatRuntimeRegistry.acquire``. A key that refuses to match therefore
+  reports ``resident_rebuild_component_<name>`` per moved component instead of
+  only ``resident_rebuild_runtime_signature_changed``. NAMES only — the digests
+  are one-way and no value is ever emitted, because the components include
+  prompt- and policy-adjacent material (``surface_prompt_sha256``, the tool
+  contract) and "which one moved" is the whole diagnostic.
+
+Impurity is confined to :class:`MissionChatTurnResolvers`
+---------------------------------------------------------
+The assembly genuinely has side effects and store reads (consuming the queued
+skill list, reading the skill catalog, loading a file, reading persona/permission
+state). Rather than scatter them, every one is a named field on a resolvers value
+object whose default binds the canonical authority. Production passes nothing and
+gets the canonical wiring; a unit test passes fakes and drives the whole builder
+without a runtime root. There is no second authority — the defaults ARE the
+authorities the turn itself uses.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import time
+from dataclasses import asdict, dataclass, field, is_dataclass
+from typing import Any, Callable, Iterable, Mapping, Sequence
+
+from .cli_format import emit_json
+from .runtime_hud import (
+    render_capability_block,
+    render_runtime_context_envelope,
+    render_situational_hud_block,
+    render_skill_preload_envelope,
+    runtime_context_delivery,
+    situational_hud_revision,
+    skill_preload_delivery,
+    skill_preload_revision,
+)
+from .turn_budget import TurnWallBudget, render_turn_budget_line, resolve_turn_wall_budget
+from .volatile_tail import VolatileTail, VolatileTailBuilder
+
+logger = logging.getLogger(__name__)
+
+#: The prompt-contract revision folded into the runtime signature. A resident
+#: actor is reusable only while every prompt/provider/tool input is identical,
+#: and this constant is how a deliberate change to the CONTRACT (rather than to
+#: any one input) invalidates every resident actor at once.
+PROMPT_CONTRACT_REVISION = "mc-chat-continuity-v1"
+
+#: Surface name the required-skill preload policy keys on.
+PRELOAD_SURFACE = "mission_chat"
+
+#: chat-turn-prep Stage 6 item 2: the sub-spans this builder measures, in the
+#: order it performs them. ``context_built`` is ONE number on the phase block —
+#: 468–1,813 ms live, 136–1,171 ms in the §0.3 sandbox — and the profile said
+#: 984 of a cold 1,171 was the skill-root walk behind ``_resolve_skill_preload``
+#: and ~90 was the HUD's roster of 11. Neither is readable from the mark.
+#:
+#: The keys are the handler's, not this module's: it folds them into the turn's
+#: ``profile_timing`` beside ``session_db_open_ms``, where the store's
+#: ``safe_turn_profile_timing`` bounds them. They are INSTRUMENTS — nothing
+#: downstream may branch on one.
+CONTEXT_TIMING_KEYS: tuple[str, ...] = (
+    "context_skill_preload_ms",
+    "context_hud_ms",
+    "context_signature_ms",
+)
+
+
+def _elapsed_ms(started: float) -> int:
+    """Whole milliseconds since ``started``, clamped at zero.
+
+    ``time.monotonic`` by construction (never a wall clock): these spans are
+    subtracted from each other and compared against the turn's own monotonic
+    marks, and an NTP step inside a turn must not be able to produce a negative
+    "duration" on a durable record.
+    """
+
+    return max(0, int((time.monotonic() - float(started)) * 1000))
+
+
+# ── volatile-tail roster ─────────────────────────────────────────────────────
+#
+# The tail is the ONE channel emitted on every delivery, so what may ride it —
+# and how much room each fact gets — is a contract, not an accident of whatever
+# each renderer happened to produce. Budgets are per contributor so a long
+# capability account cannot squeeze out the countdown and a chatty admission
+# line cannot squeeze out the capability account.
+#
+# Each budget is set several times the realistic maximum of its renderer (all
+# three are hard-capped upstream: the capability block caps each name list at
+# ``SITUATIONAL_HUD_CAPABILITY_CAP``; the admission line emits one entry per
+# declared server; the budget line is a fixed two sentences). So on any standard
+# turn the composed tail is byte-identical to the hand-joined list this replaced.
+# The budgets exist for the day a policy widens — and when that day comes the
+# shortfall is stated in band and recorded, never silently swallowed.
+
+TAIL_TURN_BUDGET = "turn_budget"
+TAIL_CAPABILITY = "capability"
+TAIL_MCP_ADMISSION = "mcp_admission"
+
+TAIL_BUDGET_BYTES: dict[str, int] = {
+    TAIL_TURN_BUDGET: 1024,
+    TAIL_CAPABILITY: 4096,
+    TAIL_MCP_ADMISSION: 2048,
+}
+
+
+# ── resolvers (the only impure surface) ──────────────────────────────────────
+
+
+def _default_consume_queued_skills(*, persona_id: str, session_id: str) -> list[str]:
+    from .queued_skills import consume_skills_for_next_turn
+
+    return list(consume_skills_for_next_turn(persona_id=persona_id, session_id=session_id))
+
+
+def _default_required_preload_skills(
+    skills: Sequence[Any], *, root_registries: dict[str, Any] | None = None
+) -> list[str]:
+    from agent.skill_utils import required_preload_skill_ids
+
+    return list(
+        required_preload_skill_ids(
+            list(skills or []),
+            surface=PRELOAD_SURFACE,
+            root_node_mode=False,
+            _root_registries=root_registries,
+        )
+    )
+
+
+def _default_build_preloaded_skills_prompt(
+    names: Sequence[str], *, task_id: str, required_skill_names: set[str] | None
+) -> tuple[str, list[str], list[str]]:
+    from agent.skill_commands import build_preloaded_skills_prompt
+
+    kwargs = {"required_skill_names": required_skill_names} if required_skill_names else {}
+    prompt, loaded, missing = build_preloaded_skills_prompt(
+        list(names), task_id=task_id, **kwargs
+    )
+    return str(prompt or ""), list(loaded or []), list(missing or [])
+
+
+def _default_admitted_operating_skills(persona: Any, *, session_id: str | None) -> list[str]:
+    # Through the bundle, which resolves ``mission_chat_operating_skills`` — see
+    # this module's "one resolve" note and :mod:`agent_runtime.chat_lane_bundle`.
+    from .chat_lane_bundle import chat_lane_bundle
+
+    return list(chat_lane_bundle(persona, session_id=session_id).operating_skills)
+
+
+def _default_load_workspace_agents(agents_file: Any) -> Any:
+    from .prompt_observability import load_workspace_agents_context
+
+    return load_workspace_agents_context(agents_file)
+
+
+def _default_capability_block(persona: Any, *, session_id: str | None) -> dict[str, Any]:
+    # Through the bundle, which resolves ``capability_block_for_persona``.
+    from .chat_lane_bundle import chat_lane_bundle
+
+    return chat_lane_bundle(persona, session_id=session_id).capability()
+
+
+def _default_situational_hud(
+    instance: Any, *, turn_budget: dict[str, Any], capability: dict[str, Any]
+) -> dict[str, Any]:
+    from .runtime_hud import situational_hud_for_instance
+
+    return situational_hud_for_instance(
+        instance, turn_budget=turn_budget, capability=capability
+    )
+
+
+def _default_admission_line(persona: Any, *, session_id: str | None) -> str:
+    # Through the bundle, which resolves ``mission_chat_admission_line``.
+    from .chat_lane_bundle import chat_lane_bundle
+
+    return chat_lane_bundle(persona, session_id=session_id).admission_line
+
+
+def _default_tool_contract(persona: Any, *, session_id: str | None) -> dict[str, Any]:
+    # Through the bundle, which composes the same two lists
+    # ``chat_runtime_tool_contract`` composes — from the SAME resolve the
+    # request the actor is built from uses, so the reuse key and the request
+    # cannot describe different tool surfaces.
+    from .chat_lane_bundle import chat_lane_bundle
+
+    return chat_lane_bundle(persona, session_id=session_id).tool_contract()
+
+
+def _default_permission_state(persona: Any, *, session_id: str | None) -> dict[str, Any]:
+    # Through the bundle, which resolves ``permission_state_for_chat``.
+    from .chat_lane_bundle import chat_lane_bundle
+
+    return chat_lane_bundle(persona, session_id=session_id).permission_state()
+
+
+def _default_store_root() -> str:
+    from . import paths
+
+    return str(paths.store_root())
+
+
+@dataclass(frozen=True, slots=True)
+class MissionChatTurnResolvers:
+    """The impure seams the assembly needs, each bound to its ONE authority.
+
+    Every default is the same function the turn itself would have called
+    inline — this object relocates the calls, it does not reinterpret them.
+    Tests override fields to drive :func:`build_mission_chat_turn_context`
+    without a runtime root.
+    """
+
+    consume_queued_skills: Callable[..., list[str]] = _default_consume_queued_skills
+    #: chat-turn-prep CP-5: takes an optional ``root_registries`` keyword so the
+    #: preload policy and the prompt-observability row share ONE registry walk
+    #: per physical root per turn. Injected fakes may still take just ``skills``
+    #: — the call site passes the keyword only when it is accepted.
+    required_preload_skills: Callable[..., list[str]] = (
+        _default_required_preload_skills
+    )
+    admitted_operating_skills: Callable[..., list[str]] = (
+        _default_admitted_operating_skills
+    )
+    build_preloaded_skills_prompt: Callable[..., tuple[str, list[str], list[str]]] = (
+        _default_build_preloaded_skills_prompt
+    )
+    load_workspace_agents: Callable[[Any], Any] = _default_load_workspace_agents
+    capability_block: Callable[..., dict[str, Any]] = _default_capability_block
+    situational_hud: Callable[..., dict[str, Any]] = _default_situational_hud
+    admission_line: Callable[..., str] = _default_admission_line
+    tool_contract: Callable[..., dict[str, Any]] = _default_tool_contract
+    permission_state: Callable[..., dict[str, Any]] = _default_permission_state
+    store_root: Callable[[], str] = _default_store_root
+
+
+DEFAULT_RESOLVERS = MissionChatTurnResolvers()
+
+
+# ── the assembled context ────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class MissionChatSkillPreload:
+    """The turn's skill preload: what was asked for, what loaded, what is missing.
+
+    ``prompt`` is already wrapped in its structural ``<skill_preload>`` envelope,
+    because that envelope is what makes the persisted native row
+    projection-safe — wrapping at the ONE producer means no downstream caller can
+    forget. ``delivery`` is ``snapshot`` only when no matching snapshot survives
+    in the effective native lineage (cold resume / post-compression re-anchor);
+    otherwise a compact ``unchanged`` stub re-asserts the active skills.
+    """
+
+    prompt: str
+    queued: tuple[str, ...] = ()
+    required: tuple[str, ...] = ()
+    loaded: tuple[str, ...] = ()
+    missing: tuple[str, ...] = ()
+    revision: str = ""
+    delivery: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class MissionChatTurnContext:
+    """Everything the turn needs to know, resolved exactly once.
+
+    The runtime-context envelope is deliberately NOT a field: it needs the
+    ``context_id`` minted by the observability row, which is built FROM this
+    object. :meth:`runtime_context_envelope` closes that loop without inviting a
+    second HUD/tail resolution.
+    """
+
+    wall_budget: TurnWallBudget
+    capability: dict[str, Any]
+    situational_hud: dict[str, Any]
+    situational_hud_revision: str
+    situational_hud_delivery: str
+    skills: MissionChatSkillPreload
+    workspace_agents: Any
+    workspace_agents_receipt: dict[str, Any] | None
+    runtime_signature: str
+    volatile_tail: VolatileTail
+    #: One digest per :func:`mission_chat_runtime_signature` component, in the
+    #: same composition the composite above was folded from. Carried so a
+    #: rebuild can NAME the input that moved instead of only reporting that the
+    #: composite did — see :func:`mission_chat_runtime_signature_digests`.
+    #: Defaulted so a caller that only wants the composite (and every test that
+    #: constructs this object by hand) is unchanged.
+    runtime_signature_digests: dict[str, str] = field(default_factory=dict)
+    #: chat-turn-prep Stage 6 item 2 — :data:`CONTEXT_TIMING_KEYS` → elapsed ms,
+    #: for the sub-spans this build actually performed. An INSTRUMENT the
+    #: handler folds onto ``profile_timing``: no consumer may branch on it, and
+    #: an empty mapping is what a hand-constructed context (or one built through
+    #: a resolver set that skipped a step) honestly reports.
+    timings: dict[str, int] = field(default_factory=dict)
+
+    # — convenience projections the CLI body used to hold as locals —
+
+    @property
+    def skill_preload_prompt(self) -> str:
+        return self.skills.prompt
+
+    @property
+    def workspace_agents_content(self) -> str | None:
+        return getattr(self.workspace_agents, "content", None)
+
+    @property
+    def workspace_agents_path(self) -> str | None:
+        """The loaded ``AGENTS.md``'s own path — the workspace POINTER (G6).
+
+        Only a file that actually LOADED points at a real workspace root: an
+        invalid / missing / oversized selection must not ground the turn
+        somewhere it never read.
+        """
+
+        receipt = getattr(self.workspace_agents, "receipt", None)
+        if not isinstance(receipt, dict) or not receipt.get("included"):
+            return None
+        return str(receipt.get("path") or "") or None
+
+    def situational_hud_body(self) -> str:
+        """The hashed HUD body for this turn (stable fields only)."""
+
+        return render_situational_hud_block(self.situational_hud)
+
+    def runtime_context_envelope(self, *, context_id: str) -> str:
+        """The per-turn envelope: hashed body + always-emitted volatile tail."""
+
+        return render_runtime_context_envelope(
+            context_id=str(context_id),
+            revision=self.situational_hud_revision,
+            delivery=self.situational_hud_delivery,
+            situational_hud_content=self.situational_hud_body(),
+            volatile_content=self.volatile_tail.content,
+        )
+
+
+# ── the builder ──────────────────────────────────────────────────────────────
+
+
+def build_mission_chat_turn_context(
+    *,
+    persona: Any,
+    instance: Any,
+    config: Any,
+    session_id: str,
+    native_history: Iterable[dict[str, Any]] | None,
+    model_selection: dict[str, Any],
+    session_model_config: dict[str, Any] | None = None,
+    max_seconds: Any,
+    relay_deadline_epoch: float | None,
+    relay_chain: Iterable[str] = (),
+    min_relay_seconds: float,
+    agents_file: Any = None,
+    surface_prompt: str = "",
+    resolvers: MissionChatTurnResolvers = DEFAULT_RESOLVERS,
+    root_registries: dict[str, Any] | None = None,
+) -> MissionChatTurnContext:
+    """Resolve one mission-chat turn's whole context. Order is load-bearing.
+
+    The wall budget is resolved BEFORE the HUD because the HUD carries its
+    projection; the capability account is resolved before the HUD for the same
+    reason; the skill preload is resolved before the envelope because the
+    envelope's delivery is chosen against the CONTENT's revision. Each fact is
+    resolved once and only once — a second resolve is how the operator's
+    recorded view and the agent's rendered view start describing different
+    turns.
+    """
+
+    # Materialised once: TWO delivery decisions scan the lineage (the skill
+    # preload's and the HUD's), and a one-shot iterable would leave the second
+    # scan looking at an empty history — which reads as "no matching snapshot
+    # survives" and silently re-snapshots every turn.
+    history = list(native_history or ())
+
+    #: Stage 6 item 2's accumulator. Filled as each sub-span closes, so a build
+    #: that raises part-way carries nothing rather than a half-attributed span.
+    timings: dict[str, int] = {}
+
+    _started = time.monotonic()
+    skills = _resolve_skill_preload(
+        persona=persona,
+        session_id=session_id,
+        native_history=history,
+        resolvers=resolvers,
+        root_registries=root_registries,
+    )
+    timings["context_skill_preload_ms"] = _elapsed_ms(_started)
+
+    workspace_agents = resolvers.load_workspace_agents(agents_file)
+    workspace_agents_receipt = None
+    if workspace_agents is not None:
+        receipt = getattr(workspace_agents, "receipt", None)
+        workspace_agents_receipt = dict(receipt) if isinstance(receipt, dict) else {}
+        # The preview is operator-facing content, not a runtime input: folding
+        # it into the signature would make the signature an observability
+        # channel for prompt text.
+        workspace_agents_receipt.pop("preview", None)
+
+    # Composed ONCE, then folded two ways: the composite is the reuse key the
+    # registry compares, the per-component digests are what let a mismatch name
+    # the input that moved. Deriving them from the same components dict is what
+    # keeps the diff honest — a second composition could name a component the
+    # key was never built from.
+    _started = time.monotonic()
+    signature_components = mission_chat_runtime_signature_components(
+        persona=persona,
+        instance=instance,
+        config=config,
+        session_id=session_id,
+        session_model_config=session_model_config or {},
+        model_selection=model_selection,
+        workspace_agents_receipt=workspace_agents_receipt,
+        surface_prompt=surface_prompt,
+        resolvers=resolvers,
+    )
+    runtime_signature = mission_chat_runtime_signature_from_components(
+        signature_components
+    )
+    runtime_signature_digests = mission_chat_runtime_signature_digests(
+        signature_components
+    )
+    # The composition AND both folds, as one span: they read the same components
+    # dict and splitting them would bill a hash separately from the resolve that
+    # produced its input. The tool contract and permission state inside the
+    # components come through the chat-lane bundle, so on a turn that rebuilt
+    # the bundle this span is where that rebuild is paid.
+    timings["context_signature_ms"] = _elapsed_ms(_started)
+
+    # Wall budget for this turn, resolved ONCE (single authority: the same object
+    # arms the runner's checkpoint clamp and renders the agent's budget line). A
+    # relayed hop inherits the chain deadline, so the TARGET's HUD shows the
+    # SHARED remaining budget — that is how a supervisor learns what window a
+    # dispatch actually has instead of briefing 50 minutes of work into a
+    # 9-minute hop (live incident 2026-07-26).
+    wall_budget = resolve_turn_wall_budget(
+        max_seconds=max_seconds,
+        relay_deadline_epoch=relay_deadline_epoch,
+        relay_chain=relay_chain,
+        min_relay_seconds=min_relay_seconds,
+    )
+
+    # This lane's capability account, resolved ONCE (G5): the typed chat-lane
+    # drops plus the terminal envelope's grant/refusal posture for this role. It
+    # rides the HUD dict for operator parity (the CONTEXT peek shows exactly what
+    # the agent was told) AND the volatile tail for the agent — never the hashed
+    # body.
+    capability = resolvers.capability_block(persona, session_id=session_id) or {}
+
+    _started = time.monotonic()
+    situational_hud = (
+        resolvers.situational_hud(
+            instance, turn_budget=wall_budget.hud_block(), capability=capability
+        )
+        or {}
+    )
+    timings["context_hud_ms"] = _elapsed_ms(_started)
+    revision = situational_hud_revision(situational_hud)
+    delivery = runtime_context_delivery(history, revision)
+
+    volatile_tail = _compose_volatile_tail(
+        persona=persona,
+        session_id=session_id,
+        wall_budget=wall_budget,
+        capability=capability,
+        resolvers=resolvers,
+    )
+
+    return MissionChatTurnContext(
+        wall_budget=wall_budget,
+        capability=capability,
+        situational_hud=situational_hud,
+        situational_hud_revision=revision,
+        situational_hud_delivery=delivery,
+        skills=skills,
+        workspace_agents=workspace_agents,
+        workspace_agents_receipt=workspace_agents_receipt,
+        runtime_signature=runtime_signature,
+        volatile_tail=volatile_tail,
+        runtime_signature_digests=runtime_signature_digests,
+        timings=timings,
+    )
+
+
+def _compose_volatile_tail(
+    *,
+    persona: Any,
+    session_id: str,
+    wall_budget: TurnWallBudget,
+    capability: dict[str, Any],
+    resolvers: MissionChatTurnResolvers,
+) -> VolatileTail:
+    """The registered roster of facts that must be true THIS turn.
+
+    Every contributor here describes something a cached ``unchanged`` delivery
+    (or an ``unavailable`` one, which drops the HUD body entirely) must not be
+    allowed to serve stale: how much wall clock is left, what this lane's policy
+    took away and what its envelope will refuse, and which declared MCP servers
+    this turn did not get. Each renderer returns ``""`` when it has nothing to
+    report, so a lane with no drops and no denials pays no line.
+
+    The MCP line stays a SEPARATE contributor from the capability account on
+    purpose — see this module's docstring.
+    """
+
+    builder = VolatileTailBuilder()
+    builder.add(
+        TAIL_TURN_BUDGET,
+        render_turn_budget_line(wall_budget),
+        budget_bytes=TAIL_BUDGET_BYTES[TAIL_TURN_BUDGET],
+    )
+    builder.add(
+        TAIL_CAPABILITY,
+        render_capability_block(capability),
+        budget_bytes=TAIL_BUDGET_BYTES[TAIL_CAPABILITY],
+    )
+    builder.add(
+        TAIL_MCP_ADMISSION,
+        _safe_admission_line(persona, session_id=session_id, resolvers=resolvers),
+        budget_bytes=TAIL_BUDGET_BYTES[TAIL_MCP_ADMISSION],
+    )
+    return builder.build()
+
+
+def _safe_admission_line(
+    persona: Any, *, session_id: str, resolvers: MissionChatTurnResolvers
+) -> str:
+    try:
+        return str(resolvers.admission_line(persona, session_id=session_id) or "")
+    except Exception:  # pragma: no cover - a context line must never fail a turn
+        logger.debug("MCP admission line unavailable for this turn", exc_info=True)
+        return ""
+
+
+def _safe_admitted_operating_skills(
+    persona: Any, *, session_id: str, resolvers: MissionChatTurnResolvers
+) -> list[str]:
+    """Same never-fails contract as the admission LINE, for the same reason.
+
+    Both read the same admission policy, and neither is worth a failed turn: a
+    turn that loses its manual is degraded, a turn that raises is lost.
+    """
+
+    try:
+        return list(
+            resolvers.admitted_operating_skills(persona, session_id=session_id) or []
+        )
+    except Exception:  # pragma: no cover - a context input must never fail a turn
+        logger.debug("admitted MCP operating skills unavailable for this turn", exc_info=True)
+        return []
+
+
+
+
+def _required_preload_skills(
+    resolvers: MissionChatTurnResolvers,
+    skills: Sequence[Any],
+    root_registries: dict[str, Any] | None,
+) -> list[str]:
+    """Call the preload resolver, passing CP-5's shared map only if it takes one.
+
+    ``MissionChatTurnResolvers`` is an injection seam and its fakes are written
+    across a dozen test modules against the old one-positional-argument shape.
+    Widening the contract by force would red every one of them for a reason that
+    has nothing to do with what they assert, so the keyword is offered and a
+    resolver that does not accept it is called exactly as before. The production
+    default accepts it, which is the path that matters for the walk count.
+    """
+
+    fn = resolvers.required_preload_skills
+    if root_registries is None:
+        return list(fn(skills))
+    try:
+        return list(fn(skills, root_registries=root_registries))
+    except TypeError:
+        return list(fn(skills))
+
+
+def _resolve_skill_preload(
+    *,
+    persona: Any,
+    session_id: str,
+    native_history: Iterable[dict[str, Any]] | None,
+    resolvers: MissionChatTurnResolvers,
+    root_registries: dict[str, Any] | None = None,
+) -> MissionChatSkillPreload:
+    """Consume the queued skills, load the preload, wrap it in its envelope.
+
+    Consuming the queue is a real mutation and happens exactly once per turn, in
+    this one place, ahead of every other resolution — a second consume would
+    silently swallow an operator's queued skill.
+
+    ``required`` has TWO producers and one meaning: "runtime policy says the
+    model must be holding this skill on this turn".
+
+    * The persona's own grants whose frontmatter declares
+      ``load_policy: required_preload`` for this surface — the standing answer.
+    * The operating manual(s) for whatever MCP surface THIS run was actually
+      admitted (``mcp_admission.MCP_OPERATING_SKILLS``) — the per-turn answer.
+      Handing an agent a tool surface while withholding the document that says
+      what to do when that surface refuses is what turned one live
+      ``helper_low_information_capture`` into a burned QA turn (2026-07-29): the
+      remedy was written down, granted to the persona, and never in context.
+
+    They merge into one list rather than two because everything downstream —
+    the ``required_skill_names`` marking that renders the stronger "runtime
+    policy requires this skill" activation note, the observability row's
+    ``required_preload_skills``, the missing-skill accounting — asks the same
+    question, and a second list would be a second answer to it. Standing policy
+    comes first so a turn's admitted manual can never displace it; ``dict``
+    de-duplication keeps a skill that is both from being loaded twice.
+    """
+
+    queued = list(
+        resolvers.consume_queued_skills(
+            persona_id=str(getattr(persona, "id", "") or ""), session_id=session_id
+        )
+        or []
+    )
+    required = list(
+        dict.fromkeys(
+            [
+                *_required_preload_skills(
+                    resolvers, getattr(persona, "skills", []) or [], root_registries
+                ),
+                *_safe_admitted_operating_skills(
+                    persona, session_id=session_id, resolvers=resolvers
+                ),
+            ]
+        )
+    )
+    to_preload = list(dict.fromkeys([*required, *queued]))
+
+    prompt = ""
+    loaded: list[str] = []
+    missing: list[str] = []
+    if to_preload:
+        try:
+            prompt, loaded, missing = resolvers.build_preloaded_skills_prompt(
+                to_preload,
+                task_id=session_id,
+                required_skill_names=set(required) if required else None,
+            )
+        except Exception:
+            # A preload fault degrades the turn's skills; it never fails the
+            # turn. The missing list is what the observability row reports.
+            logger.debug("skill preload failed for this turn", exc_info=True)
+            prompt, loaded, missing = "", [], list(to_preload)
+
+    revision = skill_preload_revision(prompt)
+    delivery = skill_preload_delivery(native_history, revision)
+    return MissionChatSkillPreload(
+        prompt=render_skill_preload_envelope(
+            skill_names=loaded,
+            skill_preload_content=prompt,
+            revision=revision,
+            delivery=delivery,
+        ),
+        queued=tuple(queued),
+        required=tuple(required),
+        loaded=tuple(loaded),
+        missing=tuple(missing),
+        revision=revision,
+        delivery=delivery,
+    )
+
+
+def _revision_hash(value: Any) -> str:
+    return hashlib.sha256(emit_json(value).encode("utf-8")).hexdigest()
+
+
+def _as_plain(value: Any) -> Any:
+    return asdict(value) if is_dataclass(value) and not isinstance(value, type) else value
+
+
+# ── actor identity vs. row liveness ──────────────────────────────────────────
+#
+# ``mission_chat_runtime_signature`` is a REUSE key: two turns share an actor only
+# when every input that decides what that actor IS is identical. It used to fold
+# ``asdict(persona)`` and ``asdict(instance)`` whole, which quietly made it a key
+# over the ROWS rather than over the actor — and a persona-instance row is
+# written on chat activity.
+#
+# **Live receipt (2026-08-23T14:45:14Z).** The operator turned
+# ``persona_chat.hot_sessions`` on and restarted the serve, so the resident-actor
+# registry finally existed. The SECOND message of one neko chat, ~45 s after the
+# first, with no persona / config / permission change between them, recorded
+# ``resident_rebuild_runtime_signature_changed`` and ``resident_actor_reused=0``.
+# The instance row had moved: ``state`` flips busy→idle across a turn,
+# ``updated_at`` and ``last_heartbeat_at`` are stamped on every write, and the
+# mission-chat handler itself writes ``skill_manifest_hash`` back onto the
+# instance at the end of each turn. So the key could never match twice and hot
+# sessions bought nothing at all.
+#
+# Both lists are ALLOWLISTS, not denylists, and that is the point: a new field on
+# either record is presumed bookkeeping until someone decides it changes the
+# actor and names it here. A denylist inverts the default and re-opens this
+# defect on the next field anyone adds.
+#
+# A name that is not on the record at all is recorded as ABSENT rather than
+# defaulted, so a record shape that LOSES a field cannot hash identical to one
+# that carries it set to ``None``.
+
+#: Persona fields that decide what a constructed actor is: its identity and
+#: prompt material, its provider/model triple, its tool surface, its skills, its
+#: profile binding and its budgets. ``readiness`` is deliberately absent — it is
+#: a stored report ABOUT the persona, refreshed by readiness passes, and nothing
+#: an actor is built from reads it.
+PERSONA_IDENTITY_FIELDS: tuple[str, ...] = (
+    "api_mode",
+    "autonomy",
+    "display_name",
+    "hermes_profile",
+    "id",
+    "include_core_context_files",
+    "include_profile_memory",
+    "iteration_budget",
+    "max_api_calls",
+    "max_total_tokens",
+    "max_wall_seconds",
+    "model",
+    "model_override_issued_at",
+    "provider",
+    "repo_scope",
+    "repo_scope_label",
+    "required_mcp_servers",
+    "role",
+    "schema_version",
+    "skills",
+    "soul_overlay_path",
+    "system_prompt_path",
+    "toolsets",
+)
+
+#: Instance fields that decide what a constructed actor is: which persona and
+#: profile it places, where it is placed, and the per-instance model-override
+#: tier (``set-model`` writes ``model`` / ``provider`` / ``api_mode`` /
+#: ``reasoning_effort`` / ``model_override_issued_at`` together, so all five are
+#: here and a real override change still rotates the key).
+#:
+#: Everything else is liveness or routing and is deliberately absent:
+#: ``state`` / ``updated_at`` / ``last_heartbeat_at`` / ``token_budget_used``
+#: (stamped by activity), ``skill_manifest_hash`` (written back by the turn that
+#: just ran), ``active_run_id`` / ``current_assignment_id`` / ``current_task_id``
+#: (run bookkeeping), the chat pointers ``default_chat_session_id`` /
+#: ``session_id`` / ``chat_head_home`` (the chat root is already in the signature
+#: as ``root``), and the graph edges ``spawned_by`` / ``steered_by`` /
+#: ``returned_to`` / ``goal_id`` (they render into the HUD, which rides the
+#: volatile tail and is therefore not part of the cached actor at all).
+#:
+#: ``current_chat_goal`` was here and is not any more (2026-08-23), by that same
+#: last rule read consistently: its only readers are the chat-list TITLE
+#: (``persona_chat_history``) and the operator projections / situational HUD, and
+#: the HUD reaches the model as per-turn ENVELOPE content, never as anything the
+#: agent factory is called with. A ``persona instance steer --goal`` therefore
+#: changes what the next turn SAYS, not what its actor IS — and paying a full
+#: rebuild for it was the same category error ``goal_id``'s exclusion already
+#: names one line above.
+INSTANCE_IDENTITY_FIELDS: tuple[str, ...] = (
+    "api_mode",
+    "display_name",
+    "id",
+    "mode",
+    "model",
+    "model_override_issued_at",
+    "persona_id",
+    "profile_id",
+    "provider",
+    "realm_id",
+    "reasoning_effort",
+    "role",
+    "runtime_root",
+    "schema_version",
+    "skill_overrides",
+    "workspace_id",
+)
+
+
+def _identity_revision(value: Any, fields: tuple[str, ...]) -> str:
+    """Hash a record's ACTOR-IDENTITY projection. See the note above."""
+
+    plain = _as_plain(value)
+    source = plain if isinstance(plain, dict) else None
+    projected: dict[str, Any] = {}
+    absent: list[str] = []
+    missing = object()
+    for name in fields:
+        if source is not None:
+            if name in source:
+                projected[name] = source[name]
+            else:
+                absent.append(name)
+            continue
+        found = getattr(value, name, missing)
+        if found is missing:
+            absent.append(name)
+        else:
+            projected[name] = found
+    return _revision_hash({"fields": projected, "absent": absent})
+
+
+# ── the permission projection the ACTOR is built from ────────────────────────
+#
+# ``permission_state_for_chat`` answers the OPERATOR's question ("what may this
+# chat do, spelled out"): a resolved ``blocked_tools`` entry list, ``workdir``,
+# ``repo_scope``, ``can_run_terminal`` / ``can_mutate_files``, and the grant's
+# ``expires_at`` / ``turns_remaining`` counters. None of that reaches the agent
+# factory. ``ProfileAgentRunner._execute_agent_run`` builds an actor from
+# ``enabled_toolsets`` and ``blocked_tool_names`` — which this signature already
+# carries VERBATIM as ``tool_contract``, composed from the same one bundle
+# resolve — plus scopes derived from the permission MODE.
+#
+# So the whole projection in the key was the row-liveness defect of
+# ``7f2c82f090`` wearing different clothes. Under the shipped default permission
+# mode (``unbounded``: ``SHIPPED_DEFAULT_PERMISSION_MODE``) the resolved
+# ``blocked_tools`` list is computed over EVERY tool registered in the process,
+# so in a warm multi-persona ``harness serve`` it moves whenever anything
+# registers or deregisters — another persona's MCP admission, a profile
+# bootstrap's plugin pass — none of which changes what THIS chat's actor is.
+#
+# What stays is what decides the constructed actor and is not already stated by
+# ``tool_contract``: the mode itself (it selects the admission mode, the
+# terminal-envelope scope and the toolset resolution), where the mode came from,
+# and whether the grant behind it has lapsed. ``turns_remaining`` decrementing
+# 5 → 4 changes nothing about the actor; the turn it reaches 0 flips ``expired``,
+# which is here, so the key still rotates exactly when the answer changes.
+_ACTOR_PERMISSION_FIELDS: tuple[str, ...] = ("mode", "source", "expired")
+
+
+def _actor_permission_identity(state: Any) -> dict[str, Any]:
+    """The permission facts a CONSTRUCTED actor depends on. See the note above."""
+
+    source = state if isinstance(state, dict) else {}
+    return {name: source.get(name) for name in _ACTOR_PERMISSION_FIELDS}
+
+
+# ── the config projection: an AMBIENT document is not an actor fact ───────────
+#
+# ``relevant_config_revision`` used to be ``_revision_hash(_as_plain(config))`` —
+# the WHOLE loaded ``AgentRuntimeConfig``. That is the row-liveness defect of
+# ``7f2c82f090`` and the permission defect of ``14271f261f`` in a third costume,
+# with one extra edge: the config object is not merely wider than the actor, it
+# is AMBIENT.
+#
+# **Live receipt (2026-08-23T21:38:29Z)**, root
+# ``persona_chat_personainst_neko_supervisor_agent_f6f7a51b_66a438245225``:
+# ``resident_signature_diff … components=relevant_config_revision`` — and again
+# at 21:39:07, 21:39:19, 21:40:36, 21:40:40. EVERY turn of that chat rebuilt its
+# actor on this ONE component, while no config file was written in the window
+# (root ``config.yaml`` hours older, the profile's days older) and the loader
+# hashes a static file identically twice in one process and across two.
+#
+# What moved was not the file — it was WHICH FILE.
+# ``load_agent_runtime_config()`` resolves ``get_hermes_home()/config.yaml``,
+# and with no context-local override on the turn's thread that is the
+# process-global ``HERMES_HOME``. ``profile_context.persona_profile_context``
+# rewrites that variable for the duration of a profile binding (its own
+# docstring states the invariant: sound only while runs are serialized by
+# ``profile_runner._WORKDIR_LOCK``), and the readiness walk behind every
+# snapshot build enters it once per persona — in the serve process that also
+# hosts chat turns, on another thread, every few seconds. So the document a turn
+# hashed was whichever profile the walk was standing in when the turn happened
+# to look, and two turns of one unchanged chat could not agree.
+#
+# The rule that answers it is the one this module already applies twice: key on
+# what the ACTOR IS, via an ALLOWLIST, and let a resolved component speak for
+# every input it already states.
+#
+#: Config fields an actor's CONSTRUCTION consumes and that no other component
+#: already states. It is EMPTY, and that is a finding rather than a stub — the
+#: audit, block by block, of what ``_construct_agent`` (``profile_runner``) is
+#: actually called with:
+#:
+#: * ``default_provider`` / ``default_model`` / ``default_api_mode`` — reach the
+#:   factory only through the model cascade, already keyed as ``provider`` /
+#:   ``model`` / ``api_mode`` / ``reasoning_effort``.
+#: * ``personas.<id>.*`` — resolved into the persona record before anything is
+#:   built, already keyed as ``persona_revision``.
+#: * ``store_root`` — already keyed as ``runtime_root``.
+#: * ``tool_permissions.default_mode`` — reaches the actor as the RESOLVED lane
+#:   mode, already keyed as ``permissions.mode``.
+#: * ``mcp_admission`` and the chat-lane toolset knobs
+#:   (``personas.<id>.chat_lane_restore_toolsets``) — folded into the bundle's
+#:   ``enabled_toolsets`` / ``blocked_tool_names`` by the SAME resolve the run
+#:   builds from (``chat_lane_bundle``: admission is an input to
+#:   ``_enabled_toolsets_for_chat``), already keyed verbatim as
+#:   ``tool_contract``.
+#: * ``terminal_envelope.grants`` — the run BINDS a scope per turn
+#:   (``profile_runner``: ``terminal_envelope_scope(request.…)``); nothing about
+#:   it is baked into the agent object.
+#: * ``mission_chat.*`` — per-turn budgets. The compaction cap is re-applied on
+#:   every turn INCLUDING a reused actor's (``profile_runner``, the
+#:   ``root_chat_session_id`` block runs after the registry hands one back), so
+#:   it cannot be stale on a resident actor.
+#: * ``persona_chat.*`` — the registry's own policy. It decides whether an actor
+#:   is resident at all, never what one IS.
+#: * ``read_model`` / ``event_log`` / ``supervision`` /
+#:   ``coordinator_permissions`` / ``redaction_mode`` /
+#:   ``lock_acquire_timeout_seconds`` / ``schema_version`` — no reader anywhere
+#:   in an actor's construction.
+#:
+#: Empty is therefore the complete answer, not a shortcut, and it is the only
+#: answer that also holds while the process is briefly pointed at another
+#: profile: any non-empty projection of an AMBIENT document can still move for a
+#: reason that has nothing to do with this chat. A field that genuinely decides
+#: what an actor IS goes here by name, and the key rotates on it again —
+#: ``test_a_NAMED_actor_config_field_still_rotates_the_key`` witnesses that the
+#: mechanism is live rather than decorative.
+ACTOR_CONFIG_IDENTITY_FIELDS: tuple[str, ...] = ()
+
+
+def mission_chat_runtime_signature_components(
+    *,
+    persona: Any,
+    instance: Any,
+    config: Any,
+    session_id: str,
+    session_model_config: dict[str, Any],
+    model_selection: dict[str, Any],
+    workspace_agents_receipt: dict[str, Any] | None,
+    surface_prompt: str,
+    resolvers: MissionChatTurnResolvers = DEFAULT_RESOLVERS,
+) -> dict[str, Any]:
+    """The reuse key's COMPONENTS, before they are folded into one digest.
+
+    Public for the same reason ``chat_lane_bundle.chat_lane_bundle_key_material``
+    is: a digest is unreadable evidence. When ``acquire`` refuses to reuse an
+    actor, the only useful question is WHICH input moved, and that cannot be
+    answered from the composite. :func:`mission_chat_runtime_signature` is
+    exactly ``sha256(this)``; :func:`mission_chat_runtime_signature_digests`
+    turns it into the per-component map a rebuild diffs.
+
+    Every value here is either an id, a bounded scalar, or already a hash —
+    config objects are HASHED before inclusion rather than embedded, so neither
+    this dict nor the digests taken from it can become an observability channel
+    for prompt/config text.
+    """
+
+    return {
+        "persona_revision": _identity_revision(persona, PERSONA_IDENTITY_FIELDS),
+        "instance_revision": _identity_revision(instance, INSTANCE_IDENTITY_FIELDS),
+        "root": session_id,
+        "root_model_config_revision": _revision_hash(session_model_config),
+        "provider": model_selection.get("effective_provider"),
+        "model": model_selection.get("effective_model"),
+        "api_mode": model_selection.get("effective_api_mode")
+        or getattr(persona, "api_mode", None),
+        "reasoning_effort": model_selection.get("effective_reasoning_effort"),
+        "profile": getattr(persona, "hermes_profile", None),
+        # STAYS, and may not be dropped: the actor is CONSTRUCTED from these two
+        # lists (``profile_runner._enabled_toolsets_for_run`` /
+        # ``_blocked_tool_names_for_run``) and
+        # ``_prepare_resident_persona_chat_agent`` does not re-apply them on
+        # reuse — it refreshes callbacks, the cache scope and the iteration cap
+        # and nothing else. A resident actor whose tool surface moved is stale,
+        # so a rebuild here is correct behaviour, not churn.
+        "tool_contract": resolvers.tool_contract(persona, session_id=session_id),
+        "permissions": _actor_permission_identity(
+            resolvers.permission_state(persona, session_id=session_id)
+        ),
+        # The config's ACTOR-IDENTITY projection, never the loaded document: the
+        # document is ambient (another thread's profile binding decides which
+        # file it is) and everything in it that reaches a constructed actor is
+        # already stated, resolved, by a component above. See
+        # ``ACTOR_CONFIG_IDENTITY_FIELDS`` and the 2026-08-23T21:38:29Z receipt.
+        "relevant_config_revision": _identity_revision(
+            config, ACTOR_CONFIG_IDENTITY_FIELDS
+        ),
+        "workspace_agents": workspace_agents_receipt,
+        "surface_prompt_sha256": hashlib.sha256(
+            str(surface_prompt or "").encode("utf-8")
+        ).hexdigest(),
+        "runtime_root": resolvers.store_root(),
+        "prompt_contract_revision": PROMPT_CONTRACT_REVISION,
+    }
+
+
+def mission_chat_runtime_signature_from_components(
+    components: Mapping[str, Any],
+) -> str:
+    """Fold composed components into the composite reuse key.
+
+    The ONE fold. Both callers that need the key compose the components first
+    (the turn builder, so it can keep the digests; the prewarm, for the same
+    reason) and would otherwise each spell the hash themselves — which is the
+    drift :func:`mission_chat_runtime_signature` already exists to prevent, one
+    level down.
+    """
+
+    return _revision_hash(dict(components))
+
+
+def mission_chat_runtime_signature_digests(
+    components: Mapping[str, Any],
+) -> dict[str, str]:
+    """One digest per component — the map a rebuild diffs to NAME what moved.
+
+    Names only ever leave this map as names: the digests are one-way, and the
+    receipt that consumes them (``PersonaChatRuntimeRegistry.acquire``) emits
+    component NAMES and never values. ``surface_prompt_sha256`` and the tool
+    contract are prompt- and policy-adjacent, and "which component moved" is the
+    whole diagnostic — "what it moved to" is not.
+    """
+
+    return {str(name): _revision_hash(value) for name, value in components.items()}
+
+
+def mission_chat_runtime_signature(
+    *,
+    persona: Any,
+    instance: Any,
+    config: Any,
+    session_id: str,
+    session_model_config: dict[str, Any],
+    model_selection: dict[str, Any],
+    workspace_agents_receipt: dict[str, Any] | None,
+    surface_prompt: str,
+    resolvers: MissionChatTurnResolvers = DEFAULT_RESOLVERS,
+) -> str:
+    """Reuse key for a resident actor: identical inputs ⇒ reusable actor.
+
+    Config objects are HASHED before inclusion rather than embedded, so the
+    signature can never become an observability channel for prompt/config text.
+
+    The persona and instance contribute their ACTOR-IDENTITY projection, not
+    their whole row — see :data:`PERSONA_IDENTITY_FIELDS` /
+    :data:`INSTANCE_IDENTITY_FIELDS` and the 2026-08-23T14:45:14Z receipt
+    recorded there. The chat permission answer contributes the same way — see
+    :data:`_ACTOR_PERMISSION_FIELDS` and the 2026-08-23T19:03Z receipt. So does
+    the runtime config — see :data:`ACTOR_CONFIG_IDENTITY_FIELDS` and the
+    2026-08-23T21:38:29Z receipt.
+
+    PUBLIC because a second caller now needs the SAME key rather than an equal
+    one: :mod:`agent_runtime.persona_chat_actor_prewarm` builds a chat's
+    resident actor before its first turn arrives, and a pre-built actor whose
+    signature does not BYTE-MATCH the next turn's is discarded by
+    ``PersonaChatRuntimeRegistry.acquire`` — which would make the prewarm pure
+    cost. Re-deriving the composition there (rather than calling this) is
+    exactly the drift this export exists to make impossible; the prewarm's job
+    is only to reproduce the INPUTS.
+    """
+
+    return mission_chat_runtime_signature_from_components(
+        mission_chat_runtime_signature_components(
+            persona=persona,
+            instance=instance,
+            config=config,
+            session_id=session_id,
+            session_model_config=session_model_config,
+            model_selection=model_selection,
+            workspace_agents_receipt=workspace_agents_receipt,
+            surface_prompt=surface_prompt,
+            resolvers=resolvers,
+        )
+    )
+
+
+__all__ = [
+    "ACTOR_CONFIG_IDENTITY_FIELDS",
+    "DEFAULT_RESOLVERS",
+    "INSTANCE_IDENTITY_FIELDS",
+    "PERSONA_IDENTITY_FIELDS",
+    "PRELOAD_SURFACE",
+    "PROMPT_CONTRACT_REVISION",
+    "TAIL_BUDGET_BYTES",
+    "TAIL_CAPABILITY",
+    "TAIL_MCP_ADMISSION",
+    "TAIL_TURN_BUDGET",
+    "MissionChatSkillPreload",
+    "MissionChatTurnContext",
+    "MissionChatTurnResolvers",
+    "build_mission_chat_turn_context",
+    "mission_chat_runtime_signature",
+    "mission_chat_runtime_signature_components",
+    "mission_chat_runtime_signature_digests",
+    "mission_chat_runtime_signature_from_components",
+]

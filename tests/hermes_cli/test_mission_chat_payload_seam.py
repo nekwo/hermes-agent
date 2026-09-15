@@ -1,0 +1,257 @@
+"""The mission-chat payload seam, and the capability answer bound beside it.
+
+``_mission_chat_emit`` is the ONE place a mission-chat turn payload leaves the
+handler. Before it existed, an in-process caller (the agent-to-agent relay) got
+the payload by wrapping the call in ``contextlib.redirect_stdout`` and parsing
+the captured text back into JSON — which rebinds ``sys.stdout``
+PROCESS-GLOBALLY, so every other thread in a serve process wrote into that
+buffer for the duration. These tests pin both halves of the replacement: the CLI
+still prints byte-for-byte what it printed before, and a caller that installs a
+sink gets the dict and NO output at all.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+from contextlib import redirect_stdout
+from types import SimpleNamespace
+
+import pytest
+
+import hermes_cli.harness as harness
+
+PAYLOAD = {"ok": False, "error": "boom", "error_kind": "unsupported_persona"}
+
+
+def _emit(args, *rest, **kwargs) -> str:
+    """Run the seam and return whatever reached stdout."""
+
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        harness._mission_chat_emit(args, *rest, **kwargs)
+    return buffer.getvalue()
+
+
+def test_the_cli_json_lane_prints_exactly_emit_json():
+    args = SimpleNamespace(json=True, stream=False)
+
+    assert _emit(args, PAYLOAD) == harness.emit_json(PAYLOAD) + "\n"
+
+
+def test_the_cli_text_lane_prints_the_error_by_default():
+    args = SimpleNamespace(json=False, stream=False)
+
+    assert _emit(args, PAYLOAD) == "boom\n"
+
+
+def test_an_explicit_plain_line_overrides_the_error():
+    args = SimpleNamespace(json=False, stream=False)
+
+    assert _emit(args, PAYLOAD, "mission chat reply for dev") == "mission chat reply for dev\n"
+
+
+def test_the_stream_lane_emits_the_chat_final_envelope():
+    args = SimpleNamespace(json=True, stream=True)
+
+    frame = json.loads(_emit(args, PAYLOAD))
+
+    assert frame["type"] == "chat.final"
+    assert frame["error"] == "boom"
+
+
+def test_a_stream_override_wins_over_the_args_attribute():
+    """One site had already resolved `stream` into a local; it must still route."""
+
+    args = SimpleNamespace(json=True, stream=False)
+
+    assert json.loads(_emit(args, PAYLOAD, stream=True))["type"] == "chat.final"
+
+
+def test_a_sink_takes_the_dict_and_suppresses_all_output():
+    """The whole point: a nested reply must never touch the caller's stdout.
+
+    In serve, stdout is a per-request line-frame proxy, so a nested handler's
+    print lands in the OUTER request's capture and corrupts its payload. The
+    sink removes the print rather than redirecting it.
+    """
+
+    seen = []
+    args = SimpleNamespace(json=True, stream=False, payload_sink=seen.append)
+
+    assert _emit(args, PAYLOAD) == ""
+    assert seen == [PAYLOAD]
+    # Handed over BY REFERENCE — no serialise/parse round trip in between.
+    assert seen[0] is PAYLOAD
+
+
+def test_a_sink_wins_over_the_stream_lane_too():
+    seen = []
+    args = SimpleNamespace(json=True, stream=True, payload_sink=seen.append)
+
+    assert _emit(args, PAYLOAD) == ""
+    assert seen == [PAYLOAD]
+
+
+def test_a_non_callable_sink_falls_back_to_printing():
+    """An argparse Namespace can never carry one, but fail toward the CLI shape."""
+
+    args = SimpleNamespace(json=True, stream=False, payload_sink=None)
+
+    assert _emit(args, PAYLOAD) == harness.emit_json(PAYLOAD) + "\n"
+
+
+# --------------------------------------------------------------------------
+# capability honesty
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def unbound_capability():
+    """Reset the per-session delivery capability around each check."""
+
+    from gateway.session_context import _SESSION_ASYNC_DELIVERY, _UNSET
+
+    token = _SESSION_ASYNC_DELIVERY.set(_UNSET)
+    yield
+    _SESSION_ASYNC_DELIVERY.reset(token)
+
+
+def test_a_serve_hosted_turn_with_a_live_drain_can_take_a_late_completion(
+    monkeypatch, unbound_capability
+):
+    """True because a consumer is RUNNING — not because nothing bound the var."""
+
+    from gateway.session_context import async_delivery_supported
+
+    monkeypatch.setattr(
+        "agent_runtime.dispatch_delivery.delivery_drain_is_live", lambda: True
+    )
+
+    assert harness._bind_mission_chat_delivery_capability() is True
+    assert async_delivery_supported() is True
+
+
+def test_a_serve_with_hot_sessions_disabled_still_delivers(
+    monkeypatch, unbound_capability
+):
+    """The 2026-08-09 incident, pinned: the drain decides, the cache does not.
+
+    ``persona_chat_runtime_registry()`` is None whenever
+    ``persona_chat.hot_sessions_enabled`` is off — which is the DEFAULT and the
+    production state. The binding used to conjoin registry presence with drain
+    liveness believing the registry "tells serve from CLI", so every
+    default-config serve answered False and ``agent_chat_send(wait=false)`` was
+    refused on the exact lane built to host it, from the day it shipped. The
+    capability gates on the consumer's own liveness — a resident-agent cache
+    flag has no vote.
+    """
+
+    from gateway.session_context import async_delivery_supported
+
+    monkeypatch.setattr(harness, "persona_chat_runtime_registry", lambda: None)
+    monkeypatch.setattr(
+        "agent_runtime.dispatch_delivery.delivery_drain_is_live", lambda: True
+    )
+
+    assert harness._bind_mission_chat_delivery_capability() is True
+    assert async_delivery_supported() is True
+
+
+def test_a_serve_whose_drain_never_started_promises_nothing(monkeypatch, unbound_capability):
+    """"This is serve" was only ever a PROXY for "a consumer exists".
+
+    The drain starts best-effort — a runtime that cannot start it still serves —
+    so a serve whose drain failed would otherwise go on granting
+    `notify_on_complete` promises with nothing left to perform them. The same
+    class of dishonesty the binding was introduced to retire, one level down.
+    """
+
+    from gateway.session_context import async_delivery_supported
+
+    monkeypatch.setattr(
+        "agent_runtime.dispatch_delivery.delivery_drain_is_live", lambda: False
+    )
+
+    assert harness._bind_mission_chat_delivery_capability() is False
+    assert async_delivery_supported() is False
+
+
+def test_a_cold_cli_turn_refuses_the_promise(monkeypatch, unbound_capability):
+    """The process exits with the turn, so `terminal` notifications die with it.
+
+    No drain is ever started in a one-shot CLI process, so the same liveness
+    fact that admits serve refuses here. ``delegate_task`` then falls back to
+    its inline path and returns the result INSIDE the turn that asked for it,
+    which is strictly better than a promise that would be kept, if ever, in
+    some future session.
+    """
+
+    from gateway.session_context import async_delivery_supported
+
+    monkeypatch.setattr(
+        "agent_runtime.dispatch_delivery.delivery_drain_is_live", lambda: False
+    )
+
+    assert harness._bind_mission_chat_delivery_capability() is False
+    assert async_delivery_supported() is False
+
+
+# --------------------------------------------------------------------------
+# lease provenance honesty
+# --------------------------------------------------------------------------
+
+
+def test_a_serve_hosted_turn_is_observed_as_serve_with_hot_sessions_disabled(
+    monkeypatch,
+):
+    """The 2026-08-09 mislabel, pinned: provenance reads the request id, not a cache.
+
+    ``observer_kind`` used to derive from ``persona_chat_runtime_registry() is
+    not None`` — the hot-sessions cache flag, default off and off in production
+    — so every live serve turn wrote ``cli`` into the lease owner file, the
+    exact forensics a ``chat_busy`` incident reads. The registry must have no
+    vote: a serve turn is a turn that arrived as a serve frame request, and the
+    request id serve's ``_run`` binds is the direct fact. It also BECOMES the
+    lease owner id, correlating the owner file with the frame that holds the
+    root (the old ``args.serve_request_id`` read was never set by anything and
+    always degraded to the ``pid-<n>`` fallback).
+    """
+
+    from hermes_cli.harness_parts import serve as serve_module
+
+    monkeypatch.setattr(harness, "persona_chat_runtime_registry", lambda: None)
+    token = serve_module._request_id.set("req-42")
+    try:
+        assert harness._mission_chat_lease_provenance() == ("req-42", "serve")
+    finally:
+        serve_module._request_id.reset(token)
+
+
+def test_a_cli_turn_is_observed_as_cli_even_with_the_cache_enabled(monkeypatch):
+    """The inverse mislabel: enabling the cache must not dress a CLI turn as serve."""
+
+    from hermes_cli.harness_parts import serve as serve_module
+
+    monkeypatch.setattr(harness, "persona_chat_runtime_registry", lambda: object())
+    assert serve_module._request_id.get() is None
+    assert harness._mission_chat_lease_provenance() == (None, "cli")
+
+
+def test_the_deferred_thread_policy_flag_restores_the_unset_tri_state(monkeypatch):
+    """argparse cannot say UNSET, and UNSET is what a dispatch forwards.
+
+    A detached dispatch runs in a child process, so ``new_session`` has to cross
+    an argv boundary where absent means False ("continue the current default
+    thread") rather than "let the policy decide". Without this flag every
+    dispatch would silently stop opening its own task thread.
+    """
+
+    args = SimpleNamespace(defer_thread_policy=True, new_session=False)
+    harness._normalize_deferred_thread_policy(args)
+    assert args.new_session is None
+
+    # Absent flag ⇒ untouched: the bare CLI keeps its historical threading.
+    untouched = SimpleNamespace(defer_thread_policy=False, new_session=False)
+    harness._normalize_deferred_thread_policy(untouched)
+    assert untouched.new_session is False

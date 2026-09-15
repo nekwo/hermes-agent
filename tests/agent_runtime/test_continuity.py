@@ -1,0 +1,201 @@
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+from agent_runtime.continuity import REF_LIMIT, REF_TEXT_LIMIT, SUMMARY_LIMIT, return_summary_to_parent_session
+from agent_runtime.events import EventLog
+from agent_runtime.persona_assignments import PersonaInstanceStore
+from tests.agent_runtime.persona_samples import sample_personas
+
+
+def _persona(persona_id: str):
+    return next(persona for persona in sample_personas() if persona.id == persona_id)
+
+
+def test_return_summary_posts_bounded_parent_message_and_records_lineage():
+    # Deliberately NO per-test ``HERMES_HOME`` override. ``tests/conftest.py``
+    # already hands every test its own home, and its step 3b re-pins
+    # ``hermes_state.DEFAULT_DB_PATH`` (a module constant computed at import
+    # time) to THAT home. An extra override here moved only the *writer* —
+    # production resolves the chat database from the live env through
+    # ``chat_session_scope`` — while the argless ``SessionDB()`` this test reads
+    # through stayed pinned to the conftest home, so the row was written to one
+    # database and looked for in another. Sharing the conftest home keeps writer
+    # and reader on one file, which is also what makes the read below a real
+    # routing assertion: the summary must land in the ambient operator-visible
+    # database, not in a profile-scoped one (defect D2,
+    # docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/chat-session-presence-authority.md).
+    store = PersonaInstanceStore()
+    parent = store.ensure_for_persona(_persona("neko_supervisor"))
+    child = store.ensure_for_persona(_persona("dev"))
+    child = store.set_parents(child.id, [parent.id], goal_id="task_r3")
+    summary = "R3 continuity proof " + ("x" * (SUMMARY_LIMIT + 200))
+    proof_ids = [f"proof_{idx}_{'p' * 200}" for idx in range(20)]
+    artifact_refs = [f"artifact://r3/{idx}/{'a' * 200}" for idx in range(20)]
+
+    result = return_summary_to_parent_session(
+        child.id,
+        parent_session_id="parent_session_r3",
+        summary=summary,
+        proof_ids=proof_ids,
+        artifact_refs=artifact_refs,
+    )
+
+    from hermes_state import SessionDB
+
+    messages = SessionDB().get_messages("parent_session_r3")
+    returned = store.get(child.id)
+    events = EventLog().for_session("parent_session_r3")
+
+    assert result["ok"] is True
+    assert result["capability_id"] == "persona.instance.return_summary"
+    assert result["bounded"] is True
+    assert result["summary_chars"] == SUMMARY_LIMIT
+    assert len(result["proof_ids"]) == REF_LIMIT
+    assert all(len(item) <= REF_TEXT_LIMIT for item in result["proof_ids"])
+    assert len(result["artifact_refs"]) == REF_LIMIT
+    assert all(len(item) <= REF_TEXT_LIMIT for item in result["artifact_refs"])
+    assert returned.returned_to == "parent_session_r3"
+    assert len(messages) == 1
+    assert messages[0]["role"] == "assistant"
+    assert f"Continuity return from {child.id}:" in messages[0]["content"]
+    assert "Proof refs:" in messages[0]["content"]
+    assert "Artifact refs:" in messages[0]["content"]
+    assert [event.type for event in events] == ["steer.returned"]
+    # S27: the ``task_id`` column and the ``stage_id`` payload key were removed
+    # with the CLI-unreachable parameters that were their only source; there is
+    # no ``Task`` record left for either to name.
+    assert events[0].task_id is None
+    assert "stage_id" not in events[0].payload
+    assert events[0].persona_id == "dev"
+    assert events[0].payload["result"] == "summary_returned"
+    assert events[0].payload["source_node_id"] == child.id
+    assert events[0].payload["target_node_id"] == "parent_session_r3"
+
+
+def test_return_summary_cli_uses_first_class_primitive(tmp_path, monkeypatch, capsys):
+    """The namespace is exactly what the parser now produces.
+
+    S22 removed the verb's ``--task``/``--stage`` flags (they wrote the deleted
+    mission-record key and stage-graph payload), so a namespace carrying
+    ``task_id``/``stage_id`` would no longer be reachable from the CLI. The ref
+    flags stay: they render into the parent chat message.
+    """
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    child = PersonaInstanceStore().ensure_for_persona(_persona("dev"))
+
+    from hermes_cli import harness
+
+    code = harness._cmd_persona_instance_return_summary(
+        SimpleNamespace(
+            persona_instance_id=child.id,
+            parent_session_id="parent_session_cli",
+            summary="CLI return summary",
+            proof_ids=["proof_cli"],
+            artifact_refs=["artifact://cli"],
+            json=True,
+        )
+    )
+
+    output = capsys.readouterr().out
+    assert code == 0
+    assert '"capability_id": "persona.instance.return_summary"' in output
+    assert '"parent_session_id": "parent_session_cli"' in output
+    assert PersonaInstanceStore().get(child.id).returned_to == "parent_session_cli"
+
+
+def test_returned_summary_reaches_the_parent_thread_live_log():
+    """The child's "here is the distilled result" row is exactly what a head
+    agent grepping the parent thread's log is looking for.
+
+    This lane appends straight to SessionDB, so while the live-log mirror was
+    hooked by call-site convention it wrote a row that never reached the file.
+    It now goes through the ``mirrored_persona_chat_append`` seam like every
+    other explicit persona-chat append.
+    """
+
+    import json
+
+    from agent_runtime.chat_live_log import chat_live_log_path, reset_chat_live_log_state
+
+    reset_chat_live_log_state()
+    try:
+        store = PersonaInstanceStore()
+        parent = store.ensure_for_persona(_persona("neko_supervisor"))
+        child = store.ensure_for_persona(_persona("dev"))
+        child = store.set_parents(child.id, [parent.id], goal_id="task_mirror")
+
+        return_summary_to_parent_session(
+            child.id,
+            parent_session_id="parent_session_mirror",
+            summary="finished the sweep; two files changed",
+        )
+
+        path = chat_live_log_path("parent_session_mirror")
+        assert path is not None and path.exists()
+        rows = [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        messages = [row for row in rows if row.get("kind") == "message"]
+        assert len(messages) == 1
+        assert messages[0]["role"] == "agent"
+        assert "finished the sweep; two files changed" in messages[0]["text"]
+    finally:
+        reset_chat_live_log_state()
+
+
+def test_a_failed_return_summary_append_is_not_mirrored():
+    """The mirror follows the durable write; a rejected row must stay invisible."""
+
+    import json
+
+    import agent_runtime.continuity as continuity
+    from agent_runtime.chat_live_log import chat_live_log_path, reset_chat_live_log_state
+
+    reset_chat_live_log_state()
+
+    class _ExplodingDB:
+        db_path = None
+
+        def ensure_session(self, *args, **kwargs):
+            return None
+
+        def append_message(self, *args, **kwargs):
+            raise RuntimeError("db down")
+
+    original = continuity._session_db
+    continuity._session_db = lambda: _ExplodingDB()
+    try:
+        store = PersonaInstanceStore()
+        parent = store.ensure_for_persona(_persona("neko_supervisor"))
+        child = store.ensure_for_persona(_persona("dev"))
+        store.set_parents(child.id, [parent.id], goal_id="task_mirror_fail")
+
+        try:
+            return_summary_to_parent_session(
+                child.id,
+                parent_session_id="parent_session_mirror_fail",
+                summary="this never lands",
+            )
+        except RuntimeError:
+            pass
+        else:  # pragma: no cover - the stub always raises
+            raise AssertionError("expected the durable append to fail")
+
+        path = chat_live_log_path("parent_session_mirror_fail")
+        rows = (
+            [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            if path is not None and path.exists()
+            else []
+        )
+        assert [row for row in rows if row.get("kind") == "message"] == []
+    finally:
+        continuity._session_db = original
+        reset_chat_live_log_state()

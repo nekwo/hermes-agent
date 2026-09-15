@@ -1844,7 +1844,15 @@ def check_compression_model_feasibility(agent: Any) -> None:
                 provider=_aux_provider, custom_providers=agent._custom_providers,
             )
         # Aux model must meet MINIMUM_CONTEXT_LENGTH like the main model, else it cannot summarise a full window.
-        if aux_context and aux_context < MINIMUM_CONTEXT_LENGTH:
+        managed_local_same_model = (
+            getattr(agent, "requested_provider", None) == "local-llama-hermes"
+            and getattr(agent, "provider", None) == "custom"
+            and aux_model == agent.model
+            and aux_context == agent.context_compressor.context_length
+            and aux_context >= 4096
+            and _aux_inherits_main_route(agent, aux_model, aux_base_url)
+        )
+        if aux_context and aux_context < MINIMUM_CONTEXT_LENGTH and not managed_local_same_model:
             raise ValueError(
                 f"Auxiliary compression model {aux_model} has a context "
                 f"window of {aux_context:,} tokens, which is below the "
@@ -2983,10 +2991,11 @@ def _publish_rotated_compaction(
     old_title = agent._session_db.get_session_title(agent.session_id)
     new_session_id = mint_session_id()
     from agent.context_compressor import _DB_PERSISTED_MARKER
+    from agent_runtime.compression_metadata import child_model_config
     agent._session_db.publish_compression_child(
         parent_session_id=old_session_id, child_session_id=new_session_id,
         source=agent.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"), model=agent.model,
-        model_config=agent._session_init_model_config, system_prompt=new_system_prompt, messages=compressed,
+        model_config=child_model_config(agent), system_prompt=new_system_prompt, messages=compressed,
         cwd=getattr(agent, "working_directory", None), profile_name=_profile_for_child,
         compression_lock_holder=lease.holder, require_compression_lease=lease.holder is not None,
         require_lease_refresh=lease.holder is not None, lease_ttl_seconds=lease.ttl,

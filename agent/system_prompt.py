@@ -291,6 +291,9 @@ def _tool_guidance_block(agent: Any) -> Optional[str]:
         memory_guidance,
         SESSION_SEARCH_GUIDANCE if "session_search" in names else None,
         SKILLS_GUIDANCE if "skill_manage" in names else None,
+        _pb.SHELL_TOOL_PREFERENCE_GUIDANCE if "terminal" in names else None,
+        _pb.CLARIFY_CHOICES_GUIDANCE if "clarify" in names else None,
+        _pb.BROWSER_PRECONDITION_GUIDANCE if "browser_navigate" in names else None,
         _kanban_guidance,
     ]
     return " ".join(g for g in tool_guidance if g) or None
@@ -508,6 +511,7 @@ def _guidance_parts(agent: Any) -> List[str]:
     if not agent.valid_tool_names:
         return parts
     # Steering only lands inside tool results, so only reachable with tools.
+    parts.append(_pb.TOOL_DESCRIBE_GUIDANCE)
     parts.append(STEER_CHANNEL_NOTE)
     # agent.tool_use_enforcement / agent.execution_guidance: "auto" (default)
     # matches the hardcoded model lists; true/false force; a list gives custom

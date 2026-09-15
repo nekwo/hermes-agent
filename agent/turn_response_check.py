@@ -120,7 +120,13 @@ def check_api_response(
         resp_model = getattr(response, 'model', 'N/A') if response else 'N/A'
         logging.debug(f"API Response received - Model: {resp_model}, Usage: {response.usage if hasattr(response, 'usage') else 'N/A'}")
 
+    from agent_runtime.conversation_observability import _emit_conversation_timing
+    validation_started = time.perf_counter()
     response_invalid, error_details = validate_response_shape(agent, response)
+    _emit_conversation_timing(agent, "response_validate", validation_started,
+        status="failed" if response_invalid else "completed",
+        error_detail_count=len(error_details), api_call_count=api_call_count,
+        api_mode=agent.api_mode, provider=agent.provider, model=agent.model)
     if response_invalid:
         _iv = retry_invalid_response(
             agent, response=response, error_details=error_details, _retry=_retry,

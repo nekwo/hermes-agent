@@ -107,6 +107,10 @@ def build_api_request(
     # api_messages was built for the primary; a fallback (DeepSeek / Kimi / MiMo) may
     # require reasoning_content — re-apply the echo-back pad (idempotent) and re-render
     # the prompt-cache decoration for the current provider.
+    from agent_runtime.conversation_observability import _emit_conversation_timing
+    import time
+    timing_meta = dict(api_call_count=api_call_count, api_mode=agent.api_mode, provider=agent.provider, model=agent.model)
+    request_build_started = time.perf_counter()
     agent._reapply_reasoning_echo_for_provider(api_messages)
     api_messages, _moa_prepared_request, tools_for_api = (
         _redecorate_prompt_cache_for_provider(
@@ -126,6 +130,10 @@ def build_api_request(
             api_kwargs, allow_stream=False, is_github_responses=agent._is_copilot_url(),
             sanitize_harmony_tokens=agent._is_codex_backend(),
         )
+    _emit_conversation_timing(agent, "request_build", request_build_started,
+        message_count=len(api_messages), tool_count=len(agent.tools or []),
+        approx_input_tokens=approx_tokens, request_char_count=total_chars, **timing_meta)
+    pre_api_hook_started = time.perf_counter()
     # OpenRouter caching replays identical responses, even empty ones; an empty-response
     # retry must bypass the cache.
     if agent._empty_content_retries > 0 and agent._is_openrouter_url():
@@ -159,8 +167,11 @@ def build_api_request(
         effective_task_id=effective_task_id, turn_id=turn_id,
     )
 
+    _emit_conversation_timing(agent, "pre_api_hook", pre_api_hook_started, **timing_meta)
     if env_var_enabled("HERMES_DUMP_REQUESTS"):
+        dump_started = time.perf_counter()
         agent._dump_api_request_debug(api_kwargs, reason="preflight")
+        _emit_conversation_timing(agent, "request_dump", dump_started, **timing_meta)
 
     # Private to the in-process MoA facade; added after middleware/hooks/debug dumps so
     # none serializes it into the provider payload. Re-read the live client:

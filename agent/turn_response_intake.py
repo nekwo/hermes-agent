@@ -147,7 +147,18 @@ def normalize_model_response(
             agent._vprint(f"{agent.log_prefix}🤖 Assistant: {content}")
         else:
             agent._vprint(f"{agent.log_prefix}🤖 Assistant: {content[:100]}{'...' if len(content) > 100 else ''}")
-    if content and agent.tool_progress_callback:
+    native_reasoning = ""
+    if agent.tool_progress_callback and getattr(agent, "_delegate_depth", 0) == 0:
+        try:
+            native_reasoning = (agent._extract_reasoning(assistant_message) or "").strip()
+        except Exception:
+            pass
+    if native_reasoning:
+        try:
+            agent.tool_progress_callback("reasoning.available", "_thinking", native_reasoning[:500], None)
+        except Exception:
+            pass
+    elif content and agent.tool_progress_callback:
         _relay_thinking(agent, content)
 
     # Incomplete <REASONING_SCRATCHPAD> (opened, never closed): the model ran out of

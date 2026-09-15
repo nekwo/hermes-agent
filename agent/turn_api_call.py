@@ -77,6 +77,11 @@ def perform_api_call(
         nonlocal thinking_spinner
         thinking_spinner = stop_thinking_spinner(agent, thinking_spinner)
 
+    from agent_runtime.conversation_observability import (
+        _emit_request_assembled_marker, _emit_conversation_timing, _first_delta_recorder,
+    )
+    import time
+    _first_byte_s = [None]
     _use_streaming = _should_stream(agent)
 
     def _perform_api_call(next_api_kwargs):
@@ -85,32 +90,46 @@ def perform_api_call(
                 next_api_kwargs, allow_stream=False, is_github_responses=agent._is_copilot_url(),
                 sanitize_harmony_tokens=agent._is_codex_backend(),
             )
-        if _use_streaming:
-            return agent._interruptible_streaming_api_call(
-                next_api_kwargs, on_first_delta=_stop_spinner
-            )
-        from agent import relay_llm
-
-        return relay_llm.execute(
-            next_api_kwargs,
-            agent._interruptible_api_call,
-            session_id=str(agent.session_id or ""),
-            name=str(agent.provider or "provider"),
-            model_name=str(agent.model or ""),
-            metadata={
-                "api_mode": agent.api_mode,
-                "api_request_id": api_request_id,
-                "call_role": (
-                    "delegated"
-                    if getattr(agent, "is_subagent", False)
-                    else "fallback"
-                    if int(getattr(agent, "_fallback_index", 0) or 0) > 0
-                    else "primary"
-                ),
-                "retry_count": retry_count,
-            },
-            defer_logical_completion=True,
-        )
+        timing_meta = dict(api_call_count=api_call_count, api_mode=agent.api_mode, provider=agent.provider, model=agent.model)
+        _emit_request_assembled_marker(agent, **timing_meta)
+        _first_byte_s[0] = None
+        agent._fork_first_byte_s = None
+        started = time.perf_counter()
+        status = "failed"
+        try:
+            if _use_streaming:
+                result = agent._interruptible_streaming_api_call(
+                    next_api_kwargs, on_first_delta=_first_delta_recorder(_first_byte_s, started, _stop_spinner)
+                )
+            else:
+                from agent import relay_llm
+        
+                result = relay_llm.execute(
+                    next_api_kwargs,
+                    agent._interruptible_api_call,
+                    session_id=str(agent.session_id or ""),
+                    name=str(agent.provider or "provider"),
+                    model_name=str(agent.model or ""),
+                    metadata={
+                        "api_mode": agent.api_mode,
+                        "api_request_id": api_request_id,
+                        "call_role": (
+                            "delegated"
+                            if getattr(agent, "is_subagent", False)
+                            else "fallback"
+                            if int(getattr(agent, "_fallback_index", 0) or 0) > 0
+                            else "primary"
+                        ),
+                        "retry_count": retry_count,
+                    },
+                    defer_logical_completion=True,
+                )
+            status = "completed"
+            return result
+        finally:
+            agent._fork_first_byte_s = _first_byte_s[0]
+            _emit_conversation_timing(agent, "provider_dispatch", started,
+                status=status, streaming=bool(_use_streaming), **timing_meta)
 
     from hermes_cli.middleware import run_llm_execution_middleware
 

@@ -560,6 +560,7 @@ def finalize_turn(
         ) or 0,
         **{key: getattr(agent, f"session_{key}") for key in _SESSION_COST_KEYS},
         # Requested service tier, for billing audits (`hermes -z --usage-file`).
+        "usage_ledger": list(getattr(agent, "session_usage_ledger", None) or []),
         "service_tier": (
             (getattr(agent, "request_overrides", {}) or {}).get("extra_body") or {}
         ).get("service_tier"),
