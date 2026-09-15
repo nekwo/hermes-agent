@@ -155,16 +155,7 @@ from tools.environments.base import EnvironmentConnectionError
 
 
 # Tool description for LLM
-TERMINAL_TOOL_DESCRIPTION = """Execute shell commands. The host OS, shell, and terminal backend are stated in your environment section — write commands for THAT platform. Filesystem, current working directory, and exported environment variables persist between calls.
-
-Do NOT use cat/head/tail (use read_file), grep/rg/find/ls (use search_files), sed/awk (use patch), or echo/heredoc file creation (use write_file). Reserve terminal for: builds, installs, git, processes, scripts, network, package managers — anything that needs a shell. Output is auto-truncated with the full text saved to a file — never pipe through tail/head to shorten it.
-Environment state persists: activate a virtualenv or export variables once per session, not before every command.
-
-Foreground (default): returns INSTANTLY when the command finishes, even with a high timeout — set timeout generously for long builds.
-Background: set background=true (returns a session_id); add notify=true for bounded tasks, leave silent only for servers/daemons that never exit. After starting a server, verify readiness with a health check in a separate call (no blind sleep loops); manage with process(action="poll"/"wait").
-Working directory: use 'workdir' for per-command cwd; when a command changes the session cwd (cd, pushd), trust the result's "cwd" field instead of prefixing every command with 'cd'.
-PTY: pty=true + background=true for interactive CLIs (they hang without a terminal); drive them with process(action="write"/"submit"). Local backend only.
-"""
+TERMINAL_TOOL_DESCRIPTION = "Run shell commands in the configured environment (cwd and exported env persist between calls). Foreground returns when done; background=true with notify_on_complete=true for long tasks; pty=true for interactive CLIs. Use read_file/search_files/patch/write_file for file work. Call tool_describe for lifecycle and platform details."
 
 # Environment lifecycle state.
 _active_environments: Dict[str, Any] = {}
@@ -415,6 +406,13 @@ def _resolve_container_task_id(task_id: Optional[str]) -> str:
        keyed profile would split from its gateway sessions), else ``"default"``,
        which subagent ids collapse onto to share the parent's container.
     """
+    try:
+        from agent_runtime.persona_chat_continuity import current_tool_execution_scope
+        chat_scope = current_tool_execution_scope()
+    except Exception:
+        chat_scope = None
+    if chat_scope:
+        return chat_scope
     if task_id and _has_isolation_overrides(task_id):
         return task_id
     scope = _session_scope()
@@ -1180,7 +1178,80 @@ def _degraded_result(e: EnvironmentConnectionError, task_id: Optional[str]) -> s
     }, ensure_ascii=False)
 
 
+from agent_runtime.terminal_policy import (
+    _harness_safety_block, _harness_network_block_reason, _harness_envelope_gate, _harness_envelope_block, _with_envelope_provenance, _log_harness_blocked_attempt, _interactive_cli_guidance
+)
+
 def terminal_tool(
+    command: str,
+    background: bool = False,
+    timeout: Optional[int] = None,
+    task_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    force: bool = False,
+    workdir: Optional[str] = None,
+    pty: bool = False,
+    notify_on_complete: bool = False,
+    watch_patterns: Optional[List[str]] = None,
+    _host_local: bool = False,
+) -> str:
+    """Execute a command, gated by the envelope and accounted for in the result.
+
+    Thin by design. The envelope decision happens ONCE, here, and the grant's
+    provenance is merged ONCE, here — which is the whole reason this wrapper
+    exists rather than the gate living inside :func:`_terminal_tool_run`. That
+    body has well over a dozen ``return json.dumps(...)`` exits (timeouts,
+    backend failures, background handoffs, PTY paths); attaching provenance at
+    each of them would be a hand-maintained list that a new exit silently falls
+    out of, and a granted command whose result quietly lost its audit account is
+    exactly the invisible-fact class this change was made to retire. One
+    chokepoint means a new exit inherits the behaviour for free.
+
+    Argument and return contract: see :func:`_terminal_tool_run`. The model-facing
+    schema is ``TERMINAL_SCHEMA``/``TERMINAL_TOOL_DESCRIPTION``, not this
+    docstring, so the tool the model sees is unchanged.
+    """
+
+    try:
+        block, provenance = _harness_envelope_gate(command)
+    except Exception as exc:  # pragma: no cover - the gate is defensive throughout
+        # Fail CLOSED, in the same shape the body's own handler returns. Moving
+        # the gate out of ``_terminal_tool_run`` moved it out of that
+        # ``except Exception`` too; without this, a gate fault would stop being
+        # a typed tool error and start propagating into the tool executor — and
+        # a command whose safety decision crashed must not run on the way there.
+        logger.error("Terminal envelope gate failed; refusing command", exc_info=True)
+        return json.dumps({
+            "output": "",
+            "exit_code": -1,
+            "error": f"Failed to execute command: {exc}",
+            "status": "error",
+        }, ensure_ascii=False)
+    if block is not None:
+        return json.dumps(block, ensure_ascii=False)
+    if not background and not pty and isinstance(command, str):
+        guidance = _interactive_cli_guidance(command)
+        if guidance:
+            return json.dumps({"output": "", "exit_code": -1, "error": guidance,
+                               "status": "error"}, ensure_ascii=False)
+    return _with_envelope_provenance(
+        _terminal_tool_run(
+            command,
+            background=background,
+            timeout=timeout,
+            task_id=task_id,
+            session_id=session_id,
+            force=force,
+            workdir=workdir,
+            pty=pty,
+            notify_on_complete=notify_on_complete,
+            watch_patterns=watch_patterns,
+            _host_local=_host_local,
+        ),
+        provenance,
+    )
+
+def _terminal_tool_run(
     command: str,
     background: bool = False,
     timeout: Optional[int] = None,

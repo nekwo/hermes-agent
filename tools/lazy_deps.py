@@ -19,6 +19,8 @@ import shutil
 import site
 import subprocess
 import sys
+import threading
+from typing import Iterator
 import sysconfig
 from dataclasses import dataclass
 from pathlib import Path
@@ -496,6 +498,10 @@ def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _Install
     ``hermes_cli.tools_config._pip_install`` (no CLI dependency)."""
     if not specs:
         return _InstallResult(True, "", "")
+    denial = venv_mutation_denial()
+    if denial:
+        return _InstallResult(False, "", denial)
+
     target = _lazy_install_target()
     constraints: Optional[Path] = None
     extra_args: list[str] = []
@@ -584,6 +590,10 @@ def ensure(feature: str, *, prompt: bool = True) -> None:
     missing = feature_missing(feature)
     if not missing:
         return
+    denial = venv_mutation_denial()
+    if denial:
+        raise RuntimeInstallDenied(feature, missing, denial)
+
     if unsupported := _unsupported_feature_reason(feature):
         raise FeatureUnavailable(feature, missing, unsupported)
     # Package-manager installs (NixOS etc.) have read-only site-packages: fail fast instead of burning
@@ -660,6 +670,10 @@ def install_specs(specs: list[str] | tuple[str, ...], *, timeout: int = 300) -> 
     for spec in cleaned:
         if not _spec_is_safe(spec):
             return InstallSpecsResult(ok=False, blocked=True, reason=f"refusing to install unsafe spec {spec!r}")
+    denial = venv_mutation_denial()
+    if denial:
+        return InstallSpecsResult(ok=False, blocked=True, reason=denial)
+
     target = _lazy_install_target()
     if not _allow_lazy_installs():
         sealed = os.environ.get("HERMES_DISABLE_LAZY_INSTALLS") == "1" and target is None
@@ -750,3 +764,74 @@ def feature_specs(feature: str) -> tuple[str, ...]:
         raise KeyError(f"Unknown lazy feature: {feature!r}")
     return LAZY_DEPS[feature]
 # ---- END PLUGIN-COMPAT ----
+
+
+class RuntimeInstallDenied(FeatureUnavailable):
+    """A lazy install was refused because the caller is inside a scope that
+    must not mutate the venv it is running in — see :func:`deny_venv_installs`.
+
+    Subclasses :class:`FeatureUnavailable` on purpose: every existing call site
+    already handles that exception by reporting the feature unavailable, so the
+    refusal degrades exactly like "the package was never installed" instead of
+    introducing a new failure mode at ~40 call sites. Callers that want to tell
+    "refused here" from "genuinely absent" can catch this subclass.
+    """
+
+_barrier_lock = threading.RLock()
+
+_barrier_reasons: list[str] = []
+
+@contextlib.contextmanager
+def deny_venv_installs(reason: str) -> Iterator[None]:
+    """Refuse venv-scoped lazy installs for the duration of this scope.
+
+    ``reason`` is operator-facing prose naming the scope (e.g.
+    ``"an agent turn (profile='base')"``); it is quoted verbatim in the
+    :class:`RuntimeInstallDenied` message, which also carries the exact
+    ``uv pip install`` / ``pip install`` command to run instead.
+
+    PROCESS-WIDE, not context-local, and deliberately so: an agent turn runs
+    its tools on worker threads, and a ``ContextVar`` would not follow them —
+    the tool call is exactly where a mid-turn install fires. The cost is that a
+    concurrent operator-initiated install in the SAME process is also refused
+    while a turn is live, which is the safe direction: that concurrency is the
+    incident's root cause.
+    """
+    text = str(reason).strip() or "a scope that must not mutate the venv"
+    with _barrier_lock:
+        _barrier_reasons.append(text)
+    try:
+        yield
+    finally:
+        with _barrier_lock:
+            try:
+                _barrier_reasons.remove(text)
+            except ValueError:  # pragma: no cover - defensive
+                pass
+
+def venv_install_denial() -> Optional[str]:
+    """Return the innermost active denial reason, or ``None`` if unbarriered.
+
+    Reports the barrier state only; it does NOT account for the durable-target
+    exemption. Use :func:`venv_mutation_denial` for the enforcement answer.
+    """
+    with _barrier_lock:
+        return _barrier_reasons[-1] if _barrier_reasons else None
+
+def venv_mutation_denial() -> Optional[str]:
+    """Return why an install must be refused right now, or ``None`` to proceed.
+
+    ``None`` when no barrier is armed, or when a durable install target is
+    configured (that install cannot touch the running venv — see the module
+    header and :func:`_lazy_install_target`).
+    """
+    reason = venv_install_denial()
+    if reason is None:
+        return None
+    if _lazy_install_target() is not None:
+        return None
+    return (
+        f"refusing to install into the running venv from inside {reason}: a live "
+        f"turn must never mutate the environment it is executing in "
+        f"(2026-08-09 venv-corruption incident). Install it up front instead"
+    )

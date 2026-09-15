@@ -23,10 +23,19 @@ def test_real_read_tool_binaries_confirm_option_ownership(
     argv, stdin, expected_returncode, expected_output
 ):
     """Pin the CLI grammar that the approval detector models."""
-    if shutil.which(argv[0]) is None:
+    resolved = shutil.which(argv[0])
+    if resolved is None:
         pytest.skip(f"{argv[0]} is not installed")
 
-    completed = subprocess.run(argv, input=stdin, text=True, capture_output=True)
+    # Invoke the binary that ``shutil.which`` just vetted, not the bare name.
+    # The two disagree on Windows: ``which`` walks PATH, while the bare name
+    # goes through CreateProcess, which searches System32 FIRST — so "sort"
+    # ran ``C:\Windows\System32\sort.exe`` (a namesake with an entirely
+    # different grammar, exit 1) while the skip guard had approved Git's GNU
+    # coreutils sort. The test was pinning the wrong program's CLI.
+    completed = subprocess.run(
+        [resolved, *argv[1:]], input=stdin, text=True, capture_output=True
+    )
 
     assert completed.returncode == expected_returncode
     assert completed.stdout == expected_output
@@ -68,6 +77,19 @@ def test_real_binaries_execute_leading_dash_program_payload(
         "MARKER": str(marker),
         "TERM": "xterm",
     }
+    # NOTE (2026-08-10 audit): this argv carries the same which-vs-
+    # CreateProcess mismatch the test above was fixed for — on Windows
+    # ``"sort"`` runs System32's namesake rather than the GNU sort that
+    # ``shutil.which`` approved. It is deliberately NOT "fixed" here: routing
+    # to the real GNU sort makes this parametrization HANG on Windows, not
+    # fail. sort spawns the ``-payload-marker`` compressor, the spawn fails,
+    # and a grandchild keeps the stdout pipe open — so ``subprocess.run``'s
+    # own ``timeout=20`` raises TimeoutExpired and then blocks forever in the
+    # ``process.communicate()`` its Windows exception path runs without a
+    # timeout. The payload cannot execute on Windows either way (a
+    # ``#!``-shebang script is not an executable image there: WinError 193),
+    # so the row is an environment gap that needs a probe-backed SKIP; the
+    # bare name at least keeps it a fast failure instead of a wedge.
     argv = [tool, *resolved_args]
     if needs_tty:
         argv = ["script", "-qec", shlex.join(argv), "/dev/null"]

@@ -347,21 +347,14 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         return path
 
     def _escape_shell_arg(self, arg: str) -> str:
-        """Single-quote ``arg`` for the shell. On Windows, native drive paths and
-        mixed MSYS leftovers are first rewritten to the Git Bash ``/c/Users/x``
-        form via the env-layer ``_bash_safe_path`` (bash eats backslashes; MSYS
-        mangles drive paths), so shell file ops and the terminal ``cd`` agree."""
-        from tools.environments.local import _bash_safe_path
-        return "'" + _bash_safe_path(arg).replace("'", "'\"'\"'") + "'"
+        """Quote shell arguments without rewriting non-path strings."""
+        from tools.environments.local import _shell_arg_safe_path
+        return "'" + _shell_arg_safe_path(arg).replace("'", "'\"'\"'") + "'"
 
     def _escape_native_tool_arg(self, arg: str) -> str:
-        """Quote a path for a NATIVE Windows binary (rg, node, git ...): those don't
-        understand the MSYS ``/c/...`` form and Hermes disables MSYS argument
-        conversion, so nothing translates it back (→ ``os error 3``). ``C:/Users/x``
-        is accepted by every layer. Identical to ``_escape_shell_arg`` off Windows."""
-        from tools.environments.local import _IS_WINDOWS, _msys_to_windows_path
-        if _IS_WINDOWS and arg:
-            arg = _msys_to_windows_path(arg).replace("\\", "/")
+        """Quote a native-tool path using the same drive-qualified form."""
+        from tools.environments.local import _shell_arg_safe_path
+        arg = _shell_arg_safe_path(arg)
         return "'" + arg.replace("'", "'\"'\"'") + "'"
 
     def _atomic_write(self, path: str, content: str) -> "ExecuteResult":

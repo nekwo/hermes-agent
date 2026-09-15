@@ -812,7 +812,7 @@ _TOOL_DOC_LINES = [
 
 
 def build_execute_code_schema(enabled_sandbox_tools: set = None,
-                              mode: str = None) -> dict:
+                              mode: str = None, *, _full_description: bool = False) -> dict:
     """execute_code schema listing only *enabled_sandbox_tools* — a disabled tool (e.g. web off)
     must not appear or the model keeps trying it. ``mode`` (None → config) picks the cwd sentence."""
     if enabled_sandbox_tools is None:
@@ -859,6 +859,16 @@ def build_execute_code_schema(enabled_sandbox_tools: set = None,
         "json.loads for terminal() output; shell_quote(s) — shlex.quote for "
         "dynamic shell args; retry(fn, max_attempts=3, delay=2) — exponential backoff."
     )
+    if not _full_description:
+        description = (
+            "Run Python in a persistent session kernel via `from hermes_tools import ...` "
+            "(web_search, web_extract, read_file, write_file, search_files, patch, terminal). "
+            "Use for 3+ chained calls with logic/filter/loop; use plain calls otherwise. "
+            "State survives calls; timeout/interruption loses it. 5-min / 50KB stdout / 50-call limits; "
+            "print your result. Truncated stdout includes a full-output file. "
+            "Call tool_describe for available tools, helper imports and execution-mode guidance."
+        )
+
     return {
         "name": "execute_code",
         "description": description,

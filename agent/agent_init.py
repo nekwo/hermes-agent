@@ -9,6 +9,9 @@ Symbols that tests patch on ``run_agent.*`` (``OpenAI``, ``get_tool_definitions`
 
 from __future__ import annotations
 
+from agent_runtime.init_observability import (
+    _tool_defs_cache_misses, _emit_tool_defs_receipt, init_timing_callback,
+)
 import logging
 import os
 import re
@@ -1042,7 +1045,7 @@ def _init_fallback_chain(agent, fallback_model):
             print(f"🔄 Fallback chain ({len(chain)} providers): " + " → ".join(labels))
 
 
-def _load_tools(agent, enabled_toolsets, disabled_toolsets):
+def _load_tools(agent, enabled_toolsets, disabled_toolsets, blocked_tool_names=None):
     # A multiplexed gateway may have switched HERMES_HOME since model_tools was imported;
     # make sure this profile's plugins are discovered before the tool snapshot.
     try:
@@ -1058,10 +1061,14 @@ def _load_tools(agent, enabled_toolsets, disabled_toolsets):
     except Exception:
         agent._tool_snapshot_generation = 0
     import model_tools
+    _tool_defs_started = time.perf_counter()
+    _tool_defs_misses_before = _tool_defs_cache_misses()
     agent.tools = model_tools.get_tool_definitions(
         enabled_toolsets=enabled_toolsets, disabled_toolsets=disabled_toolsets,
-        quiet_mode=agent.quiet_mode,
+        quiet_mode=agent.quiet_mode, blocked_tool_names=blocked_tool_names,
     )
+    _emit_tool_defs_receipt(agent.status_callback, started=_tool_defs_started,
+        misses_before=_tool_defs_misses_before, misses_after=_tool_defs_cache_misses())
 
     agent.valid_tool_names = {tool["function"]["name"] for tool in agent.tools} if agent.tools else set()
     # Kanban guidance is session-static (kanban_show iff HERMES_KANBAN_TASK); resolve once.
@@ -1893,7 +1900,15 @@ def _enforce_minimum_context(agent):
         and not isinstance(agent._config_context_length, bool)
         and agent._config_context_length > 0
     )
-    if _ctx and _ctx < MINIMUM_CONTEXT_LENGTH and not _allow_lmstudio_explicit_below_floor:
+    _allow_managed_local_context = (
+        agent.requested_provider == "local-llama-hermes" and agent.provider == "custom"
+        and isinstance(agent._config_context_length, int)
+        and not isinstance(agent._config_context_length, bool)
+        and agent._config_context_length >= 4096 and _ctx == agent._config_context_length
+    )
+    if _ctx and _ctx < MINIMUM_CONTEXT_LENGTH and not (
+        _allow_lmstudio_explicit_below_floor or _allow_managed_local_context
+    ):
         raise ValueError(
             f"Model {agent.model} has a context window of {_ctx:,} tokens, "
             f"which is below the minimum {MINIMUM_CONTEXT_LENGTH:,} required "
@@ -2106,6 +2121,7 @@ def _snapshot_primary_runtime(agent):
 
 
 def _init_usage_state(agent):
+    agent.session_usage_ledger = []
     from agent.runtime_cwd import scope_terminal_cwd
     agent._subdirectory_hints = SubdirectoryHintTracker(
         working_dir=scope_terminal_cwd() or None, enabled=not agent.skip_context_files)
@@ -2174,6 +2190,7 @@ def init_agent(
     acp_command: str = None, acp_args: list[str] | None = None, command: str = None,
     args: list[str] | None = None, model: str = "", max_iterations: int = sys.maxsize,
     enabled_toolsets: List[str] = None, disabled_toolsets: List[str] = None,
+    blocked_tool_names: List[str] = None,
     save_trajectories: bool = False, verbose_logging: bool = False, quiet_mode: bool = False,
     tool_progress_mode: str = "all", ephemeral_system_prompt: str = None,
     log_prefix_chars: int = 100, log_prefix: str = "", providers_allowed: List[str] = None,
@@ -2218,6 +2235,7 @@ def init_agent(
       skip_context_files: skip SOUL.md/.hermes.md/AGENTS.md/CLAUDE.md/.cursorrules injection;
         load_soul_identity keeps ~/.hermes/SOUL.md as identity regardless.
     """
+    _emit_init_timing = init_timing_callback(status_callback)
     _install_safe_stdio()
 
     _params = locals()
@@ -2257,6 +2275,7 @@ def init_agent(
     agent.acp_args = list(acp_args or args or [])
     _resolve_api_mode(agent, api_mode, provider_name, base_url)
     _finalize_routing(agent, api_mode, credential_pool)
+    _emit_init_timing("api_mode_setup")
 
     # Platform callbacks are stored under their parameter names verbatim.
     for _cb in _CALLBACK_PARAMS:
@@ -2275,14 +2294,18 @@ def init_agent(
     _init_turn_state(agent, run_budget_seconds)
     _setup_logging(agent)
     _set_defaults(agent, _STREAM_STATE)
+    _emit_init_timing("core_state_setup")
     _build_client(agent, api_key, base_url, fallback_model)
+    _emit_init_timing("provider_client_setup")
     _init_fallback_chain(agent, fallback_model)
-    _load_tools(agent, enabled_toolsets, disabled_toolsets)
+    _load_tools(agent, enabled_toolsets, disabled_toolsets, blocked_tool_names)
+    _emit_init_timing("tool_setup")
     _init_session_state(
         agent, session_id, session_db, parent_session_id, reasoning_config, max_tokens,
         checkpoints_enabled, checkpoint_max_snapshots, checkpoint_max_total_size_mb, checkpoint_max_file_size_mb,
     )
 
+    _emit_init_timing("session_setup")
     # Load config once for memory, skills, and compression sections
     try:
         from hermes_cli.config import load_config_readonly as _load_agent_config
@@ -2292,6 +2315,7 @@ def init_agent(
 
     _apply_display_config(agent, _agent_cfg, platform)
     _init_memory(agent, _agent_cfg, skip_memory, platform)
+    _emit_init_timing("memory_skill_setup")
     _apply_agent_section(agent, _agent_cfg)
     cs = _parse_compression_config(agent, _agent_cfg)
     _config_context_length, _custom_providers, _effective_context_length, _model_cfg = _resolve_context_length(
@@ -2301,10 +2325,12 @@ def init_agent(
     _enforce_minimum_context(agent)
     _warn_nonagentic_hermes_model(agent)
     _inject_context_engine_tools(agent)
+    _emit_init_timing("context_engine_setup")
     _init_usage_state(agent)
     _configure_ollama_num_ctx(agent, _model_cfg, _config_context_length)
     _emit_compression_summary(agent, cs)
     _snapshot_primary_runtime(agent)
+    _emit_init_timing("final_state_setup")
 
 
 __all__ = ["init_agent"]

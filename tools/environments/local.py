@@ -375,10 +375,11 @@ def _windows_bash_candidates(custom: "str | None") -> list[str]:
         os.path.join(getenv("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Git", "bin"),
         lad and os.path.join(lad, "Programs", "Git", "bin"),
     ]
-    raw = [custom or "", *(os.path.join(r, "bash.exe") for r in roots if r)]
-    candidates = list(dict.fromkeys(c for c in raw if c and os.path.isfile(c)))
+    raw = [custom or "", *(os.path.join(r, "bash.exe") for r in roots[:2] if r),
+           _bash_from_git() or "", *(os.path.join(r, "bash.exe") for r in roots[2:] if r)]
+    candidates = list(dict.fromkeys(c for c in raw if c and not _is_windows_system_shim(c) and os.path.isfile(c)))
     found = shutil.which("bash")
-    if found and found not in candidates:
+    if found and not _is_windows_system_shim(found) and found not in candidates:
         candidates.append(found)
     return candidates
 
@@ -565,7 +566,7 @@ def _path_env_key(run_env: dict) -> str | None:
 def _make_run_env(env: dict) -> dict:
     """Build a run environment with a sane PATH and provider-var stripping."""
     return _scrubbed_env([(dict(os.environ | env), True)], frozenset(),
-                         lambda p: _prepend_git_bash_dirs(_append_missing_sane_path_entries(p)))
+                         lambda p: _augment_windows_system_path(_prepend_git_bash_dirs(_append_missing_sane_path_entries(p))))
 
 
 # --- Hermes venv / repo-root detection (module-level, computed once) ---
@@ -853,3 +854,175 @@ class LocalEnvironment(BaseEnvironment):
         for f in (self._snapshot_path, self._cwd_file, *stale):
             with contextlib.suppress(OSError):
                 os.unlink(f)
+
+
+def _shell_arg_safe_path(path: str) -> str:
+    """Return *path* in a form safe to pass as an ARGUMENT to a spawned program.
+
+    Sibling of :func:`_bash_safe_path`, and deliberately a different target
+    form. ``_bash_safe_path`` feeds paths that *bash itself* resolves —
+    ``source``, redirections, ``cd`` in the snapshot bootstrap — where the
+    MSYS ``/c/...`` spelling is exactly right. Program **arguments** are a
+    different consumer class: ``rg``, ``python.exe`` and friends on Windows
+    are frequently NATIVE binaries with no MSYS runtime, and they cannot
+    resolve ``/c/...`` at all (``IO error ... (os error 3)``).
+
+    The two Windows mechanisms in this module used to contradict each other
+    here: ``_apply_windows_msys_bash_env_defaults`` sets ``MSYS_NO_PATHCONV=1``
+    / ``MSYS2_ARG_CONV_EXCL=*`` on every bash spawn, so MSYS never converts an
+    ``/c/...`` argument back to a native path for such a binary — the rewrite
+    had no counterpart and content search was simply broken.
+
+    So emit the drive-qualified forward-slash form ``C:/Users/x``:
+
+    * the MSYS runtime resolves it (Git Bash ``cat``/``find``/``grep`` and
+      bash's own redirections all accept drive-qualified paths),
+    * native Windows binaries resolve it,
+    * with argument conversion disabled MSYS cannot re-mangle it into the
+      ``Directory \\drivers\\etc does not exist`` failure class — which is
+      what that class came from in the first place.
+
+    Mixed MSYS leftovers (``/c/Users\\Alexander\\Documents``) are folded into
+    the same form. Anything that is not a drive-qualified path — genuine POSIX
+    paths, relative paths, and non-path arguments such as a ``python -c``
+    snippet — is returned **verbatim**, so this never rewrites backslashes
+    inside argument text that merely happens to contain them.
+    """
+    if not _IS_WINDOWS or not path:
+        return path
+    native = _msys_to_windows_path(path)
+    if not re.match(r'^[a-zA-Z]:[\\/]', native):
+        return path
+    return native.replace('\\', '/')
+
+
+def _is_windows_system_shim(path: str) -> bool:
+    """True when ``path`` lives under the Windows system dirs that host the
+    WSL launcher (``C:\\Windows\\System32\\bash.exe`` and friends).
+
+    ``shutil.which("bash")`` happily returns that stub on any box with the
+    WSL optional feature enabled, and routing the agent's terminal through it
+    invokes ``wsl`` — which fails with "no installed distributions" on a
+    normal Windows host.  We must never treat it as Git Bash.
+    """
+    if not path:
+        return False
+    system_root = os.environ.get("SystemRoot") or os.environ.get("windir") or r"C:\Windows"
+
+    def _norm(p: str) -> str:
+        # Separator- and case-agnostic so mixed C:\...\ / forward-slash forms
+        # (and POSIX-hosted unit tests) compare correctly.
+        return p.replace("\\", "/").rstrip("/").lower()
+
+    norm = _norm(path)
+    root = _norm(system_root)
+    for sub in ("system32", "syswow64", "sysnative"):
+        if norm.startswith(f"{root}/{sub}/"):
+            return True
+    return False
+
+
+def _bash_from_git() -> "str | None":
+    """Derive ``bash.exe`` from the installed ``git`` executable.
+
+    Git for Windows ships ``bash.exe`` beside ``git.exe`` in predictable
+    layouts.  ``git`` is a hard install prerequisite for Hermes, so if it's on
+    PATH we can locate its bash without any separate provisioning.  We
+    ``realpath`` first so scoop/chocolatey shims resolve to the real install.
+    """
+    git = shutil.which("git")
+    if not git or _is_windows_system_shim(git):
+        return None
+    git_dir = os.path.dirname(os.path.realpath(git))
+    # git.exe can live in <root>\cmd, <root>\bin, or <root>\mingw64\bin;
+    # bash.exe lives in <root>\bin or <root>\usr\bin.  Probe relative to the
+    # git dir covering all three git.exe locations.
+    for rel in (
+        (os.pardir, "bin", "bash.exe"),
+        (os.pardir, "usr", "bin", "bash.exe"),
+        (os.pardir, os.pardir, "bin", "bash.exe"),
+        (os.pardir, os.pardir, "usr", "bin", "bash.exe"),
+    ):
+        candidate = os.path.normpath(os.path.join(git_dir, *rel))
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def _bash_probe_failure_details(bash: str) -> str:
+    """Cached probe output for *bash*, empty when it started fine."""
+    return _bash_probe_details_cache.get(bash, "")
+
+
+def _windows_system_path_dirs() -> "list[str]":
+    """Windows dirs that host the native command tooling the agent may shell
+    out to from its bash terminal — ``cmd.exe``, ``powershell.exe`` (Windows
+    PowerShell 5.1), ``pwsh.exe`` (PowerShell 7), ``ssh``/``curl``, etc.
+
+    The agent's ``terminal`` runs through Git Bash; from there it reaches
+    Windows-native tooling by invoking these executables directly (e.g.
+    ``powershell.exe -NoProfile -Command ...``).  A gateway launched with a
+    minimal/sanitised PATH (service manager, restricted parent env) may not
+    carry these, so we append the ones that exist to the subprocess PATH —
+    append-only, so a healthy native PATH keeps its original precedence.
+    """
+    system_root = os.environ.get("SystemRoot") or os.environ.get("windir") or r"C:\Windows"
+    system32 = os.path.join(system_root, "System32")
+    candidates = [
+        system32,
+        system_root,
+        os.path.join(system32, "Wbem"),  # wmic and friends
+        os.path.join(system32, "WindowsPowerShell", "v1.0"),  # powershell.exe
+        os.path.join(system32, "OpenSSH"),  # ssh/scp
+    ]
+    # PowerShell 7 (pwsh) installs outside System32.
+    for base in (
+        os.environ.get("ProgramFiles", r"C:\Program Files"),
+        os.environ.get("ProgramW6432"),
+        os.environ.get("ProgramFiles(x86)"),
+    ):
+        if base:
+            candidates.append(os.path.join(base, "PowerShell", "7"))
+    seen: set[str] = set()
+    dirs: list[str] = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        key = os.path.normcase(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        if os.path.isdir(candidate):
+            dirs.append(candidate)
+    return dirs
+
+
+def _augment_windows_system_path(existing_path: str) -> str:
+    """Append missing Windows system tooling dirs to ``existing_path``.
+
+    Preserves the caller PATH verbatim (order + entries) and only appends the
+    system dirs from :func:`_windows_system_path_dirs` that aren't already
+    present (case-insensitive, separator-tolerant). No-op off Windows.
+    """
+    if not _IS_WINDOWS:
+        return existing_path
+    entries = (
+        [e for e in existing_path.split(_WINDOWS_PATH_SEP) if e]
+        if existing_path
+        else []
+    )
+    present = {os.path.normcase(e.rstrip("\\/")) for e in entries}
+    for directory in _windows_system_path_dirs():
+        if os.path.normcase(directory.rstrip("\\/")) not in present:
+            entries.append(directory)
+    return _WINDOWS_PATH_SEP.join(entries)
+
+_WINDOWS_PATH_SEP = ";"
+
+def _find_windows_git_bash() -> "str | None":
+    """First usable Git Bash; never return the Windows WSL launcher."""
+    candidates = _windows_bash_candidates(os.environ.get("HERMES_GIT_BASH_PATH"))
+    for candidate in candidates:
+        if _bash_starts(candidate):
+            return candidate
+    return candidates[0] if candidates else None

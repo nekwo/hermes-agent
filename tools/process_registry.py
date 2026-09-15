@@ -33,6 +33,9 @@ from hermes_cli.config import get_hermes_home
 
 from tools.process_registry_notifications import format_process_notification
 from tools.process_registry_checkpoint import ProcessCheckpointMixin
+from agent_runtime.process_notifications import (
+    ProcessNotificationMixin, checkpoint_path, wait_ceiling_seconds, MISSION_CHAT_WAIT_MAX_SECONDS,
+)
 from tools.process_registry_results import load_completed_results, save_completed_result
 
 logger = logging.getLogger(__name__)
@@ -47,7 +50,7 @@ def _checkpoint_path() -> Path:
     changed it, else live profile-scoped HERMES_HOME — the multiplexed gateway serves every
     profile from one process, so the import-time constant would pin every profile's process
     checkpoint to the launch home."""
-    return CHECKPOINT_PATH if CHECKPOINT_PATH != _CHECKPOINT_PATH_AT_IMPORT else get_hermes_home() / "processes.json"
+    return CHECKPOINT_PATH if CHECKPOINT_PATH != _CHECKPOINT_PATH_AT_IMPORT else checkpoint_path()
 
 MAX_OUTPUT_CHARS = 200_000      # rolling output buffer
 FINISHED_TTL_SECONDS = 1800     # keep finished processes 30 minutes
@@ -504,7 +507,7 @@ _CHECKPOINT_DEFAULTS = {
 }
 
 
-class ProcessRegistry(ProcessCheckpointMixin):
+class ProcessRegistry(ProcessNotificationMixin, ProcessCheckpointMixin):
     """In-memory registry of running and finished background processes.
     Thread-safe: accessed from executor threads (terminal_tool, process handlers),
     the gateway asyncio loop (watchers, reset checks) and the cleanup thread."""
@@ -523,12 +526,8 @@ class ProcessRegistry(ProcessCheckpointMixin):
         # process_loop and the gateway drain it after each agent turn to trigger new turns.
         import queue as _queue_mod
         self.completion_queue: _queue_mod.Queue = _queue_mod.Queue()
-        # Rehydrate durable delegation completions once, at registry startup.
-        try:
-            from tools.async_delegation import restore_undelivered_completions
-            restore_undelivered_completions(self.completion_queue)
-        except Exception as exc:
-            logger.warning("Could not restore async delegation completions: %s", exc)
+        self._durable_restore_lock = threading.Lock()
+        self._durable_completions_restored = False
         # Completions the agent already consumed via wait()/read_log() (output in
         # hand): drain loops AND gateway/tui watchers skip them.
         self._completion_consumed: set = set()
@@ -1346,24 +1345,45 @@ class ProcessRegistry(ProcessCheckpointMixin):
         # buffered ``output_buffer``, never from the pipe.
         self._release_finished_handles(session)
         self._write_checkpoint()
-        if was_running and session.notify_on_complete:
-            notification = {
-                "type": "completion",
-                "session_id": session.id,
-                "session_key": session.session_key,
-                "task_id": session.task_id,
-                "owner_task_id": session.owner_task_id or session.task_id,
-                "command": session.command,
-                **({"handoff_note": session.handoff_note} if session.handoff_note else {}),
-                **self._exit_fields(session),
-                "output": _output_tail(session, 2000),
-                # Stable producer identity across checkpoint recovery (unlike a
-                # consumer-observed completion timestamp).
-                "started_at": session.started_at,
-            }
-            _redact_process_result(notification)
-            self.completion_queue.put(notification)
-        session._completion_event.set()
+        # Only enqueue completion notification on the FIRST move.  Without
+        # this guard, kill_process() and the reader thread can both call
+        # _move_to_finished(), producing duplicate [IMPORTANT: ...] messages.
+        if not was_running:
+            return
+        # A ``process notify`` request is the SECOND reason a completion is
+        # owed — the first being a spawn-time notify_on_complete. Both produce
+        # ONE event: a session that is armed twice over must not deliver twice.
+        try:
+            notify_row = self._notify_request_row(session.id)
+            if not session.notify_on_complete and notify_row is None:
+                return
+            if notify_row is not None and not self._notify_target_is_live(notify_row):
+                # The persona instance that asked is gone. DROP it — the delivery
+                # lane's positive-ownership rule (#64484) says absence of the
+                # instance means "do not deliver", never "deliver anyway" — and say
+                # so out loud, because a silently abandoned completion is the exact
+                # failure class this lane exists to retire.
+                logger.warning(
+                    "process-exit notify for %s dropped: persona instance %s no longer"
+                    " owns chat root %s",
+                    session.id,
+                    notify_row.get("persona_instance_id") or "?",
+                    notify_row.get("chat_session_id") or "?",
+                )
+                self._settle_notify_request(
+                    session.id, fired=False, detail="persona_instance_missing"
+                )
+                notify_row = None
+                if not session.notify_on_complete:
+                    return
+            event = self._completion_event_payload(session)
+            if notify_row is not None:
+                self._stamp_notify_routing(event, notify_row)
+                self._settle_notify_request(session.id, fired=True)
+            self.completion_queue.put(event)
+        finally:
+            # A finite owner must not wake before the completion is queued.
+            session._completion_event.set()
 
     @staticmethod
     def _exit_fields(session: ProcessSession) -> dict:
@@ -1439,7 +1459,7 @@ class ProcessRegistry(ProcessCheckpointMixin):
         result: dict = {"waited": [], "completed": [], "timed_out": []}
         with self._lock:
             pending = [
-                s for s in self._running.values()
+                s for s in (*self._running.values(), *self._finished.values())
                 if s.notify_on_complete and not s._completion_event.is_set() and (task_id is None or s.task_id == task_id)
             ]
         if not pending or timeout <= 0:
@@ -1562,7 +1582,7 @@ class ProcessRegistry(ProcessCheckpointMixin):
             # Routing happened first so a foreign session cannot drop the owner's
             # event via its own consumed/observed state.
             _evt_sid = evt.get("session_id", "")
-            if evt.get("type") == "completion" and self._drain_should_skip(
+            if evt.get("type") == "completion" and not evt.get("notify_requested") and self._drain_should_skip(
                 _evt_sid, skip_poll_observed=skip_poll_observed):
                 continue
             # Subagent-owned process notifications are suppressed by default — the
@@ -1734,10 +1754,7 @@ class ProcessRegistry(ProcessCheckpointMixin):
         with status exited|timeout|interrupted|not_found|error and an output snapshot."""
         from tools.interrupt import consume_yield as _consume_yield, is_interrupted as _is_interrupted
 
-        try:
-            max_timeout = int(os.getenv("TERMINAL_TIMEOUT", "180"))
-        except (ValueError, TypeError):
-            max_timeout = 180
+        max_timeout = wait_ceiling_seconds()
         # The schema says minimum=1 but not every caller enforces it; timeout=0 is
         # falsy and would silently fall through to the default wait.
         if timeout is not None and timeout <= 0:
@@ -1975,7 +1992,7 @@ class ProcessRegistry(ProcessCheckpointMixin):
         session = self.get(session_id)
         msg = "EOF sent" if session is not None and session._pty else "stdin closed"
         return self._stdin_op(
-            session_id, lambda pty: pty.sendeof(), lambda stdin: stdin.close(), {"status": "ok", "message": msg})
+            session_id, lambda pty: pty.write("\x1a\r\n") if _IS_WINDOWS else pty.sendeof(), lambda stdin: stdin.close(), {"status": "ok", "message": msg})
 
     def count_running(self) -> int:
         """O(1) running count for status-bar polling; dict ``len()`` is atomic, no lock."""
@@ -2155,12 +2172,7 @@ process_registry = ProcessRegistry()
 # --- the "process_manage" tool schema + handler -----------------------------------
 from tools.registry import registry, tool_error
 
-PROCESS_SCHEMA = {
-    "name": "process_manage",
-    # The enum names the verbs; the description keeps only non-obvious semantics
-    # (write-vs-submit is the one real trap: a lone \n on a Windows PTY is not Enter).
-    # See #95681.
-    "description": (
+FULL_PROCESS_DESCRIPTION = (
         "Poll, wait on, or kill background terminal processes (from "
         "terminal(background=true)). "
         "Completed results remain retrievable by session_id when resuming their owning conversation "
@@ -2169,16 +2181,26 @@ PROCESS_SCHEMA = {
         "until exit or timeout (partial output on timeout). write vs "
         "submit: submit appends Enter — use it to answer prompts; write "
         "sends raw bytes, no newline. close: EOF stdin. kill: terminate. "
+        "notify: request a completion receipt in a new persona chat turn, then end this turn. "
         "handoff (subagents only): transfer a running process you started to your parent agent, which then "
         "receives its completion; `data` = one sentence on its purpose. Subagent-owned processes are otherwise "
         "killed when the subagent finishes and their notifications never reach the parent."
+    )
+
+PROCESS_SCHEMA = {
+    "name": "process_manage",
+    "description": (
+        "Background processes: wait returns partial output on timeout. "
+        "submit appends Enter to answer prompts; write sends raw bytes, no newline. "
+        "notify requests a receipt in a new persona turn: end this turn. Subagents must handoff surviving "
+        "processes. Call tool_describe for ownership and retention details."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["list", "poll", "log", "wait", "kill", "write", "submit", "close", "handoff"]
+                "enum": ["list", "poll", "log", "wait", "kill", "write", "submit", "close", "handoff", "notify"]
             },
             "session_id": {
                 "type": "string",
@@ -2246,6 +2268,7 @@ def _list_processes(task_id) -> dict:
 # action -> (handler(session_id, args) -> dict, redact output?). Output-bearing
 # actions are redacted; stdin actions return only status.
 _SESSION_ACTIONS = {
+    "notify": (lambda sid, a: process_registry.notify_on_exit(sid), True),
     "poll": (lambda sid, a: process_registry.poll(sid), True),
     "log": (lambda sid, a: process_registry.read_log(sid, offset=a.get("offset"), limit=a.get("limit", 200)), True),
     "wait": (lambda sid, a: process_registry.wait(sid, timeout=a.get("timeout")), True),
@@ -2313,7 +2336,7 @@ def _handle_process(args, **kw):
         handler, redact = _SESSION_ACTIONS[action]
         result = handler(session_id, args)
         return json.dumps(_redact_process_result(result) if redact else result, ensure_ascii=False)
-    return tool_error(f"Unknown process action: {action}. Use: list, poll, log, wait, kill, write, submit, close, handoff")
+    return tool_error(f"Unknown process action: {action}. Use: list, poll, log, wait, kill, write, submit, close, handoff, notify")
 
 
 registry.register(

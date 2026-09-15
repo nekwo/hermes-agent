@@ -58,8 +58,8 @@ class TestAuxProbeMode:
         import agent.auxiliary_client as aux
 
         stub = aux._AuxProbeClientStub()
-        with pytest.raises(RuntimeError, match="availability checks only"):
-            _ = stub.chat
+        with pytest.raises(RuntimeError, match="placeholder client was used to make a request"):
+            stub.chat.completions.create()
 
     def test_probe_mode_is_scoped_and_reentrant(self):
         import agent.auxiliary_client as aux
@@ -99,7 +99,9 @@ class TestAuxProbeMode:
 
         stub = aux._AuxProbeClientStub()
         client, model = aux._to_async_client(stub, "m")
-        assert client is stub
+        assert aux.is_capability_probe_client(client)
+        with pytest.raises(RuntimeError, match="placeholder client was used to make a request"):
+            client.chat.completions.create()
         assert model == "m"
 
 

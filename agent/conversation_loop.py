@@ -32,6 +32,11 @@ from agent.runtime_cwd import resolve_agent_cwd
 from agent.surface_switch import (
     identity_line_value, note_inert_pinned_tools, split_runtime_boundary, stage_surface_switch_note,
 )
+from agent_runtime.conversation_observability import (
+    _emit_conversation_timing, _emit_request_assembled_marker,
+    _format_ttfb_token, _first_delta_recorder,
+)
+
 from agent.turn_context import PreflightCompressionTimedOut, build_turn_context
 from agent.turn_retry_state import TurnRetryState
 # Phase helpers of the turn loop, bound at import so a source-tree swap cannot load a
@@ -654,6 +659,8 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     Mutates ``agent._cached_system_prompt`` and persists a freshly-built prompt on first
     build. Row states ``missing``/``null``/``empty``/``present`` are logged and DB
     failures log at WARNING so silent prefix-cache misses show in ``agent.log``."""
+    _prompt_started = time.perf_counter()
+    agent._system_prompt_restored_from_session = False
     stored_prompt = None
     stored_state = "missing"
     session_row = None
@@ -687,6 +694,7 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
             except Exception:
                 pass
             agent._cached_system_prompt = agent._build_system_prompt(system_message)
+            _emit_conversation_timing(agent, "system_prompt_build", _prompt_started, stored_state="capability_refresh")
             stage_surface_switch_note(agent, agent._cached_system_prompt, conversation_history)
             # Persist so the NEXT turn restores the new bytes verbatim (cache break is
             # once per capability change). on_session_start not re-fired: continuation.
@@ -730,6 +738,8 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
         from agent.system_prompt import reconstruct_static_prefix, restore_plugin_prompt_sections
         restore_plugin_prompt_sections(agent, stored_prompt)
         reconstruct_static_prefix(agent, system_message=system_message)
+        agent._system_prompt_restored_from_session = True
+        _emit_conversation_timing(agent, "system_prompt_restore", _prompt_started, stored_state=stored_state)
         return
     if stored_prompt:
         stored_state = "stale_runtime"
@@ -751,6 +761,7 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
 
     # First turn of a new session (or recovering from a broken stored prompt).
     agent._cached_system_prompt = agent._build_system_prompt(system_message)
+    _emit_conversation_timing(agent, "system_prompt_build", _prompt_started, stored_state=stored_state)
 
     # The rebuilt prompt describes the CURRENT surface, but a surface note left in the
     # transcript by an earlier switch does not — retire it here too, or a rebuild for an
@@ -1433,6 +1444,7 @@ def _run_conversation_turn(
     persist_user_display_metadata: Optional[Dict[str, Any]] = None,
     persist_user_platform_id: Optional[str] = None,
     turn_author: Optional[Dict[str, Any]] = None,
+    reuse_current_user_message: bool = False,
     moa_config: Optional[dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Run a complete conversation with tool calling until completion; returns the result dict.
@@ -1459,6 +1471,7 @@ def _run_conversation_turn(
     except Exception:
         logger.debug("per-turn env credential refresh failed", exc_info=True)
 
+    _turn_context_started = time.perf_counter()
     # Per-turn setup: build_turn_context mutates ``agent`` and returns the locals the loop reads.
     try:
         _ctx = build_turn_context(
@@ -1477,10 +1490,14 @@ def _run_conversation_turn(
             ra=_ra,
             # MoA turns append per-call aggregated context to the API copy of the
             # user message, so no byte-stable api_content sidecar can be stamped.
+            reuse_current_user_message=reuse_current_user_message,
             moa_active=bool(moa_config),
         )
     except PreflightCompressionTimedOut as _preflight_timeout_exc:
         return _preflight_timeout_result(agent, _preflight_timeout_exc, conversation_history)
+
+    _emit_conversation_timing(agent, "turn_context", _turn_context_started,
+        system_prompt_restored=bool(getattr(agent, "_system_prompt_restored_from_session", False)))
 
     # Per-turn agent state (the gateway caches agents across turns, so none of this may
     # leak into the next message): interim-commentary dedup spans the whole turn but not
@@ -1570,7 +1587,7 @@ def _run_conversation_turn(
     return result
 
 
-def run_conversation(
+def _run_conversation(
     agent,
     user_message: Any,
     system_message: str = None,
@@ -1582,6 +1599,7 @@ def run_conversation(
     persist_user_display_kind: Optional[str] = None,
     persist_user_display_metadata: Optional[Dict[str, Any]] = None,
     persist_user_platform_id: Optional[str] = None,
+    reuse_current_user_message: bool = False,
     moa_config: Optional[dict[str, Any]] = None,
     turn_author: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -1606,10 +1624,50 @@ def run_conversation(
         persist_user_display_kind=persist_user_display_kind,
         persist_user_display_metadata=persist_user_display_metadata,
         persist_user_platform_id=persist_user_platform_id,
+        reuse_current_user_message=reuse_current_user_message,
         moa_config=moa_config,
         turn_author=turn_author,
     )
     return export_current_turn_boundary(agent, result, user_message)
+
+
+def run_conversation(
+    agent,
+    user_message: Any,
+    system_message: str = None,
+    conversation_history: List[Dict[str, Any]] = None,
+    task_id: str = None,
+    stream_callback: Optional[callable] = None,
+    persist_user_message: Optional[Any] = None,
+    persist_user_timestamp: Optional[float] = None,
+    persist_user_display_kind: Optional[str] = None,
+    persist_user_display_metadata: Optional[Dict[str, Any]] = None,
+    moa_config: Optional[dict[str, Any]] = None,
+    reuse_current_user_message: bool = False,
+    persist_user_platform_id: Optional[str] = None,
+    turn_author: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Run every model turn with mutation of its interpreter barred."""
+    from tools.lazy_deps import deny_venv_installs, venv_install_denial
+
+    reason = venv_install_denial() or "an agent turn (conversation loop)"
+    with deny_venv_installs(reason):
+        return _run_conversation(
+            agent,
+            user_message,
+            system_message=system_message,
+            conversation_history=conversation_history,
+            task_id=task_id,
+            stream_callback=stream_callback,
+            persist_user_message=persist_user_message,
+            persist_user_timestamp=persist_user_timestamp,
+            persist_user_display_kind=persist_user_display_kind,
+            persist_user_display_metadata=persist_user_display_metadata,
+            moa_config=moa_config,
+            reuse_current_user_message=reuse_current_user_message,
+            persist_user_platform_id=persist_user_platform_id,
+            turn_author=turn_author,
+        )
 
 
 __all__ = ["run_conversation"]

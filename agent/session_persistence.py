@@ -148,7 +148,7 @@ def _db_flush_scan_start(agent, messages: List[Dict]) -> int:
     return scan_start
 
 
-def _db_flush_row(agent, msg: Dict, is_current_turn_user: bool) -> Dict[str, Any]:
+def _db_flush_row(agent, msg: Dict, is_current_turn_user: bool, msg_idx: int = 0) -> Dict[str, Any]:
     """Build the session-db row for ``msg``, applying the persist override to THIS row only."""
     role = msg.get("role", "unknown")
     content = msg.get("content")
@@ -168,6 +168,9 @@ def _db_flush_row(agent, msg: Dict, is_current_turn_user: bool) -> Dict[str, Any
         and sanitize_context(content).strip() != content.strip()
     ):
         api_content = content
+    if getattr(agent, "_persona_chat_root_session_id", None):
+        from agent_runtime.native_persistence import project_native_message
+        role, content = project_native_message(agent, msg, content, msg_idx)
     # Key order is the divert-JSONL wire order (divert_session_transcript_jsonl).
     row = {
         "role": role, "content": _durable_content(content), "tool_name": msg.get("tool_name"),
@@ -204,7 +207,7 @@ def _db_flush_collect(agent, messages: List[Dict], conversation_history: Optiona
         if id(msg) in history_ids or id(msg) in seed_ids:
             msg[_DB_PERSISTED_MARKER] = True
             continue
-        batch_rows.append(_db_flush_row(agent, msg, ov_idx == msg_idx or msg is pending_cli_message))
+        batch_rows.append(_db_flush_row(agent, msg, ov_idx == msg_idx or msg is pending_cli_message, msg_idx))
         batch_msgs.append(msg)
     return batch_rows, batch_msgs
 

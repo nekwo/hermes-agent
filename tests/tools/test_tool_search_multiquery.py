@@ -458,7 +458,7 @@ class TestBatchedDescribe:
         assert "terminal" in result["not_found"]
         assert "errors" not in result
 
-    def test_registered_direct_surface_name_keeps_exact_error(self):
+    def test_registered_direct_surface_has_details_only_when_in_session(self):
         from tools.tool_search import ToolSearchConfig, dispatch_tool_describe
 
         name = "mq_desktop_direct_action"
@@ -469,7 +469,10 @@ class TestBatchedDescribe:
             config=ToolSearchConfig.from_raw({}),
         ))
 
-        assert result["errors"][name] == (
+        assert result["tools"][name]["parameters"] == tool_def["function"]["parameters"]
+        hidden = json.loads(dispatch_tool_describe(
+            {"names": [name]}, current_tool_defs=[], config=ToolSearchConfig.from_raw({})))
+        assert hidden["errors"][name] == (
             f"'{name}' is not a deferrable tool. If you see it in the tools list "
             "already, call it directly; otherwise check the spelling against tool_search."
         )

@@ -221,17 +221,7 @@ def check_todo_requirements() -> bool:
 TODO_SCHEMA = {
     "name": "todo_list",
     "description": (
-        # See #95681.
-        "Track a task list for multi-step work (3+ steps). Use for complex tasks "
-        "with 3+ steps or when the user provides multiple tasks. "
-        "For 'all N items' tasks, enumerate every instance as its own checklist "
-        "item so none are silently dropped. "
-        "Call with no parameters to read the current list.\n"
-        "List order is priority. Only ONE item in_progress at a time. "
-        "Break large phases into subtasks via parent. "
-        "Mark an item completed only after the work is verified done, never "
-        "based on intent. If something fails, cancel it and add a revised "
-        "item. Always returns the full current list."
+        "Session task list for 3+ steps; no args reads it. For requested batches, enumerate every instance; split phases via parent. Keep ONE item in_progress; mark complete only when verified done. If a task fails, cancel it and add a revised item. Not durable memory."
     ),
     "parameters": {
         "type": "object",

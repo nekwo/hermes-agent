@@ -505,16 +505,118 @@ class TestBuildExecuteCodeSchema(unittest.TestCase):
         self.assertIn("code", schema["parameters"]["properties"])
         self.assertEqual(schema["parameters"]["required"], ["code"])
 
-    def test_subset_only_lists_enabled_tools(self):
-        enabled = {"terminal", "read_file"}
-        schema = build_execute_code_schema(enabled)
-        desc = schema["description"]
-        self.assertIn("terminal(", desc)
-        self.assertIn("read_file(", desc)
-        self.assertNotIn("web_search(", desc)
-        self.assertNotIn("web_extract(", desc)
-        self.assertNotIn("write_file(", desc)
+    # Fork-retained (T6b): the wire description is a static brief. Upstream's
+    # test_subset_only_lists_enabled_tools (asserting `terminal(` etc. appear in
+    # the description) is deliberately dropped — the resolved
+    # build_execute_code_schema no longer enumerates the enabled set on the wire.
+    # The import_examples_* / real_scenario_* cases below carry the enabled-set
+    # coverage that moved onto the `code` parameter, so they stay too.
+    def test_top_level_description_is_static_brief(self):
+        """T6b: the top-level description is now a static brief — it no longer
+        enumerates the enabled tools per-session (that detail moved behind
+        tool_describe). Enabled-tool awareness rides the `code` parameter's
+        import examples instead (see test_import_examples_*)."""
+        a = build_execute_code_schema({"terminal", "read_file"})["description"]
+        b = build_execute_code_schema({"web_search"})["description"]
+        self.assertEqual(a, b, "brief must not vary with the enabled set")
+        self.assertIn("from hermes_tools import", a)
+        self.assertIn("tool_describe", a)  # points at the full helper reference
 
+    def test_description_does_not_enumerate_tool_signatures(self):
+        """The retired dynamic doc listed `terminal(...)`, `read_file(...)`,
+        etc.; the brief names the standard tools plainly and defers the
+        per-tool signatures to tool_describe."""
+        desc = build_execute_code_schema({"terminal"})["description"]
+        self.assertNotIn("terminal(", desc)
+        self.assertIn("terminal", desc)
+
+    def test_import_examples_prefer_web_search_and_terminal(self):
+        enabled = {"web_search", "terminal", "read_file"}
+        schema = build_execute_code_schema(enabled)
+        code_desc = schema["parameters"]["properties"]["code"]["description"]
+        self.assertIn("web_search", code_desc)
+        self.assertIn("terminal", code_desc)
+
+    def test_import_examples_fallback_when_no_preferred(self):
+        """When neither web_search nor terminal are enabled, falls back to
+        sorted first two tools."""
+        enabled = {"read_file", "write_file", "patch"}
+        schema = build_execute_code_schema(enabled)
+        code_desc = schema["parameters"]["properties"]["code"]["description"]
+        # Should use sorted first 2: patch, read_file
+        self.assertIn("patch", code_desc)
+        self.assertIn("read_file", code_desc)
+
+    def test_empty_set_produces_valid_description(self):
+        """build_execute_code_schema(set()) must not produce 'import , ...'
+        in the code property description."""
+        schema = build_execute_code_schema(set())
+        code_desc = schema["parameters"]["properties"]["code"]["description"]
+        self.assertNotIn("import , ...", code_desc,
+                         "Empty enabled set produces broken import syntax in description")
+
+    def test_real_scenario_all_sandbox_tools_disabled(self):
+        """Reproduce the exact code path from model_tools.py:231-234.
+
+        Scenario: user runs `hermes tools code_execution` (only code_execution
+        toolset enabled). tools_to_include = {"execute_code"}.
+
+        model_tools.py does:
+            sandbox_enabled = SANDBOX_ALLOWED_TOOLS & tools_to_include
+            dynamic_schema = build_execute_code_schema(sandbox_enabled)
+
+        SANDBOX_ALLOWED_TOOLS = {web_search, web_extract, read_file, write_file,
+                                  search_files, patch, terminal}
+        tools_to_include  = {"execute_code"}
+        intersection      = empty set
+        """
+        # Simulate model_tools.py:233
+        tools_to_include = {"execute_code"}
+        sandbox_enabled = SANDBOX_ALLOWED_TOOLS & tools_to_include
+
+        self.assertEqual(sandbox_enabled, set(),
+                         "Intersection should be empty when only execute_code is enabled")
+
+        schema = build_execute_code_schema(sandbox_enabled)
+        code_desc = schema["parameters"]["properties"]["code"]["description"]
+        self.assertNotIn("import , ...", code_desc,
+                         "Bug: broken import syntax sent to the model")
+
+    def test_real_scenario_only_vision_enabled(self):
+        """Another real path: user runs `hermes tools code_execution,vision`.
+
+        tools_to_include = {"execute_code", "vision_analyze"}
+        SANDBOX_ALLOWED_TOOLS has neither, so intersection is empty.
+        """
+        tools_to_include = {"execute_code", "vision_analyze"}
+        sandbox_enabled = SANDBOX_ALLOWED_TOOLS & tools_to_include
+
+        self.assertEqual(sandbox_enabled, set())
+
+        schema = build_execute_code_schema(sandbox_enabled)
+        code_desc = schema["parameters"]["properties"]["code"]["description"]
+        self.assertNotIn("import , ...", code_desc)
+
+    def test_description_mentions_limits(self):
+        # T6b: the brief keeps the hard limits (in compact phrasing).
+        desc = build_execute_code_schema()["description"]
+        self.assertIn("5-min", desc)
+        self.assertIn("50KB", desc)
+        self.assertIn("50-call", desc)
+
+    def test_helpers_available_via_tool_describe(self):
+        """T6b: the json_parse/shell_quote/retry helper reference moved out of
+        the wire description and behind tool_describe. The brief points there;
+        the full text (served by tool_describe from the fork-owned mirror) still
+        documents the helpers."""
+        desc = build_execute_code_schema()["description"]
+        self.assertNotIn("json_parse", desc)
+        self.assertIn("tool_describe", desc)
+        from tools.tool_full_descriptions import full_tool_description
+        full = full_tool_description("execute_code")
+        self.assertIn("json_parse", full)
+        self.assertIn("shell_quote", full)
+        self.assertIn("retry", full)
 
     def test_none_defaults_to_all_tools(self):
         schema_none = build_execute_code_schema(None)
@@ -832,16 +934,25 @@ class TestRpcTokenAuthorization(unittest.TestCase):
     """
 
     def _drive_server(self, rpc_token, requests):
-        """Run _rpc_server_loop against a real AF_UNIX socketpair.
+        """Run _rpc_server_loop against a real connected socket pair.
 
         Sends each dict in *requests* as a newline-delimited JSON message
         and returns the list of decoded JSON responses.
+
+        The address family is deliberately left to ``socket.socketpair()``'s
+        default (AF_UNIX on POSIX, an AF_INET loopback pair on Windows).
+        ``_rpc_server_loop`` only ever calls ``accept``/``recv``/``sendall``,
+        and ``accept`` is supplied by the shim below — so the token check
+        under test is transport-neutral, and naming AF_UNIX here pinned a
+        POSIX spelling rather than the guarantee. The tests in this file that
+        genuinely need a unix DOMAIN socket carry ``skipIf(sys.platform ==
+        "win32", "UDS not available on Windows")``; this one does not.
         """
         from tools.code_execution_rpc import _rpc_server_loop
 
         # socketpair gives us a connected client end and a "server" end we
         # can hand to accept() by wrapping it in a tiny listener shim.
-        srv, cli = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv, cli = socket.socketpair()
 
         class _OneShotListener:
             """Minimal object exposing the .accept()/.settimeout() the loop uses."""

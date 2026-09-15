@@ -43,17 +43,27 @@ def _env_int(key: str, default: int) -> int:
 
 
 def _load_security_config() -> dict:
-    """Security settings from config.yaml, with env var overrides."""
-    try:
-        from hermes_cli.config import load_config_readonly
-        cfg = load_config_readonly().get("security", {}) or {}
-    except Exception:
-        cfg = {}
+    """Load security settings from config.yaml, with env var overrides.
+
+    The two boolean flags are resolved by ``hermes_cli.tirith_config``, which
+    is the single authority for their default and their env override — this
+    module used to be the *only* reader that honoured ``TIRITH_ENABLED`` /
+    ``TIRITH_FAIL_OPEN``, and the four readers that did not are now on the
+    same accessor. ``tirith_path`` / ``tirith_timeout`` stay here: they have
+    exactly one reader (this function) and so have no seam to share.
+    """
+    from hermes_cli import tirith_config
+
+    full = tirith_config.load_config_or_empty()
+    cfg = tirith_config.security_section(full)
+    defaults = tirith_config.SECURITY_DEFAULTS
+
     return {
-        "tirith_enabled": _env_bool("TIRITH_ENABLED", cfg.get("tirith_enabled", True)),
-        "tirith_path": os.getenv("TIRITH_BIN", cfg.get("tirith_path", "tirith")),
-        "tirith_timeout": _env_int("TIRITH_TIMEOUT", cfg.get("tirith_timeout", 5)),
-        "tirith_fail_open": _env_bool("TIRITH_FAIL_OPEN", cfg.get("tirith_fail_open", True))}
+        "tirith_enabled": tirith_config.tirith_enabled(full),
+        "tirith_path": os.getenv("TIRITH_BIN", cfg.get("tirith_path", defaults["tirith_path"])),
+        "tirith_timeout": _env_int("TIRITH_TIMEOUT", cfg.get("tirith_timeout", defaults["tirith_timeout"])),
+        "tirith_fail_open": tirith_config.tirith_fail_open(full),
+    }
 
 
 # --- Module state ---
@@ -507,7 +517,7 @@ def check_command_security(command: str) -> dict:
         return _verdict("allow", "tirith disabled (circuit breaker)")
     # No binary for this platform, ever: skip the resolver so we never spawn.
     if not is_platform_supported():
-        return _verdict("allow")
+        return _unsupported_platform_result(cfg["tirith_fail_open"])
     tirith_path = _resolve_tirith_path(cfg["tirith_path"])
     timeout, fail_open = cfg["tirith_timeout"], cfg["tirith_fail_open"]
     if tirith_path is None:
@@ -558,3 +568,44 @@ def _is_app_tld_finding(finding: dict) -> bool:
     return any(
         val is not None and ".app" in str(val).lower()
         for val in (finding.get(k) for k in ("value", "tld", "detail", "description", "message")))
+
+
+def _unsupported_platform_result(fail_open: bool) -> dict:
+    """Allow the command, but say so when fail-closed was asked for.
+
+    tirith publishes release binaries for linux/macOS on x86_64/aarch64 only
+    (see :func:`_detect_target`), so on any other host there is no scanner to
+    fail closed *against*. Blocking every command there would take the machine
+    offline rather than make it safer, so ``security.tirith_fail_open: false``
+    deliberately does NOT start blocking here — the platform arm still allows.
+
+    What it must not do is vanish. Until this helper existed the short-circuit
+    returned "allow" *before* the flag was ever read, so an operator who had
+    explicitly opted into fail-closed got a silent fail-open with nothing
+    anywhere saying their setting was inert. The override is now visible in
+    two places: logged once per process (through the same ``_warn_once``
+    dedupe the spawn warnings use, because this sits on the per-command hot
+    path and would otherwise repeat for every tool call), and named in the
+    returned ``summary`` so callers that surface it get it too.
+    """
+    if fail_open:
+        return {"action": "allow", "findings": [], "summary": ""}
+    _warn_once(
+        "tirith_fail_closed_on_unsupported_platform",
+        "security.tirith_fail_open is false, but tirith publishes no build "
+        "for %s/%s, so there is no scanner to fail closed against: commands "
+        "are being ALLOWED UNSCANNED by tirith on this host and the setting "
+        "is not binding. Pattern-matching approval guards still run. To make "
+        "this explicit set security.tirith_enabled: false; to get scanning, "
+        "run on linux or macOS (x86_64 or aarch64).",
+        platform.system() or "unknown",
+        platform.machine() or "unknown",
+    )
+    return {
+        "action": "allow",
+        "findings": [],
+        "summary": (
+            "tirith unsupported on this platform; security.tirith_fail_open="
+            "false could not be honoured (allowed unscanned)"
+        ),
+    }

@@ -35,7 +35,11 @@ def run(code, reset=False):
 
 
 def test_schema_helper_instructions_work_across_kernel_lifetimes():
-    description = registry.get_schema("execute_code")["description"]
+    from tools.tool_full_descriptions import full_tool_description
+
+    # The fork's static brief directs callers to tool_describe for helper imports.
+    assert "tool_describe" in registry.get_schema("execute_code")["description"]
+    description = full_tool_description("execute_code")
     imports = "\n".join(re.findall(r"`(from hermes_tools import [\w, ]+)`", description))
     for reset, reused in ((False, False), (False, True), (True, False)):
         result = run(PROBE.format(imports=imports), reset=reset)

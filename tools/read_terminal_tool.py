@@ -49,10 +49,7 @@ def read_terminal_tool(
 READ_TERMINAL_SCHEMA = {
     "name": "read_terminal",
     "description": (
-        "Read the in-app terminal pane beside this chat. No args = visible "
-        "screen + total_lines; page scrollback with start_line (0 = oldest) "
-        "+ count. JSON: {total_lines, start, end, viewport_rows, cursor_row, "
-        "text}."
+        "Read what is currently shown in the Hermes desktop GUI's embedded terminal pane (desktop only). No args = visible screen + total_lines; pass start_line/count to page scrollback. Returns a JSON viewport."
     ),
     "parameters": {
         "type": "object",

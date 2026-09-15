@@ -53,7 +53,7 @@ def test_headless_terminal_result_survives_cli_exit(tmp_path):
                 return
             tool_results = [m for m in request["messages"] if m["role"] == "tool"]
             follow_ups.extend(m["content"] for m in request["messages"]
-                              if m["role"] == "user" and "Background process" in str(m.get("content") or ""))
+                              if m["role"] == "user" and "background process" in str(m.get("content") or "").lower())
             has_terminal = any(t.get("function", {}).get("name") == "terminal"
                                for t in request.get("tools", []))
             message = {"role": "assistant", "content": "Coordinator finished."}
@@ -128,7 +128,7 @@ def test_headless_terminal_result_survives_cli_exit(tmp_path):
     assert observed[0].get("notify_on_complete") is True, observed
     # The owned notify_on_complete completion resumes in-process as a follow-up turn
     # (nested quiet-notify resume), carrying the child's real output to the model.
-    assert len(follow_ups) == 1, follow_ups
+    assert len(follow_ups) == 1, (follow_ups, observed, producer.stdout, producer.stderr)
     assert process_id in follow_ups[0]
     assert "SYNTHETIC_REVIEW_COMPLETE" in follow_ups[0]
     assert "exit code 7" in follow_ups[0]

@@ -22,6 +22,7 @@ from typing import Callable, Dict, Any, List, Optional
 import copy
 
 from hermes_constants import display_hermes_home
+from tools.path_identity import denotes_same_file
 
 logger = logging.getLogger(__name__)
 
@@ -128,8 +129,9 @@ def _default_output_dir() -> str:
 def _load_tts_config() -> Dict[str, Any]:
     """Return the ``tts`` config section ({} when unavailable)."""
     try:
-        from hermes_cli.config import load_config
-        return load_config().get("tts") or {}
+        from copy import deepcopy
+        from hermes_cli.config import load_config_readonly
+        return deepcopy(load_config_readonly().get("tts") or {})
     except ImportError:
         logger.debug("hermes_cli.config not available, using default TTS config")
     except Exception as e:
@@ -459,9 +461,8 @@ def text_to_speech_tool(
     except Exception as exc:
         return _tool_failure("TTS long-form generation failed", provider, exc)
     finally:
-        final_absolute = {os.path.abspath(path) for path in final_paths}
         for artifact in generated_artifacts:
-            if os.path.abspath(artifact) not in final_absolute:
+            if not any(denotes_same_file(artifact, path) for path in final_paths):
                 _remove_quietly(artifact)
 
 

@@ -53,6 +53,10 @@ def _ensure_singularity_available() -> str:
     return exe
 
 
+def _snapshot_store_path() -> Path:
+    return _snapshot_store()
+
+
 def _load_snapshots() -> dict:
     return _load_json_store(_snapshot_store())
 

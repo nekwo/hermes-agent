@@ -14,6 +14,7 @@ from pathlib import Path
 
 from tools.binary_extensions import has_opaque_document_extension, is_pdf_path
 from tools.file_tools_paths import _expand_tilde, _resolve_path_for_task
+from tools.path_identity import denotes_same_file
 
 # Prefixes matched after realpath. macOS: /private/var mirrors /var — block the
 # sensitive subtrees only; a blanket "/private/var/" refuses every temp-file
@@ -121,7 +122,7 @@ def _hermes_exempt_homes() -> tuple[str, ...]:
     if profile_home is None:
         return (home,)
     root = os.path.realpath(str(Path(str(profile_home)).parent.parent))
-    return (home, root) if root and root != home else (home,)
+    return (home, root) if root and not denotes_same_file(root, home) else (home,)
 
 
 def _resolved_or_raw(filepath: str, task_id: str) -> str:
@@ -134,7 +135,8 @@ def _resolved_or_raw(filepath: str, task_id: str) -> str:
 
 def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None:
     """Return an error message if the path targets a sensitive system location."""
-    candidates = (_resolved_or_raw(filepath, task_id), os.path.normpath(_expand_tilde(filepath)))
+    from tools.path_identity import denotes_same_file, posix_match_forms
+    candidates = (_resolved_or_raw(filepath, task_id), *posix_match_forms(_expand_tilde(filepath)))
     if any(c.startswith(_SENSITIVE_PATH_PREFIXES) or c in _SENSITIVE_EXACT_PATHS for c in candidates):
         return (
             f"Refusing to write to sensitive system path: {filepath}\n"
@@ -142,7 +144,7 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
     # approvals.mode and other security settings live in config.yaml; a
     # prompt-injected agent could silently disable exec approval by editing it.
     hermes_config = _get_hermes_config_resolved()
-    if hermes_config and hermes_config in candidates:
+    if hermes_config and any(denotes_same_file(c, hermes_config) for c in candidates):
         return (
             f"Refusing to write to Hermes config file: {filepath}\n"
             "Agent cannot modify security-sensitive configuration. "
@@ -211,7 +213,7 @@ def _protected_instruction_reason(filepath: str, task_id: str = "default",
     # ``_hermes_exempt_homes`` also covers the ROOT when the active home is a named
     # profile, so ~/.hermes/<file> cannot read as project-local ``.hermes`` config.
     for real_home in _hermes_exempt_homes():
-        if resolved == real_home or resolved.startswith(real_home + os.sep):
+        if Path(resolved).is_relative_to(Path(real_home)):
             return None
 
     for candidate in (normalized, resolved):

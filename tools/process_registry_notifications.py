@@ -4,6 +4,7 @@ watch_match, watch_disabled, watch_overflow_*, async_delegation) into the
 TUI inject into the agent conversation."""
 
 import time
+from typing import Any
 from dataclasses import dataclass
 from contextlib import suppress
 
@@ -309,7 +310,11 @@ PROCESS_COMPLETE_DISPLAY_KIND = "process_complete"
 
 
 def _short_command(command) -> str:
-    cmd = " ".join(str(command or "").split())
+    from agent.redact import redact_sensitive_text
+    from tools.ansi_strip import strip_ansi
+
+    # Redact before shortening: clipping a credential can hide its recognizable prefix.
+    cmd = " ".join(redact_sensitive_text(strip_ansi(str(command or ""))).split())
     return cmd[:77] + "..." if len(cmd) > 80 else cmd
 
 
@@ -377,6 +382,29 @@ def _completion_status(evt: dict) -> str:
 
 def format_process_notification(evt: dict) -> "str | None":
     """Format a completion_queue event into an ``[IMPORTANT: ...]`` message."""
+    try:
+        from agent.redact import redact_sensitive_text
+    except Exception:
+        redact_sensitive_text = lambda text: ""  # fail closed for UI notifications
+    try:
+        from tools.ansi_strip import strip_ansi
+    except Exception:
+        strip_ansi = lambda text: str(text or "")
+
+    def _safe(value: Any, *, limit: int = 2000) -> str:
+        text = strip_ansi(str(value or ""))
+        if len(text) > limit:
+            tail = text[-limit:]
+            nl = tail.find("\n")
+            tail = tail[nl + 1:] if nl != -1 else tail
+            text = f"[… output truncated — showing last {len(tail)} chars]\n{tail}"
+        return redact_sensitive_text(text)
+
+    evt = dict(evt)
+    for key, limit in (("command", 500), ("message", 1000), ("pattern", 200),
+                       ("output", 2000), ("handoff_note", 1000)):
+        if key in evt:
+            evt[key] = _safe(evt[key], limit=limit)
     evt_type = evt.get("type", "completion")
     # watch_disabled and overflow events carry their own human-readable `message`;
     # otherwise overflow events would fall through to the completion formatter as a
@@ -406,6 +434,20 @@ def format_process_notification(evt: dict) -> "str | None":
             "...(output trimmed — subagent-owned process; see the "
             "delegation's live transcript for full output)\n"
             + _out[-600:])
+    if evt.get("notify_requested"):
+        # Self-contained, for the same reason ``dispatch_delivery.
+        # format_dispatch_delivery`` is: by the time this re-enters the
+        # conversation the agent's turn has ENDED and a new one is reading it
+        # cold. It must say why this arrived without being asked.
+        return (
+            f"[BACKGROUND PROCESS COMPLETE — {_sid} {_completion_status(evt)} "
+            f"(exit code {_exit}{_signal}).\n"
+            "You asked to be told when this finished (process notify) and ended "
+            "your turn. This is that receipt — you may have moved on since, so "
+            "check it against what you were doing.\n"
+            f"Command: {_cmd}\n"
+            f"Output:\n{_out}]"
+        )
     return (
         f"[IMPORTANT: Background process {_sid} {_completion_status(evt)} (exit code {_exit}{_signal}).\n"
         f"{attribution}Command: {_cmd}\nOutput:\n{_out}]")

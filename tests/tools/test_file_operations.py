@@ -2,6 +2,7 @@
 
 import os
 import pytest
+import shutil
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -259,6 +260,16 @@ def make_real_subprocess_env(cwd: str, include_stderr: bool = False) -> MagicMoc
     env = MagicMock()
     env.cwd = cwd
 
+    # ``shell=True`` means "/bin/sh -c" on POSIX but "cmd.exe /c" on Windows,
+    # and ShellFileOperations emits POSIX sh (mktemp / umask / chmod / mv).
+    # Under cmd.exe the generated script simply does not run, so every test
+    # built on this helper stopped exercising the behaviour it names — while
+    # ``write_file`` still reported success. Spawn the POSIX shell explicitly:
+    # on POSIX that is byte-for-byte what ``shell=True`` already did.
+    shell = shutil.which("sh") or shutil.which("bash")
+    if shell is None:
+        pytest.skip("a POSIX shell is required to run the generated scripts")
+
     def execute(command, **kwargs):
         stdin_data = kwargs.get("stdin_data")
         is_windows = os.name == "nt"
@@ -304,14 +315,46 @@ class TestShellFileOpsHelpers:
         assert file_ops._escape_shell_arg("hello") == "'hello'"
 
 
-    @pytest.mark.windows_only
-    def test_escape_shell_arg_rewrites_forward_slash_native_paths(self, file_ops):
-        """Windows-only: ``_bash_safe_path`` only rewrites drive paths to the
-        Git Bash form on Windows, where the MSYS path mangling it works around
-        actually happens."""
+    def test_escape_shell_arg_normalizes_windows_paths_for_native_consumers(
+        self, monkeypatch, file_ops,
+    ):
+        """Shell-arg paths land in NATIVE Windows binaries (rg, python.exe).
+
+        Those cannot resolve the MSYS ``/c/...`` spelling, and Hermes sets
+        MSYS_NO_PATHCONV=1 on every bash spawn so nothing converts it back —
+        so the arg form is the drive-qualified forward-slash one, which both
+        the MSYS runtime and native binaries accept. Backslashes must still
+        be gone (bash eats them), and the already-correct form is a no-op.
+        """
+        import tools.environments.local as local_mod
+
+        monkeypatch.setattr(local_mod, "_IS_WINDOWS", True)
+        # native backslash path -> drive-qualified forward slashes
+        assert file_ops._escape_shell_arg(
+            r"C:\Users\alice\notes.txt"
+        ) == "'C:/Users/alice/notes.txt'"
+        # already forward-slash: unchanged, still no backslashes
         assert file_ops._escape_shell_arg(
             "C:/Users/alice/notes.txt"
-        ) == "'/c/Users/alice/notes.txt'"
+        ) == "'C:/Users/alice/notes.txt'"
+        # mixed MSYS leftover -> same drive-qualified form
+        assert file_ops._escape_shell_arg(
+            r"/c/Users/alice\notes.txt"
+        ) == "'C:/Users/alice/notes.txt'"
+
+    def test_escape_shell_arg_leaves_non_path_arguments_verbatim(self, monkeypatch, file_ops):
+        """Only drive-qualified paths are rewritten.
+
+        ``_escape_shell_arg`` also quotes search patterns and ``python -c``
+        snippets; blanket backslash rewriting corrupted every regex
+        containing a backslash on Windows.
+        """
+        import tools.environments.local as local_mod
+
+        monkeypatch.setattr(local_mod, "_IS_WINDOWS", True)
+        assert file_ops._escape_shell_arg(r"absent\\npattern") == r"'absent\\npattern'"
+        assert file_ops._escape_shell_arg("relative/dir") == "'relative/dir'"
+        assert file_ops._escape_shell_arg("/tmp/posix") == "'/tmp/posix'"
 
     @pytest.mark.windows_only
     def test_read_file_uses_bash_safe_windows_paths(self, mock_env):
@@ -336,20 +379,20 @@ class TestShellFileOpsHelpers:
         result = ops.read_file(r"C:\Users\alice\notes.txt")
 
         assert result.error is None
-        # One compound probe carries every stage; each embeds the MSYS path.
+        # One compound probe carries every stage; each embeds the native-compatible path.
         # The size probe gates `wc -c` behind `[ -f ]` so a FIFO or device
         # cannot block the read; it still reports a plain byte count.
         assert len(commands) == 1
         probe = commands[0]
         assert probe.startswith(
-            "if [ -f '/c/Users/alice/notes.txt' ]; "
-            "then wc -c < '/c/Users/alice/notes.txt' 2>/dev/null; "
+            "if [ -f 'C:/Users/alice/notes.txt' ]; "
+            "then wc -c < 'C:/Users/alice/notes.txt' 2>/dev/null; "
         )
-        assert "head -c 1000 '/c/Users/alice/notes.txt' 2>/dev/null | base64" in probe
-        assert "sed -n '1,2000p' '/c/Users/alice/notes.txt' 2>/dev/null | cut -b1-8001" in probe
-        assert "wc -l < '/c/Users/alice/notes.txt'" in probe
+        assert "head -c 1000 'C:/Users/alice/notes.txt' 2>/dev/null | base64" in probe
+        assert "sed -n '1,2000p' 'C:/Users/alice/notes.txt' 2>/dev/null | cut -b1-8001" in probe
+        assert "wc -l < 'C:/Users/alice/notes.txt'" in probe
         assert (
-            "elif [ -e '/c/Users/alice/notes.txt' ]; "
+            "elif [ -e 'C:/Users/alice/notes.txt' ]; "
             "then echo __hermes_not_regular__; "
         ) in probe
 
@@ -505,7 +548,12 @@ class TestSearchFilesFallbackHiddenPaths:
         result = ops._search_files("*.log", str(root), limit=50, offset=0)
 
         assert result.error is None
-        assert set(result.files) == {str(visible_file), str(visible_nested_file)}
+        # Compare PATHS, not path SPELLINGS: `find` reports the separator the
+        # shell handed it, so on Windows the very same files come back as
+        # "C:/…/agent.log" where `str(Path)` spells them "C:\…\agent.log".
+        # `Path` equality normalizes that away and leaves the guarantee — WHICH
+        # files the fallback selected — as the only thing under test.
+        assert {Path(f) for f in result.files} == {visible_file, visible_nested_file}
 
     def test_normal_root_still_excludes_hidden_descendants(self, tmp_path, monkeypatch):
         """Fallback find should still exclude hidden descendant paths for normal roots."""
@@ -524,7 +572,9 @@ class TestSearchFilesFallbackHiddenPaths:
         result = ops._search_files("*.log", str(root), limit=50, offset=0)
 
         assert result.error is None
-        assert set(result.files) == {str(visible_file), str(visible_nested_file)}
+        # See the sibling above — Path equality pins the selection, not the
+        # separator the shell echoed back.
+        assert {Path(f) for f in result.files} == {visible_file, visible_nested_file}
 
 
 class TestShellFileOpsWriteDenied:

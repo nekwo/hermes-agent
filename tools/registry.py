@@ -6,6 +6,7 @@ tools/*.py import it at module level; model_tools.py imports both; run_agent/cli
 model_tools."""
 
 import ast
+from contextlib import contextmanager
 import functools
 import importlib
 import json
@@ -15,7 +16,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Set
+from typing import Callable, Dict, List, NamedTuple, Optional, Set
 
 from hermes_constants import hermes_home_key
 
@@ -223,7 +224,7 @@ _CHECK_FN_TTL_SECONDS = 30.0
 # so a genuinely-down backend is reflected within a couple of turns.
 _CHECK_FN_FAILURE_GRACE_SECONDS = 60.0
 _CHECK_FN_CACHE_MAX = 512
-_check_fn_cache: Dict[tuple[Callable, Optional[str]], tuple[float, bool]] = {}
+_check_fn_cache: Dict[tuple[Callable, Optional[str]], tuple[float, bool, float]] = {}
 _check_fn_last_good: Dict[tuple[Callable, Optional[str]], float] = {}
 _check_fn_cache_lock = threading.Lock()
 CHECK_FN_CACHE_BYPASS = ""
@@ -247,7 +248,7 @@ def _fn_label(fn: Callable) -> object:
 def _prune_check_fn_caches(now: float) -> None:
     """Expire stale entries and cap profile-dimensional cache growth. Caller holds the lock."""
     for cache, ttl, stamp in (
-        (_check_fn_cache, _CHECK_FN_TTL_SECONDS, lambda v: v[0]),
+        (_check_fn_cache, 0.0, lambda v: v[2]),
         (_check_fn_last_good, _CHECK_FN_FAILURE_GRACE_SECONDS, lambda v: v)):
         for key, value in list(cache.items()):
             if now - stamp(value) >= ttl:
@@ -286,6 +287,7 @@ def _run_check_fn_uncached(fn: Callable) -> bool:
     """Run an availability check without cache/grace handling."""
     from agent.secret_scope import UnscopedSecretError, current_secret_scope
     try:
+        _note_check_fn_probe()
         return bool(fn())
     except UnscopedSecretError:
         # The verdict comes from the LIVE scope at the catch site, not from which registry branch
@@ -328,6 +330,7 @@ def _check_fn_cached(fn: Callable) -> bool:
         if cached is not None:
             return cached[1]
     exc_info = None
+    _note_check_fn_probe()
     try:
         value, outcome = bool(fn()), "returned False"
     except Exception as exc:
@@ -339,11 +342,14 @@ def _check_fn_cached(fn: Callable) -> bool:
         _prune_check_fn_caches(now)
         if value:
             _check_fn_last_good[cache_key] = now
-            _check_fn_cache[cache_key] = (now, True)
+            _check_fn_cache[cache_key] = (now, True, now + _CHECK_FN_TTL_SECONDS)
             return True
         last_good = _check_fn_last_good.get(cache_key)
         if last_good is not None and now - last_good < _CHECK_FN_FAILURE_GRACE_SECONDS:
-            # Recent success → flake: serve last-good True, do NOT cache (next call re-probes).
+            # Bound re-probe cost without extending grace past the last real success.
+            _check_fn_cache[cache_key] = (now, True, min(
+                now + _CHECK_FN_GRACE_REPROBE_SECONDS,
+                last_good + _CHECK_FN_FAILURE_GRACE_SECONDS))
             logger.warning(
                 "check_fn %s failed (%s) within %.0fs of last success; "
                 "treating as transient and keeping tool(s) available",
@@ -355,7 +361,7 @@ def _check_fn_cached(fn: Callable) -> bool:
         logger.warning(
             "check_fn %s %s; dependent tools will be unavailable this turn", _fn_label(fn), outcome,
             exc_info=exc_info)
-        _check_fn_cache[cache_key] = (now, False)
+        _check_fn_cache[cache_key] = (now, False, now + _CHECK_FN_TTL_SECONDS)
         return False
 
 
@@ -368,7 +374,9 @@ def _memo_check(fn: Callable, memo: Dict[Callable, bool]) -> bool:
 
 def invalidate_check_fn_cache() -> None:
     """Drop all cached ``check_fn`` results (after config changes like ``hermes tools enable``)."""
+    global _check_fn_epoch
     with _check_fn_cache_lock:
+        _check_fn_epoch += 1
         _check_fn_cache.clear()
         _check_fn_last_good.clear()
 
@@ -383,10 +391,24 @@ def get_cached_check_fn_result(fn: Callable) -> Optional[bool]:
         return None
     with _check_fn_cache_lock:
         cached = _check_fn_cache.get((fn, scope))
-    return cached[1] if cached is not None and now - cached[0] < _CHECK_FN_TTL_SECONDS else None
+    return cached[1] if cached is not None and now < cached[2] else None
 
 
 class ToolRegistry:
+    @property
+    def generation(self) -> int:
+        """The registration generation. Compare for EQUALITY, never for order.
+
+        Read under the same lock the mutators bump it under, so a reader can
+        never observe a half-applied registration's counter. Public because
+        memoizing callers outside this module (``agent_init``, and since 2026-08
+        ``agent_runtime.chat_lane_bundle`` through :func:`registry_epoch`) have
+        to key on it; ``_generation`` stays the field.
+        """
+
+        with self._lock:
+            return self._generation
+
     """Singleton registry that collects tool schemas + handlers from tool files."""
 
     def __init__(self):
@@ -453,9 +475,10 @@ class ToolRegistry:
         :meth:`get_definitions` per-tool filtering so doctor/banners agree with runtime:
         mixed toolsets (``terminal`` + desktop-only ``read_terminal``) must not be gated
         by the first ``check_fn``."""
-        memo: Dict[Callable, bool] = {}
-        members = (e for e in entries if e.toolset == toolset)
-        return any(not e.check_fn or _memo_check(e.check_fn, memo) for e in members)
+        with _probe_round():
+            memo: Dict[Callable, bool] = {}
+            members = (e for e in entries if e.toolset == toolset)
+            return any(not e.check_fn or _memo_check(e.check_fn, memo) for e in members)
 
     def get_entry(self, name: str, *, scope: Optional[str] = None) -> Optional[ToolEntry]:
         """Active profile's entry by name, falling back to global."""
@@ -792,32 +815,33 @@ class ToolRegistry:
     def get_definitions(self, tool_names: Set[str], quiet: bool = False) -> List[dict]:
         """OpenAI-format schemas for the requested tools whose ``check_fn`` passes (or is
         absent). Probes use the ~30 s TTL cache so ``hermes tools enable`` lands quickly."""
-        result = []
-        check_results: Dict[Callable, bool] = {}
-        entries_by_name = {entry.name: entry for entry in self._snapshot_entries()}
-        for name in sorted(tool_names):
-            entry = entries_by_name.get(name)
-            if not entry:
-                continue
-            if entry.check_fn and not _memo_check(entry.check_fn, check_results):
-                if not quiet:
-                    logger.debug("Tool %s unavailable (check failed)", name)
-                continue
-            schema_with_name = {**entry.schema, "name": entry.name}
-            # Runtime-dynamic overrides (e.g. delegate_task limits); the caller's memo is
-            # keyed on config.yaml mtime+size, so config changes invalidate it automatically.
-            if entry.dynamic_schema_overrides is not None:
-                try:
-                    overrides = entry.dynamic_schema_overrides()
-                except Exception as exc:
-                    overrides = None
-                    logger.warning(
-                        "dynamic_schema_overrides for tool %s raised %s; using static schema",
-                        name, exc)
-                if isinstance(overrides, dict):
-                    schema_with_name.update(overrides)
-            result.append({"type": "function", "function": schema_with_name})
-        return result
+        with _probe_round():
+            result = []
+            check_results: Dict[Callable, bool] = {}
+            entries_by_name = {entry.name: entry for entry in self._snapshot_entries()}
+            for name in sorted(tool_names):
+                entry = entries_by_name.get(name)
+                if not entry:
+                    continue
+                if entry.check_fn and not _memo_check(entry.check_fn, check_results):
+                    if not quiet:
+                        logger.debug("Tool %s unavailable (check failed)", name)
+                    continue
+                schema_with_name = {**entry.schema, "name": entry.name}
+                # Runtime-dynamic overrides (e.g. delegate_task limits); the caller's memo is
+                # keyed on config.yaml mtime+size, so config changes invalidate it automatically.
+                if entry.dynamic_schema_overrides is not None:
+                    try:
+                        overrides = entry.dynamic_schema_overrides()
+                    except Exception as exc:
+                        overrides = None
+                        logger.warning(
+                            "dynamic_schema_overrides for tool %s raised %s; using static schema",
+                            name, exc)
+                    if isinstance(overrides, dict):
+                        schema_with_name.update(overrides)
+                result.append({"type": "function", "function": schema_with_name})
+            return result
 
     # ---- Dispatch ----------------------------------------------------
 
@@ -973,3 +997,137 @@ def tool_error(message, **extra) -> str:
 def tool_result(data=None, **kwargs) -> str:
     """JSON-encode a dict positional arg *or* keyword arguments (not both)."""
     return json.dumps(data if data is not None else kwargs, ensure_ascii=False)
+
+
+_CHECK_FN_GRACE_REPROBE_SECONDS = 5.0
+_check_fn_epoch = 0
+_probe_state = threading.local()
+
+
+class ToolScan(NamedTuple):
+    tools: Dict[str, str]
+    modules: Dict[str, List[str]]
+    unresolved: List[str]
+
+
+def scan_registered_tools(tools_dir: Optional[Path] = None) -> ToolScan:
+    """Which tools each builtin module registers, and into which toolset —
+    read STATICALLY, importing nothing.
+
+    The question "what are this install's toolset names" does not need the 38
+    registrar modules; it needs the two identifying arguments of their top-level
+    ``registry.register()`` calls, including finite literal registration
+    tables. Importing them to find out costs 3.16 s measured on this checkout
+    (2026-09-04, warm verdict cache) and is paid on every cold
+    ``perform_agent_create`` and every single-test run, because the memo it would
+    otherwise ride lives under ``get_hermes_home()`` — which the test runner
+    points at a fresh temp directory per file, so it is cold by construction.
+
+    Uses the builtin discovery text prefilter and a module-level AST reader
+    that also expands literal registration tables. The scope stays module-level (a ``registry.register`` inside a
+    function body is a helper, not a registrar, and stays invisible here exactly
+    as it does there). What is added is reading the call's arguments.
+
+    **This answers NAMES, never HANDLERS.** A handler is a live callable and
+    there is no static substitute for importing the module that defines it.
+    Anything that must CALL a tool still goes through
+    :func:`discover_builtin_tools`.
+
+    It also answers only BUILTINS. Plugin tools register into the same singleton
+    through ``hermes_cli.plugins``, and MCP tools through ``discover_mcp_tools``;
+    neither is in this tree and neither is in this scan. A caller that needs the
+    complete live set must union this with the registry it has actually
+    populated — see the note on the generated manifest.
+    """
+
+    tools_path = Path(tools_dir) if tools_dir is not None else Path(__file__).resolve().parent
+    tools: Dict[str, str] = {}
+    modules: Dict[str, List[str]] = {}
+    unresolved: List[str] = []
+
+    paths = list(tools_path.glob("*.py"))
+    paths.extend(path for path in tools_path.glob("*/tool.py") if (path.parent / "__init__.py").is_file())
+    for path in sorted(paths):
+        if path.name in {"__init__.py", "registry.py", "mcp_tool.py"}:
+            continue
+        try:
+            source = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            unresolved.append(f"{path.stem}: unreadable ({type(exc).__name__})")
+            continue
+        if "registry" not in source or "register" not in source:
+            continue
+        try:
+            tree = ast.parse(source, filename=str(path))
+        except SyntaxError:
+            unresolved.append(f"{path.stem}: does not parse")
+            continue
+
+        from tools.toolset_scan import registration_rows
+        for stmt, name, toolset in registration_rows(tree):
+            if not isinstance(name, str) or not isinstance(toolset, str):
+                unresolved.append(
+                    f"{path.stem}: register() at line {stmt.lineno} has a "
+                    f"{'name' if not isinstance(name, str) else 'toolset'} this reader cannot resolve"
+                )
+                continue
+            tools[name] = toolset
+            module = ".".join(path.relative_to(tools_path).with_suffix("").parts)
+            modules.setdefault(module, []).append(name)
+
+    return ToolScan(tools=tools, modules=modules, unresolved=unresolved)
+
+
+def _note_check_fn_probe() -> None:
+    _probe_state.probes = int(getattr(_probe_state, "probes", 0)) + 1
+
+
+@contextmanager
+def _probe_round():
+    before = int(getattr(_probe_state, "probes", 0))
+    try:
+        yield
+    finally:
+        if int(getattr(_probe_state, "probes", 0)) > before:
+            _probe_state.rounds = int(getattr(_probe_state, "rounds", 0)) + 1
+
+
+def probe_rounds_this_thread() -> int:
+    """Rounds this THREAD has run since the process started.
+
+    A cumulative counter, never reset by the runtime: callers take the
+    difference across the window they care about. Resetting it here would make
+    two overlapping observers destroy each other's measurement.
+    """
+
+    return int(getattr(_probe_state, "rounds", 0))
+
+
+def registry_epoch() -> int:
+    """The registry's identity for cache keys: registration + availability.
+
+    Two counters, summed into one monotonically-increasing integer:
+
+    * ``registry.generation`` — every ``register`` / ``deregister`` /
+      ``register_toolset_alias``, which is also every MCP dynamic refresh.
+    * :data:`_check_fn_epoch` — every :func:`invalidate_check_fn_cache`, which
+      is what ``hermes tools enable`` and the credential/config paths call when
+      a backend's AVAILABILITY (not its registration) changes.
+
+    Both halves matter and neither implies the other: a toolset can stay
+    registered while its ``check_fn`` starts answering differently, and a
+    ``check_fn`` cache can stay warm while an MCP server registers new tools.
+    A memo that keyed on only one of them would go stale in the other
+    direction.
+
+    **Comparison is equality, not ordering.** The sum is monotone, but a step of
+    2 says "both halves moved", not "two registrations happened" — nothing may
+    read magnitude out of it. It exists so a caller can ask "is the registry
+    still the one I computed against?" in one integer compare.
+
+    The value is a snapshot the instant it is read; a caller memoizing against
+    it must re-read it on every lookup, which is exactly what makes an
+    invalidation that lands mid-turn visible on the next lookup.
+    """
+
+    return registry.generation + _check_fn_epoch

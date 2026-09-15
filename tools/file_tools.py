@@ -166,8 +166,9 @@ def _rewrite_v4a_patch_paths_for_host(patch: str, path_to_resolved: dict, file_o
 
 def _is_blocked_device_path(path: str) -> bool:
     """Return True for concrete device/fd/proc paths that can hang reads or leak process state."""
-    normalized = os.path.normpath(_expand_tilde(path))
-    if normalized in _BLOCKED_DEVICE_PATHS:
+    forms = _posix_match_forms(path)
+    normalized = forms[-1]
+    if any(form in _BLOCKED_DEVICE_PATHS for form in forms):
         return True
     return normalized.startswith("/proc/") and normalized.endswith(_BLOCKED_PROC_SUFFIXES)
 
@@ -1023,7 +1024,7 @@ READ_FILE_SCHEMA = {
     # route we trust (_read_file_schema_overrides). Scanned-page coverage
     # teaching lives in the response-time NEEDS-OCR warning
     # (read_extract.py); the schema doesn't pre-teach it.
-    "description": "Read a text file with line numbers and pagination. Use this instead of cat/head/tail in terminal. Output format: 'LINE_NUM|CONTENT'. Suggests similar filenames if not found. Use offset and limit for large files. Reads exceeding ~100K characters are truncated on a line boundary and return a next_offset; continue with offset to read the rest. Documents auto-extract to readable text: .ipynb, Office (.docx/.xlsx/.pptx and legacy .doc/.ppt/.xls), PDF (text layer), OpenDocument, RTF, EPUB. Cannot read images/binary — use vision_analyze for images.",
+    "description": 'Read a text file with line numbers and pagination (offset/limit; large reads truncate on a line boundary with next_offset). Auto-extracts .ipynb/.docx/.xlsx/.pptx, .doc/.ppt/.xls, PDF (text layer), OpenDocument, RTF and EPUB. Cannot read images/binary -- use vision_analyze for images; prefer this over shell cat/head/tail.',
     "parameters": {
         "type": "object",
         "properties": {
@@ -1037,7 +1038,7 @@ READ_FILE_SCHEMA = {
 
 WRITE_FILE_SCHEMA = {
     "name": "write_file",
-    "description": "Write content to a file, completely replacing existing content. Use this instead of echo/cat heredoc in terminal. Creates parent directories automatically. OVERWRITES the entire file — use 'patch' for targeted edits. Auto-runs syntax checks on .py/.json/.yaml/.toml and other linted languages; only NEW errors introduced by this write are surfaced (pre-existing errors are filtered out). The result's verified:true means the on-disk content hash was confirmed — do NOT re-read the file to check the write landed.",
+    "description": 'Write a file, completely replacing its contents (creates parent dirs; auto-syntax-checks and surfaces only NEW errors). Disambiguator: overwrites the whole file -- use patch for targeted edits; use instead of shell echo/heredoc.',
     "parameters": {
         "type": "object",
         "properties": {
@@ -1064,10 +1065,7 @@ PATCH_SCHEMA = {
     # from any model regardless (replay compat + strong models that know
     # V4A anyway): mode defaults to 'replace' when omitted.
     "description": (
-        "Targeted find-and-replace edits in files. Use this instead of sed/awk in terminal. "
-        "Uses fuzzy matching (9 strategies) so minor whitespace/indentation differences won't break it. "
-        "Returns a unified diff. Auto-runs syntax checks after editing. "
-        "Finds a unique string and replaces it."
+        "Targeted find-and-replace file edits with fuzzy matching; returns a unified diff and auto-runs syntax checks. Supply path, old_string and new_string. Disambiguator: use instead of shell sed/awk; use write_file for full rewrites."
     ),
     "parameters": {
         "type": "object",
@@ -1152,7 +1150,7 @@ def _is_openai_family_main() -> bool:
 
 SEARCH_FILES_SCHEMA = {
     "name": "search_files",
-    "description": "Search file contents or find files by name. Use this instead of grep/rg/find/ls in terminal. Ripgrep-backed, faster than shell equivalents. On macOS, broad searches above the user home automatically skip TCC-protected folders (Desktop, Documents, Downloads, Library, Movies, Music, Pictures); target one directly when access is intentional.\n\nContent search (target='content'): Regex search inside files. Output modes: full matches with line numbers, file paths only, or match counts.\n\nFile search (target='files'): Find files by glob pattern (e.g., '*.py', '*config*'). Also use this instead of ls. Discovery order is the fast bounded default; exact global newest-first order is an explicit opt-in and may scan the full tree.",
+    "description": "Search file contents (target='content', regex, ripgrep-backed) or find files by name/glob (target='files', sorted by mtime). Disambiguator: use instead of shell grep/rg/find/ls.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -1301,3 +1299,24 @@ def __getattr__(name):  # PEP 562 — lazy so no import cycles
     warn_once(__name__, name, *target)
     return getattr(importlib.import_module(target[0]), target[1])
 # ---- END PLUGIN-COMPAT ----
+
+
+from tools import path_identity
+
+def _posix_match_forms(path: str) -> tuple[str, ...]:
+    """Tilde-expand *path*, then hand it to the path-identity authority.
+
+    The spelling reconciliation itself lives in ``tools.path_identity`` — see
+    :func:`tools.path_identity.posix_match_forms` for what ``os.path.normpath``
+    does to a POSIX root on Windows and why every guard here has to know.
+
+    This shim exists for the one thing the authority deliberately refuses to
+    own: ``~`` resolves against the *effective profile home* (:func:`_expand_tilde`,
+    which consults ``hermes_constants.get_subprocess_home``), and that is Hermes
+    policy with a config dependency, not a pure spelling fact. Keeping the
+    expansion here is what lets ``path_identity`` stay import-light enough for
+    ``tools/approval.py`` to depend on it.
+
+    Guards in this module call THIS, so no caller can forget the expansion.
+    """
+    return path_identity.posix_match_forms(_expand_tilde(path))

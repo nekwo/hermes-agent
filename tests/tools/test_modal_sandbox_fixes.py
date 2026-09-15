@@ -28,6 +28,27 @@ except ImportError:
     pytest.skip("hermes-agent tools not importable (missing deps)", allow_module_level=True)
 
 
+def _native_host_cwd(*candidates: str) -> str:
+    """Pick the host-cwd spelling this platform treats as already absolute.
+
+    ``_get_env_config`` runs the candidate cwd through ``os.path.abspath``
+    before matching it against ``_HOST_CWD_PREFIXES`` — and that tuple carries
+    BOTH POSIX ("/Users/", "/home/") and Windows ("C:\\\\", "C:/") forms, on
+    purpose, because both hosts are supported. ``abspath`` is platform-
+    flavoured though: on Windows a POSIX-spelled "/Users/x" is rewritten to
+    "<current drive>:\\\\Users\\\\x", so a hardcoded POSIX fixture matched the
+    "C:\\\\" prefix only when the checkout happened to sit on the C: drive. The
+    assertion then turned on a drive letter rather than on any guarantee.
+
+    Select by the MECHANISM — does ``abspath`` leave this spelling alone
+    here? — rather than by platform name.
+    """
+    for candidate in candidates:
+        if os.path.abspath(candidate) == candidate:
+            return candidate
+    raise AssertionError(f"no already-absolute host-cwd spelling among {candidates!r}")
+
+
 # =========================================================================
 # Test 1: Tool resolution includes terminal + file tools
 # =========================================================================
@@ -36,7 +57,16 @@ class TestToolResolution:
     """Verify get_tool_definitions returns all expected tools for eval."""
 
     def test_terminal_and_file_toolsets_resolve_all_tools(self):
-        """enabled_toolsets=['terminal', 'file'] should produce 6 tools."""
+        """enabled_toolsets=['terminal', 'file'] resolves exactly those 6 tools.
+
+        Plus ``tool_describe``: the fork injects it into EVERY resolved lane,
+        independent of tool-search deferral (T6b details-on-demand — see
+        ``tests/tools/test_t6b_brief_descriptions.py::
+        test_tool_describe_injected_into_resolved_lane``). It is not a member
+        of either toolset, so it is named via the same constant the injector
+        uses and asserted separately — the toolset resolution itself is still
+        pinned exactly, and any OTHER stray tool still fails this test.
+        """
         from unittest.mock import patch as _patch
 
         from model_tools import get_tool_definitions
@@ -51,7 +81,10 @@ class TestToolResolution:
                 enabled_toolsets=["terminal", "file"],
                 quiet_mode=True,
             )
-        names = {t["function"]["name"] for t in tools}
+        from tools.tool_search import TOOL_DESCRIBE_NAME
+        all_names = [t["function"]["name"] for t in tools]
+        assert all_names.count(TOOL_DESCRIBE_NAME) == 1, all_names
+        names = set(all_names) - {TOOL_DESCRIBE_NAME}
         expected = {"terminal", "process_manage", "read_file", "write_file", "search_files", "patch"}
         assert expected == names, f"Expected {expected}, got {names}"
 
@@ -97,12 +130,14 @@ class TestCwdHandling:
 
     def test_users_path_maps_to_workspace_for_docker_when_enabled(self, monkeypatch):
         """Docker should map the host cwd into /workspace only when explicitly enabled."""
+        host_cwd = _native_host_cwd("/Users/someone/projects",
+                                    r"C:\Users\someone\projects")
         monkeypatch.setenv("TERMINAL_ENV", "docker")
-        monkeypatch.setenv("TERMINAL_CWD", "/Users/someone/projects")
+        monkeypatch.setenv("TERMINAL_CWD", host_cwd)
         monkeypatch.setenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "true")
         config = _tt_mod._get_env_config()
         assert config["cwd"] == "/workspace"
-        assert config["host_cwd"] == "/Users/someone/projects"
+        assert config["host_cwd"] == host_cwd
         assert config["docker_mount_cwd_to_workspace"] is True
 
     def test_windows_path_replaced_for_modal(self, monkeypatch):
@@ -145,13 +180,14 @@ class TestCwdHandling:
 
     def test_docker_default_cwd_maps_current_directory_when_enabled(self, monkeypatch):
         """Docker should use /workspace when cwd mounting is explicitly enabled."""
-        monkeypatch.setattr("tools.terminal_tool.os.getcwd", lambda: "/home/user/project")
+        host_cwd = _native_host_cwd("/home/user/project", r"C:\Users\user\project")
+        monkeypatch.setattr("tools.terminal_tool.os.getcwd", lambda: host_cwd)
         monkeypatch.setenv("TERMINAL_ENV", "docker")
         monkeypatch.setenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "true")
         monkeypatch.delenv("TERMINAL_CWD", raising=False)
         config = _tt_mod._get_env_config()
         assert config["cwd"] == "/workspace"
-        assert config["host_cwd"] == "/home/user/project"
+        assert config["host_cwd"] == host_cwd
 
     def test_local_backend_uses_getcwd(self, monkeypatch):
         """Local backend should use os.getcwd(), not /root."""

@@ -89,6 +89,13 @@ class TestGetSubprocessHome:
 
 
     def test_two_profiles_get_different_homes(self, tmp_path, monkeypatch):
+        """Each profile's subprocess HOME is that profile's own ``{HERMES_HOME}/home``.
+
+        The rule is per-profile identity, so assert the exact path each profile
+        resolves to. The older ``endswith("alpha/home")`` spelling asserted the
+        same rule through a hardcoded POSIX separator: it reds on Windows for
+        ``os.sep``, never for the behaviour under test.
+        """
         self._container_mode(monkeypatch)
         base = tmp_path / ".hermes" / "profiles"
         for name in ("alpha", "beta"):
@@ -104,11 +111,9 @@ class TestGetSubprocessHome:
         monkeypatch.setenv("HERMES_HOME", str(base / "beta"))
         home_b = get_subprocess_home()
 
-        assert home_a is not None
-        assert home_b is not None
+        assert home_a == str(base / "alpha" / "home")
+        assert home_b == str(base / "beta" / "home")
         assert home_a != home_b
-        assert home_a.endswith("alpha/home")
-        assert home_b.endswith("beta/home")
 
 
 

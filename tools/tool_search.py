@@ -47,6 +47,7 @@ class ToolSearchConfig:
     listing_max_tokens: int = 4000  # budget = min(this, threshold_pct% of context)
     # None = curated default; an explicit list replaces it wholesale ([] = defer no core tools).
     defer_tools: Optional[frozenset] = None
+    never_defer: tuple[str, ...] = ()
 
     @property
     def effective_defer_tools(self) -> frozenset:
@@ -60,12 +61,27 @@ class ToolSearchConfig:
             raw = {"enabled": "off" if raw is False else "auto"}
         max_search_limit = _clamped_int(raw.get("max_search_limit"), 25, 1, 50)
         defer_raw = raw.get("defer")
+        never_defer_raw = raw.get("never_defer")
+        never_defer_names: set[str] = set()
+        if isinstance(never_defer_raw, (list, tuple)):
+            for item in never_defer_raw:
+                try:
+                    cleaned = str(item).strip()
+                except Exception:
+                    continue
+                if not cleaned or cleaned in BRIDGE_TOOL_NAMES:
+                    continue
+                never_defer_names.add(cleaned)
+        never_defer = tuple(sorted(never_defer_names))
+
+
         return cls(
             enabled=_tri_state(raw.get("enabled", "auto")),
             threshold_pct=max(0.0, min(100.0, _safe_float(raw.get("threshold_pct"), 5.0))),
             search_default_limit=_clamped_int(
                 raw.get("search_default_limit"), 5, 1, max_search_limit),
             max_search_limit=max_search_limit,
+            never_defer=never_defer,
             listing=_tri_state(raw.get("listing", "auto")),
             listing_max_tokens=_clamped_int(raw.get("listing_max_tokens"), 4000, 200, 60000),
             defer_tools=(frozenset(str(n).strip() for n in defer_raw if str(n).strip())
@@ -139,11 +155,11 @@ _DEFAULT_DEFERRED_TOOLS = frozenset({
     "apply_layout", "read_terminal", "read_window_below", "focus_pane"})
 
 
-def is_deferrable_tool_name(name: str, defer_tools: Optional[frozenset] = None) -> bool:
+def is_deferrable_tool_name(name: str, defer_tools: Optional[frozenset] = None, *, config: Optional[ToolSearchConfig] = None) -> bool:
     """True if a tool is *eligible* for deferral: named in ``defer_tools`` (curated set or
     user override), OR an MCP tool, OR neither core nor a session-gated GUI surface (i.e. a
     plugin tool). Bridge names never defer."""
-    if name in BRIDGE_TOOL_NAMES:
+    if name in BRIDGE_TOOL_NAMES or name in never_defer_tool_names(config):
         return False
     if defer_tools is not None and name in defer_tools:
         return True
@@ -160,20 +176,21 @@ def _tool_def_names(tool_defs: Iterable[Dict[str, Any]]) -> Iterable[str]:
 
 
 def classify_tools(tool_defs: List[Dict[str, Any]], defer_tools: Optional[frozenset] = None,
-                   ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+                   *, config: Optional[ToolSearchConfig] = None) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Split a tool-defs list into (visible, deferrable); bridge tools are dropped (re-added
     after classification)."""
     visible: List[Dict[str, Any]] = []
     deferrable: List[Dict[str, Any]] = []
     for td, name in zip(tool_defs, _tool_def_names(tool_defs)):
         if name not in BRIDGE_TOOL_NAMES:
-            (deferrable if is_deferrable_tool_name(name, defer_tools) else visible).append(td)
+            (deferrable if is_deferrable_tool_name(name, defer_tools, config=config) else visible).append(td)
     return visible, deferrable
 
 
 def _deferrable_in(tool_defs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Deferrable subset of pre-assembly ``tool_defs`` under the read-only user config."""
-    return classify_tools(tool_defs, load_config_readonly().effective_defer_tools)[1]
+    config = load_config_readonly()
+    return classify_tools(tool_defs, config.effective_defer_tools, config=config)[1]
 
 
 def estimate_tokens_from_schemas(tool_defs: Iterable[Dict[str, Any]]) -> int:
@@ -232,9 +249,9 @@ def _search_description(deferred_count: int, listing: Optional[str], listing_for
         + "Takes a list of queries searched in parallel against the same "
         "catalog; send one query per distinct capability you need. Returns "
         "matching tool names grouped per query plus a shared map with each "
-        "tool's description. Follow with "
-        f"`{TOOL_DESCRIBE_NAME}` to load full parameter schemas, "
-        f"then `{TOOL_CALL_NAME}` to invoke. Tools listed at the top of this "
+        "tool's description and full `parameters` schema for the top matches. "
+        f"When parameters are present, invoke it directly with `{TOOL_CALL_NAME}`; otherwise "
+        f"use `{TOOL_DESCRIBE_NAME}` first. Tools listed at the top of this "
         "system prompt are already available and do not need to be searched."
         + (_CONNECTIONS_HINT if connections_granted else ""))
     if not listing:
@@ -343,7 +360,7 @@ def assemble_tool_defs(tool_defs: List[Dict[str, Any]], *, context_length: Optio
     config = config or load_config()
     incoming = [td for td, name in zip(tool_defs, _tool_def_names(tool_defs))
                 if name not in BRIDGE_TOOL_NAMES]
-    visible, deferrable = classify_tools(incoming, config.effective_defer_tools)
+    visible, deferrable = classify_tools(incoming, config.effective_defer_tools, config=config)
     connections_granted = connections_in_scope(incoming)
     if not deferrable:
         if should_activate(config, 0, context_length, connections_granted=connections_granted):
@@ -439,6 +456,9 @@ def dispatch_tool_search(args: Dict[str, Any], *, current_tool_defs: List[Dict[s
     them together, so a connector tool that answers the query is never starved by local
     tools that share one word with it. Empty groups get ``available_sources`` + ``hint`` so
     a lexical miss is not mistaken for a missing capability."""
+    legacy_query = "query" in args and "queries" not in args
+    if legacy_query:
+        args = {**args, "queries": [args["query"]]}
     config = config or load_config()
     queries, err = _string_list_arg(args, "queries", dedupe=False, max_items=_MAX_QUERIES_PER_CALL,
                                     retry_hint="Retry with fewer, more targeted queries.")
@@ -457,8 +477,15 @@ def dispatch_tool_search(args: Dict[str, Any], *, current_tool_defs: List[Dict[s
     for position, query in enumerate(queries):
         corpus = catalog + remote_entries[position]
         hits = search_catalog(corpus, query, limit=limit)
-        for h in hits:
-            tools_map.setdefault(h.name, _shared_tool_record(h))
+        for i, h in enumerate(hits):
+            record = tools_map.setdefault(h.name, _shared_tool_record(h))
+            if i < _SEARCH_HIT_SCHEMA_TOP_N:
+                params = (_fn(h.schema).get("parameters")) or {}
+                try:
+                    if len(json.dumps(params, ensure_ascii=False)) <= _SEARCH_HIT_SCHEMA_MAX_CHARS:
+                        record["parameters"] = params
+                except (TypeError, ValueError):
+                    pass
         matches = [h.name for h in hits]
         group: Dict[str, Any] = {"query": query, "matches": matches}
         if not matches and catalog:
@@ -470,6 +497,9 @@ def dispatch_tool_search(args: Dict[str, Any], *, current_tool_defs: List[Dict[s
                 "object before concluding the capability is unavailable.")
         results.append(group)
     remote_count = sum(1 for name in tools_map if is_connector_name(name))
+    if legacy_query:
+        return json.dumps({"query": queries[0], "total_available": len(catalog) + remote_count,
+                           "matches": [{"name": name, **tools_map[name]} for name in results[0]["matches"]]}, ensure_ascii=False)
     return json.dumps({"queries": queries, "total_available": len(catalog) + remote_count, "results": results,
                        "tools": tools_map}, ensure_ascii=False)
 
@@ -481,13 +511,15 @@ def dispatch_tool_describe(args: Dict[str, Any], *, current_tool_defs: List[Dict
     parameters}}, not_found: [...]  (unknown / not in this assembly; never fails the call),
     errors: {name: msg}  (registered but non-deferrable)}``. Duplicates dedupe silently."""
     config = config or load_config_readonly()
+    legacy_name = "name" in args and "names" not in args
+    if legacy_name:
+        args = {**args, "names": [args["name"]]}
     names, err = _string_list_arg(
         args, "names", dedupe=True, max_items=_MAX_DESCRIBE_NAMES_PER_CALL,
         retry_hint="Retry with fewer names per call.")
     if err:
         return err
-    deferrable = _deferrable_in(current_tool_defs)
-    by_name = {name: _fn(td) for td, name in zip(deferrable, _tool_def_names(deferrable)) if name}
+    by_name = {name: _fn(td) for td, name in zip(current_tool_defs, _tool_def_names(current_tool_defs)) if name}
     remote_schemas = remote_schemas_for(names, current_tool_defs, connector_describe)
 
     tools: Dict[str, Dict[str, Any]] = {}
@@ -497,7 +529,8 @@ def dispatch_tool_describe(args: Dict[str, Any], *, current_tool_defs: List[Dict
         fn = by_name.get(name)
         remote_fn = remote_schemas.get(name)
         if fn is not None:
-            tools[name] = {"description": fn.get("description", ""),
+            from tools.tool_full_descriptions import full_tool_description
+            tools[name] = {"description": full_tool_description(name) or fn.get("description", ""),
                            "parameters": fn.get("parameters", {})}
         elif isinstance(remote_fn, dict):
             tools[name] = {"description": str(remote_fn.get("description", "")),
@@ -518,6 +551,10 @@ def dispatch_tool_describe(args: Dict[str, Any], *, current_tool_defs: List[Dict
         result["hint"] = "Names in not_found are not currently available. Re-run tool_search to refresh."
     if errors:
         result["errors"] = errors
+    if legacy_name and names:
+        if names[0] in tools:
+            return json.dumps({"name": names[0], **tools[names[0]]}, ensure_ascii=False)
+        return tool_error(errors.get(names[0]) or f"Tool {names[0]!r} is not available in this session.")
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -525,9 +562,10 @@ def scoped_deferrable_names(tool_defs: List[Dict[str, Any]]) -> frozenset[str]:
     """Deferrable names in the *pre-assembly* ``tool_defs`` of the session scope — the
     universe ``tool_call`` may reach. Gates bridge dispatch AND the executor unwrap so a
     restricted session cannot invoke an out-of-scope tool via the bridge."""
-    defer_tools = load_config_readonly().effective_defer_tools
+    config = load_config_readonly()
+    defer_tools = config.effective_defer_tools
     return frozenset(n for n in _tool_def_names(tool_defs)
-                     if n and is_deferrable_tool_name(n, defer_tools))
+                     if n and is_deferrable_tool_name(n, defer_tools, config=config))
 
 
 def resolve_underlying_call(args: Dict[str, Any]) -> Tuple[Optional[str], Dict[str, Any], Optional[str]]:
@@ -621,3 +659,66 @@ def build_catalog_listing(
     text, _form = build_catalog_listing_with_form(deferrable, max_tokens=max_tokens)
     return text
 # ---- END PLUGIN-COMPAT ----
+
+
+_NEVER_DEFER_TOOLS = frozenset({"agent_chat_send", "agent_chat_dispatches"})
+_SEARCH_HIT_SCHEMA_TOP_N = 3
+_SEARCH_HIT_SCHEMA_MAX_CHARS = 6000
+
+
+def never_defer_tool_names(config: Optional[ToolSearchConfig] = None) -> frozenset[str]:
+    """Hardcoded promotions unioned with the operator's config extension.
+
+    Config EXTENDS the set; nothing in config can remove a hardcoded name.
+    """
+    if config is None:
+        config = load_config_readonly()  # no write on discovery
+    if not config.never_defer:
+        return _NEVER_DEFER_TOOLS
+    return _NEVER_DEFER_TOOLS | frozenset(config.never_defer)
+
+
+def tool_describe_schema() -> Dict[str, Any]:
+    """Return the fixed, always-available ``tool_describe`` schema.
+
+    Injected into every resolved lane by ``model_tools`` independent of
+    tool-search deferral so the model can always pull a brief-trimmed tool's
+    full documentation. Bridge dispatch in ``model_tools.handle_function_call``
+    routes it (``is_bridge_tool`` already recognizes the name), and
+    ``dispatch_tool_describe`` serves the full registry-held docs + live
+    parameter schema.
+    """
+    return {
+        "type": "function",
+        "function": {
+            "name": TOOL_DESCRIBE_NAME,
+            "description": (
+                "Load a tool's full documentation and parameter reference by "
+                "name. Tool descriptions in this list are brief; call "
+                "tool_describe before the first use of an unfamiliar tool."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Exact tool name to describe.",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    }
+
+
+def ensure_tool_describe_present(tool_defs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Ensure ``tool_describe`` is in the model-facing tool list.
+
+    No-op when it is already present (e.g. tool-search deferral already injected
+    the full bridge trio, which includes ``tool_describe``). Otherwise appends
+    the fixed standalone schema. Returns a new list; never mutates the input.
+    """
+    for td in tool_defs:
+        if (td.get("function") or {}).get("name") == TOOL_DESCRIBE_NAME:
+            return tool_defs
+    return list(tool_defs) + [tool_describe_schema()]

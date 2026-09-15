@@ -11,6 +11,8 @@ from unittest.mock import patch
 
 import pytest
 
+from tests._home_env import point_home_at
+from tools.environments import local as local_mod
 from tools.environments.local import (
     LocalEnvironment,
     _prepend_shell_init,
@@ -19,10 +21,35 @@ from tools.environments.local import (
 
 
 class TestResolveShellInitFiles:
+    @pytest.fixture(autouse=True)
+    def _auto_source_arm(self, tmp_path, monkeypatch):
+        """Make the auto-source rule testable on any host.
+
+        Two things otherwise silently defeat this class on Windows:
+
+        * ``monkeypatch.setenv("HOME", …)`` does not move ``~`` there —
+          ``ntpath.expanduser`` prefers ``USERPROFILE`` — so the resolver read
+          the developer's REAL home instead of the tmpdir.
+        * ``_resolve_shell_init_files`` gates the whole auto-source list on
+          ``not _IS_WINDOWS``, so every expectation here belongs to the POSIX
+          arm. Naming the arm is what keeps ``test_skips_bashrc_when_missing``
+          from passing for the wrong reason (empty because Windows, not empty
+          because no rc file exists).
+        """
+        point_home_at(monkeypatch, tmp_path)
+        monkeypatch.setattr(local_mod, "_IS_WINDOWS", False)
+
+    @staticmethod
+    def _normalized(resolved):
+        """The resolver expands ``~/.bashrc`` by substituting the home for the
+        tilde, so the remainder keeps its ``/`` and a Windows result reads
+        ``C:\\...\\home/.bashrc``. That names the same file; normpath compares
+        the FILE rather than the separator (identity on POSIX)."""
+        return [os.path.normpath(p) for p in resolved]
+
     def test_auto_sources_bashrc_when_present(self, tmp_path, monkeypatch):
         bashrc = tmp_path / ".bashrc"
         bashrc.write_text('export MARKER=seen\n')
-        monkeypatch.setenv("HOME", str(tmp_path))
 
         # Default config: auto_source_bashrc on, no explicit list.
         with patch(
@@ -31,7 +58,7 @@ class TestResolveShellInitFiles:
         ):
             resolved = _resolve_shell_init_files()
 
-        assert resolved == [str(bashrc)]
+        assert self._normalized(resolved) == [str(bashrc)]
 
     def test_auto_sources_profile_when_present(self, tmp_path, monkeypatch):
         """~/.profile is where ``n`` / ``nvm`` installers typically write
@@ -40,7 +67,6 @@ class TestResolveShellInitFiles:
         """
         profile = tmp_path / ".profile"
         profile.write_text('export PATH="$HOME/n/bin:$PATH"\n')
-        monkeypatch.setenv("HOME", str(tmp_path))
 
         with patch(
             "tools.environments.local._read_terminal_shell_init_config",
@@ -48,7 +74,7 @@ class TestResolveShellInitFiles:
         ):
             resolved = _resolve_shell_init_files()
 
-        assert resolved == [str(profile)]
+        assert self._normalized(resolved) == [str(profile)]
 
 
     def test_auto_sources_profile_before_bashrc(self, tmp_path, monkeypatch):
@@ -62,7 +88,6 @@ class TestResolveShellInitFiles:
         bash_profile.write_text('export FROM_BASH_PROFILE=1\n')
         bashrc = tmp_path / ".bashrc"
         bashrc.write_text('export FROM_BASHRC=1\n')
-        monkeypatch.setenv("HOME", str(tmp_path))
 
         with patch(
             "tools.environments.local._read_terminal_shell_init_config",
@@ -70,12 +95,12 @@ class TestResolveShellInitFiles:
         ):
             resolved = _resolve_shell_init_files()
 
-        assert resolved == [str(profile), str(bash_profile), str(bashrc)]
+        assert self._normalized(resolved) == [
+            str(profile), str(bash_profile), str(bashrc),
+        ]
 
     def test_skips_bashrc_when_missing(self, tmp_path, monkeypatch):
         # No rc files written.
-        monkeypatch.setenv("HOME", str(tmp_path))
-
         with patch(
             "tools.environments.local._read_terminal_shell_init_config",
             return_value=([], True),
@@ -86,7 +111,6 @@ class TestResolveShellInitFiles:
 
 
     def test_missing_explicit_files_are_skipped_silently(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HOME", str(tmp_path))
         with patch(
             "tools.environments.local._read_terminal_shell_init_config",
             return_value=([str(tmp_path / "does-not-exist.sh")], False),

@@ -28,6 +28,12 @@ def _base(monkeypatch):
     monkeypatch.delenv("PIPEWIRE_REMOTE", raising=False)
     monkeypatch.setattr("hermes_constants.is_container", lambda: False)
     monkeypatch.setattr("tools.voice_mode._pulse_socket_reachable", lambda: False)
+    # "no forwarding" has to mean no PowerShell TTS fallback either, or the
+    # module docstring's claim ("reproduce the WSL path on any host") is false:
+    # _wsl_powershell_tts_available() shells out to shutil.which, so on a
+    # Windows workstation it finds a real powershell.exe + ffmpeg and the WSL
+    # gate degrades to a notice instead of the hard block under test.
+    monkeypatch.setattr("tools.voice_mode.shutil.which", lambda _name: None)
     sd = MagicMock(); sd.query_devices.return_value = [{"name": "dev"}]
     monkeypatch.setattr("tools.voice_mode._import_audio", lambda: (sd, MagicMock()))
 
