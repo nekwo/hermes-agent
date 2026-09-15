@@ -1,0 +1,3 @@
+source_commit=55e7986896fc4ca8532301345c4948600ca066c3
+generator=mobile_core/tools/vendor_upstream.py
+api_mode=chat_completions

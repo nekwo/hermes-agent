@@ -1,0 +1,416 @@
+{
+  "schema_version": 1,
+  "providers": [
+    {
+      "id": "nous",
+      "display_name": "Nous Research",
+      "description": "Nous Research — Hermes model family",
+      "auth_type": "oauth_device_code",
+      "transport": "openai_chat",
+      "default_base_url": "https://inference-api.nousresearch.com/v1",
+      "api_key_env_vars": [
+        "NOUS_API_KEY"
+      ]
+    },
+    {
+      "id": "openrouter",
+      "display_name": "OpenRouter",
+      "description": "OpenRouter — unified API for 200+ models",
+      "auth_type": "api_key",
+      "transport": "openai_chat",
+      "default_base_url": "https://openrouter.ai/api/v1",
+      "api_key_env_vars": [
+        "OPENROUTER_API_KEY"
+      ]
+    },
+    {
+      "id": "moa",
+      "display_name": "Mixture of Agents",
+      "description": "Mixture of Agents (named presets; aggregator acts after reference models)",
+      "auth_type": "virtual",
+      "transport": "openai_chat",
+      "default_base_url": "moa://local",
+      "api_key_env_vars": []
+    },
+    {
+      "id": "novita",
+      "display_name": "NovitaAI",
+      "description": "NovitaAI — AI-native cloud for builders and agents",
+      "auth_type": "api_key",
+      "transport": "openai_chat",
+      "default_base_url": "https://api.novita.ai/openai",
+      "api_key_env_vars": [
+        "NOVITA_API_KEY"
+      ]
+    },
+    {
+      "id": "lmstudio",
+      "display_name": "LM Studio",
+      "description": "LM Studio (Local desktop app with built-in model server)",
+      "auth_type": "api_key",
+      "transport": "openai_chat",
+      "default_base_url": "http://127.0.0.1:1234/v1",
+      "api_key_env_vars": [
+        "LM_API_KEY"
+      ]
+    },
+    {
+      "id": "anthropic",
+      "display_name": "Anthropic",
+      "description": "Anthropic (Claude models via API key or Claude Code)",
+      "auth_type": "api_key",
+      "transport": "anthropic_messages",
+      "default_base_url": "",
+      "api_key_env_vars": [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN"
+      ]
+    },
+    {
+      "id": "openai-codex",
+      "display_name": "OpenAI Codex",
+      "description": "OpenAI Codex (Codex CLI via ChatGPT subscription or API key)",
+      "auth_type": "oauth_external",
+      "transport": "codex_responses",
+      "default_base_url": "https://chatgpt.com/backend-api/codex",
+      "api_key_env_vars": []
+    },
+    {
+      "id": "openai-api",
+      "display_name": "OpenAI API",
+      "description": "OpenAI API (api.openai.com, API key)",
+      "auth_type": "api_key",
+      "transport": "codex_responses",
+      "default_base_url": "https://api.openai.com/v1",
+      "api_key_env_vars": [
+        "OPENAI_API_KEY"
+      ]
+    },
+    {
+      "id": "alibaba",
+      "display_name": "Qwen Cloud",
+      "description": "Qwen Cloud / DashScope (Qwen + multi-provider)",
+      "auth_type": "api_key",
+      "transport": "openai_chat",
+      "default_base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+      "api_key_env_vars": [
+        "DASHSCOPE_API_KEY"
+      ]
+    },
+    {
+      "id": "xai-oauth",
+      "display_name": "xAI Grok OAuth (SuperGrok / Premium+)",
+      "description": "xAI Grok OAuth (SuperGrok / Premium+ subscription)",
+      "auth_type": "oauth_external",
+      "transport": "codex_responses",
+      "default_base_url": "https://api.x.ai/v1",
+      "api_key_env_vars": []
+    },
+    {
+      "id": "xiaomi",
+      "display_name": "Xiaomi MiMo",
+      "description": "Xiaomi MiMo (MiMo-V2.5 and V2 models: pro, omni, flash)",
+      "auth_type": "api_key",
+      "transport": "openai_chat",
+      "default_base_url": "https://api.xiaomimimo.com/v1",
+      "api_key_env_vars": [
+        "XIAOMI_API_KEY"
+      ]
+    },
+    {
+      "id": "tencent-tokenhub",
+      "display_name": "Tencent TokenHub",
+      "description": "Tencent TokenHub (Hy3 Preview via tokenhub.tencentmaas.com)",
+      "auth_type": "api_key",
+      "transport": "openai_chat",
+      "default_base_url": "https://tokenhub.tencentmaas.com/v1",
+      "api_key_env_vars": [
+        "TOKENHUB_API_KEY"
+      ]
+    },
+    {
+      "id": "nvidia",
+      "display_name": "NVIDIA NIM",
+      "description": "NVIDIA NIM — accelerated inference",
+      "auth_type": "api_key",
+      "transport": "openai_chat",
+      "default_base_url": "https://integrate.api.nvidia.com/v1",
+      "api_key_env_vars": [
+        "NVIDIA_API_KEY"
+      ]
+    },
+    {
+      "id": "copilot",
+      "display_name": "GitHub Copilot",
+      "description": "GitHub Copilot (Uses GITHUB_TOKEN or gh auth token)",
+      "auth_type": "api_key",
+      "transport": "openai_chat",
+      "default_base_url": "https://api.githubcopilot.com",
+      "api_key_env_vars": [
+        "COPILOT_GITHUB_TOKEN",
+        "GH_TOKEN",
+        "GITHUB_TOKEN"
+      ]
+    },
+    {
+      "id": "copilot-acp",
+      "display_name": "GitHub Copilot ACP",
+      "description": "GitHub Copilot ACP (Spawns copilot --acp --stdio)",
+      "auth_type": "external_process",
+      "transport": "codex_responses",
+      "default_base_url": "acp://copilot",
+      "api_key_env_vars": []
+    },
+    {
+      "id": "huggingface",
+      "display_name": "HuggingFace",
+      "description": "HuggingFace Inference API",
+      "auth_type": "api_key",
+      "transport": "openai_chat",
+      "default_base_url": "https://router.huggingface.co/v1",
+      "api_key_env_vars": [
+        "HF_TOKEN"
+      ]
+    },
+    {
+      "id": "gemini",
+      "display_name": "Google AI Studio",
+      "description": "Google AI Studio (Native Gemini API)",
+      "auth_type": "api_key",
+      "transport": "openai_chat",
+      "default_base_url": "",
+      "api_key_env_vars": [
+        "GOOGLE_API_KEY",
+        "GEMINI_API_KEY"
+      ]
+    },
+    {
+      "id": "vertex",
+      "display_name": "Google Vertex AI",
+      "description": "Google Vertex AI (Gemini via GCP; OAuth2 service account or ADC, GCP billing/quotas)",
+      "auth_type": "vertex",
+      "transport": "",
+      "default_base_url": "",
+      "api_key_env_vars": []
+    },
+    {
+      "id": "deepseek",
+      "display_name": "DeepSeek",
+      "description": "DeepSeek — native DeepSeek API",
+      "auth_type": "api_key",
+      "transport": "openai_chat",
+      "default_base_url": "https://api.deepseek.com",
+      "api_key_env_vars": [
+        "DEEPSEEK_API_KEY"
+      ]
+    },
+    {
+      "id": "xai",
+      "display_name": "xAI",
+      "description": "xAI Grok (Direct API)",
+      "auth_type": "api_key",
+      "transport": "codex_responses",
+      "default_base_url": "https://api.x.ai/v1",
+      "api_key_env_vars": [
+        "XAI_API_KEY"
+      ]
+    },
+    {
+      "id": "zai",
+      "display_name": "Z.AI (GLM)",
+      "description": "Z.AI / GLM — Zhipu AI models",
+      "auth_type": "api_key",
+      "transport": "openai_chat",
+      "default_base_url": "https://api.z.ai/api/paas/v4",
+      "api_key_env_vars": [
+        "GLM_API_KEY",
+        "ZAI_API_KEY",
+        "Z_AI_API_KEY"
+      ]
+    },
+    {
+      "id": "kimi-coding",
+      "display_name": "Kimi / Kimi Coding Plan",
+      "description": "Kimi Coding Plan (api.kimi.com & Moonshot API)",
+      "auth_type": "api_key",
+      "transport": "openai_chat",
+      "default_base_url": "https://api.kimi.com/coding/v1",
+      "api_key_env_vars": [
+        "KIMI_API_KEY",
+        "KIMI_CODING_API_KEY"
+      ]
+    },
+    {
+      "id": "kimi-coding-cn",
+      "display_name": "Kimi / Moonshot (China)",
+      "description": "Kimi / Moonshot China (Domestic direct API)",
+      "auth_type": "api_key",
+      "transport": "openai_chat",
+      "default_base_url": "https://api.kimi.com/coding/v1",
+      "api_key_env_vars": [
+        "KIMI_CN_API_KEY"
+      ]
+    },
+    {
+      "id": "stepfun",
+      "display_name": "StepFun Step Plan",
+      "description": "StepFun Step Plan (Agent / coding models via Step Plan API)",
+      "auth_type": "api_key",
+      "transport": "openai_chat",
+      "default_base_url": "https://api.stepfun.ai/step_plan/v1",
+      "api_key_env_vars": [
+        "STEPFUN_API_KEY"
+      ]
+    },
+    {
+      "id": "minimax",
+      "display_name": "MiniMax",
+      "description": "MiniMax (Global direct API)",
+      "auth_type": "api_key",
+      "transport": "anthropic_messages",
+      "default_base_url": "https://api.minimax.io/anthropic/v1",
+      "api_key_env_vars": [
+        "MINIMAX_API_KEY"
+      ]
+    },
+    {
+      "id": "minimax-oauth",
+      "display_name": "MiniMax (OAuth)",
+      "description": "MiniMax via OAuth browser flow — no API key required",
+      "auth_type": "oauth_minimax",
+      "transport": "anthropic_messages",
+      "default_base_url": "https://api.minimax.io/anthropic",
+      "api_key_env_vars": []
+    },
+    {
+      "id": "minimax-cn",
+      "display_name": "MiniMax (China)",
+      "description": "MiniMax China (Domestic direct API)",
+      "auth_type": "api_key",
+      "transport": "anthropic_messages",
+      "default_base_url": "https://api.minimaxi.com/anthropic/v1",
+      "api_key_env_vars": [
+        "MINIMAX_CN_API_KEY"
+      ]
+    },
+    {
+      "id": "ollama-cloud",
+      "display_name": "Ollama Cloud",
+      "description": "Ollama Cloud (Cloud-hosted open models, ollama.com)",
+      "auth_type": "api_key",
+      "transport": "openai_chat",
+      "default_base_url": "https://ollama.com/v1",
+      "api_key_env_vars": [
+        "OLLAMA_API_KEY"
+      ]
+    },
+    {
+      "id": "arcee",
+      "display_name": "Arcee AI",
+      "description": "Arcee AI (Trinity models, direct API)",
+      "auth_type": "api_key",
+      "transport": "openai_chat",
+      "default_base_url": "https://api.arcee.ai/api/v1",
+      "api_key_env_vars": [
+        "ARCEEAI_API_KEY"
+      ]
+    },
+    {
+      "id": "gmi",
+      "display_name": "GMI Cloud",
+      "description": "GMI Cloud — multi-model direct API (slash-form model IDs)",
+      "auth_type": "api_key",
+      "transport": "openai_chat",
+      "default_base_url": "https://api.gmi-serving.com/v1",
+      "api_key_env_vars": [
+        "GMI_API_KEY"
+      ]
+    },
+    {
+      "id": "kilocode",
+      "display_name": "Kilo Code",
+      "description": "Kilo Code (Kilo Gateway API)",
+      "auth_type": "api_key",
+      "transport": "openai_chat",
+      "default_base_url": "https://api.kilo.ai/api/gateway",
+      "api_key_env_vars": [
+        "KILOCODE_API_KEY"
+      ]
+    },
+    {
+      "id": "opencode-zen",
+      "display_name": "OpenCode Zen",
+      "description": "OpenCode Zen (Curated models, pay-as-you-go)",
+      "auth_type": "api_key",
+      "transport": "openai_chat",
+      "default_base_url": "https://opencode.ai/zen/v1",
+      "api_key_env_vars": [
+        "OPENCODE_ZEN_API_KEY"
+      ]
+    },
+    {
+      "id": "opencode-go",
+      "display_name": "OpenCode Go",
+      "description": "OpenCode Go (Open models subscription)",
+      "auth_type": "api_key",
+      "transport": "openai_chat",
+      "default_base_url": "https://opencode.ai/zen/go/v1",
+      "api_key_env_vars": [
+        "OPENCODE_GO_API_KEY"
+      ]
+    },
+    {
+      "id": "bedrock",
+      "display_name": "AWS Bedrock",
+      "description": "AWS Bedrock (Claude, Nova, Llama, DeepSeek; IAM or API key)",
+      "auth_type": "aws_sdk",
+      "transport": "bedrock_converse",
+      "default_base_url": "",
+      "api_key_env_vars": []
+    },
+    {
+      "id": "azure-foundry",
+      "display_name": "Azure Foundry",
+      "description": "Microsoft Foundry - OpenAI-compatible endpoint (user-supplied base URL)",
+      "auth_type": "api_key",
+      "transport": "openai_chat",
+      "default_base_url": "",
+      "api_key_env_vars": [
+        "AZURE_FOUNDRY_API_KEY"
+      ]
+    },
+    {
+      "id": "qwen-oauth",
+      "display_name": "Qwen OAuth (Portal)",
+      "description": "Qwen OAuth (Reuses local Qwen CLI login)",
+      "auth_type": "oauth_external",
+      "transport": "openai_chat",
+      "default_base_url": "https://portal.qwen.ai/v1",
+      "api_key_env_vars": [
+        "QWEN_API_KEY"
+      ]
+    },
+    {
+      "id": "alibaba-coding-plan",
+      "display_name": "Alibaba Cloud (Coding Plan)",
+      "description": "Alibaba Cloud Coding Plan (Dedicated coding tier)",
+      "auth_type": "api_key",
+      "transport": "openai_chat",
+      "default_base_url": "https://coding-intl.dashscope.aliyuncs.com/v1",
+      "api_key_env_vars": [
+        "ALIBABA_CODING_PLAN_API_KEY",
+        "DASHSCOPE_API_KEY"
+      ]
+    },
+    {
+      "id": "custom",
+      "display_name": "custom",
+      "description": "custom (direct API)",
+      "auth_type": "api_key",
+      "transport": "",
+      "default_base_url": "",
+      "api_key_env_vars": []
+    }
+  ]
+}

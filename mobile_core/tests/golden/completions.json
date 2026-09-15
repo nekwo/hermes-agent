@@ -1,0 +1,75 @@
+[
+  {
+    "name": "openrouter_plain_completion",
+    "response": {
+      "id": "gen-redacted-plain",
+      "model": "example/plain-model",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "Hello from the captured fixture.",
+            "reasoning": null,
+            "reasoning_content": null,
+            "tool_calls": null,
+            "refusal": null
+          },
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {"prompt_tokens": 7, "completion_tokens": 6, "total_tokens": 13}
+    }
+  },
+  {
+    "name": "openai_refusal_completion",
+    "response": {
+      "id": "chatcmpl-redacted-refusal",
+      "model": "example/refusal-model",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "reasoning": null,
+            "reasoning_content": null,
+            "tool_calls": null,
+            "refusal": "I cannot help with that request."
+          },
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {"prompt_tokens": 9, "completion_tokens": 8, "total_tokens": 17}
+    }
+  },
+  {
+    "name": "gemini_compatible_tool_call",
+    "response": {
+      "id": "chatcmpl-redacted-tool",
+      "model": "example/tool-model",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "reasoning": "I should call the function.",
+            "reasoning_content": null,
+            "tool_calls": [
+              {
+                "id": "call_redacted",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": "{\"id\":1}"},
+                "extra_content": {"google": {"thought_signature": "redacted-fixture-signature"}}
+              }
+            ],
+            "refusal": null
+          },
+          "finish_reason": "tool_calls"
+        }
+      ],
+      "usage": {"prompt_tokens": 11, "completion_tokens": 4, "total_tokens": 15}
+    }
+  }
+]
