@@ -1,0 +1,26 @@
+{
+  "argv": [
+    "harness",
+    "realm",
+    "sync",
+    "status",
+    "realm_fixture_missing",
+    "--json"
+  ],
+  "exit_code": 3,
+  "stdout": {
+    "error": {
+      "code": "not_found",
+      "correlation_id": null,
+      "error_id": "err_fixture",
+      "hint": "Check the id with the matching list command.",
+      "message": "realm_fixture_missing.json",
+      "retryable": false,
+      "safe_details": {
+        "error_class": "NotFound"
+      }
+    },
+    "kind": "error",
+    "schema_version": 1
+  }
+}

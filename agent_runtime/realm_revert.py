@@ -1,0 +1,1031 @@
+"""Per-item revert-to-upstream for realm store drift — the second exit from
+"unpublished changes" (``hermes harness realm sync revert``).
+
+Plan: ``docs/mission_control/planned/realm-sync-local-changes-resolution.md``
+(launcher repo), Stage H. Until this module existed the ONLY exit the product
+offered an operator holding local store drift was **Publish** — pull
+deliberately never clobbers local state (correct), so an operator whose local
+changes are noise had no exit at all. Measured 2026-08-31 on the operator's
+store: office drift ``offices_changed 1, actors_removed 1``, the one item a
+baseline actor the census had archived locally and nobody ever meant to
+publish.
+
+Three rulings shape every line below.
+
+* **A revert is DIAGNOSTIC intent, not authored deletion** (the actor-lifecycle
+  wave's authored-vs-diagnostic ruling, §AX7). The operator is saying "my local
+  unpublished state is noise; upstream is truth" — NOT "delete this
+  realm-wide". So the ``added`` arm archives through the
+  ``record_tombstone=False`` lane on BOTH stores, and **no revert ever mints a
+  realm-visible tombstone**. That is a guarantee, pinned by
+  ``tests/agent_runtime/test_realm_revert.py``.
+* **Local-only.** No git, no network, no credential, no remote. This
+  reconciles the local store against the local sync-repo subtree — the
+  LAST-PULLED upstream picture. A fresher upstream is what Pull is for, and the
+  verb refuses ``sync_repo_missing`` rather than inventing one.
+* **Archive-never-delete stands.** Reverting a locally-added row archives it;
+  nothing is unlinked, and ``actor-restore`` / ``board card restore`` still
+  reach it.
+
+The write arms are the PULL lane's arms, not new ones: ``adopt_remote_actor`` /
+``adopt_remote_surface`` / ``adopt_remote_board`` / ``adopt_remote_card`` /
+``restore_actor`` / ``restore_card`` / ``archive_card`` / ``remove_actor``,
+— and, since the SKILL family joined on 2026-09-12, the ONE guarded promotion
+door (``skill_promotion.execute_promotion`` with ``adopt_divergent=True``, and
+``_archive_package`` for the local-only arm),
+and — since the replicated persona-INSTANCE family joined on 2026-08-31 —
+``replicate_instance`` / ``retire_replica``, and since the replicated CANVAS
+family joined on 2026-09-05, ``FlowGraphStore.set_doc`` / ``.archive``, plus the
+same admission door every pulled payload passes. A revert writes nothing a pull
+could not have written.
+(The two board adopt verbs arrived on 2026-09-02 with the pull arm that grew
+them; until then both lanes wrote board rows with a raw ``atomic_json_write``
+and emitted nothing, which is why the sentence above was true and the module's
+own "a live subscriber that never heard" note below was not.)
+
+The instance family's ``added`` arm needs no ``record_tombstone=False``
+parameter, and that is not an omission: a persona-instance record carries no
+realm-visible ledger at all, so the only place this lane could mint one is the
+office half — and ``retire_replica`` deliberately does not run it. The canvas
+family's arm is the same shape for the same reason, one step simpler:
+``FlowGraphStore.archive`` moves the file into ``flow_graphs_stale/`` and writes
+no ledger anywhere, so archive-never-delete holds with no parameter at all.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+from typing import Any
+
+from . import board_models, office_models, paths
+from .realm_sync import (
+    DRIFT_FAMILY_BOARD,
+    DRIFT_FAMILY_BOARD_CARD,
+    DRIFT_FAMILY_FLOW_GRAPH,
+    DRIFT_FAMILY_OFFICE_ACTOR,
+    DRIFT_FAMILY_OFFICE_SURFACE,
+    DRIFT_FAMILY_PERSONA_INSTANCE,
+    DRIFT_FAMILY_SKILL,
+    DRIFT_KIND_ADDED,
+    DRIFT_KIND_CHANGED,
+    DRIFT_KIND_REMOVED,
+    RealmSyncError,
+    StoreDriftItem,
+    _append_realm_sync_event,
+    _board_store_drift,
+    _office_store_drift,
+    _realm_subtree,
+    _safe_display_path,
+    _sync_repo_path,
+    _workspaces_for_realm,
+    store_drift_items,
+)
+from .serde import to_jsonable
+from .store import RealmStore
+
+#: The event a completed revert appends. It advances the EventLog watermark the
+#: same way ``realm.sync.pulled`` / ``realm.sync.published`` do, because a
+#: revert rewrites store state through the same door and a live office
+#: subscriber that never heard would render rows the store no longer has.
+REVERT_EVENT_TYPE = "realm.sync.reverted"
+
+#: ``updated_by`` on every write this lane takes. The pull's arms stamp
+#: ``realm_sync``; this one says which sync lane moved the row, so an operator
+#: reading an actor's provenance can tell a peer's pull from their own revert.
+REVERT_ACTOR_REF = "realm_sync_revert"
+
+# --- outcomes (the typed vocabulary the launcher renders per row) ----------
+
+#: A baseline row that was archived/absent locally is live again, from the
+#: subtree artifact.
+OUTCOME_RESTORED = "restored_from_upstream"
+#: A locally-edited row's content was overwritten with the subtree artifact's.
+OUTCOME_REVERTED = "reverted_to_upstream"
+#: A local-only row was archived through the ``record_tombstone=False`` lane.
+OUTCOME_ARCHIVED_LOCAL_ONLY = "archived_local_only"
+#: The baseline claimed an artifact the subtree does not have. Accounted, never
+#: silent: the stale entry is dropped so the item stops counting.
+OUTCOME_BASELINE_DROPPED = "baseline_entry_dropped"
+#: There is no upstream copy to revert TO and this family has no local-only
+#: archive lane (a board def / office surface cannot be "archived locally").
+REFUSED_NO_UPSTREAM = "refused_no_upstream"
+#: The requested item is not in this realm's current drift set — a typo, or an
+#: item some earlier pass already resolved.
+REFUSED_UNKNOWN_ITEM = "refused_unknown_item"
+#: The subtree artifact exists and would not decode. Never treated as absence:
+#: absence is what drives the baseline-drop and archive arms, so a parse error
+#: read as absence is a delete-shaped decision taken on a read failure.
+REFUSED_UNREADABLE_UPSTREAM = "refused_unreadable_upstream"
+#: The subtree payload would not pass ``sync_admission`` — the same door the
+#: pull holds against secret-shaped and machine-shaped content.
+REFUSED_ADMISSION = "refused_admission"
+#: The store refused the write. The item is untouched and the pass continues.
+REFUSED_STORE_ERROR = "refused_store_error"
+
+APPLIED_OUTCOMES = frozenset(
+    {OUTCOME_RESTORED, OUTCOME_REVERTED, OUTCOME_ARCHIVED_LOCAL_ONLY, OUTCOME_BASELINE_DROPPED}
+)
+
+#: Families whose row IS the container definition. They have no local-only
+#: archive lane, which is the one place their transition table differs.
+CONTAINER_FAMILIES = frozenset({DRIFT_FAMILY_BOARD, DRIFT_FAMILY_OFFICE_SURFACE})
+FAMILIES = frozenset(
+    {
+        DRIFT_FAMILY_BOARD,
+        DRIFT_FAMILY_BOARD_CARD,
+        DRIFT_FAMILY_OFFICE_SURFACE,
+        DRIFT_FAMILY_OFFICE_ACTOR,
+        DRIFT_FAMILY_PERSONA_INSTANCE,
+        DRIFT_FAMILY_FLOW_GRAPH,
+        DRIFT_FAMILY_SKILL,
+    }
+)
+
+#: Rows before containers, and the CANVAS after the agents it binds. A restored
+#: actor leaves its workspace's resurrection-guard ledger, which CHANGES the
+#: surface hash — so the surface arm (and the baseline realignment that follows
+#: it) must run after the rows it is downstream of, or a ``--all`` pass realigns
+#: the surface against a picture one write out of date.
+#:
+#: The canvas sits LAST for the pull lane's reason, not the surface's: a canvas
+#: binds nodes to instance ids, owner-liveness reaping archives a drawing whose
+#: owner is gone, and a canvas restored before its owner instance looks exactly
+#: like that. ``apply_flow_graph_pull`` runs after ``apply_persona_instance_pull``
+#: for this, and a ``--all`` revert that carried both would otherwise restore
+#: them in family-name order — ``flow_graph`` before ``persona_instance``.
+#: The SKILL family sits in the ROW band (0) and needs nothing from the others:
+#: its upstream is the per-realm inbox mirror and its container is the machine's
+#: shared skills root, so no other family's write can change what a skill row
+#: reverts to, and no skill write changes another family's hash.
+_PROCESS_ORDER = {
+    DRIFT_FAMILY_OFFICE_ACTOR: 0,
+    DRIFT_FAMILY_BOARD_CARD: 0,
+    DRIFT_FAMILY_PERSONA_INSTANCE: 0,
+    DRIFT_FAMILY_SKILL: 0,
+    DRIFT_FAMILY_OFFICE_SURFACE: 1,
+    DRIFT_FAMILY_BOARD: 1,
+    DRIFT_FAMILY_FLOW_GRAPH: 2,
+}
+
+
+class _SkillWriteRefused(RuntimeError):
+    """The promotion door refused a skill revert's write, with its typed code.
+
+    Raised out of the write arms and caught in :func:`_revert_one` BEFORE the
+    generic handler, so the row carries the door's own ``BLOCK_*`` code instead of
+    the exception class name — an installer-owned package is a policy answer the
+    operator can act on, not an unexpected failure.
+    """
+
+    def __init__(self, code: str, message: str = ""):
+        super().__init__(message or code)
+        self.code = code
+
+
+class RevertAction(str, Enum):
+    RESTORE = "restore"  # baseline row, gone locally → live again from upstream
+    ADOPT = "adopt"  # local row overwritten with the upstream artifact
+    ARCHIVE_LOCAL = "archive_local"  # local-only row → archived, NO tombstone
+    DROP_BASELINE = "drop_baseline"  # stale baseline entry with no artifact behind it
+    REFUSE = "refuse"  # nothing to revert to, and nothing safe to do
+
+
+@dataclass(frozen=True, slots=True)
+class RevertDecision:
+    action: RevertAction
+    outcome: str
+
+
+def classify_revert(*, family: str, kind: str, upstream_present: bool) -> RevertDecision:
+    """THE transition table, pure and total over (family × kind × upstream).
+
+    ``upstream_present`` is "the last-pulled subtree holds a decodable artifact
+    for this row" — the only fact about upstream this decision needs. The
+    unreadable case never reaches here: a subtree artifact that exists and will
+    not decode is refused by the caller rather than folded into ``False``,
+    because ``False`` is what drives the two delete-shaped arms below.
+    """
+
+    if kind == DRIFT_KIND_REMOVED:
+        # Baseline says the realm has this row; locally it is archived or gone.
+        return (
+            RevertDecision(RevertAction.RESTORE, OUTCOME_RESTORED)
+            if upstream_present
+            else RevertDecision(RevertAction.DROP_BASELINE, OUTCOME_BASELINE_DROPPED)
+        )
+    if kind == DRIFT_KIND_CHANGED:
+        return (
+            RevertDecision(RevertAction.ADOPT, OUTCOME_REVERTED)
+            if upstream_present
+            else RevertDecision(RevertAction.DROP_BASELINE, OUTCOME_BASELINE_DROPPED)
+        )
+    if kind == DRIFT_KIND_ADDED:
+        # No baseline entry — but "no baseline entry" is a statement about what
+        # THIS install last published, not about what the realm holds. When the
+        # subtree does have the row, reverting to upstream means adopting it,
+        # not deleting it; only a row upstream genuinely lacks is local-only.
+        if upstream_present:
+            return RevertDecision(RevertAction.ADOPT, OUTCOME_REVERTED)
+        if family in CONTAINER_FAMILIES:
+            return RevertDecision(RevertAction.REFUSE, REFUSED_NO_UPSTREAM)
+        return RevertDecision(RevertAction.ARCHIVE_LOCAL, OUTCOME_ARCHIVED_LOCAL_ONLY)
+    raise ValueError("invalid_request")
+
+
+@dataclass(slots=True)
+class RevertRow:
+    """One item's result. ``detail`` names the exception CLASS or the admission
+    code — never a message, the same disclosure rule the rest of this runtime's
+    receipts follow."""
+
+    family: str
+    container: str
+    item_key: str
+    kind: str | None
+    outcome: str
+    detail: str | None = None
+
+    @property
+    def applied(self) -> bool:
+        return self.outcome in APPLIED_OUTCOMES
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "family": self.family,
+            "container": self.container,
+            "item_key": self.item_key,
+            "kind": self.kind,
+            "outcome": self.outcome,
+            "detail": self.detail,
+        }
+
+
+def parse_item_spec(raw: str) -> tuple[str, str, str]:
+    """``FAMILY:CONTAINER:KEY`` → the triple. Raises ``RealmSyncError
+    invalid_request`` for anything else: an unparseable selector is a fault in
+    the REQUEST, and guessing at one is how the wrong desk gets archived.
+
+    **The CONTAINER may be blank, and blank means blank** (w17/hb's row, fixed
+    2026-09-06). A drift row whose holder is gone has no container to name — the
+    persona-instance family's ``removed`` rows are exactly that: a baselined
+    agent with no live record, whose ``workspace_id`` died with the record it
+    was read from. The walk writes ``container=""`` there rather than guess one,
+    so ``FAMILY::KEY`` is that row's own ``spec`` echoed back and refusing it
+    left the family's removals reachable only through ``--all``.
+
+    The canvas family's trick — derive the container from the item key
+    (``owner_instance_id_of``) — is not available here and would not be honest
+    if it were: a graph id literally CONTAINS its owner's id, while an instance
+    id says nothing about the workspace that held it. And this family needs no
+    container at all: ``_Upstream.lookup`` reads the persona-instance projection
+    (one realm-wide document) by key and never touches the container, so the
+    blank is the accurate value rather than a missing one.
+
+    A blank container is never a WILDCARD. Selection stays an exact match
+    against the derived drift set (``by_spec`` in :func:`revert_realm_sync`), so
+    ``FAMILY::KEY`` reaches only a row that itself reported a blank; a row that
+    has a container is still addressed by it. Family and key stay required: a
+    blank family has no transition table to dispatch on, and a blank key names
+    nothing.
+    """
+
+    text = str(raw or "").strip()
+    parts = text.split(":", 2)
+    if len(parts) != 3 or not parts[0].strip() or not parts[2].strip():
+        raise RealmSyncError(
+            "invalid_request",
+            "--item takes FAMILY:CONTAINER:KEY (e.g. office_actor:ws_x:dev_agent_1234); "
+            "the container — and only the container — may be empty, for a row whose "
+            "holder is gone (persona_instance::personainst_1234).",
+            safe_details={"item": text},
+        )
+    family, container, item_key = (part.strip() for part in parts)
+    if family not in FAMILIES:
+        raise RealmSyncError(
+            "invalid_request",
+            f"Unknown drift family {family!r}; expected one of {sorted(FAMILIES)}.",
+            safe_details={"item": text},
+        )
+    return family, container, item_key
+
+
+class _Upstream:
+    """The last-pulled subtree, read through the PULL lane's own readers.
+
+    Per-container and cached, for the reason ``_read_remote_office`` exists at
+    all: the payload is truth and the filename is routing, so an item is looked
+    up by its decoded key rather than by recomputing a filename token — and the
+    directory's ``unreadable`` count travels with the rows, so an artifact that
+    exists and would not decode can be told apart from one that is absent.
+    """
+
+    def __init__(self, subtree: Path, *, realm_id: str | None = None) -> None:
+        self._subtree = subtree
+        #: The SKILL family's upstream is NOT under the subtree: it is the
+        #: per-realm INBOX mirror, which is the subtree's ``skills/`` tree copied
+        #: LF-canonical and package-filtered (tombstones dropped) by the pull. The
+        #: revert adopts THAT copy so a revert and a pull install byte-identical
+        #: content — reading the raw subtree here would reintroduce the EOL
+        #: divergence the mirror exists to normalize.
+        self._realm_id = realm_id
+        self._offices: dict[str, Any] = {}
+        self._boards: dict[str, Any] = {}
+        #: The instance family is ONE document for the whole realm, so it caches
+        #: as one entry rather than per container.
+        self._instances: tuple[dict[str, Any], str | None] | None = None
+        #: So is the canvas projection.
+        self._flow_graphs: tuple[dict[str, Any], str | None] | None = None
+
+    def _office(self, workspace_id: str):
+        from .office_sync import _read_remote_office
+
+        if workspace_id not in self._offices:
+            office_dir = self._subtree / "store" / "office" / paths.safe_path_token(workspace_id)
+            self._offices[workspace_id] = _read_remote_office(office_dir)
+        return self._offices[workspace_id]
+
+    def _board(self, board_id: str):
+        from .board_sync import _read_remote_board
+
+        if board_id not in self._boards:
+            board_dir = self._subtree / "store" / "boards" / paths.safe_path_token(board_id)
+            self._boards[board_id] = _read_remote_board(board_dir)
+        return self._boards[board_id]
+
+    def _instance(self, instance_id: str) -> tuple[Any, bool]:
+        """One instance BODY out of the pulled projection, and whether the
+        document itself would not decode.
+
+        The whole family lives in ONE artifact, so ``unreadable`` is a property
+        of the document rather than of the row: when the projection will not
+        parse, every instance is unreadable and none is absent — and absence is
+        what drives the archive arm below."""
+
+        from .persona_instance_sync import read_remote_persona_instances
+
+        if self._instances is None:
+            bodies, source = read_remote_persona_instances(self._subtree)
+            self._instances = (bodies, source)
+        bodies, source = self._instances
+        if source == "unreadable":
+            return None, True
+        return bodies.get(instance_id), False
+
+    def _flow_graph(self, graph_id: str) -> tuple[Any, bool]:
+        """One canvas BODY out of the pulled projection, and whether the
+        document itself would not decode.
+
+        The instance family's shape exactly, and for the same reason: the whole
+        family is ONE artifact, so ``unreadable`` is a property of the document
+        rather than of the row. An ABSENT projection is not unreadable — an
+        older publisher carries none, and reading that as "the realm dropped
+        every drawing" would archive the operator's canvases on a version skew.
+        """
+
+        from .flow_graph_sync import read_remote_flow_graphs
+
+        if self._flow_graphs is None:
+            self._flow_graphs = read_remote_flow_graphs(self._subtree)
+        bodies, source = self._flow_graphs
+        if source == "unreadable":
+            return None, True
+        return bodies.get(graph_id), False
+
+    def _skill(self, slug: str) -> tuple[Any, bool]:
+        """The inbox package DIRECTORY for one slug, or ``None`` when the realm
+        does not carry it.
+
+        Never ``unreadable``: a skill package is a directory of files, not a
+        document that parses, so there is no third state between present and
+        absent. Its admission door runs in :func:`_revert_one` (the pull's own
+        ``refuse_package``, over the same bytes).
+        """
+
+        from .skill_promotion import realm_inbox_dir
+
+        if self._realm_id is None:
+            return None, False
+        package = realm_inbox_dir(self._realm_id).joinpath(*slug.split("/"))
+        return (package if (package / "SKILL.md").is_file() else None), False
+
+    def lookup(self, family: str, container: str, item_key: str) -> tuple[Any, bool]:
+        """``(entity_or_None, unreadable)``. ``unreadable`` True means the
+        artifact is not decodable HERE, which is never the same answer as
+        absent."""
+
+        if family == DRIFT_FAMILY_SKILL:
+            return self._skill(item_key)
+        if family == DRIFT_FAMILY_PERSONA_INSTANCE:
+            return self._instance(item_key)
+        if family == DRIFT_FAMILY_FLOW_GRAPH:
+            return self._flow_graph(item_key)
+        if family == DRIFT_FAMILY_OFFICE_SURFACE:
+            remote = self._office(container)
+            return remote.surface, remote.surface_unreadable
+        if family == DRIFT_FAMILY_OFFICE_ACTOR:
+            remote = self._office(container)
+            actor = remote.actors.get(item_key)
+            return actor, actor is None and remote.unreadable > 0
+        if family == DRIFT_FAMILY_BOARD:
+            remote = self._board(container)
+            return remote.board, remote.board_unreadable
+        remote = self._board(container)
+        card = remote.cards.get(item_key)
+        return card, card is None and remote.unreadable > 0
+
+
+def revert_realm_sync(
+    realm_id: str,
+    *,
+    item_specs: list[str] | None = None,
+    revert_all: bool = False,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Revert the selected drifted store rows to the last-pulled upstream.
+
+    Local-only and credential-free by construction: the only thing read from
+    outside the store is the checked-out subtree already on disk.
+    """
+
+    from .board_store import BoardStore
+    from .board_sync import read_board_baseline, write_board_baseline
+    from .office_store import OfficeStore
+    from .office_sync import read_office_baseline, write_office_baseline
+
+    requested = [spec for spec in (item_specs or []) if str(spec).strip()]
+    if revert_all and requested:
+        raise RealmSyncError(
+            "invalid_request", "Pass --all or --item, never both — the selection must be unambiguous."
+        )
+    if not revert_all and not requested:
+        raise RealmSyncError(
+            "invalid_request", "Nothing selected: pass --all, or at least one --item FAMILY:CONTAINER:KEY."
+        )
+
+    realm = RealmStore().get(realm_id)
+    repo = _sync_repo_path(realm)
+    subtree = _realm_subtree(repo, realm.id)
+    # The refusal is deliberately BEFORE any selection work, and it covers the
+    # missing SUBTREE as well as the missing clone. Without the subtree every
+    # item would read as "upstream does not have this", and the ``added`` arm
+    # would then archive the operator's whole local office on the strength of a
+    # directory that was never cloned.
+    if not repo.exists():
+        raise RealmSyncError(
+            "sync_repo_missing",
+            "The realm sync repo is not present locally; pull before reverting.",
+            safe_details={"missing": "sync_repo", "sync_repo": _safe_display_path(repo)},
+        )
+    if not subtree.exists():
+        raise RealmSyncError(
+            "sync_repo_missing",
+            "This realm has no pulled subtree in the local sync repo; pull before reverting.",
+            safe_details={"missing": "realm_subtree", "sync_repo": _safe_display_path(repo)},
+        )
+
+    workspaces = _workspaces_for_realm(realm)
+    drift = store_drift_items(realm.id, workspaces)
+    by_spec = {item.spec: item for item in drift}
+
+    selected: list[StoreDriftItem] = []
+    rows: list[RevertRow] = []
+    if revert_all:
+        selected = list(drift)
+    else:
+        for raw in requested:
+            family, container, item_key = parse_item_spec(raw)
+            item = by_spec.get(f"{family}:{container}:{item_key}")
+            if item is None:
+                rows.append(
+                    RevertRow(
+                        family=family,
+                        container=container,
+                        item_key=item_key,
+                        kind=None,
+                        outcome=REFUSED_UNKNOWN_ITEM,
+                        detail="not_in_drift_set",
+                    )
+                )
+                continue
+            selected.append(item)
+
+    from .flow_graph_sync import read_flow_graph_baseline, write_flow_graph_baseline
+    from .persona_instance_sync import (
+        read_persona_instance_baseline,
+        write_persona_instance_baseline,
+    )
+    from .skill_sync import read_skill_baseline, write_skill_baseline
+
+    upstream = _Upstream(subtree, realm_id=realm.id)
+    office_store = OfficeStore()
+    board_store = BoardStore()
+    office_baseline = read_office_baseline(realm.id)
+    board_baseline = read_board_baseline(realm.id)
+    instance_baseline = read_persona_instance_baseline(realm.id)
+    flow_graph_baseline = read_flow_graph_baseline(realm.id)
+    skill_baseline = read_skill_baseline(realm.id)
+    touched_office = touched_board = touched_instances = touched_flow_graphs = False
+    touched_skills = False
+
+    for item in sorted(selected, key=lambda row: (_PROCESS_ORDER[row.family], row.family, row.container, row.item_key)):
+        row = _revert_one(
+            item,
+            upstream=upstream,
+            office_store=office_store,
+            board_store=board_store,
+            office_baseline=office_baseline,
+            board_baseline=board_baseline,
+            instance_baseline=instance_baseline,
+            flow_graph_baseline=flow_graph_baseline,
+            skill_baseline=skill_baseline,
+            realm_id=realm.id,
+            dry_run=dry_run,
+        )
+        rows.append(row)
+        if row.applied:
+            if item.family in (DRIFT_FAMILY_OFFICE_ACTOR, DRIFT_FAMILY_OFFICE_SURFACE):
+                touched_office = True
+            elif item.family == DRIFT_FAMILY_PERSONA_INSTANCE:
+                touched_instances = True
+            elif item.family == DRIFT_FAMILY_FLOW_GRAPH:
+                touched_flow_graphs = True
+            elif item.family == DRIFT_FAMILY_SKILL:
+                touched_skills = True
+            else:
+                touched_board = True
+
+    applied = [row for row in rows if row.applied]
+    if not dry_run:
+        # The baselines are realigned the way the publish/pull lanes maintain
+        # them — PER ITEM and from the store's own post-write content, never by
+        # re-recording the whole workspace. Re-recording would zero the drift of
+        # every row the operator did NOT select, which is exactly the lie this
+        # accounting exists to prevent.
+        if touched_office:
+            write_office_baseline(realm.id, office_baseline)
+        if touched_board:
+            write_board_baseline(realm.id, board_baseline)
+        if touched_instances:
+            write_persona_instance_baseline(realm.id, instance_baseline)
+        if touched_flow_graphs:
+            write_flow_graph_baseline(realm.id, flow_graph_baseline)
+        if touched_skills:
+            write_skill_baseline(realm.id, skill_baseline)
+        if applied:
+            _append_realm_sync_event(
+                REVERT_EVENT_TYPE, realm, changed=True, artifacts=len(applied)
+            )
+
+    return {
+        "id": realm.id,
+        "realm_id": realm.id,
+        "dry_run": bool(dry_run),
+        "selection": "all" if revert_all else "items",
+        "count": len(rows),
+        "reverted": len(applied),
+        "refused": len(rows) - len(applied),
+        "items": [row.as_dict() for row in rows],
+        # Measured AFTER the pass. On ``--dry-run`` nothing was applied, so this
+        # is the unchanged current drift — ``dry_run`` above is what says which.
+        "store_drift_after": {
+            "boards": _board_store_drift(realm.id, workspaces),
+            "office": _office_store_drift(realm.id, workspaces),
+        },
+        "sync_repo": _safe_display_path(repo),
+    }
+
+
+def _revert_one(
+    item: StoreDriftItem,
+    *,
+    upstream: _Upstream,
+    office_store,
+    board_store,
+    office_baseline: dict[str, str],
+    board_baseline: dict[str, str],
+    instance_baseline: dict[str, str] | None = None,
+    flow_graph_baseline: dict[str, str] | None = None,
+    skill_baseline: dict[str, str] | None = None,
+    realm_id: str | None = None,
+    dry_run: bool,
+) -> RevertRow:
+    """One item, decided purely and then applied. Every store refusal is caught
+    HERE and reported as a row: a realm must not stop converging because one
+    file would not archive (the pull's per-entity isolation rule)."""
+
+    entity, unreadable = upstream.lookup(item.family, item.container, item.item_key)
+    row = RevertRow(
+        family=item.family,
+        container=item.container,
+        item_key=item.item_key,
+        kind=item.kind,
+        outcome=REFUSED_UNREADABLE_UPSTREAM,
+    )
+    if unreadable:
+        row.detail = "subtree_artifact_unreadable"
+        return row
+
+    decision = classify_revert(
+        family=item.family, kind=item.kind, upstream_present=entity is not None
+    )
+    row.outcome = decision.outcome
+    if decision.action is RevertAction.REFUSE:
+        row.detail = "no_subtree_artifact"
+        return row
+
+    if item.family in (DRIFT_FAMILY_OFFICE_ACTOR, DRIFT_FAMILY_OFFICE_SURFACE):
+        baseline = office_baseline
+    elif item.family == DRIFT_FAMILY_PERSONA_INSTANCE:
+        baseline = instance_baseline if instance_baseline is not None else {}
+    elif item.family == DRIFT_FAMILY_FLOW_GRAPH:
+        baseline = flow_graph_baseline if flow_graph_baseline is not None else {}
+    elif item.family == DRIFT_FAMILY_SKILL:
+        baseline = skill_baseline if skill_baseline is not None else {}
+    else:
+        baseline = board_baseline
+    key = item.baseline_key()
+
+    if decision.action is RevertAction.DROP_BASELINE:
+        if not dry_run:
+            baseline.pop(key, None)
+        return row
+
+    if decision.action in (RevertAction.ADOPT, RevertAction.RESTORE):
+        from .sync_admission import refuse_entity
+
+        # The same door every pulled payload passes. A revert adopts bytes this
+        # machine did not author, so it inherits the pull's trust boundary
+        # rather than opening a second one beside it — and for the instance
+        # family that means the FAMILY's door (allowlist totality, canonical-id
+        # and steering-shape refusals), not just the shared scan, or a revert
+        # would admit a body its own pull would have turned away.
+        if item.family == DRIFT_FAMILY_PERSONA_INSTANCE:
+            from .persona_instance_sync import refuse_persona_instance
+
+            refusal = refuse_persona_instance(item.item_key, entity)
+        elif item.family == DRIFT_FAMILY_FLOW_GRAPH:
+            # The canvas family's door is ``parse_flow_graph_doc`` and ONLY
+            # that, because that is the only door ``apply_flow_graph_pull``
+            # holds. Adding the shared ``refuse_entity`` scan here would make a
+            # revert stricter than the pull for the same bytes — the operator
+            # would be refused a drawing that already landed on this machine
+            # through the pull, which is a worse lie than either door alone.
+            refusal = _refuse_flow_graph(entity)
+        elif item.family == DRIFT_FAMILY_SKILL:
+            # The skill family's door is ``refuse_package`` over the package
+            # DIRECTORY — the exact door ``apply_skill_inbox_pull`` holds, for the
+            # canvas family's reason: the same bytes must not be admissible
+            # through a pull and refused through a revert. ``refuse_entity`` is
+            # not usable here at all; a package is a tree of files, not a
+            # JSON-able entity.
+            from .sync_admission import refuse_package
+
+            refusal = refuse_package(item.item_key, entity)
+        else:
+            refusal = refuse_entity(key, payload=to_jsonable(entity))
+        if refusal is not None:
+            row.outcome = REFUSED_ADMISSION
+            row.detail = refusal.code
+            return row
+
+    if dry_run:
+        return row
+
+    try:
+        if item.family == DRIFT_FAMILY_SKILL:
+            # ONE arm for this family: RESTORE and ADOPT are the same install
+            # (the canonical slot is empty for a ``removed`` row and occupied for
+            # a ``changed`` one, and the guarded door decides which), so splitting
+            # them across the two helpers below would be two spellings of one
+            # write.
+            if decision.action is RevertAction.ARCHIVE_LOCAL:
+                _archive_local_skill(item)
+            else:
+                _install_skill_from_inbox(item, entity, realm_id=realm_id)
+        elif decision.action is RevertAction.RESTORE:
+            _restore_from_upstream(
+                item, entity, office_store=office_store, board_store=board_store, realm_id=realm_id
+            )
+        elif decision.action is RevertAction.ADOPT:
+            _adopt_from_upstream(
+                item, entity, office_store=office_store, board_store=board_store, realm_id=realm_id
+            )
+        else:  # ARCHIVE_LOCAL
+            _archive_local_only(item, office_store=office_store, board_store=board_store)
+    except _SkillWriteRefused as exc:
+        row.outcome = REFUSED_STORE_ERROR
+        row.detail = exc.code
+        return row
+    except Exception as exc:  # noqa: BLE001 — accounted, never silent; the pass continues
+        row.outcome = REFUSED_STORE_ERROR
+        row.detail = type(exc).__name__
+        return row
+
+    if decision.action is RevertAction.ARCHIVE_LOCAL:
+        # A local-only row has no baseline entry by definition; ``pop`` states
+        # that rather than assuming it.
+        baseline.pop(key, None)
+        return row
+
+    try:
+        baseline[key] = _current_content_hash(item, office_store=office_store, board_store=board_store)
+    except Exception as exc:  # noqa: BLE001 — the write landed; the receipt did not
+        # The write happened, so the row is NOT reported as refused — but a
+        # baseline entry that cannot be re-read is left absent rather than
+        # guessed, which reclassifies the row as locally added on the next
+        # status. Honest, and repairable by a publish.
+        baseline.pop(key, None)
+        row.detail = f"baseline_unrecorded:{type(exc).__name__}"
+    return row
+
+
+def _install_skill_from_inbox(item: StoreDriftItem, source_dir, *, realm_id: str | None) -> None:
+    """Install the realm's copy of a skill package over the local canonical one.
+
+    Goes through the ONE guarded promotion door
+    (``skill_promotion.execute_promotion``), with ``adopt_divergent=True`` so a
+    present canonical package is ARCHIVED before the install rather than
+    overwritten — archive-never-delete, and the same arm the pull's ``updated``
+    bucket and the operator's ``--take remote`` use. Nothing here is a second
+    write path.
+
+    ``move_source=False``: the inbox is the realm's mirror, not a duplicate to
+    retire. A refusal (installer-owned package, or a canonical slot that moved
+    under us) raises :class:`_SkillWriteRefused` so the row carries the door's own
+    typed code.
+    """
+
+    from .skill_promotion import classify_promotion, execute_promotion
+
+    plan = classify_promotion(item.item_key, source_dir)
+    if plan.action == "refuse_invalid":
+        raise _SkillWriteRefused("skill_plan_refused", plan.reason)
+    result = execute_promotion(
+        plan,
+        source={"kind": "realm", "realm_id": realm_id or ""},
+        adopt_divergent=True,
+        move_source=False,
+    )
+    if result.action not in ("promoted", "noop"):
+        raise _SkillWriteRefused(result.reason_code or "skill_promotion_refused", result.reason)
+
+
+def _archive_local_skill(item: StoreDriftItem) -> None:
+    """Archive a local-only skill package — the ``added`` arm.
+
+    ``skill_promotion._archive_package`` MOVES the tree into
+    ``shared/skills/.archive/<UTC ts>/``, which is the never-delete lane the
+    promotion door and ``skills delete`` both use; ``hermes harness skills
+    promote`` can bring it back from there. This lane mints NO realm-visible
+    tombstone, exactly as the office/board ``added`` arms do not
+    (``record_tombstone=False``): the operator is saying "my local copy is noise",
+    not "delete this skill for the realm".
+    """
+
+    from hermes_constants import get_shared_skills_dir
+
+    from .skill_promotion import _archive_package
+
+    package = get_shared_skills_dir().joinpath(*item.item_key.split("/"))
+    if package.is_dir():
+        _archive_package(package, item.item_key)
+
+
+def _refuse_flow_graph(body):
+    """The canvas family's admission door — ``parse_flow_graph_doc``, and only it.
+
+    A ``Refusal`` in the shared shape so the row reads like every other family's,
+    carrying the parser's own code. Nothing else is added: this is the exact door
+    ``apply_flow_graph_pull`` holds, and a revert must write nothing a pull could
+    not have written — nor refuse what a pull would have admitted.
+    """
+
+    from .flow_graph import FlowGraphDocError, parse_flow_graph_doc
+    from .flow_graph_sync import REFUSAL_INVALID_REMOTE_DOCUMENT
+    from .sync_admission import Refusal
+
+    graph_id = str((body or {}).get("graph_id") or "") if isinstance(body, dict) else ""
+    try:
+        parse_flow_graph_doc(body)
+    except FlowGraphDocError as exc:
+        return Refusal(graph_id, REFUSAL_INVALID_REMOTE_DOCUMENT, str(exc))
+    return None
+
+
+def _restore_from_upstream(
+    item: StoreDriftItem, entity, *, office_store, board_store, realm_id: str | None = None
+) -> None:
+    """The un-archive door, then the upstream content on top of it.
+
+    Two writes and not one, deliberately. The archive copy holds THIS machine's
+    last local bytes, and only the store's own restore verb clears the
+    resurrection-guard ledger entry that made the row invisible; adopting the
+    upstream copy straight over a live-but-tombstoned key would leave a desk
+    that the next pull's classifier still reads as archived. When the restored
+    content already equals upstream's, the second write is skipped — the
+    idempotence this lane promises is not paid for with a revision bump per
+    call.
+
+    A key that is in the resurrection-guard ledger with NO archive copy behind
+    it falls through to the adopt arm alone, which leaves the ledger entry
+    standing. No writer in this runtime produces that state (the archive copy is
+    written BEFORE the ledger entry, and ``remove_actor`` itself reports
+    not-found in it), so it is not machinery this lane grows a second door for —
+    but it is why the ledger check is spelled as "is there an archive copy" and
+    not "is this key archived".
+    """
+
+    if item.family == DRIFT_FAMILY_FLOW_GRAPH:
+        # A canvas has no un-archive verb either, and for a stronger reason than
+        # the instance family's: ``FlowGraphStore.archive`` MOVES the file into
+        # ``flow_graphs_stale/`` and leaves no ledger entry behind, so there is
+        # no resurrection guard to clear and "restore" and "adopt" are the same
+        # write. The stale copy stays where archive-never-delete put it — a
+        # second copy of a drawing the projection can rebuild is not worth a
+        # second verb, and the operator's own last local bytes are exactly what
+        # ``flow_graphs_stale/`` is for.
+        _adopt_from_upstream(
+            item, entity, office_store=office_store, board_store=board_store, realm_id=realm_id
+        )
+        return
+    if item.family == DRIFT_FAMILY_PERSONA_INSTANCE:
+        # A replicated AGENT has no un-archive verb of its own and does not need
+        # one: the store door mints a row for an id with no live file, deriving
+        # this machine's §1.3 half exactly as the pull would. So "restore" and
+        # "adopt" are the same write for this family, and the archived copy on
+        # disk stays where archive-never-delete put it — a second copy of a row
+        # the projection can rebuild is not worth a second verb.
+        _adopt_from_upstream(
+            item, entity, office_store=office_store, board_store=board_store, realm_id=realm_id
+        )
+        return
+    if item.family == DRIFT_FAMILY_OFFICE_ACTOR:
+        if paths.office_archived_actor_path(item.container, item.item_key).exists():
+            restored = office_store.restore_actor(
+                item.container, item.item_key, updated_by=REVERT_ACTOR_REF
+            )
+            if office_models.office_content_hash(restored) == office_models.office_content_hash(entity):
+                return
+        _adopt_from_upstream(item, entity, office_store=office_store, board_store=board_store)
+        return
+    if paths.board_archived_card_path(item.container, item.item_key).exists():
+        restored = board_store.restore_card(
+            item.item_key, board_id=item.container, updated_by=REVERT_ACTOR_REF
+        )
+        if board_models.board_content_hash(restored) == board_models.board_content_hash(entity):
+            return
+    _adopt_from_upstream(item, entity, office_store=office_store, board_store=board_store)
+
+
+def _adopt_from_upstream(
+    item: StoreDriftItem, entity, *, office_store, board_store, realm_id: str | None = None
+) -> None:
+    """Write the subtree artifact over the local row — the pull's adopt arms,
+    unchanged.
+
+    "Unchanged" is the whole contract of this function, and it is why the board
+    families moved when their pull arm did. They went through
+    ``atomic_json_write`` for as long as ``board_sync.apply_board_pull`` did —
+    the office store grew evented ``adopt_remote_*`` verbs in the actor-lifecycle
+    wave (H1) and the board store did not, so this lane matched its family's pull
+    arm rather than inventing a third spelling. The board store now has
+    ``adopt_remote_board`` / ``adopt_remote_card`` and the pull routes through
+    them, so this lane does too: four families, four store doors, and a revert
+    that still writes nothing a pull could not have written.
+    """
+
+    if item.family == DRIFT_FAMILY_FLOW_GRAPH:
+        # ``set_doc`` is the pull's own arm, so the document is validated by
+        # ``parse_flow_graph_doc`` on the way in and never written raw.
+        # ``requested_by`` says which lane moved it, the way ``REVERT_ACTOR_REF``
+        # does for the stores that take an ``updated_by``.
+        from .flow_graph import FlowGraphStore, parse_flow_graph_doc
+
+        FlowGraphStore().set_doc(parse_flow_graph_doc(entity), requested_by=REVERT_ACTOR_REF)
+        return
+    if item.family == DRIFT_FAMILY_PERSONA_INSTANCE:
+        # Through the SAME store door the pull writes replicas with, so a revert
+        # writes nothing a pull could not have written — including the delta
+        # patch and the ``persona_instance.replicated`` receipt. ``entity`` here
+        # is the projected BODY (a dict), not a record: this family's upstream
+        # artifact is one document for the whole realm.
+        from .persona_assignments import PersonaInstanceStore
+
+        store = PersonaInstanceStore()
+        try:
+            existing = store.get(item.item_key)
+        except Exception:
+            existing = None
+        store.replicate_instance(entity, realm_id=str(realm_id or ""), adopt_existing=existing)
+        return
+    if item.family == DRIFT_FAMILY_OFFICE_ACTOR:
+        entity.workspace_id = item.container
+        entity.state = "active"
+        office_store.adopt_remote_actor(entity, updated_by=REVERT_ACTOR_REF)
+        return
+    if item.family == DRIFT_FAMILY_OFFICE_SURFACE:
+        entity.workspace_id = item.container
+        office_store.adopt_remote_surface(entity, updated_by=REVERT_ACTOR_REF)
+        return
+    if item.family == DRIFT_FAMILY_BOARD:
+        entity.board_id = item.container
+        board_store.adopt_remote_board(entity, updated_by=REVERT_ACTOR_REF)
+        return
+    entity.state = "active"
+    board_store.adopt_remote_card(
+        entity, board_id=item.container, updated_by=REVERT_ACTOR_REF
+    )
+
+
+def _archive_local_only(item: StoreDriftItem, *, office_store, board_store) -> None:
+    """THE ruling, spelled once: a revert archives through the
+    ``record_tombstone=False`` lane on both stores, so no realm-visible ledger
+    entry is minted. See the module docstring (§AX7)."""
+
+    if item.family == DRIFT_FAMILY_FLOW_GRAPH:
+        # A drawing the realm does not have. ``archive`` MOVES it into
+        # ``flow_graphs_stale/`` — the same door owner-liveness reaping uses —
+        # so archive-never-delete holds and the operator's map is recoverable by
+        # hand. ``record_tombstone=False`` is structural here rather than a
+        # parameter: a graph carries no realm-visible ledger at all, so there is
+        # nowhere for this lane to mint one.
+        from .flow_graph import FlowGraphStore
+
+        store = FlowGraphStore()
+        store.archive(item.item_key, store.stale_dir())
+        return
+    if item.family == DRIFT_FAMILY_PERSONA_INSTANCE:
+        # A locally-authored agent the realm does not have. The instance record
+        # carries NO realm-visible ledger at all, so ``record_tombstone=False``
+        # is structural here rather than a parameter: ``retire_replica`` archives
+        # the row and deliberately runs no office half, which is the only place
+        # this lane could have minted a ledger entry.
+        from .persona_assignments import PersonaInstanceStore
+
+        PersonaInstanceStore().retire_replica(item.item_key, reason="revert_local_only")
+        return
+    if item.family == DRIFT_FAMILY_OFFICE_ACTOR:
+        office_store.remove_actor(
+            item.container,
+            item.item_key,
+            reason="revert_local_only",
+            updated_by=REVERT_ACTOR_REF,
+            record_tombstone=False,
+        )
+        return
+    board_store.archive_card(
+        item.item_key,
+        board_id=item.container,
+        reason="revert_local_only",
+        updated_by=REVERT_ACTOR_REF,
+        record_tombstone=False,
+    )
+
+
+def _current_content_hash(item: StoreDriftItem, *, office_store, board_store) -> str:
+    """The baseline is realigned from the STORE's post-write content, not from
+    the upstream artifact's hash.
+
+    The two are not always equal and the difference is the honest part:
+    ``adopt_remote_surface`` UNIONS the resurrection-guard ledger (C1), so a
+    surface holding a local-only tombstone the realm has not seen re-hashes
+    away from upstream. Recording the store's own content says "this is what I
+    would publish", which is what a baseline means; recording the remote's would
+    make the sheet read in-sync for content this install does not hold.
+    """
+
+    if item.family == DRIFT_FAMILY_SKILL:
+        from hermes_constants import get_shared_skills_dir
+
+        from .skill_promotion import skill_package_sync_hash
+
+        # The canonical package as it stands after the install, hashed with the
+        # SYNC hash — the same hash the pull, the publish baseline and the resolve
+        # verb record, so a reverted row reads ``local == baseline`` on the very
+        # next status instead of ``changed`` over an EOL difference.
+        return skill_package_sync_hash(
+            get_shared_skills_dir().joinpath(*item.item_key.split("/"))
+        )
+    if item.family == DRIFT_FAMILY_FLOW_GRAPH:
+        from .flow_graph import FlowGraphStore
+        from .flow_graph_sync import flow_graph_def_hash, project_flow_graph
+
+        return flow_graph_def_hash(
+            project_flow_graph(FlowGraphStore().get(item.item_key), dropped=[])
+        )
+    if item.family == DRIFT_FAMILY_PERSONA_INSTANCE:
+        from .persona_assignments import PersonaInstanceStore
+        from .persona_instance_sync import persona_instance_def_hash, project_persona_instance
+
+        return persona_instance_def_hash(
+            project_persona_instance(PersonaInstanceStore().get(item.item_key))
+        )
+    if item.family == DRIFT_FAMILY_OFFICE_ACTOR:
+        return office_models.office_content_hash(office_store.get_actor(item.container, item.item_key))
+    if item.family == DRIFT_FAMILY_OFFICE_SURFACE:
+        return office_models.office_content_hash(office_store.get_surface(item.container))
+    if item.family == DRIFT_FAMILY_BOARD:
+        return board_models.board_content_hash(board_store.get(item.container))
+    return board_models.board_content_hash(board_store.get_card(item.item_key, board_id=item.container))

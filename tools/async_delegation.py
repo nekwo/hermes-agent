@@ -78,7 +78,21 @@ _STALL_FIELD_MAP = (("_stall_quiet_seconds", "stalled_after_quiet_seconds"),
 
 # ── Durable ledger (state.db / async_delegations) ───────────────────────────
 def _db_path():
-    return get_hermes_home() / "state.db"
+    """The delegation store's database, resolved at call time.
+
+    Resolved through ``get_hermes_background_work_home`` rather than ambient
+    ``get_hermes_home``: a dispatch made INSIDE a persona turn runs with
+    ``HERMES_HOME`` flipped process-globally to that persona's profile
+    (``persona_profile_context``), and on the launcher's layout the ambient home
+    is not the home the operator's Activity projection reads. Writing there
+    would persist an in-flight delegation into a database nothing else opens.
+    With no explicit head declared the two resolve identically, so the gateway
+    and CLI lanes are unchanged.
+    """
+
+    from hermes_constants import get_hermes_background_work_home
+
+    return get_hermes_background_work_home() / "state.db"
 
 
 def _connect() -> sqlite3.Connection:
