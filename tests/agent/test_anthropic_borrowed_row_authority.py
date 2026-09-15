@@ -29,10 +29,18 @@ reading an actually persisted, actually sanitized row.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import time
 from dataclasses import replace as dc_replace
 
 import pytest
+
+pytestmark = pytest.mark.allow_claude_code_credentials_file
+
+
+@pytest.fixture(autouse=True)
+def isolated_home(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
 from agent import anthropic_credentials as AA
 from agent.credential_persistence import sanitize_borrowed_credential_payload

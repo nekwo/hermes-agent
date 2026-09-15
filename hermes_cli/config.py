@@ -1984,10 +1984,9 @@ def load_config() -> Dict[str, Any]:
 
 
 def load_config_readonly() -> Dict[str, Any]:
-    """``load_config()`` without the defensive deepcopy (~half of the 265us cache-hit cost).
-    **Mutating the returned dict (or any nested structure) corrupts the in-process cache for
-    every subsequent caller** — only for code paths that never write to the result."""
-    return _load_config_impl(want_deepcopy=False)
+    """Read cached config without scaffolding the home; mutations are refused."""
+    from hermes_cli.config_read_scope import project_readonly_config
+    return project_readonly_config(_load_config_impl(want_deepcopy=False, ensure_home=False))
 
 
 def _ensure_dict(parent: Dict[str, Any], key: str) -> Dict[str, Any]:
@@ -2176,9 +2175,14 @@ def _merge_managed_overlay(expanded: Dict[str, Any]) -> Tuple[Dict[str, Any], An
     return _deep_merge(expanded, _expand_env_vars(managed_normalized)), managed_config
 
 
-def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
+def _load_config_impl(*, want_deepcopy: bool, ensure_home: bool = True) -> Dict[str, Any]:
     with _CONFIG_LOCK:
-        ensure_hermes_home()
+        # ``ensure_home=False`` is the read-only contract: loading config to
+        # LOOK at it must not scaffold the home directory tree (mkdirs +
+        # SOUL.md). Everything below already tolerates an absent home — the
+        # config stat handles FileNotFoundError and the cache is in-memory.
+        if ensure_home:
+            ensure_hermes_home()
         config_path = get_config_path()
         path_key = str(config_path)
 

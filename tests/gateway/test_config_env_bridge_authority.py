@@ -71,7 +71,7 @@ def _run_gateway_import(hermes_home: Path, initial_env: dict[str, str]) -> dict[
         "HOMEPATH",
         "LOCALAPPDATA",
         "APPDATA",
-        "SYSTEMROOT",
+        "SYSTEMROOT", "SystemRoot", "SystemDrive",
         "TEMP",
         "TMP",
     ):

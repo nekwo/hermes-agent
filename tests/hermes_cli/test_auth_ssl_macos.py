@@ -17,6 +17,12 @@ from pathlib import Path
 
 import pytest
 
+# NOTE (fork): this module used to insert the repo root into ``sys.path`` here.
+# Inserting ``tests/`` instead put a directory literally named ``hermes_cli``
+# (this test package) at the FRONT of sys.path, so the import below resolved to
+# ``tests/hermes_cli`` and raised ``ModuleNotFoundError``. ``tests/conftest.py``
+# now inserts PROJECT_ROOT before any test module is imported, so the local
+# insert is redundant — do not reintroduce a ``tests/``-relative one.
 
 from hermes_cli.auth import _default_verify, _resolve_verify
 

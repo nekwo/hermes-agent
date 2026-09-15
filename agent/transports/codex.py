@@ -20,6 +20,10 @@ from agent.reasoning_effort import (
 from agent.transports.base import ProviderTransport
 from agent.transports.types import NormalizedResponse, ToolCall
 
+from agent_runtime.cache_routing import (
+    _cache_routing_fingerprint, _cache_routing_observability, persona_content_cache_key,
+)
+
 logger = logging.getLogger(__name__)
 
 # Cron fires use ``cron_<job_id>_<YYYYMMDD_HHMMSS>``; the per-fire timestamp is
@@ -604,6 +608,12 @@ class ResponsesApiTransport(ProviderTransport):
         # compression rotation; session_id itself stays untouched for transcript isolation.
         _cache_scope = _cache_scope_from_session_id(params.get("cache_scope_id") or session_id)
         cache_key = _content_cache_key(instructions, response_tools, _cache_scope) or _cache_scope
+        # Persona sessions deliberately have no transcript session_id. Their
+        # explicit header scope must not alter the content-addressed body key.
+        header_cache_scope = params.get("header_cache_scope_id")
+        if header_cache_scope:
+            cache_key = persona_content_cache_key(instructions, response_tools) or session_id
+        cache_key_source = "static_prefix" if instructions or response_tools else "session_fallback" if cache_key else "none"
         # xAI takes prompt_cache_key in extra_body (below); GitHub Models opts out entirely.
         if not is_github_responses and not is_xai_responses and cache_key:
             kwargs["prompt_cache_key"] = cache_key
@@ -647,6 +657,9 @@ class ResponsesApiTransport(ProviderTransport):
                 "session_id": str(session_id) if session_id else None,
                 "x-client-request-id": kwargs.get("prompt_cache_key") or _bounded_prompt_cache_key(_cache_scope),
             }
+            if header_cache_scope:
+                bounded_scope = _bounded_prompt_cache_key(header_cache_scope)
+                headers = {"session_id": bounded_scope, "x-client-request-id": bounded_scope}
             headers = {k: v for k, v in headers.items() if v}
             if headers:
                 _merge_extra_headers(kwargs, **headers)
@@ -670,6 +683,13 @@ class ResponsesApiTransport(ProviderTransport):
             kwargs["extra_body"].setdefault("prompt_cache_key", kwargs.get("prompt_cache_key", cache_key))
 
         _bound_prompt_cache_key_field(kwargs.get("extra_body"))
+        self._last_cache_routing_observability = _cache_routing_observability(
+            kwargs, computed_cache_key=_bounded_prompt_cache_key(cache_key) or cache_key,
+            computed_cache_key_source=cache_key_source,
+            cache_scope_id=header_cache_scope, session_id=session_id,
+            is_codex_backend=is_codex_backend, is_github_responses=is_github_responses,
+            is_xai_responses=is_xai_responses,
+        )
         return kwargs
 
     def normalize_response(self, response: Any, **kwargs) -> NormalizedResponse:

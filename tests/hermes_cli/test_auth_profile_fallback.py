@@ -246,6 +246,58 @@ def test_root_write_through_is_visible_to_the_next_fallback_read(profile_env):
     assert read_credential_pool("openai-codex")[0]["access_token"] == "new"
 
 
+
+
+def test_codex_runtime_prefers_global_singleton_over_profile_stale_pool(profile_env):
+    """A stale profile pool must not shadow a usable global Codex singleton."""
+    from hermes_cli.auth import resolve_codex_runtime_credentials
+
+    _write(profile_env["global"] / "auth.json", _make_auth_store(
+        providers={
+            "openai-codex": {
+                "auth_mode": "chatgpt",
+                "tokens": {"access_token": "global-singleton-access-token", "refresh_token": "global-singleton-refresh-token"},
+                "last_refresh": "2026-05-29T00:00:00Z",
+            },
+        },
+        pool={
+            "openai-codex": [{
+                "id": "glob-codex",
+                "label": "global-codex",
+                "auth_type": "oauth",
+                "priority": 0,
+                "source": "manual:device_code",
+                "access_token": "global-pool-access-token",
+                "refresh_token": "global-pool-refresh-token",
+            }],
+        },
+    ))
+    _write(profile_env["profile"] / "auth.json", _make_auth_store(
+        providers={
+            "openai-codex": {
+                "auth_mode": "chatgpt",
+                "tokens": {"access_token": "", "refresh_token": ""},
+            },
+        },
+        pool={
+            "openai-codex": [{
+                "id": "profile-stale",
+                "label": "profile-stale",
+                "auth_type": "oauth",
+                "priority": 0,
+                "source": "manual:device_code",
+                "access_token": "profile-stale-access-token",
+                "refresh_token": "profile-stale-refresh-token",
+            }],
+        },
+    ))
+
+    creds = resolve_codex_runtime_credentials(refresh_if_expiring=False)
+
+    assert creds["source"] == "global-auth-store"
+    assert creds["api_key"] == "global-singleton-access-token"
+
+
 # ---------------------------------------------------------------------------
 # Classic mode — no fallback path should ever trigger
 # ---------------------------------------------------------------------------

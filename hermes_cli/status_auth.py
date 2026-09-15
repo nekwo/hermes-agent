@@ -47,6 +47,7 @@ def _oauth_block(name: str, status: dict, hint: str, rows) -> None:
 # Values may be a single env var name (str) or a tuple of alternates (first found wins).
 _API_KEYS: dict[str, str | tuple[str, ...]] = {
     "OpenRouter": "OPENROUTER_API_KEY", "OpenAI": "OPENAI_API_KEY",
+    "Anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN"),
     "Google / Gemini": ("GOOGLE_API_KEY", "GEMINI_API_KEY"), "DeepSeek": "DEEPSEEK_API_KEY",
     "xAI / Grok": "XAI_API_KEY", "NVIDIA NIM": "NVIDIA_API_KEY", "Z.AI / GLM": "GLM_API_KEY",
     "Kimi": "KIMI_API_KEY", "StepFun Step Plan": "STEPFUN_API_KEY", "MiniMax": "MINIMAX_API_KEY",
@@ -91,7 +92,9 @@ def _render_api_keys(ctx):
     _status._section("API Keys")
     from hermes_cli.auth import get_anthropic_key
     # Anthropic uses the dedicated lookup (it also resolves OAuth tokens).
-    for name, env_ref in (*_API_KEYS.items(), ("Anthropic", get_anthropic_key)):
+    for name, env_ref in _API_KEYS.items():
+        if name == "Anthropic":
+            env_ref = get_anthropic_key
         value = env_ref() if callable(env_ref) else _status._first_env_value(env_ref)
         _status._row(name, bool(value), config.redact_key(value))
 

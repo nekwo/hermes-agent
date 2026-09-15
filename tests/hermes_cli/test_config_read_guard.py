@@ -47,16 +47,52 @@ ALLOWLIST = {
     "hermes_cli/managed_scope.py",
     # Parse-health probe: intentionally answers "does the raw file parse?".
     "gateway/readiness.py",
+    # Reads a PULLED REALM SUBTREE's profiles/<name>/config.yaml — a foreign,
+    # published document that happens to share the filename, not this machine's
+    # user config. Same class as managed_scope.py above. The canonical loaders
+    # resolve the LIVE profile config and cannot address an arbitrary subtree
+    # path, and routing this read through them would be a bug, not a fix: it
+    # would apply this machine's managed-scope overlay and ${ENV} expansion to
+    # somebody else's realm document. read_remote_persona_defs() exists
+    # precisely to strip the publisher's machine paths / venv pointers /
+    # mcp_servers at the door, so overlaying local state onto it is the thing
+    # it is defending against.
+    "agent_runtime/persona_config_sync.py",
 }
 
 # Directories that never count (tests may build fixture configs freely).
+#
+# ``.claude`` (ML-14 / B20(iii)): agent worktrees are created under
+# ``.claude/worktrees/<branch>/``, and each one is a FULL COPY of this repo. A
+# walk that descends there does not merely get slower — it reports the copies'
+# ``gateway/config.py`` etc. as violations (the ALLOWLIST is keyed on the
+# relative path from the repo root, which a copy's path does not match), and
+# every repo-wide grep run beside it returns N copies of every hit. On
+# 2026-08-18 that was 13 live worktrees: this guard was red for a fortnight and
+# the tree contained fourteen copies of itself. The operator has since pruned
+# them, so the exclusion is preventative — which is exactly why it carries a
+# DRIVEN witness below (``test_the_walk_does_not_descend_into_a_repo_copy``)
+# rather than resting on a red that only appears when worktrees happen to
+# exist. A guard that can only be checked when the hazard is present is not
+# checked.
 EXCLUDED_DIR_PARTS = {
-    "tests", ".venv", ".git", ".worktrees", "node_modules", "website",
+    "tests", ".venv", ".git", ".worktrees", ".claude", "node_modules", "website",
     "docs", "scripts", "examples", "apps",
     # Compiled bytecode is not source. Sibling test processes also create
     # and delete these directories while this scan walks the tree.
     "__pycache__",
 }
+
+# Marker file every PEP-405 virtual environment carries at its root. The
+# subject of this guard is FIRST-PARTY source: ``.venv`` was already excluded
+# by name above, but an operator-named sibling (``.venv-ci``, ``.venv-py313``,
+# ``venv/``) is the same thing under a different spelling and was being walked
+# and read in full. That was not just slow — it made the guard non-hermetic:
+# the offender set depended on which third-party packages happened to be
+# installed on the box, and any vendored library shipping a ``safe_load`` near
+# a ``"config.yaml"`` string would have failed OUR guard. Interpreter
+# environments are pruned by marker, not by name.
+VENV_MARKER = "pyvenv.cfg"
 
 # A safe_load within this many lines of a config.yaml reference is treated
 # as a raw user-config read.
@@ -66,33 +102,34 @@ SAFE_LOAD_RE = re.compile(r"\bsafe_load\s*\(")
 CONFIG_YAML_RE = re.compile(r"""["']config\.yaml["']""")
 
 
-def _iter_source_files():
-    # This uses os.walk with a pruned dirnames, and not rglob. rglob descends
-    # into every directory and filters after that, so it calls scandir() on
-    # __pycache__ trees that this guard never inspects. Sibling test processes
-    # create and delete those entries during the run.
+def _iter_source_files(root: Path = REPO_ROOT):
+    # os.walk with in-place ``dirnames`` pruning rather than ``rglob`` + a
+    # post-filter: the post-filter still paid to enumerate every excluded
+    # subtree. Pruning a directory name here is exactly equivalent to the old
+    # "any part of the relative path is excluded" test, because a pruned
+    # directory can contribute no descendants.
     #
-    # A directory that disappears in the middle of a walk raises
-    # FileNotFoundError out of rglob. The test then fails for a reason that it
-    # does not assert.
-    #
-    # The prune skips those trees. The onerror callback ignores a directory
-    # that disappears anyway.
-    for dirpath, dirnames, filenames in os.walk(REPO_ROOT, onerror=lambda _e: None):
-        dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIR_PARTS]
+    # ``root`` is a parameter so the pruning rules can be DRIVEN on a synthetic
+    # tree instead of only being observable when this checkout happens to
+    # contain the hazard. Production callers pass nothing.
+    for dirpath, dirnames, filenames in os.walk(root, onerror=lambda _e: None):
+        here = Path(dirpath)
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if name not in EXCLUDED_DIR_PARTS
+            and not (here / name / VENV_MARKER).is_file()
+        ]
         for name in filenames:
             if not name.endswith(".py"):
                 continue
-            path = Path(dirpath) / name
-            rel = path.relative_to(REPO_ROOT)
-            if any(part in EXCLUDED_DIR_PARTS for part in rel.parts):
-                continue
-            yield rel, path
+            path = here / name
+            yield path.relative_to(root), path
 
 
-def test_no_raw_config_yaml_reads_outside_owner_modules():
+def _offenders(root: Path = REPO_ROOT) -> list[str]:
     offenders: list[str] = []
-    for rel, path in _iter_source_files():
+    for rel, path in _iter_source_files(root):
         rel_str = str(rel).replace("\\", "/")
         if rel_str in ALLOWLIST:
             continue
@@ -112,6 +149,16 @@ def test_no_raw_config_yaml_reads_outside_owner_modules():
                 continue
             if any(abs(i - j) <= PROXIMITY for j in cfg_lines):
                 offenders.append(f"{rel_str}:{i + 1}: {stripped}")
+    return offenders
+
+
+#: A raw read the guard must report: a ``safe_load`` within ``PROXIMITY`` lines
+#: of a ``"config.yaml"`` reference, in a file no allowlist entry covers.
+_RAW_READ_SOURCE = 'import yaml\n\nyaml.safe_load(open("config.yaml"))\n'
+
+
+def test_no_raw_config_yaml_reads_outside_owner_modules():
+    offenders = _offenders()
 
     assert not offenders, (
         "Raw yaml.safe_load of config.yaml outside allowlisted owner modules.\n"
@@ -120,6 +167,40 @@ def test_no_raw_config_yaml_reads_outside_owner_modules():
         "round-trips and raw-file diagnostics must use "
         "hermes_cli.config.read_user_config_raw().\nOffenders:\n  "
         + "\n  ".join(offenders)
+    )
+
+
+def test_the_walk_does_not_descend_into_a_repo_copy(tmp_path):
+    """``.claude/worktrees/<branch>/`` is a FULL COPY of this repo (B20(iii)).
+
+    Driven on a synthetic tree rather than on this checkout, because the hazard
+    is intermittent: worktrees exist while agents are running and are pruned
+    afterwards, so a witness that waited for the real thing would be a check
+    that passes for the wrong reason most of the time — and it passed for the
+    wrong reason for the fortnight this guard was red.
+
+    Both directions in one case. The copy's file is invisible; the identical
+    file OUTSIDE the excluded directory is reported. Without the control, an
+    exclusion set that had swallowed the whole walk would look like a fix.
+    """
+
+    copy = tmp_path / ".claude" / "worktrees" / "wave-2" / "gateway"
+    copy.mkdir(parents=True)
+    (copy / "config.py").write_text(_RAW_READ_SOURCE, encoding="utf-8")
+
+    first_party = tmp_path / "some_package"
+    first_party.mkdir()
+    (first_party / "reader.py").write_text(_RAW_READ_SOURCE, encoding="utf-8")
+
+    offenders = _offenders(tmp_path)
+
+    assert [entry.split(":")[0] for entry in offenders] == [
+        "some_package/reader.py"
+    ], (
+        "the walk reported a different offender set than expected. If it "
+        "contains a path under `.claude/`, the exclusion is gone and every "
+        "repo-wide scan is again reading this repository's own copies of "
+        f"itself. Offenders: {offenders}"
     )
 
 

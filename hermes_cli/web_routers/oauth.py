@@ -513,19 +513,8 @@ async def _start_device_code_flow(provider_id: str, profile: Optional[str] = Non
 
 
 def _oauth_provider_disconnect_command(provider: Dict[str, Any]) -> Optional[str]:
-    """Shell command that clears an external provider's credentials, or None.
-
-    The disconnect API never silently deletes files another CLI owns; the GUI runs
-    this in its embedded terminal so the user sees exactly what executes. Claude Code
-    has no scriptable logout, so remove what logout would: the macOS Keychain entry
-    and/or ``~/.claude/.credentials.json`` (the two ``read_claude_code_credentials()`` sources).
-    """
-    if provider.get("flow") != "external" or provider.get("id") != "claude-code":
-        return None
-    rm_file = "rm -f ~/.claude/.credentials.json"
-    if sys.platform == "darwin":
-        return f'security delete-generic-password -s "Claude Code-credentials" 2>/dev/null; {rm_file}'
-    return rm_file
+    from hermes_cli.provider_catalog import disconnect_command_for
+    return disconnect_command_for(provider.get("id", ""), provider.get("flow", ""))
 
 
 def _oauth_provider_disconnect_hint(provider: Dict[str, Any], status: Dict[str, Any]) -> Optional[str]:

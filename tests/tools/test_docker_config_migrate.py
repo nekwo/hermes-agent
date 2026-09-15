@@ -39,6 +39,13 @@ def _run_migration(hermes_home: Path, **env_overrides: str) -> subprocess.Comple
         env=env,
         capture_output=True,
         text=True,
+        # The script emits UTF-8 — its diagnostics carry em dashes. Without an
+        # explicit encoding ``text=True`` decodes with the host locale (cp1252
+        # on Windows), the reader thread dies with UnicodeDecodeError, and
+        # ``proc.stderr`` arrives as None: the assertion then fails with a
+        # TypeError that names nothing about the real cause.
+        encoding="utf-8",
+        errors="replace",
     )
 
 

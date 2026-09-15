@@ -481,16 +481,14 @@ def _auth_file_path() -> Path:
 
 
 def _global_auth_file_path() -> Optional[Path]:
-    """Global-root auth.json in profile mode; None when profile and global root are the same dir.
-
-    Read-only fallback path, so no pytest seat belt here (it lives on ``_auth_file_path()``)."""
+    """Read-only shared auth fallback; honor context-local and spawned overrides."""
+    from hermes_constants import get_hermes_auth_home, get_default_hermes_root
+    explicit = get_hermes_auth_home()
     try:
-        from hermes_constants import get_default_hermes_root
-        global_root = get_default_hermes_root()
+        root = Path(explicit) if explicit else get_default_hermes_root()
     except Exception:
         return None
-    return None if _same_path(get_hermes_home(), global_root) else global_root / "auth.json"
-
+    return None if _same_path(get_hermes_home(), root) else root / "auth.json"
 
 def _load_global_auth_store() -> Dict[str, Any]:
     """Load the global-root auth store (read-only fallback, mtime-memoised); ``{}`` when absent or
@@ -2326,3 +2324,9 @@ def __getattr__(name):  # PEP 562 — lazy so no import cycles
     warn_once(__name__, name, *target)
     return getattr(importlib.import_module(target[0]), target[1])
 # ---- END PLUGIN-COMPAT ----
+
+# Downstream additions retain their public auth API while living in the fork.
+from agent_runtime.auth_extensions import (
+    read_pool_rotation_state, write_pool_rotation_state,
+    codex_auth_store_credentials_present, _read_global_codex_tokens_if_usable,
+)

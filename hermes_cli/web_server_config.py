@@ -169,6 +169,7 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
 # (models_dev, onboarding, mcp, computer_use, telemetry, plugins, doctor, runtime, session,
 # nous, telegram) currently surface a single schema field each.
 _CATEGORY_MERGE: Dict[str, str] = {
+    "charsheet": "agent",
     "privacy": "security",
     "context": "agent",
     "skills": "agent",

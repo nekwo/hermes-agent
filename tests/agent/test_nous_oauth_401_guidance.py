@@ -20,6 +20,20 @@ import inspect
 from agent import turn_recovery
 
 
+
+def _turn_loop_source() -> str:
+    """Source of the turn loop, wrapper AND body.
+
+    ``run_conversation`` became a thin venv-barrier wrapper on 2026-08-09 and
+    the loop moved to ``_run_conversation``; reading only the public name made
+    these gates green-to-red on a pure refactor. Reading both keeps the gate
+    pointed at the turn loop wherever inside that pair the guidance lives.
+    """
+
+    return inspect.getsource(conversation_loop.run_conversation) + inspect.getsource(
+        conversation_loop._run_conversation
+    )
+
 def test_nous_provider_is_in_oauth_401_set():
     """The provider-set gate that selects OAuth-specific guidance must
     include ``nous`` alongside ``openai-codex`` and ``xai-oauth``.

@@ -146,6 +146,13 @@ def _pip_install(args: List[str], *, timeout: int = 300, capture_output: bool = 
     """Install Python packages: ``uv pip install`` (needs no pip in the venv), then ``python -m
     pip``, then ``ensurepip --upgrade`` + retry — the Windows installer creates the venv via
     ``uv venv``, which does NOT seed pip, so bare ``-m pip`` failed on fresh installs."""
+    if "--target" not in args:
+        from tools.lazy_deps import venv_mutation_denial
+        denial = venv_mutation_denial()
+        if denial:
+            return subprocess.CompletedProcess(
+                [sys.executable, "-m", "pip", "install", *args], returncode=1, stdout="", stderr=denial,
+            )
     venv_root = Path(sys.executable).parent.parent
     install_flags = _post_setup_no_window_flags(streams_to_console=not capture_output)
 

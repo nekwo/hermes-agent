@@ -36,8 +36,26 @@ from hermes_cli.config import (
 
 class TestGetHermesHome:
     def test_default_path(self):
+        """With HERMES_HOME unset, the home is the PLATFORM-NATIVE default.
+
+        That is ``~/.hermes`` on POSIX and ``%LOCALAPPDATA%\\hermes`` on
+        native Windows — the contract documented on ``get_hermes_home`` and
+        implemented by ``_get_platform_default_hermes_home``.  The expected
+        path is spelled out here per platform rather than re-derived from the
+        helper under test, so this still fails if either branch drifts.
+        """
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("HERMES_HOME", None)
+            if sys.platform == "win32":
+                local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
+                base = (
+                    Path(local_appdata)
+                    if local_appdata
+                    else Path.home() / "AppData" / "Local"
+                )
+                expected = base / "hermes"
+            else:
+                expected = Path.home() / ".hermes"
             home = get_hermes_home()
             if sys.platform == "win32":
                 # Windows default is %LOCALAPPDATA%\hermes — see
@@ -50,7 +68,7 @@ class TestGetHermesHome:
                 )
                 assert home == base / "hermes"
             else:
-                assert home == Path.home() / ".hermes"
+                assert home == expected
 
 
 class TestEnsureHermesHome:
@@ -1734,8 +1752,8 @@ class TestBackgroundNotificationsConciseMigration:
         # Unset users inherit the new default at read time; no write needed.
         assert "display" not in raw or "background_process_notifications" not in raw.get("display", {})
 
-    def test_default_config_is_concise(self):
-        assert DEFAULT_CONFIG["display"]["background_process_notifications"] == "concise"
+    def test_default_config_preserves_fork_result_delivery(self):
+        assert DEFAULT_CONFIG["display"]["background_process_notifications"] == "result"
 
 
 class TestConfigNormalizationDoesNotOverwriteUserValues:

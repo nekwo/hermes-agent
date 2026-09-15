@@ -336,7 +336,7 @@ def _try_resolve_from_custom_pool(
     for pool_key in candidates:
         try:
             pool = rp.load_pool(pool_key)
-            entry = pool.select() if pool.has_credentials() else None
+            entry = rp._select_pool_entry(pool) if pool.has_credentials() else None
             pool_api_key = rp._pool_entry_api_key(entry) if entry is not None else ""
             if not pool_api_key:
                 continue

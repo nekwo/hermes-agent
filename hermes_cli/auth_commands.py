@@ -810,6 +810,13 @@ _AUTH_ACTIONS = {
 
 
 def auth_command(args) -> None:
+    action = getattr(args, "auth_action", "")
+    if action == "set-key":
+        from hermes_cli.auth_noninteractive import auth_set_key_command
+        raise SystemExit(auth_set_key_command(args))
+    if action == "login":
+        from hermes_cli.auth_noninteractive import auth_login_command
+        raise SystemExit(auth_login_command(args))
     handler = _AUTH_ACTIONS.get(getattr(args, "auth_action", ""))
     if handler is not None:
         handler(args)

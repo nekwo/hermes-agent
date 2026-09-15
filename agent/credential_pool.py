@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from agent.credential_pool_admin import CredentialPoolAdminMixin
+from agent_runtime.pool_rotation import PoolRotationMixin, PoolRotationCursor
 
 import logging
 import os
@@ -890,7 +891,7 @@ class _RefreshDone(Exception):
         self.result = result
 
 
-class CredentialPool(CredentialPoolAdminMixin):
+class CredentialPool(PoolRotationMixin, CredentialPoolAdminMixin):
     def __init__(self, provider: str, entries: List[PooledCredential]):
         self.provider = provider
         self._entries = sorted(entries, key=lambda entry: entry.priority)
@@ -916,6 +917,9 @@ class CredentialPool(CredentialPoolAdminMixin):
         # entries" and the caller's 401 retry loop runs unbounded. Reset when a
         # real entry is identified or an escape path returns None.
         self._unmatched_rotation_streak: int = 0
+        self._rotation_cursor: Optional[PoolRotationCursor] = None
+        if self._strategy == STRATEGY_LEAST_USED:
+            self._sync_usage_counts_from_store()
 
     # ---- read accessors ---------------------------------------------------
 
@@ -1885,7 +1889,7 @@ class CredentialPool(CredentialPoolAdminMixin):
         logger.info("credential pool: no available entries (all exhausted or empty)")
 
     def _select_unlocked(
-        self, *, refresh: bool = True, count: bool = True,
+        self, *, refresh: bool = True, count: bool = True, persist_rotation: bool = True,
     ) -> Tuple[Optional[PooledCredential], List[PooledCredential]]:
         """Select the best available entry; returns ``(entry, pending_refresh)``.
 
@@ -1902,23 +1906,7 @@ class CredentialPool(CredentialPoolAdminMixin):
         # logs immediately.
         self._last_no_entries_log_at = None
 
-        if self._strategy == STRATEGY_RANDOM:
-            entry = random.choice(available)
-        elif self._strategy == STRATEGY_LEAST_USED and len(available) > 1:
-            entry = min(available, key=lambda e: e.request_count)
-        else:
-            entry = available[0]
-        # Count the selection under every strategy. The counter is ``least_used``'s
-        # baseline and reaches auth.json on the next persist (exhaustion, rotation,
-        # refresh); it used to move only while ``least_used`` was active.
-        if count:
-            entry = self._adopt(entry, persist=False, request_count=entry.request_count + 1)
-        if self._strategy == STRATEGY_ROUND_ROBIN and len(available) > 1:
-            rotated = [candidate for candidate in self._entries if candidate.id != entry.id]
-            rotated.append(replace(entry, priority=len(self._entries) - 1))
-            self._entries = [replace(candidate, priority=idx) for idx, candidate in enumerate(rotated)]
-            self._persist()
-            entry = self._find(lambda candidate: candidate.id == entry.id) or entry
+        entry = self._select_with_rotation(available, count=count, persist_rotation=persist_rotation)
         self._current_id = entry.id
         return entry, pending_refresh
 

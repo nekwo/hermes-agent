@@ -469,6 +469,13 @@ def resolve_codex_runtime_credentials(
             if imported:
                 data = {"tokens": imported, "last_refresh": imported.get("last_refresh")}
     if data is None:
+        from hermes_cli.auth import _read_global_codex_tokens_if_usable
+        global_data = _read_global_codex_tokens_if_usable()
+        if global_data:
+            return _codex_runtime_result(
+                global_data["access_token"], source="global-auth-store",
+                last_refresh=global_data.get("last_refresh"))
+    if data is None:
         pool_token = _pool_codex_access_token()
         if pool_token:
             return _codex_runtime_result(pool_token, source="credential_pool", last_refresh=None)

@@ -13,6 +13,10 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 from urllib.parse import urlparse
 
+from agent_runtime.provider_probes import (
+    _select_pool_entry, pool_rotation_scope, probe_runtime_provider, codex_credentials_resolvable_read_only,
+)
+
 logger = logging.getLogger(__name__)
 
 from hermes_cli import auth as auth_mod
@@ -527,7 +531,7 @@ def _resolve_from_pool(provider: str, requested_provider: str, model_cfg: Dict[s
         pool = None
     if not (pool and pool.has_credentials()):
         return None
-    entry = pool.select()
+    entry = _select_pool_entry(pool)
     if entry is None:
         return None
     pool_api_key = _pool_entry_api_key(entry)
@@ -833,7 +837,8 @@ def _opencode_free_runtime(provider, requested_provider, model_cfg, target_model
 
 
 def resolve_runtime_provider(*, requested: Optional[str] = None, explicit_api_key: Optional[str] = None,
-                             explicit_base_url: Optional[str] = None, target_model: Optional[str] = None) -> Dict[str, Any]:
+                             explicit_base_url: Optional[str] = None, target_model: Optional[str] = None,
+                             persist_pool_rotation: bool = True) -> Dict[str, Any]:
     """Resolve runtime provider credentials for agent execution. Ladder (order is behavior — each
     rung returns or raises, else falls to the next):
       1. disabled-provider guard (``providers.<name>.enabled: false``)
@@ -847,9 +852,10 @@ def resolve_runtime_provider(*, requested: Optional[str] = None, explicit_api_ke
       8. OpenRouter / bare-custom fallback
     target_model overrides model_cfg["default"] when computing provider-specific api_mode (e.g.
     OpenCode Zen/Go where different models route through different API surfaces)."""
-    requested_provider = resolve_requested_provider(requested)
-    _raise_if_provider_disabled(requested_provider)
-    return next(r for r in _ladder_rungs(requested_provider, explicit_api_key, explicit_base_url, target_model) if r)
+    with pool_rotation_scope(persist_pool_rotation):
+        requested_provider = resolve_requested_provider(requested)
+        _raise_if_provider_disabled(requested_provider)
+        return next(r for r in _ladder_rungs(requested_provider, explicit_api_key, explicit_base_url, target_model) if r)
 
 
 def _ladder_rungs(requested_provider, explicit_api_key, explicit_base_url, target_model):
