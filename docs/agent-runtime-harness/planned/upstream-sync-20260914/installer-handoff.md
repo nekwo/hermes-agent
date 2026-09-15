@@ -24,3 +24,13 @@ The fork's `agent_runtime/local_llama/` remains the authoritative owner for `loc
 All 48 fork Local llama tests pass under the candidate's pinned dependency environment through `scripts/run_tests.sh`. Existing isolated real probe completed: configure, scan, start, load at 8192, text inference, full agent/terminal tool roundtrip, same-model/same-endpoint compression with no fallback, active-turn closure, unload, reload at 4096, owned stop and shutdown. Receipt hash and exact invocation are in `candidate-test-evidence.json`.
 
 No installer endpoints, second-host acceptance, full Launcher/Stage C pass, or installer crash journal proof exists. The installation contract remains proposed. Pin the final delivered SHA and rerun producer proof before enabling Launcher installer integration.
+
+## Runtime qualification addendum (stage 22)
+
+The current candidate is `9caca1a1a257244c6e23542b6e034e96016dac32`; main delivery still awaits its full CI result. The proposed original installation contract is unchanged in status: do not implement from the old absence-of-upstream-installer assumption.
+
+Qualification must record the actual linked SQLite version, not infer safety from Python's minor version. The operator's Python 3.12.5 links SQLite 3.45.3; isolated Python 3.12.14 links SQLite 3.53.1. The patched runtime passed 73 Local llama/WAL checks and the real model/terminal roundtrip, including owned shutdown. An upstream WAL guard may leave an existing WAL database in its existing mode with a warning; it does not prove that every unsafe runtime refuses startup.
+
+Respect declared dependency versions. The broad uv override resolved cryptography 50.0.1 during staging while project metadata requires 50.0.0; qualification used the exact declared version and passed `pip check`. Installer receipts should distinguish interpreter, linked database library, package resolution and binary/model qualification.
+
+The managed deployment uses an external venv at `X:/Eternia/.hermes/venvs/hermes-agent`, not a repository-local venv. Launcher already follows the active Hermes interpreter. Future installer work must preserve that ownership and must not repoint global Python/PATH or assume repository-relative venv layout. The permanent patched interpreter and a verified 7,421-file pre-upgrade backup are staged; those facts are not a claim that live maintenance has occurred.
