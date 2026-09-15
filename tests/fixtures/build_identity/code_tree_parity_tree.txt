@@ -1,0 +1,22 @@
+# Shared code-tree parity fixture. This file is BYTE-EQUAL in two repos:
+#   hermes-agent/tests/fixtures/build_identity/code_tree_parity_tree.txt
+#   EterniaLauncher/test/fixtures/build_identity/code_tree_parity_tree.txt
+# Each side hashes it with its own implementation of RS-6's code-tree rule and
+# pins the SAME digest, so the two implementations cannot drift apart without a
+# red on both. Edit one copy and you must edit the other.
+#
+# Each entry line is <path> then a TAB then <blob>. Blank lines and lines
+# starting with # are ignored. The order below is deliberately NOT sorted: the
+# rule sorts by the path's UTF-8 bytes, and a fixture that arrived sorted would
+# not say so.
+
+hermes_cli/harness_parts/serve.py	8888888888888888888888888888888888888888
+docs/agent-runtime-harness/index.rst	7777777777777777777777777777777777777777
+agent_runtime/serve_socket.py	5555555555555555555555555555555555555555
+README.md	3333333333333333333333333333333333333333
+tests/agent_runtime/test_build_identity.py	aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+agent_runtime/skills/README.md	6666666666666666666666666666666666666666
+.github/workflows/ci.yml	1111111111111111111111111111111111111111
+scripts/run_tier.ps1	9999999999999999999999999999999999999999
+AGENTS.md	2222222222222222222222222222222222222222
+agent_runtime/build_identity.py	4444444444444444444444444444444444444444

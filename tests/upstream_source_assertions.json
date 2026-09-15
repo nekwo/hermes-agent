@@ -1,0 +1,272 @@
+{
+  "upstream": "110baa095bc7135a0624557a9cc35df0f98ece0f",
+  "approved_count": 66,
+  "reason": "Operator approved a separate closed register on 2026-09-15 to retain unchanged upstream tests. These source assertions are not behavioral proof. New, stale, and changed enclosing functions must fail; no automatic register refresh.",
+  "entries": [
+    {
+      "key": "tests/agent/test_413_image_payload_recovery.py::TestConversationLoopWiring.test_413_branch_scores_bytes_not_tokens::'new_bytes < original_bytes * 0.95' in src",
+      "function_sha256": "8c600a6d6009f17dcc84b85a5b7b4b4bb5a8b3fdf63e997b674f16c630c0918a"
+    },
+    {
+      "key": "tests/agent/test_413_image_payload_recovery.py::TestConversationLoopWiring.test_413_branch_scores_bytes_not_tokens::'new_bytes = serialized_messages_bytes' in branch",
+      "function_sha256": "8c600a6d6009f17dcc84b85a5b7b4b4bb5a8b3fdf63e997b674f16c630c0918a"
+    },
+    {
+      "key": "tests/agent/test_413_image_payload_recovery.py::TestConversationLoopWiring.test_413_branch_scores_bytes_not_tokens::'new_bytes = serialized_messages_bytes(messages)' in src",
+      "function_sha256": "8c600a6d6009f17dcc84b85a5b7b4b4bb5a8b3fdf63e997b674f16c630c0918a"
+    },
+    {
+      "key": "tests/agent/test_413_image_payload_recovery.py::TestConversationLoopWiring.test_413_branch_scores_bytes_not_tokens::'original_bytes = serialized_messages_bytes' in branch",
+      "function_sha256": "8c600a6d6009f17dcc84b85a5b7b4b4bb5a8b3fdf63e997b674f16c630c0918a"
+    },
+    {
+      "key": "tests/agent/test_413_image_payload_recovery.py::TestConversationLoopWiring.test_413_branch_scores_bytes_not_tokens::'original_bytes = serialized_messages_bytes(messages)' in src",
+      "function_sha256": "8c600a6d6009f17dcc84b85a5b7b4b4bb5a8b3fdf63e997b674f16c630c0918a"
+    },
+    {
+      "key": "tests/agent/test_compaction_prompt_rebuild.py::TestCommitAlwaysRebuilds.test_drift_rebuild_is_logged::self.assertIn('Compaction rebuilt a drifted system prompt', src)",
+      "function_sha256": "6b5bb57002bf6933b5416a6e1ae98224c57c4301c594a0e3edf59a318c122fbc"
+    },
+    {
+      "key": "tests/agent/test_compaction_prompt_rebuild.py::TestCommitAlwaysRebuilds.test_keep_prompt_branch_requires_byte_equality::self.assertIn('rebuilt_system_prompt == cached_system_prompt', window, 'keep-prompt must be gated on BYTE EQUALITY of the rebuilt output, not on memory containment')",
+      "function_sha256": "f089cb9f4ec9a88409683bf123e78b8ccac3de86821e153552e4aa85e0a673c7"
+    },
+    {
+      "key": "tests/agent/test_image_corrupt_recovery.py::TestCanonicalHistoryIsolation.test_image_corrupt_branch_strips_only_payload_copy::'_strip_images_from_messages(api_messages)' in body",
+      "function_sha256": "784818a71f5ed60ce8922a22270abb5ff4991c7a811f029dab129eb5fe827718"
+    },
+    {
+      "key": "tests/agent/test_infinite_compaction_loop.py::TestPressureRealFloor.test_anchored_pressure_is_never_floored::'else:' in window",
+      "function_sha256": "a32eaac3939ff12185a9314efaa3dd2ef30acafab73f2a5479fa45cf9e7ab04b"
+    },
+    {
+      "key": "tests/agent/test_infinite_compaction_loop.py::TestPressureRealFloor.test_anchored_pressure_is_never_floored::'request_pressure_tokens = _anchored_pressure' in window",
+      "function_sha256": "a32eaac3939ff12185a9314efaa3dd2ef30acafab73f2a5479fa45cf9e7ab04b"
+    },
+    {
+      "key": "tests/agent/test_micro_compaction.py::TestDefragFlushCursorInvalidation.test_finalizer_consumes_flag_and_invalidates_agent_cursor::'_flush_scan_cursor_invalidated' in micro_block",
+      "function_sha256": "84e2415f99e7fe77a1ac963f464414e50dca368cb1acbafcf702fd633372b5d6"
+    },
+    {
+      "key": "tests/agent/test_micro_compaction.py::TestDefragFlushCursorInvalidation.test_finalizer_consumes_flag_and_invalidates_agent_cursor::'agent._db_flush_scan_prefix = None' in micro_block",
+      "function_sha256": "84e2415f99e7fe77a1ac963f464414e50dca368cb1acbafcf702fd633372b5d6"
+    },
+    {
+      "key": "tests/agent/test_turn_base_display_anchor.py::TestInvalidationSitesClearTurnBaseAnchor.test_agent_init_defines_turn_base_anchor::'\"_turn_base_usage_anchor\": None' in src",
+      "function_sha256": "32a01ec854fcbdc5c02217d590b6c58cf3229dd570a21c58ae50b1661ab15ebd"
+    },
+    {
+      "key": "tests/gateway/test_cron_interrupt_notification.py::TestDeliveryErrorIsRecordedWhenTheNoticeCannotBeSent.test_interrupted_run_records_delivery_error_without_mark_job_run::'_consume_interrupted_flag(' in body_src",
+      "function_sha256": "9e63e769d74564b595fb77bd89bfa15a16cae42fb65d5207d3ec25fb42327e66"
+    },
+    {
+      "key": "tests/gateway/test_cron_interrupt_notification.py::TestDeliveryErrorIsRecordedWhenTheNoticeCannotBeSent.test_interrupted_run_records_delivery_error_without_mark_job_run::'_finish_interrupted_run(' in body_src",
+      "function_sha256": "9e63e769d74564b595fb77bd89bfa15a16cae42fb65d5207d3ec25fb42327e66"
+    },
+    {
+      "key": "tests/gateway/test_cron_interrupt_notification.py::TestDeliveryErrorIsRecordedWhenTheNoticeCannotBeSent.test_interrupted_run_records_delivery_error_without_mark_job_run::'if delivery_error:' in src",
+      "function_sha256": "9e63e769d74564b595fb77bd89bfa15a16cae42fb65d5207d3ec25fb42327e66"
+    },
+    {
+      "key": "tests/gateway/test_cron_interrupt_notification.py::TestDeliveryErrorIsRecordedWhenTheNoticeCannotBeSent.test_interrupted_run_records_delivery_error_without_mark_job_run::'update_job(job[\"id\"], {\"last_delivery_error\": delivery_error})' in src",
+      "function_sha256": "9e63e769d74564b595fb77bd89bfa15a16cae42fb65d5207d3ec25fb42327e66"
+    },
+    {
+      "key": "tests/gateway/test_startup_watchdog.py::TestProgressLease.test_repair_declares_lease::'report_startup_progress' in src",
+      "function_sha256": "e53cbc8574f945292b39ede9f653e695c3f206de94a665a5ed60f9cc45d640f5"
+    },
+    {
+      "key": "tests/gateway/test_startup_watchdog.py::TestProgressLease.test_schema_init_declares_lease::'report_startup_progress' in src",
+      "function_sha256": "d1fc6bf6500eba9084ab05360ba1e7e0fe27163631cb60a334d3341663c77db4"
+    },
+    {
+      "key": "tests/gateway/test_stream_final_adoption_gate.py::TestGateWiring.test_run_py_gate_matches_contract::'not result.get(\"interrupted\")' in window",
+      "function_sha256": "2245074760c1ba5d77d4366caed5c0ac772a839f6faa01c776b17b2d1bb33590"
+    },
+    {
+      "key": "tests/gateway/test_stream_final_adoption_gate.py::TestGateWiring.test_run_py_gate_matches_contract::'result.get(\"completed\") is not False' in window",
+      "function_sha256": "2245074760c1ba5d77d4366caed5c0ac772a839f6faa01c776b17b2d1bb33590"
+    },
+    {
+      "key": "tests/gateway/test_transcript_read_failure.py::TestSlashCommandsOnUnreadableTranscript.test_every_transcript_reading_handler_catches_the_error::'except TranscriptReadError' in window",
+      "function_sha256": "0e6028afd42bf61bce39aa89fdeb8868bdfa811db449f6e4ea1a144135be246c"
+    },
+    {
+      "key": "tests/hermes_cli/test_cli_quiet_stdout_leak.py::test_quiet_branch_clears_inline_diff_callbacks::attr in branch",
+      "function_sha256": "11ce708b68de594cb531512766697a94752c36a5e068d0d072d73879d406c0ef"
+    },
+    {
+      "key": "tests/hermes_cli/test_cli_quiet_stdout_leak.py::test_quiet_branch_clears_reasoning_callback::'cli.agent.reasoning_callback = None' in branch",
+      "function_sha256": "af3e4ee851d797424d9f8860b1c7f86cb30b0078cba24712d1fa7ae272746aeb"
+    },
+    {
+      "key": "tests/hermes_cli/test_cli_quiet_stdout_leak.py::test_quiet_branch_clears_tool_progress_callback::'cli.agent.tool_progress_callback = None' in branch",
+      "function_sha256": "7f03dd63f10b332af78541a68e0c50b4f7c58502e207b5986c0877df15819fd0"
+    },
+    {
+      "key": "tests/hermes_cli/test_cli_quiet_stdout_leak.py::test_quiet_branch_neutralizations_precede_run_conversation::'_configure_quiet_agent(cli.agent)' in branch",
+      "function_sha256": "703f77e5155635d37417ba6aa3cd14b7c4c20d5c93b0431d127becdecd45838c"
+    },
+    {
+      "key": "tests/hermes_cli/test_cli_quiet_stdout_leak.py::test_quiet_branch_neutralizations_precede_run_conversation::'run_conversation(' in inspect.getsource(cli_mod._run_quiet_single_query)",
+      "function_sha256": "703f77e5155635d37417ba6aa3cd14b7c4c20d5c93b0431d127becdecd45838c"
+    },
+    {
+      "key": "tests/hermes_cli/test_cli_quiet_stdout_leak.py::test_quiet_branch_syncs_tool_progress_off_to_agent::'cli.agent.tool_progress_mode = \"off\"' in branch",
+      "function_sha256": "90bddfab2cf2cd6e42db61a0eb0f2ce294f088c0d412d970d28ecd3557552c2e"
+    },
+    {
+      "key": "tests/hermes_cli/test_in_dir_msys_paths.py::TestInDirMsysResolution.test_main_call_site_uses_translation::'_msys_to_windows_path' in block",
+      "function_sha256": "9dcffb744747f173c748484e6b8e9d671188adb7bc264b19af56fd6c21d64095"
+    },
+    {
+      "key": "tests/hermes_cli/test_single_query_clarify.py::test_agent_construction_gates_clarify_callback_on_single_query_mode::\"'_single_query_mode'\" in init_agent_src",
+      "function_sha256": "585f7da6bdf71f2df729cbd5a9c348ab6183933032f9a64a896700d9b8da589b"
+    },
+    {
+      "key": "tests/hermes_cli/test_single_query_clarify.py::test_agent_construction_gates_clarify_callback_on_single_query_mode::'\"_single_query_mode\"' in init_agent_src",
+      "function_sha256": "585f7da6bdf71f2df729cbd5a9c348ab6183933032f9a64a896700d9b8da589b"
+    },
+    {
+      "key": "tests/hermes_cli/test_single_query_clarify.py::test_agent_construction_gates_clarify_callback_on_single_query_mode::'_single_query_clarify_callback' in src",
+      "function_sha256": "585f7da6bdf71f2df729cbd5a9c348ab6183933032f9a64a896700d9b8da589b"
+    },
+    {
+      "key": "tests/hermes_cli/test_single_query_clarify.py::test_agent_construction_gates_clarify_callback_on_single_query_mode::'clarify_callback=' in init_agent_src",
+      "function_sha256": "585f7da6bdf71f2df729cbd5a9c348ab6183933032f9a64a896700d9b8da589b"
+    },
+    {
+      "key": "tests/hermes_cli/test_sqlite3_cli_salvage_gate.py::TestGuidanceNeverNamesLiveDb.test_forensic_backup_refusals_name_safe_lane::'--inspect-only' in body",
+      "function_sha256": "96e163b3f95386f1af27eff8402478839ccd3fdfb8550bf2b30a8db0744d0735"
+    },
+    {
+      "key": "tests/hermes_cli/test_sqlite3_cli_salvage_gate.py::TestGuidanceNeverNamesLiveDb.test_forensic_backup_refusals_name_safe_lane::'sessions recover --source' in body",
+      "function_sha256": "96e163b3f95386f1af27eff8402478839ccd3fdfb8550bf2b30a8db0744d0735"
+    },
+    {
+      "key": "tests/hermes_cli/test_sqlite3_cli_salvage_gate.py::TestGuidanceNeverNamesLiveDb.test_gateway_corruption_banner::'--inspect-only' in body",
+      "function_sha256": "7b62aadc2a8a64dbee7b3c923b6894db93b096aa2428ad1054927801bbd1e618"
+    },
+    {
+      "key": "tests/hermes_cli/test_sqlite3_cli_salvage_gate.py::TestGuidanceNeverNamesLiveDb.test_gateway_corruption_banner::'--output' in body",
+      "function_sha256": "7b62aadc2a8a64dbee7b3c923b6894db93b096aa2428ad1054927801bbd1e618"
+    },
+    {
+      "key": "tests/hermes_cli/test_sqlite3_cli_salvage_gate.py::TestGuidanceNeverNamesLiveDb.test_gateway_corruption_banner::'do NOT' in body",
+      "function_sha256": "7b62aadc2a8a64dbee7b3c923b6894db93b096aa2428ad1054927801bbd1e618"
+    },
+    {
+      "key": "tests/hermes_cli/test_sqlite3_cli_salvage_gate.py::TestGuidanceNeverNamesLiveDb.test_gateway_corruption_banner::'sessions recover --source' in body",
+      "function_sha256": "7b62aadc2a8a64dbee7b3c923b6894db93b096aa2428ad1054927801bbd1e618"
+    },
+    {
+      "key": "tests/hermes_cli/test_sqlite3_cli_salvage_gate.py::TestGuidanceNeverNamesLiveDb.test_kanban_manual_recovery_warns_about_live_db::'copy kanban.db aside FIRST' in source",
+      "function_sha256": "986edf8e2380496d3f341fbf2c45dcc37cb6796e8c3ba809a2423a5ff130d231"
+    },
+    {
+      "key": "tests/hermes_cli/test_update_apply_shallow_count.py::test_source_matches_exercised_logic::'_github_compare_behind' in src",
+      "function_sha256": "2666a6ebcff6421f41da8ed33d0d8ea03c145587b3fe1b0a81b765982e051fbf"
+    },
+    {
+      "key": "tests/hermes_cli/test_update_apply_shallow_count.py::test_source_matches_exercised_logic::'apply_is_shallow' in src",
+      "function_sha256": "2666a6ebcff6421f41da8ed33d0d8ea03c145587b3fe1b0a81b765982e051fbf"
+    },
+    {
+      "key": "tests/hermes_cli/test_update_apply_shallow_count.py::test_source_matches_exercised_logic::'commit count unknown on this shallow checkout' in inspect.getsource(update_cmd._cmd_update_impl)",
+      "function_sha256": "2666a6ebcff6421f41da8ed33d0d8ea03c145587b3fe1b0a81b765982e051fbf"
+    },
+    {
+      "key": "tests/hermes_cli/test_update_fleet_check_fail_closed.py::TestCallSiteWiring.test_settle_sleep_gated_on_expected_runtimes::'_fleet_rows_expected = _m()._fleet_probe_expected_runtimes(' in src",
+      "function_sha256": "5d86df2680a5fea0ca87b155edf894a01f7dc9cf54fa54aa64bbc5b9e37ff5af"
+    },
+    {
+      "key": "tests/hermes_cli/test_update_fleet_check_fail_closed.py::TestCallSiteWiring.test_settle_sleep_gated_on_expected_runtimes::'_fleet_snapshot = _collect_fleet_snapshot(restart, _fleet_rows_expected)' in src",
+      "function_sha256": "5d86df2680a5fea0ca87b155edf894a01f7dc9cf54fa54aa64bbc5b9e37ff5af"
+    },
+    {
+      "key": "tests/hermes_cli/test_update_fleet_check_fail_closed.py::TestCallSiteWiring.test_settle_sleep_gated_on_expected_runtimes::'_time.sleep(2.0)' in snap_src",
+      "function_sha256": "5d86df2680a5fea0ca87b155edf894a01f7dc9cf54fa54aa64bbc5b9e37ff5af"
+    },
+    {
+      "key": "tests/hermes_cli/test_update_fleet_check_fail_closed.py::TestCallSiteWiring.test_settle_sleep_gated_on_expected_runtimes::'if not rows_expected:\\n' in snap_src",
+      "function_sha256": "5d86df2680a5fea0ca87b155edf894a01f7dc9cf54fa54aa64bbc5b9e37ff5af"
+    },
+    {
+      "key": "tests/hermes_cli/test_update_fleet_check_fail_closed.py::TestCallSiteWiring.test_zero_row_guard_gated_on_expected_runtimes::'elif not _fleet_snapshot and _fleet_rows_expected:' in src",
+      "function_sha256": "a4e17c0203ad74d23b4d73a7ca97e574cc44374be9a35852244f5fb99a57c4b5"
+    },
+    {
+      "key": "tests/hermes_cli/test_update_self_lock.py::test_pre_fetch_flow_has_no_self_lock_preflight::'_m()._abort_dependency_sync_if_self_locked' in sync_src",
+      "function_sha256": "155f4882b962e7e80de613b8e016c68442d3c4631a863f350ee8417684465016"
+    },
+    {
+      "key": "tests/hermes_cli/test_update_self_lock.py::test_pre_fetch_flow_has_no_self_lock_preflight::'_sync_python_dependencies_after_pull(' in post_fetch",
+      "function_sha256": "155f4882b962e7e80de613b8e016c68442d3c4631a863f350ee8417684465016"
+    },
+    {
+      "key": "tests/hermes_cli/test_update_self_lock.py::test_zip_update_guards_dependency_sync::'_abort_dependency_sync_if_self_locked' in src[:swap_idx]",
+      "function_sha256": "b7eb2c14faf461e84058deeead5801c231b68532e172b1f11158df05305cc21e"
+    },
+    {
+      "key": "tests/hermes_cli/test_update_zip_fallback_guards.py::test_swap_preserve_set_is_the_module_constant::'_ZIP_PRESERVED_TOP_LEVEL' in src",
+      "function_sha256": "14416a6865952c719856f54ba466b4bd3ff5cd70bfe50575e3961f27d00654c6"
+    },
+    {
+      "key": "tests/hermes_state/test_replace_messages_archive_siblings.py::TestAcpPersistPreservesArchives.test_persist_source_has_no_failopen_probe::'active_only=True' in src",
+      "function_sha256": "b7d2089d3ecc7276e9efafcf9d495351e9d29ce2d4771806eeae33a46f1179a5"
+    },
+    {
+      "key": "tests/hermes_state/test_replace_messages_archive_siblings.py::TestTuiPromptTruncationPreservesArchives.test_truncation_source_uses_active_only::'active_only=True' in call",
+      "function_sha256": "9619883da2313d8d1f20bf96c8ac0ef20632458e7a306b5351012d55be0e77f4"
+    },
+    {
+      "key": "tests/plugins/model_providers/test_commandcode_profile.py::TestCommandCodeModelFiltering.test_anthropic_profile_filters_to_claude::'\"claude-\" in m' in source",
+      "function_sha256": "231be4430da7c4ba7395290d78d13327d67c1bb003f0b4634c769217322d94cf"
+    },
+    {
+      "key": "tests/plugins/model_providers/test_commandcode_profile.py::TestCommandCodeModelFiltering.test_anthropic_profile_filters_to_claude::'startswith(\"claude-\")' in source",
+      "function_sha256": "231be4430da7c4ba7395290d78d13327d67c1bb003f0b4634c769217322d94cf"
+    },
+    {
+      "key": "tests/tools/test_compaction_tool_refresh.py::TestCompactionWiring.test_commit_path_calls_helper_and_survives_failure::self.assertIn('try:', guard_window, 'refresh call must be exception-guarded')",
+      "function_sha256": "dd89458cbf71998551e7019b668789775fe1da3f1f7ab3a21c0d105c30beb5ad"
+    },
+    {
+      "key": "tests/tools/test_file_tools.py::TestSSHConfigWriteGateSingleQuery.test_gate_call_passes_single_query_deny_message::'pattern_key=\"ssh_config_write\"' in block",
+      "function_sha256": "6612c9a45fe092c0d2255aefa3239a4b062f58ece72152dbf3fa1c9dfc733139"
+    },
+    {
+      "key": "tests/tools/test_image_generate_schema.py::TestDynamicParamGating.test_handler_still_rejects_unadvertised_edit_with_teaching_error::self.assertIn('capable of image-to-image / editing', handler_src)",
+      "function_sha256": "d91e32ef376b4214a384c77560b123dacb7fbf8e905d9de8fe9d56edb07e72c0"
+    },
+    {
+      "key": "tests/tools/test_image_generate_schema.py::TestDynamicParamGating.test_handler_still_rejects_unadvertised_edit_with_teaching_error::self.assertIn('omit image_url', handler_src)",
+      "function_sha256": "d91e32ef376b4214a384c77560b123dacb7fbf8e905d9de8fe9d56edb07e72c0"
+    },
+    {
+      "key": "tests/tools/test_mcp_stdio_children_dead.py::test_watch_ok_probe_does_not_create_unawaited_coroutine::'iscoroutinefunction(_watch_children)' in src",
+      "function_sha256": "3e34ce89e1c18732310d99b1fed21dadb309563ee7a349117eb19d288ac2a208"
+    },
+    {
+      "key": "tests/tools/test_read_file_schema_gating.py::TestReadFileSchemaStatic.test_coverage_warning_teaching_left_to_the_warning::self.assertIn('NEEDS OCR', src)",
+      "function_sha256": "1fefce4a8828af0da10199f8b0085fc7de51f55f7cfbab4230fc22e7f9c1d227"
+    },
+    {
+      "key": "tests/tools/test_read_file_schema_gating.py::TestReadFileSchemaStatic.test_coverage_warning_teaching_left_to_the_warning::self.assertIn('pdftoppm', src)",
+      "function_sha256": "1fefce4a8828af0da10199f8b0085fc7de51f55f7cfbab4230fc22e7f9c1d227"
+    },
+    {
+      "key": "tests/tools/test_read_file_schema_gating.py::TestReadFileSchemaStatic.test_coverage_warning_teaching_left_to_the_warning::self.assertIn('vision_analyze', src)",
+      "function_sha256": "1fefce4a8828af0da10199f8b0085fc7de51f55f7cfbab4230fc22e7f9c1d227"
+    },
+    {
+      "key": "tests/tools/test_terminal_config_env_sync.py::test_docker_snap_compat_is_bridged_everywhere::'TERMINAL_DOCKER_SNAP_COMPAT' in _terminal_tool_env_var_names()",
+      "function_sha256": "282f88dcb5a51cb62ee1ae30278aa3c0274a6ceac1c0d4381416f2843ad2c85a"
+    },
+    {
+      "key": "tests/tui_gateway/test_cold_start_gil_stall.py::test_handle_ws_ready_payload_wires_skin_through_to_thread::'to_thread(server.resolve_skin)' in source",
+      "function_sha256": "20e7464a62817b813e9689d379b94230ef4c10f7e41a945e71b2519454409aaf"
+    }
+  ],
+  "hash_format": "sha256-ast-dump-no-empty-type-params-v1"
+}
