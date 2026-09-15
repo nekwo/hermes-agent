@@ -1,0 +1,10 @@
+{
+  "note": "Pinned shape of the CHARSHEET-QA line. The producer is an agent following harness-skills/harness-charsheet-authoring/SKILL.md; the consumers are the launcher's B2 QA card and P1 Studio-project creation, which key a character project off the draft id and cannot fall back to prose. Risk D.5 of EterniaLauncher/docs/spatial/CHARA_CONSOLE_AUTHORING_QA_PLAN_2026-08-24.md asks for this file in BOTH repos; the twin at EterniaLauncher/test/fixtures/charsheet/charsheet_qa_line.json is B2's to add, not this slice's. Until it exists, this half is the only pin the key set has that is not prose.",
+  "prefix": "CHARSHEET-QA:",
+  "requiredKeys": ["draft", "slug", "displayName", "stage", "generator"],
+  "optionalKeys": ["item", "path"],
+  "lines": {
+    "stageChange": "CHARSHEET-QA:{\"draft\":\"20260824-140756-cd645a\",\"slug\":\"anime-girl\",\"displayName\":\"Anime Girl\",\"stage\":\"rows\",\"generator\":\"openai-codex\"}",
+    "itemChanged": "CHARSHEET-QA:{\"draft\":\"20260824-140756-cd645a\",\"slug\":\"anime-girl\",\"displayName\":\"Anime Girl\",\"stage\":\"rows\",\"generator\":\"openai-codex\",\"item\":\"walk-n\",\"path\":\"X:\\\\Eternia\\\\.hermes\\\\profiles\\\\alice\\\\characters\\\\.drafts\\\\20260824-140756-cd645a\\\\revisions\\\\row@walk-n\\\\attempt-3.png\"}"
+  }
+}
